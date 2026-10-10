@@ -9,6 +9,12 @@ import { assertStagedManifestIsPublic } from './public-manifest-guard.ts';
 import { OWNER_IDENTIFIER_PATTERNS, scannableText } from './owner-identifier-patterns.ts';
 import { DEFAULT_GOOGLE_PILOT_CLIENT_ID } from '../src/core/google-pilot-client.ts';
 import {
+  describeReleaseGooglePilotChoice,
+  GOOGLE_PILOT_CLIENT_MISSING_MESSAGE,
+  packagedGooglePilotClientModule,
+  releaseGooglePilotChoice,
+} from './release-google-pilot-choice.ts';
+import {
   V0_4_PUBLIC_PACKAGE_BUILD_READY,
   V0_4_PUBLIC_PACKAGE_FILES,
   V0_4_PUBLIC_PACKAGE_NAME,
@@ -54,7 +60,9 @@ interface OpenClawManifest {
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const packageJson = readJson<PackageJson>('package.json');
 const manifest = readJson<OpenClawManifest>('openclaw.plugin.json');
-const googlePilotClientId = releaseGooglePilotClientId(process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID);
+const googlePilotChoice = releaseGooglePilotChoice(process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID, DEFAULT_GOOGLE_PILOT_CLIENT_ID);
+if (!googlePilotChoice) throw new Error(GOOGLE_PILOT_CLIENT_MISSING_MESSAGE);
+console.log(describeReleaseGooglePilotChoice(googlePilotChoice));
 
 if (!V0_4_PUBLIC_PACKAGE_BUILD_READY) {
   throw new Error(
@@ -137,19 +145,21 @@ for (const path of V0_4_PUBLIC_PACKAGE_FILES) {
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
     throw new Error(`Public package entry must be a regular non-symlink file: ${path}.`);
   }
-  if (path === 'dist/index.js' || path === 'dist/cli.js' || path === 'dist/embedding-drain.js' || path === 'dist/control-ui/index.js') continue;
+  if (path === 'dist/index.js' || path === 'dist/cli.js' || path === 'dist/embedding-drain.js' || path === 'dist/litert-helper.js' || path === 'dist/control-ui/index.js') continue;
   mkdirSync(dirname(join(stagingDir, path)), { recursive: true });
   copyFileSync(source, join(stagingDir, path));
 }
 await buildPublicRuntime('src/native-plugin.ts', 'dist/index.js');
 await buildPublicRuntime('src/cli.ts', 'dist/cli.js');
 await buildPublicRuntime('scripts/source-embedding-drain.ts', 'dist/embedding-drain.js');
+await buildPublicRuntime('src/workers/source-index/built-in-embedding/litert-helper.ts', 'dist/litert-helper.js', 'bun');
 await buildPublicRuntime('src/control-ui.ts', 'dist/control-ui/index.js', 'browser');
 run('bun', [
   join(rootDir, 'scripts/strip-generated-trailing-whitespace.ts'),
   join(stagingDir, 'dist/index.js'),
   join(stagingDir, 'dist/cli.js'),
   join(stagingDir, 'dist/embedding-drain.js'),
+  join(stagingDir, 'dist/litert-helper.js'),
   join(stagingDir, 'dist/control-ui/index.js'),
 ]);
 assertStagedEntrypointsAreSynchronouslyLoadable(stagingDir);
@@ -178,6 +188,7 @@ if (JSON.stringify(packedFiles) !== JSON.stringify(expectedFiles)) {
 assertPackagedArchive(artifactPath);
 
 console.log(`Wrote ${artifactPath}`);
+console.log(describeReleaseGooglePilotChoice(googlePilotChoice));
 console.log(`SHA-256 ${createHash('sha256').update(readFileSync(artifactPath)).digest('hex')}`);
 console.log(`npm integrity ${pack.integrity}`);
 console.log(`npm shasum ${pack.shasum}`);
@@ -190,7 +201,7 @@ function readJson<T>(relativePath: string): T {
   return JSON.parse(readFileSync(join(rootDir, relativePath), 'utf8')) as T;
 }
 
-async function buildPublicRuntime(entry: string, output: string, target: 'node' | 'browser' = 'node'): Promise<void> {
+async function buildPublicRuntime(entry: string, output: string, target: 'node' | 'browser' | 'bun' = 'node'): Promise<void> {
   const destination = join(stagingDir, output);
   const buildFlavorPath = join(rootDir, 'src/core/build-flavor.ts');
   const googlePilotClientPath = join(rootDir, 'src/core/google-pilot-client.ts');
@@ -221,7 +232,7 @@ async function buildPublicRuntime(entry: string, output: string, target: 'node' 
             throw new Error(`Unexpected Google pilot-client module: ${path}`);
           }
           return {
-            contents: `export const DEFAULT_GOOGLE_PILOT_CLIENT_ID = ${JSON.stringify(googlePilotClientId)};\nexport const PACKAGED_GOOGLE_PILOT_CLIENT_ID = ${JSON.stringify(googlePilotClientId)};\nexport function resolveGooglePilotClientId(packaged, shipped) { return (packaged || '').trim() || (shipped || '').trim() || undefined; }\nexport function packagedGooglePilotClientId() { return PACKAGED_GOOGLE_PILOT_CLIENT_ID; }\n`,
+            contents: packagedGooglePilotClientModule(googlePilotChoice!),
             loader: 'ts',
           };
         });
@@ -265,19 +276,6 @@ async function buildPublicRuntime(entry: string, output: string, target: 'node' 
     throw new Error(`Public runtime optimizer produced no output for ${entry}.`);
   }
   writeFileSync(destination, `${optimized.code}\n`);
-}
-
-/**
- * The env var still wins, so a release can pin a different client without a
- * source edit. It stays REQUIRED while `DEFAULT_GOOGLE_PILOT_CLIENT_ID` is
- * empty: a release artifact must never ship the shared-OAuth path unwired.
- */
-function releaseGooglePilotClientId(value: string | undefined): string {
-  const clientId = value?.trim() || DEFAULT_GOOGLE_PILOT_CLIENT_ID.trim();
-  if (!/^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(clientId)) {
-    throw new Error('OLYMPUS_GOOGLE_PILOT_CLIENT_ID must name the publisher-owned Google Desktop OAuth client before building a release artifact, or DEFAULT_GOOGLE_PILOT_CLIENT_ID must carry it in src/core/google-pilot-client.ts.');
-  }
-  return clientId;
 }
 
 function assertExactStagedInventory(baseDir: string): void {

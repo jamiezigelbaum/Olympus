@@ -12,7 +12,6 @@ import {
   sourceInvocationProvenance,
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { gmailAfterBound, gmailBeforeBound } from '../../core/mail-source-scope.ts';
 import { MAX_FROM_HEADER_CHARS, senderMatchesRule } from '../../core/sender-rules.ts';
 import type { OwnerTierRule } from '../classification/tier-classifier.ts';
@@ -610,13 +609,11 @@ export class GoogleGmailSourceConnector implements SourceConnector {
 }
 
 export function gmailConnectorStoreClassification(
-  sensitivityMap: SensitivityMap | undefined,
   ownerRules: readonly OwnerTierRule[] = [],
 ): ConnectorStoreClassificationOptions {
   return {
     baselineTrustTier: 'S3',
     baselineTrustDomain: 'internal',
-    ...(sensitivityMap ? { sensitivityMap } : {}),
     // Owner rules that raise (the mail scope's "always Private" senders) place
     // matching mail in the secure_local store only: private embeddings.
     ...(ownerRules.length > 0 ? { ownerRules: [...ownerRules] } : {}),

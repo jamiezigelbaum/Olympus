@@ -9,7 +9,6 @@
 // Retry-After handling. Existing history lives in the canonical stores;
 // normal runtime has no migration source or fallback index.
 
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { createHash } from 'node:crypto';
 import type {
   RawItem,
@@ -28,6 +27,7 @@ import {
 } from '../connector-store/index.ts';
 import {
   createLaneTieredStoreSet,
+  type LaneTieredStoreSetOptions,
   tieredLaneReceiptCounts,
   type TieredLaneReceiptCounts,
   type TieredStoreRoutingCounts,
@@ -35,11 +35,12 @@ import {
   type TieredStoreSetRun,
 } from '../connector-store/tiered-store-set.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
+import { isImageMediaType } from '../classification/tier-classifier.ts';
 import {
   isApprovedSecureSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
-import { accountFromGoogleHandle, loadGoogleSensitivityMap } from './classification.ts';
+import { accountFromGoogleHandle } from './classification.ts';
 import {
   DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES,
   GOOGLE_DRIVE_PROVIDER,
@@ -175,11 +176,6 @@ export interface GoogleDriveConnectorStoreSyncHandler {
 }
 
 export interface GoogleDriveConnectorStoreSyncOptions extends GoogleDriveSourceConnectorOptions {
-  /**
-   * The owner's sensitivity map for this lane's placement policy and its
-   * recorded four-tier decisions. Loaded from the environment when omitted.
-   */
-  sensitivityMap?: SensitivityMap;
   internalStore: LocalConnectorStore;
   secureStore: LocalConnectorStore;
   /**
@@ -200,6 +196,25 @@ export interface GoogleDriveConnectorStoreSyncOptions extends GoogleDriveSourceC
   onTierLegOpened?: (store: LocalConnectorStore) => void;
 }
 
+/**
+ * The Drive lane's tier set. The listing reads documents itself, but never a
+ * picture: the shared extraction factory reads that later. A NEW still image
+ * is therefore routed as in a lane whose text arrives later
+ * (`contentArrivesLaterFor`): its names go to their metadata tier's store at
+ * listing, and its content lands where its content tier decides (Private by
+ * default) when the factory reads it. Everything else keeps the lane's rules.
+ * The sync and the extraction factory both build the set here, so they route
+ * alike.
+ */
+export function createGoogleDriveLaneTierSet(
+  options: Omit<LaneTieredStoreSetOptions, 'contentArrivesLaterFor'>,
+): TieredStoreSet {
+  return createLaneTieredStoreSet({
+    ...options,
+    contentArrivesLaterFor: (item) => isImageMediaType(item.mimeType),
+  });
+}
+
 export function createGoogleDriveConnectorStoreSyncHandler(
   options: GoogleDriveConnectorStoreSyncOptions,
 ): GoogleDriveConnectorStoreSyncHandler {
@@ -213,9 +228,7 @@ export function createGoogleDriveConnectorStoreSyncHandler(
   ) {
     throw new Error('Google Drive secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
-  const classification = googleDriveConnectorStoreClassification(
-    options.sensitivityMap ?? loadGoogleSensitivityMap(env),
-  );
+  const classification = googleDriveConnectorStoreClassification();
   const buildConnector = (overrides: {
     maxFiles?: number;
     maxContentFiles?: number;
@@ -235,8 +248,7 @@ export function createGoogleDriveConnectorStoreSyncHandler(
     provenance: sourceInvocationProvenance(overrides.provenance),
   });
 
-  const sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
-  const tierSet = options.tierSet ?? createLaneTieredStoreSet({
+  const tierSet = options.tierSet ?? createGoogleDriveLaneTierSet({
     setId: connectorId,
     internalStore: options.internalStore,
     secureStore: options.secureStore,
@@ -245,7 +257,6 @@ export function createGoogleDriveConnectorStoreSyncHandler(
       : {}),
     ...(options.internalEmbeddingProvider ? { internalEmbeddingProvider: options.internalEmbeddingProvider } : {}),
     ...(options.secureEmbeddingProvider ? { secureEmbeddingProvider: options.secureEmbeddingProvider } : {}),
-    ...(sensitivityMap ? { tierClassification: { sensitivityMap } } : {}),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened!(store) } : {}),
   });

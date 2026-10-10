@@ -1,3 +1,4 @@
+import { fetchModelEndpoint } from './model-transport.ts';
 import {
   existsSync,
   mkdirSync,
@@ -259,7 +260,7 @@ async function fetchCatalog(
   const timer = setTimeout(() => controller.abort(), input.timeoutMs);
   let response: Response;
   try {
-    response = await input.fetchImpl(input.catalogUrl, {
+    response = await fetchModelEndpoint(input.fetchImpl, input.catalogUrl, {
       method: 'GET',
       redirect: 'error',
       headers: {

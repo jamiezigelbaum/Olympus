@@ -20,7 +20,7 @@
  * decoders live in `document-formats.ts` and this file has none of its own.
  */
 
-import type { ExtractionDerivation, Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
+import type { ExtractedMedia, ExtractionDerivation, Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
 import {
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   DEFAULT_MAX_TABLE_SAMPLE_COLUMNS,
@@ -68,6 +68,7 @@ import {
   officeTableSummary,
   parseDelimitedRows,
   pdfAppearsImageOnly,
+  OfficeDocumentUnreadableError,
   readZipEntries,
   readZipEntryText,
   sheetXmlHasFormula,
@@ -75,9 +76,11 @@ import {
   normalizeTableCell,
   type ZipEntryDirectoryRecord,
 } from './document-formats.ts';
+import type { ImagePreparation } from './image-prepare.ts';
+import { releaseMediaCacheFile } from '../../../core/media-cache.ts';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export const TEXT_EXTRACTOR_KIND = 'local_text';
 export const TEXT_EXTRACTOR_VERSION = '2026-05-22';
@@ -103,6 +106,19 @@ export interface TextExtractorOptions {
    */
   pdfOcr?: PdfOcr;
   /**
+   * Reads an image's text by OCR. Injected by the registry like `pdfOcr`;
+   * answers undefined where no zero-install engine exists, which leaves the
+   * image names-only as before.
+   */
+  imageOcr?: ImageOcr;
+  /**
+   * Prepares an image for media search (a JPEG copy in the media cache).
+   * Injected by the registry on macOS; absent elsewhere, which leaves images
+   * exactly as they were. With it, an image is indexed: a short descriptor
+   * plus any text OCR read, with the prepared copy attached as `media`.
+   */
+  imagePreparation?: ImagePreparation;
+  /**
    * Emit a media descriptor for an image instead of declining it.
    *
    * The production lane decided this per job by testing the requested kind
@@ -118,6 +134,8 @@ export type PdfOcr = (input: {
   mimeType: string;
   sizeBytes: number;
 }) => Promise<ExtractorOutput | undefined>;
+
+export type ImageOcr = PdfOcr;
 
 interface DerivedSlice {
   derivation: ExtractionDerivation;
@@ -145,10 +163,22 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   const pdfTextTimeoutMs = options.pdfTextTimeoutMs ?? DEFAULT_PDF_TEXT_TIMEOUT_MS;
   const imageMediaDescriptor = options.imageMediaDescriptor ?? false;
   const pdfOcr = options.pdfOcr;
+  const imageOcr = options.imageOcr;
+  const imagePreparation = options.imagePreparation;
   return {
     kind,
     version,
     needsBytes: true,
+    // Pictures read for media search are a new reading of an image: an image
+    // read before (names only, or OCR text) is queued once more under this.
+    ...(imagePreparation
+      ? {
+        versionFor(mimeType: string | undefined): string {
+          const normalized = normalizeMimeType(mimeType);
+          return normalized && IMAGE_MIME_TYPES.has(normalized) ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}` : version;
+        },
+      }
+      : {}),
     egress: 'local',
     accepts(mimeType) {
       return textLaneAccepts(mimeType);
@@ -186,6 +216,26 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         });
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
+        if (imagePreparation) {
+          const prepared = await imagePreparation({ bytes, mimeType, sizeBytes: context.sizeBytes });
+          if (prepared.kind === 'settled') return prepared.output;
+          if (prepared.kind === 'media') {
+            let output: ExtractorOutput;
+            try {
+              const ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
+              output = preparedImageOutput(prepared.media, ocr, maxBoundedTextChars);
+            } catch (error) {
+              releaseStaged(prepared.media);
+              throw error;
+            }
+            // A result that does not carry the picture on gives up the
+            // extraction's hold, so the cached copy does not outlive it.
+            if (output.status !== 'indexed') releaseStaged(prepared.media);
+            return output;
+          }
+        }
+        const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
+        if (ocrOutput) return ocrOutput;
         if (!imageMediaDescriptor) {
           return { status: 'metadata_only' };
         }
@@ -230,6 +280,57 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   };
 }
 
+function releaseStaged(media: ExtractedMedia): void {
+  if (media.stagingHolder) releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname(media.path));
+}
+
+/**
+ * The descriptor an image chunk carries. The words the model reads beside the
+ * picture are the item's title and context (the store adds them) and this.
+ */
+export const IMAGE_MEDIA_DESCRIPTOR = 'Photo';
+
+/**
+ * Appended to the text lane's version for images when pictures are read for
+ * media search (2026-10-07). The result is a job key part, so it may use only
+ * the job store's safe identifier characters: a `+` here made every plan pass
+ * that met a picture throw, stopping the whole lane.
+ */
+export const IMAGE_MEDIA_VERSION_SUFFIX = '.image-media-2026-10-07';
+
+/**
+ * An image prepared for media search: indexed, with the prepared copy as
+ * `media` and a short descriptor plus whatever text OCR read as its text. An
+ * OCR failure is returned as is, so the job retries or settles exactly as it
+ * did before; an empty OCR read is just a photo without text.
+ */
+function preparedImageOutput(
+  media: ExtractedMedia,
+  ocr: ExtractorOutput | undefined,
+  maxBoundedTextChars: number,
+): ExtractorOutput {
+  if (ocr && (ocr.status === 'failed_retryable' || ocr.status === 'failed_terminal')) return ocr;
+  const ocrText = ocr?.status === 'indexed' ? ocr.text : '';
+  const bounded = boundText(
+    normalizeExtractedText(ocrText ? `${IMAGE_MEDIA_DESCRIPTOR}\n${ocrText}` : IMAGE_MEDIA_DESCRIPTOR),
+    maxBoundedTextChars,
+  );
+  return {
+    status: 'indexed',
+    text: bounded.text,
+    media,
+    derivations: [
+      buildDerivation({
+        artifact: 'image_media',
+        structural: { kind: 'image', label: 'prepared image' },
+        bounded: boundText(IMAGE_MEDIA_DESCRIPTOR, maxBoundedTextChars),
+      }),
+      ...(ocr?.status === 'indexed' ? ocr.derivations ?? [] : []),
+    ],
+    ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
+  };
+}
+
 /**
  * Broad on purpose: the OCR lane composes this extractor for anything that is
  * neither a PDF nor an image, so the accepted set has to cover everything the
@@ -256,15 +357,20 @@ export function missingBytesFailure(): ExtractorOutput {
 }
 
 /**
- * A malformed container throws out of the decoders. The production lane caught
- * it here and reported a retryable failure carrying the exception message;
- * `errorKind` is a bounded categorical token on the landed seam, so the message
- * is dropped and the category is kept.
+ * A malformed container throws out of the decoders. `errorKind` is a bounded
+ * categorical token on the landed seam, so the message is dropped and the
+ * category is kept. A container the decoders recognise as unreadable (damaged,
+ * password-protected, unsupported) settles terminal at once: the same bytes
+ * fail the same way on every attempt, and retrying them only delayed the
+ * honest answer. Anything else stays retryable.
  */
 function structuredExtractionOrFailure(extract: () => ExtractorOutput): ExtractorOutput {
   try {
     return extract();
-  } catch {
+  } catch (error) {
+    if (error instanceof OfficeDocumentUnreadableError) {
+      return { status: 'failed_terminal', errorKind: `office_document_${error.reason}` };
+    }
     return { status: 'failed_retryable', errorKind: 'structured_extraction_failed' };
   }
 }
@@ -411,9 +517,13 @@ async function extractPdfText(input: {
     });
     if (viaCommand) return viaCommand;
   }
-  const streamTexts = extractPdfTextStreams(input.context.bytes);
+  const streamText = normalizeExtractedText(extractPdfTextStreams(input.context.bytes).join('\n'));
+  // The inline decoder knows no font encodings: a PDF whose text is drawn in
+  // a composite (CID) font decodes to glyph ids, which read as control
+  // characters. Indexing that would put noise where the document's text
+  // should be, so it counts as no text layer (OCR, or an honest gap).
   const bounded = boundText(
-    normalizeExtractedText(streamTexts.join('\n')),
+    pdfTextLooksUndecoded(streamText) ? '' : streamText,
     input.context.maxBoundedTextChars,
   );
   return pdfTextExtractionResult({
@@ -422,6 +532,24 @@ async function extractPdfText(input: {
     warnings: ['pdf_text_layer_only'],
     ...(input.ocr ? { ocr: input.ocr } : {}),
   });
+}
+
+/**
+ * Whether decoded PDF text is mostly not text: more than one character in
+ * ten is a control character (other than line breaks and tabs) or the
+ * replacement character.
+ */
+export function pdfTextLooksUndecoded(text: string): boolean {
+  if (!text) return false;
+  let unreadable = 0;
+  let total = 0;
+  for (const char of text) {
+    total += 1;
+    const code = char.codePointAt(0) ?? 0;
+    if (code === 0x09 || code === 0x0a || code === 0x0d) continue;
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0xfffd) unreadable += 1;
+  }
+  return total > 0 && unreadable / total > 0.1;
 }
 
 /**

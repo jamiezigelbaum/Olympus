@@ -56,26 +56,82 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 
 | Preset | Public and Personal embeddings | Private search | Private answers | You supply |
 |---|---|---|---|---|
-| Venice (`private-cloud-only`) — recommended after you confirm you do not run local models | Gemini Embedding 2 | Venice Private embeddings when no local provider is configured | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
-| Local models (`local-only`) | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key; local server and exact registered model IDs, with their matching output dimensions |
-| Local models with Venice fallback (`local-first`) | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
-| Don't ingest Private data (`no-sensitive`) | Gemini Embedding 2 | Private content is unavailable to answering | None | Gemini key |
+| Venice (`private-cloud-only`) — recommended after you confirm you do not run local models | Built-in model | Built-in model | Approved Venice Private/TEE model | Venice account, usable API balance and key |
+| Local models (`local-only`) | Built-in model | Built-in model | Local answer model | Local answer server and its exact registered model ID |
+| Local models with Venice fallback (`local-first`) | Built-in model | Built-in model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
+| Don't ingest Private data (`no-sensitive`) | Built-in model | Private content is unavailable to answering | None | Nothing |
 
-The **Venice** preset describes **Private-data handling**: Private answers use
-Venice, and Private semantic search uses a separately configured Venice Private
-embedding model when no local provider is configured. It does not route all
-Olympus traffic through Venice; Gemini serves Public and Personal
-embeddings. Explain that distinction before asking for either provider key.
+### Built-in embeddings
 
-`local-only` describes the handling of **Private** data; the shipped preset
-still uses Gemini for Public and Personal embeddings. It is not an all-offline preset.
-The ordinary answer path uses the host's configured inference route by default.
-Neither a Gemini key nor a Venice key creates an OpenClaw subscription/login.
+New installs embed every tier with the **built-in model**: Google's
+EmbeddingGemma 2 (Apache-2.0), 768 dimensions, in Google's own LiteRT build
+(text, image and audio encoders in one file). It runs on the computer through
+LiteRT-LM, in a small helper process Olympus starts under Bun, needs no
+account, no key and no extra app, and nothing leaves the computer. On first
+use Olympus downloads the model (485 MB) and the LiteRT-LM library for this
+platform (from Google's `litert-lm-api` 0.18.0 wheel: 21 MB on macOS, 47 MB on
+Linux) once into
+`<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models/built-in-embedding`
+(override with `OLYMPUS_BUILT_IN_EMBEDDING_DIR`); every file is pinned by size
+and checksum and re-verified before it loads. While it downloads, questions
+fall back to keyword search. It runs on the GPU where one is usable (Metal on
+Apple silicon, Vulkan on Linux) and otherwise on the CPU, with the same
+vectors either way; `OLYMPUS_BUILT_IN_EMBEDDING_DEVICE=cpu` keeps it on the
+CPU. The first start compiles its GPU programs (up to half a minute; later
+starts take seconds). On the CPU it uses at most half the cores, capped at
+four (`OLYMPUS_BUILT_IN_EMBEDDING_THREADS` overrides). Supported: macOS on
+Apple silicon, Linux x64 and arm64 (glibc 2.27 or newer).
 
-Private content never goes to Gemini. The private-cloud-only preset does not
-require a GPU or a local embedding server. Local presets retain local Private
-embeddings; an unavailable local server does not silently change the vector
-model. Venice E2EE integration remains outside this release. Existing saved
+Photos are searched by their picture too (2026-10-07,
+`docs/design/photo-embeddings.md`). Mac only for now: elsewhere photos stay
+names-only. An ingestion policy file you wrote yourself
+(`~/.olympus/sources/dropbox.personal.ingestion.json`) is used as written; if
+its media rule still lists `image/` and the photo extensions, remove those
+entries to have photos read. On a Mac each still image is reduced to a
+JPEG of at most 1,024 pixels (with the built-in `sips`) and kept in an
+owner-only cache, `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/media-cache`
+(or an `olympus-media` folder inside `OLYMPUS_MEDIA_CACHE_DIR`); the built-in model embeds that
+picture together with the photo's title and any text read off it, about
+1.4 s per photo on an M3's GPU. Its image encoder is on from the start and
+leaves text vectors unchanged, so this needs no re-embed. Other embedding
+providers embed a photo's text alone. Ordinary photos are Personal like your
+other files; only sensitive ones (nudity or intimate images, identity
+documents, bank or credit cards, pictures of financial or medical documents)
+are Private (owner decision 2026-10-08). The built-in model judges each
+picture on the Mac when it embeds it; a photo it cannot judge (no image
+encoder, another embedding provider, off macOS) stays Private. Text read off
+an ordinary photo is still judged like any other text, and a per-item tier
+override still wins. Cloud models only ever receive a photo's text, never
+its picture.
+
+The profile is:
+
+```json
+"built-in-embedding": {
+  "provider": "built-in",
+  "trust": "local",
+  "model": "embeddinggemma-2-litert-24d962e",
+  "purpose": "embedding"
+}
+```
+
+Installs set up before EmbeddingGemma 2 embed with the previous built-in
+model, Snowflake Arctic Embed M v1.5 (`arctic-embed-m-v1.5-int8-e58a8f7`,
+110 MB, on ONNX Runtime). Olympus keeps running it for them; moving such an install to
+EmbeddingGemma 2 is the re-embed described below. The same holds for an
+install configured only by environment: `OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER=built-in`
+with no `OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL` keeps running Arctic, so an
+upgrade never re-embeds on its own; name the EmbeddingGemma 2 model id to move.
+
+Gemini, a local OpenAI-compatible embedding server, and Venice Private
+embeddings stay available as opt-in profiles. Switching an existing corpus to
+a different embedding model is a re-embed and needs the owner's approval and
+an embedding-ledger entry. Installs set up before the built-in model keep the
+policy they were written with, and keep their current embeddings.
+
+Private content never goes to Gemini. No preset requires a GPU or a local
+embedding server. An unavailable embedding provider never silently changes the
+vector model. Venice E2EE integration remains outside this release. Existing saved
 configurations are preserved: a previously lexical-only install needs explicit
 activation of its new embedding profile and a bounded backfill.
 
@@ -250,7 +306,11 @@ work, ordinary cloud models for Public material, or a mix.
 A data class describes what kind of information is being handled. User-facing
 language is Public, Personal, Private, and Secrets; internally those map to the
 existing granular trust scale (`public_safe`, `internal`, `secure_local`, and
-S5) through the legacy stored keys shown below.
+S5) through the legacy stored keys shown below. A policy with no `public_safe`
+route and no `public_safe` retrieval policy has no Public class: the
+`no-sensitive` preset, which `olympus engine install` seeds for every ChatGPT
+install, is written that way, and Public verdicts become Personal (see
+[TRUST_MODEL.md](TRUST_MODEL.md#product-tier-names)).
 
 | User-facing data class | Legacy stored key | Granular trust scale |
 |---|---|---|
@@ -448,6 +508,225 @@ estimate. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
 `OLYMPUS_TIER_SNIFFER_INTERVAL_MS`, `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS`,
 `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`.
 
+### Experimental: zkAPI consult transport
+
+zkAPI (`zkapi-clientd`, from the Ethereum Foundation and the Open Anonymity
+Project) pays for ordinary cloud models from a prepaid ETH deposit in a way the
+payment side cannot tie to the deposit. OpenRouter and the upstream model still
+read every request. Olympus therefore uses it for one thing only: carrying a
+**consult**, a single question a local model wrote, with no evidence (design:
+`docs/design/frontier-consult-lane.md`, track Z). **No consult can be sent yet.**
+This release ships the transport and its checks; the consult lane that writes,
+gates and approves questions lands separately.
+
+A `zkapi` profile is consult-only. Its trust is always `standard_cloud`, its
+`purpose` must be `consult`, and it is refused, with a `config_error`, in every
+role that carries evidence: any analyst route (including the secure pool),
+any embedding policy, vision and classification. Any profile with
+`purpose: "consult"` is refused in those roles too. A `local` or
+`local-openai-compatible` profile pointing at the daemon's port (8787 by
+default, or a configured `zkapi` profile's port) is refused, because a
+loopback address there forwards to the cloud.
+
+```json
+"zkapi-consult": {
+  "provider": "zkapi",
+  "trust": "standard_cloud",
+  "purpose": "consult",
+  "baseUrl": "http://127.0.0.1:8787/v1",
+  "model": "<a model id from the daemon's model list>",
+  "secretRef": "env:OLYMPUS_ZKAPI_LOCAL_API_KEY",
+  "zkapi": {
+    "tor": "per_consult",
+    "torSocksPort": 19050,
+    "fundingDate": "2026-10-01",
+    "depositUsd": 20,
+    "acknowledgements": { "version": 5, "accepted": ["automatic", "provider_reads", "cost", "fees", "expiry", "new_service"] }
+  }
+}
+```
+
+**You install and fund the daemon yourself, in its own tool.** Olympus holds
+no credential that can move funds, calls no wallet route, never runs
+`zkapi-clientd config`, and never reads the daemon's private configuration.
+Funding, the funding address and withdrawal all happen in the daemon's own
+terminal session. Configure the daemon once:
+
+```sh
+zkapi-clientd config --key-reuse-window-seconds 0 --require-api-key --relay-url socks5://127.0.0.1:19050
+zkapi-clientd config --api-key   # store this inference-only key for Olympus
+```
+
+Install Tor yourself; Olympus does not bundle it. Do not keep your own
+`zkapi-clientd serve` running: for each consult Olympus starts a throwaway Tor
+client with a fresh data directory on the relay port, starts the daemon (under
+network confinement where the platform allows it), verifies it, sends one
+request, waits for the daemon to report that request's key settled, stops Tor
+and stops every process it started. If the daemon's relay is the port shown
+above, nothing listens there between consults and the daemon cannot reach the
+network; Olympus cannot read that setting, so it cannot confirm this. This
+sequence follows the reference wrapper scripts in `ethereum/zkapi` pull
+request #16.
+
+**The money, plainly.** Turning this on requires accepting six statements
+(acknowledgement version 6: the owner's calmer rewrite of 2026-10-08, with
+the provider statement corrected on 2026-10-10; any
+earlier acknowledgement must be given again, and nothing is sent until it is):
+
+- Questions go out automatically when the answer from your Mac is missing
+  something. You can turn this off at any time.
+- The AI provider reads each question but cannot tell who sent it. At
+  Standard, a question goes out the way you choose; at Strict, your model
+  removes identifying details first. An unusual situation could still hint at
+  who you are.
+- Each question usually costs a few cents. While it runs, up to $6 is held
+  from your balance; the rest comes back.
+- Adding money and taking it out are Ethereum transactions, each with its own
+  network fee.
+- Money left unused for about 30 days can be claimed by the zkAPI operator.
+  The estimated date is shown on this page when Olympus knows it.
+- zkAPI is new. Your balance is kept in files on this Mac, and its operator
+  can pause deposits and withdrawals. Only add what you're comfortable losing.
+
+The card's "Everything to know first" list keeps the fuller detail: each
+question counts against any daily limit you set at the amount zkAPI holds for
+its model ($1 to $6), and there is no daily limit unless you set one; there is no top-up (each deposit is a new note with
+its own fee and 30-day clock); the expiry date is an estimate from the funding
+date you confirm; the fee buffer; the required API key and key reuse off; the
+operator's pause power and the single-party proof setup.
+
+**What may be sent.** `~/.olympus/consult.json` carries `level`:
+`"unnamed"` (**Standard (recommended)**, the default) lets the local writer
+describe the situation and ask for a verdict, with identifying details
+removed; `"general"` (**Strict**) sends general questions only. A file without
+`level` reads as `"unnamed"`: that is safe because nothing is sent until the
+statements above are accepted at the current version, and they say what
+Standard sends. Choosing a level is never refused; while the statements are
+not accepted, the card shows them beside Standard with one "Accept and save",
+and outside help stays paused. Replacing a damaged settings file without a
+choice writes `"general"` (and leaves outside help off). The outbound check
+runs at both levels (`docs/design/consult-writer-instructions.md`,
+`docs/design/consult-gate-false-refusals.md`).
+
+Deposits are in ETH, so their dollar value moves with the ETH price. The
+daemon activates a deposit before the chain finalizes it; a rare chain
+reorganization after activation can need recovery in the daemon's own tool.
+In practice a deposit is prepaid credit you should not expect back: expect to
+pay roughly the deposit fee plus whatever you deposit each month you keep this
+on, so deposit the smallest amount the service accepts.
+
+**What each consult verifies, and what it cannot.**
+
+- From the daemon Olympus started: a reviewed version (0.1.5 or 0.1.6), a
+  fresh key for every request (key reuse 0), local API-key authentication
+  enforced (an unauthenticated request must be rejected), SOCKS5 routing on,
+  and that the daemon and Tor ports are held by the process groups Olympus
+  started, checked again right before anything carries the key. Any failure
+  refuses the consult.
+- The daemon reads its relay and companion settings only from its private
+  configuration, which Olympus does not read, and its wallet companion reaches
+  the network through a proxy on a random loopback port. So Olympus cannot
+  prove where the daemon and companion connect: it knows that it started a
+  fresh Tor client and that the daemon reports SOCKS5 mode, not that the
+  daemon's SOCKS endpoint is that Tor client. On macOS it runs the daemon in a
+  sandbox meant to refuse every connection except loopback, including the
+  system resolver. Each session checks this first: the same probes must fail
+  inside the sandbox and succeed outside it, and a failed check refuses the
+  session. Loopback ports cannot be filtered for this daemon, so another
+  loopback proxy would still be reachable. On other platforms there is no
+  confinement. **No platform therefore gets the label "anonymous route" in
+  this release**; the label says "a fresh Tor client was started and the
+  daemon reports SOCKS5 mode, but the actual route is not verified". With
+  `"tor": "off"` the mode is called **payment privacy only**: your network
+  address is visible.
+- A fresh Tor client is a fresh set of guards and circuits, not a guarantee of
+  a different exit, and Tor does not hide the content of the question or the
+  timing of requests. A question's wording and when it is sent can still link
+  consults.
+
+**Guards.**
+
+- The expiry date is an **estimate** from the funding date you confirm; the
+  real expiry is set on-chain by the deposit block. Doctor and status show the
+  estimated date, days left, and a notice at 10, 5 and 2 days. A recorded note
+  past its estimated expiry refuses consults.
+- **No limit unless you set one.** Before each send Olympus records the
+  request at the per-request allowance the daemon's live model list states
+  for the chosen model (`oa_request_limit_micro_usd`, $1 to $6 by the model's
+  price tier; that is the amount the daemon holds), in a ledger that survives
+  restarts, and doctor shows today's count and worst-case total. The settled
+  price is never recorded: the daemon does not report it and Olympus reads no
+  balance. To limit spending, add either or both to the profile's `zkapi`
+  block: `"dailyRequestCap": 5` (requests per UTC day) or
+  `"dailySpendCapUsd": 30` (worst-case dollars per UTC day; each consult
+  counts its model's listed allowance). A set limit is enforced at the send,
+  atomically across processes; before a session, when the next model's
+  allowance is not yet known, the spend limit blocks only once it is used up.
+  A request whose outcome is unknown still counts toward it. Caveat: the
+  daemon recomputes a request's allowance from live policy after it is
+  queued, so a policy change between the listing and the send can move the
+  actual hold, bounded by the reviewed versions' $6 maximum.
+- **Unresolved sessions.** Before each send Olympus records a fence, and clears
+  it only when the daemon reports that request's key settled. If that is not
+  confirmed (a crash, a timeout, a missing log line), no further consult is
+  sent until a recovery-only session runs: the same supervised session sending
+  one fixed question with no content, so the daemon can settle the earlier
+  lease. That earlier lease is then settled under the recovery session's
+  network identity, and recovery costs one request. A recovery the daemon
+  refuses (for example because the model is unavailable) leaves the fence in
+  place. A fence belongs to one wallet, identified by the daemon's
+  configuration directory (canonicalized); the daemon executable and port are
+  recorded with it but do not change it, so updating the daemon keeps the same
+  fence. **Keep one wallet per configuration directory**: Olympus cannot tell
+  two wallets in the same directory apart without reading private files. Any
+  outstanding fence, for any wallet, blocks every consult and is listed by
+  doctor. Recovery runs only against the wallet that holds the fence. Until
+  the consult lane offers recovery, run the developer harness from the
+  Olympus checkout: `bun scripts/zkapi-consult-recover.ts --yes` (exit 0 only
+  when settlement is confirmed and the fence cleared). If that wallet can no
+  longer run, the same script's `--abandon <scope> --yes-abandon` marks the
+  fence abandoned; it is kept as a record, and the unsettled lease may later
+  settle under another session's network identity. Nothing clears a fence
+  automatically. Olympus
+  waits up to five minutes for settlement, longer than the daemon's own
+  four-minute companion timeout.
+- One session at a time across every Olympus process. A failed or timed-out
+  consult is never resent, on zkAPI or any other route.
+- The model check is membership in the daemon's live model list, not a test
+  request. The released daemons wait at most one minute for that list; over Tor
+  a cold policy can take longer (PR #16 raises the daemon's own timeouts), so
+  a consult can fail with "policy unavailable" and costs nothing when it does.
+- The balance, fee quotes and the on-chain expiry are not available from the
+  daemon without its wallet-management credential, which Olympus will not
+  hold. Olympus shows no live fee estimate.
+- Any endpoint that reaches this machine on a known zkAPI daemon port is
+  refused by the shared model transport that every analyst, embedding, vision
+  and setup probe sends through, and by policy validation for every provider,
+  whatever trust it declares. Known ports are 8787 and the port of every zkapi
+  profile in your sovereignty policy, which the guard reads itself, so the
+  guard depends on that file. Every loopback spelling counts (`localhost`
+  names, all of 127/8, IPv4-mapped IPv6), and **any host name on a daemon port
+  is refused**: a local model on such a port must use a numeric loopback
+  address. **A daemon on a port no policy names cannot be recognized by
+  port**; the protection covers the ports Olympus knows about. If the policy
+  file exists but cannot be read, every local model endpoint is refused, and a
+  host name is refused if it resolves to this machine or cannot be resolved,
+  until the file can be read again; the refusal names the file to fix.
+- If Olympus crashes mid-session, a watchdog stops the session's processes,
+  and the next session cleans up what is left only after proving it belonged
+  to the crashed session; anything it cannot prove is reported, not signalled.
+  A session whose processes cannot be confirmed stopped ends as a failure,
+  and doctor lists the leftover process groups. To clear them, find each
+  group (`ps -o pid,pgid,command -g <pgid>`) and stop its processes yourself;
+  a reboot is the conservative fallback, which the next session recognizes.
+  Never delete the zkAPI ledger to clear this.
+  The watchdog cannot contain a descendant that starts its own session or
+  process group, and it cannot supervise a wallet companion that was already
+  running outside Olympus.
+
+`olympus doctor` reports all of this as the `zkapi_consult_transport` check,
+content-free.
+
 ## Active Shape
 
 Olympus v0.3 activates the sovereignty engine. The default location is
@@ -555,12 +834,43 @@ Hard invariants remain enforced outside user control:
   chat fetch, and residual non-cooperative orphans are counted content-free
 - consecutive member failures open a worker-local cooldown breaker; skipped
   members are recorded in the analyst-leg trace without source content
-- Private embeddings use loopback local providers or an explicitly selected,
-  catalog-approved Venice Private provider; other cloud providers are refused
+- Private embeddings use the built-in model, loopback local providers, or an
+  explicitly selected, catalog-approved Venice Private provider; other cloud
+  providers are refused
 - secrets are hard-denied everywhere
 - empty or exhausted fallback chains fail closed
+- model transports that carry source content (analyst chat, the built-in
+  private model, embeddings, vision extraction, the privacy sniffer, Delphi)
+  refuse redirects: any 3xx answer fails with a typed, content-free
+  `ModelEndpointRedirectError`, which each caller maps to its usual transport
+  failure, and is not retried on the spot
+- credential-bearing catalog, connect, key-health and billing checks also
+  send `redirect: 'error'`; a redirect there surfaces as the check's existing
+  categorical failure or status result, not as the typed error
+- a local profile, local embedding model, local vision model, or Argus route
+  whose model id carries a reserved cloud-style tag (`:cloud`, or a tag ending
+  in `-cloud`, such as `gpt-oss:120b-cloud`, which is how Ollama names models
+  its local daemon forwards to its cloud) is refused with a `config_error`;
+  only the tag is checked, so a name that merely contains "cloud" is accepted
 
-The preset Gemini embedding profile references
+Loopback locality is asserted by the owner's configuration. Olympus checks the
+address, refuses redirects, and refuses reserved cloud-style tags, but it
+cannot verify what a loopback process does with a request. The tag check is a
+heuristic:
+
+- it refuses a genuinely local custom model whose tag ends in `-cloud`
+  (rename the tag to use it);
+- it does not catch an alias that points at a cloud model, a digest-form
+  model id, or a forwarding proxy on loopback (LM Studio, LiteLLM, an
+  OpenRouter-style gateway, or anything similar).
+
+Never point a local profile at a proxy or daemon that forwards to a cloud
+model. Redirect refusal also depends on the transport honouring it: Olympus
+sends `redirect: 'error'` and treats any 3xx it still receives as a refusal,
+but a custom fetch implementation that followed a redirect on its own would
+already have re-sent the request.
+
+An opt-in Gemini embedding profile references
 `env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY`, matching the supervised worker
 launcher. The env-derived compatibility bridge and embedding provider also
 accept `GEMINI_API_KEY` for existing interactive installs.

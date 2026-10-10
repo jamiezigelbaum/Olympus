@@ -1,11 +1,134 @@
-# Olympus 0.4 release plan
+# Olympus release plan: 1.0 (ChatGPT) and the 0.4 line
 
 Status: active
 
 Owner: Olympus product owner
-Planning authority: this document defines v0.4 scope, sequence, and completion. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
+Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
-## Outcome
+## Olympus 1.0 (ChatGPT)
+
+Status: active, 2026-10-02. Owner decision 2026-10-01 (Decisions, below):
+this release ships as **Olympus 1.0, the ChatGPT plugin release**, published
+by OCU Inc. (Open Coordination Unlimited, Inc.). This section is the current
+plan. The 0.4 sections after it stay as the record of the OpenClaw line,
+whose outcome still holds for existing OpenClaw installs. Design and
+protocol: [`design/chatgpt-plugin.md`](design/chatgpt-plugin.md). User-facing
+path: [README, "Olympus for ChatGPT"](../README.md#olympus-for-chatgpt).
+
+**Outcome.** A person who has only ChatGPT and a Mac adds Olympus in ChatGPT,
+installs the engine on their Mac with ChatGPT's help, connects Dropbox, Gmail
+or Google Drive with accounts they already have, says what is private for
+them, and asks questions in ChatGPT. Personal items are answered in the chat
+with citations; Private items are answered only in the private answer panel;
+Secret items are never answered from. No API key is ever entered in ChatGPT,
+nothing else needs installing (no Tailscale, no OpenClaw), and the only new
+account they may ever create is an optional Venice account.
+
+### Delivered (branch `claude/chatgpt-plugin`)
+
+- **Standalone engine on the Mac.** `olympus engine
+  install|status|restart|logs|uninstall` runs and supervises the worker as a
+  per-user LaunchAgent, with no OpenClaw. A fresh install is keyless: it
+  seeds the `no-sensitive` preset with the built-in models.
+- **Relay v2** at one fixed host, `mcp.olympusplugin.ai` (Hetzner
+  `olympus-relay-1`, Caddy TLS): one WSS session per install, per-request
+  routing, static OAuth metadata, the authorize bridge, a Mac-offline
+  fallback, abuse limits and durable revocation. Relay v1 (per-install
+  hostnames, DNS-01, the Let's Encrypt agreement and `olympus connections
+  terms`) is deleted.
+- **Engine OAuth.** Consent only on the Mac's loopback page (one click, no
+  pairing code, no account); ChatGPT's client is pinned; codes and tokens
+  carry a routable install prefix.
+- **ChatGPT tools.** `olympus_search` is the primary answer tool (Olympus
+  retrieves, ChatGPT reasons under the one generic Analyst instruction);
+  `source_answer` and `source_answer_result` are listed only when an answer
+  model is set up on the Mac; `source_index_status`; `ask_anonymously` (one
+  typed question to a frontier model through zkAPI, Strict or Standard, asked
+  once and remembered); setup tools for
+  connecting sources, folders and mail, disconnecting, model choice and
+  privacy. Mixed auth: the dashboard works before the engine exists.
+- **Dashboard inside ChatGPT** (`ui://olympus/dashboard`, in the sidebar):
+  sources, indexing progress, what needs the user, models and privacy. A
+  folder picker with Full / Names only / Skip (and Mixed) and a Gmail mail
+  picker. Gmail, Drive and Dropbox connect through Olympus's publisher apps
+  and a one-time relay link that works from any device.
+- **No keys through ChatGPT.** Venice and Readwise are configured on the Mac
+  only; ChatGPT can only switch between models already set up there.
+- **Three tiers for new installs: Personal / Private / Secret.** Public is
+  retired on fresh installs (a Public verdict is lifted to Personal); older
+  policies keep their Public tier. "What's private for you?" in the user's
+  own words, plus always-Private folder, label and sender rules. With a
+  private model available, every read item is checked by it before it may be
+  Personal.
+- **Built-in models.** A built-in embedding model is the default for every
+  tier (zero setup, nothing leaves the Mac). The built-in private model is
+  Qwen3.5 4B (Q4_K_M), used for the privacy check and for private answers
+  ([benchmark](design/private-model-benchmark.md)).
+- **Private answer panel.** Shows itself under ChatGPT's reply when Private
+  items match. The answer is prepared on the Mac (started at search time),
+  sealed to the panel's own key and fetched through the relay, never through
+  ChatGPT; badge "Not sent to ChatGPT"; a summary by default and a full read
+  when the user asks for all the details; a collapsed Sources list whose items
+  open on the Mac (or in Dropbox on the web). ChatGPT's model learns only that
+  some matching items are Private. A Private item's name may still be visible
+  to ChatGPT; its contents never are.
+- **Site and submission kit.** olympusplugin.ai home, install, Mac-offline
+  help, support, and draft privacy and terms pages (`site/`);
+  [`chatgpt-plugin/SUBMISSION.md`](../chatgpt-plugin/SUBMISSION.md) with
+  synthetic reviewer data in `chatgpt-plugin/demo-data/`.
+- **Proven end to end** in ChatGPT developer mode on the owner's Mac through
+  `https://mcp.olympusplugin.ai/mcp`: cited answers, the sidebar dashboard,
+  and private answers in the panel.
+
+### Remaining to ship 1.0
+
+Each item names its owner and the precondition that gates it. Nothing here
+waits for a calendar slot.
+
+| # | Item | Owner | Precondition |
+|---|---|---|---|
+| 1 | **Olympus logo.** Replace `chatgpt-plugin/assets/icon.png` (a temporary placeholder; not the OCU mark) and set `logo`, `composerIcon` and `brandColor` in `chatgpt-plugin/plugin.json`. | Owner makes the artwork; any session wires it in | The artwork |
+| 2 | **Mac installer: a script** (owner decision 2026-10-03, Decisions). `curl -fsSL https://olympusplugin.ai/install.sh \| sh`, built on branch `claude/install-script`: `scripts/install-macos.sh` is the one source; `bun scripts/publish-release-to-site.ts` builds the release tarball, puts it at `site/releases/<version>/olympus-<version>.tgz` and writes `site/install.sh` with its version, SHA-256 and size pinned (both gitignored); `site/deploy/deploy.sh` refuses to publish unless `--check` proves the served installer is the template with those pins and the tarball matches. Apple silicon and macOS 13+ only (Intel refused: the built-in models ship for Apple silicon only); pinned Bun 1.3.14; per-user, no `sudo`; same-release re-run repairs, a new release upgrades and restores the previous version on failure; `site/uninstall.sh` removes it and keeps data. The setup skill, `site/install/` and the README show the one command. Remaining: publish rc.1 to the site, then a fresh-install test on a clean Mac user (item 4). | A session built it; the owner publishes (`bun scripts/publish-release-to-site.ts`, then `site/deploy/deploy.sh`) | Independent review of the installer (install/upgrade is critical class) |
+| 3 | **Integration PR** `claude/chatgpt-plugin` → `main` (squash) after an independent review, since the branch touches critical paths. Rename this plan to the v1 plan in the same merge and update every link to it, AGENTS.md included. | A session opens it, gets the independent review, and merges | Required exact-head CI green; independent review |
+| 4 | **`1.0.0-rc.1`**: `package.json`, `openclaw.plugin.json` and `plugin.json` are set to it (test enforced; done on `claude/install-script`). Build and publish it with item 2's tooling, then a fresh-install test on a clean Mac user: add the plugin → install the engine → approve on the Mac → connect Dropbox → choose folders → ask a Personal and a Private question. | A session; the owner drives ChatGPT | Item 3 merged; item 2 published |
+| 5 | **ChatGPT directory submission** under OCU Inc., per the [kit](../chatgpt-plugin/SUBMISSION.md): 5a-5e below. | Owner submits | 5a-5e |
+| 5a | Domain verification: the challenge token from platform.openai.com, served by the relay at `/.well-known/openai-apps-challenge` (relay config). | Owner gets the token; a session sets the relay config | Owner starts the submission |
+| 5b | Reviewer demo engine with synthetic data only (`demo-data/`, the demo marker, `remote.demoConsent`, credentials in 1Password); settle how its `.eml` files are ingested; confirm each intended tier on it. | A session | Item 4 |
+| 5c | Legal review of the privacy policy and terms drafts, then remove their Draft banners. | Owner, with counsel | None |
+| 5d | Listing text (long description, capabilities) moved from the kit into `plugin.json`; the panel's CORS origins confirmed against a live panel; the 5 positive and 3 negative test cases pass on the demo engine from a fresh ChatGPT account, desktop and mobile. | A session | 5b |
+| 5e | Demo video, recorded last from the tested build. | Owner | 5a-5d done |
+
+### Deferred to after 1.0
+
+- **Built-in scan reading** with macOS Vision OCR (filed below: "Deferred to
+  the release after 1.0: built-in scan reading").
+- **Delphi as a configured private lane** for the owner's own install.
+- **Signed `.pkg` installer and installer skill**: 1.0 ships a script (decided 2026-10-03)
+  (design: "Later").
+- **MCP Events** (design: "Later").
+- **Dead Let's Encrypt agreement UI.** The browser dashboard still carries
+  the relay-v1 terms panel, which nothing triggers since relay v2
+  (`needsTerms`, `LETS_ENCRYPT_REPOSITORY_URL` in
+  `src/workers/agent-connections.ts`); delete it with the dashboard lane.
+- **Hosted agents beyond ChatGPT** (Claude, Grok, Muse) stay out of scope.
+- **Authenticating the Mac's key to the panel.** A compromised relay could
+  swap keys (a residual risk stated in the design); accepted for 1.0.
+- **Outside help on the private answer panel** (frontier consult over
+  zkAPI; design `docs/design/frontier-consult-lane.md`, owner decisions of
+  2026-10-07). Not in 1.0; a candidate for the release after. Its build
+  stages land behind the internal settings mechanism (no public enable
+  path): C1 gate and packs, C2 the transport session, C3 settings, C4a the
+  panel collection protocol, C4b the writer scheduling and dispatch
+  orchestration (wired; inert unless a valid enabled `consult.json` exists),
+  C5 the Mac dashboard Outside help card (the settings writer and the only
+  enable path, control session only; `docs/design/chatgpt-plugin.md`,
+  "Outside help enable flow"). The quiet-machine B2 first-token rerun of
+  §A.7 is a release prerequisite for the enable path and is still owed: the
+  card does not ship to users until it passes. The "experimental, route not
+  verified" label is about the macOS route verification (§Z.4), not a waiver
+  of that proof.
+
+## Outcome (0.4, OpenClaw)
 
 Release Olympus as a testable plugin to the product owner and a fluid cohort of
 technically sophisticated OpenClaw beta testers so they can:
@@ -20,6 +143,107 @@ and Linux installations, every source's actual limits are documented, and beta
 testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
+
+- **2026-10-08 — Ordinary photos are Personal; only sensitive photos are
+  Private.** Owner decision, replacing the 2026-10-07 interim rule below.
+  Sensitive: nudity or intimate images, identity documents, bank or credit
+  cards, and pictures of financial or medical documents. A photo that cannot
+  be judged (no image encoder, off macOS, the judge failed) stays Private; a
+  missed sensitive photo is worse than a wrongly Private one. The judge is
+  zero-shot on EmbeddingGemma 2 (image-only vector against six descriptions;
+  margin 0.04, intimate 0.025, the owner's medium setting): 22 of 22 public
+  specimens caught, 8 of the owner's 116 photos flagged (7 near "intimate",
+  mostly beach photos; 1 lab result). Text read off an ordinary photo still goes through the usual rules.
+  Design: `docs/design/photo-embeddings.md` (photo judge).
+
+- **2026-10-07 — Photos are searchable by content.** Owner decision: photos
+  first (video stays names-only), Mac first, and a photo's content rests
+  Private until a media judge exists. Still images are extracted by default;
+  on macOS the shared text lane prepares a 1,024-pixel JPEG in an owner-only
+  media cache, and the built-in EmbeddingGemma 2 embeds the picture with the
+  photo's title and descriptor (vision encoder on, 140 tokens per image; its
+  identity unchanged because text vectors are). Relevance bar 0.73 kept
+  (matching photos 0.73 to 0.78, non-matching queries at most 0.695 on 116 of
+  the owner's photos). Design: `docs/design/photo-embeddings.md`.
+
+- **2026-10-03 (superseding the entry below) — 1.0 ships the beta.11 Google
+  Desktop client as the source default.** An independent review found that
+  installs which connected Gmail or Drive through the Desktop client that
+  0.4.0-beta.11 packaged would lose publisher recognition (and one-click
+  reconnect) after an upgrade to a build without it. The owner set
+  `DEFAULT_GOOGLE_PILOT_CLIENT_ID` in `src/core/google-pilot-client.ts` to that
+  same public client id, taken from the published beta.11 package, so nothing
+  changes for any existing or new install. Release builds use the source
+  default; the explicit `none` choice below stays available.
+- **2026-10-03 — 1.0 release builds may carry no Google Desktop client.** Owner
+  decision, conditional on proof that no host loses one-click Google sign-in;
+  the proof holds for fresh installs. Every Gmail and Google Drive connect path — the standalone
+  Mac dashboard, the native OpenClaw page, ChatGPT's `olympus_connect_source`
+  (and Hermes or Claude Code, which use the same dashboard) — goes through
+  `/dashboard/connect/oauth/start`, which picks the publisher Google Web
+  client, the relay and the publisher exchange whenever the install has not
+  registered its own app. The Desktop "pilot" client
+  (`OLYMPUS_GOOGLE_PILOT_CLIENT_ID`) was only a fallback for an install with
+  no publisher Web client; `olympus connect gmail|google-drive` has always
+  required `--client-id` (bring-your-own) and never read it. Pinned by the
+  "no Google Desktop client" tests in
+  `test/dashboard-oauth-publisher-relay.test.ts`. The release builder still
+  refuses by omission: a release is built with a Desktop client id, or with
+  the explicit `OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none`, which packages "no
+  Desktop client" (`scripts/release-google-pilot-choice.ts`) and says so in
+  the build log. The dashboard's Google status (`google_pilot`) now follows
+  the publisher Web client too, so it keeps the unverified-app note and no
+  longer says "set up your own Google app" over one-click cards.
+
+- **2026-10-03 — The 1.0 Mac installer is a script.** Owner decision: Olympus
+  1.0 ships with `curl -fsSL https://olympusplugin.ai/install.sh | sh`, not a
+  signed `.pkg`, and the website is published. The release tarball is hosted
+  on olympusplugin.ai beside the installer (no npm publication needed), and
+  the installer pins its version, SHA-256 and size, and Bun's, verifying each
+  before anything runs. A signed, notarized `.pkg` stays deferred to after 1.0
+  (above).
+
+- **2026-10-01 — This release is Olympus 1.0.** Owner decision: the
+  standalone engine, the ChatGPT plugin, the relay and the Personal / Private
+  / Secret privacy model ship as Olympus 1.0, not as further 0.4 betas. The
+  0.4 beta line ends at beta.11. Test builds are `1.0.0-rc.N`; `1.0.0` is
+  the version submitted to the ChatGPT plugin directory. This plan becomes the
+  v1 plan (file rename and AGENTS.md pointer to follow with the integration
+  merge).
+
+- **2026-10-01 — ChatGPT is the release target; engine on the user's Mac.**
+  Owner direction: get Olympus working as a ChatGPT plugin (the 2026-09-29
+  plugin platform) with the dashboard inside ChatGPT, built to the final
+  design rather than staged. A ChatGPT user installs only the Olympus engine
+  (ChatGPT's desktop agent can run the installer); OpenClaw becomes one
+  optional host. No extra installs and no new accounts except an optional
+  Venice account. ChatGPT reaches each Mac through one hosted relay at
+  `mcp.olympusplugin.ai` (Hetzner `olympus-relay-1`); consent happens on the
+  Mac's loopback page. Claude, Grok and Muse are out of scope for now. No
+  pre-submission contact with OpenAI. Design and build plan:
+  [`design/chatgpt-plugin.md`](design/chatgpt-plugin.md); it supersedes the
+  hosted-relay parts of `design/hosted-agent-compatibility.md`. The OpenClaw
+  outcome below stays valid for existing OpenClaw installs.
+
+- **2026-10-07 — Built-in transcription is in 1.0.** Owner decision: audio
+  (Dropbox audio files, voice notes, the sound track of the accepted video
+  containers) is transcribed on the machine with nothing to install, by
+  Qwen3-ASR 0.6B run on the llama.cpp `llama-server` Olympus already pins for
+  built-in reasoning. Audio never leaves the machine; there is no cloud ASR.
+  An owner-configured transcription command still wins. Scope, bounds and
+  proof: [built-in transcription](#built-in-transcription-in-10-owner-2026-10-07).
+
+- **2026-10-02 — Built-in scan reading is in 1.0.** Owner decision: the
+  item deferred on 2026-10-01 is pulled into this release. On a Mac, scanned
+  PDFs and images are read on-device with the system's own Vision text
+  recognition, with nothing to install; tesseract stays the engine elsewhere.
+  Scope, bounds and proof: [built-in scan reading](#built-in-scan-reading-in-10-owner-2026-10-02).
+
+- **2026-10-01 — Built-in embeddings are the default for new installs.**
+  Owner approval: a small model runs inside Olympus with zero setup and
+  nothing leaving the machine; other providers stay opt-in. Embedding custody
+  is unchanged: re-embedding an existing store still needs the owner's
+  advance approval with its cost estimate and an embedding-ledger entry.
 
 - **2026-09-30 — Repair PDF extraction; attachment metadata only.** Owner
   authorization: every PDF the connected file sources allow is extracted,
@@ -812,6 +1036,76 @@ capture freshness from importer activity, catalogue presence from readable
 content, and readable text from complete extraction and vector coverage.
 Reproduce any misleading status on synthetic fixtures and fix the product
 without expanding the owner's selected ingestion scope.
+
+### Built-in scan reading (in 1.0, owner 2026-10-02)
+
+Deferred on 2026-10-01, pulled into 1.0 on 2026-10-02. A fresh Mac used to
+leave scanned PDFs and images names-only because the OCR lane needed
+`ocrmypdf` / `tesseract` from Homebrew. Now:
+
+- The existing OCR lane (`local_ocr_tesseract`; the kind keeps its name for
+  stored jobs and tooling) has a built-in engine on macOS: the packaged
+  `scripts/macos-vision-ocr.js` runs under the system's `/usr/bin/osascript`,
+  renders PDF pages with PDFKit and reads them with Vision's accurate text
+  recognizer and automatic language detection. No install, no Xcode, no
+  network, no privacy prompt.
+- Routing: a PDF whose text layer is empty (or undecodable) and any image the
+  text lane meets are read by it. Tesseract remains the engine on Linux, when
+  the owner sets `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE=tesseract`, or when Vision
+  cannot run on a Mac. Off macOS, images in the text lane stay names-only as
+  before.
+- Recognized text is ordinary extracted text: the same bounds, job outcomes and
+  per-item tier classification (map and local sniffer) as any other file.
+- Design, bounds and failure classes:
+  [`design/built-in-scan-reading.md`](design/built-in-scan-reading.md).
+
+Proof (2026-10-02, owner's Mac, macOS 26.5, copies of real files outside the
+live store): all 20 PDFs the Mac could not read text from (scans, plus text
+layers the built-in decoder cannot decode) and all 3 images from the health
+and resource folders were read — 190 pages in about 195 seconds. Timings are
+in the design note.
+
+Not in this step: on-device transcription of audio and video. The Speech
+framework needs a speech-recognition privacy permission that a background
+`osascript` cannot ask for without an unexplained system prompt, so it stays
+off. Audio is read by the built-in transcription model instead (next
+section). A local vision model for charts and photos remains a later step.
+
+### Built-in transcription (in 1.0, owner 2026-10-07)
+
+A fresh Mac used to leave audio names-only unless the owner configured a
+transcription command. Now:
+
+- The transcription lane (`whisper_transcription`; the kind keeps its name)
+  has a built-in engine: Qwen3-ASR 0.6B (Apache-2.0; ggml-org GGUF, Q8_0
+  weights plus Q8_0 audio projector, about 1 GB, pinned by commit and
+  SHA-256) on the pinned llama.cpp b11320 `llama-server`, as a separate
+  loopback-only process that stops after 3 idle minutes. The llama.cpp
+  runtime is shared with the built-in reasoning model and installed once.
+- Engine order: an owner command (`OLYMPUS_TRANSCRIBE_COMMAND`) first, then
+  the built-in engine (on by default on Apple silicon;
+  `OLYMPUS_BUILT_IN_TRANSCRIPTION=on|off`), then none (`transcription_required`).
+- When it downloads (owner 2026-10-07): only when the owner's chosen sources
+  contain audio, checked at engine start and after each sync that catalogued
+  new items; with no audio it never downloads. Built-in model sizes: reasoning
+  about 2.6 GB, embedding about 0.8 GB, transcription about 1 GB only when
+  needed. Once it is ready, extraction runs within seconds, not at the next
+  pass.
+- While the model downloads, or
+  where it cannot run, audio settles names-only with `transcription_required`
+  and spends no retry; once the model is ready, the shared extraction runner
+  reads each such job (and legacy `transcriber_not_configured` terminal jobs)
+  once more.
+- Formats: the system `afconvert` decodes AAC/M4A, MP3, WAV, AIFF, CAF, FLAC,
+  Ogg Opus (voice notes), and the audio of MP4/MOV, to 16 kHz mono; audio is
+  read in chunks of up to 30 s cut at quiet moments.
+- Design, bounds and failure classes:
+  [`design/built-in-transcription.md`](design/built-in-transcription.md).
+
+Proof (2026-10-07, Apple-silicon Mac, scratch directories, synthetic clips):
+the pinned model downloaded and verified through the installer in 29 s; M4A,
+Ogg Opus, CAF Opus, MOV and AIFF clips and a 99 s MP3 (four chunks) were
+transcribed correctly, the longest in 7.6 s. Details in the design note.
 
 ### Deferred: high-value email embeddings
 

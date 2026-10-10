@@ -75,20 +75,20 @@ describe('public flip owner-identifier scan', () => {
 
   test('a sanctioned identifier is allowed only in its own file', () => {
     const { root, paths } = fixtureTree({
-      'config/critical-review.json': '{ "reviewerLogins": ["jamiezigelbaum"] }\n',
-      'src/elsewhere.ts': "export const reviewer = 'jamiezigelbaum';\n",
+      'config/private-ops-disposition.json': '{ "owner": "jamiezigelbaum" }\n',
+      'src/elsewhere.ts': "export const owner = 'jamiezigelbaum';\n",
     });
     const report = scanTree(root, paths);
     expect(report.sanctioned).toHaveLength(1);
-    expect(report.sanctioned[0]!.path).toBe('config/critical-review.json');
+    expect(report.sanctioned[0]!.path).toBe('config/private-ops-disposition.json');
     expect(report.blockers).toHaveLength(1);
     expect(report.blockers[0]!.path).toBe('src/elsewhere.ts');
   });
 
   test('a sanctioned file still fails on a different identifier', () => {
     const { root, paths } = fixtureTree({
-      // The sanction covers the reviewer login, not everything in the file.
-      'config/critical-review.json': '{ "reviewerLogins": ["jamiezigelbaum"], "host": "sparta" }\n',
+      // The sanction covers the owner login, not everything in the file.
+      'config/private-ops-disposition.json': '{ "owner": "jamiezigelbaum", "host": "sparta" }\n',
     });
     const report = scanTree(root, paths);
     expect(report.sanctioned.map((hit) => hit.match)).toEqual(['jamiezigelbaum']);

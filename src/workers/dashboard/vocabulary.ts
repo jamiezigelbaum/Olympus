@@ -140,6 +140,13 @@ export interface DashboardStatusGroup {
 export interface DashboardVocabularyOptions {
   now?: Date;
   degradedCredentials?: readonly WorkerCredentialDegradation[];
+  /**
+   * Which dashboard the words are for. The ChatGPT dashboard has no How to fix
+   * sheet and its owner signs in through Olympus's own apps, so a provider
+   * refusal there reads DASHBOARD_CHATGPT_REFUSAL_COPY. Defaults to the local
+   * dashboard.
+   */
+  surface?: 'local' | 'chatgpt';
 }
 
 export interface DashboardStatusResolution {
@@ -165,7 +172,7 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   // doing something. It outranks the unknown fallback too — an expired
   // credential still needs them whatever else on the card has drifted — so the
   // marker rides along rather than swallowing the word.
-  if (degradationForSource(source, input.degradedCredentials)) {
+  if (dashboardDegradationForSource(source, input.degradedCredentials)) {
     return {
       status: 'Needs you',
       mappedUnknown: unknownValue !== undefined,
@@ -354,7 +361,7 @@ export function dashboardSubLine(
     case 'Waiting':
       return waitingLine(source);
     case 'Fresh':
-      return freshLine(source);
+      return freshLine(source, options?.now ?? new Date());
     case 'Off':
       return source.connection.label;
   }
@@ -369,7 +376,7 @@ export function dashboardAttentionLine(
   source: DashboardSourceCard,
   options?: DashboardVocabularyOptions,
 ): string {
-  const degradation = degradationForSource(source, options?.degradedCredentials);
+  const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
     return clause ? `can't sign in · ${clause}` : `can't sign in`;
@@ -378,17 +385,19 @@ export function dashboardAttentionLine(
   // line below, because "not connected" over an attempt the provider
   // explicitly rejected explains nothing the owner can act on. The provider's
   // own words stay in the sheet's How to fix disclosure.
-  if (source.connection.provider_refusal) return dashboardProviderRefusalLine(source);
+  if (source.connection.provider_refusal) return dashboardProviderRefusalLine(source, options);
   switch (source.connection.state) {
     case 'reauth_required':
       return DASHBOARD_SIGNED_OUT;
     case 'awaiting_consent': {
       // The label is the provider's own name off the card, so the sentence
       // points at the tab the owner is actually looking at.
-      const base = `waiting for you to approve in the ${source.label} tab`;
+      // The sign-in may be in any browser or on any device, so the line says
+      // what to do, never which tab to look in (owner rule, 2026-10-02).
+      const base = `finish signing in to ${source.label}`;
       const minutes = source.connection.pending?.expires_in_minutes;
       return minutes !== undefined && minutes > 0
-        ? `${base} · expires in ${dashboardDuration(minutes * 60)}`
+        ? `${base} · link expires in ${Math.max(1, Math.ceil(minutes))} min`
         : base;
     }
     case 'needs_setup':
@@ -404,7 +413,12 @@ export function dashboardAttentionLine(
     default:
       break;
   }
-  if (source.answer_readiness.state === 'needs_attention') return `paused — ${pausedReason(source)}`;
+  // "Paused" is said only of a real pause — Olympus parked the lane on a budget
+  // or a rate limit (owner ruling, 2026-10-08). A broken file, a stale sync or
+  // a failing task is stated as itself.
+  if (source.answer_readiness.state === 'needs_attention') {
+    return dashboardOperatorPaused(source) ? `paused — ${pausedReason(source)}` : pausedReason(source);
+  }
   // Owner ruling, 2026-08-24: NO ERROR COUNTS ANYWHERE. This line used to end
   // "3 items need attention · 1 task retrying", which is a number about queue
   // depth dressed as a number about the reader's data — and the reader can do
@@ -445,11 +459,19 @@ function pausedReason(source: DashboardSourceCard): string {
   return relative ? `last synced ${relative}, later than expected` : 'it has not synced when expected';
 }
 
+/**
+ * The readiness label source-dashboard.ts raises when more than
+ * DASHBOARD_UNREADABLE_ALARM_SHARE of a source's in-scope files can't be read:
+ * past that, it is an extractor regression, not a few damaged files.
+ */
+export const DASHBOARD_MANY_UNREADABLE_LABEL = 'Many files cannot be read';
+
 /** The view model's readiness labels that name a cause, in the owner's words. */
 const READINESS_REASONS: Readonly<Record<string, string>> = {
   'Reauthenticate this source': DASHBOARD_SIGNED_OUT,
   'Embedding lane needs attention': 'indexing has stopped',
   'Content extraction is stalled': 'reading files has stalled',
+  [DASHBOARD_MANY_UNREADABLE_LABEL]: "many files can't be read",
 };
 
 /** The view model's catch-all readiness label, which names no cause. */
@@ -472,8 +494,9 @@ const REDIRECT_REFUSAL_CODES: ReadonlySet<string> = new Set([
  * the address to register are technical detail; they live in the connect
  * sheet's How to fix disclosure, never on the row.
  */
-export function dashboardProviderRefusalLine(source: DashboardSourceCard): string {
+export function dashboardProviderRefusalLine(source: DashboardSourceCard, options?: DashboardVocabularyOptions): string {
   const code = source.connection.provider_refusal?.code ?? '';
+  if (options?.surface === 'chatgpt') return DASHBOARD_CHATGPT_REFUSAL_COPY.line[chatgptRefusalKind(code)];
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `rejected the sign-in address — fix it in your ${source.label} app settings`;
   }
@@ -482,13 +505,20 @@ export function dashboardProviderRefusalLine(source: DashboardSourceCard): strin
 }
 
 /** The same refusal as a full sentence, for the top of the connect sheet. */
-export function dashboardProviderRefusalSentence(source: DashboardSourceCard): string {
+export function dashboardProviderRefusalSentence(source: DashboardSourceCard, options?: DashboardVocabularyOptions): string {
   const code = source.connection.provider_refusal?.code ?? '';
+  if (options?.surface === 'chatgpt') return DASHBOARD_CHATGPT_REFUSAL_COPY.sentence[chatgptRefusalKind(code)](source.label);
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `${source.label} rejected the sign-in address. Fix it in your ${source.label} app settings, then connect again.`;
   }
   if (code === 'access_denied') return `${source.label} sign-in was declined. Connect again to retry.`;
   return `${source.label} refused the sign-in. How to fix has the details.`;
+}
+
+function chatgptRefusalKind(code: string): keyof typeof DASHBOARD_CHATGPT_REFUSAL_COPY.line {
+  if (REDIRECT_REFUSAL_CODES.has(code)) return 'address';
+  if (code === 'access_denied') return 'declined';
+  return 'unfinished';
 }
 
 /** The raw refusal, for the How to fix disclosure only. */
@@ -520,9 +550,9 @@ export const DASHBOARD_INDEXING_NAME = 'Indexing';
 /**
  * "98% done, 4,055 items left, about 2 hours" — the half after the name.
  *
- * Moving with no measured rate says "estimating time left"; a stopped lane
- * says stalled; a lane something parked says paused. No ETA is printed
- * without a rate behind it.
+ * Moving with no measured rate says nothing about time (owner rule,
+ * 2026-10-02: no ETA unless measured, and no placeholder for one); a stopped
+ * lane says stalled; a lane something parked says paused.
  */
 export function dashboardIndexingFacts(progress: DashboardIndexingProgress): string {
   if (progress.state === 'done') return 'up to date';
@@ -533,9 +563,7 @@ export function dashboardIndexingFacts(progress: DashboardIndexingProgress): str
   }
   switch (progress.state) {
     case 'moving':
-      parts.push(progress.etaMs !== undefined && progress.etaMs > 0
-        ? dashboardEtaWords(progress.etaMs)
-        : 'estimating time left…');
+      if (progress.etaMs !== undefined && progress.etaMs > 0) parts.push(dashboardEtaWords(progress.etaMs));
       break;
     case 'stalled':
       parts.push('stalled');
@@ -607,6 +635,13 @@ export function dashboardSetupLead(sourceId: string, instructions: string): { su
 }
 
 /** The control that speeds indexing up, and what it costs. */
+/** Fills `{name}` placeholders in a fixed sentence. */
+export function fill(template: string, values: Record<string, string | number>): string {
+  let out = template;
+  for (const key of Object.keys(values)) out = out.split(`{${key}}`).join(String(values[key]));
+  return out;
+}
+
 export const DASHBOARD_INDEX_FASTER = {
   on: 'Index faster',
   off: 'Stop indexing faster',
@@ -812,6 +847,11 @@ export interface DashboardWorkingSummary {
   in_scope_items: number;
   /** Of those, how many have their text extracted. */
   read_items: number;
+  /**
+   * Of those, how many extraction gave up on for good. Settled, not pending:
+   * they finish the stage without ever counting as read.
+   */
+  unreadable_items?: number;
   /** Percent of in-scope files whose text is extracted, 0..100. */
   read_percent: number;
   /**
@@ -844,6 +884,7 @@ export function dashboardWorkingSummary(
   if (inScope <= 0) return undefined;
   const read = Math.max(0, Math.min(inScope, source.coverage.content_ready_items));
   const readPercent = clampPercent((read / inScope) * 100);
+  const unreadable = Math.max(0, Math.min(inScope - read, Math.trunc(source.coverage.unreadable_items ?? 0)));
   const backlog = source.embedding_backlog;
   // Parity counts chunks, so it can only ever qualify the headline — never
   // become it. `chunks` is documented as always > 0 where a backlog exists.
@@ -856,9 +897,10 @@ export function dashboardWorkingSummary(
   return {
     in_scope_items: inScope,
     read_items: read,
+    ...(unreadable > 0 ? { unreadable_items: unreadable } : {}),
     read_percent: readPercent,
     ...(searchablePercent !== undefined ? { searchable_percent: searchablePercent } : {}),
-    fully_working: read >= inScope && !parityShort,
+    fully_working: read + unreadable >= inScope && !parityShort,
   };
 }
 
@@ -871,6 +913,12 @@ export function dashboardWorkingSummary(
  */
 export function dashboardWorkingHeadline(summary: DashboardWorkingSummary): string {
   if (summary.fully_working) {
+    const unreadable = summary.unreadable_items ?? 0;
+    if (unreadable > 0) {
+      return `everything readable is working — ${dashboardCount(summary.read_items)} of`
+        + ` ${dashboardCount(summary.in_scope_items)} ${plural(summary.in_scope_items, 'file')}`
+        + ` · ${dashboardCount(unreadable)} can't be read`;
+    }
     return `everything in scope is working — ${dashboardCount(summary.in_scope_items)}`
       + ` ${plural(summary.in_scope_items, 'file')}`;
   }
@@ -893,18 +941,173 @@ export function dashboardCount(value: number): string {
   return rounded < 0 ? `-${digits}` : digits;
 }
 
-function freshLine(source: DashboardSourceCard): string {
+function freshLine(source: DashboardSourceCard, now: Date): string {
   // The answer lane has nothing to sync, and its freshness label is the only
   // field that says so.
   if (source.freshness.label.startsWith('Answer lane:')) return 'answers questions directly';
+  const unreadable = dashboardUnreadablePhrase(source);
+  // The owner's own Sync now press, while it is the latest word, says what it
+  // found in place of the bare sync time.
+  const manual = dashboardManualSyncLine(source, now);
+  if (manual) return unreadable ? `${manual} · ${unreadable}` : manual;
   const hours = source.freshness.hours;
-  if (typeof hours !== 'number' || !Number.isFinite(hours)) return '';
+  if (typeof hours !== 'number' || !Number.isFinite(hours)) return unreadable ?? '';
   const relative = dashboardRelativeFromHours(hours);
-  if (!relative) return '';
+  if (!relative) return unreadable ?? '';
   // A lane Olympus parked is calm, not idle by accident. Saying so keeps this
   // line from implying the sync is still running, and matches the detail
   // page's paused sentence for the same marker.
-  return dashboardOperatorPaused(source) ? `synced ${relative} · sync paused` : `synced ${relative}`;
+  const synced = dashboardOperatorPaused(source) ? `synced ${relative} · sync paused` : `synced ${relative}`;
+  return unreadable ? `${synced} · ${unreadable}` : synced;
+}
+
+/**
+ * The noun a source's items go by (owner note, 2026-09-01: "the units need to
+ * be correct for each bar" — Gmail was counting "files"). Off the card's
+ * family, which is the one field that says what kind of thing an item is.
+ */
+export function dashboardItemNoun(source: Pick<DashboardSourceCard, 'family'>): string {
+  switch (source.family) {
+    case 'email':
+    case 'chat':
+      return 'messages';
+    // Readwise indexes Reader documents and highlights alike, so neither word
+    // alone names what is counted (owner review, 2026-09-24).
+    case 'readwise':
+      return 'items';
+    case 'x':
+      return 'posts';
+    case 'file':
+      return 'files';
+    default:
+      return 'items';
+  }
+}
+
+/** "1 file", "2 files", "12 new files": the item noun at a count. */
+function itemsPhrase(source: Pick<DashboardSourceCard, 'family'>, count: number, adjective = ''): string {
+  const noun = dashboardItemNoun(source);
+  return `${dashboardCount(count)} ${adjective ? `${adjective} ` : ''}${count === 1 ? noun.replace(/s$/, '') : noun}`;
+}
+
+/**
+ * "2 files can't be read", or undefined when nothing is unreadable.
+ *
+ * Owner ruling, 2026-10-08: a damaged file, or one in a format nothing reads,
+ * is a fact the row states beside its normal line — never a pause and never a
+ * Needs you of its own (the readiness guard re-alarms past
+ * DASHBOARD_UNREADABLE_ALARM_SHARE). Counts only; no file is ever named.
+ */
+export function dashboardUnreadablePhrase(source: DashboardSourceCard): string | undefined {
+  const count = Math.max(0, Math.trunc(source.coverage.unreadable_items ?? 0));
+  return count > 0 ? `${itemsPhrase(source, count)} can't be read` : undefined;
+}
+
+/** A finished phase that left some files unread for good: "Done · 252 read · 2 can't be read". */
+export function dashboardPhaseUnreadableWords(read: number, unreadable: number): string {
+  return `Done · ${dashboardCount(read)} read · ${dashboardCount(unreadable)} can't be read`;
+}
+
+/**
+ * The detail page's plain reason for those files (2026-10-08). Never a file
+ * name: the reason is the same for every one of them.
+ */
+export function dashboardUnreadableSentence(source: DashboardSourceCard): string | undefined {
+  const phrase = dashboardUnreadablePhrase(source);
+  if (!phrase) return undefined;
+  const lead = `${phrase[0]!.toUpperCase()}${phrase.slice(1)}: extraction failed permanently — the file is damaged`
+    + " or in a format Olympus can't read.";
+  // Past the alarm share the row says Needs you, so this sentence must not say
+  // nothing is waiting — and the rest of the source still answers.
+  return source.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL
+    ? `${lead} ${DASHBOARD_UNREADABLE_NOTE_MANY}`
+    : `${lead} ${DASHBOARD_UNREADABLE_NOTE}`;
+}
+
+/** The note under See why, and the detail page's tail: nothing to do, the rest answers. */
+export const DASHBOARD_UNREADABLE_NOTE = 'Olympus does not retry these, and nothing is waiting on you.';
+
+/** The same note past DASHBOARD_UNREADABLE_ALARM_SHARE, where the row already says Needs you. */
+export const DASHBOARD_UNREADABLE_NOTE_MANY =
+  'That is more than a healthy source has, so it may be a problem in Olympus rather than your files.'
+  + ' The other files still answer questions.';
+
+/**
+ * Why files can't be read, as a closed list (phase 3 of the unified dashboard).
+ * Today extraction records one permanent failure, so one reason exists: a
+ * damaged file and a format nothing reads are the same to the engine. More
+ * codes need extraction to store one first. The view model carries a code and
+ * a count, never a file name; the panel holds these words.
+ */
+export const DASHBOARD_UNREADABLE_REASON_CODES = ['damaged_or_unsupported'] as const;
+export type DashboardUnreadableReasonCode = (typeof DASHBOARD_UNREADABLE_REASON_CODES)[number];
+
+export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
+  Record<DashboardUnreadableReasonCode, { one: string; other: string }>
+> = {
+  damaged_or_unsupported: {
+    one: "{count} file is damaged or in a format Olympus can't read",
+    other: "{count} files are damaged or in a format Olympus can't read",
+  },
+};
+
+/** A Sync now that could not run, in plain words; the provider's own text stays in the log. */
+export function dashboardManualSyncFailedLine(label: string): string {
+  return `Couldn't check ${label} just now — Olympus will try again on its own`;
+}
+
+/** While a Sync now press is outstanding: "Checking Dropbox…". */
+export function dashboardManualSyncPendingLine(label: string): string {
+  return `Checking ${label}…`;
+}
+
+/** A Sync now press that found a sync of this source already running, so started nothing new. */
+export function dashboardManualSyncBusyLine(label: string): string {
+  return `Already checking ${label}`;
+}
+
+/**
+ * A Sync now pressed again within a minute of the last one (2026-10-09): the
+ * press starts nothing, and says why.
+ */
+export function dashboardManualSyncTooSoonLine(label: string): string {
+  return `${label} was checked a moment ago — try again in a minute`;
+}
+
+/**
+ * What the last Sync now press found, while the card still carries it
+ * (DASHBOARD_MANUAL_SYNC_SHOWN_MS): "Checked just now — no new files",
+ * "Checked 3m ago — 12 new files, reading them now". While the press's sync
+ * still runs: "Checking Dropbox…". Never provider text.
+ */
+export function dashboardManualSyncLine(
+  source: Pick<DashboardSourceCard, 'label' | 'family' | 'last_manual_sync'>,
+  now: Date,
+): string | undefined {
+  const sync = source.last_manual_sync;
+  if (!sync) return undefined;
+  const at = Date.parse(sync.at);
+  if (!Number.isFinite(at)) return undefined;
+  const elapsed = now.getTime() - at;
+  const when = elapsed < 60_000 ? 'just now' : dashboardRelativeFromMs(elapsed);
+  switch (sync.outcome) {
+    case 'checking':
+      return dashboardManualSyncPendingLine(source.label);
+    case 'busy':
+      return dashboardManualSyncBusyLine(source.label);
+    case 'failed':
+      return when === 'just now'
+        ? dashboardManualSyncFailedLine(source.label)
+        : `Couldn't check ${source.label} ${when} — Olympus will try again on its own`;
+    case 'checked': {
+      const found = sync.new_items;
+      if (found === undefined) return `Checked ${when}`;
+      if (found <= 0) return `Checked ${when} — no new ${dashboardItemNoun(source)}`;
+      return `Checked ${when} — ${itemsPhrase(source, found, 'new')}, reading them now`;
+    }
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -983,6 +1186,8 @@ function workingLine(source: DashboardSourceCard): string {
   if (typeof eta === 'number' && Number.isFinite(eta) && eta > 0) {
     parts.push(`~${dashboardDuration(eta * 60)} left`);
   }
+  const unreadable = dashboardUnreadablePhrase(source);
+  if (unreadable) parts.push(unreadable);
   return parts.join(' · ');
 }
 
@@ -1017,7 +1222,13 @@ function degradationClause(degradation: WorkerCredentialDegradation): string {
  * like 'email' and 'file' that several cards share, and a shared name would
  * light up every one of them.
  */
-function degradationForSource(
+/**
+ * The worker credential degradation that names this source, if any: matched by
+ * label, provider, source id or its family prefix, case- and punctuation-blind.
+ * The one match both dashboards make (shared-status.ts reads it too); the name
+ * is matched, never printed.
+ */
+export function dashboardDegradationForSource(
   source: DashboardSourceCard,
   degraded: readonly WorkerCredentialDegradation[] | undefined,
 ): WorkerCredentialDegradation | undefined {
@@ -1057,3 +1268,1105 @@ function unknownStatus(value: string): DashboardStatusResolution {
 function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
 }
+
+/**
+ * Sentences the ChatGPT dashboard's producer composes into the view model
+ * (src/workers/chatgpt/dashboard-view-model.ts). Same keys the producer used
+ * while they were pending there; every value is a fixed string.
+ */
+export const DASHBOARD_CHATGPT_VOCABULARY = {
+  installingNoSource: 'Connect a source to begin',
+  installingModel: 'Getting search ready on your computer',
+  installingFirstIndex: 'Indexing your sources for the first time',
+  connectOnMac: 'Connect sources in Olympus on your computer.',
+  reconnect: 'Reconnect',
+  checkAgain: 'Check again',
+  openOnMac: 'Open Olympus on your computer',
+  stageReading: 'Reading',
+  stageSearchable: 'Indexing',
+  embeddingNeedsAttention: 'Search has stopped working on your computer.',
+  answerModelNeedsAttention: 'Answers have stopped working on your computer.',
+  /**
+   * A built-in model whose install failed, by its fixed failure code
+   * (ModelInstallFailedReason); the item's fix starts the install again.
+   */
+  modelInstallFailed: {
+    embedding: {
+      disk_full: 'Couldn\'t download the search model: the disk is full.',
+      network: 'Couldn\'t download the search model: the network dropped.',
+      checksum: 'Couldn\'t download the search model: the download was damaged.',
+      unknown: 'Couldn\'t download the search model.',
+    },
+    answers: {
+      disk_full: 'Couldn\'t download the private model: the disk is full.',
+      network: 'Couldn\'t download the private model: the network dropped.',
+      checksum: 'Couldn\'t download the private model: the download was damaged.',
+      unknown: 'Couldn\'t download the private model.',
+    },
+  },
+  /** After a disk-full install failure: how much to free, then the item's own Try again. */
+  diskFreeUp: 'Free up {size}, then Try again.',
+  diskFreeUpUnknown: 'Free up some space, then Try again.',
+  fixOnMac: 'Open Olympus on your computer to fix this.',
+  privateMatches: 'Some matching items are private and stay on your computer.',
+  changeModelsOnMac: 'Change models in Olympus on your computer.',
+} as const;
+
+/**
+ * A provider refusal as the ChatGPT dashboard words it, by the refusal's kind.
+ * ChatGPT has no How to fix sheet, and its owner signs in through Olympus's own
+ * apps (no app settings of their own to fix), so every refusal points at the
+ * row's Reconnect. `line` is the reason half after "<Source> — "; `sentence`
+ * stands alone. A declined sign-in already reads as a retry on both
+ * dashboards, so it keeps the shared words. The local dashboard keeps its own
+ * words for the rest (dashboardProviderRefusalLine).
+ */
+export const DASHBOARD_CHATGPT_REFUSAL_COPY = {
+  line: {
+    address: 'sign-in didn\'t go through — try Reconnect',
+    declined: 'sign-in was declined — connect again to retry',
+    unfinished: 'didn\'t finish signing in — try Reconnect',
+  },
+  sentence: {
+    address: (source: string) => `${source} sign-in didn't go through. Try Reconnect.`,
+    declined: (source: string) => `${source} sign-in was declined. Connect again to retry.`,
+    unfinished: (source: string) => `${source} didn't finish signing in. Try Reconnect.`,
+  },
+} as const;
+
+/**
+ * The ChatGPT dashboard's own copy for the five connection states. The view
+ * model carries only the state; the page owns these words (the relay renders
+ * two of the states without reading this file). `disabledReason` is printed
+ * beside every other control while the state holds.
+ */
+export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
+  /**
+   * No Olympus link for this ChatGPT account. The relay cannot tell an owner
+   * who has not linked yet from one with no install, so the page offers
+   * Connect first and the install link beside it.
+   */
+  not_connected: {
+    title: 'Olympus isn\'t connected to ChatGPT yet',
+    disabledReason: 'Connect Olympus first',
+    install: 'Not installed yet?',
+  },
+  /** Linked to this ChatGPT account, first-run setup (models, first index) not finished. */
+  installing: {
+    title: 'Olympus is setting up on your computer…',
+    disabledReason: 'Available once Olympus is set up',
+  },
+  mac_offline: {
+    title: 'Your computer is offline or asleep, so answers are paused',
+    lastSeen: 'Last seen {when}',
+    disabledReason: 'Your computer is offline',
+  },
+  relay_unavailable: {
+    title: 'Olympus can\'t reach your computer right now.',
+    disabledReason: 'Can\'t reach your computer',
+  },
+  /** Labels for `connection.action.id`; `help` is shown as text when the action has no link. */
+  actions: {
+    /** Re-reads the dashboard, whose result carries ChatGPT's own connect prompt. */
+    connect: { label: 'Connect Olympus', help: '' },
+    open_olympus: { label: 'Open Olympus on your computer', help: 'Open Olympus on your computer, then check again here.' },
+    wake_mac: {
+      label: 'How to keep it available',
+      help: 'Keep your computer on, awake and online with Olympus running. Answers resume on their own when it is back.',
+    },
+    retry: { label: 'Try again', help: '' },
+  },
+} as const;
+
+/** Every other word the ChatGPT dashboard page prints. */
+export const DASHBOARD_CHATGPT_PAGE_COPY = {
+  title: 'Olympus',
+  loading: 'Checking your computer…',
+  upToDate: 'Olympus is up to date.',
+  needsYou: 'Needs you',
+  sources: 'Sources',
+  sourcesLocal: 'On your computer',
+  sourcesCloud: 'Accounts',
+  notConnected: 'Not connected',
+  noSources: 'No sources yet.',
+  progress: 'Progress',
+  progressInitial: 'First index',
+  progressRefresh: 'Catching up',
+  percentDone: '{percent}% done',
+  left: '{count} {unit} left',
+  eta: 'about {duration}',
+  stalled: 'stalled',
+  progressPaused: 'paused while your computer is offline',
+  details: 'Details',
+  stageLine: '{stage}: {done} of {total} {unit}',
+  models: 'Models',
+  modelSearch: 'Search',
+  modelAnswers: 'Answers',
+  modelBuiltIn: 'Built-in',
+  modelCustom: 'Custom',
+  modelReady: 'Ready',
+  modelDownloading: 'Downloading {percent}%',
+  modelNotWorking: 'Not working',
+  modelNotReady: 'Not ready',
+  modelGettingReady: 'Getting ready',
+  modelNeedsYou: 'Needs you',
+  modelChecking: 'Checking',
+  /** The install lines under the Models summary; {model} is one of modelNames. */
+  modelNames: { search: 'the search model', answers: 'the private model', transcription: 'the transcription model' },
+  /** The built-in transcription model's line in Models (models.transcription). */
+  modelTranscription: 'Transcription',
+  /** Not installed because the chosen sources hold no audio: nothing to download yet. */
+  modelNotNeededNoAudio: 'Not needed: no audio in your chosen folders',
+  /** Starts the transcription model's download ahead of any audio, or again after a failure. */
+  modelDownloadNow: 'Download now',
+  /** No readable record that this model is on disk (an unreadable or older status file). */
+  modelNotDownloaded: 'Not downloaded',
+  /** A download that stopped part way (the engine restarted mid-download). */
+  modelDownloadInterrupted: 'Download stopped before it finished',
+  /** Downloaded, but it would not start. */
+  modelCouldNotStart: 'Couldn\'t start {model}',
+  modelInstallDownloading: 'Downloading {model}',
+  modelInstallVerifying: 'Checking {model}…',
+  modelInstallFailed: 'Couldn\'t download {model}: {reason}',
+  modelInstallBytes: '{done} of {total}',
+  modelInstallReasons: {
+    disk_full: 'the disk is full',
+    network: 'the connection dropped',
+    checksum: 'the download was damaged',
+    unknown: 'something went wrong',
+  },
+  synced: 'Synced {when}',
+  updated: 'Updated {when}',
+  checkAgain: 'Check again',
+  tryAgain: 'Try again',
+  openOlympus: 'Open Olympus',
+  moreActions: 'More actions for {source}',
+  confirmPrompt: 'Are you sure?',
+  confirm: 'Yes, {label}',
+  cancel: 'Cancel',
+  working: 'Working…',
+  justNow: 'just now',
+  minutesAgo: '{n} min ago',
+  hoursAgo: '{n} hr ago',
+  daysAgo: '{n} days ago',
+  dayAgo: '1 day ago',
+  durationMinutes: '{n} min',
+  durationHours: '{n} hr',
+  durationHoursMinutes: '{h} hr {m} min',
+  durationDays: '{n} days',
+  durationLessThanMinute: 'less than a minute',
+  units: {
+    files: { one: 'file', many: 'files' },
+    messages: { one: 'message', many: 'messages' },
+    items: { one: 'item', many: 'items' },
+  },
+  /** A source's progress bar: its first unfinished stage. */
+  sourceStages: { listing: 'Finding items', reading: 'Reading', indexing: 'Indexing' },
+  findingItems: 'Finding items',
+  sourceProgress: '{stage} — {percent}%, {done} of {total} {unit}',
+  /** One plain sentence per stalled reason; {source} is the source's name. */
+  stalledReasons: {
+    waiting_for_credentials: 'Paused: Olympus needs you to sign in to {source} again',
+    scope_pending: 'Paused until you choose folders',
+    provider_unavailable: 'Paused: {source} isn\'t responding; Olympus will retry',
+    model_downloading: 'Waiting for the search model to finish downloading',
+  },
+  linkExpires: 'link expires in {n} min',
+  linkExpired: 'link expired',
+  /** Beside a control whose fix only the Mac can make: the fix's olympusplugin.ai help page. */
+  howOnMac: 'Fix this on your computer',
+  /** A source that is not moving and whose reason the engine did not send (never a blank row). */
+  sourcePaused: 'Paused',
+  /**
+   * Sync now, pressed (2026-10-09): the control while its sync runs, and the
+   * row's line until the dashboard's next read says the same ("Checking
+   * Dropbox…", dashboardManualSyncPendingLine). The result line after it is
+   * the engine's own (dashboardManualSyncLine), the same on both surfaces.
+   */
+  syncChecking: 'Checking…',
+  syncCheckingLine: dashboardManualSyncPendingLine('{source}'),
+  /** The disclosure under a row whose files can't be read (counts and reasons, never names). */
+  seeWhy: 'See why',
+  unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+  unreadableNote: DASHBOARD_UNREADABLE_NOTE,
+  unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY,
+} as const;
+
+/**
+ * What the same panel adds when the computer itself hosts it (unified
+ * dashboard phase 4, design signed off by Jamie 2026-10-09): the one "On this
+ * computer" section, the locked-controls reason, and Index faster under
+ * Progress → Details. Nothing else on the page has words of its own here.
+ */
+/** Opening-link handoff for the host-owning agent; never request a durable secret. */
+export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
+  'Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, '
+  + 'resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, '
+  + 'run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. '
+  + 'Do not read or print the worker token. Do not change configuration or connect sources.';
+
+/**
+ * The computer host page's banner while the local controls are locked. It
+ * leads with the one-click `olympus://open/dashboard` link (the browser asks
+ * first, then Olympus opens an unlocked dashboard); the terminal command is
+ * the fallback line, and an agent's opening link or a worker token sit behind
+ * "Other ways". It is the only place the locked state is explained: the
+ * panel's controls are disabled without a reason of their own.
+ */
+export const DASHBOARD_HOST_GATE_COPY = {
+  title: 'Dashboard controls are locked',
+  open: 'Open dashboard controls',
+  /** Before and after the command, which renders as code. */
+  fallbackBefore: 'or run ',
+  fallbackCommand: 'olympus dashboard',
+  fallbackAfter: ' in a terminal',
+  button: 'Other ways',
+  how: 'Ask your agent for a fresh opening link: copy this request to it, then open the link it gives you. The link works once and expires after fifteen minutes.',
+  copy: 'Copy prompt',
+  copied: 'Copied',
+  copyFailed: 'Select the text and copy it.',
+  advanced: 'Advanced: use a worker token',
+  tokenField: 'Worker token',
+  unlock: 'Unlock',
+  unlocking: 'Unlocking…',
+  pasteToken: 'Paste the worker bearer token.',
+  readToken: 'That is the read-only view token; use the worker bearer token from setup.',
+  refused: 'That token was not accepted.',
+} as const;
+
+export const DASHBOARD_COMPUTER_PANEL_COPY = {
+  section: 'On this computer',
+  onlyHere: 'only here',
+  open: 'Open',
+  rows: {
+    keys: { title: 'Keys', line: 'Venice, Readwise and X keys' },
+    agents: { title: 'Agents', line: 'Remote access and connected agents' },
+    outsideHelp: { title: 'Outside help', line: 'Anonymous answers (zkAPI)' },
+    connector: { title: 'Build a connector', line: 'For a source Olympus does not have yet' },
+  },
+  /**
+   * Why a control waits while the local dashboard controls are locked. The
+   * computer's banner carries it, so the panel shows it beside no control
+   * there; kept for a host without that banner.
+   */
+  locked: 'Open dashboard controls first',
+  /** The OpenClaw tab for a connection without operator.write. */
+  readOnlyOpenClaw: 'Reconnect OpenClaw with operator.write access to change this',
+  indexFaster: DASHBOARD_INDEX_FASTER,
+} as const;
+
+/**
+ * Control labels the ChatGPT producer puts on setup fixes
+ * (src/workers/chatgpt/dashboard-view-model.ts, which proposed them as
+ * CHATGPT_SETUP_LABELS). Closed set, owner words.
+ */
+export const DASHBOARD_CHATGPT_SETUP_LABELS = {
+  connect: 'Connect',
+  syncNow: 'Sync now',
+  chooseFolders: 'Choose folders',
+  chooseMail: 'Choose mail',
+  disconnect: 'Disconnect',
+  changeModels: 'Change',
+} as const;
+
+/**
+ * Words for the ChatGPT page's in-place Connect flow and its folder and mail
+ * pickers (src/workers/dashboard/chatgpt/picker.ts). Folder names, label names
+ * and senders are never part of this copy: the picker prints them only beside
+ * these words, inside the picker view.
+ */
+export const DASHBOARD_CHATGPT_PICKER_COPY = {
+  back: 'Back to Olympus',
+  cancel: 'Cancel',
+  tryAgain: 'Try again',
+  checkAgain: 'Check again',
+  connectTitle: 'Connect {source}',
+  connectStarting: 'Opening sign-in…',
+  connectWaiting: 'Waiting for you to finish signing in…',
+  connectWaitingHelp: 'Sign in to {source} in the window that opened. This page updates on its own when you are done.',
+  connectReopen: 'Open sign-in again',
+  connectTimeout: 'Olympus has not heard back from {source} yet. If you finished signing in, check again.',
+  connectFailed: 'Olympus could not start signing in to {source}. Try again.',
+  connected: '{source} is connected.',
+  foldersTitle: 'Choose folders',
+  foldersIntro: 'Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.',
+  mailTitle: 'Choose mail',
+  mailIntro: 'Choose which {source} mail Olympus may read. Nothing starts until you save.',
+  loadingFolders: 'Loading folders…',
+  loadingMail: 'Reading your labels and senders…',
+  loadFailed: 'Olympus could not load this list. Try again.',
+  up: 'Back',
+  upTo: 'Back to {name}',
+  pathMore: '…',
+  accountRow: 'Everything in {source}',
+  exceptions: 'Exceptions ({n})',
+  foldersHeading: 'Folders',
+  thisFolder: 'This folder',
+  unknownFolder: 'A folder not opened yet',
+  insideFolder: 'A folder inside {name}',
+  noFolders: 'No folders here.',
+  loadMore: 'Load more folders',
+  loadMoreCount: { one: 'Load 1 more folder', many: 'Load {n} more folders' },
+  /** The level has more folders than Olympus reads at once; some are not listed. */
+  truncated: 'This folder has more folders than Olympus can list here, so this list is incomplete.',
+  states: { ingest: 'Fully indexed', metadata_only: 'Names only', exclude: 'Skipped' },
+  statesLower: { ingest: 'fully indexed', metadata_only: 'names only', exclude: 'skipped' },
+  notIncluded: 'Not included',
+  mixed: 'Mixed',
+  mixedSome: 'Mixed: some folders inside are {state}',
+  /** The row control's segments: [full label, short label under ~420px]. */
+  segments: { ingest: ['Full', 'Full'], metadata_only: ['Names only', 'Names'], exclude: ['Skip', 'Skip'] },
+  choiceGroup: 'Choice for {name}',
+  openFolder: 'Open {name}',
+  cannotChoose: 'Olympus cannot read this folder.',
+  wholeOnlyFull: 'The whole account is all or nothing. Set Names only or Skip on folders instead.',
+  inheritedFrom: 'Inherited from {parent}',
+  overridden: 'This folder is set to {own}, but {parent} is {state}, which wins.',
+  notPossible: 'Not possible while {parent} is {state}.',
+  capReached: 'You have {max} folder choices, the most Olympus can save. Clear a folder\'s choice to choose another.',
+  folderFiles: { one: '{n} file', many: '{n} files' },
+  wholePrompt: 'Olympus will read every folder in {source}, now and later, except folders you set to Names only or Skip.',
+  wholeConfirm: 'Yes, use the entire account',
+  summaryTitle: 'What happens when you save',
+  summaryNone: 'Nothing chosen yet, so nothing will be read.',
+  summaryWhole: 'Everything else in {source}: fully indexed, including folders added later.',
+  summaryFolder: { one: 'folder', many: 'folders' },
+  summaryIngest: '{n} fully indexed',
+  summaryMetadata: '{n} with names only',
+  summaryExclude: '{n} skipped',
+  summarySize: 'about {size}',
+  needChoice: 'Choose at least one folder first.',
+  needConfirm: 'Confirm the entire account first.',
+  saveFolders: 'Save and start',
+  saveNoStart: 'Save',
+  saveMail: 'Save and start',
+  saving: 'Saving…',
+  saveFailed: 'Olympus could not save. Your choices are still here. Try again.',
+  conflict: 'These choices were changed somewhere else, so this view has been refreshed. Check it and save again.',
+  saved: '{source}: saved. Olympus is starting.',
+  discardPrompt: 'Discard your changes?',
+  discard: 'Discard changes',
+  keep: 'Keep choosing',
+  mailWindow: 'Read the full text of mail from',
+  mailWindowHelp: 'For older mail Olympus keeps only the subject, sender, date and labels.',
+  mailWindows: {
+    '6m': 'The last 6 months',
+    '1y': 'The last year',
+    '2y': 'The last 2 years',
+    '5y': 'The last 5 years',
+    all: 'All time',
+  },
+  mailRecommended: 'Recommended',
+  mailCategories: 'Gmail categories',
+  mailCategoriesHelp: 'Checked categories are read. Promotions and Social are skipped at first.',
+  mailCategoryNames: {
+    primary: ['Primary', 'Personal mail'],
+    updates: ['Updates', 'Receipts, statements, confirmations'],
+    forums: ['Forums', 'Mailing lists and groups'],
+    social: ['Social', 'Social network notifications'],
+    promotions: ['Promotions', 'Marketing and offers'],
+  },
+  mailCategoryCount: '{count} in your mailbox',
+  mailLabels: 'Labels',
+  mailLabelsHelp: 'Checked labels are read. Uncheck a label to skip all mail that has it.',
+  mailLabelsEmpty: 'This mailbox has no labels of its own.',
+  mailSentLabel: 'Sent',
+  mailSenders: 'Senders',
+  mailPrivate: 'Always private',
+  mailPrivateHelp: 'One address or @domain per line. Their new mail is treated as private and never goes to the cloud.',
+  mailSkip: 'Skip',
+  mailSkipHelp: 'One address or @domain per line. Their new mail is never read.',
+  mailSuggestions: 'Frequent senders in a sample of your recent mail',
+  mailSuggestionCount: '{n} of {total}',
+  mailEstimate: 'About {content} messages read in full and {metadata} by subject and sender only.',
+  mailCost: 'Indexing costs at most ${cost}.',
+  mailEstimateNote: 'Counts are Gmail\'s own estimates. Nothing has been read yet.',
+  mailUpdateEstimate: 'Update estimate',
+  mailSummaryWindow: 'Full text from {window}',
+  mailSummarySkipped: { one: '{n} category or label skipped', many: '{n} categories and labels skipped' },
+  mailSummaryPrivate: { one: '{n} sender always private', many: '{n} senders always private' },
+  mailSummarySkipSenders: { one: '{n} sender skipped', many: '{n} senders skipped' },
+} as const;
+
+/**
+ * The follow-up questions both privacy editors ask when the owner's words name
+ * a broad area (shared-privacy-logic.ts holds which areas, how they are
+ * spotted and each choice's default). An answered area becomes one sentence
+ * in the description, built from `about`, `privateList` and `shareList`, and
+ * read back from them: changing these words changes how saved answers read.
+ */
+export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
+  title: 'A few quick questions',
+  intro: 'Your words name some broad areas. Pick what\'s private in each, so Olympus keeps only those things private. Your answers are added to your description, where you can still edit them.',
+  private: 'Private',
+  share: 'Fine to share',
+  /** A choice whose sentence would not fit in the description: nothing changes. */
+  tooLong: 'Your description is too long to add this answer. Shorten your own words, then choose again.',
+  about: 'About {topic}:',
+  privateList: 'private — {list}',
+  shareList: 'fine to share — {list}',
+  topics: {
+    family: {
+      name: 'family',
+      question: 'Which family things are private?',
+      options: {
+        medical: 'Family members\' medical records',
+        legal_money: 'Family legal and money papers (divorce, custody, trusts)',
+        conversations: 'Private family conversations and journals',
+        logistics: 'School plans and family logistics',
+        contacts: 'Alumni, contact and address lists',
+        history: 'Family history and photos',
+      },
+    },
+    health: {
+      name: 'health',
+      question: 'Which health things are private?',
+      options: {
+        results: 'My lab, test and medical results',
+        prescriptions: 'Prescriptions and clinic or visit notes',
+        therapy: 'Therapy sessions',
+        exports: 'Health-data exports',
+        wellness: 'Wellness programs, diets and detox plans',
+        guides: 'Health books, guides and courses',
+        product_tests: 'Product or supplement test reports',
+      },
+    },
+    money: {
+      name: 'money',
+      question: 'Which money things are private?',
+      options: {
+        statements: 'Bank, card, brokerage and crypto statements',
+        tax: 'Tax and payroll papers',
+        bills: 'Invoices, bills and receipts',
+        loans: 'Loans and proof of funds',
+        articles: 'Articles and guides about money',
+        projects: 'Crypto project whitepapers and research',
+        prices: 'Prices and quotes I am researching',
+      },
+    },
+    work: {
+      name: 'work',
+      question: 'Which work things are private?',
+      options: {
+        contracts: 'Contracts, NDAs, offers and salaries',
+        hr: 'HR and legal matters',
+        projects: 'Project notes, specs and plans',
+        meetings: 'Work meeting transcripts',
+        wikis: 'Team wikis and assistant instruction files',
+      },
+    },
+    relationships: {
+      name: 'relationships',
+      question: 'Which relationship things are private?',
+      options: {
+        journals: 'Journals and personal session transcripts',
+        conversations: 'Private conversations',
+        teachings: 'Books and teachings about relationships',
+        groups: 'Group sessions and courses',
+      },
+    },
+    home: {
+      name: 'home',
+      question: 'Which home things are private?',
+      options: {
+        deeds: 'Deeds, purchase contracts and leases',
+        info: 'Property information and certificates',
+        plans: 'Listings, renovation and moving plans',
+      },
+    },
+  },
+} as const;
+
+/**
+ * Words for the ChatGPT page's privacy setup (src/workers/dashboard/chatgpt/privacy.ts)
+ * and the dashboard's Privacy row. Two tiers are a person's to choose:
+ * shared with ChatGPT (the default) and private (answered on the Mac only);
+ * secrets are detected on the Mac and never a choice. Folder, label and
+ * sender names and the person's own description are never part of this copy.
+ */
+export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
+  back: 'Back to Olympus',
+  title: 'What\'s private for you?',
+  intro: 'Olympus shares your items with ChatGPT unless you say they\'re private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.',
+  loading: 'Loading your privacy settings…',
+  loadFailed: 'Olympus could not load your privacy settings. Try again.',
+  tryAgain: 'Try again',
+  descriptionLabel: 'In your own words',
+  descriptionPlaceholder: 'For example: my health and therapy, money and taxes, anything about my kids, my divorce',
+  /** Under the description box: the description is saved through ChatGPT, so it sees it. */
+  descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
+  /** The follow-up questions under the description, and the sentences they add to it. */
+  questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
+  rulesTitle: 'Always private (optional)',
+  rulesEmpty: 'No folders, labels or senders yet.',
+  /** Under the always-private rules: their names travel through ChatGPT to be listed and saved. */
+  namesShared: 'Folder and label names and senders you add here are shown to ChatGPT.',
+  kindFolder: 'Folder in {source}',
+  kindLabel: 'Gmail label',
+  kindSender: 'Sender',
+  remove: 'Remove',
+  removeFor: 'Remove {name}',
+  removed: 'Removed: {name}',
+  undo: 'Undo',
+  undoFor: 'Undo removing {name}',
+  addFolder: 'Add a folder',
+  addLabel: 'Add a Gmail label',
+  addSender: 'Add a sender',
+  needFolderSource: 'Connect Dropbox or Google Drive to add a folder.',
+  needGmail: 'Connect Gmail to add a label.',
+  pending: {
+    one: '{n} item is waiting to be checked on your computer.',
+    many: '{n} items are waiting to be checked on your computer.',
+  },
+  save: 'Save',
+  saving: 'Saving…',
+  cancel: 'Cancel',
+  saveFailed: 'Olympus could not save. Your changes are still here. Try again.',
+  saved: 'Privacy saved.',
+  /** The inline step before a save that lowers protection; {list} names the removed rules. */
+  confirmRemove: 'This removes protection from {list}.',
+  confirmDescription: 'This changes your description, which decides what Olympus keeps private.',
+  confirm: 'Confirm',
+  /** A save refused because the settings changed elsewhere: the draft stays until the person picks. */
+  conflict: 'Your changes weren\'t saved because the privacy settings changed elsewhere.',
+  conflictNow: 'What is saved now:',
+  conflictDescription: 'Your description: {text}',
+  conflictNoDescription: 'No description',
+  applyAgain: 'Apply my changes again',
+  discardMine: 'Discard my changes',
+  /** A folder rule saved without its name. */
+  folderUnnamed: 'A folder in {source}',
+  discardPrompt: 'Discard your changes?',
+  discard: 'Discard changes',
+  keep: 'Keep editing',
+  backToPrivacy: 'Back to privacy',
+  folderSourceTitle: 'Add a folder',
+  folderSourceIntro: 'Which account is the folder in?',
+  folderTitle: 'Add a folder',
+  folderIntro: 'Open a folder in {source} to look inside it. Make private covers everything in the folder.',
+  makePrivate: 'Make private',
+  makePrivateFor: 'Make {name} private',
+  alreadyPrivate: 'Already private',
+  labelTitle: 'Add a Gmail label',
+  labelIntro: 'Mail with a private label is answered only on your computer.',
+  loadingLabels: 'Loading your labels…',
+  noLabels: 'This mailbox has no labels of its own.',
+  sentLabel: 'Sent',
+  senderTitle: 'Add a sender',
+  senderIntro: 'Mail from this sender is answered only on your computer.',
+  senderLabel: 'Email address or @domain',
+  senderPlaceholder: 'name@example.com or @example.com',
+  senderAdd: 'Add',
+  senderInvalid: 'Enter an email address like name@example.com, or a domain like @example.com.',
+  senderDuplicate: 'That sender is already private.',
+  section: 'Privacy',
+  row: {
+    none: 'Uses your description. No always-private rules.',
+    one: 'Uses your description and {n} always-private rule.',
+    many: 'Uses your description and {n} always-private rules.',
+  },
+  rowNoCount: 'Uses your description and always-private rules.',
+  edit: 'Edit',
+  editLabel: 'Edit what\'s private',
+  dashboardPending: {
+    one: '{n} item waiting to be checked',
+    many: '{n} items waiting to be checked',
+  },
+} as const;
+
+/** The dashboard's prompt to set up privacy, until the person has said what's private for them. */
+export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
+  sentence: 'Tell Olympus what\'s private for you',
+  label: 'Set up privacy',
+} as const;
+
+/**
+ * The private answer panel under a ChatGPT search result
+ * (src/workers/dashboard/chatgpt/private-answer.ts). `{n}`, `{percent}`,
+ * `{list}` are filled in by the panel. Nothing here names a source item.
+ */
+export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
+  pageTitle: 'Olympus private answer',
+  title: 'Private answer from your computer',
+  /** The muted line under the title once the answer is shown. */
+  notSent: 'Not sent to ChatGPT',
+  /** The muted line once the person hid the answer; Show brings it back from memory. */
+  hidden: 'Private answer hidden',
+  show: 'Show',
+  /** The Show button's accessible name (its visible text is its start). */
+  showLabel: 'Show private answer',
+  hide: 'Hide',
+  hideLabel: 'Hide private answer',
+  tryAgain: 'Try again',
+  /** No job exists in these two states, so the panel can only say what to do and to ask again. */
+  noModel: 'Private answers need the private model on your computer. Open the Olympus dashboard to finish setup, then ask again.',
+  downloading: 'The private model is downloading ({percent}%). Ask again when it\'s ready.',
+  downloadingUnknown: 'The private model is downloading. Ask again when it\'s ready.',
+  downloadingLabel: 'Private model download',
+  preparing: 'Preparing the answer on your computer…',
+  /** A full-detail answer reads selected parts more closely, not necessarily every page. */
+  preparingFull: 'Reading your report in more detail on your computer…',
+  slow: 'Your computer is taking longer than usual to prepare the answer.',
+  failed: 'Olympus couldn\'t answer this on your computer.',
+  claimed: 'This answer was already opened in another window.',
+  expired: 'This answer has expired. Ask again to get a new one.',
+  rateLimited: 'Too many requests — try again in a moment.',
+  macOffline: 'Your computer is offline, so the private answer can\'t be shown.',
+  unreachable: 'Olympus couldn\'t reach your computer. Try again in a moment.',
+  generic: 'Olympus couldn\'t show the private answer here.',
+  /** The collapsed disclosure under the answer; it opens a list of titles. */
+  sourcesToggle: 'Sources ({n})',
+  /** Brief inline result after a source is opened on the person's Mac. */
+  openedOnMac: 'Opened on your computer',
+  openFailed: 'Couldn\'t open it on your computer',
+  unanswered: 'Not found in your private items: {list}',
+  /** The answer was withdrawn on the Mac after it was shown (an item is no longer Private-eligible). */
+  withdrawn: 'This private answer is no longer available from your computer.',
+  /**
+   * The outside block's own container (design docs/design/frontier-consult-lane.md
+   * §A.6): its application-owned attribution, pinned while the text scrolls.
+   */
+  outsideTitle: 'Anonymous answer · zkAPI',
+  outsideNote: 'General information from an outside model. It did not read your documents and has not been checked.',
+  /** The container shows while an outside reply is on its way, or paused. */
+  outsidePending: 'Looking up general background…',
+  outsidePaused: 'Anonymous answers are paused.',
+  /** The label over the exact question(s) sent, shown above the reply: the general level, then the unnamed level. */
+  outsideAsked: 'What Olympus asked:',
+  outsideSentUnnamed: 'Sent without names:',
+  /** The application-owned footer when the reply was shortened. */
+  outsideShortened: 'Shortened by Olympus.',
+} as const;
+
+/**
+ * The local folder picker's words (native Control UI page and the standalone
+ * /dashboard/dispositions page). The same layout and wording as the approved
+ * ChatGPT picker (DASHBOARD_CHATGPT_PICKER_COPY), minus what only applies
+ * there. Rendered onto the picker form as JSON: the browser controller is
+ * serialized into the standalone page, so it cannot import this module.
+ */
+export const DASHBOARD_PICKER_COPY = {
+  foldersTitle: 'Choose folders',
+  foldersIntro: 'Choose what Olympus may read. A folder follows the one above it until you change it. Nothing starts until you save.',
+  backTo: 'Back to {source}',
+  up: 'Back',
+  locations: 'Locations',
+  loadingFolders: 'Loading folders…',
+  loadFailed: 'Olympus could not load this list. Try again.',
+  tryAgain: 'Try again',
+  connectFirst: 'Connect this account first, then return here to choose folders. Connecting does not start anything.',
+  connect: 'Connect {source}',
+  pathMore: '…',
+  accountRow: 'Everything in {source}',
+  exceptions: 'Exceptions ({n})',
+  foldersHeading: 'Folders',
+  thisFolder: 'This folder',
+  unknownFolder: 'A folder not opened yet',
+  insideFolder: 'A folder inside {name}',
+  noFolders: 'No folders here.',
+  loadMore: 'Load more folders',
+  states: { ingest: 'Fully indexed', metadata_only: 'Names only', exclude: 'Skipped' },
+  statesLower: { ingest: 'fully indexed', metadata_only: 'names only', exclude: 'skipped' },
+  mixed: 'Mixed',
+  mixedSome: 'Mixed: some folders inside are {state}',
+  /** The row control's segments: [full label, short label when the picker is narrow]. */
+  segments: { ingest: ['Full', 'Full'], metadata_only: ['Names only', 'Names'], exclude: ['Skip', 'Skip'] },
+  choiceGroup: 'Choice for {name}',
+  openFolder: 'Open {name}',
+  cannotChoose: 'Olympus cannot read this folder.',
+  wholeOnlyFull: 'The whole account is all or nothing. Set Names only or Skip on folders instead.',
+  inheritedFrom: 'Inherited from {parent}',
+  overridden: 'This folder is set to {own}, but {parent} is {state}, which wins.',
+  notPossible: 'Not possible while {parent} is {state}.',
+  capReached: 'You have {max} folder choices, the most Olympus can save. Clear a folder\'s choice to choose another.',
+  wholePrompt: 'Olympus will read every folder in {source}, now and later, except folders you set to Names only or Skip.',
+  wholeConfirm: 'Yes, use the entire account',
+  wholeCancel: 'Cancel',
+  summaryTitle: 'What happens when you save',
+  summaryNone: 'Nothing chosen yet, so nothing will be read.',
+  summaryWhole: 'Everything else in {source}: fully indexed, including folders added later.',
+  summaryFolder: { one: 'folder', many: 'folders' },
+  summaryIngest: '{n} fully indexed',
+  summaryMetadata: '{n} with names only',
+  summaryExclude: '{n} skipped',
+  needChoice: 'Choose at least one folder first.',
+  needConfirm: 'Confirm the entire account first.',
+  saveFolders: 'Save and start',
+  saveNoStart: 'Save',
+  saving: 'Saving…',
+  discard: 'Discard changes',
+  discarded: 'Changes discarded. Loading your saved folders…',
+  saveFailed: 'Olympus could not save. Your choices are still here. Try again.',
+  conflict: 'The account or saved choices changed somewhere else. Reopen this picker before saving.',
+  cycle: 'The folder list loops back on itself. Reopen this picker before continuing.',
+  readOnly: 'Write access expired. Reconnect before browsing private folders.',
+  browseFailed: 'Could not list folders. Your choices are still here; try again when the connection is ready.',
+  saved: 'Saved. Opening the source status…',
+  unconfirmed: 'Could not confirm the result. Reopen the picker to check your saved choices before retrying.',
+} as const;
+
+/**
+ * The local dashboard's words for the ChatGPT dashboard's rules, ported on
+ * 2026-10-02 for the computer's own pages (since 2026-10-09 the panel is the
+ * one dashboard; Keys and the other local pages still read these). Where
+ * both surfaces say the same thing the value is the ChatGPT block's own, so
+ * they cannot drift apart; wording that names ChatGPT or "your Mac" is
+ * rewritten here for the computer Olympus runs on. Never "Public": the owner's
+ * choices are private or not.
+ */
+export const DASHBOARD_LOCAL_COPY = {
+  needsYou: DASHBOARD_CHATGPT_PAGE_COPY.needsYou,
+  sources: DASHBOARD_CHATGPT_PAGE_COPY.sources,
+  sourcesLocal: 'On this computer',
+  sourcesCloud: DASHBOARD_CHATGPT_PAGE_COPY.sourcesCloud,
+  notConnected: DASHBOARD_CHATGPT_PAGE_COPY.notConnected,
+  noSources: 'No sources connected yet.',
+  progress: DASHBOARD_CHATGPT_PAGE_COPY.progress,
+  progressInitial: DASHBOARD_CHATGPT_PAGE_COPY.progressInitial,
+  progressRefresh: DASHBOARD_CHATGPT_PAGE_COPY.progressRefresh,
+  percentDone: DASHBOARD_CHATGPT_PAGE_COPY.percentDone,
+  left: DASHBOARD_CHATGPT_PAGE_COPY.left,
+  eta: DASHBOARD_CHATGPT_PAGE_COPY.eta,
+  stalled: DASHBOARD_CHATGPT_PAGE_COPY.stalled,
+  units: DASHBOARD_CHATGPT_PAGE_COPY.units,
+  /** A source's bar: its first unfinished stage. */
+  sourceStages: DASHBOARD_CHATGPT_PAGE_COPY.sourceStages,
+  findingItems: DASHBOARD_CHATGPT_PAGE_COPY.findingItems,
+  sourceProgress: DASHBOARD_CHATGPT_PAGE_COPY.sourceProgress,
+  /** One plain sentence per reason a source is not moving; {source} is its name. */
+  stalledReasons: {
+    waiting_for_credentials: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.waiting_for_credentials,
+    scope_pending: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.scope_pending,
+    scope_pending_mail: 'Paused until you choose mail',
+    provider_unavailable: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.provider_unavailable,
+    model_downloading: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.model_downloading,
+  },
+  /** A sign-in that is still outstanding: what to do, and how long the link stays good. */
+  connecting: 'Finish signing in to {source}',
+  linkExpires: DASHBOARD_CHATGPT_PAGE_COPY.linkExpires,
+  openSignInAgain: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen,
+  cancelSignIn: 'Cancel sign-in',
+  chooseFolders: DASHBOARD_CHATGPT_SETUP_LABELS.chooseFolders,
+  chooseMail: DASHBOARD_CHATGPT_SETUP_LABELS.chooseMail,
+  syncNow: 'Sync now',
+  seeModels: 'See models',
+  models: DASHBOARD_CHATGPT_PAGE_COPY.models,
+  modelBuiltIn: DASHBOARD_CHATGPT_PAGE_COPY.modelBuiltIn,
+  modelCustom: DASHBOARD_CHATGPT_PAGE_COPY.modelCustom,
+  modelReady: DASHBOARD_CHATGPT_PAGE_COPY.modelReady,
+  modelGettingReady: DASHBOARD_CHATGPT_PAGE_COPY.modelGettingReady,
+  modelNeedsYou: DASHBOARD_CHATGPT_PAGE_COPY.modelNeedsYou,
+  modelNotReady: DASHBOARD_CHATGPT_PAGE_COPY.modelNotReady,
+  modelNotWorking: DASHBOARD_CHATGPT_PAGE_COPY.modelNotWorking,
+  modelChecking: DASHBOARD_CHATGPT_PAGE_COPY.modelChecking,
+  modelSearch: DASHBOARD_CHATGPT_PAGE_COPY.modelSearch,
+  modelAnswers: DASHBOARD_CHATGPT_PAGE_COPY.modelAnswers,
+  modelNames: DASHBOARD_CHATGPT_PAGE_COPY.modelNames,
+  modelTranscription: DASHBOARD_CHATGPT_PAGE_COPY.modelTranscription,
+  modelNotNeededNoAudio: DASHBOARD_CHATGPT_PAGE_COPY.modelNotNeededNoAudio,
+  modelDownloadNow: DASHBOARD_CHATGPT_PAGE_COPY.modelDownloadNow,
+  modelNotDownloaded: DASHBOARD_CHATGPT_PAGE_COPY.modelNotDownloaded,
+  modelDownloadInterrupted: DASHBOARD_CHATGPT_PAGE_COPY.modelDownloadInterrupted,
+  modelCouldNotStart: DASHBOARD_CHATGPT_PAGE_COPY.modelCouldNotStart,
+  modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
+  modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
+  modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
+  modelInstallBytes: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallBytes,
+  modelInstallReasons: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallReasons,
+  modelTryAgain: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain,
+  /** A built-in model whose install failed, in Needs you: its sentence, by failure code. */
+  modelInstallFailedItem: DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed,
+  modelsNotReady: 'Models are not ready, so sources stay locked.',
+  privacy: {
+    section: DASHBOARD_CHATGPT_PRIVACY_COPY.section,
+    row: DASHBOARD_CHATGPT_PRIVACY_COPY.row,
+    edit: DASHBOARD_CHATGPT_PRIVACY_COPY.edit,
+    editLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.editLabel,
+    setUpSentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
+    setUp: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label,
+    pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
+    unreadable: 'Olympus could not read your privacy settings.',
+  },
+} as const;
+
+/**
+ * The Outside help card (outside-help.ts; design frontier-consult-lane.md
+ * §A.10 for the disclosure, §A.14 for the enable flow). Plain words, no
+ * content: the card never shows a question, a reply, a key or the daemon's
+ * configuration. "Daemon" is the program's own name for itself; the card
+ * says "the zkapi-clientd program".
+ */
+export const DASHBOARD_OUTSIDE_HELP_COPY = {
+  crumb: 'Anonymous answers',
+  title: 'Anonymous answers · zkAPI',
+  /** Setup's section heading and its one row (owner naming, 2026-10-07). */
+  sectionTitle: 'Private answers',
+  row: {
+    off: 'Anonymous answers (zkAPI): off',
+    on: 'Anonymous answers (zkAPI): on',
+    invalid: 'Anonymous answers (zkAPI): off · settings file damaged',
+    route_not_configured: 'Anonymous answers (zkAPI): off · not set up',
+    fence_held: 'Anonymous answers (zkAPI): paused · unfinished payment',
+    needs_acceptance: 'Anonymous answers (zkAPI): paused · accept the updated statements',
+  },
+  /** The honesty label: the network route is not verified on macOS, said plainly. */
+  experimental: 'Experimental: on macOS, Olympus can\'t yet confirm the connection is anonymous (network route not verified).',
+  /** What outside help is, before anything technical (owner, 2026-10-07). */
+  intro: 'For people running a strong local model at home: ask frontier models anonymously when your model needs help. When the answer from your computer is missing something, Olympus can send a top AI model a short question through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.',
+  /** What zkAPI may send (owner titles 2026-10-08; internal ids 'unnamed' and 'general'). */
+  levelTitle: 'What may zkAPI send?',
+  /** Who writes the outside question (owner decision 2026-10-10): the built-in model, or the owner's own. No gate on the model. */
+  writer: {
+    title: 'Who writes the question',
+    builtInShort: 'the model built into Olympus',
+    intro: 'By default the small model built into Olympus writes the outside question from the first answer. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it reads the private material the answer used, decides whether a frontier model would help, and writes the question. At Strict, Olympus\'s privacy check still runs before anything is sent; at Standard, only passwords, keys and tokens are stopped. This works best with a substantial model.',
+    currentBuiltIn: 'Now: the model built into Olympus.',
+    currentOwn: 'Now: your model {model} at {address}.',
+    baseUrl: 'Your model server\'s address (OpenAI-compatible, usually ending in /v1)',
+    model: 'Model name',
+    secretRef: 'Key reference, if your server needs one (optional: env:NAME or store:name)',
+    where: 'Your private material goes to this address, so use a server you control. A server on another computer is reached over your network; prefer https or a private network such as a tailnet.',
+    keyMissing: 'The key reference {secretRef} is not set on this computer, so your model cannot be used until it is.',
+    frontierModel: 'zkAPI model for questions from ChatGPT (optional)',
+    frontierHint: 'A model from a provider other than OpenAI is better here: OpenAI also holds your ChatGPT conversation and could link the two. Empty uses Claude Sonnet.',
+    openAiNote: 'Questions from ChatGPT now go to {model}, an OpenAI model. OpenAI also holds your ChatGPT conversation; a model from another provider is better here.',
+    save: 'Save',
+    useBuiltIn: 'Use the built-in model',
+    testTitle: 'Test your model',
+    testIntro: 'Runs six invented cases through your model and Olympus\'s privacy check, and shows the questions it wrote. Nothing is sent to zkAPI and nothing costs money. It runs only when you click, and can take several minutes on a home server.',
+    testNeedsChoice: 'Choose and save your model first.',
+    test: 'Test your model',
+    testAgain: 'Test again',
+    testStarting: 'Starting the test…',
+    testProgress: 'Testing: {done} of {total} cases done…',
+    testSummary: '{cases} cases: {written} written, {declined} with no question, {failed} failed. The privacy check would send {passed} and refuse {refused}.',
+    testNoLeaks: 'No invented name, place or figure got past the privacy check.',
+    testLeaks: '{n} cases let an invented name, place or figure past the privacy check. Do not rely on this model yet.',
+    testDocumentQuestions: '{n} cases asked about a document the frontier model cannot see.',
+    testPassed: 'would be sent',
+    testRefused: 'refused by the privacy check ({reasons})',
+    testDeclined: 'no question (the model decided outside help would not help)',
+    testFailed: 'no usable reply ({reason})',
+    testLeakMark: 'leak',
+    testDocumentMark: 'asks about a document',
+  },
+  levels: {
+    unnamed: {
+      title: 'Standard (recommended)',
+      body: 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can\'t tell who sent it.',
+    },
+    general: {
+      title: 'Strict',
+      body: 'Your model rewrites it into general questions first (Vitalik Buterin\'s approach).',
+    },
+  },
+  /** How Standard prepares a question (owner decision 2026-10-10: open, the user's choice). */
+  standard: {
+    title: 'How should your model prepare a question before it leaves?',
+    modes: {
+      as_written: { title: 'Exactly as written', body: 'No model step: the question goes out unchanged.' },
+      light_cleanup: { title: 'Lightly cleaned (default)', body: 'Your model follows this instruction. Edit it to make it your own.' },
+      custom: { title: 'By your own instruction', body: 'Your model follows exactly what you write here.' },
+    },
+    instructionLabel: 'Instruction for your model',
+    save: 'Save',
+  },
+  /** "Ask anonymously" (owner decision 2026-10-10): a typed question, prepared as Standard is set, sent through zkAPI; never ChatGPT. */
+  ask: {
+    title: 'Ask anonymously',
+    intro: 'Type a question. It is prepared the way you chose above, sent through zkAPI, and the answer shows here. It never goes to ChatGPT. Each question costs a little from your zkAPI balance.',
+    label: 'Your question',
+    send: 'Ask',
+    running: 'Asking anonymously… Starting a private route takes a minute or two.',
+    sentTitle: 'What was sent',
+    replyTitle: 'Answer',
+    notSent: 'Nothing was sent.',
+  },
+  levelSave: 'Save',
+  /** Standard chosen while the statements are not accepted: they show inline with one action. */
+  levelAcceptSave: 'Accept and save',
+  levelAcceptIntro: 'Nothing is sent until you accept these:',
+  /** The public privacy line, in plain words (design §2, §A.10). */
+  privacy: 'Your files and private answer stay on this computer. The outside model sees only the short question, and that question could still hint at private things.',
+  state: {
+    off: 'Anonymous answers are off.',
+    on: 'Anonymous answers are on.',
+    invalid: 'Anonymous answers are off: the settings file on this computer is damaged.',
+    route_not_configured: 'Anonymous answers are off: zkAPI is not set up yet.',
+    fence_held: 'Paused: an earlier question has not finished paying yet.',
+    needs_acceptance: 'Paused until you accept the updated statements below.',
+  },
+  /** Said only when a saved change needs a restart this worker could not do itself. */
+  restartPending: 'Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.',
+  /** The status block: route health in one line. */
+  routeReady: 'Ready to ask.',
+  routeReadyNoTor: 'Ready to ask.',
+  /** Said beside Ready when Tor is off, in plain words (Details names Tor). */
+  addressVisible: 'Your network address will be visible to the provider.',
+  routeNotReady: 'Not ready: {reason}',
+  /** Only the statements are missing: everything else is ready, said without repeating them. */
+  routeReadyButStatements: 'Everything else is ready.',
+  routeMore: '(+{n} more below)',
+  routeUnknown: 'Olympus could not check zkAPI right now.',
+  routeMissingShort: 'Not ready: zkAPI is not set up yet.',
+  /**
+   * Today's usage. Only each question's hold (the amount zkAPI holds for its
+   * model, $1 to $6) is recorded, never the settled price, so the day's figure
+   * is said as what counts against limits, never as money spent.
+   */
+  usageNone: 'No questions today',
+  usageOne: '1 question today',
+  usageMany: '{n} questions today',
+  usageCounted: '(counted as up to ${usd} against your limits)',
+  usageExpiry: 'balance expires about {date} ({days} days left)',
+  usageExpired: 'balance past its estimated expiry',
+  usageExpiryUnknown: 'balance expiry unknown',
+  /** How cost works, real cost first, in one line (owner, 2026-10-08); the statements carry the recorded wording. */
+  costLine: 'A question usually costs a few cents. Up to $6 is held while it runs, and the rest comes back.',
+  problemsTitle: 'To fix',
+  disclosureTitle: 'Before you turn this on',
+  /** Two short lines at first view; the fuller detail sits behind disclosureMore. */
+  disclosureShort: [
+    'It asks on its own: when an answer from your computer is missing something, Olympus may send one short question. You can turn it off at any time.',
+    'The provider reads the question, prepared the way you choose; zkAPI hides who paid.',
+  ],
+  disclosureMore: 'Everything to know first',
+  /**
+   * The fuller detail, in calm words (owner, 2026-10-08). It keeps what the
+   * shorter statements leave out: the timing window, the hold counted against
+   * limits, no default limit, deposit fees and no top-up, the estimated
+   * expiry date, the fee buffer, the API key and key reuse, the operator
+   * and the proof setup, and that the route is not verified on macOS.
+   */
+  disclosure: [
+    'Olympus sends a question only within about five minutes of a private answer appearing in ChatGPT, and only if the panel was recently active. Closing the panel does not guarantee nothing is sent in that window.',
+    'A question usually costs a few cents. While it runs, up to $6 of your zkAPI balance is held, and the rest comes back when it settles. Olympus counts each question at the amount held for its model (between $1 and $6) when checking the daily limits you set.',
+    'There is no daily limit unless you set one under Balance and limits. Your balance is the most that can be spent.',
+    'Adding money and taking it out are each an Ethereum transaction with its own network fee (about $7 each when Olympus last checked). There is no top-up: each deposit starts a new balance with its own fee and its own 30-day clock.',
+    'Olympus estimates the 30-day date from the funding date you enter; the exact date is set on-chain when the deposit is confirmed.',
+    'When you add money, send one transfer with the deposit plus the fee buffer zkapi-clientd shows. Network fees move, so the buffer can fall short and need a second transfer.',
+    'Set zkapi-clientd to require an API key, so only Olympus on this computer can spend the balance. Olympus refuses to send while key reuse is on, so separate questions are not linked by a shared payment key.',
+    'One operator account can pause deposits and withdrawals while the 30-day clock keeps running, and one party ran zkAPI\'s proof setup. Your balance lives in files on this computer; losing them loses the money.',
+    'The provider reads the question; zkAPI hides who paid. On macOS, Olympus cannot yet confirm the network route is anonymous.',
+  ],
+  routeMissing: 'zkAPI is not set up. Add it, then follow Set up zkAPI below.',
+  policyNotFile: 'Your privacy policy is not kept in a file on this computer, so the route must be added where that policy lives.',
+  addRoute: 'Add zkAPI to Olympus',
+  addRouteConfirm: 'This adds a consult-only zkAPI route to your privacy policy and restarts the Olympus worker. No money moves. Continue?',
+  /** The Details disclosure: the route's technical facts, never on first view. */
+  detailsTitle: 'Details',
+  facts: {
+    daemon: 'zkapi-clientd {version} found',
+    versionUnknown: '(version unknown)',
+    daemonMissing: 'zkapi-clientd not installed',
+    tor: 'Tor found (a fresh Tor client per consult)',
+    torOff: 'Tor off: the route is direct and your network address is visible to the provider',
+    torMissing: 'Tor not installed',
+    key: 'API key configured',
+    keyMissing: 'API key not configured',
+    today: '{n} requests today (${usd} counted against your limits)',
+    todayOne: '1 request today (${usd} counted against your limits)',
+    expiry: 'balance estimated to expire {date} ({days} days left)',
+    expired: 'balance past its estimated expiry',
+    expiryUnknown: 'balance expiry unknown until you enter the funding date',
+  },
+  routeLabel: 'Route: {label}.',
+  lastSession: 'Last consult: {at}, {result}.',
+  /** The To fix list: plain words, each with where its fix is. Technical names stay in Set up zkAPI and Details. */
+  blockers: {
+    daemon_not_found: 'The zkAPI app is not installed on this computer. See Set up zkAPI.',
+    daemon_version_unsupported: 'This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6: see Set up zkAPI.',
+    tor_not_found: 'The program that hides your network address is not installed. See Set up zkAPI.',
+    daemon_api_key_missing: 'Olympus does not have your zkAPI access key yet. See Set up zkAPI.',
+    acknowledgements_incomplete: 'The statements on this page are not accepted yet. Nothing is sent until they are.',
+    funding_date_missing: 'Enter the day you paid in under Balance and limits, so Olympus can tell when the balance expires.',
+    funding_date_invalid: 'The day you paid in is in the future. Fix it under Balance and limits.',
+    note_expired: 'Your balance is past its estimated 30-day expiry.',
+    unresolved_session: 'An earlier question has not finished paying. Use Recover under Unfinished payment.',
+    unresolved_session_other_wallet: 'An unfinished payment belongs to another zkAPI wallet. Finish it there, or abandon it under Unfinished payment.',
+    stranded_processes: 'Programs from an earlier question may still be running.',
+    daemon_already_running: 'Another copy of the zkAPI app is already running. Close it; Olympus starts its own for each question.',
+    tor_port_busy: 'Another program is using the connection Olympus needs to hide your network address.',
+    daily_cap_reached: 'Today\'s question limit is reached. Raise or remove it under Balance and limits.',
+    spend_cap_reached: 'Another question would pass today\'s spending limit. Raise or remove it under Balance and limits.',
+    state_unavailable: 'Olympus could not read its record of questions on this computer.',
+    key_reuse_on: 'The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off: see Set up zkAPI.',
+  },
+  blockerOther: 'Not ready yet ({code}).',
+  stepsTitle: 'Set up zkAPI',
+  stepsIntro: 'Install the parts above with one click, then run the rest in Terminal, in this order. This is the order that worked live.',
+  steps: [
+    'Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). If you installed them yourself, zkapi-clientd must be version 0.1.5 or 0.1.6.',
+    'Run: zkapi-clientd config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.',
+    'Wait until the tool prints "Private inference balance activated".',
+    'Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050',
+    'Run: zkapi-clientd config --require-api-key',
+    'Run: zkapi-clientd config --api-key <key>. Store the same key where the route\'s key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.',
+    'Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.',
+  ],
+  costTitle: 'Cost and risk',
+  costIntro: 'Nothing is sent until you accept these. If the wording changes, you are asked again.',
+  accept: 'Accept',
+  acknowledged: 'You accepted the {n} cost and risk statements.',
+  acknowledgedReview: 'Review',
+  limitsTitle: 'Balance and limits',
+  limitsNone: 'No daily limit',
+  limitsRequests: '{n} questions a day',
+  limitsUsd: '${usd} a day',
+  fundedOn: 'paid in on {date}',
+  notFunded: 'payment date not set',
+  /** Today's worst-case count, inside Balance and limits. */
+  limitsToday: 'Questions today: {n}, counted as up to ${usd} against your limits.',
+  fundingDate: 'Funding date: the day your deposit was confirmed (YYYY-MM-DD)',
+  capRequests: 'Daily question limit (optional)',
+  capUsd: 'Daily spending limit in dollars, counting each question at the amount held for its model (optional)',
+  noLimitIntro: 'There is no daily limit unless you set one. Your balance is the most that can be spent.',
+  removeLimits: 'No daily limit',
+  removeLimitsHint: 'Clears both limits.',
+  saveRestarts: 'Saving restarts Olympus to apply it.',
+  saveRoute: 'Save',
+  fenceTitle: 'Unfinished payment',
+  fenceIntro: 'An earlier question has not been confirmed as paid. Until it is, no question is sent.',
+  fenceThis: 'Held since {at} (this wallet)',
+  fenceOther: 'Held since {at} (another wallet folder)',
+  recover: 'Recover',
+  recoverHint: 'Sends one empty request to finish it; up to $6 is held while it runs.',
+  recoverConfirm: 'Recovery sends one fixed request with no content through the same route and reserves up to $6. Continue?',
+  abandon: 'Abandon',
+  abandonHint: 'Stops waiting without finishing it; the unfinished payment may later link two sessions.',
+  abandonConfirm: 'Abandoning means the unsettled request may later settle under another session\'s network identity, linking the two. It stops blocking consults and stays in the ledger as a record. Continue?',
+  languagesTitle: 'Languages',
+  languagesIntro: 'The outside question may use these languages. Only languages with a word pack installed on this computer can be chosen.',
+  packMissing: 'pack not installed',
+  /** The gate's domain packs beside the languages: which word lists a question may draw on. */
+  domainsOn: 'Besides everyday words in these languages, a question may use: {list}.',
+  domainsOff: 'Not admitted: {list}.',
+  domainsNone: 'no extra word lists',
+  domainNames: {
+    units: 'units of measure',
+    countries: 'country names',
+    places: 'place names',
+    technical: 'technical terms',
+    medicines: 'medicine names',
+    medicineBrands: 'medicine brand names',
+  },
+  turnOn: 'Turn on anonymous answers',
+  turnOff: 'Turn off anonymous answers',
+  replaceFile: 'Replace the damaged settings file (anonymous answers stay off)',
+  enableBlockedRoute: 'Add zkAPI first.',
+  enableBlockedAcks: 'Accept the statements on this page first.',
+  edit: 'Edit',
+  setUp: 'Set up',
+  saving: 'Saving…',
+  saveFailed: 'Olympus could not save this. Try again.',
+  /** A refusal that carried no words of its own: the HTTP status at least. */
+  saveFailedStatus: 'Olympus could not save this (error {status}). Try again.',
+  /** No answer at all, usually because Olympus is restarting. */
+  saveUnreachable: 'Olympus did not answer. If it is restarting, wait a moment and try again.',
+  restarting: 'Restarting Olympus to apply it…',
+  locked: 'Open dashboard controls to see and change anonymous answers.',
+  unlockIntro: 'Changing anonymous answers needs a session opened on this computer itself, not one an agent or the launch link opened. One click, in this browser.',
+  unlock: 'Unlock anonymous answers on this computer',
+  native: 'Anonymous answers are set up on this computer\'s own dashboard only, never from an agent or ChatGPT.',
+  unavailable: 'Anonymous answers are not available from this worker.',
+} as const;

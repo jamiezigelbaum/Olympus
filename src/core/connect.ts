@@ -1,3 +1,5 @@
+import { modelEndpointFetch } from './model-transport.ts';
+import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
 import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -905,11 +907,15 @@ async function validateGeminiApiKey(options: {
   try {
     // Header, never a query parameter: a key in the URL lands in every proxy
     // and access log between here and Google.
-    response = await fetchWithTimeout(options.fetchImpl, url, {
+    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
       method: 'GET',
       headers: { 'x-goog-api-key': options.apiKey, Accept: 'application/json' },
+      // The key rides this request: a redirect is refused, never followed.
+      redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
+    // A zkAPI-daemon refusal is a configuration problem, not an outage.
+    if (isZkapiDaemonEndpointRefusal(error)) throw error;
     if (isAbortError(error)) {
       throw new Error('Gemini API key validation timed out. No credentials were stored; try again when the Gemini API is reachable.');
     }
@@ -934,11 +940,13 @@ async function validatePublicApiKeySource(options: {
       ?? 'https://readwise.io/api/v2/auth/';
     let response: Response;
     try {
-      response = await fetchWithTimeout(options.fetchImpl, url, {
+      response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
         method: 'GET',
         headers: { Authorization: `Token ${options.apiKey}`, Accept: 'application/json' },
       }, options.timeoutMs);
     } catch (error) {
+      // A zkAPI-daemon refusal is a configuration problem, not an outage.
+      if (isZkapiDaemonEndpointRefusal(error)) throw error;
       if (isAbortError(error)) {
         throw new Error('Readwise token validation timed out. No credentials were stored; try again when Readwise is reachable.');
       }
@@ -955,11 +963,15 @@ async function validatePublicApiKeySource(options: {
     ?? 'https://api.venice.ai/api/v1/models';
   let response: Response;
   try {
-    response = await fetchWithTimeout(options.fetchImpl, url, {
+    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
       method: 'GET',
       headers: { Authorization: `Bearer ${options.apiKey}`, Accept: 'application/json' },
+      // The key rides this request: a redirect is refused, never followed.
+      redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
+    // A zkAPI-daemon refusal is a configuration problem, not an outage.
+    if (isZkapiDaemonEndpointRefusal(error)) throw error;
     if (isAbortError(error)) {
       throw new Error('Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.');
     }
@@ -1077,7 +1089,7 @@ async function validateApiKeySource(options: {
       ?? 'https://readwise.io/api/v2/auth/';
     let response: Response;
     try {
-      response = await fetchWithTimeout(options.fetchImpl, url, {
+      response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
         method: 'GET',
         headers: {
           Authorization: `Token ${options.apiKey}`,
@@ -1085,6 +1097,8 @@ async function validateApiKeySource(options: {
         },
       }, options.timeoutMs);
     } catch (error) {
+      // A zkAPI-daemon refusal is a configuration problem, not an outage.
+      if (isZkapiDaemonEndpointRefusal(error)) throw error;
       if (isAbortError(error)) {
         throw new Error('Readwise token validation timed out. No credentials were stored; try again when Readwise is reachable.');
       }
@@ -1106,7 +1120,7 @@ async function validateApiKeySource(options: {
     const url = new URL('/v1/users/me', normalizeNotionBaseUrl(baseUrl)).toString();
     let response: Response;
     try {
-      response = await fetchWithTimeout(options.fetchImpl, url, {
+      response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${options.apiKey}`,
@@ -1115,6 +1129,8 @@ async function validateApiKeySource(options: {
         },
       }, options.timeoutMs);
     } catch (error) {
+      // A zkAPI-daemon refusal is a configuration problem, not an outage.
+      if (isZkapiDaemonEndpointRefusal(error)) throw error;
       if (isAbortError(error)) {
         throw new Error('Notion integration token validation timed out. No credentials were stored; try again when Notion is reachable.');
       }
@@ -1131,14 +1147,18 @@ async function validateApiKeySource(options: {
     ?? 'https://api.venice.ai/api/v1/models';
   let response: Response;
   try {
-    response = await fetchWithTimeout(options.fetchImpl, url, {
+    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${options.apiKey}`,
         Accept: 'application/json',
       },
+      // The key rides this request: a redirect is refused, never followed.
+      redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
+    // A zkAPI-daemon refusal is a configuration problem, not an outage.
+    if (isZkapiDaemonEndpointRefusal(error)) throw error;
     if (isAbortError(error)) {
       throw new Error('Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.');
     }

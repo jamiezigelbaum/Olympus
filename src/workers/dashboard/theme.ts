@@ -19,10 +19,16 @@ export const DASHBOARD_THEME_TOKENS = {
   t3: '#A9ABB3',
   t4: '#8C8E97',
   good: '#6CC08B',
-  warn: '#E3AA45',
-  run: '#AE9EF0',
+  // Text-safe status colours: readable as words on every surface.
+  warn: '#FB8C3C',
+  run: '#FACC15',
   bad: '#F08276',
   off: '#8C8E97',
+  // Status fills for dots and bars (owner rule, 2026-10-02): in progress is a
+  // clear yellow, needs you a warm orange. In the dark theme the fill and the
+  // text colour are the same; the light theme needs darker words.
+  runFill: '#FACC15',
+  warnFill: '#FB8C3C',
   warnBg: '#261E10',
   warnLine: '#8A6A2A',
   errBg: '#2B1614',
@@ -34,6 +40,44 @@ export const DASHBOARD_THEME_TOKENS = {
   field: '#6A6D77',
   selected: '#2C4485',
 } as const;
+
+export type DashboardThemeTokenName = keyof typeof DASHBOARD_THEME_TOKENS;
+
+/**
+ * The light theme, used when the reader's system prefers light (the native
+ * Control UI and the standalone page follow prefers-color-scheme). Same token
+ * names, so every rule reads one variable and works in both. Neutrals follow
+ * ChatGPT's light greys; the status fills are the owner's (2026-10-02):
+ * yellow #F5C518 in progress, orange #EA6C0A needs you.
+ */
+export const DASHBOARD_THEME_TOKENS_LIGHT: Readonly<Record<DashboardThemeTokenName, string>> = {
+  bg: '#FFFFFF',
+  panel: '#F7F7F8',
+  panel2: '#F0F0F2',
+  line: '#D9D9DE',
+  line2: '#E8E8EC',
+  t1: '#0D0D0D',
+  t2: '#353740',
+  t3: '#55575F',
+  t4: '#62646C',
+  good: '#22693F',
+  warn: '#A84A06',
+  run: '#735600',
+  bad: '#B42318',
+  off: '#6B6E76',
+  runFill: '#F5C518',
+  warnFill: '#EA6C0A',
+  warnBg: '#FFF4E5',
+  warnLine: '#B45309',
+  errBg: '#FDECEA',
+  errLine: '#B42318',
+  link: '#1F4FBF',
+  linkLine: '#3E63C8',
+  accent: '#3E63C8',
+  onAccent: '#FFFFFF',
+  field: '#767680',
+  selected: '#DCE5FB',
+};
 
 /**
  * The page backdrop. The page sits directly on it: there is no card frame
@@ -63,8 +107,8 @@ export const DASHBOARD_TYPE_SCALE = {
  * borders) need 3:1.
  */
 export const DASHBOARD_CONTRAST_PAIRS: ReadonlyArray<{
-  fg: keyof typeof DASHBOARD_THEME_TOKENS;
-  bg: keyof typeof DASHBOARD_THEME_TOKENS;
+  fg: DashboardThemeTokenName;
+  bg: DashboardThemeTokenName;
   min: 4.5 | 3;
 }> = [
   ...(['t1', 't2', 't3', 't4', 'link', 'warn', 'bad', 'good', 'run'] as const).flatMap((fg) =>
@@ -83,20 +127,10 @@ export const DASHBOARD_CONTRAST_PAIRS: ReadonlyArray<{
   { fg: 'good', bg: 'bg', min: 3 },
 ];
 
-/** Literal glyph color per status word. */
-export const DASHBOARD_STATUS_COLORS: Readonly<Record<DashboardStatus, string>> = {
-  'Fresh': DASHBOARD_THEME_TOKENS.good,
-  'Working': DASHBOARD_THEME_TOKENS.run,
-  'Waiting': DASHBOARD_THEME_TOKENS.off,
-  'Needs you': DASHBOARD_THEME_TOKENS.warn,
-  'Failing': DASHBOARD_THEME_TOKENS.bad,
-  'Off': DASHBOARD_THEME_TOKENS.line,
-};
-
 // The custom-property name each token is published under. Written out rather
 // than derived from the key so a rename on either side is a visible edit
 // instead of a silently renamed variable no rule refers to any more.
-const CSS_VARIABLE_NAMES: Readonly<Record<keyof typeof DASHBOARD_THEME_TOKENS, string>> = {
+const CSS_VARIABLE_NAMES: Readonly<Record<DashboardThemeTokenName, string>> = {
   bg: '--bg',
   panel: '--panel',
   panel2: '--panel2',
@@ -111,6 +145,8 @@ const CSS_VARIABLE_NAMES: Readonly<Record<keyof typeof DASHBOARD_THEME_TOKENS, s
   run: '--run',
   bad: '--bad',
   off: '--off',
+  runFill: '--run-fill',
+  warnFill: '--warn-fill',
   warnBg: '--warn-bg',
   warnLine: '--warn-line',
   errBg: '--err-bg',
@@ -123,13 +159,36 @@ const CSS_VARIABLE_NAMES: Readonly<Record<keyof typeof DASHBOARD_THEME_TOKENS, s
   selected: '--selected',
 };
 
-const PAGE_BACKDROP = DASHBOARD_PAGE_BACKDROP;
+/**
+ * The token that colours each status word's glyph. Glyphs paint through the
+ * CSS variable, so a dot follows the light or dark theme.
+ */
+export const DASHBOARD_STATUS_TOKENS: Readonly<Record<DashboardStatus, DashboardThemeTokenName>> = {
+  'Fresh': 'good',
+  'Working': 'runFill',
+  'Waiting': 'off',
+  'Needs you': 'warnFill',
+  'Failing': 'bad',
+  'Off': 'off',
+};
+
+/** Glyph colour per status word, as a CSS variable reference. */
+export const DASHBOARD_STATUS_COLORS: Readonly<Record<DashboardStatus, string>> = Object.fromEntries(
+  (Object.keys(DASHBOARD_STATUS_TOKENS) as DashboardStatus[])
+    .map((status) => [status, `var(${dashboardThemeVariable(DASHBOARD_STATUS_TOKENS[status])})`]),
+) as Record<DashboardStatus, string>;
+
+/** The custom property a token is published under, e.g. runFill → --run-fill. */
+export function dashboardThemeVariable(token: DashboardThemeTokenName): string {
+  return CSS_VARIABLE_NAMES[token];
+}
 
 const MONO_STACK = '"Berkeley Mono","SF Mono",Menlo,Consolas,monospace';
 
 const ROOT_BLOCK = [
   ':root {',
-  ...(Object.keys(CSS_VARIABLE_NAMES) as Array<keyof typeof DASHBOARD_THEME_TOKENS>)
+  '  color-scheme: light dark;',
+  ...(Object.keys(CSS_VARIABLE_NAMES) as DashboardThemeTokenName[])
     .map((key) => `  ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS[key]};`),
   `  --mono: ${MONO_STACK};`,
   `  --fs-title: ${DASHBOARD_TYPE_SCALE.title};`,
@@ -138,12 +197,19 @@ const ROOT_BLOCK = [
   `  --fs-body: ${DASHBOARD_TYPE_SCALE.body};`,
   `  --fs-caption: ${DASHBOARD_TYPE_SCALE.caption};`,
   '}',
+  // The light theme: same variables, the reader's system preference decides.
+  '@media (prefers-color-scheme: light) {',
+  '  :root {',
+  ...(Object.keys(CSS_VARIABLE_NAMES) as DashboardThemeTokenName[])
+    .map((key) => `    ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS_LIGHT[key]};`),
+  '  }',
+  '}',
 ].join('\n');
 
 /** The full stylesheet, already wrapped in nothing: callers put it in <style>. */
 export const DASHBOARD_THEME_CSS: string = `${ROOT_BLOCK}
 * { box-sizing: border-box; }
-body { margin: 0; background: ${PAGE_BACKDROP}; color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
+body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
 /* No card around the page: the page is the surface, as wide as a reading
    layout allows, and every row below shares its left and right edges. */
@@ -162,16 +228,18 @@ a { color: var(--link); }
 .sect.sub { font-size: var(--fs-body); color: var(--t2); margin: 18px 0 8px; }
 .sect.sub.attn { color: var(--warn); }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.hollow { background: transparent; border: 2px solid var(--off); }
 /* Every row is the same shape: a 20px lead column (icon or dot), the text,
    then the controls, so names line up from section to section. */
 .attncard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 52px; }
 .attncard::before { content: ''; flex: 0 0 20px; align-self: center; }
 /* A problem is a tinted row with a 1px border and an icon, never a stripe. */
 .attncard:not(.plain) { background: var(--warn-bg); border-color: var(--warn-line); }
-.attncard:not(.plain)::before { content: '!'; height: 20px; border-radius: 50%; background: var(--warn); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.attncard:not(.plain)::before { content: '!'; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
 .attncard.error { background: var(--err-bg); border-color: var(--err-line); }
 .attncard.error::before { background: var(--bad); }
 .attncard.plain { background: var(--panel); border-color: var(--line); }
+.attncard.plain[data-remote-access]::before, .attncard.plain[data-agent-connection]::before { display: none; }
 .attncard .grow { flex: 1; }
 /* The source page's ONE banner, and only it. A bare flex:1 gave the
    description a zero basis, so a banner carrying Sync now, its status text and
@@ -247,7 +315,7 @@ a.card.cardlink:hover { border-color: var(--link-line); }
 a.card.cardlink:hover .hd { color: var(--link); }
 a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
-.bar i { display: block; height: 100%; background: var(--run); }
+.bar i { display: block; height: 100%; background: var(--run-fill); }
 .foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0 22px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
@@ -286,10 +354,13 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 table { border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
 th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
-.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; min-height: 52px; }
+/* A not-connected source: one flat list row, like the source rows above it. */
+.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
 .setrow > .dot { justify-self: center; }
 .setrow.noblurb { grid-template-columns: 20px 1fr auto; }
 .setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
+.setrow a.name { text-decoration: none; }
+.setrow a.name:hover { color: var(--link); text-decoration: underline; }
 .setrow .blurb { color: var(--t2); font-size: var(--fs-body); }
 .setrow .blurb .caveat { color: var(--warn); font-weight: 600; }
 .setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }

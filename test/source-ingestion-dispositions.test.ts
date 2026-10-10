@@ -40,8 +40,10 @@ import {
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import {
   connectorStoreCoverageGaps,
+  createConnectorStoreContentProvider,
   LocalConnectorStore,
 } from '../src/workers/connector-store/index.ts';
+import { Database } from 'bun:sqlite';
 import {
   buildSourceIngestionLedgerSnapshot,
   formatSourceIngestionLedger,
@@ -491,6 +493,74 @@ describe('stored-item dispositions', () => {
         expect(gated.metadataOnlyContentPresent().items).toBe(0);
       } finally {
         gated.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('the private answer guard: a metadata-only rule refuses an item at read time, before and after the strip; an unknown tier refuses it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-guard-strip-'));
+    const dbPath = join(root, 'store.sqlite');
+    const openStore = (exclusions?: ReturnType<typeof createSourceExclusionMatcher>) =>
+      new LocalConnectorStore({
+        dbPath,
+        corpusId: CORPUS_ID,
+        family: 'file',
+        trustDomain: 'secure_local',
+        ...(exclusions ? { exclusions } : {}),
+      });
+    const servable = (store: LocalConnectorStore, id: string) => createConnectorStoreContentProvider({ store }).contentServable({
+      provenance: { sourceItem: { family: 'file', provider: 'dropbox', accountScope: ACCOUNT, providerItemId: id, localItemId: `${ACCOUNT}:${id}` } } as never,
+      trustDomain: 'secure_local',
+    });
+    try {
+      const permissive = openStore();
+      try {
+        await permissive.syncFromConnector(
+          connectorOver([
+            fileItem('/4 Archive/1 Archived Projects/spec.md', 'old-1'),
+            fileItem('/1 Projects/live.md', 'live-1'),
+          ]),
+          { fetchContent: true },
+        );
+        expect(servable(permissive, 'old-1')).toBe(true);
+        expect(servable(permissive, 'live-1')).toBe(true);
+      } finally {
+        permissive.close();
+      }
+
+      const gated = openStore(matcherFor([metadataOnlyRule('archived-projects', '/4 Archive/1 Archived Projects')]));
+      try {
+        // The rule exists, the strip has not run: the text is still stored, and refused.
+        expect(gated.status().counts.chunks).toBe(2);
+        expect(servable(gated, 'old-1')).toBe(false);
+        expect(servable(gated, 'live-1')).toBe(true);
+        // After the strip (item row kept, chunks gone): still refused.
+        gated.stripMetadataOnlyRepresentations({ dryRun: false });
+        expect(gated.status().counts.items).toBe(2);
+        expect(servable(gated, 'old-1')).toBe(false);
+        expect(servable(gated, 'live-1')).toBe(true);
+      } finally {
+        gated.close();
+      }
+
+      // Without the rule, an item whose text was stripped has nothing to serve.
+      const reopened = openStore();
+      try {
+        expect(servable(reopened, 'old-1')).toBe(false);
+        // A stored tier the store does not know is not servable.
+        const db = new Database(dbPath);
+        try {
+          db.query("UPDATE items SET trust_tier = 'S9' WHERE local_item_id = ?").run(`${ACCOUNT}:live-1`);
+        } finally {
+          db.close();
+        }
+        expect(servable(reopened, 'live-1')).toBe(false);
+        // Nor is an unknown item.
+        expect(servable(reopened, 'missing')).toBe(false);
+      } finally {
+        reopened.close();
       }
     } finally {
       rmSync(root, { recursive: true, force: true });

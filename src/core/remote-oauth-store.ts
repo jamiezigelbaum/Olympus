@@ -9,7 +9,10 @@
  *
  * Only SHA-256 digests of tokens and pairing-code secrets are stored. Access
  * tokens are opaque, live one hour, and are bound to the protected resource
- * they were issued for. Refresh tokens rotate on every use. Presenting a used
+ * they were issued for. In relay mode tokens name this install
+ * (`oly2.<installId>.…`, `oly2r.<installId>.…`; connect-relay/shared/tokens.ts)
+ * so the relay can route them; a rotated pair keeps the install of the token
+ * it replaces. Refresh tokens rotate on every use. Presenting a used
  * one again is treated as theft and revokes the whole grant, except within a
  * short grace window, where the same successor pair is returned (concurrent
  * refreshes, or a retry after a lost response). The grace window lives in this
@@ -28,6 +31,7 @@
  */
 import type { Database } from 'bun:sqlite';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { credentialInstallId, mintCredential } from '../../connect-relay/shared/tokens.ts';
 import type { SqliteMigration } from './sqlite-migrations.ts';
 
 export const REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600;
@@ -100,8 +104,8 @@ export interface RemoteOAuthStore {
   checkPairingCode(input: string): PairingCodeCheck;
   registerClient(input: { clientName: string; redirectUris: string[] }): RegisteredOAuthClient | 'capacity';
   getRegisteredClient(clientId: string): RegisteredOAuthClient | undefined;
-  /** Creates the connection (the grant) and its first token pair. */
-  createGrant(input: { clientId: string; displayName: string; resource: string }): {
+  /** Creates the connection (the grant) and its first token pair; `installId` in relay mode. */
+  createGrant(input: { clientId: string; displayName: string; resource: string; installId?: string }): {
     connection: OAuthConnectionRef;
     tokens: IssuedOAuthTokens;
   };
@@ -113,11 +117,11 @@ export interface RemoteOAuthStore {
 }
 
 export function isWellFormedOAuthAccessToken(token: string): boolean {
-  return ACCESS_TOKEN_PATTERN.test(token);
+  return ACCESS_TOKEN_PATTERN.test(token) || credentialInstallId('access', token) !== undefined;
 }
 
 export function isWellFormedOAuthRefreshToken(token: string): boolean {
-  return REFRESH_TOKEN_PATTERN.test(token);
+  return REFRESH_TOKEN_PATTERN.test(token) || credentialInstallId('refresh', token) !== undefined;
 }
 
 export function isRegisteredOAuthClientId(value: string): boolean {
@@ -193,9 +197,19 @@ export function createRemoteOAuthStore(
       WHERE t.token_hash = ? AND t.kind = ?
     `).get(digest(token), kind) as TokenRow | null;
 
-  const issueTokens = (connectionId: string, clientId: string, resource: string, at: Date): IssuedOAuthTokens => {
-    const accessToken = `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
-    const refreshToken = `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
+  const issueTokens = (
+    connectionId: string,
+    clientId: string,
+    resource: string,
+    at: Date,
+    installId: string | undefined,
+  ): IssuedOAuthTokens => {
+    const accessToken = installId
+      ? mintCredential('access', installId)
+      : `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
+    const refreshToken = installId
+      ? mintCredential('refresh', installId)
+      : `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
     const insert = db.query(`
       INSERT INTO remote_oauth_tokens (token_hash, connection_id, kind, resource, client_id, created_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -306,7 +320,7 @@ export function createRemoteOAuthStore(
           INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at)
           VALUES (?, ?, 'oauth', NULL, ?, ?)
         `).run(id, input.displayName, input.clientId, at.toISOString());
-        const tokens = issueTokens(id, input.clientId, input.resource, at);
+        const tokens = issueTokens(id, input.clientId, input.resource, at, input.installId);
         return { connection: { id, displayName: input.displayName, clientId: input.clientId }, tokens };
       })();
     },
@@ -362,7 +376,7 @@ export function createRemoteOAuthStore(
         db.query('UPDATE remote_oauth_tokens SET used_at = ? WHERE token_hash = ?').run(at.toISOString(), row.token_hash);
         // The previous access token retires with its refresh token.
         db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ? AND kind = 'access'").run(row.connection_id);
-        const tokens = issueTokens(row.connection_id, row.client_id, row.resource, at);
+        const tokens = issueTokens(row.connection_id, row.client_id, row.resource, at, credentialInstallId('refresh', input.refreshToken));
         for (const [key, entry] of refreshGrace) if (entry.expiresAt <= at.getTime()) refreshGrace.delete(key);
         refreshGrace.set(Buffer.from(row.token_hash).toString('hex'), {
           tokens,

@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.0.0-rc.3 - unreleased
+
+- **"Do this on your computer" opens Olympus there, with no Terminal step.**
+  Connect for X bookmarks, Readwise, Telegram and WhatsApp, and every "Fix
+  this on your computer" link in ChatGPT, open an olympusplugin.ai/open/ page
+  that opens Olympus on the computer at that source's Connect panel (or
+  Models) through a new `olympus://` link handler, which `olympus engine
+  install` sets up (`olympus open-handler install|uninstall|status` by hand;
+  the uninstaller removes it). A link only opens a page; it changes nothing.
+  The page keeps the two steps by hand for a phone or an older install.
+- **A full disk says how much to free.** A model download that failed for
+  space reads "Free up 3 GB, then Try again", and Models no longer repeats
+  the Needs-you line.
+
+- **A first question before anything is connected says so.** With no source
+  connected, an empty `olympus_search` tells ChatGPT nothing is connected yet
+  and how to connect one, instead of "no evidence in 4 searched sources".
+
+## 1.0.0-rc.2 - unreleased
+
+- **A leftover OpenClaw entry no longer leaves search unset.** The engine
+  skips writing its default model policy only when OpenClaw really runs an
+  Olympus plugin (installed, enabled), not when an old `olympus` entry is all
+  that is left; that case left a new install with no search model.
+- **The uninstaller waits for the engine to stop** (up to 30 seconds) instead
+  of refusing after 3.
+
+## 1.0.0-rc.1
+
+First release candidate of Olympus 1.0, the ChatGPT plugin release (see the
+release plan, docs/V0_4_RELEASE.md). The 0.4 beta line ended at beta.11.
+
+- **One-line Mac installer.** `curl -fsSL https://olympusplugin.ai/install.sh | sh`
+  installs Olympus for the current macOS user (Apple silicon, macOS 13 or
+  later; no administrator password), verifies Bun and the Olympus release
+  against pinned SHA-256 digests before using them, starts the engine as a
+  LaunchAgent and waits for proof it is healthy, and adds the `olympus`
+  command. Re-running repairs; a new release upgrades and puts the previous
+  version back if it does not start. `curl -fsSL https://olympusplugin.ai/uninstall.sh | sh`
+  removes it and keeps your data.
+- **Privacy settings are the only privacy path; the sensitivity map is
+  retired.** What you mark in the dashboard's **Privacy** section (or with
+  ChatGPT's `olympus_privacy_set`), your own words and always-Private folders,
+  labels and senders, is the only privacy configuration Olympus reads.
+  `~/.olympus/sensitivity-map.json`, `OLYMPUS_SENSITIVITY_MAP_PATH` and
+  `olympus sensitivity validate` are gone. An existing install's map file is
+  no longer read and is left where it is: re-add its rules in the Privacy
+  editor.
+
 ## 0.4.0-beta.11 - 2026-10-01
 
 Re-reading PDFs now works while another file source is still waiting for

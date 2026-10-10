@@ -1,4 +1,5 @@
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
+import type { WorkerLaunch } from './core/model-key-reload.ts';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
 import { olympusPackageRoot } from './core/package-root.ts';
@@ -10,6 +11,8 @@ import { resolve } from 'node:path';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
 import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from './core/dashboard-launch.ts';
+import { DASHBOARD_LAUNCH_OPEN_KEY, openTargetPath, openTargetToken, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
+import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenHandlerResult } from './core/open-handler.ts';
 import {
   deleteAllConfirmationPrompts,
   deleteOlympusDataWithCustody,
@@ -62,7 +65,6 @@ import {
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
-import { validateSensitivityMapFile } from './core/sensitivity-map.ts';
 import { TIER_CLI_USAGE, runTierCommand } from './workers/classification/tier-cli.ts';
 import {
   runSetupWizard,
@@ -112,11 +114,10 @@ import {
   type RemoteConnectionRecord,
 } from './core/remote-connections.ts';
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
+import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
+import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
 import {
   readRemoteAccessStatus,
-  readTermsAcceptance,
-  recordTermsAcceptance,
-  resolveCurrentTermsUrl,
   relayProcessRunning,
   remoteAccessDirForCli,
   remoteAccessStatusView,
@@ -130,13 +131,91 @@ const PUBLIC_CLI_HELP_GROUPS = new Set([
   'source',
   'source index',
   'sovereignty',
-  'sensitivity',
   'worker',
+  'engine',
   'connect',
   'connections',
   'data',
   'tier',
+  'zkapi',
+  'open-handler',
 ]);
+
+const ZKAPI_TEST_WRITER_USAGE = 'olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]';
+
+/**
+ * `olympus zkapi test-writer`: the writer capability check
+ * (core/consult-writer-check.ts) against the owner's own model, the one saved
+ * in ~/.olympus/consult.json or one named on the command line to try before
+ * saving it. Runs only when invoked; sends nothing to zkAPI; writes no setting.
+ */
+async function runZkapiTestWriter(rest: string[]): Promise<void> {
+  const flags: Record<string, string> = {};
+  let json = false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index]!;
+    if (arg === '--json') {
+      json = true;
+      continue;
+    }
+    const name = arg.startsWith('--') ? arg.slice(2) : undefined;
+    const value = rest[index + 1];
+    if (!name || !['level', 'base-url', 'model', 'secret-ref'].includes(name) || value === undefined || value.startsWith('--')) {
+      throw new OperationError('invalid_params', `Usage: ${ZKAPI_TEST_WRITER_USAGE}`);
+    }
+    flags[name] = value;
+    index += 1;
+  }
+  const { readConsultSettings, parseConsultWriterChoice, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS } = await import('./core/consult-settings.ts');
+  const { checkOwnConsultWriter } = await import('./core/consult-writer-check.ts');
+  const { resolveSecretRefValueSync } = await import('./core/secret-store.ts');
+  const { environmentWithWorkerSetupEnv } = await import('./core/worker-auth.ts');
+  const read = readConsultSettings();
+  const saved = read.state === 'valid' ? read.settings : undefined;
+  const named = flags['base-url'] !== undefined || flags.model !== undefined;
+  const choice = named
+    ? parseConsultWriterChoice({
+      ...(flags['base-url'] !== undefined ? { baseUrl: flags['base-url'] } : {}),
+      ...(flags.model !== undefined ? { model: flags.model } : {}),
+      ...(flags['secret-ref'] !== undefined ? { secretRef: flags['secret-ref'] } : {}),
+    })
+    : saved?.writer;
+  if (!choice) {
+    throw new OperationError('invalid_params', named
+      ? 'Give --base-url (an http:// or https:// OpenAI-compatible address, usually ending in /v1) and --model; --secret-ref is env:NAME or store:name.'
+      : 'No model of your own is chosen. Choose one on the Anonymous answers card, or name one with --base-url and --model.');
+  }
+  const level = flags.level ?? saved?.level ?? 'unnamed';
+  if (level !== 'unnamed' && level !== 'general') throw new OperationError('invalid_params', '--level must be unnamed or general.');
+  let apiKey: string | undefined;
+  if (choice.secretRef) {
+    apiKey = resolveSecretRefValueSync(choice.secretRef, { env: environmentWithWorkerSetupEnv() })?.trim() || undefined;
+    if (!apiKey) throw new OperationError('config_error', `The key reference ${choice.secretRef} is not set on this computer.`);
+  }
+  console.error(`Testing ${choice.model} at ${choice.baseUrl} (${level === 'unnamed' ? 'Standard' : 'Strict'}) on invented cases. Nothing is sent to zkAPI.`);
+  const report = await checkOwnConsultWriter({
+    endpoint: { baseUrl: choice.baseUrl, model: choice.model, ...(apiKey ? { apiKey } : {}) },
+    level,
+    ...(saved ? { languages: saved.languages } : {}),
+    deadlineMs: choice.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS,
+    onCase: (result, index, total) => {
+      if (json) return;
+      const verdict = result.outcome === 'questions'
+        ? result.gate === 'pass' ? 'would be sent' : `refused by the privacy check (${result.gateReasons.join(', ')})`
+        : result.outcome === 'declined' ? 'no question' : `no usable reply (${result.reason ?? result.outcome})`;
+      console.log(`[${index + 1}/${total}] ${result.id}: ${verdict}${result.canaryLeak ? ' LEAK' : ''}${result.asksAboutDocuments ? ' ASKS-ABOUT-DOCUMENT' : ''}`);
+      for (const question of result.questions) console.log(`    ${question}`);
+    },
+  });
+  if (json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log(`${report.cases} cases: ${report.written} written, ${report.declined} with no question, ${report.failed} failed. The privacy check would send ${report.gatePassed} and refuse ${report.gateRefused}.`);
+    console.log(report.canaryLeaks.length === 0 ? 'No invented name, place or figure got past the privacy check.' : `Leaks past the privacy check: ${report.canaryLeaks.join(', ')}. Do not rely on this model yet.`);
+    if (report.documentQuestions.length > 0) console.log(`Asked about a document the frontier model cannot see: ${report.documentQuestions.join(', ')}.`);
+  }
+  if (report.canaryLeaks.length > 0) process.exitCode = 1;
+}
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -187,20 +266,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (args[0] === 'sensitivity' && args[1] === 'validate') {
-    try {
-      console.log(JSON.stringify(validateSensitivityMapFile(parseSensitivityValidateArgs(args.slice(2))), null, 2));
-    } catch (error) {
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
   if (args[0] === 'setup') {
     try {
       const result = await runSetupWizard(parseSetupArgs(args.slice(1)));
@@ -228,11 +293,67 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === 'zkapi' && args[1] === 'install-tools') {
+    if (args.length !== 2) throw new OperationError('invalid_params', 'olympus zkapi install-tools takes no options.');
+    // The same installer as the dashboard's one click (core/managed-tools.ts):
+    // pinned downloads, verified before extraction, into Olympus's own folder.
+    // It configures nothing: no wallet, no key, no setting.
+    const { installManagedTools } = await import('./core/managed-tools.ts');
+    const labels: Record<string, string> = { tor: 'Tor', 'zkapi-clientd': 'zkAPI' };
+    let last = '';
+    const result = await installManagedTools({
+      onProgress: (event) => {
+        const percent = event.phase === 'downloading' && event.receivedBytes !== undefined && event.totalBytes
+          ? ` ${Math.floor((event.receivedBytes / event.totalBytes) * 10) * 10}%`
+          : '';
+        const line = `${event.phase === 'downloading' ? 'Downloading' : event.phase === 'checking' ? 'Checking' : 'Installing'} ${labels[event.tool] ?? event.tool}…${percent}`;
+        if (line !== last) console.error(line);
+        last = line;
+      },
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (args[0] === 'zkapi' && args[1] === 'test-writer') {
+    await runZkapiTestWriter(args.slice(2));
+    return;
+  }
+
   if (args[0] === '__worker-service-run') {
     if (args.length > 2) {
       throw new OperationError('invalid_params', 'Native worker service invocation has unexpected arguments.');
     }
     await runWorkerForeground(args[1] ? { managedInstanceId: args[1] } : {});
+    return;
+  }
+
+  if (args[0] === 'engine') {
+    try {
+      const result = await runEngineCommand(args.slice(1));
+      if (result !== undefined) console.log(JSON.stringify(result, null, 2));
+      // install, verify and rollback report ok: false when the build did not prove healthy.
+      const verifying = ['install', 'verify', 'rollback'].includes(args[1] ?? '');
+      if (verifying && result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) process.exitCode = 1;
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
+  if (args[0] === '__engine-run') {
+    if (args.length !== 1) {
+      throw new OperationError('invalid_params', 'Engine host invocation has unexpected arguments.');
+    }
+    // Loaded only here: the host pulls in every native service adapter.
+    const { runEngineHostProcess } = await import('./core/engine-host.ts');
+    await runEngineHostProcess(import.meta.url);
     return;
   }
 
@@ -270,9 +391,7 @@ async function main(): Promise<void> {
 
   if (args[0] === 'connections') {
     try {
-      const result = args[1] === 'terms'
-        ? await runConnectionsTermsCommand(args.slice(2))
-        : runConnectionsCommand(args.slice(1));
+      const result = runConnectionsCommand(args.slice(1));
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
@@ -310,6 +429,36 @@ async function main(): Promise<void> {
       }
       throw error;
     }
+    return;
+  }
+
+  if (args[0] === 'open') {
+    // What the olympus:// handler runs. Never a state change: it only mints
+    // the same one-time opening link as `olympus dashboard` and opens it.
+    try {
+      const result = await runOpenCommand(args.slice(1));
+      console.log(JSON.stringify(result, null, 2));
+      if (!result.opened) process.exitCode = 1;
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
+  if (args[0] === 'open-handler') {
+    const action = args[1];
+    if (args.length !== 2 || (action !== 'install' && action !== 'uninstall' && action !== 'status')) {
+      console.error('Usage: olympus open-handler install|uninstall|status');
+      process.exit(2);
+    }
+    const result = action === 'install' ? installOpenHandler() : action === 'uninstall' ? uninstallOpenHandler() : openHandlerStatus();
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exitCode = 1;
     return;
   }
 
@@ -679,16 +828,18 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
   if (operation) return operation.cliHints.name;
 
   const [group, command] = commandArgs;
-  if (group === 'setup' || group === 'dashboard' || group === 'serve') return group;
+  if (group === 'setup' || group === 'dashboard' || group === 'serve' || group === 'open') return group;
   if (group === 'source' && command === 'extract-pdfs') return 'source extract-pdfs';
   if (
     group === 'sovereignty'
-    || group === 'sensitivity'
     || group === 'worker'
+    || group === 'engine'
     || group === 'connect'
     || group === 'connections'
     || group === 'data'
     || group === 'tier'
+    || group === 'zkapi'
+    || group === 'open-handler'
   ) {
     return command ? `${group} ${command}` : undefined;
   }
@@ -1107,16 +1258,20 @@ function printHelp(): void {
   console.log('  olympus argus list [--lane fast|deep]');
   console.log('  olympus argus complete <prompt> [--lane fast|deep]');
   console.log('  olympus source answer <question>');
+  console.log('  olympus ask <question> [--level strict|standard] [--cleanup as_written|light_cleanup|custom] [--remember true] [--model <zkapi-model>]');
   console.log('  olympus source index status');
   console.log('  olympus source index search <query> --corpus-id <corpus>');
   console.log('  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]');
   console.log(`  olympus setup --preset ${SOVEREIGNTY_PRESETS.join('|')} --yes [--cloud-lane subscription|api-key]`);
   console.log(`  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join('|')} [--path ~/.olympus/sovereignty.json]`);
-  console.log('  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]');
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
+  console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
+  console.log('  olympus engine uninstall|status|start|stop|restart|rollback|logs');
   console.log('  olympus dashboard [--read-only] [--no-open]');
   console.log('  olympus dashboard token');
+  console.log('  olympus open olympus://open/<target>');
+  console.log('  olympus open-handler install|uninstall|status');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
@@ -1129,11 +1284,12 @@ function printHelp(): void {
   console.log('  olympus connections list');
   console.log('  olympus connections revoke <id>');
   console.log('  olympus connections status');
-  console.log('  olympus connections terms [--accept]');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
   for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
+  console.log('  olympus zkapi install-tools');
+  console.log(`  ${ZKAPI_TEST_WRITER_USAGE}`);
   console.log('  olympus serve');
   console.log('  olympus --tools-json');
 }
@@ -1141,7 +1297,6 @@ function printHelp(): void {
 const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   setup: 'olympus setup --preset <preset> --yes',
   'sovereignty init': 'olympus sovereignty init --preset <preset> [--path <path>]',
-  'sensitivity validate': 'olympus sensitivity validate [--path <path>]',
   'worker install': 'olympus worker install [--platform darwin|linux] [--dry-run]',
   'worker status': 'olympus worker status [--platform darwin|linux]',
   'worker start': 'olympus worker start [--platform darwin|linux]',
@@ -1151,6 +1306,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'worker upgrade': 'olympus worker upgrade --artifact <path> [--platform darwin|linux]',
   'worker uninstall': 'olympus worker uninstall [--platform darwin|linux]',
   'worker run': 'olympus worker run',
+  ...ENGINE_CLI_USAGE,
   'connect google': 'olympus connect google --client-id <id>',
   'connect gmail': 'olympus connect gmail --client-id <id>',
   'connect google-drive': 'olympus connect google-drive --client-id <id>',
@@ -1166,13 +1322,18 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections list': 'olympus connections list',
   'connections revoke': 'olympus connections revoke <id>',
   'connections status': 'olympus connections status',
-  'connections terms': 'olympus connections terms [--accept]',
   dashboard: 'olympus dashboard [--read-only] [--no-open]',
+  open: 'olympus open olympus://open/<target>',
+  'open-handler install': 'olympus open-handler install',
+  'open-handler uninstall': 'olympus open-handler uninstall',
+  'open-handler status': 'olympus open-handler status',
   'source extract-pdfs': 'olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
   ...TIER_CLI_USAGE,
+  'zkapi install-tools': 'olympus zkapi install-tools',
+  'zkapi test-writer': ZKAPI_TEST_WRITER_USAGE,
   serve: 'olympus serve',
 };
 
@@ -1221,13 +1382,14 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Commands:',
     `  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join('|')} [--path <path>] [--force]`,
   ],
-  sensitivity: [
-    'Usage: olympus sensitivity <command>',
-    'Commands:',
-    '  olympus sensitivity validate [--path <path>]',
-  ],
   worker: [
     'Usage: olympus worker install|start|stop|restart|status|foreground|upgrade|uninstall',
+  ],
+  engine: [
+    'Usage: olympus engine <command>',
+    'Runs Olympus on this Mac without OpenClaw, as a per-user LaunchAgent.',
+    'Commands:',
+    ...Object.values(ENGINE_CLI_USAGE).map((usage) => `  ${usage}`),
   ],
   connect: [
     'Usage: olympus connect <source>',
@@ -1245,8 +1407,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok',
     '  olympus connections list',
     '  olympus connections revoke <id>',
-    '  olympus connections status          Remote access: relay, public URLs, certificate expiry',
-    '  olympus connections terms [--accept]  Show (or accept) the Let\'s Encrypt subscriber agreement',
+    '  olympus connections status          Remote access: relay session and public URLs',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -1263,6 +1424,19 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     `  ${TIER_CLI_USAGE['tier rules']}`,
     `  ${TIER_CLI_USAGE['tier classifier']}`,
     `  ${TIER_CLI_USAGE['tier migrate']}`,
+  ],
+  zkapi: [
+    'Usage: olympus zkapi <command>',
+    'Commands:',
+    '  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers',
+    '  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)',
+  ],
+  'open-handler': [
+    'Usage: olympus open-handler <command>',
+    'Commands:',
+    '  olympus open-handler install     Let olympus:// links open the Olympus dashboard on this computer',
+    '  olympus open-handler uninstall   Remove that link handler',
+    '  olympus open-handler status      Say whether it is installed',
   ],
 };
 
@@ -1561,7 +1735,9 @@ async function runWorkerCommand(args: string[]): Promise<void> {
   if (command === 'install' || command === 'upgrade') {
     const parsed = parseWorkerInstallArgs(command, args.slice(1));
     const options = command === 'install' ? withWorkerInstallAuth(parsed) : parsed;
-    console.log(JSON.stringify(runWorkerLifecycle(command, options), null, 2));
+    const result = runWorkerLifecycle(command, options);
+    const handler = command === 'install' && !options.dryRun ? linuxDesktopOpenHandler('install', options) : undefined;
+    console.log(JSON.stringify(handler ? { ...result, open_handler: handler } : result, null, 2));
     return;
   }
   if (['status', 'start', 'stop', 'restart', 'uninstall'].includes(command)) {
@@ -1581,17 +1757,35 @@ async function runWorkerCommand(args: string[]): Promise<void> {
       }, null, 2));
       return;
     }
-    console.log(JSON.stringify(result, null, 2));
+    const handler = command === 'uninstall' ? linuxDesktopOpenHandler('uninstall', actionOptions) : undefined;
+    console.log(JSON.stringify(handler ? { ...result, open_handler: handler } : result, null, 2));
     return;
   }
   throw new OperationError('invalid_params', `Unknown worker command: ${command}`);
+}
+
+/**
+ * On a Linux desktop the worker service is how Olympus runs, so the
+ * olympus:// link handler comes and goes with it (macOS's comes with
+ * `olympus engine install`). A headless host (no display) gets none on
+ * install; uninstall always removes one that is there.
+ */
+function linuxDesktopOpenHandler(
+  action: 'install' | 'uninstall',
+  options: { platform?: WorkerServicePlatform; homeDir?: string },
+): OpenHandlerResult | undefined {
+  if ((options.platform ?? process.platform) !== 'linux') return undefined;
+  const handlerOptions = { platform: 'linux', ...(options.homeDir ? { homeDir: options.homeDir } : {}) };
+  if (action === 'uninstall') return uninstallOpenHandler(handlerOptions);
+  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return undefined;
+  return installOpenHandler(handlerOptions);
 }
 
 export async function runWorkerForeground(options: {
   managedInstanceId?: string;
   env?: Record<string, string | undefined>;
   applySetupEnv?: () => void;
-  startWorker?: () => void | Promise<void>;
+  startWorker?: (launch: WorkerLaunch) => void | Promise<void>;
 } = {}): Promise<void> {
   const env = options.env ?? process.env;
   const managedInstanceId = options.managedInstanceId;
@@ -1610,8 +1804,9 @@ export async function runWorkerForeground(options: {
     }
   }
   const startWorker = options.startWorker
-    ?? (await import('./workers/email-source/server.ts')).main;
-  await startWorker();
+    ?? (await import('./workers/email-source/server.ts')).startWorkerWithLaunch;
+  // Only the validated native-service launch is supervised; never an ambient marker.
+  await startWorker({ nativeServiceSupervised: managedInstanceId !== undefined });
 }
 
 async function readWorkerHttpState(): Promise<Record<string, unknown>> {
@@ -2316,9 +2511,20 @@ function parseConnectOptions(args: string[]): {
 }
 
 /** The supervised worker state delete custody reads, or `unknown` if unreadable. */
-function observedWorkerServiceState(): WorkerServiceState {
+function observedWorkerServiceState(): { workerState: WorkerServiceState; engineLoaded: boolean } {
+  // The standalone engine supervises its own worker. Loaded at all (running,
+  // or between launchd's restarts), it holds the worker whatever the legacy
+  // worker unit says.
+  if (process.platform === 'darwin') {
+    const custody = engineDataCustody(inspectEngine());
+    if (custody === 'loaded') return { workerState: 'active', engineLoaded: true };
+    if (custody === 'unknown') return { workerState: 'unknown', engineLoaded: false };
+  }
   const lifecycleStatus = runWorkerLifecycle('status');
-  return lifecycleStatus.action === 'status' ? lifecycleStatus.service.state : 'unknown';
+  return {
+    workerState: lifecycleStatus.action === 'status' ? lifecycleStatus.service.state : 'unknown',
+    engineLoaded: false,
+  };
 }
 
 async function runDataCommand(args: string[]): Promise<unknown> {
@@ -2344,7 +2550,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     // with no public capability falls through to the worker-inactive
     // requirement, which is unsatisfiable unless the observed state is passed
     // in — the delete was refused at every worker state without it.
-    const workerState = observedWorkerServiceState();
+    const { workerState, engineLoaded } = observedWorkerServiceState();
     if (options.sourceId) {
       const sourceId = options.sourceId;
       const registryPath = handleRegistryPathFromEnv(process.env, true)!;
@@ -2354,6 +2560,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
           dryRun: options.dryRun,
           connectedRegistry: readConnectedHandleRegistry(registryPath),
           workerState,
+          engineLoaded,
         })
       );
     }
@@ -2361,6 +2568,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
       all: options.all,
       dryRun: options.dryRun,
       workerState,
+      engineLoaded,
       relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
     });
   }
@@ -2413,24 +2621,6 @@ function parseDataOptions(args: string[]): {
     }
   }
   return { output: outputPath, input: inputPath, sourceId, all, dryRun, yesIAMSure };
-}
-
-function parseSensitivityValidateArgs(args: string[]): { path?: string } {
-  const options: { path?: string } = {};
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === '--path') {
-      options.path = requireOptionValue(args, (index += 1), arg);
-    } else if (arg?.startsWith('--path=')) {
-      options.path = arg.slice('--path='.length);
-    } else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: olympus sensitivity validate [--path <path>]');
-      process.exit(0);
-    } else {
-      throw new OperationError('invalid_params', `Unknown sensitivity validate option: ${arg}`);
-    }
-  }
-  return options;
 }
 
 async function confirmDeleteAll(): Promise<void> {
@@ -2579,8 +2769,8 @@ function remoteUrlFields(urls: RemoteAccessUrls): Record<string, unknown> {
 }
 
 /**
- * `olympus connections status`: remote access mode, relay session,
- * certificate expiry and the URLs to hand an agent. The same JSON is what the
+ * `olympus connections status`: remote access mode, relay session and the
+ * URLs to hand an agent. The same JSON is what the
  * dashboard's "Connect an agent" panel consumes.
  */
 function runConnectionsStatus(env: Record<string, string | undefined>): Record<string, unknown> {
@@ -2593,65 +2783,7 @@ function runConnectionsStatus(env: Record<string, string | undefined>): Record<s
     status,
     configuredWorkerBaseUrl: loadConfig(layeredEnv).email.baseUrl,
   });
-  return { ...remoteAccessStatusView({ dir, urls, status }) };
-}
-
-/**
- * `olympus connections terms [--accept]`: shows the certificate authority's
- * subscriber agreement, and records the owner's acceptance of that exact
- * version. The relay places no certificate order until this is recorded, and a
- * new agreement from the CA needs a new acceptance.
- */
-export async function runConnectionsTermsCommand(
-  args: readonly string[],
-  env: Record<string, string | undefined> = process.env,
-  dependencies: { fetchTerms?: () => Promise<string | undefined>; now?: () => Date } = {},
-): Promise<Record<string, unknown>> {
-  const accept = args.length === 1 && args[0] === '--accept';
-  if (args.length > 1 || (args.length === 1 && !accept)) {
-    throw new OperationError('invalid_params', 'Usage: olympus connections terms [--accept]');
-  }
-  const dir = remoteAccessDirForCli(env);
-  const status = readRemoteAccessStatus(dir);
-  const fetchTerms = dependencies.fetchTerms
-    ?? (async () => (await import('./core/remote-access-terms.ts')).fetchLetsEncryptTermsUrl());
-  let termsUrl: string | undefined;
-  try {
-    // The relay's reported agreement, or none when the CA named none, else
-    // the CA directory now: the one resolution the dashboard shares.
-    termsUrl = await resolveCurrentTermsUrl(status, fetchTerms);
-  } catch {
-    throw new OperationError(
-      'config_error',
-      'Could not read the Let\'s Encrypt subscriber agreement URL from its directory.',
-      'Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.',
-    );
-  }
-  const acceptance = readTermsAcceptance(dir);
-  if (accept) {
-    const recorded = recordTermsAcceptance(dir, termsUrl, dependencies.now?.() ?? new Date());
-    return {
-      kind: 'remote_access_terms',
-      url: termsUrl ?? null,
-      accepted: true,
-      accepted_at: recorded.accepted_at,
-      notice: termsUrl
-        ? 'Accepted. Olympus will now request this install\'s certificate through the relay.'
-        : 'Accepted. The certificate authority publishes no agreement URL, so this records consent to its terms as it states them; if it later publishes an agreement, you will be asked again.',
-    };
-  }
-  const accepted = acceptance !== undefined && (termsUrl === undefined || acceptance.terms_url === termsUrl);
-  return {
-    kind: 'remote_access_terms',
-    url: termsUrl ?? null,
-    accepted,
-    accepted_at: accepted ? acceptance!.accepted_at : null,
-    notice: accepted
-      ? 'Already accepted.'
-      : termsUrl
-        ? 'Remote access needs a certificate for this install\'s own hostname, which means agreeing to the certificate authority\'s Subscriber Agreement. Read it at the url above; to accept, run olympus connections terms --accept.'
-        : 'Remote access needs a certificate for this install\'s own hostname. The certificate authority publishes no agreement URL; to consent to its terms and continue, run olympus connections terms --accept.',
-  };
+  return { ...remoteAccessStatusView({ urls, status }) };
 }
 
 function remoteConnectionView(connection: RemoteConnectionRecord): Record<string, unknown> {
@@ -2687,6 +2819,8 @@ export interface DashboardCommandDependencies {
   openImpl?: (url: string) => boolean;
   /** Mint and return the link without consuming it in a local browser. */
   noOpen?: boolean;
+  /** Where the opened dashboard lands (an `olympus://` link's target); the plain dashboard when absent. */
+  target?: OpenTarget;
 }
 
 const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
@@ -2736,6 +2870,29 @@ export async function runDashboardCommand(
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
         + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
   };
+}
+
+/**
+ * `olympus open <link>`: what the olympus:// handler runs (core/open-handler.ts).
+ *
+ * The link only ever chooses WHERE the dashboard opens, from a closed list
+ * (core/open-targets.ts); an unknown `olympus:` link opens the plain
+ * dashboard, and anything else opens nothing. The rest is exactly
+ * `olympus dashboard`: a fresh single-use ticket from this install's own
+ * worker, opened in the default browser. It changes no setting, starts no
+ * sign-in and submits nothing; the page it opens only shows a panel.
+ */
+export async function runOpenCommand(
+  args: string[],
+  dependencies: Omit<DashboardCommandDependencies, 'target' | 'noOpen'> = {},
+): Promise<{ opened: boolean; target?: string; reason?: string }> {
+  if (args.length !== 1) {
+    throw new OperationError('invalid_params', 'olympus open takes exactly one olympus:// link.', 'Usage: olympus open olympus://open/dashboard');
+  }
+  const target = parseOlympusOpenUrl(args[0]);
+  if (!target) return { opened: false, reason: 'not_an_olympus_link' };
+  const result = await runDashboardCommand({ ...dependencies, target });
+  return { opened: result.opened, target: openTargetPath(target) };
 }
 
 /**
@@ -2875,7 +3032,9 @@ async function mintDashboardOpeningUrl(
       'This worker predates the standalone opening handoff; upgrade it, then run this again.',
     );
   }
-  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`;
+  const openToken = dependencies.target ? openTargetToken(dependencies.target) : undefined;
+  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`
+    + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : '');
 }
 
 /** Open in the desktop browser. Bun.spawnSync rather than a shell, always. */

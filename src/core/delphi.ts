@@ -1,5 +1,8 @@
 import type { ArgusLane, ArgusModelProfile, OlympusConfig } from './config.ts';
 import { OperationError } from './operation-error.ts';
+import { assertLocalModelIdNotCloudForwarding } from './local-model-policy.ts';
+import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
+import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
 import { resolveSecretRefValue } from './secret-store.ts';
 
 export type DelphiFetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -139,6 +142,9 @@ export class DelphiClient {
   async complete(options: CompleteOptions): Promise<DelphiCompletionResult> {
     const route = this.resolveRoute(options);
     const model = options.model || route.model;
+    // Argus lanes and profiles are local model routes; a cloud-forwarding
+    // model id would carry the prompt off this machine through them.
+    assertLocalModelIdNotCloudForwarding(`Argus ${route.errorLabel} model`, model);
     const messages = [
       ...(options.system ? [{ role: 'system', content: options.system }] : []),
       { role: 'user', content: options.prompt },
@@ -272,6 +278,11 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      // A zkAPI daemon port is refused before anything is sent: not an outage.
+      if (isZkapiDaemonEndpointRefusal(firstError)) throw firstError;
+      // A redirect is the endpoint's answer, not a stale socket: no retry,
+      // and nothing from the request or the Location header in the error.
+      if (isModelEndpointRedirectError(firstError)) throw argusRedirectError(lane, firstError);
       // The caller's own cancellation (a disconnect, a hand-off job's
       // deadline, a leg budget) is not this lane timing out: it surfaces as
       // the caller's abort reason, which the answer route reads as a
@@ -293,6 +304,7 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
         if (isAbortError(secondError)) {
           throw argusTimeoutError(lane, url, timeoutMs);
         }
+        if (isModelEndpointRedirectError(secondError)) throw argusRedirectError(lane, secondError);
         throw new OperationError(
           'argus_unreachable',
           `Argus ${lane} lane is unreachable at ${url}.`,
@@ -314,14 +326,14 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
   }
 
   private async fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-    if (timeoutMs <= 0) return this.fetchImpl(url, init);
+    if (timeoutMs <= 0) return fetchModelEndpoint(this.fetchImpl, url, init);
     const controller = new AbortController();
     const abortFromCaller = () => controller.abort(init.signal?.reason);
     if (init.signal?.aborted) abortFromCaller();
     else init.signal?.addEventListener('abort', abortFromCaller, { once: true });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await this.fetchImpl(url, {
+      return await fetchModelEndpoint(this.fetchImpl, url, {
         ...init,
         signal: controller.signal,
       });
@@ -350,6 +362,14 @@ async function safeText(response: Response): Promise<string> {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+function argusRedirectError(lane: string, error: Error): OperationError {
+  return new OperationError(
+    'argus_unreachable',
+    `Argus ${lane} lane answered with a redirect, which is refused.`,
+    error.message,
+  );
 }
 
 function argusTimeoutError(lane: string, url: string, timeoutMs: number): OperationError {

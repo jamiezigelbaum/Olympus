@@ -4,6 +4,7 @@ import type {
   SourceTrustDomain,
   SourceTrustTier,
 } from './source-index/types.ts';
+import { isSecureSensitivity } from './source-index/types.ts';
 
 export type EvidenceConfidence = 'low' | 'medium' | 'high';
 export type EvidenceExtractionKind = 'quoted_fact' | 'paraphrase' | 'inference' | 'metadata';
@@ -163,7 +164,7 @@ export function evaluateReleaseGate(input: ReleaseGateInput): ReleaseDecision {
   }
 
   const crossingToCallingAgent = isCallingAgentDestination(input.destination);
-  const secureFacts = input.facts.filter((fact) => fact.sensitivity.trustDomain === 'secure_local');
+  const secureFacts = input.facts.filter((fact) => isSecureSensitivity(fact.sensitivity));
   if (crossingToCallingAgent && secureFacts.some((fact) => fact.releaseSurface === 'local_only')) {
     return {
       decision: 'needs_approval',

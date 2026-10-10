@@ -4,6 +4,15 @@
  * Port of the production OCR extractor: rasterize-and-OCR for PDFs, direct OCR
  * for images, and delegation to the text lane for everything else.
  *
+ * Two engines sit behind the one lane. On macOS the default is the built-in
+ * one (`apple-vision-ocr.ts`): PDFKit and Vision through the system's own
+ * `osascript`, so a fresh Mac reads scans with nothing installed. Everywhere
+ * else, when the owner sets the engine to `tesseract`, or when Vision cannot
+ * run on a Mac, the lane uses the `ocrmypdf` / `tesseract` commands as before.
+ * The kind keeps its historical `local_ocr_tesseract` name because stored jobs,
+ * reclassification rules and operator tooling key on it; which engine read a
+ * file is recorded on the derivation as the `ocr_engine_apple_vision` warning.
+ *
  * The delegation used to be a substring dispatch on the requested kind string.
  * Under an explicit registry it is composition: this extractor constructs a
  * text extractor once and hands the item over. That is why `accepts()` stays as
@@ -40,8 +49,18 @@ import {
   isCommandMissing,
   missingBytesFailure,
   textLaneAccepts,
+  type ImageOcr,
   type PdfOcr,
 } from './text.ts';
+import {
+  AppleVisionOcrUnavailableError,
+  appleVisionImageOcr,
+  appleVisionOcrSelected,
+  appleVisionPdfOcr,
+  resolveAppleVisionOcrScript,
+  type AppleVisionOcrOptions,
+  type OcrEnginePreference,
+} from './apple-vision-ocr.ts';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,6 +97,101 @@ export interface OcrExtractorOptions {
   maxBoundedTextChars?: number;
   commandRunner?: ExtractionCommandRunner;
   ocrTimeoutMs?: number;
+  engine?: OcrEngineOptions;
+}
+
+/**
+ * Engine selection and the built-in engine's bounds. Every field is optional;
+ * the defaults pick Vision on macOS and tesseract elsewhere.
+ */
+export interface OcrEngineOptions {
+  preference?: OcrEnginePreference;
+  /**
+   * Overrides `process.platform`, for tests.
+   */
+  platform?: NodeJS.Platform;
+  /**
+   * Overrides the packaged script lookup; `null` means "not found".
+   */
+  appleVisionScriptPath?: string | null;
+  /**
+   * Runs the built-in engine's `osascript`; defaults to the lane's runner.
+   */
+  appleVisionCommandRunner?: ExtractionCommandRunner;
+  maxPages?: number;
+  pagesPerRun?: number;
+  fileDeadlineMs?: number;
+  /**
+   * Clock for the whole-file deadline, for tests.
+   */
+  now?: () => number;
+}
+
+/**
+ * The engine choice for one lane instance. Vision is tried first when
+ * selected; the first time it proves unavailable on this host the instance
+ * remembers that and every later file goes straight to tesseract.
+ */
+interface OcrEngine {
+  vision: AppleVisionOcrOptions | undefined;
+  markVisionUnavailable(): void;
+}
+
+function createOcrEngine(input: {
+  options: OcrEngineOptions | undefined;
+  commandRunner: ExtractionCommandRunner;
+  timeoutMs: number;
+  maxBoundedTextChars: number;
+}): OcrEngine {
+  const options = input.options ?? {};
+  let vision: AppleVisionOcrOptions | undefined;
+  if (appleVisionOcrSelected(options.preference ?? 'auto', options.platform ?? process.platform)) {
+    vision = {
+      commandRunner: options.appleVisionCommandRunner ?? input.commandRunner,
+      scriptPath: options.appleVisionScriptPath === null
+        ? undefined
+        : options.appleVisionScriptPath ?? resolveAppleVisionOcrScript(),
+      timeoutMs: input.timeoutMs,
+      maxBoundedTextChars: input.maxBoundedTextChars,
+      ...(options.maxPages !== undefined ? { maxPages: options.maxPages } : {}),
+      ...(options.pagesPerRun !== undefined ? { pagesPerRun: options.pagesPerRun } : {}),
+      ...(options.fileDeadlineMs !== undefined ? { fileDeadlineMs: options.fileDeadlineMs } : {}),
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    };
+  }
+  return {
+    get vision() {
+      return vision;
+    },
+    markVisionUnavailable() {
+      if (vision) {
+        console.error('Built-in macOS scan reading is unavailable on this host; using the tesseract commands.');
+      }
+      vision = undefined;
+    },
+  };
+}
+
+/**
+ * Read with Vision when it is the engine, else answer undefined so the caller
+ * runs the tesseract path. Unavailability is remembered, never surfaced as a
+ * job failure.
+ */
+async function withVision(
+  engine: OcrEngine,
+  read: (vision: AppleVisionOcrOptions) => Promise<ExtractorOutput>,
+): Promise<ExtractorOutput | undefined> {
+  const vision = engine.vision;
+  if (!vision) return undefined;
+  try {
+    return await read(vision);
+  } catch (error) {
+    if (error instanceof AppleVisionOcrUnavailableError) {
+      engine.markVisionUnavailable();
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 export function createOcrExtractor(options: OcrExtractorOptions = {}): Extractor {
@@ -86,6 +200,12 @@ export function createOcrExtractor(options: OcrExtractorOptions = {}): Extractor
   const maxBoundedTextChars = options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS;
   const commandRunner = options.commandRunner ?? runExtractionCommand;
   const timeoutMs = options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS;
+  const engine = createOcrEngine({
+    options: options.engine,
+    commandRunner,
+    timeoutMs,
+    maxBoundedTextChars,
+  });
   const textExtractor = createTextExtractor({
     kind,
     version,
@@ -108,25 +228,14 @@ export function createOcrExtractor(options: OcrExtractorOptions = {}): Extractor
       if (!bytes) return missingBytesFailure();
       const mimeType = normalizeMimeType(input.mimeType ?? input.ref.mimeType);
       const sizeBytes = input.sizeBytes ?? bytes.byteLength;
+      const laneInput = { bytes, mimeType: mimeType ?? '', sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs };
       if (mimeType === PDF_MIME_TYPE) {
-        return runOcrLane(() => extractPdfOcr({
-          bytes,
-          mimeType,
-          sizeBytes,
-          maxBoundedTextChars,
-          commandRunner,
-          timeoutMs,
-        }));
+        return runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision))
+          ?? extractPdfOcr(laneInput));
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
-        return runOcrLane(() => extractImageOcr({
-          bytes,
-          mimeType,
-          sizeBytes,
-          maxBoundedTextChars,
-          commandRunner,
-          timeoutMs,
-        }));
+        return runOcrLane(async () => await withVision(engine, (vision) => visionImage(laneInput, vision))
+          ?? extractImageOcr(laneInput));
       }
       return textExtractor.extract(input);
     },
@@ -144,30 +253,93 @@ export function createPdfOcr(options: {
   maxBoundedTextChars?: number;
   commandRunner?: ExtractionCommandRunner;
   ocrTimeoutMs?: number;
+  engine?: OcrEngineOptions;
 } = {}): PdfOcr {
   const commandRunner = options.commandRunner ?? runExtractionCommand;
+  const maxBoundedTextChars = options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS;
+  const timeoutMs = options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS;
+  const engine = createOcrEngine({ options: options.engine, commandRunner, timeoutMs, maxBoundedTextChars });
   return async ({ bytes, mimeType, sizeBytes }) => {
+    const laneInput: OcrLaneInput = {
+      bytes,
+      mimeType,
+      sizeBytes,
+      maxBoundedTextChars,
+      commandRunner: async (request) => {
+        try {
+          return await commandRunner(request);
+        } catch (error) {
+          if (isCommandMissing(error)) throw new OcrUnavailableError();
+          throw error;
+        }
+      },
+      timeoutMs,
+    };
     try {
-      return await runOcrLane(() => extractPdfOcr({
-        bytes,
-        mimeType,
-        sizeBytes,
-        maxBoundedTextChars: options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS,
-        commandRunner: async (request) => {
-          try {
-            return await commandRunner(request);
-          } catch (error) {
-            if (isCommandMissing(error)) throw new OcrUnavailableError();
-            throw error;
-          }
-        },
-        timeoutMs: options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS,
-      }));
+      return await runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision))
+        ?? extractPdfOcr(laneInput));
     } catch (error) {
       if (error instanceof OcrUnavailableError) return undefined;
       throw error;
     }
   };
+}
+
+/**
+ * OCR for the text lane's images.
+ *
+ * Built-in engine only: on a Mac the text lane reads an image's text with
+ * Vision, which costs nothing to install. Where only tesseract is available,
+ * this answers undefined and images stay names-only in the text lane exactly
+ * as before; the explicit OCR lane still reads them with tesseract on request.
+ * Also answers undefined when Vision proves unavailable on this host.
+ */
+export function createImageOcr(options: {
+  maxBoundedTextChars?: number;
+  commandRunner?: ExtractionCommandRunner;
+  ocrTimeoutMs?: number;
+  engine?: OcrEngineOptions;
+} = {}): ImageOcr {
+  const commandRunner = options.commandRunner ?? runExtractionCommand;
+  const maxBoundedTextChars = options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS;
+  const timeoutMs = options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS;
+  const engine = createOcrEngine({ options: options.engine, commandRunner, timeoutMs, maxBoundedTextChars });
+  return async ({ bytes, mimeType, sizeBytes }) => {
+    if (!engine.vision) return undefined;
+    const laneInput: OcrLaneInput = { bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs };
+    return runOcrLane(() => withVision(engine, (vision) => visionImage(laneInput, vision)));
+  };
+}
+
+async function visionPdf(input: OcrLaneInput, vision: AppleVisionOcrOptions): Promise<ExtractorOutput> {
+  return withTempInput(input.bytes, '.pdf', (inputPath) => appleVisionPdfOcr({
+    inputPath,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes,
+  }, vision));
+}
+
+async function visionImage(input: OcrLaneInput, vision: AppleVisionOcrOptions): Promise<ExtractorOutput> {
+  return withTempInput(input.bytes, imageExtensionForMimeType(input.mimeType), (inputPath) => appleVisionImageOcr({
+    inputPath,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes,
+  }, vision));
+}
+
+async function withTempInput<T>(
+  bytes: Uint8Array,
+  extension: string,
+  read: (inputPath: string) => Promise<T>,
+): Promise<T> {
+  const tempDir = await mkdtemp(join(tmpdir(), TEMP_DIR_PREFIX));
+  try {
+    const inputPath = join(tempDir, `input${extension}`);
+    await writeFile(inputPath, bytes);
+    return await read(inputPath);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 }
 
 class OcrUnavailableError extends Error {}
@@ -178,7 +350,7 @@ class OcrUnavailableError extends Error {}
  * failure. The landed seam expresses the same disposition in-place, so the
  * outcome is unchanged and the category is now explicit.
  */
-async function runOcrLane(run: () => Promise<ExtractorOutput>): Promise<ExtractorOutput> {
+async function runOcrLane<T extends ExtractorOutput | undefined>(run: () => Promise<T>): Promise<T | ExtractorOutput> {
   try {
     return await run();
   } catch (error) {

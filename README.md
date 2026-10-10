@@ -6,7 +6,7 @@
 
 **Your whole digital life, searchable by your AI — on your privacy terms.**
 
-*A sovereignty-aware source brain for [OpenClaw](https://openclaw.ai) agents.*
+*A private knowledge engine on your Mac for ChatGPT, and a sovereignty-aware source brain for [OpenClaw](https://openclaw.ai) agents.*
 
 [![version](https://img.shields.io/badge/version-0.4.0-534AB7)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-0F6E56)](LICENSE)
@@ -14,7 +14,7 @@
 [![openclaw](https://img.shields.io/badge/OpenClaw-2026.7.1%2B-378ADD)](https://openclaw.ai)
 [![runtime](https://img.shields.io/badge/runtime-Bun%20%2B%20TypeScript-B45309)](https://bun.sh)
 
-[Quickstart](docs/QUICKSTART.md) · [Release status](docs/V0_4_RELEASE.md) · [Source capabilities](docs/SOURCE_CAPABILITIES.md) · [How it works](#how-it-works) ·
+[Olympus for ChatGPT](#olympus-for-chatgpt) · [OpenClaw quickstart](docs/QUICKSTART.md) · [Release status](docs/V0_4_RELEASE.md) · [Source capabilities](docs/SOURCE_CAPABILITIES.md) · [How it works](#how-it-works) ·
 [Sources](#supported-sources) · [Security model](#the-security-model) ·
 [Commands](#command-reference)
 
@@ -22,14 +22,16 @@
 
 ---
 
-> **🤖 Installing this as an AI agent?** Stop and read
+> **🤖 Installing this as an AI agent for OpenClaw?** Stop and read
 > **[INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md)** before running any
 > command — it is the step-by-step runbook you must follow, including
 > exactly what to tell your operator after each step (your install report
 > must end with the Step 1→2 invitation, never a bare status line). Managed
 > `git:`, `clawhub:`, and `npm-pack:` installs intentionally hide their internal
 > package path; use the installed `olympus` CLI and this packaged runbook rather
-> than searching OpenClaw's managed storage.
+> than searching OpenClaw's managed storage. **Setting up Olympus for ChatGPT
+> instead?** Follow [Olympus for ChatGPT](#olympus-for-chatgpt) and the
+> plugin's own setup skill, not this runbook.
 
 ---
 
@@ -53,10 +55,149 @@ agent › Three commitments: the tax documents to Maria by Friday
 Your agent saw a bounded, cited, policy-gated answer. It never saw your
 mailbox.
 
+## Olympus for ChatGPT
+
+Olympus 1.0 is a ChatGPT plugin. The Olympus engine runs on your Mac and
+keeps your index there; ChatGPT asks it questions through one secure
+connection that you approve on the Mac. You need ChatGPT and a Mac with
+Apple silicon (M1 or later) on macOS 13 Ventura or later; Intel Macs are not
+supported. You do not need OpenClaw, Tailscale, an API key or a new account.
+
+### 1. Install Olympus on your Mac, then add it in ChatGPT
+
+1. Open **Terminal** and run:
+
+   ```bash
+   curl -fsSL https://olympusplugin.ai/install.sh | sh
+   ```
+
+   It installs Olympus for your macOS user only (no administrator password),
+   checks every download against a pinned SHA-256 before using it, runs
+   Olympus in the background as a login item (a LaunchAgent), adds the
+   `olympus` command, and waits until the engine proves it is running. Then
+   Olympus downloads its built-in models once. Running it again updates or
+   repairs the install; a failed update puts the previous version back.
+   Details, folders and uninstall: <https://olympusplugin.ai/install/>.
+2. In the ChatGPT desktop app, add **Olympus** from the plugin directory and
+   ask *"Connect Olympus"*. ChatGPT's setup skill shows the same install
+   command if Olympus is not on the Mac yet; it never runs commands itself.
+
+### 2. Approve ChatGPT on your Mac
+
+The first time ChatGPT connects to Olympus, an Olympus page opens in your
+Mac's browser asking to connect ChatGPT. Click **Approve**. That click, on your own Mac, is how
+Olympus knows the Mac is yours: there is no code to copy and no account to
+create. To check on it later, run `olympus engine status` in Terminal.
+
+### 3. Connect Dropbox and choose folders
+
+Open the **Olympus** dashboard in ChatGPT's sidebar (or ask *"Show my
+Olympus dashboard"*). Choose **Connect** next to Dropbox and sign in with
+your own Dropbox account; the sign-in link works once, for 10 minutes, from
+any device. Gmail and Google Drive connect the same way.
+
+Then pick folders. For each folder choose:
+
+- **Full**: Olympus reads the files and can answer from what they say.
+- **Names only**: Olympus keeps the file names and details such as dates,
+  not what the files say.
+- **Skip**: Olympus leaves the folder alone.
+
+A folder follows its parent's choice unless you change it; **Mixed** means
+some folders inside it are set differently. Choose **Save and start**, and
+indexing begins on your Mac.
+
+### 4. Tell Olympus what's private
+
+Olympus sorts every item, one by one, into one of three tiers:
+
+- **Personal**: everyday mail, notes and files. ChatGPT can see the parts
+  that answer your question, and cites them.
+- **Private**: things you keep to yourself, such as health, money or family
+  matters. What they say is never sent to ChatGPT. Olympus answers from
+  them on your Mac, in the private answer panel (below).
+- **Secret**: passwords, recovery codes and keys. No model ever reads them,
+  and Olympus never answers from them.
+
+Olympus decides on your Mac. Once its built-in private model is ready, it
+checks every item it reads before treating it as Personal. In the dashboard,
+**Privacy** asks *"What's private for you?"*: answer in your own words. You
+can also mark folders, Gmail labels or senders as always Private.
+
+### 5. Ask
+
+Ask in ChatGPT the way you normally would: *"What did Sam say about the
+lease?"* ChatGPT searches Olympus and answers from your Personal items, with
+citations.
+
+### The private answer panel
+
+When some of the items that match your question are Private, a small Olympus
+panel appears on its own under ChatGPT's reply: **Private answer from your
+Mac**, marked **Not sent to ChatGPT**.
+
+- Your Mac writes the answer with its built-in private model (Qwen3.5 4B)
+  and sends it to the panel sealed, so only the panel can open it. It goes
+  around the ChatGPT conversation, not through it, and the Olympus relay
+  cannot read it.
+- It usually arrives within a minute. Ask for *"all the details"* and
+  Olympus reads the whole documents instead; that can take a few minutes.
+- **Sources** (closed at first) lists the items the answer used. Click one to
+  open it on your Mac, or in Dropbox on the web if it is not on this Mac
+  (ChatGPT opens that web link for you, so it sees the address).
+- **Hide** folds the answer away and **Show** brings it back. An answer
+  expires after 10 minutes; ask again for a new one.
+- Ask follow-up questions in the chat as usual; each private answer appears
+  in a new panel.
+
+Your Mac needs to be awake and online. The panel runs inside ChatGPT's page,
+so it relies on the panel code ChatGPT loads; the
+[design](docs/design/chatgpt-plugin.md#who-can-read-the-answer) states that
+limit plainly.
+
+### What ChatGPT can and can't see
+
+ChatGPT **can** see:
+
+- The parts of your Personal items that answer a question: excerpts, titles,
+  dates and links.
+- File names, including the names of some Private items. A file's name can be
+  Personal while what it says is Private, so its name may show up in ChatGPT;
+  its contents never do.
+- That some items matching a question are Private: ChatGPT's model learns
+  just that, with no titles and no content.
+- Status: which sources are connected, how far indexing has got, and what
+  needs you. The folder picker shows your folder names inside ChatGPT so you
+  can choose; they pass through ChatGPT to reach the picker, but ChatGPT's
+  model is not given them.
+
+ChatGPT **can't** see:
+
+- What your Private items say, or the private answers made from them.
+- Your Secret items, ever.
+- Folders you skip, or what the files in Names-only folders say.
+- API keys or passwords: you never enter one in ChatGPT. Optional extras such
+  as a Venice account are set up on your Mac.
+
+The relay at `mcp.olympusplugin.ai` passes ChatGPT's requests to your Mac. It
+stores and logs no questions, answers or tokens, but like any HTTPS service
+it handles them in transit. Full details: the
+[ChatGPT design](docs/design/chatgpt-plugin.md) and the
+[trust model](docs/TRUST_MODEL.md).
+
+To uninstall, run `curl -fsSL https://olympusplugin.ai/uninstall.sh | sh`:
+it stops Olympus and removes the app, the runtime and the `olympus` command,
+and keeps your settings and data. To delete those too, first run
+`olympus engine stop` and `olympus data delete --all`. To only stop Olympus
+and remove its login item, run `olympus engine uninstall`.
+
+The rest of this README covers Olympus with OpenClaw, which stays supported
+and optional.
+
 ## How it works
 
-Every item you ingest is judged on its own as Public, Personal, Private, or
-Secrets (internally S0-S5): its names are Personal unless something raises
+Every item you ingest is judged on its own as Personal, Private, or Secrets
+(plus Public where the posture keeps it; internally S0-S5): its names are Personal unless something raises
 them, and its content is raised to Private or Secrets on evidence. Each tier
 has its own index and routes only to the model lanes your sovereignty policy
 allows:
@@ -91,9 +232,12 @@ flowchart LR
     CLOUD & PRIVATE & LOCAL --> AGENT
 ```
 
-Olympus uses four tiers: **Public**, **Personal** (ordinary personal and work
-content), **Private** (sensitive material), and **Secrets** (never model input).
-See the [tier mapping](docs/TRUST_MODEL.md#product-tier-names) for the unchanged
+Olympus uses **Personal** (ordinary personal and work content), **Private**
+(sensitive material), and **Secrets** (never model input). A ChatGPT
+install, and any install on the `no-sensitive` posture, has no Public tier:
+anything that would have been Public is Personal. The other OpenClaw
+postures, and installs made before 1.0, keep a **Public** tier too. See the
+[tier mapping](docs/TRUST_MODEL.md#product-tier-names) for the unchanged
 storage identifiers.
 
 Four postures, chosen (and changeable) in setup — a config file, not a code
@@ -107,10 +251,10 @@ fork:
 | **Do not add secure data to Olympus** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
 
 “Private cloud only” describes **Private-data handling**: Venice answers
-Private questions, and Private search is keyword-only by default. Venice
-Private embeddings for Private content are available but switched on only
-with the owner's explicit, advance approval. Gemini still supplies embeddings
-for Public and Personal content, and Private content never goes to Gemini. Public and Personal
+Private questions. Search indexing for every tier uses a small embedding model
+built into Olympus: it downloads once, runs on your computer, needs no account
+or key, and sends nothing anywhere. Gemini, local, or Venice Private embeddings
+stay an opt-in choice, and Private content never goes to Gemini. Public and Personal
 questions use OpenClaw's own configured default model.
 
 One question searches every tier. When it finds Private evidence, the private
@@ -122,7 +266,10 @@ Some rules are not configurable, by design: secure content never routes to
 ordinary cloud models, secrets are denied to every lane, and an
 exhausted policy chain refuses rather than silently downgrading.
 
-## Get started
+## Get started with OpenClaw
+
+Using ChatGPT? See [Olympus for ChatGPT](#olympus-for-chatgpt) instead; none
+of this section is needed.
 
 **You need** OpenClaw `2026.7.1+` on a Node release OpenClaw itself supports
 (`>=24.16.0 <25` or `>=26.1.0` for OpenClaw 2026.9.5; check
@@ -149,10 +296,10 @@ install is non-TTY, and without the flag the host exits 1 asking for capability
 consent it cannot prompt for. Omit the flag on `2026.7.1`, which does not
 define it.
 
-The agent checks prerequisites, installs the plugin, helps you describe your
-data as a sensitivity map, asks for your privacy posture and your approval of
-the private classifier, verifies the worker, restarts the gateway, and hands
-you the dashboard. You paste your model keys into its **Models** section
+The agent checks prerequisites, installs the plugin, talks through what is
+private for you (you save it later in the dashboard's Privacy section), asks
+for your privacy posture and your approval of the private classifier,
+verifies the worker, restarts the gateway, and hands you the dashboard. You paste your model keys into its **Models** section
 yourself; the agent never collects them. That completes base installation.
 Then you can choose a source in the dashboard or leave Olympus ready for
 later; no source is selected for you. Once your chosen source is ready, the
@@ -283,6 +430,7 @@ flowchart LR
 | `olympus dashboard --no-open` | generates an unused opening link for an agent to hand to you |
 | `olympus dashboard token` | advanced compatibility access to the worker bearer; never share it in chat |
 | `olympus source answer "…"` | ask across your sources from the terminal |
+| `olympus ask "…" [--level strict\|standard]` | one question to a frontier model anonymously through zkAPI (paid from your zkAPI balance; the question only) |
 | `olympus tier explain\|set\|rules\|classifier …` | why an item has its tier, owner overrides and rules, and the private classifier's approval |
 | `olympus tier migrate plan\|approve\|run\|rollback\|purge\|status` | moves an existing install's items into per-item tiers, each step owner-approved after a dry-run plan |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |
@@ -320,9 +468,9 @@ Open the dashboard's **Setup** page and press **Connect an agent**. Pick the
 agent you use and follow its steps; every address and snippet has a copy
 button.
 
-- **Claude** (web, desktop and phone), **ChatGPT**, **Grok** and **Grok Bot**:
-  add the Olympus address as a custom connector, then approve it on the Olympus
-  approval page with a one-time code from **Get pairing code**.
+- **ChatGPT**: add the Olympus plugin in ChatGPT (see
+  [Olympus for ChatGPT](#olympus-for-chatgpt)), then approve it with one
+  click on the page that opens on this computer.
 - **Muse** and the **Grok API**: paste the address, then press **Create key**
   and give the agent the key. The key is shown once.
 - **Claude Code** and **Codex** on this computer: copy the prompt (or the
@@ -330,12 +478,13 @@ button.
 
 Agents in the cloud reach Olympus only when remote access is on; the Agents
 section says whether it is. To turn it on, press **Turn on remote access** in
-that section. It first shows Let's Encrypt's subscriber agreement (a link plus
-a short summary), because Olympus gets a free certificate for this computer's
-own address, and turns remote access on only after you accept. Olympus then
-connects through the Olympus relay (`connect.olympusplugin.ai`): you create no
-account and run no tunnel. The relay forwards encrypted traffic and cannot read
-questions or answers. **Turn off remote access** turns it off again. If the
+that section. Olympus then connects through the Olympus relay
+(`mcp.olympusplugin.ai`): you create no account and run no tunnel. The relay
+passes requests between the agent and this computer; it stores and logs no
+questions, answers or tokens, but like any HTTPS endpoint it handles them in
+transit. Approving an agent such as ChatGPT happens on this computer only, with
+one click on a page Olympus serves locally. **Turn off remote access** turns it
+off again. If the
 relay cannot be reached, the section says **Olympus relay unavailable** and
 Olympus keeps retrying on its own; agents on this computer are unaffected.
 Advanced: to use a tunnel you run yourself instead of the relay, set
@@ -356,11 +505,25 @@ instructions, or load the packaged Agent Skills folder
 ### Using Olympus from other agents (MCP)
 
 `olympus serve` exposes the same sanitized read operations — `source_answer`,
-`source_answer_result`, `source_index_status`, and capability-gated
-`source_index_search` — to any MCP-capable agent. The supported Hermes
-configuration narrows that server to exactly `source_answer`,
-`source_answer_result` and `source_index_status` through its per-server tool
-allowlist.
+`source_answer_result`, `source_index_status`, capability-gated
+`source_index_search`, and `ask_anonymously` — to any MCP-capable agent. The
+supported Hermes configuration narrows that server to exactly `source_answer`,
+`source_answer_result`, `source_index_status` and `ask_anonymously` through its
+per-server tool allowlist.
+
+`ask_anonymously` sends one typed question to a frontier model through zkAPI
+(paid per question from the user's own balance; nothing identifies them). The
+first call with no `level` returns `needs_choice`: the agent asks the user once
+for Strict (their own model rewrites the question into general questions before
+it leaves) or Standard (their words, prepared as written, lightly cleaned up or
+by their saved instruction), then calls again with `level` and `remember: true`.
+Only the question goes out, never documents, and never to the provider that
+hosts the agent asking: a question from ChatGPT goes to Claude Sonnet by
+default, one from Claude Code or Claude Desktop to an OpenAI model, and a
+one-off `model` from the agent's own provider is refused. Setup (the zkAPI
+route, the writer model, the spend limit) lives on the dashboard's Anonymous
+answers card; see
+[`docs/design/private-answers.md`](docs/design/private-answers.md).
 
 MCP clients cap how long one tool call may run, and an answer can take several
 minutes. So over MCP (local `olympus serve` and remote `/mcp` alike) and the
@@ -371,7 +534,8 @@ seconds for local `olympus serve` (`OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS`,
 under Codex's 60-second default tool timeout); both are capped at 230000.
 `source_answer_result` with that `job_id` returns the answer, the same error
 the call would have raised, or `working` again after waiting up to a minute
-(never longer than the threshold). A job that runs past 20 minutes is stopped
+(never longer than the threshold). A slow `ask_anonymously` (a Tor route can
+take minutes) hands off the same way and is collected with the same tool. A job that runs past 20 minutes is stopped
 with `source_answer_deadline`, and revoking a connection drops its jobs.
 
 Remote answers share the analyst with your own assistant's answers; there is
@@ -407,21 +571,22 @@ mcp_servers:
     command: <absolute-managed-plugin-root>/bin/olympus
     args: [serve]
     tools:
-      include: [source_answer, source_answer_result, source_index_status]
+      include: [source_answer, source_answer_result, source_index_status, ask_anonymously]
       prompts: false
       resources: false
 ```
 
 Restart Hermes or run `/reload-mcp`, then verify that the discovered registered
 names are exactly `mcp_olympus_source_answer`,
-`mcp_olympus_source_answer_result` and `mcp_olympus_source_index_status`. Invoke the discovered names rather than
+`mcp_olympus_source_answer_result`, `mcp_olympus_source_index_status` and
+`mcp_olympus_ask_anonymously`. Invoke the discovered names rather than
 hard-coding them. A cited-answer round trip uses the discovered
 `mcp_olympus_source_answer`; `source_watch_*` remains OpenClaw-only.
 
 The optional packaged Hermes skill is
 [`integrations/hermes/ask-sources/SKILL.md`](integrations/hermes/ask-sources/SKILL.md).
 Copy its directory to `~/.hermes/skills/ask-sources/` or expose the parent with
-`skills.external_dirs`; it declares the same three tools and no fallback access.
+`skills.external_dirs`; it declares the same four tools and no fallback access.
 
 No `hermes://mcp/install` link is published: current Hermes upstream documents
 custom MCP installation through `hermes mcp add` but does not document that URI
@@ -430,10 +595,10 @@ separately reviewed external action.
 
 There are no operator agent tools. Index maintenance — sync, extraction,
 embedding, retries — is the worker's own scheduler, and what a person drives by
-hand goes through the `olympus` CLI. The whole agent tool surface is eleven tools —
+hand goes through the `olympus` CLI. The whole agent tool surface is twelve tools —
 `argus_ping`, `argus_list_models`, `argus_complete`, `source_answer`,
 `source_answer_result` (MCP and remote only), `source_index_status`, `source_index_search`, `source_watch_create`,
-`source_watches`, `source_watch_cancel`, `olympus_doctor` — declared in
+`source_watches`, `source_watch_cancel`, `olympus_doctor`, `ask_anonymously` — declared in
 [`src/core/public-surface.ts`](src/core/public-surface.ts); Hermes over MCP sees
 the subset above, and worker bearer auth is enforced throughout.
 

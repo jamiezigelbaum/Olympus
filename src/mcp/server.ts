@@ -7,7 +7,7 @@ import {
 import { loadConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { createEmailTransport, EmailClient } from '../core/email.ts';
-import { sanitizeCallerDisplayName, type OperationCaller } from '../core/operation-caller.ts';
+import { callerProviderFromLabel, sanitizeCallerDisplayName, type OperationCaller } from '../core/operation-caller.ts';
 import { shouldExposeOperation, type OperationSurface } from '../core/operation-exposure.ts';
 import { findOperationByName, operations, OperationError } from '../core/operations.ts';
 import { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv, sourceAnswerJobOwner } from '../core/source-answer-jobs.ts';
@@ -96,19 +96,29 @@ export async function serve(): Promise<void> {
   // already per client: a slow source_answer hands off to it rather than
   // outliving the client's tool-call limit.
   const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env, 'stdio') });
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     // The stdio client names itself during initialize (e.g. "claude-code").
     // Self-reported, so it is an audit label only, never an authorization.
-    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name, sourceAnswerJobs));
+    // The request's signal is the client's cancellation: it ends a call
+    // before hand-off (an ask stops before dispatch, nothing paid).
+    return handleMcpCallTool(request, () => ({
+      ...makeContext(server.getClientVersion()?.name, sourceAnswerJobs),
+      ...(extra.signal ? { signal: extra.signal } : {}),
+    }));
   });
 
   await server.connect(new StdioServerTransport());
 }
 
-/** The stdio MCP caller identity; the client's self-reported name is a label only. */
+/**
+ * The stdio MCP caller identity; the client's self-reported name is a label
+ * only, and the hosting provider it suggests ("claude-code" → Anthropic)
+ * only chooses an anonymous-answer model setting.
+ */
 export function mcpOperationCaller(clientName?: string): OperationCaller {
   const displayName = sanitizeCallerDisplayName(clientName);
-  return { surface: 'mcp', ...(displayName ? { displayName } : {}) };
+  const provider = callerProviderFromLabel(displayName);
+  return { surface: 'mcp', ...(displayName ? { displayName } : {}), ...(provider ? { provider } : {}) };
 }
 
 function makeContext(clientName?: string, sourceAnswerJobs?: SourceAnswerJobRegistry): OperationContext {

@@ -19,17 +19,13 @@
 //   scorer seam below is where a local-LLM scorer plugs in later.
 
 import { scanDropboxContentPolicyText } from '../dropbox-files/content-policy.ts';
-import {
-  matchSensitivityMap,
-  type SensitivityMap,
-} from '../../core/sensitivity-map.ts';
 
 export const ITEM_CLASSIFICATION_ENGINE_KIND = 'olympus_deterministic_item_tier_classifier';
 export const ITEM_CLASSIFICATION_ENGINE_VERSION = '2026-06-21.1';
 
 export type ItemTier = 'S2' | 'S3' | 'S4' | 'S5';
 export type ItemTrustDomain = 'internal' | 'secure_local';
-export type ItemTierDecidedBy = 'sensitive_detector' | 'sensitivity_map' | 'clean_rules' | 'default_secure';
+export type ItemTierDecidedBy = 'sensitive_detector' | 'clean_rules' | 'default_secure';
 
 export interface ClassifyItemTierInput {
   subject?: string;
@@ -72,7 +68,6 @@ export interface ClassifyItemTierOptions {
   // matched case-insensitively as substrings of the sender field. Checked as
   // a detector: overrides clean rules, never overridden by them.
   sensitiveSenderPatterns?: readonly string[];
-  sensitivityMap?: SensitivityMap;
 }
 
 export function classifyItemTier(
@@ -106,16 +101,6 @@ export function classifyItemTier(
         signals: ['sensitive_sender_override'],
       };
     }
-  }
-
-  const sensitivityMapMatch = matchSensitivityMap(options.sensitivityMap, input);
-  if (sensitivityMapMatch) {
-    return {
-      tier: sensitivityMapMatch.targetTrustTier,
-      trustDomain: sensitivityMapMatch.targetTrustDomain,
-      decidedBy: 'sensitivity_map',
-      signals: sensitivityMapMatch.categoryIds.map((categoryId) => `sensitivity_map:${categoryId}`),
-    };
   }
 
   if (sensitive.signals.length > 0) {
@@ -236,31 +221,51 @@ export function detectSecretFindingKinds(text: string): string[] {
 }
 
 export interface SensitiveContentDetection {
-  /** Positive financial/health/identity detector hits (each one raises to S4). */
+  /**
+   * Structured detector hits: a Luhn-valid card, an IBAN, a routing or account
+   * number, an SSN, a passport or NIF number. Each one raises to Private at once.
+   */
   signals: string[];
-  /** Families with a single weak vocabulary hit: not enough to raise, worth a second look. */
+  /**
+   * Vocabulary-only hits (`health:vocabulary:treatment`, `financial:vocabulary:invoice`,
+   * `health:origin_hint`). Words alone do not prove an item private: a book
+   * chapter says "treatment" and "symptoms" too. When a privacy-safe model can
+   * be asked, these families are borderline and the model judges the item;
+   * with none, they raise to Private exactly like a structured hit.
+   */
+  vocabulary: string[];
+  /**
+   * Families worth the privacy-safe model's second look: every vocabulary
+   * family above, plus families with a single weak term (not enough to raise).
+   * A family with a structured hit is never borderline (it is already Private).
+   */
   borderline: string[];
 }
 
 /**
- * The S4 detectors (financial, health, identity) without the secret scan, plus
- * which families came close. `input.sender` and `input.path` feed the health
- * origin hint exactly as they do in classifyItemTier.
+ * The S4 detectors (financial, health, identity) without the secret scan,
+ * split into structured hits and vocabulary-only hits, plus which families
+ * came close. `input.sender` and `input.path` feed the health origin hint
+ * exactly as they do in classifyItemTier.
  */
 export function detectSensitiveContent(input: ClassifyItemTierInput): SensitiveContentDetection {
   const haystack = buildHaystack(input);
   const signals = [
-    ...detectFinancialSignals(haystack),
-    ...detectHealthSignals(input, haystack),
+    ...detectFinancialStructuredSignals(haystack),
     ...detectIdentityDocumentSignals(haystack),
   ];
+  const vocabulary = [
+    ...detectFinancialVocabularySignals(haystack),
+    ...detectHealthSignals(input, haystack),
+  ];
+  const structured = (family: string) => signals.some((signal) => signal.startsWith(`${family}:`));
+  const worded = (family: string) => vocabulary.some((signal) => signal.startsWith(`${family}:`));
   const borderline: string[] = [];
-  if (!signals.some((signal) => signal.startsWith('financial:'))
-    && matchTerms(haystack, FINANCIAL_WEAK_TERMS).length === 1) {
+  if (!structured('financial')
+    && (worded('financial') || matchTerms(haystack, FINANCIAL_WEAK_TERMS).length === 1)) {
     borderline.push('financial');
   }
-  if (!signals.some((signal) => signal.startsWith('health:'))
-    && matchTerms(haystack, HEALTH_WEAK_TERMS).length === 1) {
+  if (worded('health') || matchTerms(haystack, HEALTH_WEAK_TERMS).length === 1) {
     borderline.push('health');
   }
   // Therapy, legal, family-law and identity vocabulary in the TEXT has no
@@ -270,10 +275,10 @@ export function detectSensitiveContent(input: ClassifyItemTierInput): SensitiveC
   // Personal-target category can settle them.
   const text = input.text ?? '';
   if (PERSONAL_LIFE_NAME_PATTERN.test(text)) borderline.push('personal_life');
-  if (!signals.some((signal) => signal.startsWith('identity:')) && IDENTITY_NAME_PATTERN.test(text)) {
+  if (!structured('identity') && IDENTITY_NAME_PATTERN.test(text)) {
     borderline.push('identity');
   }
-  return { signals, borderline };
+  return { signals, vocabulary, borderline };
 }
 
 /**
@@ -302,7 +307,6 @@ const SECRET_FINDING_TYPES = new Set([
   'slack_token',
   'api_secret_token',
   'credential_assignment',
-  'explicit_s5_marker',
 ]);
 
 const FINANCIAL_STRONG_TERMS = [
@@ -389,6 +393,11 @@ function detectSensitiveSignals(
 }
 
 function detectFinancialSignals(haystack: string): string[] {
+  return [...detectFinancialStructuredSignals(haystack), ...detectFinancialVocabularySignals(haystack)];
+}
+
+/** Structured financial identifiers: checksummed or labelled numbers, never words alone. */
+function detectFinancialStructuredSignals(haystack: string): string[] {
   const signals: string[] = [];
 
   if (findValidIban(haystack)) signals.push('financial:iban');
@@ -399,13 +408,17 @@ function detectFinancialSignals(haystack: string): string[] {
   if (/\baccount\s*(?:number|no\.?|#)\s*[:#-]?\s*[\dXx*][\dXx* -]{5,}/i.test(haystack)) {
     signals.push('financial:account_number');
   }
+  return signals;
+}
 
+/** Financial vocabulary: one strong term or two weak ones. Words, not proof. */
+function detectFinancialVocabularySignals(haystack: string): string[] {
   const strong = matchTerms(haystack, FINANCIAL_STRONG_TERMS);
   const weak = matchTerms(haystack, FINANCIAL_WEAK_TERMS);
   if (strong.length >= 1 || weak.length >= 2) {
-    for (const term of [...strong, ...weak]) signals.push(`financial:vocabulary:${term}`);
+    return [...strong, ...weak].map((term) => `financial:vocabulary:${term}`);
   }
-  return signals;
+  return [];
 }
 
 function detectHealthSignals(input: ClassifyItemTierInput, haystack: string): string[] {
@@ -457,15 +470,67 @@ function isValidIban(candidate: string): boolean {
   return remainder === 1;
 }
 
-// Card numbers: WHOLE separated digit runs only (a 20-digit run never yields a
-// 16-digit "card"), 13-19 digits, must pass Luhn. Non-Luhn runs (order ids,
-// tracking numbers) do not fire.
+// Card numbers (design 2.2, step 10). A Luhn check alone is a 1-in-10 coin
+// toss on any digit run, so a candidate must also LOOK like a card:
+//
+// - a whole number: never the fraction of a decimal ("111.32059161437502"),
+//   never part of a longer number or of a grid of digit groups;
+// - grouped the way cards are printed (4-4-4-4, 4-4-4-4-3, 4-4-4-1..3,
+//   Amex 4-6-5, Diners 4-6-4, one separator throughout), or one unbroken run;
+// - an issuer prefix with a length that issuer uses (Visa, Mastercard, Amex,
+//   Discover, Diners, JCB, UnionPay, Maestro);
+// - and passes Luhn.
+//
+// An unbroken run carries no printed shape, so it also needs card context
+// nearby (card, visa, expiry, cvv, an MM/YY date) or must stand on its own:
+// a number in a column of numbers (a spreadsheet, a table) without card
+// words around it is data, not a card. 2026-10-02: a calorie spreadsheet
+// went Private on the digits of a formula result.
+const CARD_GROUPED = /(?<![\d.,]|\d[ -])(\d{4}([ -])(?:\d{4}\2\d{4}\2\d{4}(?:\2\d{3})?|\d{4}\2\d{4}\2\d{1,3}|\d{6}\2\d{4,5}))(?!\d|[.,]\d|\2\d)/g;
+const CARD_UNBROKEN = /(?<![\d.,]|\d[ -])\d{13,19}(?!\d|[.,]\d)/g;
+const CARD_CONTEXT = /\b(?:cards?|card ?(?:no|number|#)|visa|master ?card|amex|american express|discover|diners|jcb|maestro|union ?pay|credit|debit|cardholder|exp|expiry|expires|expiration|valid thru|cvv2?|cvc2?|csc|security code)\b|\b(?:0[1-9]|1[0-2]) ?\/ ?(?:\d{2}|20\d{2})\b/i;
+/** Characters either side of an unbroken run read for context and density. */
+const CARD_WINDOW = 60;
+/** Other digits in that window that make a run part of a numeric table. */
+const CARD_DENSE_DIGITS = 8;
+
 function findLuhnCardNumber(haystack: string): boolean {
-  const runs = haystack.matchAll(/\d(?:[ -]?\d)*/g);
-  for (const run of runs) {
-    const digits = run[0].replace(/[ -]/g, '');
-    if (digits.length >= 13 && digits.length <= 19 && passesLuhn(digits)) return true;
+  for (const match of haystack.matchAll(CARD_GROUPED)) {
+    if (isCardNumber(match[1]!.replace(/[ -]/g, ''))) return true;
   }
+  for (const match of haystack.matchAll(CARD_UNBROKEN)) {
+    const digits = match[0];
+    if (!isCardNumber(digits)) continue;
+    const before = haystack.slice(Math.max(0, match.index! - CARD_WINDOW), match.index!);
+    const after = haystack.slice(match.index! + digits.length, match.index! + digits.length + CARD_WINDOW);
+    if (CARD_CONTEXT.test(before) || CARD_CONTEXT.test(after)) return true;
+    const otherDigits = (before + after).replace(/\D/g, '').length;
+    if (otherDigits < CARD_DENSE_DIGITS) return true;
+  }
+  return false;
+}
+
+/** An issuer prefix with a length that issuer uses, and a valid Luhn check digit. */
+function isCardNumber(digits: string): boolean {
+  return cardIssuerAccepts(digits) && passesLuhn(digits);
+}
+
+function cardIssuerAccepts(digits: string): boolean {
+  const length = digits.length;
+  const two = Number(digits.slice(0, 2));
+  const three = Number(digits.slice(0, 3));
+  const four = Number(digits.slice(0, 4));
+  const six = Number(digits.slice(0, 6));
+  if (digits[0] === '4') return length === 13 || length === 16 || length === 19; // Visa
+  if ((two >= 51 && two <= 55) || (four >= 2221 && four <= 2720)) return length === 16; // Mastercard
+  if (two === 34 || two === 37) return length === 15; // Amex
+  if (four === 6011 || two === 65 || (three >= 644 && three <= 649) || (six >= 622126 && six <= 622925)) {
+    return length >= 16 && length <= 19; // Discover
+  }
+  if ((three >= 300 && three <= 305) || two === 36 || two === 38 || two === 39) return length >= 14 && length <= 19; // Diners
+  if (four >= 3528 && four <= 3589) return length >= 16 && length <= 19; // JCB
+  if (two === 62) return length >= 16 && length <= 19; // UnionPay
+  if (two === 50 || (two >= 56 && two <= 69)) return length >= 13 && length <= 19; // Maestro
   return false;
 }
 

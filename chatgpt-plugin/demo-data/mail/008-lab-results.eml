@@ -1,0 +1,16 @@
+From: Riverside Clinic <results@clinic.example.org>
+To: Robin Vale <robin.vale@example.com>
+Date: Fri, 25 Sep 2026 14:30:00 +0000
+Subject: Your test results are ready
+Message-ID: <008-lab-results@demo.example.com>
+X-Olympus-Demo: synthetic sample data, fictional people
+X-Olympus-Demo-Intended-Tier: Private
+Content-Type: text/plain; charset=utf-8
+
+Dear Robin,
+
+Your blood test results from 22 September are ready. Dr. Hale has reviewed them:
+your iron level is low and she recommends a supplement and a repeat test in
+three months. Please book a follow-up appointment.
+
+Riverside Clinic (fictional)

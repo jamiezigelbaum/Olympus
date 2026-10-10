@@ -24,6 +24,24 @@ import { normalizeExtractedText } from './bounded-text.ts';
 
 const MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 5_000_000;
 
+/**
+ * An Office file these bytes can never yield text from: the container is
+ * damaged (a truncated download or copy), password-protected, or uses a zip
+ * feature the local reader does not support. Parsing is deterministic, so
+ * retrying the same bytes cannot succeed; a changed file is a new job.
+ */
+export type OfficeDocumentUnreadableReason = 'damaged' | 'encrypted' | 'unsupported';
+
+export class OfficeDocumentUnreadableError extends Error {
+  readonly reason: OfficeDocumentUnreadableReason;
+
+  constructor(reason: OfficeDocumentUnreadableReason, message: string) {
+    super(message);
+    this.name = 'OfficeDocumentUnreadableError';
+    this.reason = reason;
+  }
+}
+
 export interface ZipEntryDirectoryRecord {
   method: number;
   compressedSize: number;
@@ -317,14 +335,19 @@ export function readZipEntries(bytes: Uint8Array): Map<string, ZipEntryDirectory
   const entries = new Map<string, ZipEntryDirectoryRecord>();
   const eocdOffset = findZipEndOfCentralDirectory(bytes);
   if (eocdOffset < 0) {
-    throw new Error('Office document zip directory was not found.');
+    // A password-protected Office file is not a zip at all: Office wraps the
+    // encrypted package in a compound-file container.
+    if (isCompoundFileContainer(bytes)) {
+      throw new OfficeDocumentUnreadableError('encrypted', 'Office document is password-protected.');
+    }
+    throw new OfficeDocumentUnreadableError('damaged', 'Office document zip directory was not found.');
   }
   const entryCount = readUint16Le(bytes, eocdOffset + 10);
   const centralDirectoryOffset = readUint32Le(bytes, eocdOffset + 16);
   let offset = centralDirectoryOffset;
   for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
     if (readUint32Le(bytes, offset) !== 0x02014b50) {
-      throw new Error('Office document zip directory entry is malformed.');
+      throw new OfficeDocumentUnreadableError('damaged', 'Office document zip directory entry is malformed.');
     }
     const flags = readUint16Le(bytes, offset + 8);
     const method = readUint16Le(bytes, offset + 10);
@@ -335,10 +358,13 @@ export function readZipEntries(bytes: Uint8Array): Map<string, ZipEntryDirectory
     const commentLength = readUint16Le(bytes, offset + 32);
     const localHeaderOffset = readUint32Le(bytes, offset + 42);
     if ((flags & 0x0001) !== 0) {
-      throw new Error('Encrypted Office document zip entries are not supported.');
+      throw new OfficeDocumentUnreadableError('encrypted', 'Encrypted Office document zip entries are not supported.');
     }
     if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff) {
-      throw new Error('Zip64 Office document entries are not supported in the local extractor.');
+      throw new OfficeDocumentUnreadableError(
+        'unsupported',
+        'Zip64 Office document entries are not supported in the local extractor.',
+      );
     }
     const name = decodeUtf8(bytes.subarray(offset + 46, offset + 46 + nameLength));
     if (!name.endsWith('/')) {
@@ -362,7 +388,7 @@ export function readZipEntryText(
   const entry = entries.get(name);
   if (!entry) return undefined;
   if (entry.uncompressedSize > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) {
-    throw new Error('Office document zip entry exceeds the local extraction cap.');
+    throw new OfficeDocumentUnreadableError('unsupported', 'Office document zip entry exceeds the local extraction cap.');
   }
   return decodeZipEntryText(bytes, entry);
 }
@@ -377,7 +403,7 @@ function decodeZipEntryText(
 ): string {
   const offset = entry.localHeaderOffset;
   if (readUint32Le(bytes, offset) !== 0x04034b50) {
-    throw new Error('Office document zip local entry is malformed.');
+    throw new OfficeDocumentUnreadableError('damaged', 'Office document zip local entry is malformed.');
   }
   const nameLength = readUint16Le(bytes, offset + 26);
   const extraLength = readUint16Le(bytes, offset + 28);
@@ -385,9 +411,18 @@ function decodeZipEntryText(
   const compressed = bytes.subarray(dataOffset, dataOffset + entry.compressedSize);
   if (entry.method === 0) return decodeUtf8(compressed);
   if (entry.method === 8) {
-    return decodeUtf8(new Uint8Array(inflateRawSync(compressed)));
+    let inflated: Buffer;
+    try {
+      inflated = inflateRawSync(compressed);
+    } catch {
+      throw new OfficeDocumentUnreadableError('damaged', 'Office document zip entry does not decompress.');
+    }
+    return decodeUtf8(new Uint8Array(inflated));
   }
-  throw new Error(`Unsupported Office document zip compression method ${entry.method}.`);
+  throw new OfficeDocumentUnreadableError(
+    'unsupported',
+    `Unsupported Office document zip compression method ${entry.method}.`,
+  );
 }
 
 function findZipEndOfCentralDirectory(bytes: Uint8Array): number {
@@ -396,6 +431,14 @@ function findZipEndOfCentralDirectory(bytes: Uint8Array): number {
     if (readUint32Le(bytes, offset) === 0x06054b50) return offset;
   }
   return -1;
+}
+
+/**
+ * The OLE compound-file signature.
+ */
+function isCompoundFileContainer(bytes: Uint8Array): boolean {
+  const signature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+  return signature.every((byte, index) => bytes[index] === byte);
 }
 
 function readUint16Le(bytes: Uint8Array, offset: number): number {

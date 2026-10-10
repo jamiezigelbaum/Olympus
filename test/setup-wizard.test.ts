@@ -46,15 +46,17 @@ describe('olympus setup wizard', () => {
       expect(pitch).toContain('ordinary API with a live-catalog Private or plain TEE model');
       expect(pitch).toContain('does not provide or qualify E2EE out of the box');
       expect(pitch).toContain('custom integrations are user-owned');
-      expect(pitch).toContain('Private semantic search uses local embeddings or an approved Venice Private embedding model');
-      expect(pitch).toContain('Gemini indexes Public and Personal content');
+      expect(pitch).toContain('Semantic search uses a small model built into Olympus');
+      expect(pitch).toContain('needs no account or key');
+      expect(pitch).toContain('Private content never goes to ordinary cloud embedding providers');
       expect(pitch).toContain("Choosing Don't ingest Private data is a deliberate choice");
       expect(result.presetLabel).toBe("Don't ingest Private data");
       expect(pitch).not.toContain('Venice E2EE can be connected');
       expect(pitch).not.toContain('E2EE and Anonymized models are refused');
       expect(result.secureTierDecision).toBe('secure_off_user_choice');
       expect(result.cloudLane).toBe('subscription');
-      expect(result.unmet_prerequisites.map((item) => item.id)).toContain('env:GEMINI_API_KEY');
+      // The built-in embedding model needs nothing: a new install has no prerequisite.
+      expect(result.unmet_prerequisites).toEqual([]);
       expect(result.worker.authTokenRef).toBe('worker.env:OLYMPUS_WORKER_AUTH_TOKEN');
       expect(result.dashboard.url).toBe('http://127.0.0.1:8010/dashboard');
       expect(result.dashboard.url_scope).toBe('worker_local');
@@ -165,7 +167,7 @@ describe('olympus setup wizard', () => {
     expect(bun?.repairHint).toContain('Bun 1.2+');
   });
 
-  test('preflights no-sensitive credentials from the worker environment, not shell exports', async () => {
+  test('no-sensitive needs no embedding key: the built-in model indexes Public and Personal content', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-preflight-cloud-test-'));
     try {
       const missing = await runIsolatedSetupWizard({
@@ -178,13 +180,9 @@ describe('olympus setup wizard', () => {
         tokenGenerator: () => 'missing-token',
         dependencyCheck: healthyDependencyCheck,
       });
-      expect(missing.unmet_prerequisites).toMatchObject([{
-        id: 'env:GEMINI_API_KEY',
-        kind: 'env_secret',
-        // An export in the operator's shell never reaches the launchd worker,
-        // so the remedy names the command that writes the key into worker.env.
-        remedy: 'Open Models in Olympus Setup to connect Gemini. Headless fallback: olympus connect gemini --api-key-prompt',
-      }]);
+      // The worker-env vs shell-export rule for opt-in keys is covered in
+      // setup-preflight-worker-env.test.ts against a pre-built-in policy.
+      expect(missing.unmet_prerequisites).toEqual([]);
 
       const present = await runIsolatedSetupWizard({
         preset: 'no-sensitive',
@@ -196,14 +194,14 @@ describe('olympus setup wizard', () => {
         tokenGenerator: () => 'present-token',
         dependencyCheck: healthyDependencyCheck,
       });
-      expect(present.unmet_prerequisites.map((item) => item.id)).toEqual(['env:GEMINI_API_KEY']);
+      expect(present.unmet_prerequisites).toEqual([]);
       expect(readFileSync(present.worker.install.env_path, 'utf8')).not.toContain('GEMINI_API_KEY=');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test('preflights private-cloud-only store secret and Gemini without local server expectations', async () => {
+  test('preflights private-cloud-only store secret without Gemini or local server expectations', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-preflight-private-test-'));
     try {
       const missing = await runIsolatedSetupWizard({
@@ -219,7 +217,6 @@ describe('olympus setup wizard', () => {
       });
       expect(missing.unmet_prerequisites.map((item) => item.id)).toEqual([
         'store:venice.api_key',
-        'env:GEMINI_API_KEY',
       ]);
       expect(missing.unmet_prerequisites.find((item) => item.id === 'store:venice.api_key')?.remedy)
         .toContain('olympus connect venice --api-key-prompt');
@@ -236,13 +233,13 @@ describe('olympus setup wizard', () => {
         tokenGenerator: () => 'present-token',
         dependencyCheck: healthyDependencyCheck,
       });
-      expect(withSecrets.unmet_prerequisites.map((item) => item.id)).toEqual(['env:GEMINI_API_KEY']);
+      expect(withSecrets.unmet_prerequisites).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test('preflights local-first Venice, Gemini, and local model server expectations', async () => {
+  test('preflights local-first Venice and the local answer server, with no embedding prerequisite', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-preflight-local-test-'));
     try {
       const result = await runIsolatedSetupWizard({
@@ -252,21 +249,22 @@ describe('olympus setup wizard', () => {
         platform: 'linux',
         homeDir: dir,
         env: {},
+        // An empty store, never the developer's own (~/.config/olympus): a stored
+        // Venice key there hid the expected prerequisite.
+        secretStore: memorySecretStore({}),
         tokenGenerator: () => 'local-token',
         dependencyCheck: healthyDependencyCheck,
       });
       expect(result.unmet_prerequisites.map((item) => item.id)).toEqual([
         'local_model_server:local-source-answer:http://127.0.0.1:28090/v1',
         'store:venice.api_key',
-        'local_model_server:local-source-embedding:http://127.0.0.1:28090/v1',
-        'env:GEMINI_API_KEY',
       ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test('preflights local-only Gemini and local model servers without Venice', async () => {
+  test('preflights local-only answer server without Venice, Gemini, or an embedding server', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-preflight-local-only-test-'));
     try {
       const result = await runIsolatedSetupWizard({
@@ -281,8 +279,6 @@ describe('olympus setup wizard', () => {
       });
       expect(result.unmet_prerequisites.map((item) => item.id)).toEqual([
         'local_model_server:local-source-answer:http://127.0.0.1:28090/v1',
-        'local_model_server:local-source-embedding:http://127.0.0.1:28090/v1',
-        'env:GEMINI_API_KEY',
       ]);
       expect(result.unmet_prerequisites.map((item) => item.id)).not.toContain('store:venice.api_key');
     } finally {
@@ -586,7 +582,7 @@ describe('olympus setup wizard', () => {
         cloudLane: 'subscription',
       });
       expect(stderr).toContain('Unmet preset prerequisites:');
-      expect(stderr).toContain('olympus connect gemini --api-key-prompt');
+      expect(stderr).not.toContain('olympus connect gemini');
       expect(stderr).not.toContain('export GEMINI_API_KEY=');
       expect(stderr).toContain('olympus connect venice --api-key-prompt');
       expect(stdout).not.toContain('OLYMPUS_WORKER_AUTH_TOKEN=');

@@ -9,15 +9,14 @@
 import { describe, expect, test } from 'bun:test';
 import type { SourceClassificationSignals } from '../src/core/contracts.ts';
 import {
-  USER_FACING_TIER_MAPPING,
-  parseSensitivityMap,
-  type SensitivityMap,
-} from '../src/core/sensitivity-map.ts';
-import {
+  SNIFFER_EXCERPT_MAX_CHARS,
+  TIER_MAP_REVISION,
   classifyItemTiers,
   type OwnerTierRule,
   type TierClassificationOptions,
   type TierSniffer,
+  type TierSnifferRequest,
+  type TierSnifferVerdict,
 } from '../src/workers/classification/tier-classifier.ts';
 
 const AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
@@ -31,26 +30,6 @@ function classify(
   provider = 'fixture',
 ) {
   return classifyItemTiers({ signals, provider, ...(text !== undefined ? { text } : {}) }, options);
-}
-
-function mapV2(categories: Array<{ id: string; tier: 'public' | 'private' | 'secure' | 'secrets'; keywords?: string[]; pathPatterns?: string[] }>): SensitivityMap {
-  return parseSensitivityMap({
-    schemaVersion: 2,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories: categories.map((category) => ({
-      id: category.id,
-      label: category.id,
-      targetTierName: category.tier,
-      targetTrustTier: USER_FACING_TIER_MAPPING[category.tier].targetTrustTier,
-      targetTrustDomain: USER_FACING_TIER_MAPPING[category.tier].targetTrustDomain,
-      examples: ['example'],
-      match: {
-        keywords: category.keywords ?? [],
-        senderPatterns: [],
-        pathPatterns: category.pathPatterns ?? [],
-      },
-    })),
-  });
 }
 
 function rule(overrides: Partial<OwnerTierRule> & Pick<OwnerTierRule, 'tier' | 'strength'>): OwnerTierRule {
@@ -88,20 +67,17 @@ describe('defaults and Public evidence', () => {
     }
   });
 
-  test('an owner rule or a map category can make an item Public', () => {
+  test('an owner rule can make an item Public', () => {
     expect(classify({ path: '/work/published/talk.pdf' }, BENIGN, {
       rules: [rule({ tier: 'public', strength: 'prior' })],
-    }).metadataTier).toBe('public');
-    expect(classify({ path: '/blog/drafts/post.md' }, BENIGN, {
-      sensitivityMap: mapV2([{ id: 'blog', tier: 'public', pathPatterns: ['/blog/'] }]),
     }).metadataTier).toBe('public');
   });
 });
 
 describe('raises beat lowers', () => {
-  test('a raising map category beats public evidence', () => {
-    const decision = classify({ title: 'Therapy notes', sharing: 'public_link' }, BENIGN, {
-      sensitivityMap: mapV2([{ id: 'therapy', tier: 'secure', keywords: ['therapy'] }]),
+  test('an owner always-Private rule beats public evidence', () => {
+    const decision = classify({ title: 'Therapy notes', path: '/therapy/notes.txt', sharing: 'public_link' }, BENIGN, {
+      rules: [rule({ id: 'therapy', match: { kind: 'pathPrefix', value: '/therapy' }, tier: 'secure', strength: 'prior' })],
     });
     expect(decision.metadataTier).toBe('secure');
     expect(decision.reasons).not.toContain('metadata:evidence:public_link');
@@ -117,19 +93,19 @@ describe('raises beat lowers', () => {
     expect(decision.reasons).toContain('metadata:floor:provider:secret_chat');
   });
 
-  test('when a raising and a lowering map category both match, the raise wins', () => {
+  test('when a raising and a lowering owner rule both match, the raise wins', () => {
     const decision = classify({ path: '/blog/medical/scan.txt' }, BENIGN, {
-      sensitivityMap: mapV2([
-        { id: 'blog', tier: 'public', pathPatterns: ['/blog/'] },
-        { id: 'medical', tier: 'secure', pathPatterns: ['/medical/'] },
-      ]),
+      rules: [
+        rule({ id: 'blog', match: { kind: 'pathPrefix', value: '/blog' }, tier: 'public', strength: 'prior' }),
+        rule({ id: 'medical', match: { kind: 'pathPrefix', value: '/blog/medical' }, tier: 'secure', strength: 'prior' }),
+      ],
     });
     expect(decision.metadataTier).toBe('secure');
   });
 
   test('among lowering signals the most sensitive target wins', () => {
     const decision = classify({ path: '/family/post.md', sharing: 'public_link' }, BENIGN, {
-      sensitivityMap: mapV2([{ id: 'family', tier: 'private', pathPatterns: ['/family/'] }]),
+      rules: [rule({ id: 'family', match: { kind: 'pathPrefix', value: '/family' }, tier: 'private', strength: 'prior' })],
     });
     expect(decision.metadataTier).toBe('private');
   });
@@ -161,13 +137,6 @@ describe('Secrets', () => {
     expect(decision.decidedBy).toBe('secret_detector');
   });
 
-  test('a secrets-target map category raises to Secrets', () => {
-    const decision = classify({ title: 'vault export' }, BENIGN, {
-      sensitivityMap: mapV2([{ id: 'vault', tier: 'secrets', keywords: ['vault export'] }]),
-    });
-    expect(decision.contentTier).toBe('secrets');
-  });
-
   test('the sniffer is never asked about a secret-bearing item', () => {
     let asked = 0;
     const sniffer: TierSniffer = { id: 'spy', judge: () => { asked += 1; return { verdict: 'undecided' }; } };
@@ -176,6 +145,16 @@ describe('Secrets', () => {
     // The second item's names are flagged, so pass 1 asks once; pass 2 finds
     // the secret before any excerpt question.
     expect(asked).toBe(1);
+  });
+
+  test('a "do not distribute" or "highly confidential" stamp is not a secret', () => {
+    // Calibration 2026-10-05: handouts and readings stamped this way were made
+    // Secrets (hidden everywhere, vectors deleted). A stamp is not a credential.
+    for (const text of ['Integration handout. Do not distribute.', 'HIGHLY CONFIDENTIAL reading notes', 'Tier S5 is the top tier in this design.']) {
+      const decision = classify({ title: 'notes.pdf' }, text);
+      expect(decision.contentTier).not.toBe('secrets');
+      expect(decision.reasons.some((reason) => reason.includes('secret'))).toBe(false);
+    }
   });
 });
 
@@ -264,23 +243,6 @@ describe('content only raises', () => {
     expect(decision.contentTier).toBe('secure');
   });
 
-  test('a lowering map category on the text is ignored', () => {
-    const decision = classify({ title: 'Account' }, 'our public roadmap blog', {
-      sensitivityMap: mapV2([{ id: 'roadmap', tier: 'public', keywords: ['public roadmap'] }]),
-    });
-    expect(decision.metadataTier).toBe('private');
-    expect(decision.contentTier).toBe('private');
-  });
-
-  test('a raising map category on the text raises the content only', () => {
-    const decision = classify({ title: 'Weekly' }, 'about my therapy session', {
-      sensitivityMap: mapV2([{ id: 'therapy', tier: 'secure', keywords: ['therapy session'] }]),
-    });
-    expect(decision.metadataTier).toBe('private');
-    expect(decision.contentTier).toBe('secure');
-    expect(decision.reasons).toContain('content:sensitivity_map:therapy');
-  });
-
   test('an unread item keeps its metadata tier and says so', () => {
     const decision = classify({ title: 'Report' }, undefined);
     expect(decision.contentTier).toBe(decision.metadataTier);
@@ -302,21 +264,11 @@ describe('sniffer seam', () => {
     expect(withRecord.contentTier).toBe('secure');
   });
 
-  test('a decided sniffer verdict raises; an owner map match means the sniffer is not asked', () => {
+  test('a decided sniffer verdict raises', () => {
     const sniffer: TierSniffer = { id: 'fake', judge: () => ({ verdict: 'decided', tier: 'secure', code: 'health:0.9' }) };
     const decided = classify({ title: 'therapy invoices' }, BENIGN, { sniffer });
     expect(decided.metadataTier).toBe('secure');
     expect(decided.state).toBe('current');
-
-    let asked = 0;
-    const spy: TierSniffer = { id: 'spy', judge: () => { asked += 1; return { verdict: 'undecided' }; } };
-    const mapped = classify({ title: 'therapy invoices', path: '/household/therapy invoices.pdf' }, BENIGN, {
-      sniffer: spy,
-      sensitivityMap: mapV2([{ id: 'household', tier: 'private', pathPatterns: ['/household/'] }]),
-    });
-    expect(mapped.metadataPending).toBe(false);
-    expect(mapped.state).toBe('current');
-    expect(asked).toBe(0);
   });
 
   test('unflagged names are never pending', () => {
@@ -340,28 +292,98 @@ describe('reasons are content-free', () => {
   });
 });
 
-describe('sensitivity map versions', () => {
-  test('a v1 map still loads and still raises', () => {
-    const v1 = parseSensitivityMap({
-      schemaVersion: 1,
-      userFacingTiers: USER_FACING_TIER_MAPPING,
-      categories: [{
-        id: 'therapy',
-        label: 'Therapy',
-        targetTierName: 'secure',
-        targetTrustTier: 'S4',
-        targetTrustDomain: 'secure_local',
-        examples: ['therapy'],
-        match: { keywords: ['therapy'], senderPatterns: [], pathPatterns: [] },
-      }],
+describe('the retired sensitivity map', () => {
+  test('every decision records the fixed map revision', () => {
+    expect(TIER_MAP_REVISION).toBe('none');
+    expect(classify({ title: 'x' }, BENIGN).mapRevision).toBe('none');
+  });
+});
+
+describe('vocabulary-only detector hits are judged by the private model (owner ruling 2026-10-01)', () => {
+  // A book chapter: ordinary prose that happens to say "treatment" and
+  // "symptoms" well past the opening. Words alone are not a private item.
+  const FILLER = 'The integral approach maps quadrants and levels of development across many fields of human inquiry, from art and ethics to ecology. '
+    .repeat(12);
+  const BOOK = `${FILLER}In medicine, a purely physical treatment of symptoms ignores the interior quadrants of meaning and culture. ${FILLER}`;
+  const BOOK_NAMES = { title: 'Introduction to the Integral Approach.pdf', path: '/Books/Introduction to the Integral Approach.pdf' };
+
+  function answering(answer: TierSnifferVerdict, asked: TierSnifferRequest[]): TierSniffer {
+    return { id: 'local:test', judge: (request) => { asked.push(request); return answer; } };
+  }
+
+  test('a book that mentions treatment and symptoms is asked about, and is Personal when the model says so', () => {
+    const asked: TierSnifferRequest[] = [];
+    const decision = classify(BOOK_NAMES, BOOK, {
+      sniffer: answering({ verdict: 'decided', tier: 'private', code: 'other:0.95' }, asked),
     });
-    expect(v1.schemaVersion).toBe(1);
-    expect(classify({ title: 'therapy' }, BENIGN, { sensitivityMap: v1 }).metadataTier).toBe('secure');
+    expect(decision).toMatchObject({ metadataTier: 'private', contentTier: 'private', state: 'current', contentPending: false });
+    expect(decision.decidedBy).not.toBe('sensitive_detector');
+    expect(decision.reasons.some((reason) => reason.startsWith('content:detector:'))).toBe(false);
+    expect(decision.reasons).toContain('content:sniffer:local:test:other:0.95');
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.pass).toBe('content');
+    expect(asked[0]!.flags).toContain('content:borderline:health');
+    // The model reads the passage the detector matched, not only the opening, and still only an excerpt.
+    expect(asked[0]!.material).toContain('physical treatment of symptoms');
+    // The names travel with the excerpt (p3); the excerpt itself stays bounded.
+    expect(asked[0]!.material).toStartWith('Names: Introduction to the Integral Approach.pdf');
+    expect(asked[0]!.material!.split('\nExcerpt: ')[1]!.length).toBeLessThanOrEqual(SNIFFER_EXCERPT_MAX_CHARS);
   });
 
-  test('the map revision is recorded with every decision', () => {
-    const map = mapV2([{ id: 'therapy', tier: 'secure', keywords: ['therapy'] }]);
-    expect(classify({ title: 'x' }, BENIGN).mapRevision).toBe('none');
-    expect(classify({ title: 'x' }, BENIGN, { sensitivityMap: map }).mapRevision).toMatch(/^v2:[a-f0-9]{16}$/);
+  test('real health content the model calls health stays Private', () => {
+    const decision = classify(BOOK_NAMES, BOOK, {
+      sniffer: answering({ verdict: 'decided', tier: 'secure', code: 'health:0.97' }, []),
+    });
+    expect(decision).toMatchObject({ contentTier: 'secure', decidedBy: 'sniffer', state: 'current' });
+  });
+
+  test('until the model answers, the item is pending (held Private)', () => {
+    const decision = classify(BOOK_NAMES, BOOK, { sniffer: answering({ verdict: 'undecided' }, []) });
+    expect(decision).toMatchObject({ state: 'pending', contentPending: true });
+    expect(decision.reasons).toContain('content:borderline:health');
+    expect(decision.reasons).toContain('content:sniffer:local:test:undecided');
+  });
+
+  test('with no private model to ask, vocabulary still makes the item Private', () => {
+    const decision = classify(BOOK_NAMES, BOOK);
+    expect(decision).toMatchObject({ contentTier: 'secure', decidedBy: 'sensitive_detector' });
+    expect(decision.reasons).toContain('content:detector:health:vocabulary');
+  });
+
+  test('financial vocabulary is judged the same way', () => {
+    const essay = 'The essay compares salary norms and tax policy across several countries over a century.';
+    const asked: TierSnifferRequest[] = [];
+    const personal = classify({ title: 'essay.md' }, essay, {
+      sniffer: answering({ verdict: 'decided', tier: 'private', code: 'work:0.93' }, asked),
+    });
+    expect(personal).toMatchObject({ contentTier: 'private', state: 'current' });
+    expect(asked[0]!.flags).toContain('content:borderline:financial');
+    expect(classify({ title: 'essay.md' }, essay)).toMatchObject({ contentTier: 'secure', decidedBy: 'sensitive_detector' });
+  });
+
+  test('structured identifiers stay Private at once, and the model is never asked', () => {
+    for (const [text, reason] of [
+      ['Applicant SSN 123-45-6789 on file.', 'content:detector:identity:ssn'],
+      ['Card 4111 1111 1111 1111 expires soon.', 'content:detector:financial:card_luhn'],
+      [`${BOOK} Routing number 021000021.`, 'content:detector:financial:routing_number'],
+    ] as const) {
+      const asked: TierSnifferRequest[] = [];
+      const decision = classify({ title: 'note.txt' }, text, {
+        sniffer: answering({ verdict: 'decided', tier: 'private', code: 'other:0.99' }, asked),
+      });
+      expect(decision).toMatchObject({ contentTier: 'secure', decidedBy: 'sensitive_detector', state: 'current' });
+      expect(decision.reasons).toContain(reason);
+      expect(asked).toHaveLength(0);
+    }
+  });
+
+  test('an owner Private rule still decides without asking', () => {
+    const asked: TierSnifferRequest[] = [];
+    const decision = classify(BOOK_NAMES, BOOK, {
+      rules: [rule({ match: { kind: 'pathPrefix', value: '/books' }, tier: 'secure', strength: 'prior' })],
+      sniffer: answering({ verdict: 'decided', tier: 'private', code: 'other:0.95' }, asked),
+    });
+    expect(decision).toMatchObject({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'owner_rule' });
+    expect(asked).toHaveLength(0);
   });
 });

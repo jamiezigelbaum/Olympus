@@ -14,7 +14,6 @@ import {
   createSourceCorpusRegistry,
   type SourceCorpusRegistry,
 } from '../core/source-corpus-registry.ts';
-import type { SensitivityMap } from '../core/sensitivity-map.ts';
 import { SOURCE_TRUST_DOMAINS } from '../core/source-index/types.ts';
 import type {
   SovereigntyEngine,
@@ -25,6 +24,7 @@ import type { ConnectedHandleRegistry, ConnectedCredentialHandle } from './crede
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './dashboard/scheduler-markers.ts';
 import {
   ITEMS_WITH_TEXT_COUNT_KEY,
+  UNREADABLE_ITEMS_COUNT_KEY,
   answerReadyEligibleFromCounts,
   answerReadyEligibleItems,
   answerReadyPercent,
@@ -34,6 +34,7 @@ import {
 // view-model imports are all `import type` — so the page's one wording source
 // is reachable from the builder without a cycle.
 import {
+  DASHBOARD_MANY_UNREADABLE_LABEL,
   DASHBOARD_NONE_READ_BY_POLICY,
 } from './dashboard/vocabulary.ts';
 // The phase model's own test for a finished pass, so the sample history and
@@ -256,15 +257,6 @@ export interface SourceDashboardViewModel {
   where_your_data_lives: DashboardTrustDomainCard[];
   unassigned_corpora: DashboardUnassignedCorpora;
   excluded_by_configuration: DashboardExcludedByConfiguration;
-  /**
-   * The owner's own secure categories, read off the sensitivity map.
-   *
-   * OMITTED ENTIRELY when no map is configured or the configured one does not
-   * parse. Absent means "nothing to say", never "no categories": a page that
-   * rendered an empty category list for an unreadable file would be asserting
-   * the owner protects nothing.
-   */
-  sensitivity?: DashboardSensitivity;
   /**
    * What each tier permits, hardcoded from the enforcement code rather than
    * measured. Always emitted; optional in the type only because hand-written
@@ -541,40 +533,6 @@ export interface DashboardExcludedSource {
 }
 
 /**
- * The owner's secure categories, as configured.
- *
- * `editable` is false and stays false until a write route exists: no route in
- * this worker writes the sensitivity map, so a page offering an add or remove
- * control would offer a button that cannot work.
- *
- * The categories' MATCH TERMS never cross this boundary — only how many there
- * are. Keywords, sender patterns and path patterns are the owner's real email
- * addresses and folder paths, `notes` is free text that routinely contains
- * them, and this view model is reachable with the weak `dash_` query token
- * while its own policy block declares no paths and no file names are returned.
- */
-export interface DashboardSensitivity {
-  /** Always true where this block exists at all; absent is how "not configured" is said. */
-  configured: boolean;
-  /** Always false: no route in this worker writes the sensitivity map. */
-  editable: boolean;
-  categories: DashboardSensitivityCategory[];
-}
-
-export interface DashboardSensitivityCategory {
-  id: string;
-  label: string;
-  /** The owner's own examples, joined. Always at least one — the parser requires it. */
-  interpretation: string;
-  /** Only ever `secure` or `secrets`: the map is raise-only and refuses the rest. */
-  target_tier_name: string;
-  target_trust_tier: string;
-  target_trust_domain: string;
-  /** How many keywords, sender patterns and path patterns match this category. A count, never the terms. */
-  match_terms: number;
-}
-
-/**
  * What each tier PERMITS, taken from the code that enforces it.
  *
  * These are ceilings, not availability. A `venice: true` says the policy allows
@@ -655,6 +613,117 @@ export interface DashboardUnpairAction {
   provider_unlink_label: string;
 }
 
+/**
+ * What one Sync now press found, counts only. `new_items` is the run's own
+ * changed-item count and is absent where the lane reports none; `busy` means a
+ * sync was already running, so the press started nothing new. `checking`
+ * (2026-10-09): the press started a sync that is still running, since `at`;
+ * Sync now answers at once and the result replaces this when the sync ends.
+ */
+export interface DashboardManualSync {
+  at: string;
+  outcome: 'checking' | 'checked' | 'failed' | 'busy';
+  new_items?: number;
+}
+
+/**
+ * How long a Sync now result stays on the row: long enough to survive the page
+ * refresh and a glance back, short enough that "checked just now" never
+ * outlives the check (2026-10-08). A later sync supersedes it sooner.
+ */
+export const DASHBOARD_MANUAL_SYNC_SHOWN_MS = 10 * 60_000;
+
+/**
+ * Sync now starts at most one run per source in this long (owner ruling,
+ * 2026-10-09): a second press inside it answers `too_soon` and starts nothing.
+ * The run skips Olympus's own daily budget (operator provenance), so this is
+ * what keeps a repeated press from spending a provider's quota.
+ */
+export const DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60_000;
+
+/** The press result while it is still the latest word on this source, else undefined. */
+export function dashboardLiveManualSync(
+  sync: DashboardManualSync | undefined,
+  lastSyncAt: string | undefined,
+  now: Date,
+): DashboardManualSync | undefined {
+  if (!sync) return undefined;
+  const at = Date.parse(sync.at);
+  if (!Number.isFinite(at)) return undefined;
+  // A press still running is news for as long as it runs: its result replaces
+  // it the moment the sync ends, and a restart drops it with the rest.
+  if (sync.outcome === 'checking') return sync;
+  const age = now.getTime() - at;
+  if (age < -60_000 || age > DASHBOARD_MANUAL_SYNC_SHOWN_MS) return undefined;
+  // A scheduled sync that finished after the press is the newer word. A
+  // minute's grace: the press's own run stamps last_sync_at around `at`.
+  const last = Date.parse(lastSyncAt ?? '');
+  if (Number.isFinite(last) && last > at + 60_000) return undefined;
+  return sync;
+}
+
+/**
+ * What a Sync now run found, read off whatever the dispatch returned — counts
+ * only, never a provider's words, and no source named.
+ *
+ * `items_changed` is the one count every lane uses for "new or changed since
+ * last time" (`items_indexed` counts writes, which a lane re-upserting rows it
+ * already had inflates). A run that reports none but settled `idle` changed
+ * nothing; otherwise the number is unknown and stays absent.
+ *
+ * Through the scheduler, the tasks the press actually ran are the ones whose
+ * `last_attempt_at` moved since `before`; none moved while one was running is
+ * a press that joined a sync already under way.
+ */
+export function dashboardManualSyncOutcome(input: {
+  result: unknown;
+  before?: SourceSchedulerStatus;
+  schedulerSourceId?: string;
+  at: Date;
+}): DashboardManualSync {
+  const at = input.at.toISOString();
+  const result = input.result;
+  if (isRecord(result) && result.kind === 'source_scheduler_status' && Array.isArray(result.sources)) {
+    const matches = (source: SourceSchedulerSourceStatus) => input.schedulerSourceId !== undefined
+      && (source.source_id === input.schedulerSourceId || source.corpus_id === input.schedulerSourceId);
+    const previous = new Map<string, string | undefined>();
+    for (const source of input.before?.sources ?? []) {
+      if (!matches(source)) continue;
+      for (const task of source.tasks) previous.set(task.id, task.last_attempt_at);
+    }
+    const tasks = (result.sources as SourceSchedulerSourceStatus[]).filter(matches).flatMap((source) => source.tasks);
+    const ran = tasks.filter((task) => task.last_attempt_at !== undefined && task.last_attempt_at !== previous.get(task.id));
+    if (ran.length === 0) return { at, outcome: tasks.some((task) => task.running) ? 'busy' : 'failed' };
+    if (ran.some((task) => task.last_result?.status === 'failed')) return { at, outcome: 'failed' };
+    const syncs = ran.filter((task) => task.kind === 'sync');
+    const newItems = changedItems((syncs.length > 0 ? syncs : ran).map((task) => task.last_result));
+    return { at, outcome: 'checked', ...(newItems === undefined ? {} : { new_items: newItems }) };
+  }
+  const newItems = isRecord(result) ? changedItems([result]) : undefined;
+  return { at, outcome: 'checked', ...(newItems === undefined ? {} : { new_items: newItems }) };
+}
+
+function changedItems(results: ReadonlyArray<unknown>): number | undefined {
+  let total: number | undefined;
+  for (const result of results) {
+    if (!isRecord(result)) return undefined;
+    const counts = isRecord(result.counts) ? result.counts : undefined;
+    const changed = counts?.items_changed;
+    if (typeof changed === 'number' && Number.isFinite(changed)) {
+      total = (total ?? 0) + Math.max(0, Math.trunc(changed));
+    } else if (result.status === 'idle') {
+      total = total ?? 0;
+    } else {
+      return undefined;
+    }
+  }
+  return total;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export interface DashboardSourceCard {
   corpus_id: string;
   source_id: string;
@@ -719,6 +788,14 @@ export interface DashboardSourceCard {
      * subtraction remains the answer.
      */
     answer_ready_eligible_items?: number;
+    /**
+     * In-scope items extraction gave up on for good — a damaged file, or a
+     * format nothing reads — with nothing left to retry. Owner ruling,
+     * 2026-10-08: a fact the row states ("2 files can't be read"), never a
+     * pause; they stay in the eligible denominator and leave the queue's
+     * needs-attention count. Absent when the corpus publishes no such count.
+     */
+    unreadable_items?: number;
   };
   /** File populations the user deliberately added to Olympus. Excluded files are omitted. */
   ingestion_selection?: {
@@ -849,6 +926,8 @@ export interface DashboardSourceCard {
   last_run?: DashboardSourceRun;
   /** Absolute last sync, from the ingestion ledger. `freshness` carries only relative prose. */
   last_sync_at?: string;
+  /** The owner's last Sync now press, while it is still news; see DASHBOARD_MANUAL_SYNC_SHOWN_MS. */
+  last_manual_sync?: DashboardManualSync;
   schedule?: DashboardSourceSchedule;
   embedding_backlog?: DashboardEmbeddingBacklog;
   /**
@@ -1076,6 +1155,11 @@ export interface SourceDashboardHistorySample {
    */
   in_scope_items?: number;
   /**
+   * In-scope items extraction gave up on. A phase whose only remainder is
+   * these is complete, so the baseline is taken there too.
+   */
+  unreadable_items?: number;
+  /**
    * Whether this card had finished at least one full pass when the sample was
    * taken. A phase reaching parity mid-crawl is not a settled corpus, so the
    * baseline that separates "the first crawl is nearly done" from "a settled
@@ -1123,6 +1207,11 @@ export interface SourceDashboardBuildOptions {
    * unpaired state over a session file that is still there.
    */
   unpairedSources?: readonly DashboardUnpairedSourceState[];
+  /**
+   * The last Sync now result per source id, kept by the worker that ran it.
+   * Stamped on the card only while dashboardLiveManualSync says it is news.
+   */
+  manualSyncs?: Readonly<Record<string, DashboardManualSync>>;
   credentialHealth?: CredentialHealthReport;
   oauthClientIds?: Partial<Record<DashboardOAuthSource | 'google', string>>;
   oauthClientSecretAvailability?: Partial<Record<DashboardOAuthSource | 'google', boolean>>;
@@ -1160,15 +1249,6 @@ export interface SourceDashboardBuildOptions {
   /** Explicit-scope state for folder-capable sources; keys absent for every other family. */
   fileSourceScopeStatus?: Readonly<Record<string, 'scope_pending' | 'approved'>>;
   fileSourceScopeIngestionEnabled?: Readonly<Record<string, boolean>>;
-  /**
-   * The owner's sensitivity map, already loaded and parsed by the caller.
-   *
-   * Read-only and optional: this page never opens a file of its own, so the map
-   * arrives the same way the ledger snapshot does. Absent means no map is
-   * configured or the configured one did not parse, and the `sensitivity`
-   * section is then omitted rather than emitted empty.
-   */
-  sensitivityMap?: SensitivityMap;
 }
 
 export interface DashboardPendingConnect {
@@ -1596,11 +1676,15 @@ function phaseAtParity(sample: SourceDashboardHistorySample, counter: string, va
   if (sample.settled_pass !== true) return false;
   const inScope = sample.in_scope_items;
   if (inScope === undefined || !Number.isFinite(inScope) || inScope <= 0) return false;
-  if (counter === 'content_ready_items') return value >= inScope;
+  // Unreadable files never become text or vectors, so they count as settled.
+  const unreadable = Math.max(0, sample.unreadable_items ?? 0);
+  if (counter === 'content_ready_items') return value + unreadable >= inScope;
   // Embedding is complete only where extraction is: the bar clamps its
   // numerator to what has been read, so a store that has run ahead of
   // extraction is not at parity however many files it reports.
-  if (counter === 'embedded_files') return value >= inScope && sample.content_ready_items >= inScope;
+  if (counter === 'embedded_files') {
+    return value + unreadable >= inScope && sample.content_ready_items + unreadable >= inScope;
+  }
   return false;
 }
 
@@ -1974,7 +2058,12 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // Four-tier facts, stamped like sync_now below: counts from the card's own
     // corpora, and the migration only when its plan touches one of them.
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
-    const card: DashboardSourceCard = tierClassification ? { ...built, tier_classification: tierClassification } : built;
+    const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
+    const card: DashboardSourceCard = {
+      ...built,
+      ...(tierClassification ? { tier_classification: tierClassification } : {}),
+      ...(manualSync ? { last_manual_sync: { ...manualSync } } : {}),
+    };
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
     // to sync is a fact about the card.
@@ -2017,6 +2106,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       card.coverage.not_read_by_policy_items,
       card.coverage.answer_ready_eligible_items,
     ),
+    ...(card.coverage.unreadable_items === undefined ? {} : { unreadable_items: card.coverage.unreadable_items }),
     settled_pass: dashboardHasSettledPass(card),
   }));
   options.history?.record(samples);
@@ -2034,7 +2124,6 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
   const excludedByConfiguration = excludedByConfigurationFrom(
     options.ingestionLedger?.excluded_by_configuration,
   );
-  const sensitivity = sensitivityFrom(options.sensitivityMap);
   const folderPicker: DashboardFolderPicker = {
     available: options.ingestionDispositionsAvailable === true,
     label: 'Choose what gets ingested',
@@ -2059,7 +2148,10 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       : {}),
     summary,
     onboarding: onboarding(summary, cardsWithProgress, folderPicker),
-    google_pilot: googlePilotStatus(options.googlePilotClientConfigured === true),
+    google_pilot: googlePilotStatus(
+      options.googlePilotClientConfigured === true
+        || (options.publisherOAuthSources ?? []).some((source) => source === 'gmail' || source === 'google-drive'),
+    ),
     answer_lanes: answerLanes,
     where_your_data_lives: trustCards,
     unassigned_corpora: unassignedCorpora,
@@ -2067,9 +2159,6 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // opens a store of its own, so the exclusion facts arrive the same way the
     // per-source ingestion health does.
     excluded_by_configuration: excludedByConfiguration,
-    // Omitted, not emptied, when no map is configured — which is the ordinary
-    // state on a fresh install.
-    ...(sensitivity ? { sensitivity } : {}),
     sensitivity_tiers: DASHBOARD_SENSITIVITY_TIERS,
     folder_picker: folderPicker,
     sources: cardsWithProgress,
@@ -2334,6 +2423,17 @@ function sourceCardFromDefinition(
   return card;
 }
 
+/**
+ * Whether Gmail and Drive connect through an Olympus-owned Google app, and the
+ * unverified-app note that comes with one.
+ *
+ * `configured` is true for the publisher Web client (relay + publisher
+ * exchange), which is what every dashboard origin and ChatGPT use, OR for a
+ * packaged Desktop pilot client. Olympus 1.0 release builds carry no Desktop
+ * client (owner, 2026-10-03), so keying this on the Desktop id alone told
+ * dashboard.json readers to set up their own Google app over cards that offer
+ * one-click Connect, and dropped the unverified-app note from those sheets.
+ */
 function googlePilotStatus(configured: boolean): NonNullable<SourceDashboardViewModel['google_pilot']> {
   return {
     mode: configured ? 'shared_pilot' : 'advanced_byo_required',
@@ -2781,11 +2881,10 @@ function coverageSentence(covered: boolean, percent: number, eligibleItems: numb
 /*
  * The "not read by policy" clause used to be appended here, right after
  * "88% covered". Owner ruling, 2026-08-23/24: the exclusion count must not sit
- * beside the percentage anywhere, and this label is read in the detail page's
- * foot and as a failing check's cause — both places a percentage is standing
- * next to it. The count now has exactly one home, the foot's own footnote line
- * in pages/detail.ts, which is also why it must not be repeated here: the foot
- * prints this label too, and the reader would have been told twice.
+ * beside the percentage anywhere, and this label is read as a failing check's
+ * cause, where a percentage stands next to it. (Its other reader, the old
+ * per-source page's foot, went with that page in the unified dashboard,
+ * 2026-10-09; the panel says the count in words, never beside the ratio.)
  *
  * coverageSentence still says it in words, with no number, when the policy
  * leaves nothing eligible at all — that is a fact about the corpus rather than
@@ -2808,6 +2907,10 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
   // another's indexed total.
   const eligibleItems = cards.reduce<number | undefined>((sum, card) => {
     const value = card.coverage.answer_ready_eligible_items;
+    return value === undefined ? sum : (sum ?? 0) + value;
+  }, undefined);
+  const unreadable = cards.reduce<number | undefined>((sum, card) => {
+    const value = card.coverage.unreadable_items;
     return value === undefined ? sum : (sum ?? 0) + value;
   }, undefined);
   // The per-file embedding count is present on the card only when EVERY
@@ -2833,6 +2936,7 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     needs_review_items: 0,
     ...(notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {}),
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
+    ...(unreadable !== undefined ? { unreadable_items: unreadable } : {}),
   });
 }
 
@@ -4056,6 +4160,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
   const needsReviewItems = sumCounts(counts, DASHBOARD_NEEDS_REVIEW_REASONS.map((reason) => reason.count_key));
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
   const eligibleItems = answerReadyEligibleFromCounts(counts);
+  const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   return {
     indexed_items: indexedItems,
     content_ready_items: contentReadyItems,
@@ -4064,6 +4169,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
     needs_review_items: needsReviewItems,
     ...(notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {}),
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
+    ...(unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {}),
   };
 }
 
@@ -4295,6 +4401,9 @@ function answerReadinessFrom(
   if (staleUnexplained || queue.needs_attention > 0 || failingUnexplained) {
     return { state: 'needs_attention', label: 'Needs attention before answers' };
   }
+  if (unreadableShareTooHigh(coverage)) {
+    return { state: 'needs_attention', label: DASHBOARD_MANY_UNREADABLE_LABEL };
+  }
   if (coverage.content_ready_items > 0 || coverage.embedded_items > 0) {
     return operatorPaused
       ? { state: 'ready', label: 'Ready for questions; sync paused' }
@@ -4303,6 +4412,24 @@ function answerReadinessFrom(
   if (queue.waiting > 0 || queue.active > 0) return { state: 'syncing', label: 'Syncing now' };
   if (coverage.indexed_items > 0) return { state: 'syncing', label: 'Preparing answer-ready text' };
   return { state: 'empty', label: 'Waiting for the first sync' };
+}
+
+/**
+ * Above this share of the in-scope population, unreadable files stop being a
+ * footnote and the card asks for attention again: a few damaged files are
+ * life, a twentieth of a corpus is an extractor that broke (2026-10-08).
+ */
+export const DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05;
+
+function unreadableShareTooHigh(coverage: DashboardSourceCard['coverage']): boolean {
+  const unreadable = coverage.unreadable_items ?? 0;
+  if (unreadable <= 0) return false;
+  const eligible = answerReadyEligibleItems(
+    coverage.indexed_items,
+    coverage.not_read_by_policy_items,
+    coverage.answer_ready_eligible_items,
+  );
+  return eligible > 0 && unreadable > eligible * DASHBOARD_UNREADABLE_ALARM_SHARE;
 }
 
 function unassignedCorporaFrom(
@@ -4400,33 +4527,6 @@ function excludedSourceFrom(
       ? { unenforceable_rule_ids: [...source.unenforceable_rule_ids] }
       : {}),
     entries: excludedRulesFrom(source.entries),
-  };
-}
-
-/**
- * The owner's secure categories, minus everything that would leak.
- *
- * `interpretation` is the owner's own `examples` list joined — authored by them,
- * capped at 12 by the parser and never empty. The match terms are counted and
- * not carried, and `notes` is dropped outright: both hold real sender addresses
- * and folder paths.
- */
-function sensitivityFrom(map: SensitivityMap | undefined): DashboardSensitivity | undefined {
-  if (!map) return undefined;
-  return {
-    configured: true,
-    editable: false,
-    categories: map.categories.map((category) => ({
-      id: category.id,
-      label: category.label,
-      interpretation: category.examples.join(', '),
-      target_tier_name: category.targetTierName,
-      target_trust_tier: category.targetTrustTier,
-      target_trust_domain: category.targetTrustDomain,
-      match_terms: category.match.keywords.length
-        + category.match.senderPatterns.length
-        + category.match.pathPatterns.length,
-    })),
   };
 }
 
@@ -4685,6 +4785,10 @@ function providerLabel(provider: SovereigntyProfileProvider): string {
       return 'Anthropic';
     case 'openai-compatible':
       return 'OpenAI-compatible';
+    case 'built-in':
+      return 'Built into Olympus';
+    case 'zkapi':
+      return 'zkAPI (experimental, consults only)';
   }
 }
 

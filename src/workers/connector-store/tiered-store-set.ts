@@ -92,7 +92,13 @@ import {
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
+import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
+import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
+import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
+import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
+import { sweepImageContentToPrivate } from './tier-image-content-sweep.ts';
+import { applyMediaJudgments } from './tier-media-judgment-sweep.ts';
 
 
 /** Legs run in this order, least private first. */
@@ -178,6 +184,24 @@ export interface TieredStoreSetOptions {
    * whose text was not read keeps the lane's own placement (phase P1b).
    */
   contentArrivesLater?: boolean;
+  /**
+   * The same, for only some of a lane's items: those the lane's listing does
+   * not read and a later reader does (a still image, read by the extraction
+   * factory, in a lane whose listing reads documents itself). Such an item is
+   * routed exactly as in a `contentArrivesLater` lane; every other item keeps
+   * the lane's own rules. Where only a decision is at hand (a re-judgment), an
+   * item whose text has not landed is placed as one whose text arrives later,
+   * and one whose text has landed as the lane places read items: the two
+   * differ only for a pending decision, and then the latter is more private.
+   */
+  contentArrivesLaterFor?: (item: RawItem) => boolean;
+  /**
+   * False for a second set over a lane's stores and ledger that only reads
+   * and lands extracted text (it must route exactly as the lane's own set
+   * does): the lane's own set stays the one its ledger's background passes
+   * (the sniffer, moves) find. Default true.
+   */
+  registerWithLedger?: boolean;
 }
 
 export interface TieredStoreLegRun {
@@ -228,6 +252,10 @@ export class TieredStoreSet {
   private readonly onLegOpened: TieredStoreSetOptions['onLegOpened'];
   private readonly laneFloor: TieredLaneFloor | undefined;
   private readonly contentArrivesLater: boolean;
+  private readonly contentArrivesLaterFor: ((item: RawItem) => boolean) | undefined;
+  private privateEmbedder: SourceEmbeddingProvider | undefined;
+  private privateEmbedWith: (() => SourceEmbeddingProvider | undefined) | undefined;
+  private lastRowRehome: TierRowRehomeReport | undefined;
 
   constructor(options: TieredStoreSetOptions) {
     if (!options.setId.trim()) throw new Error('A tiered store set needs a stable id.');
@@ -239,6 +267,7 @@ export class TieredStoreSet {
     this.onLegOpened = options.onLegOpened;
     this.laneFloor = options.laneFloor;
     this.contentArrivesLater = options.contentArrivesLater === true;
+    this.contentArrivesLaterFor = options.contentArrivesLater === true ? undefined : options.contentArrivesLaterFor;
     this.legs = new Map();
     for (const spec of options.legs) {
       if (this.legs.has(spec.trustDomain)) throw new Error(`A tiered store set has one leg per trust domain (${spec.trustDomain}).`);
@@ -253,7 +282,10 @@ export class TieredStoreSet {
     if (!this.legs.has('secure_local')) throw new Error('A tiered store set needs a secure_local leg.');
     // The sniffer's background pass settles this set's routed items through
     // this planner, so a verdict queues a move rather than rewriting placement.
-    registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
+    if (options.registerWithLedger !== false) {
+      registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
+      registerTierSetForLedger(this.ledger.dbPath, this);
+    }
   }
 
   /** The leg's store, opening it when it is open, exists, or `create` is set. */
@@ -301,15 +333,23 @@ export class TieredStoreSet {
    * There, only an open NAME question (the sniffer) makes the whole item
    * pending (Private); an open CONTENT question holds just the content copy
    * in the Private store, held back from embedding.
+   *
+   * `contentArrivesLater` says whether this item's text arrives after listing
+   * (`contentArrivesLaterFor`); a caller that knows the item says so. Omitted,
+   * the lane's own option decides (see `contentArrivesLaterFor`).
    */
   placementFor(
     decision: Pick<TierDecision, 'metadataTier' | 'contentTier' | 'state' | 'metadataPending' | 'contentPending'>
       & Partial<Pick<TierDecision, 'contentRead' | 'decidedBy' | 'metadataOwnerRule'>>,
+    options: { contentArrivesLater?: boolean } = {},
   ): TierPlacementPlan {
     if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
       return { copies: [], embedHold: false };
     }
-    const wholePending = this.contentArrivesLater
+    const deferred = this.contentArrivesLater
+      || (this.contentArrivesLaterFor !== undefined
+        && (options.contentArrivesLater ?? decision.contentRead !== true));
+    const wholePending = deferred
       ? decision.metadataPending
       : decision.state === 'pending' || decision.metadataPending || decision.contentPending;
     if (wholePending) {
@@ -322,14 +362,14 @@ export class TieredStoreSet {
     }
     const floor = this.floorFor(decision);
     const metadataDomain = this.domainAtLeast(atLeastDomain(TIER_KEY_TRUST_DOMAIN[decision.metadataTier], floor));
-    if (this.contentArrivesLater && decision.contentRead !== true) {
+    if (deferred && decision.contentRead !== true) {
       return {
         copies: [{ corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: 'metadata' }],
         embedHold: false,
         stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) },
       };
     }
-    const contentHeld = this.contentArrivesLater && decision.contentPending;
+    const contentHeld = deferred && decision.contentPending;
     const contentDomain = contentHeld
       ? this.domainAtLeast('secure_local')
       : this.domainAtLeast(atLeastDomain(
@@ -349,9 +389,67 @@ export class TieredStoreSet {
     };
   }
 
-  /** @internal Whether this lane's content arrives after listing (see the option). */
-  readsContentLater(): boolean {
-    return this.contentArrivesLater;
+  /**
+   * Tell the set which embedder the Private store really uses when its leg
+   * declares none (a lane whose embedder is chosen at runtime and handed to a
+   * scheduler). The Private-row re-home pass moves only when this is local.
+   */
+  declarePrivateEmbedder(
+    provider: SourceEmbeddingProvider,
+    options: { embedWith?: () => SourceEmbeddingProvider | undefined } = {},
+  ): void {
+    this.privateEmbedder = provider;
+    this.privateEmbedWith = options.embedWith;
+  }
+
+  /**
+   * The provider that embeds rows moved into the Private store, as the lane
+   * would embed them now: with its scope binding when the lane has one
+   * (`embedWith`; undefined while the binding is not current), else the
+   * declared or configured provider. Undefined: nothing may be queued yet.
+   */
+  privateEmbeddingProvider(): SourceEmbeddingProvider | undefined {
+    if (this.privateEmbedWith) {
+      try {
+        return this.privateEmbedWith();
+      } catch {
+        return undefined;
+      }
+    }
+    return this.privateEmbedder ?? this.legs.get('secure_local')?.spec.embeddingProvider;
+  }
+
+  /**
+   * Where the Private store embeds NOW: 'local' or 'cloud' when the runtime
+   * declared its provider or the secure leg is configured with one, otherwise
+   * undefined. Unknown is never treated as local.
+   */
+  privateEmbedderBackend(): 'local' | 'cloud' | undefined {
+    const declared = this.privateEmbedder ?? this.legs.get('secure_local')?.spec.embeddingProvider;
+    if (declared) return declared.backend === 'local' ? 'local' : declared.backend === 'cloud' ? 'cloud' : undefined;
+    // Never inferred from stored vectors: a historical authority says what the
+    // store once used, not what is configured now.
+    return undefined;
+  }
+
+  /** Counts from the last Private-row re-home pass this process ran (content-free). */
+  rowRehomeReport(): TierRowRehomeReport | undefined {
+    return this.lastRowRehome;
+  }
+
+  /** @internal */
+  recordRowRehomeReport(report: TierRowRehomeReport): void {
+    this.lastRowRehome = report;
+  }
+
+  /**
+   * @internal Whether this item's content arrives after listing (see the
+   * options). Without an item: whether any of the lane's items' does.
+   */
+  readsContentLater(item?: RawItem): boolean {
+    if (this.contentArrivesLater) return true;
+    if (!this.contentArrivesLaterFor) return false;
+    return item === undefined || this.contentArrivesLaterFor(item);
   }
 
   /** @internal The tier a routed copy in this domain's leg is stored at. */
@@ -399,6 +497,7 @@ export class TieredStoreSet {
     } = {},
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
+    await this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
@@ -433,6 +532,7 @@ export class TieredStoreSet {
     entries: ReadonlyArray<{ trustDomain: SourceTrustDomain; connector: SourceConnector; sync?: ConnectorStoreSyncOptions }>,
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
+    await this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'per_leg');
     const legRuns: TieredStoreLegRun[] = [];
     for (const entry of entries) {
@@ -443,6 +543,49 @@ export class TieredStoreSet {
       run.finalize();
     }
     return tieredRun(legRuns, run.counts, undefined);
+  }
+
+  /**
+   * A listing re-judges only what it lists, and an incremental one never
+   * re-lists an unchanged item. Before each run, a bounded page of items
+   * already stored is settled: a newly saved raising owner rule (an "always
+   * Private" folder) raises the ones it matches (tier-rules-sweep.ts), and
+   * items a names-only folder covers stop waiting for text that never comes
+   * (tier-names-only-settle.ts). The sniffer's tick runs both too. Rows that
+   * are Private by their own stored tier but sit in a Personal or Public
+   * store are queued and moved to the Private store (tier-row-rehome.ts).
+   * Never fails the sync.
+   */
+  private async settleStoredItems(): Promise<void> {
+    try {
+      sweepOwnerRuleRaises({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      settleNamesOnlyItems({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      // Picture content stored in a Personal or Public store before pictures
+      // were Private-only moves to the Private store (once).
+      sweepImageContentToPrivate({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      // The photo judge's verdicts: ordinary photos are queued to leave the
+      // Private store; the moves run where moves run (never here).
+      applyMediaJudgments({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      await rehomePrivateTierRows({ set: this });
+    } catch {
+      // The next run tries again.
+    }
   }
 
   /**
@@ -506,7 +649,7 @@ export class TieredStoreSet {
     // and rules file re-read when edited, the sniffer), keyed by the set
     // ledger the sniffer's queue sits beside. Resolved per call, so an edited
     // map or rules file applies at the next pass.
-    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath, undefined);
+    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
   }
 
   /** @internal */
@@ -551,6 +694,10 @@ export interface LaneTieredStoreSetOptions {
   /** Default: the secure store's own co-located ledger (tieredStoreSetLedgerPath). */
   ledger?: TierLedger;
   onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
+  /** See TieredStoreSetOptions.contentArrivesLaterFor. */
+  contentArrivesLaterFor?: (item: RawItem) => boolean;
+  /** See TieredStoreSetOptions.registerWithLedger. */
+  registerWithLedger?: boolean;
 }
 
 /**
@@ -570,6 +717,8 @@ export function createLaneTieredStoreSet(options: LaneTieredStoreSetOptions): Ti
     ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
+    ...(options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}),
+    ...(options.registerWithLedger === false ? { registerWithLedger: false } : {}),
     legs: [
       ...(options.publicLeg
         ? [{
@@ -1009,12 +1158,14 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
 
     // A lane whose text arrives later reads none at listing; an owner
     // metadata-only disposition means none ever arrives.
-    const deferred = this.set.readsContentLater();
+    const deferred = this.set.readsContentLater(item);
     const text = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
     // The owner's installed inputs (map, rules file, sniffer) merged with the
     // set's own (TieredStoreSet.classification()), resolved once per run.
     const classification = this.classification;
-    let decision = decideItemTiers(connector, item, text, classification, ledger);
+    // Names-only by the owner's choice: the text never arrives, so the names
+    // are the whole decision and the item never waits on it.
+    let decision = decideItemTiers(connector, item, text, classification, ledger, { namesOnly: deferred && input.metadataOnly });
     // With the owner's rules file or map unusable, the decision (made with
     // the last good ones) may not place anything below Private: hold it
     // pending (secure_local, embedding held) until the file is fixed.
@@ -1045,7 +1196,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       decision = withRecordedContent(decision, ledger.getCurrent(identity));
     }
 
-    const placement = this.set.placementFor(decision);
+    const placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
     const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity),
       ...(deferred ? { stagedLandingAllowed: true } : {}),

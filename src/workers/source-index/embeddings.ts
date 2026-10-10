@@ -5,6 +5,9 @@ import type { IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import { OperationError } from '../../core/operation-error.ts';
+import { assertLocalModelIdNotCloudForwarding } from '../../core/local-model-policy.ts';
+import { fetchModelEndpoint, isModelEndpointRedirectError } from '../../core/model-transport.ts';
+import { isZkapiDaemonEndpointRefusal } from '../../core/zkapi-consult-settings.ts';
 import { resolveEmbeddingEpoch } from './embedding-identity.ts';
 
 export type SourceEmbeddingBackend = 'cloud' | 'local';
@@ -14,6 +17,20 @@ export interface SourceEmbeddingInput {
   text: string;
   title?: string;
   media?: SourceEmbeddingMediaInput[];
+  /**
+   * A prepared local image (the media cache's JPEG of a photo) to embed
+   * together with the text, for a document. Only a provider whose model
+   * reads images uses it (the built-in EmbeddingGemma 2); every other
+   * provider embeds the text alone and ignores it.
+   */
+  image?: SourceEmbeddingImageInput;
+}
+
+export interface SourceEmbeddingImageInput {
+  /** An absolute path in the owner-only media cache. */
+  path: string;
+  sha256: string;
+  mimeType: string;
 }
 
 export interface SourceEmbeddingMediaInput {
@@ -35,6 +52,56 @@ export interface SourceEmbeddingProvider {
    * sweep checks it before embedding anything queued under the binding.
    */
   assertBindingCurrent?(): void;
+  /**
+   * Present only on a provider whose model reads pictures (the built-in
+   * EmbeddingGemma 2): whether it can embed a document's `image` right now
+   * (its image encoder started). A provider without this method embeds the
+   * text and ignores `image`. When this answers false, chunks with a picture
+   * are held, never embedded as text under an input hash that names the
+   * picture.
+   */
+  imageSupport?(): Promise<boolean>;
+  /**
+   * Present only on a provider whose model reads pictures: the documents'
+   * vectors exactly as `embed` returns them, plus each picture's IMAGE-ONLY
+   * vector, in the same model call (the photo judge, media-judge.ts). An
+   * image vector is undefined for an input with no picture, or whose picture
+   * alone could not be read. Failures are those of `embed`.
+   */
+  embedWithImageVectors?(inputs: SourceEmbeddingInput[]): Promise<{ vectors: number[][]; imageVectors: Array<number[] | undefined> }>;
+  /**
+   * Present only on a provider whose model reads pictures: each picture's
+   * image-only vector (undefined for one the encoder could not read). Throws
+   * `SourceEmbeddingInputsFailedError` (held) while the encoder is not running.
+   */
+  embedImageVectors?(images: SourceEmbeddingImageInput[]): Promise<Array<number[] | undefined>>;
+  /** Present only with `embedImageVectors`: text embedded exactly as given, with no task prefix (the judge's descriptions). */
+  embedPromptTexts?(texts: string[]): Promise<number[][]>;
+}
+
+/**
+ * Some inputs of a batch could not be embedded (a picture the image encoder
+ * could not read, or pictures sent while the encoder is not running) while
+ * the rest could. The embed lane embeds the others; it is never a fault of
+ * the engine.
+ */
+export class SourceEmbeddingInputsFailedError extends Error {
+  readonly failedIndexes: readonly number[];
+  readonly reason: string;
+  /**
+   * `failed`: these inputs' pictures could not be read. `held`: the pictures
+   * are fine but cannot be read right now (the image encoder is not running),
+   * so they wait and nothing is recorded against them.
+   */
+  readonly disposition: 'failed' | 'held';
+
+  constructor(failedIndexes: readonly number[], reason: string, disposition: 'failed' | 'held' = 'failed') {
+    super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
+    this.name = 'SourceEmbeddingInputsFailedError';
+    this.failedIndexes = failedIndexes;
+    this.reason = reason;
+    this.disposition = disposition;
+  }
 }
 
 /** Secure corpora may use local embeddings or the explicitly approved Venice cloud lane. */
@@ -234,7 +301,7 @@ async function fetchEmbeddingResponse(
     let reason: TransientEmbeddingReason;
     let waitMs: number | undefined;
     try {
-      const response = await fetchImpl(url, init);
+      const response = await fetchModelEndpoint(fetchImpl, url, init);
       attempt += 1;
       if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status)) return response;
       reason = response.status;
@@ -249,6 +316,16 @@ async function fetchEmbeddingResponse(
       }
     } catch (error) {
       if (error instanceof TransientSourceEmbeddingError) throw error;
+      if (isZkapiDaemonEndpointRefusal(error)) throw error;
+      // A redirect is a property of the endpoint, not a passing outage:
+      // retrying would only send the same body to be redirected again.
+      if (isModelEndpointRedirectError(error)) {
+        throw new OperationError(
+          'source_index_error',
+          `${provider} source embedding endpoint answered with a redirect, which is refused.`,
+          error.message,
+        );
+      }
       if (init.signal.aborted) throw timedOut(attempt + 1);
       attempt += 1;
       reason = 'network';
@@ -483,6 +560,9 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
     if (!this.modelId) {
       throw new OperationError('config_error', 'Local source embedding model must be configured.');
     }
+    if (this.backend === 'local') {
+      assertLocalModelIdNotCloudForwarding('Local source embedding model', this.modelId);
+    }
     this.dimension = options.dimension ?? 0;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -527,7 +607,6 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
           input: inputs.map((input) => this.formatInput(input, options.taskType)),
           ...(this.sendDimensions ? { dimensions: this.dimension } : {}),
         }),
-        redirect: 'error',
         signal: controller.signal,
       }, budget);
       if (!response.ok) {
@@ -1130,4 +1209,52 @@ function fnv1a(value: string): number {
 
 function hashString(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * The same provider, with each single-text query embedding made once. One
+ * request embeds its query in the vector lane and again to rank an item's
+ * passages; sharing one memoized provider between them costs one forward
+ * pass, not two. Document embeddings pass straight through. Scope it to one
+ * request: the memo is never evicted.
+ */
+export function memoizeQueryEmbeddings(provider: SourceEmbeddingProvider): SourceEmbeddingProvider {
+  const queries = new Map<string, Promise<number[][]>>();
+  const memoized: SourceEmbeddingProvider = {
+    provider: provider.provider,
+    modelId: provider.modelId,
+    dimension: provider.dimension,
+    configHash: provider.configHash,
+    epochId: provider.epochId,
+    backend: provider.backend,
+    embed(inputs, options) {
+      if (options.taskType !== 'RETRIEVAL_QUERY' || inputs.length !== 1) return provider.embed(inputs, options);
+      const key = inputs[0]!.text;
+      const cached = queries.get(key);
+      if (cached) return cached;
+      const pending = provider.embed(inputs, options);
+      queries.set(key, pending);
+      // A failed embed is not remembered: the next caller may try again.
+      pending.catch(() => queries.delete(key));
+      return pending;
+    },
+    ...(provider.assertBindingCurrent ? { assertBindingCurrent: () => provider.assertBindingCurrent!() } : {}),
+    ...(provider.imageSupport ? { imageSupport: () => provider.imageSupport!() } : {}),
+    ...mediaJudgeMethods(provider),
+  };
+  return memoized;
+}
+
+/**
+ * The photo judge's methods of a provider, forwarded by a wrapper: a wrapper
+ * that dropped them would leave every photo unjudged (and Private).
+ */
+export function mediaJudgeMethods(
+  provider: SourceEmbeddingProvider,
+): Pick<SourceEmbeddingProvider, 'embedWithImageVectors' | 'embedImageVectors' | 'embedPromptTexts'> {
+  return {
+    ...(provider.embedWithImageVectors ? { embedWithImageVectors: (inputs: SourceEmbeddingInput[]) => provider.embedWithImageVectors!(inputs) } : {}),
+    ...(provider.embedImageVectors ? { embedImageVectors: (images: SourceEmbeddingImageInput[]) => provider.embedImageVectors!(images) } : {}),
+    ...(provider.embedPromptTexts ? { embedPromptTexts: (texts: string[]) => provider.embedPromptTexts!(texts) } : {}),
+  };
 }

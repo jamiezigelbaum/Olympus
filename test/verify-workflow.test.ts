@@ -51,8 +51,8 @@ describe('verification contract', () => {
     const deploySection = workflow.slice(workflow.indexOf('\n  deploy:\n'), workflow.indexOf('\n  go:\n'));
     expect(deploySection).not.toContain('actions/setup-go@');
     expect(workflow).toContain('bun scripts/test-lane.ts go');
-    expect(workflow).toContain('shard: [1, 2, 3]');
-    expect(workflow).toContain('bun scripts/test-lane.ts deploy --shard=${{ matrix.shard }}/3');
+    expect(workflow).toContain('shard: [1, 2, 3, 4]');
+    expect(workflow).toContain('bun scripts/test-lane.ts deploy --shard=${{ matrix.shard }}/4');
     expect(workflow).not.toMatch(/\n  verify:\n/);
     expect(workflow).not.toContain('needs: [static, fast, deploy, go]');
     expect(workflow).not.toContain('Require every lane');
@@ -72,16 +72,19 @@ describe('verification contract', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
     const workflow = readFileSync(join(ROOT, '.github/workflows/verify.yml'), 'utf8');
     const staticSection = workflow.slice(workflow.indexOf('\n  static:\n'), workflow.indexOf('\n  fast:\n'));
-    const fastSection = workflow.slice(workflow.indexOf('\n  fast:\n'), workflow.indexOf('\n  deploy:\n'));
+    const fastSection = workflow.slice(workflow.indexOf('\n  fast:\n'), workflow.indexOf('\n  exchange:\n'));
+    const exchangeSection = workflow.slice(workflow.indexOf('\n  exchange:\n'), workflow.indexOf('\n  deploy:\n'));
     expect(staticSection).toContain('run: bun run typecheck');
     expect(pkg.scripts.typecheck).toBe('tsc --noEmit && bun run typecheck:exchange && bun run typecheck:connect-relay');
     expect(pkg.scripts['typecheck:exchange']).toBe('tsc --noEmit -p exchange/tsconfig.json');
     expect(pkg.scripts['typecheck:connect-relay']).toBe('tsc --noEmit -p connect-relay/tsconfig.json');
     expect(fastSection).toContain('run: bun run test:fast');
     expect(pkg.scripts['test:fast']).toBe(
-      'bun run build && bun scripts/test-lane.ts fast && bun run test:exchange && bun run test:connect-relay',
+      'bun run build && bun scripts/test-lane.ts fast && bun run test:connect-relay',
     );
-    expect(pkg.scripts['test:connect-relay']).toBe('bun test ./connect-relay/test');
+    expect(exchangeSection).toContain('name: exchange tests');
+    expect(exchangeSection).toContain('run: bun run test:exchange');
+    expect(pkg.scripts['test:connect-relay']).toBe('bun test --parallel --timeout=15000 ./connect-relay/test');
     expect(existsSync(join(ROOT, 'connect-relay/test/relay-e2e.test.ts'))).toBe(true);
     // Directory discovery includes new exchange tests, including nested tests.
     expect(pkg.scripts['test:exchange']).toBe('bun test ./exchange/test');

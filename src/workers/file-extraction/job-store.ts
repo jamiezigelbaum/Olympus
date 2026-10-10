@@ -319,6 +319,32 @@ export interface JanitorRequeueExtractionJobsResult {
   reason: string;
 }
 
+/**
+ * Jobs a lane settled unread for want of a reader: `metadata_only` with one of
+ * `warnings` on a derivation of that job, or `failed_terminal` with one of
+ * `terminalErrorKinds` as its last error kind.
+ */
+export interface UnreadExtractionJobsRequest extends ExtractionLaneKey {
+  extractorKind: string;
+  warnings: readonly string[];
+  terminalErrorKinds: readonly string[];
+  /**
+   * Warnings marking a job settled while the reader was not ready yet. Such
+   * a job is eligible again whatever its requeue count: it was never read.
+   */
+  notReadyWarnings?: readonly string[];
+}
+
+export interface RequeueUnreadExtractionJobsRequest extends UnreadExtractionJobsRequest {
+  reason: string;
+  limit?: number;
+}
+
+export interface RequeueUnreadExtractionJobsResult {
+  matchedJobs: number;
+  jobsRequeued: number;
+}
+
 export interface ExtractionJobRecord {
   jobId: string;
   ref: ExtractionItemRef;
@@ -390,16 +416,43 @@ export interface ExtractionCorpusReadiness {
   /**
    * Failed jobs whose item nothing else has read successfully — the ones that
    * actually cost content. A failure superseded by another extractor's
-   * `indexed` job against the same item is history, not homework.
+   * `indexed` job against the same item is history, not homework, and so is
+   * a failure on a settled item (see `unreadableItems`).
    */
   failedActionableJobs: number;
+  /**
+   * Items extraction gave up on: no `indexed` job, at least one
+   * `failed_terminal` job, and nothing queued, leased or retryable left to
+   * try. Owner ruling, 2026-10-08: one damaged file is a fact the page states,
+   * not a pause — these leave `failedActionableJobs` and count here instead.
+   * Disjoint from the two policy exits above.
+   */
+  unreadableItems: number;
   retryableDueJobs: number;
   oldestActionableAt?: string;
   newestTerminalProgressAt?: string;
 }
 
+/**
+ * A `failed_terminal` job the runner will still try once more, so its item is
+ * not settled yet (PR #191 review, 2026-10-08). Two shapes, mirroring the
+ * runner's two passes:
+ * - reread (`Extractor.reread`): the same lane, once ever, when its reader is
+ *   ready — `janitor_terminal_requeue_count` below 1.
+ * - escalation (`defaultTerminalReclassificationRules`): another extractor,
+ *   while no job of that kind exists for the item yet.
+ */
+export interface ExtractionTerminalRetryPath {
+  extractorKind: string;
+  lastErrorKinds: readonly string[];
+  // Present for an escalation; absent for a once-ever reread.
+  escalateToExtractorKind?: string;
+}
+
 export interface ExtractionScopedReadinessOptions {
   now?: Date;
+  // Terminal failures that still have a retry path (ExtractionTerminalRetryPath).
+  terminalRetryPaths?: readonly ExtractionTerminalRetryPath[];
   /** Current store identity/scope fence for rows read from this separate queue. */
   currentItem?: (ref: ExtractionItemRef) => boolean;
 }
@@ -1182,6 +1235,124 @@ export class LocalFileExtractionJobStore {
     };
   }
 
+  /**
+   * How many jobs wait for a reader (see `UnreadExtractionJobsRequest`) and
+   * have not been read again before. A read: the runner asks this before it
+   * asks a lane whether its reader is ready, so a lane with nothing unread
+   * never starts a first-use download.
+   */
+  unreadJobCount(request: UnreadExtractionJobsRequest): number {
+    const { sql, params } = this.unreadJobsQuery(request);
+    const row = this.db.query(`SELECT COUNT(*) AS count FROM extraction_jobs j WHERE ${sql}`)
+      .get(...params) as { count: number };
+    return row.count;
+  }
+
+  /**
+   * Queues those jobs again, ONCE per job ever: the same one-requeue guard as
+   * the terminal janitor (`janitor_terminal_requeue_count`), so a reader that
+   * becomes ready and then still cannot read a file costs that file exactly
+   * one more try. A job settled while its reader was still getting ready
+   * (`notReadyWarnings`) was never read and stays eligible: a restart that
+   * lands between the requeue and the read cannot strand it. The attempt
+   * count starts over, because the earlier attempts
+   * were spent while no reader existed and say nothing about the file.
+   */
+  requeueUnread(request: RequeueUnreadExtractionJobsRequest): RequeueUnreadExtractionJobsResult {
+    this.assertWritable('unread requeue');
+    const reason = requireReason(request.reason);
+    const limit = clampInteger(request.limit ?? DEFAULT_JANITOR_LIMIT, 1, MAX_JANITOR_LIMIT);
+    const { sql, params } = this.unreadJobsQuery(request);
+    const now = nowIso();
+    let matched: Array<{ job_id: string }> = [];
+    let requeued = 0;
+    this.db.transaction(() => {
+      matched = this.db.query(`
+        SELECT j.job_id FROM extraction_jobs j
+        WHERE ${sql}
+        ORDER BY j.updated_at ASC, j.job_id ASC
+        LIMIT ?
+      `).all(...params, limit) as Array<{ job_id: string }>;
+      const update = this.db.query(`
+        UPDATE extraction_jobs
+        SET status = 'queued',
+            attempts = 0,
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            last_error_kind = ?,
+            next_retry_at = NULL,
+            janitor_requeue_count = COALESCE(janitor_requeue_count, 0) + 1,
+            janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1,
+            janitor_requeued_at = ?,
+            janitor_requeue_reason = ?,
+            updated_at = ?
+        WHERE job_id = ?
+          AND status IN ('metadata_only', 'failed_terminal')
+      `);
+      for (const row of matched) {
+        requeued += update.run(JANITOR_TERMINAL_ERROR_KIND, now, reason, now, row.job_id).changes;
+      }
+    })();
+    return { matchedJobs: matched.length, jobsRequeued: requeued };
+  }
+
+  /**
+   * Whether this lane has work waiting for `extractorKind`'s reader: a job
+   * queued, leased or due a retry, or one it settled unread (as in
+   * `unreadJobCount`). The queue holds what the lane chose to read, routed
+   * by media type and file extension at plan time, so for an approved lane
+   * this answers "do the owner's chosen sources contain such items". Always
+   * lane-scoped (there is no cross-lane mode): rows left behind by a lane
+   * that is no longer approved never count. Uses the lane index and stops at
+   * the first hit.
+   */
+  hasWorkWaitingForReader(request: UnreadExtractionJobsRequest): boolean {
+    const lane = requireLaneKey(request);
+    const extractorKind = requireToken(request.extractorKind, 'extractorKind');
+    const pending = this.db.query(`
+      SELECT 1 AS hit FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status IN ('queued', 'leased', 'failed_retryable')
+        AND extractor_kind = ?
+      LIMIT 1
+    `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind) as { hit: number } | null;
+    if (pending) return true;
+    const { sql, params } = this.unreadJobsQuery(request);
+    return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
+  }
+
+  private unreadJobsQuery(request: UnreadExtractionJobsRequest): { sql: string; params: string[] } {
+    const lane = requireLaneKey(request);
+    const extractorKind = requireToken(request.extractorKind, 'extractorKind');
+    const warnings = request.warnings.map((warning) => requireToken(warning, 'warning'));
+    const kinds = request.terminalErrorKinds.map((kind) => requireToken(kind, 'terminalErrorKind'));
+    const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken(warning, 'notReadyWarning'));
+    const clauses: string[] = [];
+    const params: string[] = [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind];
+    const hasWarning = (values: readonly string[]): string => `EXISTS (
+        SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
+        WHERE a.job_id = j.job_id AND a.warnings_json IS NOT NULL
+          AND w.value IN (${values.map(() => '?').join(', ')})
+      )`;
+    const onceGuard = 'COALESCE(j.janitor_terminal_requeue_count, 0) < 1';
+    if (warnings.length > 0) {
+      // Once ever, unless the job was settled while its reader was not ready.
+      clauses.push(`(j.status = 'metadata_only' AND ${hasWarning(warnings)} AND (${onceGuard}${
+        notReady.length > 0 ? ` OR ${hasWarning(notReady)}` : ''}))`);
+      params.push(...warnings, ...notReady);
+    }
+    if (kinds.length > 0) {
+      clauses.push(`(j.status = 'failed_terminal' AND ${onceGuard} AND j.last_error_kind IN (${kinds.map(() => '?').join(', ')}))`);
+      params.push(...kinds);
+    }
+    const sql = `j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ?
+      AND j.extractor_kind = ?
+      AND ${clauses.length > 0 ? `(${clauses.join(' OR ')})` : '0'}`;
+    return { sql, params };
+  }
+
   get(jobId: string): ExtractionJobRecord | undefined {
     const row = this.jobRow(requireKeyPart(jobId, 'jobId'));
     return row ? recordFromRow(row) : undefined;
@@ -1243,6 +1414,31 @@ export class LocalFileExtractionJobStore {
   }
 
   /**
+   * When the lane's earliest backed-off retry comes due, if it has one still
+   * in the future. A due retry is leased by the next run like any queued job;
+   * this answers when that next run should be, so a short backoff is not
+   * stretched to the lane's idle interval.
+   */
+  nextRetryAt(lane: ExtractionLaneKey, now: Date = new Date()): string | undefined {
+    const key = requireLaneKey(lane);
+    const row = this.db.query(`
+      SELECT MIN(next_retry_at) AS next_retry_at
+      FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status = 'failed_retryable'
+        AND next_retry_at IS NOT NULL
+        AND next_retry_at > ?
+    `).get(
+      key.corpusId,
+      key.provider,
+      key.accountScope,
+      key.approvedScopeKey,
+      now.toISOString(),
+    ) as { next_retry_at: string | null } | null;
+    return row?.next_retry_at ?? undefined;
+  }
+
+  /**
    * Readiness across an explicit set of current lanes, retaining the corpus
    * roll-up's per-item supersession and timestamp semantics.
    */
@@ -1280,8 +1476,16 @@ export class LocalFileExtractionJobStore {
     }
     let blockedByPolicyItems = 0;
     let metadataOnlyExpectedItems = 0;
-    for (const itemRows of byItem.values()) {
+    let unreadableItems = 0;
+    const settledFailedItems = new Set<string>();
+    for (const [itemId, itemRows] of byItem) {
       if (itemRows.some((row) => row.status === 'indexed')) continue;
+      const settledFailed = itemRows.some((row) => row.status === 'failed_terminal')
+        && !itemRows.some((row) => (
+          row.status === 'queued' || row.status === 'leased' || row.status === 'failed_retryable'
+          || terminalHasRetryPath(row, itemRows, options.terminalRetryPaths ?? [])
+        ));
+      if (settledFailed) settledFailedItems.add(itemId);
       if (itemRows.some((row) => row.status === 'blocked_policy')) {
         blockedByPolicyItems += 1;
       } else if (itemRows.some((row) => (
@@ -1290,6 +1494,8 @@ export class LocalFileExtractionJobStore {
         || row.status === 'skipped_too_large'
       ))) {
         metadataOnlyExpectedItems += 1;
+      } else if (settledFailed) {
+        unreadableItems += 1;
       }
     }
     const now = (options.now ?? new Date()).toISOString();
@@ -1299,7 +1505,8 @@ export class LocalFileExtractionJobStore {
       row.status === 'failed_retryable' || row.status === 'failed_terminal'
     ));
     const failedActionableJobs = failedRows.filter((row) => !(
-      byItem.get(row.local_item_id)?.some((candidate) => candidate.status === 'indexed') ?? false
+      (byItem.get(row.local_item_id)?.some((candidate) => candidate.status === 'indexed') ?? false)
+      || settledFailedItems.has(row.local_item_id)
     )).length;
     const retryableDueRows = rows.filter((row) => (
       row.status === 'failed_retryable'
@@ -1332,6 +1539,7 @@ export class LocalFileExtractionJobStore {
       failedRetryableJobs: count('failed_retryable'),
       failedTerminalJobs: count('failed_terminal'),
       failedActionableJobs,
+      unreadableItems,
       retryableDueJobs: retryableDueRows.length,
       ...(oldestActionableAt ? { oldestActionableAt } : {}),
       ...(newestTerminalProgressAt ? { newestTerminalProgressAt } : {}),
@@ -1346,25 +1554,41 @@ export class LocalFileExtractionJobStore {
    * roll-up that decides the policy exits, and the per-status job tally the
    * queue ladder reads.
    */
-  corpusReadiness(corpusId: string, now: Date = new Date()): ExtractionCorpusReadiness {
+  corpusReadiness(
+    corpusId: string,
+    now: Date = new Date(),
+    options: Pick<ExtractionScopedReadinessOptions, 'terminalRetryPaths'> = {},
+  ): ExtractionCorpusReadiness {
     const corpus = requireKeyPart(corpusId, 'corpusId');
+    const itemRetry = terminalRetryPathSql('x', options.terminalRetryPaths ?? []);
+    const pendingRetry = terminalRetryPathSql('pending', options.terminalRetryPaths ?? []);
     const items = this.db.query(`
       WITH item_state AS (
         SELECT
           MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
           MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
           MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported', 'skipped_too_large')
-              THEN 1 ELSE 0 END) AS metadata_only_jobs
-        FROM extraction_jobs
+              THEN 1 ELSE 0 END) AS metadata_only_jobs,
+          MAX(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS terminal_failed_jobs,
+          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
+              THEN 1 ELSE 0 END) AS in_flight_jobs
+        FROM extraction_jobs x
         WHERE corpus_id = ?
         GROUP BY local_item_id
       )
       SELECT
         SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 1 THEN 1 ELSE 0 END) AS blocked_items,
         SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 1
-            THEN 1 ELSE 0 END) AS metadata_only_items
+            THEN 1 ELSE 0 END) AS metadata_only_items,
+        SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 0
+            AND terminal_failed_jobs = 1 AND in_flight_jobs = 0
+            THEN 1 ELSE 0 END) AS unreadable_items
       FROM item_state
-    `).get(corpus) as { blocked_items: number | null; metadata_only_items: number | null } | null;
+    `).get(...itemRetry.params, corpus) as {
+      blocked_items: number | null;
+      metadata_only_items: number | null;
+      unreadable_items: number | null;
+    } | null;
     const jobs = this.db.query(`
       SELECT
         SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_jobs,
@@ -1389,10 +1613,24 @@ export class LocalFileExtractionJobStore {
                 AND superseding.job_id <> j.job_id
                 AND superseding.status = 'indexed'
             )
+            AND NOT (
+              EXISTS (
+                SELECT 1 FROM extraction_jobs settled
+                WHERE settled.corpus_id = j.corpus_id
+                  AND settled.local_item_id = j.local_item_id
+                  AND settled.status = 'failed_terminal'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM extraction_jobs pending
+                WHERE pending.corpus_id = j.corpus_id
+                  AND pending.local_item_id = j.local_item_id
+                  AND (pending.status IN ('queued', 'leased', 'failed_retryable') OR ${pendingRetry.sql})
+              )
+            )
           THEN 1 ELSE 0 END) AS failed_actionable_jobs
       FROM extraction_jobs j
       WHERE corpus_id = ?
-    `).get(now.toISOString(), now.toISOString(), corpus) as Record<string, number | string | null> | null;
+    `).get(now.toISOString(), now.toISOString(), ...pendingRetry.params, corpus) as Record<string, number | string | null> | null;
     const count = (value: number | null | undefined): number => Math.max(0, Math.trunc(value ?? 0));
     const jobCount = (key: string): number => count(typeof jobs?.[key] === 'number' ? jobs[key] : undefined);
     return {
@@ -1403,6 +1641,7 @@ export class LocalFileExtractionJobStore {
       failedRetryableJobs: jobCount('failed_retryable_jobs'),
       failedTerminalJobs: jobCount('failed_terminal_jobs'),
       failedActionableJobs: jobCount('failed_actionable_jobs'),
+      unreadableItems: count(items?.unreadable_items),
       retryableDueJobs: jobCount('retryable_due_jobs'),
       ...(typeof jobs?.oldest_actionable_at === 'string' ? { oldestActionableAt: jobs.oldest_actionable_at } : {}),
       ...(typeof jobs?.newest_terminal_progress_at === 'string'
@@ -1912,16 +2151,27 @@ function requireLaneKey(lane: ExtractionLaneKey): ExtractionLaneKey {
   };
 }
 
+// A refused field of an extraction job request, named so a caller can tell which part was wrong.
+export class ExtractionJobFieldError extends TypeError {
+  readonly field: string;
+
+  constructor(field: string, message: string) {
+    super(message);
+    this.name = 'ExtractionJobFieldError';
+    this.field = field;
+  }
+}
+
 function requireKeyPart(value: string, field: string): string {
   if (typeof value !== 'string' || !SAFE_KEY_PART.test(value)) {
-    throw new TypeError(`Extraction job ${field} must be a safe identifier.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe identifier.`);
   }
   return value;
 }
 
 function requireToken(value: string, field: string): string {
   if (typeof value !== 'string' || !SAFE_TOKEN.test(value)) {
-    throw new TypeError(`Extraction job ${field} must be a safe categorical token.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe categorical token.`);
   }
   return value;
 }
@@ -1935,7 +2185,7 @@ function requireHash(value: string): string {
 
 function requireBoundedString(value: string, field: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 1_024) {
-    throw new TypeError(`Extraction job ${field} must be a bounded non-empty string.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a bounded non-empty string.`);
   }
   return value;
 }
@@ -1963,14 +2213,14 @@ function requireTerminalStatus(value: ExtractionTerminalStatus): ExtractionTermi
 
 function requireSafeInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new TypeError(`Extraction job ${field} must be a non-negative safe integer.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a non-negative safe integer.`);
   }
   return value;
 }
 
 function requirePositiveSafeInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new TypeError(`Extraction job ${field} must be a positive safe integer.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a positive safe integer.`);
   }
   return value;
 }
@@ -1992,4 +2242,54 @@ function hashString(value: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+// True when the runner will still try this terminal job once more (ExtractionTerminalRetryPath).
+function terminalHasRetryPath(
+  row: ExtractionJobSqlRow,
+  itemRows: readonly ExtractionJobSqlRow[],
+  paths: readonly ExtractionTerminalRetryPath[],
+): boolean {
+  if (row.status !== 'failed_terminal') return false;
+  return paths.some((path) => {
+    if (row.extractor_kind !== path.extractorKind) return false;
+    if (path.escalateToExtractorKind !== undefined) {
+      // The escalation pass matches a missing error kind too (COALESCE).
+      if (row.last_error_kind !== null && !path.lastErrorKinds.includes(row.last_error_kind)) return false;
+      return !itemRows.some((candidate) => candidate.extractor_kind === path.escalateToExtractorKind);
+    }
+    return row.last_error_kind !== null
+      && path.lastErrorKinds.includes(row.last_error_kind)
+      && (row.janitor_terminal_requeue_count ?? 0) < 1;
+  });
+}
+
+// The same predicate as terminalHasRetryPath, over the row aliased `alias`.
+function terminalRetryPathSql(
+  alias: string,
+  paths: readonly ExtractionTerminalRetryPath[],
+): { sql: string; params: string[] } {
+  const clauses: string[] = [];
+  const params: string[] = [];
+  for (const path of paths) {
+    const kinds = path.lastErrorKinds.map((kind) => requireToken(kind, 'lastErrorKind'));
+    if (kinds.length === 0) continue;
+    const kindList = kinds.map(() => '?').join(', ');
+    if (path.escalateToExtractorKind !== undefined) {
+      clauses.push(`(${alias}.extractor_kind = ? AND (${alias}.last_error_kind IS NULL OR ${alias}.last_error_kind IN (${kindList}))
+        AND NOT EXISTS (
+          SELECT 1 FROM extraction_jobs target
+          WHERE target.corpus_id = ${alias}.corpus_id
+            AND target.local_item_id = ${alias}.local_item_id
+            AND target.extractor_kind = ?
+        ))`);
+      params.push(requireToken(path.extractorKind, 'extractorKind'), ...kinds, requireToken(path.escalateToExtractorKind, 'extractorKind'));
+    } else {
+      clauses.push(`(${alias}.extractor_kind = ? AND ${alias}.last_error_kind IN (${kindList})
+        AND COALESCE(${alias}.janitor_terminal_requeue_count, 0) < 1)`);
+      params.push(requireToken(path.extractorKind, 'extractorKind'), ...kinds);
+    }
+  }
+  if (clauses.length === 0) return { sql: '0', params };
+  return { sql: `(${alias}.status = 'failed_terminal' AND (${clauses.join(' OR ')}))`, params };
 }

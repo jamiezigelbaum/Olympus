@@ -1,914 +1,892 @@
 /**
- * End to end over loopback: relay + install client + mock ACME + fake worker.
- * A hosted agent opens TLS with SNI `<install-id>.<zone>` to the relay and
- * reaches the fake worker; the relay only ever forwards ciphertext.
+ * End to end over loopback: a real relay, real install clients and fake
+ * loopback workers. Public callers reach the relay over plain HTTP here; in
+ * production Caddy terminates TLS in front of the same server.
  */
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { X509Certificate, createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
-import tls from 'node:tls';
-import http, { type IncomingHttpHeaders } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
+import { generateKeyPairSync } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { latestRenewalMoment, startConnect, type ConnectHandle } from '../client/connect.ts';
-import { ariCertId } from '../client/ari.ts';
-import { loadOrCreateIdentity } from '../client/identity.ts';
-import { RelayClient } from '../client/relay-client.ts';
-import {
-  PROTOCOL_VERSION,
-  acmeChallengeName,
-  base64url,
-  installIdForPublicKey,
-  signInstallMessage,
-  spkiOf,
-} from '../shared/protocol.ts';
-import { tlsAlertRecord, TLS_ALERT } from '../shared/sni.ts';
-import { MemoryDnsProvider, type DnsProvider } from '../server/dns.ts';
-import type { RelayLimits } from '../server/public-path.ts';
-import { FileInstallRegistry, MemoryInstallRegistry, type InstallRegistry } from '../server/registry.ts';
+import { RelayClient, type RelayClientStatus } from '../client/relay-client.ts';
+import { DEMO_AUTHORIZE_PATH, FORWARDED_PATHS } from '../client/forward.ts';
+import { loadOrCreateIdentity, type InstallIdentity } from '../client/identity.ts';
+import { PROTOCOL_VERSION, base64url, installIdForPublicKey, signInstallMessage, spkiOf } from '../shared/protocol.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, mintCredential } from '../shared/tokens.ts';
+import { createOAuthRelayNonce, signOAuthRelayState } from '../../src/core/oauth-relay.ts';
+import type { RelayLimits } from '../server/limits.ts';
+import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
+import { NOT_CONNECTED_MESSAGE } from '../server/relay-mcp.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
-import { runAdmin, startAdminSocket } from '../server/admin.ts';
-import { readRegistrySnapshot } from '../server/registry.ts';
-import { startMockAcme, type MockAcme } from './helpers/mock-acme.ts';
-import { agentRequest, captureClientHello, holdOpen, openControl, rawExchange, syntheticClientHello, trickle } from './helpers/net.ts';
-import { createTestCa, type TestCa } from './helpers/pki.ts';
+import generatedDashboard from '../server/generated/chatgpt-dashboard.json';
+import generatedSurface from '../server/generated/chatgpt-tools.json';
+import generatedPrivateAnswer from '../server/generated/chatgpt-private-answer.json';
 
-// Several tests issue a certificate through the mock CA (openssl) before exercising timeouts.
-setDefaultTimeout(20_000);
+setDefaultTimeout(15_000);
 
-const ZONE = 'connect.olympus.test';
-const CONTROL_HOST = `relay.${ZONE}`;
-const DATA_HOST = `data.${CONTROL_HOST}`;
-const REQUEST_MARKER = 'agent-question-7f3a91c2-plaintext';
-const RESPONSE_MARKER = 'olympus-answer-5bd204e8-plaintext';
+const PUBLIC_HOST = 'mcp.olympus.test';
+/** The account-linking challenge every tool sends a caller without a token. */
+const LINKING_CHALLENGE = [
+  `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", error="invalid_token", `
+    + 'error_description="Connect Olympus on your Mac to use this tool."',
+];
 
-/** Deterministic 8 MiB body for the backpressure test. */
-const BIG = Buffer.alloc(8 * 1024 * 1024);
-for (let i = 0; i < BIG.length; i += 4) BIG.writeUInt32LE((i * 2654435761) >>> 0, i);
+interface WorkerRecord {
+  method: string;
+  path: string;
+  headers: Record<string, string>;
+  body: string;
+}
 
-let ca: TestCa;
-let acme: MockAcme;
-let dns: MemoryDnsProvider;
-let worker: http.Server;
-let workerUrl: string;
-const workerRequests: Array<{ url: string | undefined; headers: IncomingHttpHeaders; body: string }> = [];
-const stateDirs: string[] = [];
-const relays: RelayHandle[] = [];
-const connects: ConnectHandle[] = [];
+interface FakeWorker {
+  url: string;
+  requests: WorkerRecord[];
+  aborted: string[];
+  stop(): void;
+}
 
-function newStateDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-install-'));
-  stateDirs.push(dir);
+const dirs: string[] = [];
+const cleanups: Array<() => unknown> = [];
+
+function tempDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-v2-'));
+  dirs.push(dir);
   return dir;
 }
 
+/** A loopback Olympus worker stand-in that records what reached it. */
+function fakeWorker(name: string, options: { bigBodyBytes?: number; validToken?: string } = {}): FakeWorker {
+  const requests: WorkerRecord[] = [];
+  const aborted: string[] = [];
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    idleTimeout: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      const body = await request.text();
+      const headers: Record<string, string> = {};
+      request.headers.forEach((value, key) => {
+        headers[key] = value;
+      });
+      requests.push({ method: request.method, path: `${url.pathname}${url.search}`, headers, body });
+      if (url.pathname === '/mcp') {
+        // An engine: a 401 for a credential it does not hold, else it marks the response authenticated.
+        if (options.validToken !== undefined && headers.authorization !== `Bearer ${options.validToken}`) {
+          return Response.json({ error: 'invalid_token' }, { status: 401 });
+        }
+        const response = await engineFor(request, url, body);
+        const marked = new Headers(response.headers);
+        marked.set(AUTHENTICATED_RESPONSE_HEADER, '1');
+        return new Response(response.body, { status: response.status, headers: marked });
+      }
+      return engineFor(request, url, body);
+    },
+  });
+  return { url: `http://127.0.0.1:${server.port}`, requests, aborted, stop: () => server.stop(true) };
+
+  async function engineFor(request: Request, url: URL, body: string): Promise<Response> {
+    if (url.pathname === '/mcp' && request.method === 'GET') {
+      // Server-Sent Events: three events, 150 ms apart.
+      let n = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (n > 0) await Bun.sleep(150);
+          n += 1;
+          controller.enqueue(new TextEncoder().encode(`data: event-${n}\n\n`));
+          if (n === 3) controller.close();
+        },
+      });
+      return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'set-cookie': 'leak=1' } });
+    }
+    if (url.pathname === '/mcp' && body.includes('"slow"')) {
+      // Holds the request open until the caller goes away.
+      await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true }));
+      aborted.push(body);
+      return new Response('too late');
+    }
+    if (url.pathname === '/mcp' && body.includes('"big"')) {
+      return new Response('x'.repeat(options.bigBodyBytes ?? 1024), { headers: { 'content-type': 'text/plain' } });
+    }
+    return Response.json({ worker: name, path: url.pathname, body }, { headers: { 'mcp-session-id': `session-${name}` } });
+  }
+}
+
+const logLines: string[] = [];
+
 async function makeRelay(
   limits: Partial<RelayLimits> = {},
-  tap?: (direction: 'to-install' | 'to-agent', chunk: Buffer) => void,
-  overrides: { dns?: DnsProvider; registry?: InstallRegistry } = {},
-) {
-  const registry = overrides.registry ?? new MemoryInstallRegistry();
-  const controlTls = ca.issue(CONTROL_HOST, DATA_HOST);
+  registry = new MemoryInstallRegistry(),
+  extra: { demoInstallId?: string } = {},
+): Promise<RelayHandle> {
   const relay = await startRelay({
-    zone: ZONE,
-    controlHost: CONTROL_HOST,
-    controlTls,
+    publicHost: PUBLIC_HOST,
     registry,
-    dns: overrides.dns ?? dns,
     listen: { host: '127.0.0.1', port: 0 },
     limits,
-    ...(tap ? { tap } : {}),
+    ...extra,
+    log: (event, fields) => logLines.push(JSON.stringify({ event, ...fields })),
   });
-  relays.push(relay);
-  return { relay, registry };
+  cleanups.push(() => relay.close());
+  return relay;
 }
 
 async function connectInstall(
   relay: RelayHandle,
-  stateDir = newStateDir(),
-  extra: { maxDataConnections?: number; firstRequestTimeoutMs?: number; idleTimeoutMs?: number } = {},
+  worker: FakeWorker,
+  identity = loadOrCreateIdentity(tempDir()),
+  forwardedPaths?: readonly string[],
 ) {
-  const handle = await startConnect({
-    ...extra,
-    stateDir,
-    relayHost: '127.0.0.1',
-    relayPort: relay.port,
-    controlServerName: CONTROL_HOST,
-    zone: ZONE,
-    ca: ca.cert,
-    target: workerUrl,
-    heartbeatMs: 1_000,
+  const statuses: RelayClientStatus[] = [];
+  const secret = base64url(crypto.getRandomValues(new Uint8Array(32)));
+  const client = new RelayClient({
+    relayHost: PUBLIC_HOST,
+    relayUrl: `ws://127.0.0.1:${relay.port}/v2/connect`,
+    identity,
+    target: worker.url,
+    relaySecret: secret,
+    heartbeatMs: 500,
     backoff: { minMs: 50, maxMs: 200 },
-    acme: { directoryUrl: acme.directoryUrl, termsOfServiceAgreed: true, propagationDelayMs: 0, pollIntervalMs: 20 },
+    onStatus: (status) => statuses.push(status),
+    ...(forwardedPaths ? { forwardedPaths } : {}),
   });
-  connects.push(handle);
-  return { handle, stateDir, hostname: new URL(await handle.url()).hostname };
+  client.start();
+  cleanups.push(() => client.stop());
+  await until(() => statuses.at(-1)?.state === 'online');
+  return { client, identity, secret, statuses };
 }
 
 async function until(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!condition()) {
     if (Date.now() > deadline) throw new Error('condition not met in time');
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await Bun.sleep(10);
   }
 }
 
-beforeAll(async () => {
-  ca = createTestCa();
-  dns = new MemoryDnsProvider();
-  acme = await startMockAcme({ lookupTxt: (name) => dns.lookupTxt(name), signCsr: (der) => ca.signCsr(der) });
-  worker = http.createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on('data', (chunk) => chunks.push(chunk));
-    req.on('end', () => {
-      workerRequests.push({ url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
-      if (req.url === '/mcp/slow') {
-        setTimeout(() => res.end('slow answer'), 1_000);
-        return;
-      }
-      if (req.url === '/mcp/big') {
-        res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(BIG.length) });
-        res.end(BIG);
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ answer: RESPONSE_MARKER, path: req.url }));
-    });
+const rpc = (method: string, params: Record<string, unknown> = {}, id = 1) => JSON.stringify({ jsonrpc: '2.0', id, method, params });
+
+function mcpPost(relay: RelayHandle, token: string, body: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(`${relay.url}/mcp`, {
+    method: 'POST',
+    ...init,
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(init.headers as Record<string, string> | undefined) },
+    body,
   });
-  await new Promise<void>((resolve) => worker.listen(0, '127.0.0.1', resolve));
-  workerUrl = `http://127.0.0.1:${(worker.address() as AddressInfo).port}`;
+}
+
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-afterAll(async () => {
-  for (const handle of connects) await handle.stop().catch(() => {});
-  for (const relay of relays) await relay.close().catch(() => {});
-  await acme.close();
-  await new Promise<void>((resolve) => worker.close(() => resolve()));
-  for (const dir of stateDirs) rmSync(dir, { recursive: true, force: true });
-  ca.cleanup();
+afterAll(() => {
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-describe('connect relay end to end', () => {
-  test('a hosted agent reaches the local worker through SNI pass-through, and the relay sees only ciphertext', async () => {
-    const forwarded: Record<'to-install' | 'to-agent', Buffer[]> = { 'to-install': [], 'to-agent': [] };
-    const { relay, registry } = await makeRelay({}, (direction, chunk) => forwarded[direction].push(Buffer.from(chunk)));
-    const { stateDir, hostname } = await connectInstall(relay);
-    const installId = hostname.split('.')[0]!;
+describe('logging', () => {
+  test('relay logs carry no token, install id, query string or address', async () => {
+    logLines.length = 0;
+    const relay = await makeRelay({ requestsPerInstall: { capacity: 1, refillPerSecond: 0.001 } });
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const token = mintCredential('access', a.identity.installId);
+    await mcpPost(relay, token, rpc('ping'));
+    await mcpPost(relay, token, rpc('ping'));
+    await fetch(`${relay.url}/connect/authorize?client_id=secret-query`);
+    await relay.revoke(a.identity.installId);
+    expect(logLines.length).toBeGreaterThan(2);
+    const all = logLines.join('\n');
+    expect(all).not.toContain(a.identity.installId);
+    expect(all).not.toContain('oly2');
+    expect(all).not.toContain('secret-query');
+    expect(all).not.toContain('127.0.0.1');
+  });
+});
 
-    // Registration proved possession of the key the id is derived from.
-    expect(registry.get(installId)?.installId).toBe(installId);
-    expect(hostname).toBe(`${installId}.${ZONE}`);
-    // DNS-01 ran through the relay: explicit address record, TXT cleared after issuance.
-    expect(acme.issued).toContain(hostname);
-    expect(dns.addresses.has(hostname)).toBe(true);
-    expect(dns.lookupTxt(acmeChallengeName(installId, ZONE))).toEqual([]);
-    for (const file of ['install-key.pem', 'acme-account-key.pem', 'tls-key.pem', 'tls-cert.pem']) {
-      expect(statSync(join(stateDir, 'connect-relay', file)).mode & 0o777).toBe(0o600);
-    }
+describe('routing', () => {
+  test('a bearer token reaches only the install it names, with the relay marker and no forwarding headers', async () => {
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    const a = await connectInstall(relay, workerA);
+    const b = await connectInstall(relay, workerB);
 
-    const before = workerRequests.length;
-    const response = await agentRequest({
-      port: relay.port,
-      servername: hostname,
-      ca: ca.cert,
+    const response = await mcpPost(relay, mintCredential('access', a.identity.installId), rpc('tools/list'), {
+      headers: { 'x-olympus-relay': 'forged', 'x-forwarded-for': '203.0.113.9', forwarded: 'for=203.0.113.9', cookie: 'c=1' },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ worker: 'A', path: '/mcp' });
+    expect(response.headers.get('mcp-session-id')).toBe('session-A');
+    expect(workerB.requests).toHaveLength(0);
+    const seen = workerA.requests[0]!;
+    expect(seen.headers['x-olympus-relay']).toBe(a.secret);
+    expect(seen.headers['x-forwarded-for']).toBeUndefined();
+    expect(seen.headers.forwarded).toBeUndefined();
+    expect(seen.headers.cookie).toBeUndefined();
+    expect(seen.headers.authorization).toStartWith('Bearer oly2.');
+
+    const toB = await mcpPost(relay, mintCredential('access', b.identity.installId), rpc('tools/list'));
+    expect(await toB.json()).toMatchObject({ worker: 'B' });
+    expect(workerA.requests).toHaveLength(1);
+    expect(workerB.requests[0]!.headers['x-olympus-relay']).toBe(b.secret);
+  });
+
+  test('token requests route by the code or refresh token prefix; revocation by the token', async () => {
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    const a = await connectInstall(relay, workerA);
+    const b = await connectInstall(relay, workerB);
+    const form = (fields: Record<string, string>) =>
+      fetch(`${relay.url}/connect/token`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(fields).toString(),
+      });
+
+    const code = await form({ grant_type: 'authorization_code', code: mintCredential('code', a.identity.installId) });
+    expect(await code.json()).toMatchObject({ worker: 'A', path: '/connect/token' });
+    const refresh = await form({ grant_type: 'refresh_token', refresh_token: mintCredential('refresh', b.identity.installId) });
+    expect(await refresh.json()).toMatchObject({ worker: 'B', path: '/connect/token' });
+    // A code shaped like a refresh token, or under the wrong grant, routes nowhere.
+    const mismatched = await form({ grant_type: 'authorization_code', code: mintCredential('refresh', a.identity.installId) });
+    expect(mismatched.status).toBe(400);
+    expect(await mismatched.json()).toMatchObject({ error: 'invalid_grant' });
+
+    const revoke = await fetch(`${relay.url}/connect/revoke`, {
       method: 'POST',
-      path: '/mcp',
-      headers: { 'content-type': 'application/json', 'x-forwarded-for': '203.0.113.9', 'x-olympus-relay': 'forged' },
-      body: JSON.stringify({ question: REQUEST_MARKER }),
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: mintCredential('refresh', b.identity.installId) }).toString(),
     });
-    expect(response.status).toBe(200);
-    expect(JSON.parse(response.body).answer).toBe(RESPONSE_MARKER);
-
-    const seen = workerRequests.slice(before);
-    expect(seen).toHaveLength(1);
-    expect(seen[0]!.url).toBe('/mcp');
-    expect(seen[0]!.body).toContain(REQUEST_MARKER);
-    expect(seen[0]!.headers.host).toBe(hostname);
-    expect(seen[0]!.headers['x-olympus-relay']).toBe('1');
-    expect(seen[0]!.headers['x-forwarded-proto']).toBe('https');
-    // The agent's own forwarding claims are discarded; the relay's view is used.
-    expect(seen[0]!.headers['x-forwarded-for']).toBe('127.0.0.1');
-
-    // Everything the relay forwarded was TLS records, and no plaintext marker
-    // appears in either direction.
-    const toInstall = Buffer.concat(forwarded['to-install']);
-    const toAgent = Buffer.concat(forwarded['to-agent']);
-    expect(toInstall.length).toBeGreaterThan(0);
-    expect(toAgent.length).toBeGreaterThan(0);
-    expect(toInstall[0]).toBe(0x16);
-    expect(toAgent[0]).toBe(0x16);
-    for (const stream of [toInstall, toAgent]) {
-      expect(stream.includes(REQUEST_MARKER)).toBe(false);
-      expect(stream.includes(RESPONSE_MARKER)).toBe(false);
-      expect(stream.includes('HTTP/1.1')).toBe(false);
-      expect(stream.includes('/mcp')).toBe(false);
-    }
-  });
-
-  test('only the remote agent surface is forwarded; loopback-only worker routes stay unreachable', async () => {
-    const { relay } = await makeRelay();
-    const { hostname } = await connectInstall(relay);
-    const before = workerRequests.length;
-    for (const path of ['/dashboard', '/', '/mcp/../dashboard', '/mcp%2f..%2fdashboard', '/mcpx', '//mcp']) {
-      const response = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path });
-      expect(response.status).toBe(404);
-    }
-    expect(workerRequests.length).toBe(before);
-    const allowed = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp/session?x=1' });
-    expect(allowed.status).toBe(200);
-  });
-
-  test('a restarted install reuses its identity, registration and certificate', async () => {
-    const { relay } = await makeRelay();
-    const first = await connectInstall(relay);
-    await first.handle.stop();
-    const issuedBefore = acme.issued.length;
-    const second = await connectInstall(relay, first.stateDir);
-    expect(second.hostname).toBe(first.hostname);
-    expect(acme.issued.length).toBe(issuedBefore);
-    const response = await agentRequest({ port: relay.port, servername: second.hostname, ca: ca.cert, path: '/mcp' });
-    expect(response.status).toBe(200);
-  });
-
-  test('renewal follows the CA renewal window (ARI) and names the certificate it replaces', async () => {
-    const { relay } = await makeRelay();
-    const hour = 60 * 60 * 1000;
-    try {
-      // A window a month out: the install reports when it will renew, and does not renew now.
-      acme.setRenewalWindow({ start: Date.now() + 30 * 24 * hour, end: Date.now() + 31 * 24 * hour });
-      const first = await connectInstall(relay);
-      const status = first.handle.certificate();
-      expect(status.state).toBe('serving');
-      const renewAt = Date.parse((status as { renewAt?: string }).renewAt ?? '');
-      expect(renewAt).toBeGreaterThanOrEqual(Date.now() + 30 * 24 * hour - 60_000);
-      expect(renewAt).toBeLessThanOrEqual(Date.now() + 31 * 24 * hour);
-      const oldPem = readFileSync(join(first.stateDir, 'connect-relay', 'tls-cert.pem'), 'utf8');
-      const oldId = ariCertId(oldPem)!;
-      expect(acme.renewalInfoRequests).toContain(oldId);
-      await first.handle.stop();
-
-      // The CA pulls the window into the past (as before a mass revocation).
-      // The certificate is 90 days fresh by the proportional rule, yet the
-      // restarted install renews at once, with `replaces` naming the old one.
-      acme.setRenewalWindow({ start: Date.now() - 2 * hour, end: Date.now() - hour });
-      const issuedBefore = acme.issued.length;
-      const second = await connectInstall(relay, first.stateDir);
-      expect(acme.issued.length).toBe(issuedBefore + 1);
-      expect(acme.replacements.at(-1)).toBe(oldId);
-      const newPem = readFileSync(join(first.stateDir, 'connect-relay', 'tls-cert.pem'), 'utf8');
-      expect(ariCertId(newPem)).not.toBe(oldId);
-      // A CA still answering "overdue" for the brand-new certificate does not start a renewal loop.
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(acme.issued.length).toBe(issuedBefore + 1);
-      const response = await agentRequest({ port: relay.port, servername: second.hostname, ca: ca.cert, path: '/mcp' });
-      expect(response.status).toBe(200);
-    } finally {
-      acme.setRenewalWindow(undefined);
-    }
-  });
-
-  test('a renewal window the CA sets past expiry is clamped to the last sixth of the lifetime', async () => {
-    const { relay } = await makeRelay();
-    const day = 24 * 60 * 60 * 1000;
-    try {
-      acme.setRenewalWindow({ start: Date.now() + 200 * day, end: Date.now() + 201 * day });
-      const { handle, stateDir } = await connectInstall(relay);
-      const pem = readFileSync(join(stateDir, 'connect-relay', 'tls-cert.pem'), 'utf8');
-      const renewAt = Date.parse((handle.certificate() as { renewAt?: string }).renewAt ?? '');
-      expect(renewAt).toBe(latestRenewalMoment(pem));
-      expect(renewAt).toBeLessThan(Date.parse(new X509Certificate(pem).validTo));
-    } finally {
-      acme.setRenewalWindow(undefined);
-    }
-  });
-
-  test('an unknown install name gets a fatal unrecognized_name alert', async () => {
-    const { relay } = await makeRelay();
-    const unknown = `${'a'.repeat(32)}.${ZONE}`;
-    const reply = await rawExchange(relay.port, await captureClientHello(unknown));
-    expect(reply).toEqual(tlsAlertRecord(TLS_ALERT.unrecognizedName));
-    const foreign = await rawExchange(relay.port, await captureClientHello('example.com'));
-    expect(foreign).toEqual(tlsAlertRecord(TLS_ALERT.unrecognizedName));
-    await expect(agentRequest({ port: relay.port, servername: unknown, ca: ca.cert, path: '/mcp' })).rejects.toThrow();
-  });
-
-  test('an offline install gets an immediate fatal internal_error alert, not a hang', async () => {
-    const { relay } = await makeRelay();
-    const { handle, hostname } = await connectInstall(relay);
-    await handle.stop();
-    await until(() => relay.onlineInstalls().length === 0);
-    const started = Date.now();
-    const reply = await rawExchange(relay.port, await captureClientHello(hostname));
-    expect(reply).toEqual(tlsAlertRecord(TLS_ALERT.internalError));
-    expect(Date.now() - started).toBeLessThan(2_000);
-  });
-
-  test('an install that does not attach in time gets internal_error, and concurrency is capped per install', async () => {
-    const { relay, registry } = await makeRelay({ attachTimeoutMs: 300, maxConcurrentPerInstall: 1 });
-    // A registered install whose session ignores `open` (e.g. still waiting for its certificate).
-    const identity = loadOrCreateIdentity(newStateDir());
-    const control = openControl(relay.port, CONTROL_HOST, ca.cert);
-    const challenge = await control.next();
-    control.send({
-      type: 'register',
-      v: PROTOCOL_VERSION,
-      installId: identity.installId,
-      publicKey: identity.publicKeySpki,
-      sig: signInstallMessage(identity.privateKey, 'register', String(challenge.nonce), identity.installId),
+    expect(await revoke.json()).toMatchObject({ worker: 'B', path: '/connect/revoke' });
+    const unknownRevoke = await fetch(`${relay.url}/connect/revoke`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'token=whatever',
     });
-    expect((await control.next()).type).toBe('ready');
-    expect(registry.get(identity.installId)).toBeDefined();
-    const hello = await captureClientHello(`${identity.installId}.${ZONE}`);
-    const first = rawExchange(relay.port, hello);
-    expect((await control.next()).type).toBe('open');
-    const second = await rawExchange(relay.port, hello);
-    expect(second).toEqual(tlsAlertRecord(TLS_ALERT.internalError));
-    expect(await first).toEqual(tlsAlertRecord(TLS_ALERT.internalError));
-    control.destroy();
-  });
-});
-
-describe('install authentication', () => {
-  test('forged, replayed, and unregistered install keys are rejected', async () => {
-    const { relay, registry } = await makeRelay();
-    const owner = loadOrCreateIdentity(newStateDir());
-    const attacker = generateKeyPairSync('ed25519');
-    const attackerSpki = base64url(spkiOf(attacker.publicKey));
-
-    // Unregistered install: hello is refused.
-    let control = openControl(relay.port, CONTROL_HOST, ca.cert);
-    let challenge = await control.next();
-    control.send({ type: 'hello', v: PROTOCOL_VERSION, installId: owner.installId, sig: signInstallMessage(owner.privateKey, 'hello', String(challenge.nonce), owner.installId) });
-    expect(await control.next()).toMatchObject({ type: 'error', code: 'unregistered' });
-
-    // Claiming the owner's id with the attacker's key: the id is not derived from that key.
-    control = openControl(relay.port, CONTROL_HOST, ca.cert);
-    challenge = await control.next();
-    control.send({ type: 'register', v: PROTOCOL_VERSION, installId: owner.installId, publicKey: attackerSpki, sig: signInstallMessage(attacker.privateKey, 'register', String(challenge.nonce), owner.installId) });
-    expect(await control.next()).toMatchObject({ type: 'error', code: 'id_mismatch' });
-
-    // Owner's public key, signed by someone else: no proof of possession.
-    control = openControl(relay.port, CONTROL_HOST, ca.cert);
-    challenge = await control.next();
-    control.send({ type: 'register', v: PROTOCOL_VERSION, installId: owner.installId, publicKey: owner.publicKeySpki, sig: signInstallMessage(attacker.privateKey, 'register', String(challenge.nonce), owner.installId) });
-    expect(await control.next()).toMatchObject({ type: 'error', code: 'bad_signature' });
-    expect(registry.get(owner.installId)).toBeUndefined();
-
-    // Genuine registration.
-    control = openControl(relay.port, CONTROL_HOST, ca.cert);
-    challenge = await control.next();
-    const genuine = signInstallMessage(owner.privateKey, 'register', String(challenge.nonce), owner.installId);
-    control.send({ type: 'register', v: PROTOCOL_VERSION, installId: owner.installId, publicKey: owner.publicKeySpki, sig: genuine });
-    expect(await control.next()).toMatchObject({ type: 'ready', installId: owner.installId });
-
-    // Replaying that signature on a new connection fails: the nonce differs.
-    const replay = openControl(relay.port, CONTROL_HOST, ca.cert);
-    await replay.next();
-    replay.send({ type: 'register', v: PROTOCOL_VERSION, installId: owner.installId, publicKey: owner.publicKeySpki, sig: genuine });
-    expect(await replay.next()).toMatchObject({ type: 'error', code: 'bad_signature' });
-
-    // Hello for the registered id signed by the attacker.
-    const forged = openControl(relay.port, CONTROL_HOST, ca.cert);
-    challenge = await forged.next();
-    forged.send({ type: 'hello', v: PROTOCOL_VERSION, installId: owner.installId, sig: signInstallMessage(attacker.privateKey, 'hello', String(challenge.nonce), owner.installId) });
-    expect(await forged.next()).toMatchObject({ type: 'error', code: 'bad_signature' });
-
-    // An attacker cannot attach to (hijack) the owner's pending public connection.
-    const pendingAgent = rawExchange(relay.port, await captureClientHello(`${owner.installId}.${ZONE}`));
-    const open = await control.next();
-    expect(open.type).toBe('open');
-    const hijack = openControl(relay.port, DATA_HOST, ca.cert);
-    challenge = await hijack.next();
-    hijack.send({ type: 'attach', v: PROTOCOL_VERSION, installId: owner.installId, connId: open.connId, sig: signInstallMessage(attacker.privateKey, 'attach', String(challenge.nonce), owner.installId, String(open.connId)) });
-    expect(await hijack.next()).toMatchObject({ type: 'error', code: 'bad_signature' });
-    // Nor guess a connection id, even with the right key.
-    const guess = openControl(relay.port, DATA_HOST, ca.cert);
-    challenge = await guess.next();
-    const guessed = 'A'.repeat(22);
-    guess.send({ type: 'attach', v: PROTOCOL_VERSION, installId: owner.installId, connId: guessed, sig: signInstallMessage(owner.privateKey, 'attach', String(challenge.nonce), owner.installId, guessed) });
-    expect(await guess.next()).toMatchObject({ type: 'error', code: 'unknown_connection' });
-    control.destroy();
-    expect((await pendingAgent).length).toBeGreaterThan(0);
+    expect(unknownRevoke.status).toBe(200);
+    expect(workerA.requests.map((r) => r.path)).toEqual(['/connect/token']);
+    expect(workerB.requests.map((r) => r.path)).toEqual(['/connect/token', '/connect/revoke']);
   });
 
-  test('registrations are rate limited per source address', async () => {
-    const { relay } = await makeRelay({ registrationsPerIp: { capacity: 1, refillPerSecond: 0 } });
-    const results: unknown[] = [];
-    for (let i = 0; i < 2; i += 1) {
-      const identity = loadOrCreateIdentity(newStateDir());
-      const control = openControl(relay.port, CONTROL_HOST, ca.cert);
-      const challenge = await control.next();
-      control.send({ type: 'register', v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig: signInstallMessage(identity.privateKey, 'register', String(challenge.nonce), identity.installId) });
-      results.push(await control.next());
-      control.destroy();
-    }
-    expect(results[0]).toMatchObject({ type: 'ready' });
-    expect(results[1]).toMatchObject({ type: 'error', code: 'rate_limited' });
-  });
-
-  test('an install can only publish ACME TXT values under its own name, within limits', async () => {
-    const { relay } = await makeRelay({ acmeDnsPerInstall: { capacity: 1, refillPerSecond: 0 } });
-    const identity = loadOrCreateIdentity(newStateDir());
-    const control = openControl(relay.port, CONTROL_HOST, ca.cert);
-    const challenge = await control.next();
-    control.send({ type: 'register', v: PROTOCOL_VERSION, installId: identity.installId, publicKey: identity.publicKeySpki, sig: signInstallMessage(identity.privateKey, 'register', String(challenge.nonce), identity.installId) });
-    await control.next();
-    control.send({ type: 'acme-dns-set', id: 'bad', value: 'not a digest; also: _acme-challenge.other' });
-    expect(await control.next()).toMatchObject({ type: 'acme-dns-result', id: 'bad', ok: false });
-    const value = 'B'.repeat(43);
-    control.send({ type: 'acme-dns-set', id: 'good', value });
-    expect(await control.next()).toMatchObject({ type: 'acme-dns-result', id: 'good', ok: true });
-    expect(dns.lookupTxt(acmeChallengeName(identity.installId, ZONE))).toEqual([value]);
-    control.send({ type: 'acme-dns-set', id: 'again', value: 'C'.repeat(43) });
-    expect(await control.next()).toMatchObject({ type: 'acme-dns-result', id: 'again', ok: false, error: 'rate_limited' });
-    // Values a session published are withdrawn when the session ends.
-    control.destroy();
-    await until(() => dns.lookupTxt(acmeChallengeName(identity.installId, ZONE)).length === 0);
-  });
-
-  test('install ids are self-certifying', () => {
-    const { publicKey } = generateKeyPairSync('ed25519');
-    const id = installIdForPublicKey(spkiOf(publicKey));
-    expect(id).toMatch(/^[a-z2-7]{32}$/);
-    expect(installIdForPublicKey(spkiOf(generateKeyPairSync('ed25519').publicKey))).not.toBe(id);
-  });
-});
-
-async function registerRaw(relay: RelayHandle) {
-  const identity = loadOrCreateIdentity(newStateDir());
-  const control = openControl(relay.port, CONTROL_HOST, ca.cert);
-  const challenge = await control.next();
-  control.send({
-    type: 'register',
-    v: PROTOCOL_VERSION,
-    installId: identity.installId,
-    publicKey: identity.publicKeySpki,
-    sig: signInstallMessage(identity.privateKey, 'register', String(challenge.nonce), identity.installId),
-  });
-  const ready = await control.next();
-  return { identity, control, ready };
-}
-
-class CountingDns extends MemoryDnsProvider {
-  calls = 0;
-  failRemovals = false;
-  duringRemove?: () => void;
-  override async removeAddress(hostname: string) {
-    this.calls += 1;
-    if (this.failRemovals) throw new Error('provider unavailable');
-    this.duringRemove?.();
-    return super.removeAddress(hostname);
-  }
-  override async ensureAddress(hostname: string) {
-    this.calls += 1;
-    return super.ensureAddress(hostname);
-  }
-  override async setTxt(name: string, value: string) {
-    this.calls += 1;
-    return super.setTxt(name, value);
-  }
-  override async clearTxt(name: string, value: string) {
-    this.calls += 1;
-    return super.clearTxt(name, value);
-  }
-}
-
-describe('abuse resistance', () => {
-  test('public traffic above the control budget does not starve the install (data host has its own limit)', async () => {
-    // One session establishment per 2 s per address. Every agent below comes
-    // from the same address as the install, and far faster than that.
-    const { relay } = await makeRelay({
-      controlConnectionsPerIp: { capacity: 2, refillPerSecond: 0.5 },
-      newConnectionsPerInstall: { capacity: 100, refillPerSecond: 100 },
-    });
-    const { hostname } = await connectInstall(relay);
-    const started = Date.now();
-    for (let i = 0; i < 20; i += 1) {
-      const response = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp' });
-      expect(response.status).toBe(200);
-    }
-    expect(Date.now() - started).toBeLessThan(10_000);
-    expect(relay.onlineInstalls()).toContain(hostname.split('.')[0]!);
-  });
-
-  test('attach is only accepted on the data host, and session setup only on the control host', async () => {
-    const { relay } = await makeRelay();
-    const { identity, control } = await registerRaw(relay);
-    const wrongPlane = openControl(relay.port, CONTROL_HOST, ca.cert);
-    const challenge = await wrongPlane.next();
-    const connId = 'A'.repeat(22);
-    wrongPlane.send({ type: 'attach', v: PROTOCOL_VERSION, installId: identity.installId, connId, sig: signInstallMessage(identity.privateKey, 'attach', String(challenge.nonce), identity.installId, connId) });
-    expect(await wrongPlane.next()).toMatchObject({ type: 'error', code: 'bad_request' });
-    const dataPlane = openControl(relay.port, DATA_HOST, ca.cert);
-    const dataChallenge = await dataPlane.next();
-    dataPlane.send({ type: 'hello', v: PROTOCOL_VERSION, installId: identity.installId, sig: signInstallMessage(identity.privateKey, 'hello', String(dataChallenge.nonce), identity.installId) });
-    expect(await dataPlane.next()).toMatchObject({ type: 'error', code: 'bad_request' });
-    control.destroy();
-  });
-
-  test('clear floods cannot reach the DNS provider, and DNS calls have a relay-wide budget', async () => {
-    const counting = new CountingDns();
-    const { relay } = await makeRelay({ dnsCallsGlobal: { capacity: 2, refillPerSecond: 0 } }, undefined, { dns: counting });
-    const first = await registerRaw(relay);
-    for (let i = 0; i < 50; i += 1) first.control.send({ type: 'acme-dns-clear', id: `c${i}`, value: String(i).padStart(43, 'Z') });
-    for (let i = 0; i < 50; i += 1) expect(await first.control.next()).toMatchObject({ type: 'acme-dns-result', ok: false });
-    expect(counting.calls).toBe(0);
-    // A first publish needs the address record plus the TXT: two calls, the whole budget.
-    first.control.send({ type: 'acme-dns-set', id: 'p1', value: 'D'.repeat(43) });
-    expect(await first.control.next()).toMatchObject({ ok: true });
-    const second = await registerRaw(relay);
-    second.control.send({ type: 'acme-dns-set', id: 'p2', value: 'E'.repeat(43) });
-    expect(await second.control.next()).toMatchObject({ ok: false, error: 'rate_limited' });
-    expect(counting.calls).toBe(2);
-    first.control.destroy();
-    second.control.destroy();
-  });
-
-  test('registrations have a relay-wide rate and address records a relay-wide cap', async () => {
-    const { relay } = await makeRelay({ registrationsGlobal: { capacity: 1, refillPerSecond: 0 }, maxAddressRecords: 0 });
-    const first = await registerRaw(relay);
-    expect(first.ready).toMatchObject({ type: 'ready' });
-    first.control.send({ type: 'acme-dns-set', id: 'x', value: 'F'.repeat(43) });
-    expect(await first.control.next()).toMatchObject({ ok: false, error: 'capacity' });
-    const second = await registerRaw(relay);
-    expect(second.ready).toMatchObject({ type: 'error', code: 'rate_limited' });
-    first.control.destroy();
-  });
-
-  test('never-issued registrations expire only once offline; quiet ones expire and their address record is removed within budget, with retry', async () => {
-    const counting = new CountingDns();
-    const { relay, registry } = await makeRelay({}, undefined, { dns: counting });
-    const idle = await registerRaw(relay);
-    const active = await registerRaw(relay);
-    active.control.send({ type: 'acme-dns-set', id: 'a', value: 'G'.repeat(43) });
-    expect(await active.control.next()).toMatchObject({ ok: true });
-    const hostname = `${active.identity.installId}.${ZONE}`;
-    expect(counting.addresses.has(hostname)).toBe(true);
-    expect(registry.addressRecordCount()).toBe(1);
-
-    const day = 24 * 60 * 60_000;
-    // Still connected: a live session is never expired as unactivated.
-    expect(await relay.sweep(Date.now() + day + 60_000)).toEqual([]);
-    expect(registry.get(idle.identity.installId)).toBeDefined();
-    idle.control.destroy();
-    await until(() => !relay.onlineInstalls().includes(idle.identity.installId));
-    expect(await relay.sweep(Date.now() + day + 60_000)).toEqual([idle.identity.installId]);
-    expect(registry.get(idle.identity.installId)).toBeUndefined();
-
-    // Quiet for 90 days: expired, but the address record stays counted until DNS removal succeeds.
-    active.control.destroy();
-    await until(() => relay.onlineInstalls().length === 0);
-    counting.failRemovals = true;
-    expect(await relay.sweep(Date.now() + 91 * day)).toEqual([active.identity.installId]);
-    expect(counting.addresses.has(hostname)).toBe(true);
-    expect(registry.addressRecordCount()).toBe(1);
-    expect(registry.pendingAddressRemovals()).toEqual([active.identity.installId]);
-    counting.failRemovals = false;
-    expect(await relay.sweep(Date.now() + 91 * day)).toEqual([]);
-    expect(counting.addresses.has(hostname)).toBe(false);
-    expect(registry.addressRecordCount()).toBe(0);
-    expect(registry.pendingAddressRemovals()).toEqual([]);
-  });
-
-  test('an install that reclaims its record while the removal is in flight gets the record back', async () => {
-    const counting = new CountingDns();
-    const { relay, registry } = await makeRelay({}, undefined, { dns: counting });
-    const active = await registerRaw(relay);
-    active.control.send({ type: 'acme-dns-set', id: 'a', value: 'J'.repeat(43) });
-    expect(await active.control.next()).toMatchObject({ ok: true });
-    active.control.destroy();
-    await until(() => relay.onlineInstalls().length === 0);
-    const hostname = `${active.identity.installId}.${ZONE}`;
-    counting.duringRemove = () => registry.register(active.identity.installId, active.identity.publicKeySpki);
-    expect(await relay.sweep(Date.now() + 91 * 24 * 60 * 60_000)).toEqual([active.identity.installId]);
-    expect(registry.get(active.identity.installId)?.hasAddressRecord).toBe(true);
-    expect(counting.addresses.has(hostname)).toBe(true);
-    expect(registry.addressRecordCount()).toBe(1);
-    expect(registry.pendingAddressRemovals()).toEqual([]);
-  });
-
-  test('address-record removal waits for DNS budget', async () => {
-    const counting = new CountingDns();
-    const { relay, registry } = await makeRelay({ dnsCallsGlobal: { capacity: 2, refillPerSecond: 0 } }, undefined, { dns: counting });
-    const active = await registerRaw(relay);
-    active.control.send({ type: 'acme-dns-set', id: 'a', value: 'H'.repeat(43) });
-    expect(await active.control.next()).toMatchObject({ ok: true }); // spends the whole budget
-    active.control.destroy();
-    await until(() => relay.onlineInstalls().length === 0);
-    expect(await relay.sweep(Date.now() + 91 * 24 * 60 * 60_000)).toEqual([active.identity.installId]);
-    expect(registry.pendingAddressRemovals()).toEqual([active.identity.installId]);
-    expect(counting.addresses.size).toBe(1);
-  });
-
-  test('the file registry is append-only, survives a torn line, and replays expiry state', async () => {
-    const dir = newStateDir();
-    const path = join(dir, 'registry.jsonl');
-    const identity = loadOrCreateIdentity(newStateDir());
-    const registry = new FileInstallRegistry(path);
-    registry.register(identity.installId, identity.publicKeySpki);
-    registry.activate(identity.installId);
-    registry.markAddressRecord(identity.installId);
-    await registry.flush();
-    const lines = readFileSync(path, 'utf8').trim().split('\n');
-    expect(lines.map((line) => JSON.parse(line).op)).toEqual(['register', 'activate', 'address']);
-    appendFileSync(path, '{"op":"seen","installId":"trunc');
-    const reopened = new FileInstallRegistry(path);
-    expect(reopened.get(identity.installId)).toMatchObject({ installId: identity.installId, hasAddressRecord: true });
-    expect(reopened.get(identity.installId)?.activatedAt).toBeNumber();
-    expect(reopened.addressRecordCount()).toBe(1);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-  });
-});
-
-describe('operator commands (server/admin.ts)', () => {
-  test('revoke ends the install everywhere without a restart, goes through the DNS budget, and sticks', async () => {
-    const dir = newStateDir();
-    const registryPath = join(dir, 'registry.jsonl');
-    const env = { RELAY_REGISTRY_PATH: registryPath, RELAY_ADMIN_SOCKET: join(dir, 'admin.sock') };
-    const { relay, registry } = await makeRelay({}, undefined, { registry: new FileInstallRegistry(registryPath) });
-    const admin = await startAdminSocket(env.RELAY_ADMIN_SOCKET, relay);
-    try {
-      const { hostname } = await connectInstall(relay);
-      const installId = hostname.split('.')[0]!;
-      expect(dns.addresses.has(hostname)).toBe(true);
-      expect(statSync(env.RELAY_ADMIN_SOCKET).mode & 0o777).toBe(0o600);
-
-      // Status: counts only, never an install id.
-      const before = await runAdmin(['status'], env);
-      expect(before.code).toBe(0);
-      expect(before.out).toContain('Registered installs:        1 (1 have requested a certificate)');
-      expect(before.out).toContain('Online now:                 1');
-      expect(before.out).not.toContain(installId);
-
-      const revoked = await runAdmin(['revoke', installId], env);
-      expect(revoked).toEqual({
-        code: 0,
-        out: `Revoked ${installId}. Its registration was removed. Its session was ended. Its DNS address record was removed.\n`,
-      });
-      expect(dns.addresses.has(hostname)).toBe(false);
-      await until(() => relay.onlineInstalls().length === 0);
-      // The install does not simply re-register, though its reconnect backoff here is 50 ms.
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      expect(registry.get(installId)).toBeUndefined();
-      expect(registry.isRevoked(installId)).toBe(true);
-      expect(await rawExchange(relay.port, await captureClientHello(hostname))).toEqual(tlsAlertRecord(TLS_ALERT.unrecognizedName));
-      const after = await runAdmin(['status'], env);
-      expect(after.out).toContain('Registered installs:        0');
-      expect(after.out).toContain('Revoked installs:           1');
-      expect((await runAdmin(['revoke', installId], env)).out).toBe(`${installId} was already revoked.\n`);
-
-      // It survives a relay restart (the registry log carries it), and restore lifts it.
-      await registry.flush();
-      expect(new FileInstallRegistry(registryPath).isRevoked(installId)).toBe(true);
-      expect((await runAdmin(['restore', installId], env)).out).toBe(`Restored ${installId}; it may register again.\n`);
-      expect(registry.isRevoked(installId)).toBe(false);
-    } finally {
-      await admin.close();
-    }
-  });
-
-  test('a revoked install is refused at registration, and a revoke without DNS budget queues the record', async () => {
-    const counting = new CountingDns();
-    const { relay, registry } = await makeRelay({ dnsCallsGlobal: { capacity: 2, refillPerSecond: 0 } }, undefined, { dns: counting });
-    const first = await registerRaw(relay);
-    first.control.send({ type: 'acme-dns-set', id: 'a', value: 'H'.repeat(43) });
-    expect(await first.control.next()).toMatchObject({ ok: true }); // spends the whole DNS budget
-    const result = await relay.revoke(first.identity.installId);
-    expect(result).toEqual({ installId: first.identity.installId, revoked: true, wasRegistered: true, wasOnline: true, addressRecord: 'pending' });
-    expect(await first.control.next()).toMatchObject({ type: 'error', code: 'revoked' });
-    expect(registry.pendingAddressRemovals()).toEqual([first.identity.installId]);
-    expect(counting.addresses.size).toBe(1);
-    // Registering again with the same key is refused.
-    const control = openControl(relay.port, CONTROL_HOST, ca.cert);
-    const challenge = await control.next();
-    control.send({
-      type: 'register',
-      v: PROTOCOL_VERSION,
-      installId: first.identity.installId,
-      publicKey: first.identity.publicKeySpki,
-      sig: signInstallMessage(first.identity.privateKey, 'register', String(challenge.nonce), first.identity.installId),
-    });
-    expect(await control.next()).toMatchObject({ type: 'error', code: 'revoked' });
-    expect(registry.get(first.identity.installId)).toBeUndefined();
-  });
-
-  test('with the relay stopped, revoke is recorded in the log and status reads it', async () => {
-    const dir = newStateDir();
-    const registryPath = join(dir, 'registry.jsonl');
-    const env = { RELAY_REGISTRY_PATH: registryPath, RELAY_ADMIN_SOCKET: join(dir, 'admin.sock') };
-    const identity = loadOrCreateIdentity(newStateDir());
-    const registry = new FileInstallRegistry(registryPath);
-    registry.register(identity.installId, identity.publicKeySpki);
-    registry.markAddressRecord(identity.installId);
-    await registry.flush();
-    appendFileSync(registryPath, '{"op":"seen","installId":"trunc'); // a torn final line
-    const out = await runAdmin(['revoke', identity.installId], env);
-    expect(out.code).toBe(0);
-    expect(out.out).toContain('The relay is not running');
-    const status = await runAdmin(['status'], env);
-    expect(status.out).toContain('Relay not running');
-    expect(status.out).toContain('Registered installs:        0');
-    expect(status.out).toContain('Revoked installs:           1');
-    expect(status.out).toContain('(1 queued for removal)');
-    const reopened = new FileInstallRegistry(registryPath);
-    expect(reopened.isRevoked(identity.installId)).toBe(true);
-    expect(reopened.pendingAddressRemovals()).toEqual([identity.installId]);
-    expect(readRegistrySnapshot(registryPath).counts().revoked).toBe(1);
-    expect((await runAdmin(['restore', identity.installId], env)).code).toBe(1);
-  });
-
-  test('offline revoke writes the log only as its owner, and a starting relay is never mistaken for a stopped one', async () => {
-    const dir = newStateDir();
-    const registryPath = join(dir, 'registry.jsonl');
-    const env = { RELAY_REGISTRY_PATH: registryPath, RELAY_ADMIN_SOCKET: join(dir, 'admin.sock') };
-    const identity = loadOrCreateIdentity(newStateDir());
-    const registry = new FileInstallRegistry(registryPath);
-    registry.register(identity.installId, identity.publicKeySpki);
-    await registry.flush();
-    const before = readFileSync(registryPath, 'utf8');
-    const ownUid = process.getuid!();
-    // Another user (root, say) is refused rather than creating or extending a log it would own.
-    const other = await runAdmin(['revoke', identity.installId], env, ownUid + 1);
-    expect(other.code).toBe(1);
-    expect(other.out).toContain('service user');
-    expect(readFileSync(registryPath, 'utf8')).toBe(before);
-    // A relay that holds its socket but is still starting answers "starting"; nothing is appended.
-    const admin = await startAdminSocket(env.RELAY_ADMIN_SOCKET, () => undefined);
-    try {
-      const starting = await runAdmin(['revoke', identity.installId], env, ownUid);
-      expect(starting.code).toBe(1);
-      expect(starting.out).toContain('starting');
-      expect(readFileSync(registryPath, 'utf8')).toBe(before);
-    } finally {
-      await admin.close();
-    }
-    // Missing state directory: nothing is created.
-    const missing = await runAdmin(['revoke', identity.installId], { RELAY_REGISTRY_PATH: join(dir, 'absent', 'registry.jsonl'), RELAY_ADMIN_SOCKET: join(dir, 'none.sock') }, ownUid);
-    expect(missing.code).toBe(1);
-  });
-
-  test('the command refuses malformed input', async () => {
-    expect((await runAdmin([], {})).code).toBe(2);
-    expect((await runAdmin(['revoke'], {})).code).toBe(2);
-    expect((await runAdmin(['status', 'x'], {})).code).toBe(2);
-    expect((await runAdmin(['revoke', 'NOT-AN-ID'], {})).code).toBe(2);
-  });
-});
-
-describe('before the ClientHello', () => {
-  test('a hello that never finishes times out; pre-hello connections are capped per address', async () => {
-    const { relay } = await makeRelay({ clientHelloTimeoutMs: 300, maxPreHelloPerAddress: 2 });
-    const a = holdOpen(relay.port);
-    const b = holdOpen(relay.port, Buffer.from([0x16, 0x03, 0x01]));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const c = holdOpen(relay.port);
-    const third = await c.closed;
-    expect(third.afterMs).toBeLessThan(250);
-    const [first, second] = await Promise.all([a.closed, b.closed]);
-    for (const result of [first, second]) {
-      expect(result.afterMs).toBeGreaterThanOrEqual(250);
-      expect(result.received.length).toBe(0);
-    }
-  });
-
-  test('oversized, SNI-less, multi-name, and non-TLS hellos get unrecognized_name', async () => {
-    const { relay } = await makeRelay({ maxClientHelloBytes: 64 });
-    const alert = tlsAlertRecord(TLS_ALERT.unrecognizedName);
-    expect(await rawExchange(relay.port, await captureClientHello(`${'b'.repeat(32)}.${ZONE}`))).toEqual(alert);
-    const { relay: normal } = await makeRelay();
-    expect(await rawExchange(normal.port, await captureClientHello(''))).toEqual(alert);
-    expect(await rawExchange(normal.port, syntheticClientHello([CONTROL_HOST, `${'c'.repeat(32)}.${ZONE}`]))).toEqual(alert);
-    expect(await rawExchange(normal.port, Buffer.from('GET / HTTP/1.1\r\nHost: x\r\n\r\n'))).toEqual(alert);
-  });
-
-  test('a byte-at-a-time hello is still routed', async () => {
-    const { relay } = await makeRelay();
-    const reply = await trickle(relay.port, await captureClientHello(`${'d'.repeat(32)}.${ZONE}`));
-    expect(reply).toEqual(tlsAlertRecord(TLS_ALERT.unrecognizedName));
-  });
-
-  test('random garbage never takes the relay down', async () => {
-    const { relay } = await makeRelay({ clientHelloTimeoutMs: 300, maxPreHelloPerAddress: 100 });
-    const { hostname } = await connectInstall(relay);
-    const hello = await captureClientHello(hostname);
-    await Promise.all(
-      Array.from({ length: 60 }, (_, i) => {
-        const mutated = Buffer.from(hello);
-        for (let j = 0; j < 8; j += 1) mutated[Math.floor(Math.random() * mutated.length)] = Math.floor(Math.random() * 256);
-        return rawExchange(relay.port, i % 2 ? mutated : randomBytes(1 + Math.floor(Math.random() * 600)), 3_000).catch(() => {});
-      }),
+  test('an unroutable or unknown credential gets 401 with the resource metadata pointer', async () => {
+    const relay = await makeRelay();
+    const stranger = loadOrCreateIdentity(tempDir());
+    const unknown = await mcpPost(relay, mintCredential('access', stranger.installId), rpc('initialize'));
+    expect(unknown.status).toBe(401);
+    expect(unknown.headers.get('www-authenticate')).toBe(
+      `Bearer realm="olympus", resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", `
+        + 'error="invalid_token", error_description="The connection token is not valid or has been revoked."',
     );
-    const response = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp' });
-    expect(response.status).toBe(200);
+    const garbage = await mcpPost(relay, 'olympus_at_notroutable', rpc('initialize'));
+    expect(garbage.status).toBe(401);
+    expect(garbage.headers.get('www-authenticate')).toContain('resource_metadata=');
+    expect((await fetch(`${relay.url}/dashboard`)).status).toBe(404);
+  });
+
+  test('a caller with no token gets the relay\'s not-connected surface and never reaches an engine', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    await connectInstall(relay, worker);
+    const anonymous = (body: string) => fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    const init = await (await anonymous(rpc('initialize', { protocolVersion: '2025-11-25' }))).json();
+    expect(init.result.protocolVersion).toBe('2025-11-25');
+    expect(init.result.instructions).toBe(NOT_CONNECTED_MESSAGE);
+    const list = await (await anonymous(rpc('tools/list'))).json();
+    // The engine's full ChatGPT tool set, so ChatGPT's model can pick an
+    // answer tool and so start linking.
+    expect(list.result.tools).toEqual(generatedSurface.tools);
+    expect(list.result.tools.map((tool: { name: string }) => tool.name))
+      .toEqual([
+        'olympus_dashboard',
+        'olympus_search',
+        'source_index_status',
+        'source_answer',
+        'source_answer_result',
+        'ask_anonymously',
+        'olympus_connect_source',
+        'olympus_scope_list',
+        'olympus_scope_set',
+        'olympus_disconnect_source',
+        'olympus_model_set',
+        'olympus_model_retry',
+        'olympus_privacy_get',
+        'olympus_privacy_set',
+        'olympus_sync_source',
+      ]);
+    for (const tool of list.result.tools) {
+      expect(tool.securitySchemes).toEqual(tool.name === 'olympus_dashboard'
+        ? [{ type: 'noauth' }, { type: 'oauth2', scopes: [] }]
+        : [{ type: 'oauth2', scopes: [] }]);
+    }
+    const resources = await (await anonymous(rpc('resources/list'))).json();
+    // The engine advertises content-versioned URIs (`<base>?v=<hash>`).
+    expect(resources.result.resources).toEqual(generatedSurface.resources);
+    expect(resources.result.resources).toEqual([
+      { uri: expect.stringMatching(/^ui:\/\/olympus\/dashboard\?v=[0-9a-f]{12}$/), name: 'Olympus dashboard', mimeType: 'text/html;profile=mcp-app' },
+      { uri: expect.stringMatching(/^ui:\/\/olympus\/private-answer\?v=[0-9a-f]{12}$/), name: 'Olympus private answer', mimeType: 'text/html;profile=mcp-app' },
+    ]);
+    const panel = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/private-answer' }))).json();
+    expect(panel.result.contents).toEqual(generatedPrivateAnswer.contents);
+    const resource = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/dashboard' }))).json();
+    // The dashboard lane's real bundle, not a placeholder.
+    expect(resource.result.contents).toEqual(generatedDashboard.contents);
+    expect(resource.result.contents[0].mimeType).toBe('text/html;profile=mcp-app');
+    expect(resource.result.contents[0].text).toContain('not_connected');
+    // Every advertised (versioned) URI reads the same bundle; an unknown one does not.
+    for (const advertised of generatedSurface.resources as { uri: string }[]) {
+      const read = await (await anonymous(rpc('resources/read', { uri: advertised.uri }))).json();
+      expect(read.result.contents.length).toBe(1);
+    }
+    const unknown = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/dashboard?v=zzz' }))).json();
+    expect(unknown.error.code).toBe(-32002);
+    const dashboard = await (await anonymous(rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
+    expect(dashboard.result.structuredContent).toMatchObject({
+      v: 1,
+      connection: { state: 'not_connected', action: { id: 'connect' }, installHref: 'https://olympusplugin.ai/install/' },
+      needsYou: [],
+      sources: [],
+    });
+    expect(dashboard.result.content).toEqual([{ type: 'text', text: NOT_CONNECTED_MESSAGE }]);
+    // The tool's own UI metadata, plus the same linking challenge the
+    // protected tools send, so ChatGPT offers Connect beside the dashboard.
+    expect(dashboard.result._meta).toEqual({ ...generatedSurface.tools[0]!._meta, 'mcp/www_authenticate': LINKING_CHALLENGE });
+    expect(dashboard.result.isError).toBeUndefined();
+    // Every oauth2 tool, called without a token: the documented linking
+    // trigger (isError + _meta["mcp/www_authenticate"]) on an HTTP 200.
+    for (const name of ['source_answer', 'source_answer_result', 'source_index_status']) {
+      const call = await anonymous(rpc('tools/call', { name, arguments: { question: 'x', job_id: 'j' } }));
+      expect(call.status).toBe(200);
+      const engineTool = await call.json();
+      expect(engineTool.result.isError).toBe(true);
+      expect(engineTool.result._meta['mcp/www_authenticate']).toEqual(LINKING_CHALLENGE);
+    }
+    expect((await fetch(`${relay.url}/mcp`)).status).toBe(405);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  test('the domain verification token is served when configured, else 404', async () => {
+    let token: string | undefined;
+    const relay = await startRelay({
+      publicHost: PUBLIC_HOST,
+      registry: new MemoryInstallRegistry(),
+      listen: { host: '127.0.0.1', port: 0 },
+      appsChallenge: () => token,
+    });
+    cleanups.push(() => relay.close());
+    const path = `${relay.url}/.well-known/openai-apps-challenge`;
+    expect((await fetch(path)).status).toBe(404);
+    token = '  abc123-challenge\n';
+    const served = await fetch(path);
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe('abc123-challenge');
+    expect((await fetch(`${(await makeRelay()).url}/.well-known/openai-apps-challenge`)).status).toBe(404);
+  });
+
+  test('static OAuth documents, health and the authorize bridge are served by the relay itself', async () => {
+    const relay = await makeRelay();
+    const prm = await (await fetch(`${relay.url}/.well-known/oauth-protected-resource/mcp`)).json();
+    expect(prm).toEqual({
+      resource: `https://${PUBLIC_HOST}/mcp`,
+      authorization_servers: [`https://${PUBLIC_HOST}`],
+      bearer_methods_supported: ['header'],
+      resource_name: 'Olympus',
+    });
+    const as = (await (await fetch(`${relay.url}/.well-known/oauth-authorization-server`)).json()) as Record<string, unknown>;
+    expect(as.issuer).toBe(`https://${PUBLIC_HOST}`);
+    expect(as.token_endpoint).toBe(`https://${PUBLIC_HOST}/connect/token`);
+    expect(as.registration_endpoint).toBeUndefined();
+    expect((await fetch(`${relay.url}/healthz`)).status).toBe(200);
+
+    const query = '?response_type=code&client_id=https%3A%2F%2Fchatgpt.com%2Foauth%2Fclient.json&state=a"<b';
+    const bridge = await fetch(`${relay.url}/connect/authorize${query}`);
+    expect(bridge.status).toBe(200);
+    const html = await bridge.text();
+    expect(html).toContain('href="http://127.0.0.1:8010/connect/authorize?response_type=code&amp;client_id=https%3A%2F%2Fchatgpt.com%2Foauth%2Fclient.json&amp;state=a%22%3Cb"');
+    expect(html).toContain('Install Olympus');
+    expect(bridge.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
   });
 });
 
-describe('flow control and client limits', () => {
-  test('a large response through a slow reader arrives intact (pause/resume backpressure)', async () => {
-    const { relay } = await makeRelay();
-    const { hostname } = await connectInstall(relay);
-    const body = await new Promise<Buffer>((resolve, reject) => {
-      const socket = tls.connect({ host: '127.0.0.1', port: relay.port, servername: hostname, ca: ca.cert }, () => {
-        socket.write(`GET /mcp/big HTTP/1.1\r\nHost: ${hostname}\r\nConnection: close\r\n\r\n`);
-      });
-      const chunks: Buffer[] = [];
-      let received = 0;
-      socket.on('data', (chunk: Buffer) => {
-        chunks.push(chunk);
-        received += chunk.length;
-        if (received % 5 === 0 || chunks.length % 16 === 0) {
-          socket.pause();
-          setTimeout(() => socket.resume(), 5);
-        }
-      });
-      socket.on('error', reject);
-      socket.on('end', () => {
-        const all = Buffer.concat(chunks);
-        resolve(all.subarray(all.indexOf('\r\n\r\n') + 4));
-      });
+describe('demo sign-in', () => {
+  test('without a demo install the bridge offers none and the path is 404', async () => {
+    const relay = await makeRelay();
+    expect(await (await fetch(`${relay.url}/connect/authorize?state=s`)).text()).not.toContain('demo');
+    expect((await fetch(`${relay.url}/connect/demo/authorize?state=s`)).status).toBe(404);
+  });
+
+  test('routes only to the configured demo install, and only a demo install forwards it', async () => {
+    const demoWorker = fakeWorker('demo');
+    const realWorker = fakeWorker('real');
+    cleanups.push(demoWorker.stop, realWorker.stop);
+    const demoIdentity = loadOrCreateIdentity(tempDir());
+    const relay = await makeRelay({}, new MemoryInstallRegistry(), { demoInstallId: demoIdentity.installId });
+    await connectInstall(relay, demoWorker, demoIdentity, [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH]);
+    const real = await connectInstall(relay, realWorker);
+
+    const bridge = await (await fetch(`${relay.url}/connect/authorize?state=s`)).text();
+    expect(bridge).toContain('href="/connect/demo/authorize?state=s"');
+    const page = await fetch(`${relay.url}/connect/demo/authorize?state=s`, { headers: { authorization: `Bearer ${mintCredential('access', real.identity.installId)}` } });
+    expect(await page.json()).toMatchObject({ worker: 'demo', path: '/connect/demo/authorize' });
+    expect(demoWorker.requests.at(-1)!.path).toBe('/connect/demo/authorize?state=s');
+    expect(demoWorker.requests.at(-1)!.headers['x-olympus-relay']).toBeDefined();
+    const posted = await fetch(`${relay.url}/connect/demo/authorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: `https://${PUBLIC_HOST}` },
+      body: 'request_id=x&csrf=y',
     });
-    expect(body.length).toBe(BIG.length);
-    expect(createHash('sha256').update(body).digest('hex')).toBe(createHash('sha256').update(BIG).digest('hex'));
+    expect(posted.status).toBe(200);
+    expect(demoWorker.requests.at(-1)!.headers.origin).toBe(`https://${PUBLIC_HOST}`);
+    expect(realWorker.requests).toHaveLength(0);
   });
 
-  test('the relay cannot make the install open more than its data-connection cap', async () => {
-    const { relay } = await makeRelay({ attachTimeoutMs: 400 });
-    const { handle, hostname } = await connectInstall(relay, newStateDir(), { maxDataConnections: 1 });
-    const held = tls.connect({ host: '127.0.0.1', port: relay.port, servername: hostname, ca: ca.cert });
-    held.on('error', () => {});
-    await new Promise((resolve) => held.once('secureConnect', resolve));
-    expect(handle.client.activeDataConnections).toBe(1);
-    const hello = await captureClientHello(hostname);
-    const refused = await Promise.all([rawExchange(relay.port, hello), rawExchange(relay.port, hello)]);
-    for (const reply of refused) expect(reply).toEqual(tlsAlertRecord(TLS_ALERT.internalError));
-    expect(handle.client.activeDataConnections).toBe(1);
-    held.destroy();
+  test('a relay pointed at a non-demo install still cannot reach its demo path', async () => {
+    const worker = fakeWorker('real');
+    cleanups.push(worker.stop);
+    const identity = loadOrCreateIdentity(tempDir());
+    const relay = await makeRelay({}, new MemoryInstallRegistry(), { demoInstallId: identity.installId });
+    await connectInstall(relay, worker, identity);
+    const response = await fetch(`${relay.url}/connect/demo/authorize?state=s`);
+    expect(response.status).toBe(404);
+    expect(worker.requests).toHaveLength(0);
   });
+});
 
-  test('the client refuses a ready message that names another hostname', async () => {
-    const tlsMaterial = ca.issue(CONTROL_HOST);
-    const fake = tls.createServer({ key: tlsMaterial.key, cert: tlsMaterial.cert }, (socket) => {
-      socket.write(`${JSON.stringify({ type: 'challenge', v: PROTOCOL_VERSION, nonce: 'n' })}\n`);
-      socket.once('data', () => socket.write(`${JSON.stringify({ type: 'ready', installId: 'x', hostname: 'victim.example.com' })}\n`));
-      socket.on('error', () => {});
+describe('streaming and cancellation', () => {
+  test('a Server-Sent Events response streams through before it ends, with cookies dropped', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const response = await fetch(`${relay.url}/mcp`, {
+      headers: { authorization: `Bearer ${mintCredential('access', a.identity.installId)}`, accept: 'text/event-stream' },
     });
-    await new Promise<void>((resolve) => fake.listen(0, '127.0.0.1', resolve));
-    const statuses: string[] = [];
-    const client = new RelayClient({
-      relayHost: '127.0.0.1',
-      relayPort: (fake.address() as AddressInfo).port,
-      controlServerName: CONTROL_HOST,
-      zone: ZONE,
-      ca: ca.cert,
-      identity: loadOrCreateIdentity(newStateDir()),
-      backoff: { minMs: 50, maxMs: 50 },
-      onStatus: (status) => statuses.push(status.state === 'offline' ? `offline:${status.reason}` : status.state),
-    });
-    client.start();
-    await until(() => statuses.filter((status) => status.startsWith('offline')).length >= 2);
-    await client.stop();
-    fake.close();
-    expect(statuses).not.toContain('online');
-    expect(statuses).toContain('offline:relay announced an unexpected hostname');
-    expect(client.hostname).toBeUndefined();
-  });
-
-  test('one address cannot hold all of an install\'s slots, and stalled handshakes are closed', async () => {
-    const { relay } = await makeRelay({ maxConcurrentPerInstallPerAddress: 3, newConnectionsPerInstall: { capacity: 100, refillPerSecond: 100 } });
-    const { handle, hostname } = await connectInstall(relay, newStateDir(), { firstRequestTimeoutMs: 400 });
-    const hello = await captureClientHello(hostname);
-    // Three stalled ClientHellos from one address fill that address's share...
-    const stalled = [holdOpen(relay.port, hello), holdOpen(relay.port, hello), holdOpen(relay.port, hello)];
-    await until(() => handle.client.activeDataConnections === 3);
-    // ...the fourth is refused at once...
-    expect(await rawExchange(relay.port, hello)).toEqual(tlsAlertRecord(TLS_ALERT.internalError));
-    // ...and the stalled ones are closed by the install's first-request deadline, freeing the slots.
-    for (const result of await Promise.all(stalled.map((entry) => entry.closed))) {
-      expect(result.afterMs).toBeLessThan(3_000);
-    }
-    await until(() => handle.client.activeDataConnections === 0);
-    const response = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp' });
-    expect(response.status).toBe(200);
-  });
-
-  test('an idle keep-alive connection is closed (portable across Node and Bun), but a slow in-flight response is not', async () => {
-    const { relay } = await makeRelay();
-    const { handle, hostname } = await connectInstall(relay, newStateDir(), { idleTimeoutMs: 400 });
+    expect(response.headers.get('content-type')).toBe('text/event-stream');
+    expect(response.headers.get('set-cookie')).toBeNull();
+    const reader = response.body!.getReader();
     const started = Date.now();
-    const closedAfter = await new Promise<number>((resolve, reject) => {
-      const socket = tls.connect({ host: '127.0.0.1', port: relay.port, servername: hostname, ca: ca.cert }, () => {
-        socket.write(`GET /mcp HTTP/1.1\r\nHost: ${hostname}\r\nConnection: keep-alive\r\n\r\n`);
-      });
-      socket.on('data', () => {});
-      socket.on('error', reject);
-      socket.on('close', () => resolve(Date.now() - started));
+    const first = new TextDecoder().decode((await reader.read()).value);
+    expect(first).toContain('event-1');
+    // The first event arrives before the later ones are even produced.
+    expect(Date.now() - started).toBeLessThan(140);
+    let rest = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += new TextDecoder().decode(value);
+    }
+    expect(rest).toContain('event-3');
+  });
+
+  test('a caller that goes away cancels the loopback request', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const controller = new AbortController();
+    const pending = mcpPost(relay, mintCredential('access', a.identity.installId), rpc('tools/call', { name: 'slow' }), { signal: controller.signal });
+    await until(() => worker.requests.length === 1);
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    await until(() => worker.aborted.length === 1);
+    await until(() => a.client.activeRequests === 0);
+    expect(relay.status().inFlight).toBe(0);
+  });
+});
+
+describe('offline fallback', () => {
+  test('an authorized request for a registered install with no session gets the relay\'s own MCP answers', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    await a.client.stop();
+    await until(() => relay.onlineInstalls().length === 0);
+    const token = mintCredential('access', a.identity.installId);
+
+    const init = await (await mcpPost(relay, token, rpc('initialize', { protocolVersion: '2025-06-18' }))).json();
+    expect(init.result.protocolVersion).toBe('2025-06-18');
+    const list = await (await mcpPost(relay, token, rpc('tools/list'))).json();
+    expect(list.result.tools).toEqual(generatedSurface.tools);
+    const resource = await (await mcpPost(relay, token, rpc('resources/read', { uri: 'ui://olympus/dashboard' }))).json();
+    expect(resource.result.contents).toEqual(generatedDashboard.contents);
+    const dashboard = await (await mcpPost(relay, token, rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
+    expect(dashboard.result.structuredContent).toMatchObject({
+      v: 1,
+      connection: { state: 'mac_offline', action: { id: 'wake_mac', href: 'https://olympusplugin.ai/help/mac-offline/' } },
+      needsYou: [],
+      sources: [],
+      models: { embedding: { kind: 'built_in', state: 'downloading' } },
     });
-    expect(closedAfter).toBeGreaterThanOrEqual(400);
-    expect(closedAfter).toBeLessThan(3_000);
-    await until(() => handle.client.activeDataConnections === 0);
-    const slow = await agentRequest({ port: relay.port, servername: hostname, ca: ca.cert, path: '/mcp/slow' });
-    expect(slow.status).toBe(200);
-    expect(slow.body).toBe('slow answer');
+    expect(typeof dashboard.result.structuredContent.connection.lastSeenAt).toBe('string');
+    expect(dashboard.result._meta).toEqual(generatedSurface.tools[0]!._meta);
+    const other = await (await mcpPost(relay, token, rpc('tools/call', { name: 'source_answer', arguments: {} }))).json();
+    expect(other.error.message).toContain('Your Mac is offline');
+    const notification = await mcpPost(relay, token, JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }));
+    expect(notification.status).toBe(202);
+    expect(worker.requests).toHaveLength(0);
+  });
+});
+
+describe('private answer collection', () => {
+  const PANEL = 'https://olympus.web-sandbox.oaiusercontent.com';
+  const collect = (relay: RelayHandle, jobId: string, init: { origin?: string; body?: string; method?: string } = {}) =>
+    fetch(`${relay.url}/private/${jobId}`, {
+      method: init.method ?? 'POST',
+      headers: { 'content-type': 'application/json', ...(init.origin !== undefined ? { origin: init.origin } : { origin: PANEL }) },
+      ...(init.method === 'OPTIONS' || init.method === 'GET' ? {} : { body: init.body ?? JSON.stringify({ v: 1, publicKey: 'k' }) }),
+    });
+
+  test('routes a job id to the install it names, with CORS for ChatGPT widget origins only', async () => {
+    logLines.length = 0;
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    const a = await connectInstall(relay, workerA);
+    await connectInstall(relay, workerB);
+    const jobId = mintCredential('private', a.identity.installId);
+
+    const preflight = await fetch(`${relay.url}/private/${jobId}`, {
+      method: 'OPTIONS',
+      headers: { origin: PANEL, 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(preflight.headers.get('access-control-allow-methods')).toContain('POST');
+    expect(preflight.headers.get('access-control-allow-headers')).toBe('content-type');
+    const badPreflight = await fetch(`${relay.url}/private/${jobId}`, { method: 'OPTIONS', headers: { origin: 'https://evil.example' } });
+    expect(badPreflight.status).toBe(403);
+    expect(badPreflight.headers.get('access-control-allow-origin')).toBeNull();
+
+    const response = await collect(relay, jobId);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(response.headers.get('vary')).toBe('Origin');
+    expect(await response.json()).toMatchObject({ worker: 'A', path: `/private/${jobId}` });
+    expect(workerA.requests[0]!.headers['x-olympus-relay']).toBe(a.secret);
+    expect(workerA.requests[0]!.headers.origin).toBe(PANEL);
+    expect(workerB.requests).toHaveLength(0);
+
+    // The relay's own origin only names the panel (`_meta.ui.domain`); ChatGPT
+    // never serves it from there, and install answers on it are sandboxed.
+    for (const origin of [`https://${PUBLIC_HOST}`, 'https://evil.example', 'null', '', 'https://x.y.web-sandbox.oaiusercontent.com']) {
+      const refused = await collect(relay, jobId, { origin });
+      expect(refused.status, origin).toBe(403);
+      expect(refused.headers.get('access-control-allow-origin')).toBeNull();
+    }
+    expect((await collect(relay, jobId, { method: 'GET' })).status).toBe(405);
+    expect(workerA.requests).toHaveLength(1);
+
+    // Wrong shapes and unknown installs never reach any engine.
+    expect((await collect(relay, 'nope')).status).toBe(404);
+    expect((await collect(relay, mintCredential('access', a.identity.installId))).status).toBe(404);
+    expect((await fetch(`${relay.url}/private/${jobId}?x=1`, { method: 'POST', headers: { origin: PANEL } })).status).toBe(404);
+    const unknown = await collect(relay, mintCredential('private', 'c'.repeat(32)));
+    expect(unknown.status).toBe(410);
+    expect(await unknown.json()).toEqual({ status: 'gone' });
+    expect(unknown.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect((await collect(relay, jobId, { body: 'x'.repeat(600) })).status).toBe(413);
+    expect(workerA.requests).toHaveLength(1);
+    expect(workerB.requests).toHaveLength(0);
+
+    const logs = logLines.join('\n');
+    expect(logs).not.toContain(jobId.split('.')[2]!);
+    expect(logs).not.toContain(a.identity.installId);
+  });
+
+  test('a source-open request (/private/<job id>/open) is routed and answers CORS like the collection', async () => {
+    logLines.length = 0;
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    const a = await connectInstall(relay, workerA);
+    await connectInstall(relay, workerB);
+    const jobId = mintCredential('private', a.identity.installId);
+    const openPath = `${relay.url}/private/${jobId}/open`;
+    const preflight = await fetch(openPath, {
+      method: 'OPTIONS',
+      headers: { origin: PANEL, 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(preflight.headers.get('access-control-allow-methods')).toContain('POST');
+    expect(preflight.headers.get('access-control-allow-headers')).toBe('content-type');
+    expect((await fetch(openPath, { method: 'OPTIONS', headers: { origin: 'https://evil.example' } })).status).toBe(403);
+
+    const open = (origin: string) => fetch(openPath, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ v: 1, open: 'A'.repeat(43) }),
+    });
+    const response = await open(PANEL);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(await response.json()).toMatchObject({ worker: 'A', path: `/private/${jobId}/open` });
+    expect(workerB.requests).toHaveLength(0);
+    const refused = await open('https://evil.example');
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get('access-control-allow-origin')).toBeNull();
+    // Nothing else under the job path reaches an engine.
+    for (const suffix of ['/open/', '/open/x', '/opened', '/open?x=1']) {
+      expect((await fetch(`${relay.url}/private/${jobId}${suffix}`, { method: 'POST', headers: { origin: PANEL }, body: '{}' })).status, suffix).toBe(404);
+    }
+    expect(workerA.requests).toHaveLength(1);
+    expect(logLines.join('\n')).not.toContain(jobId.split('.')[2]!);
+  });
+
+  test('an offline Mac answers mac_offline, with CORS, so the panel can say so', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    await a.client.stop();
+    await until(() => relay.onlineInstalls().length === 0);
+    const response = await collect(relay, mintCredential('private', a.identity.installId));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ status: 'mac_offline' });
+    expect(response.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  test('collections are rate limited per address', async () => {
+    const relay = await makeRelay({ privateFetchesPerIp: { capacity: 2, refillPerSecond: 0.001 } });
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const jobId = mintCredential('private', a.identity.installId);
+    expect((await collect(relay, jobId)).status).toBe(200);
+    expect((await collect(relay, jobId)).status).toBe(200);
+    const limited = await collect(relay, jobId);
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ status: 'rate_limited' });
+    expect(limited.headers.get('access-control-allow-origin')).toBe(PANEL);
+    expect(worker.requests).toHaveLength(2);
+  });
+});
+
+describe('limits', () => {
+  test('request bodies over the cap are refused before they reach the install', async () => {
+    const relay = await makeRelay({ maxRequestBodyBytes: 1024 });
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const response = await mcpPost(relay, mintCredential('access', a.identity.installId), JSON.stringify({ pad: 'x'.repeat(4096) }));
+    expect(response.status).toBe(413);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  test('responses over the cap are cut off', async () => {
+    const relay = await makeRelay({ maxResponseBodyBytes: 100 * 1024 });
+    const worker = fakeWorker('A', { bigBodyBytes: 512 * 1024 });
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const response = await mcpPost(relay, mintCredential('access', a.identity.installId), rpc('tools/call', { name: 'big' }));
+    expect(response.status).toBe(200);
+    // Cut off at the cap (plus at most one chunk in flight), never delivered whole.
+    const text = await response.text().catch(() => '');
+    expect(text.length).toBeLessThan(100 * 1024 + 64 * 1024);
+  });
+
+  test('concurrency is capped per install, with the last slot reserved for the dashboard tool', async () => {
+    const relay = await makeRelay({ concurrentPerInstall: 2 });
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const token = mintCredential('access', a.identity.installId);
+    // The engine confirms the credential once; from then on it takes the owner lane.
+    expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(200);
+    const controller = new AbortController();
+    const slow = mcpPost(relay, token, rpc('tools/call', { name: 'slow' }), { signal: controller.signal }).catch(() => undefined);
+    await until(() => worker.requests.length === 2);
+    const busy = await mcpPost(relay, token, rpc('tools/list'));
+    expect(busy.status).toBe(503);
+    const dashboard = await mcpPost(relay, token, rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }));
+    expect(dashboard.status).toBe(200);
+    expect(await dashboard.json()).toMatchObject({ worker: 'A' });
+    controller.abort();
+    await slow;
+  });
+
+  test('requests per install are rate limited', async () => {
+    const relay = await makeRelay({ requestsPerInstall: { capacity: 2, refillPerSecond: 0.001 } });
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const token = mintCredential('access', a.identity.installId);
+    // The first request confirms the credential (unverified lane, paid by the address).
+    expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(200);
+    expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(200);
+    expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(200);
+    expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(429);
+  });
+
+  test('registrations and sessions are capped per address', async () => {
+    const relay = await makeRelay({ registrationsPerIp: { capacity: 1, refillPerSecond: 0.0001 } });
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    await connectInstall(relay, worker);
+    const statuses: RelayClientStatus[] = [];
+    const second = new RelayClient({
+      relayHost: PUBLIC_HOST,
+      relayUrl: `ws://127.0.0.1:${relay.port}/v2/connect`,
+      identity: loadOrCreateIdentity(tempDir()),
+      target: worker.url,
+      relaySecret: 'x'.repeat(43),
+      backoff: { minMs: 5_000, maxMs: 5_000 },
+      onStatus: (status) => statuses.push(status),
+    });
+    second.start();
+    cleanups.push(() => second.stop());
+    await until(() => statuses.some((status) => status.state === 'offline' && status.reason.includes('too many registrations')));
+  });
+});
+
+describe('sessions and revocation', () => {
+  test('a forged hello is refused and names no session', async () => {
+    const relay = await makeRelay();
+    const victim = loadOrCreateIdentity(tempDir());
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    await connectInstall(relay, worker, victim);
+    const impostorKey = generateKeyPairSync('ed25519').privateKey;
+    const socket = new WebSocket(`ws://127.0.0.1:${relay.port}/v2/connect`);
+    const messages: string[] = [];
+    const closed = new Promise<void>((resolve) => socket.addEventListener('close', () => resolve()));
+    socket.addEventListener('message', (event) => {
+      const message = JSON.parse(String(event.data));
+      messages.push(message.type === 'error' ? message.code : message.type);
+      if (message.type === 'challenge') {
+        socket.send(JSON.stringify({ type: 'hello', v: PROTOCOL_VERSION, installId: victim.installId, sig: signInstallMessage(impostorKey, 'hello', message.nonce, victim.installId, PUBLIC_HOST) }));
+      }
+    });
+    await closed;
+    expect(messages).toEqual(['challenge', 'bad_signature']);
+    expect(relay.onlineInstalls()).toEqual([victim.installId]);
+  });
+
+  test('a register for an id not derived from its key is refused', async () => {
+    const relay = await makeRelay();
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    const other = installIdForPublicKey(spkiOf(generateKeyPairSync('ed25519').publicKey));
+    const socket = new WebSocket(`ws://127.0.0.1:${relay.port}/v2/connect`);
+    const messages: string[] = [];
+    const closed = new Promise<void>((resolve) => socket.addEventListener('close', () => resolve()));
+    socket.addEventListener('message', (event) => {
+      const message = JSON.parse(String(event.data));
+      messages.push(message.type === 'error' ? message.code : message.type);
+      if (message.type === 'challenge') {
+        socket.send(JSON.stringify({
+          type: 'register',
+          v: PROTOCOL_VERSION,
+          installId: other,
+          publicKey: base64url(spkiOf(publicKey)),
+          sig: signInstallMessage(privateKey, 'register', message.nonce, other, PUBLIC_HOST),
+        }));
+      }
+    });
+    await closed;
+    expect(messages).toEqual(['challenge', 'id_mismatch']);
+  });
+
+  test('revocation is durable before it is reported, ends the session, and refuses the install', async () => {
+    const dir = tempDir();
+    const registryPath = join(dir, 'registry.jsonl');
+    const relay = await makeRelay({}, new FileInstallRegistry(registryPath));
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const result = await relay.revoke(a.identity.installId);
+    expect(result).toEqual({ installId: a.identity.installId, revoked: true, wasRegistered: true, wasOnline: true });
+    expect(readFileSync(registryPath, 'utf8')).toContain(`"op":"revoke","installId":"${a.identity.installId}"`);
+    await until(() => a.statuses.some((status) => status.state === 'offline' && status.reason.includes('revoked')));
+    const refused = await mcpPost(relay, mintCredential('access', a.identity.installId), rpc('tools/list'));
+    expect(refused.status).toBe(401);
+    expect(worker.requests).toHaveLength(0);
+    // A restart replays the log: the id stays refused.
+    const replayed = new FileInstallRegistry(registryPath);
+    expect(replayed.isRevoked(a.identity.installId)).toBe(true);
+    expect(await relay.restore(a.identity.installId)).toBe(true);
+  });
+
+  test('a second session for the same install replaces the first', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const identity: InstallIdentity = loadOrCreateIdentity(tempDir());
+    const first = await connectInstall(relay, worker, identity);
+    await connectInstall(relay, worker, identity);
+    await until(() => first.statuses.some((status) => status.state === 'replaced'));
+    expect(relay.onlineInstalls()).toEqual([identity.installId]);
+  });
+});
+
+describe('setup hand-offs', () => {
+  test('a one-time /go link reaches only the install it names, GET only', async () => {
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    const a = await connectInstall(relay, workerA);
+    await connectInstall(relay, workerB);
+    const link = `/go/${mintCredential('handoff', a.identity.installId)}`;
+    const response = await fetch(`${relay.url}${link}`, { redirect: 'manual' });
+    expect(await response.json()).toMatchObject({ worker: 'A', path: link });
+    expect(workerB.requests).toHaveLength(0);
+    expect(workerA.requests[0]!.headers['x-olympus-relay']).toBe(a.secret);
+    expect((await fetch(`${relay.url}${link}`, { method: 'POST' })).status).toBe(405);
+  });
+
+  test('an unknown install, a malformed id or an offline Mac gets a plain page, never another engine', async () => {
+    const registry = new MemoryInstallRegistry();
+    const relay = await makeRelay({}, registry);
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const stranger = loadOrCreateIdentity(tempDir());
+    const unknown = await fetch(`${relay.url}/go/${mintCredential('handoff', stranger.installId)}`);
+    expect(unknown.status).toBe(404);
+    expect(await unknown.text()).toContain('expired or was already used');
+    expect((await fetch(`${relay.url}/go/${mintCredential('access', a.identity.installId)}`)).status).toBe(404);
+    expect((await fetch(`${relay.url}/go/not-an-id`)).status).toBe(404);
+    expect(worker.requests).toHaveLength(0);
+    // Registered but no live session: the Mac is offline.
+    const offline = loadOrCreateIdentity(tempDir());
+    registry.register(offline.installId, offline.publicKeySpki);
+    const page = await fetch(`${relay.url}/go/${mintCredential('handoff', offline.installId)}`);
+    expect(page.status).toBe(503);
+    expect(await page.text()).toContain('offline');
+  });
+
+  test('a publisher sign-in callback routes by the install prefix of its state nonce, query intact', async () => {
+    const relay = await makeRelay();
+    const workerA = fakeWorker('A');
+    const workerB = fakeWorker('B');
+    cleanups.push(workerA.stop, workerB.stop);
+    await connectInstall(relay, workerA);
+    const b = await connectInstall(relay, workerB);
+    const state = signOAuthRelayState({
+      origin: `https://${PUBLIC_HOST}`,
+      source: 'gmail',
+      nonce: `${b.identity.installId}_${createOAuthRelayNonce()}`,
+      iat: Math.floor(Date.now() / 1000),
+    }, 'k'.repeat(43));
+    const query = new URLSearchParams({ code: 'provider-code', state }).toString();
+    const response = await fetch(`${relay.url}/oauth/callback/gmail?${query}`);
+    expect(await response.json()).toMatchObject({ worker: 'B', path: '/oauth/callback/gmail' });
+    expect(workerB.requests[0]!.path).toBe(`/oauth/callback/gmail?${query}`);
+    expect(workerA.requests).toHaveLength(0);
+    // A state without an install prefix, or none at all, routes nowhere.
+    const plain = signOAuthRelayState({ origin: 'http://127.0.0.1:8010', source: 'gmail', nonce: createOAuthRelayNonce(), iat: 1 }, 'k'.repeat(43));
+    expect((await fetch(`${relay.url}/oauth/callback/gmail?code=c&state=${plain}`)).status).toBe(404);
+    expect((await fetch(`${relay.url}/oauth/callback/gmail?code=c`)).status).toBe(404);
+    expect((await fetch(`${relay.url}/oauth/callback/x?code=c&state=${state}`)).status).toBe(404);
+    expect(workerA.requests).toHaveLength(0);
+    expect(workerB.requests).toHaveLength(1);
   });
 });

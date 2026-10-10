@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "modelProfiles": {
+    "built-in-embedding": {
+      "provider": "built-in",
+      "trust": "local",
+      "model": "embeddinggemma-2-litert-24d962e",
+      "purpose": "embedding"
+    },
     "local-source-answer": {
       "provider": "local-openai-compatible",
       "trust": "local",
@@ -20,21 +26,6 @@
       "provider": "openclaw-infer",
       "trust": "standard_cloud",
       "purpose": "analyst"
-    },
-    "local-source-embedding": {
-      "provider": "local-openai-compatible",
-      "trust": "local",
-      "baseUrl": "http://127.0.0.1:28090/v1",
-      "model": "secure-local-qwen3-embed",
-      "purpose": "embedding"
-    },
-    "gemini-source-embedding": {
-      "provider": "google-gemini",
-      "trust": "standard_cloud",
-      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
-      "model": "gemini-embedding-2",
-      "secretRef": "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
-      "purpose": "embedding"
     }
   },
   "routes": {
@@ -52,7 +43,7 @@
       "secure_local": {
         "minimumExecutionTrust": "local",
         "allowedEmbeddingTrust": ["local"],
-        "embeddingProfile": "local-source-embedding",
+        "embeddingProfile": "built-in-embedding",
         "allowCloudQuery": false,
         "activationMode": "hybrid_shadow",
         "secureHandling": "answerable"
@@ -60,14 +51,14 @@
       "internal": {
         "minimumExecutionTrust": "standard_cloud",
         "allowedEmbeddingTrust": ["local", "standard_cloud"],
-        "embeddingProfile": "gemini-source-embedding",
+        "embeddingProfile": "built-in-embedding",
         "allowCloudQuery": true,
         "activationMode": "hybrid_shadow"
       },
       "public_safe": {
         "minimumExecutionTrust": "standard_cloud",
         "allowedEmbeddingTrust": ["local", "standard_cloud"],
-        "embeddingProfile": "gemini-source-embedding",
+        "embeddingProfile": "built-in-embedding",
         "allowCloudQuery": true,
         "activationMode": "hybrid_shadow"
       }

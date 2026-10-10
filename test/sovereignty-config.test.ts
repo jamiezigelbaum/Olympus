@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -10,6 +10,7 @@ import {
   SOVEREIGNTY_PRESETS,
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
+  isPublicTierRetired,
   loadSovereigntyEngine,
   loadSovereigntyPreset,
   sovereigntyRoutingSnapshot,
@@ -35,6 +36,54 @@ import { createAnalyst } from '../src/core/analyst.ts';
 import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';
 import { inspectSovereigntyConfigDrift } from '../scripts/sovereignty-drift-check.ts';
+
+const SOVEREIGNTY_MODULE = join(import.meta.dir, '..', 'src', 'core', 'sovereignty.ts');
+
+/**
+ * `loadSovereigntyEngine({ env })` with no explicit path falls back to
+ * `~/.olympus/sovereignty.json` via `os.homedir()`, which Bun resolves once
+ * per process and does not re-read from `process.env.HOME`. So an env-bridge
+ * load in this process reads the developer's own policy file (one with a
+ * provider this build does not know made the golden test fail). The load runs
+ * in a child whose HOME is `home` instead.
+ */
+function routingSnapshotUnderHome(env: Record<string, string>, home: string): { ok: boolean; out: string; err: string } {
+  const script = [
+    `import { loadSovereigntyEngine, sovereigntyRoutingSnapshot } from ${JSON.stringify(SOVEREIGNTY_MODULE)};`,
+    'const env = JSON.parse(process.env.OLYMPUS_TEST_BRIDGE_ENV ?? "{}");',
+    'process.stdout.write(JSON.stringify(sovereigntyRoutingSnapshot(loadSovereigntyEngine({ env }))));',
+  ].join('\n');
+  const childEnv: Record<string, string | undefined> = { ...process.env, HOME: home, OLYMPUS_TEST_BRIDGE_ENV: JSON.stringify(env) };
+  delete childEnv.OLYMPUS_SOVEREIGNTY_CONFIG;
+  delete childEnv.OLYMPUS_SOVEREIGNTY_CONFIG_PATH;
+  const child = Bun.spawnSync([process.execPath, '-e', script], { env: childEnv, stdout: 'pipe', stderr: 'pipe' });
+  return { ok: child.exitCode === 0, out: child.stdout.toString(), err: child.stderr.toString() };
+}
+
+/**
+ * A home whose `~/.olympus/sovereignty.json` names a provider this build
+ * rejects (the original report was a policy naming "built-in" on a build that
+ * predated it; any unknown provider reproduces it).
+ */
+function decoyHome(): string {
+  const home = mkdtempSync(join(tmpdir(), 'olympus-sovereignty-decoy-home-'));
+  const decoy = buildEnvBridgeSovereigntyConfig({ OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'decoy-key' });
+  for (const profile of Object.values(decoy.modelProfiles)) (profile as { provider: string }).provider = 'decoy-unknown-provider';
+  mkdirSync(join(home, '.olympus'), { recursive: true });
+  writeFileSync(join(home, '.olympus', 'sovereignty.json'), JSON.stringify(decoy));
+  return home;
+}
+
+const GOLDEN_BRIDGE_ENV = {
+  OLYMPUS_ARGUS_FAST_BASE_URL: 'http://127.0.0.1:8000/v1',
+  OLYMPUS_ARGUS_FAST_MODEL: 'mlx-community/Qwen3.6-35B-A3B-4bit-DWQ',
+  OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED: 'true',
+  OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL: 'openai/gpt-5.5',
+  OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'google-gemini',
+  OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: 'gemini-key',
+  OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'venice-key',
+  OLYMPUS_SOURCE_INDEX_VENICE_ANALYST_MODEL: 'zai-org-glm-5-2',
+};
 
 const INTERNAL = 'internal.test.notes';
 const SECURE = 'secure_local.test.files';
@@ -198,6 +247,34 @@ describe('sovereignty config engine', () => {
         public_safe: { analyst: ['cloud', 'local'] },
       },
     }))).toThrow('baseUrl must stay on loopback');
+  });
+
+  test('local profiles refuse Ollama cloud-forwarding model ids by tag only', () => {
+    const withLocalModel = (model: string) => baseConfig({
+      modelProfiles: {
+        local: {
+          provider: 'local-openai-compatible',
+          trust: 'local',
+          baseUrl: 'http://127.0.0.1:11434/v1',
+          model,
+          purpose: 'analyst',
+        },
+      },
+    });
+    for (const model of ['gpt-oss:120b-cloud', 'gemma4:cloud']) {
+      let error: unknown;
+      try {
+        createSovereigntyEngine(withLocalModel(model));
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(OperationError);
+      expect((error as OperationError).code).toBe('config_error');
+      expect((error as Error).message).toContain("is a reserved cloud-style tag, so it cannot serve as a local model");
+    }
+    for (const model of ['gpt-oss:120b', 'my-cloud-model:latest', 'cloudllama:7b']) {
+      expect(() => createSovereigntyEngine(withLocalModel(model))).not.toThrow();
+    }
   });
 
   test('schema accepts store-backed secretRef values', () => {
@@ -370,8 +447,8 @@ describe('sovereignty config engine', () => {
       'cloud-openclaw-infer',
       'local-source-answer',
     ]);
-    expect(engine.resolveEmbeddingProfile('secure_local')?.id).toBe('local-source-embedding');
-    expect(engine.resolveEmbeddingProfile('internal')?.id).toBe('gemini-source-embedding');
+    expect(engine.resolveEmbeddingProfile('secure_local')?.id).toBe('built-in-embedding');
+    expect(engine.resolveEmbeddingProfile('internal')?.id).toBe('built-in-embedding');
   });
 
   test('preset routing: local-only serves secure_local through the local lane only', () => {
@@ -381,8 +458,8 @@ describe('sovereignty config engine', () => {
     expect(engine.resolveAnalystRoute({ trustDomain: 'secure_local' }).map((entry) => entry.id)).toEqual([
       'local-source-answer',
     ]);
-    expect(engine.resolveEmbeddingProfile('secure_local')?.id).toBe('local-source-embedding');
-    expect(engine.resolveEmbeddingProfile('internal')?.id).toBe('gemini-source-embedding');
+    expect(engine.resolveEmbeddingProfile('secure_local')?.id).toBe('built-in-embedding');
+    expect(engine.resolveEmbeddingProfile('internal')?.id).toBe('built-in-embedding');
   });
 
   test('preset routing: private-cloud-only serves secure_local through Venice only', () => {
@@ -401,9 +478,11 @@ describe('sovereignty config engine', () => {
     expect(engine.resolveAnalystRoute({ trustDomain: 'internal' }).map((entry) => entry.id)).toEqual([
       'cloud-openclaw-infer',
     ]);
+    // New installs embed with the built-in model, even here: it is local,
+    // so stricter than the private-cloud lane the preset otherwise uses.
     expect(engine.resolveEmbeddingProfile('secure_local')).toMatchObject({
-      id: 'venice-source-embedding',
-      profile: { provider: 'venice', trust: 'encrypted_cloud', purpose: 'embedding' },
+      id: 'built-in-embedding',
+      profile: { provider: 'built-in', trust: 'local', purpose: 'embedding' },
     });
   });
 
@@ -417,7 +496,6 @@ describe('sovereignty config engine', () => {
 
     expect(unmet.map((item) => item.id)).toEqual([
       'store:venice.api_key',
-      'env:GEMINI_API_KEY',
     ]);
     expect(unmet.map((item) => item.kind)).not.toContain('local_model_server');
   });
@@ -635,23 +713,40 @@ describe('sovereignty config engine', () => {
   });
 
   test('golden env bridge: private-host-shaped env and generated config produce identical routing decisions', () => {
-    const env = {
-      OLYMPUS_ARGUS_FAST_BASE_URL: 'http://127.0.0.1:8000/v1',
-      OLYMPUS_ARGUS_FAST_MODEL: 'mlx-community/Qwen3.6-35B-A3B-4bit-DWQ',
-      OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED: 'true',
-      OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL: 'openai/gpt-5.5',
-      OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'google-gemini',
-      OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: 'gemini-key',
-      OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'venice-key',
-      OLYMPUS_SOURCE_INDEX_VENICE_ANALYST_MODEL: 'zai-org-glm-5-2',
-    };
-    const envEngine = loadSovereigntyEngine({ env });
-    const generatedConfigEngine = createSovereigntyEngine(buildEnvBridgeSovereigntyConfig(env));
+    // An empty HOME: the env bridge, never the developer's ~/.olympus policy.
+    const home = mkdtempSync(join(tmpdir(), 'olympus-sovereignty-golden-home-'));
+    try {
+      const envLoad = routingSnapshotUnderHome(GOLDEN_BRIDGE_ENV, home);
+      expect(envLoad.err).toBe('');
+      expect(envLoad.ok).toBe(true);
+      const generatedConfigEngine = createSovereigntyEngine(buildEnvBridgeSovereigntyConfig(GOLDEN_BRIDGE_ENV));
 
-    expect(JSON.stringify(sovereigntyRoutingSnapshot(generatedConfigEngine))).toBe(
-      JSON.stringify(sovereigntyRoutingSnapshot(envEngine)),
-    );
-  });
+      expect(JSON.stringify(sovereigntyRoutingSnapshot(generatedConfigEngine))).toBe(envLoad.out);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('golden env bridge stays hermetic when the running user has an unloadable ~/.olympus/sovereignty.json', () => {
+    const home = decoyHome();
+    try {
+      // The decoy is real: an unisolated env-bridge load under that HOME fails.
+      const unisolated = routingSnapshotUnderHome(GOLDEN_BRIDGE_ENV, home);
+      expect(unisolated.ok).toBe(false);
+      expect(unisolated.err).toContain('unsupported provider "decoy-unknown-provider"');
+      // The golden test itself, run as that user, still passes.
+      const run = Bun.spawnSync(
+        [process.execPath, 'test', join(import.meta.dir, 'sovereignty-config.test.ts'), '-t', 'golden env bridge: private-host-shaped env'],
+        { cwd: join(import.meta.dir, '..'), env: { ...process.env, HOME: home }, stdout: 'pipe', stderr: 'pipe' },
+      );
+      const output = `${run.stdout.toString()}${run.stderr.toString()}`;
+      expect(output).toContain(' 1 pass');
+      expect(output).toContain(' 0 fail');
+      expect(run.exitCode).toBe(0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test('env bridge cloud analyst gate fails closed on invalid boolean input', () => {
     const warnings: string[] = [];
@@ -790,8 +885,11 @@ describe('sovereignty config engine', () => {
 
   test('subscription-first presets put openclaw-infer first for ordinary cloud routes', () => {
     for (const preset of SOVEREIGNTY_PRESETS) {
-      const engine = createSovereigntyEngine(loadSovereigntyPreset(preset));
-      for (const domain of ['internal', 'public_safe'] as const) {
+      const config = loadSovereigntyPreset(preset);
+      const engine = createSovereigntyEngine(config);
+      // A preset without a Public tier (the fresh-install preset) has no public_safe route.
+      const domains = isPublicTierRetired(config) ? ['internal'] as const : ['internal', 'public_safe'] as const;
+      for (const domain of domains) {
         const route = engine.resolveAnalystRoute({ trustDomain: domain });
         expect(route[0]).toMatchObject({
           id: 'cloud-openclaw-infer',

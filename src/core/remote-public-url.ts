@@ -1,12 +1,14 @@
 /**
  * The public address hosted agents use to reach this install's worker.
  *
- * OAuth for remote agents is on only when the owner (or, later, the relay
- * client) configures `OLYMPUS_PUBLIC_BASE_URL` in the worker's environment.
- * The issuer, the protected resource and every metadata URL come from this
- * value and nothing else: never from a request's Host, Origin or forwarding
- * headers, which a caller controls. With no value configured, OAuth is off and
- * the bearer connections from `olympus connections add` keep working.
+ * OAuth for remote agents is on only when a public base URL is configured:
+ * the Olympus relay (`remote.relayHost`, reported through status.json with
+ * this install's id), or a tunnel the owner runs (`OLYMPUS_PUBLIC_BASE_URL` in
+ * worker.env, or `remote.publicBaseUrl`). The issuer, the protected resource
+ * and every metadata URL come from this value and nothing else: never from a
+ * request's Host, Origin or forwarding headers, which a caller controls. With
+ * no value configured, OAuth is off and the bearer connections from
+ * `olympus connections add` keep working.
  */
 export const REMOTE_PUBLIC_BASE_URL_ENV = 'OLYMPUS_PUBLIC_BASE_URL';
 export const REMOTE_MCP_RESOURCE_PATH = '/mcp';
@@ -21,6 +23,12 @@ export interface RemotePublicUrls {
   resource: string;
   protectedResourceMetadataUrl: string;
   secure: boolean;
+  /**
+   * Set in relay mode: this install's relay id. Codes and tokens then carry it
+   * (`oly2c.<id>.…`) so the relay can route them, consent is loopback-only,
+   * and ChatGPT is the pinned client.
+   */
+  installId?: string;
 }
 
 /**
@@ -45,7 +53,7 @@ const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
  * host for local development and tests. The value must be an origin: a path,
  * query, fragment or credentials would make the issuer ambiguous.
  */
-export function parseRemotePublicBaseUrl(value: string | undefined): RemotePublicUrlResolution {
+export function parseRemotePublicBaseUrl(value: string | undefined, installId?: string): RemotePublicUrlResolution {
   const raw = value?.trim();
   if (!raw) return { enabled: false, reason: 'not_configured' };
   let url: URL;
@@ -77,6 +85,7 @@ export function parseRemotePublicBaseUrl(value: string | undefined): RemotePubli
       resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
       protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
       secure,
+      ...(installId ? { installId } : {}),
     },
   };
 }

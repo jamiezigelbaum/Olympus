@@ -9,7 +9,6 @@
 // handling. Existing history lives in those canonical stores; normal runtime
 // has no migration source or fallback index.
 
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { createHash } from 'node:crypto';
 import type {
   RawItem,
@@ -39,7 +38,7 @@ import {
   isApprovedSecureSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
-import { accountFromGoogleHandle, loadGoogleSensitivityMap } from './classification.ts';
+import { accountFromGoogleHandle } from './classification.ts';
 import {
   GMAIL_PROVIDER,
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
@@ -177,11 +176,6 @@ export interface GmailConnectorStoreSyncHandler {
 }
 
 export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnectorOptions {
-  /**
-   * The owner's sensitivity map for this lane's placement policy and its
-   * recorded four-tier decisions. Loaded from the environment when omitted.
-   */
-  sensitivityMap?: SensitivityMap;
   internalStore: LocalConnectorStore;
   secureStore: LocalConnectorStore;
   /**
@@ -221,13 +215,11 @@ export function createGmailConnectorStoreSyncHandler(
   if (options.secureEmbeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.secureEmbeddingProvider)) {
     throw new Error('Gmail secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
-  const sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
   const ownerRules = options.scope?.ownerTierRules ?? [];
-  const classification = gmailConnectorStoreClassification(sensitivityMap, ownerRules);
+  const classification = gmailConnectorStoreClassification(ownerRules);
   // The recorded four-tier decision sees the same owner rules, so the ledger
   // names the rule (metadata:owner_rule:sender:<id>:force) as the reason.
   const tierClassification = {
-    ...(sensitivityMap ? { sensitivityMap } : {}),
     ...(ownerRules.length > 0 ? { rules: ownerRules } : {}),
   };
   // Under a scope, mail either store already holds is never re-observed: a

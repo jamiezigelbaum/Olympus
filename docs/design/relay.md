@@ -1,5 +1,11 @@
 # Olympus connect relay
 
+> **Superseded (2026-10-01).** This describes relay v1 (per-install hostnames,
+> SNI pass-through, DNS-01), which was deleted. Relay v2 (one host,
+> `mcp.olympusplugin.ai`, TLS at Caddy, WebSocket install sessions, per-request
+> routing) is specified in [chatgpt-plugin.md](chatgpt-plugin.md); its runbook
+> is `connect-relay/deploy/`. Kept for the history of the design decisions.
+
 Status: slice 5 of
 [hosted-agent compatibility](hosted-agent-compatibility.md). Code: [`connect-relay/`](../../connect-relay). Nothing here is
 deployed yet.
@@ -282,7 +288,8 @@ cannot name another record.
 - **Subscriber agreement:** creating the ACME account accepts the CA's
   subscriber agreement, so no order is placed until the owner has accepted
   the CA's *current* agreement (the directory's `meta.termsOfService`) with
-  `olympus connections terms --accept`. Until then the relay session stays
+  `olympus connections terms --accept` (removed with relay v1; relay v2 asks
+  for no CA agreement). Until then the relay session stays
   up and `olympus connections status` reports `awaiting_terms` with the
   agreement's URL. A new agreement from the CA needs a new acceptance. A CA
   that publishes no agreement URL is accepted against no URL, so issuance can
@@ -346,7 +353,8 @@ the rest of the plugin.
   owner's acceptance of the CA's current agreement: the route answers 409
   `terms_required` with the agreement URL, the page shows it with a plain
   summary, and the owner's explicit acceptance comes back naming that URL. It
-  is recorded exactly as `olympus connections terms --accept` records it
+  is recorded exactly as `olympus connections terms --accept` (since removed)
+  recorded it
   (`resolveCurrentTermsUrl`, `recordTermsAcceptance`); a URL that changed
   meanwhile is refused as `terms_changed`. The config change never touches
   openclaw.json directly: the worker asks the Gateway over the plugin route

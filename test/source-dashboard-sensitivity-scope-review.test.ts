@@ -2,23 +2,19 @@
 // dashboard view model, plus the pins that keep them additive.
 //
 // Every one of them is a statement about the owner's own configuration, which
-// is why most of these tests are about what does NOT cross: the match terms
-// behind a category, the paths behind an exclusion rule, and any per-tier item
-// count, none of which this page can publish honestly.
+// is why most of these tests are about what does NOT cross: the paths behind
+// an exclusion rule and any per-tier item count, neither of which this page
+// can publish honestly. The legacy sensitivity map that once fed a categories
+// block was retired on 2026-10-03; that block is never produced.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
 } from '../src/core/sovereignty.ts';
-import {
-  parseSensitivityMap,
-  USER_FACING_TIER_MAPPING,
-  type SensitivityMap,
-} from '../src/core/sensitivity-map.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
   type SourceExclusionCriterion,
@@ -38,10 +34,7 @@ const NOW = new Date('2026-08-18T12:00:00.000Z');
 
 // The owner's real addresses and folders. Named here so the privacy assertions
 // below read as "these exact strings never appear", not as a vague grep.
-const OWNER_KEYWORD = 'escrow-payoff';
-const OWNER_SENDER = 'statements@creditunion.example';
 const OWNER_PATH = '/Finances/Joint';
-const OWNER_NOTE = 'Owner note: the credit union folder, plus anything Dana forwards.';
 
 const tempDirs: string[] = [];
 
@@ -50,13 +43,12 @@ afterEach(() => {
 });
 
 describe('dashboard sensitivity section', () => {
-  test('no configured map means the section is absent, never an empty category list', () => {
-    // The live state on a fresh install: ~/.olympus/sensitivity-map.json does
-    // not exist. An empty `categories` here would tell the owner they protect
-    // nothing, which is a different claim from "nothing is configured".
+  test('the retired categories block is never produced', () => {
+    // The legacy sensitivity map was retired on 2026-10-03; the privacy
+    // profile is the only privacy path. Absent, never an empty list.
     const view = buildView({ status: statusWithCorpora([emailCorpus('internal.email', 'internal', 10, {})]) });
 
-    expect(view.sensitivity).toBeUndefined();
+    expect('sensitivity' in view).toBe(false);
     expect(JSON.stringify(view)).not.toContain('"sensitivity"');
   });
 
@@ -83,74 +75,13 @@ describe('dashboard sensitivity section', () => {
     // have to be invented, so the tier rows carry permissions only.
     const view = buildView({
       status: statusWithCorpora([emailCorpus('internal.email', 'internal', 10, {})]),
-      sensitivityMap: sensitivityMapFixture(),
     });
 
     for (const tier of view.sensitivity_tiers?.tiers ?? []) {
       expect(Object.keys(tier).sort()).toEqual(['frontier', 'local', 'meaning', 'name', 'tier_label', 'venice']);
     }
-    for (const category of view.sensitivity?.categories ?? []) {
-      expect(Object.keys(category)).not.toContain('items');
-      expect(Object.keys(category)).not.toContain('indexed_items');
-    }
   });
 
-  test('categories cross as the owner\'s own examples and a term COUNT, never the terms', () => {
-    const view = buildView({
-      status: statusWithCorpora([emailCorpus('internal.email', 'internal', 10, {})]),
-      sensitivityMap: sensitivityMapFixture(),
-    });
-
-    expect(view.sensitivity).toEqual({
-      configured: true,
-      editable: false,
-      categories: [
-        {
-          id: 'family-finance',
-          label: 'Family finance',
-          interpretation: 'the joint account, anything about the house',
-          target_tier_name: 'secure',
-          target_trust_tier: 'S4',
-          target_trust_domain: 'secure_local',
-          match_terms: 3,
-        },
-        {
-          id: 'recovery-codes',
-          label: 'Recovery codes',
-          interpretation: '2FA backup codes',
-          target_tier_name: 'secrets',
-          target_trust_tier: 'S5',
-          target_trust_domain: 'secure_local',
-          match_terms: 2,
-        },
-      ],
-    });
-
-    // /dashboard.json is reachable with the weak dash_ query token and its own
-    // policy block says no paths and no file names are returned. The match
-    // terms are the owner's literal addresses and folders, and `notes` is free
-    // text that routinely repeats them.
-    const serialized = JSON.stringify(view);
-    expect(serialized).not.toContain(OWNER_KEYWORD);
-    expect(serialized).not.toContain(OWNER_SENDER);
-    expect(serialized).not.toContain(OWNER_PATH);
-    expect(serialized).not.toContain(OWNER_NOTE);
-    expect(serialized).not.toContain('"notes"');
-    // The examples ARE the interpretation line, and they are the owner's words.
-    expect(serialized).toContain('the joint account');
-  });
-
-  test('the section says it is read-only, because no route writes the map', () => {
-    const view = buildView({
-      status: statusWithCorpora([emailCorpus('internal.email', 'internal', 10, {})]),
-      sensitivityMap: sensitivityMapFixture(),
-    });
-
-    // A page that offered add or remove would offer a button that 501s: the
-    // worker's whole POST surface is oauth start, api-key, sync-now and the
-    // folder-disposition save.
-    expect(view.sensitivity?.editable).toBe(false);
-  });
 });
 
 describe('dashboard exclusion scope', () => {
@@ -508,10 +439,7 @@ describe('the delta stays additive', () => {
     });
 
     const before = withoutDeltaFields(buildView({ status, ledger }));
-    const after = withoutDeltaFields(buildView({ status, ledger, sensitivityMap: sensitivityMapFixture() }));
 
-    // Supplying a sensitivity map changes the new block and nothing else.
-    expect(after).toEqual(before);
     // The pre-existing exclusion fields keep their pre-existing meanings.
     expect(before.excluded_by_configuration).toMatchObject({
       rules: 1,
@@ -524,18 +452,14 @@ describe('the delta stays additive', () => {
 });
 
 describe('the /dashboard.json route wires both new inputs', () => {
-  test('the route reads the owner\'s configured map and the picker\'s per-source gates', async () => {
+  test('the route reads the picker\'s per-source gates and emits no categories block', async () => {
     const { withWorkerBearerAuth } = await import('../src/workers/http.ts');
     const { createEmailSourceWorker } = await import('../src/workers/email-source/index.ts');
 
     const dir = mkdtempSync(join(tmpdir(), 'olympus-dashboard-sensitivity-'));
     tempDirs.push(dir);
-    const mapPath = join(dir, 'sensitivity-map.json');
-    writeFileSync(mapPath, JSON.stringify(sensitivityMapJson()), 'utf8');
-    const previous = process.env.OLYMPUS_SENSITIVITY_MAP_PATH;
-    process.env.OLYMPUS_SENSITIVITY_MAP_PATH = mapPath;
 
-    try {
+    {
       const worker = createEmailSourceWorker({
         sourceIndexStatus: {
           async status() {
@@ -568,9 +492,7 @@ describe('the /dashboard.json route wires both new inputs', () => {
       const raw = await response.text();
       const body = JSON.parse(raw) as ReturnType<typeof buildSourceDashboardViewModel>;
 
-      // Read off disk by the route, through OLYMPUS_SENSITIVITY_MAP_PATH.
-      expect(body.sensitivity?.categories.map((category) => category.id))
-        .toEqual(['family-finance', 'recovery-codes']);
+      expect('sensitivity' in body).toBe(false);
       expect(body.sensitivity_tiers?.tiers).toHaveLength(4);
       // Attribution comes from the picker runtime the route already opens.
       expect(body.excluded_by_configuration.by_source).toEqual([{
@@ -586,98 +508,18 @@ describe('the /dashboard.json route wires both new inputs', () => {
       }]);
       // Still nothing the weak dash_ token must not see.
       expect(raw).not.toContain(OWNER_PATH);
-      expect(raw).not.toContain(OWNER_SENDER);
-      expect(raw).not.toContain(OWNER_KEYWORD);
-    } finally {
-      if (previous === undefined) delete process.env.OLYMPUS_SENSITIVITY_MAP_PATH;
-      else process.env.OLYMPUS_SENSITIVITY_MAP_PATH = previous;
     }
   });
 
-  test('a missing map leaves the section off without failing the render', async () => {
-    const { withWorkerBearerAuth } = await import('../src/workers/http.ts');
-    const { createEmailSourceWorker } = await import('../src/workers/email-source/index.ts');
-
-    const dir = mkdtempSync(join(tmpdir(), 'olympus-dashboard-no-sensitivity-'));
-    tempDirs.push(dir);
-    const previous = process.env.OLYMPUS_SENSITIVITY_MAP_PATH;
-    process.env.OLYMPUS_SENSITIVITY_MAP_PATH = join(dir, 'absent.json');
-
-    try {
-      const worker = createEmailSourceWorker({
-        sourceIndexStatus: {
-          async status() {
-            return statusWithCorpora([dropboxCorpus(40, 30)]);
-          },
-        },
-        sourceDashboard: {
-          sovereigntyEngine: fixtureSovereigntyEngine(),
-          registryPath: join(dir, 'missing-handles.json'),
-        },
-      });
-      const fetchImpl = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
-
-      const response = await fetchImpl(new Request('http://worker.test/dashboard.json', {
-        headers: { Authorization: 'Bearer dashboard-secret' },
-      }));
-      expect(response.status).toBe(200);
-      const body = await response.json() as ReturnType<typeof buildSourceDashboardViewModel>;
-
-      expect(body.sensitivity).toBeUndefined();
-      expect(body.sensitivity_tiers?.tiers).toHaveLength(4);
-    } finally {
-      if (previous === undefined) delete process.env.OLYMPUS_SENSITIVITY_MAP_PATH;
-      else process.env.OLYMPUS_SENSITIVITY_MAP_PATH = previous;
-    }
-  });
-
-  test('an unparseable map leaves the section off rather than 500ing the page', async () => {
-    const { withWorkerBearerAuth } = await import('../src/workers/http.ts');
-    const { createEmailSourceWorker } = await import('../src/workers/email-source/index.ts');
-
-    const dir = mkdtempSync(join(tmpdir(), 'olympus-dashboard-bad-sensitivity-'));
-    tempDirs.push(dir);
-    const mapPath = join(dir, 'sensitivity-map.json');
-    writeFileSync(mapPath, '{ not json at all', 'utf8');
-    const previous = process.env.OLYMPUS_SENSITIVITY_MAP_PATH;
-    process.env.OLYMPUS_SENSITIVITY_MAP_PATH = mapPath;
-
-    try {
-      const worker = createEmailSourceWorker({
-        sourceIndexStatus: {
-          async status() {
-            return statusWithCorpora([dropboxCorpus(40, 30)]);
-          },
-        },
-        sourceDashboard: {
-          sovereigntyEngine: fixtureSovereigntyEngine(),
-          registryPath: join(dir, 'missing-handles.json'),
-        },
-      });
-      const fetchImpl = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
-
-      const response = await fetchImpl(new Request('http://worker.test/dashboard.json', {
-        headers: { Authorization: 'Bearer dashboard-secret' },
-      }));
-
-      expect(response.status).toBe(200);
-      expect((await response.json() as { sensitivity?: unknown }).sensitivity).toBeUndefined();
-    } finally {
-      if (previous === undefined) delete process.env.OLYMPUS_SENSITIVITY_MAP_PATH;
-      else process.env.OLYMPUS_SENSITIVITY_MAP_PATH = previous;
-    }
-  });
 });
 
 function buildView(input: {
   status: SourceIndexStatusResult;
   ledger?: SourceIngestionLedgerSnapshot;
-  sensitivityMap?: SensitivityMap;
 }) {
   return buildSourceDashboardViewModel({
     sourceIndexStatus: input.status,
     ...(input.ledger ? { ingestionLedger: input.ledger } : {}),
-    ...(input.sensitivityMap ? { sensitivityMap: input.sensitivityMap } : {}),
     sovereigntyEngine: fixtureSovereigntyEngine(),
     now: NOW,
   });
@@ -731,42 +573,6 @@ function ledgerWithExcluded(excluded: SourceIngestionExcludedByConfiguration): S
       source_text_returned: false,
       castor_safe: true,
     },
-  };
-}
-
-function sensitivityMapFixture(): SensitivityMap {
-  return parseSensitivityMap(sensitivityMapJson());
-}
-
-function sensitivityMapJson(): unknown {
-  return {
-    schemaVersion: 1,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories: [
-      {
-        id: 'family-finance',
-        label: 'Family finance',
-        targetTierName: 'secure',
-        targetTrustTier: 'S4',
-        targetTrustDomain: 'secure_local',
-        examples: ['the joint account', 'anything about the house'],
-        notes: OWNER_NOTE,
-        match: {
-          keywords: [OWNER_KEYWORD],
-          senderPatterns: [OWNER_SENDER],
-          pathPatterns: [OWNER_PATH],
-        },
-      },
-      {
-        id: 'recovery-codes',
-        label: 'Recovery codes',
-        targetTierName: 'secrets',
-        targetTrustTier: 'S5',
-        targetTrustDomain: 'secure_local',
-        examples: ['2FA backup codes'],
-        match: { keywords: ['one-time backup code', 'seed phrase'], senderPatterns: [], pathPatterns: [] },
-      },
-    ],
   };
 }
 

@@ -191,7 +191,7 @@ function remoteAccessControls(access: DashboardRemoteAccess): string {
   const confirmation = 'Turn off remote access? Agents in the cloud will no longer reach Olympus until you turn it on again. Agents on this computer are unaffected.';
   return review
     + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml(confirmation)}">`
-    + `<button class="btn quiet" type="submit">Turn off remote access</button>${status}`
+    + `<button class="btn" type="submit">Turn off remote access</button>${status}`
     + `</form>`;
 }
 
@@ -204,7 +204,7 @@ function termsPanel(): string {
     + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>`
     + `<form class="rowform" data-agent-kind="remote-accept">`
     + `<button class="btn primary" type="submit">I accept, turn on remote access</button>`
-    + `<button class="btn quiet" type="button" data-remote-terms-cancel>Not now</button>`
+    + `<button class="btn" type="button" data-remote-terms-cancel>Not now</button>`
     + `<span class="actmsg" data-action-message role="status"></span>`
     + `</form>`
     + `</div>`;
@@ -319,7 +319,7 @@ function secretSlot(id: string, label: string): string {
   return `<div class="agentsecret" data-agent-secret-slot hidden>`
     + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml(label)}">`
     + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>`
-    + `<button class="btn quiet" type="button" data-agent-secret-done>Done</button>`
+    + `<button class="btn" type="button" data-agent-secret-done>Done</button>`
     + `<span class="copystatus" data-copy-status aria-live="polite"></span>`
     + `<span class="hint" data-agent-secret-note></span>`
     + `</div>`;
@@ -344,7 +344,7 @@ function connectionRow(connection: DashboardAgentConnection, now: Date): string 
     + `<div class="grow"><span class="name">${escapeHtml(connection.name)}</span><span class="why"> — ${escapeHtml(why)}</span></div>`
     + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml(confirmation)}">`
     + `<input type="hidden" name="connection_id" value="${escapeHtml(connection.id)}">`
-    + `<button class="btn quiet" type="submit">Revoke</button>`
+    + `<button class="btn" type="submit">Revoke</button>`
     + `<span class="actmsg" data-action-message role="status"></span>`
     + `</form>`
     + `</div>`;

@@ -14,7 +14,13 @@
 // routing layer can fall back to the stricter local analyst where appropriate.
 
 import { OperationError } from './operation-error.ts';
-import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from './analyst.ts';
+import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
+import {
+  refuseLocalOnlyOnOrdinaryCloud,
+  type AnalystModel,
+  type AnalystModelCompletion,
+  type AnalystModelRequest,
+} from './analyst.ts';
 
 // Injectable so tests can script the wire without a network. Matches the global
 // fetch signature closely enough for our single POST.
@@ -53,6 +59,10 @@ export interface OpenAICompatibleAnalystModelOptions {
   extraBody?: Record<string, unknown>;
   // Injectable transport (tests / proxies). Defaults to global fetch.
   fetchImpl?: OpenAIAnalystFetch;
+  // Only the Venice adapter sets this: it enforces its own approved privacy
+  // category for local-only requests before delegating here. Every other use
+  // is a standard-cloud analyst and refuses a local-only request.
+  admitsLocalOnly?: boolean;
 }
 
 const DEFAULT_MODEL = 'gpt-5.5';
@@ -85,6 +95,7 @@ export function createOpenAICompatibleAnalystModel(
 
   return {
     async complete(request: AnalystModelRequest): Promise<AnalystModelCompletion> {
+      if (options.admitsLocalOnly !== true) refuseLocalOnlyOnOrdinaryCloud(request, providerLabel);
       const url = `${baseUrl}/chat/completions`;
       const body: Record<string, unknown> = {
         ...(options.extraBody ?? {}),
@@ -122,7 +133,7 @@ export function createOpenAICompatibleAnalystModel(
       try {
         let response: Response;
         try {
-          response = await fetchImpl(url, {
+          response = await fetchModelEndpoint(fetchImpl, url, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -133,6 +144,13 @@ export function createOpenAICompatibleAnalystModel(
           });
         } catch (error) {
           if (request.signal?.aborted) throw callerAbortError(request.signal.reason);
+          if (isModelEndpointRedirectError(error)) {
+            throw new OperationError(
+              'source_index_error',
+              `${providerLabel} (${model}) answered with a redirect, which is refused.`,
+              error.message,
+            );
+          }
           throw new OperationError(
             'source_index_error',
             `${providerLabel} (${model}) was unreachable at ${url}.`,

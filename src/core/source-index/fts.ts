@@ -18,33 +18,42 @@ export interface SourceIndexFtsMigrationResult {
 }
 
 const TOKEN_PATTERN = /[\p{L}\p{N}_]+/gu;
+// Words that carry no topic: function words, the scaffolding of a request
+// ("what do I have about", "what did I save", "show me") and nouns that name
+// an item's kind rather than its subject ("files", "papers"). Each is in
+// nearly every readable document, so as a query term it matches everything
+// with text and nothing in particular: "What do I have about integral
+// theory?" matched every readable file on "do", "have" and "about" and ranked
+// them above the files named for the topic. Words that are also common
+// subjects (a "will", the month "May", "US") stay searchable.
 const FTS_QUERY_STOPWORDS = new Set([
-  'a',
-  'an',
-  'and',
-  'are',
-  'as',
-  'at',
-  'by',
-  'for',
-  'from',
-  'in',
-  'is',
-  'it',
-  'me',
-  'my',
-  'of',
-  'on',
-  'or',
-  'the',
-  'to',
-  'was',
-  'were',
-  'what',
-  'when',
-  'where',
-  'who',
-  'with',
+  'a', 'about', 'after', 'again', 'all', 'also', 'am', 'an', 'and', 'any', 'anything', 'are', 'article', 'articles',
+  'as', 'at',
+  'be', 'been', 'before', 'being', 'but', 'by',
+  'can', 'could',
+  'detail', 'details', 'did', 'do', 'doc', 'docs', 'document', 'documents', 'does', 'doing', 'done',
+  'each',
+  'file', 'files', 'find', 'for', 'found', 'from',
+  'get', 'give', 'got',
+  'had', 'happen', 'happened', 'has', 'have', 'having', 'he', 'her', 'here', 'him', 'his', 'how',
+  'i', 'if', 'in', 'into', 'is', 'it', 'item', 'items', 'its',
+  'just',
+  'keep', 'kept', 'know',
+  'let', 'look',
+  'many', 'me', 'might', 'more', 'most', 'much', 'must', 'my',
+  'need', 'no', 'not', 'now',
+  'of', 'on', 'or', 'our', 'out',
+  'paper', 'papers',
+  'please',
+  'read', 'remember',
+  'said', 'save', 'saved', 'say', 'says', 'see', 'she', 'should', 'show', 'so', 'some', 'something', 'stuff', 'such',
+  'tell', 'than', 'that', 'the', 'their', 'them', 'then', 'there', 'these', 'they', 'thing', 'things', 'this',
+  'those', 'to',
+  'use', 'using',
+  'very',
+  'want', 'was', 'we', 'were', 'what', 'when', 'where', 'which', 'while', 'who', 'whom', 'whose', 'why', 'with',
+  'would', 'write', 'written', 'wrote',
+  'you', 'your',
 ]);
 
 const SOURCE_INDEX_SYNONYMS: Readonly<Record<string, readonly string[]>> = Object.freeze({
@@ -86,7 +95,8 @@ export function sourceIndexFtsQuery(
   const terms = sourceIndexFtsTerms(query);
   if (terms.length === 0) return '';
   const suffix = options.prefix === false ? '' : '*';
-  return terms.map((term) => `"${escapeFtsPhrase(term)}"${suffix}`).join(' OR ');
+  const exact = queryInitialisms(query);
+  return terms.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? '' : suffix}`).join(' OR ');
 }
 
 export function sourceIndexFtsTerms(query: string): readonly string[] {
@@ -101,7 +111,47 @@ export function sourceIndexFtsTerms(query: string): readonly string[] {
     }
     if (terms.length >= 24) break;
   }
+  for (const initialism of queryInitialisms(query).keys()) appendTerm(initialism, seen, terms);
   return terms;
+}
+
+// Words a name's initialism may span between its capitalised words
+// ("Letter of Intent", "Carta de Intención").
+const INITIALISM_CONNECTORS = new Set(['of', 'and', 'for', 'the', 'to', 'on', 'in', 'de', 'del', 'la', 'le', 'du', 'des', 'y']);
+const MAX_INITIALISMS = 4;
+
+/**
+ * The initialisms of the capitalised names in a question, each with the
+ * words it stands for: "Letter of Intent" is also "loi", "Non-Disclosure
+ * Agreement" "nda". Files are often named by the initialism alone, and a
+ * keyword search for the words never reaches them (2026-10-10 live: a letter
+ * of intent filed as "LOI_…" was found only when the embedding happened to
+ * rank it, so a reworded question missed it). Spans of two or three
+ * capitalised words, connectors allowed between them; three to five letters.
+ * They match whole tokens only (see sourceIndexFtsGroupQuery).
+ */
+export function queryInitialisms(query: string): ReadonlyMap<string, readonly string[]> {
+  const words = [...query.matchAll(TOKEN_PATTERN)].map((match) => match[0]);
+  const capitalised = (word: string) => /^\p{Lu}\p{Ll}/u.test(word) && !INITIALISM_CONNECTORS.has(word.toLowerCase());
+  const found = new Map<string, string[]>();
+  for (let start = 0; start < words.length && found.size < MAX_INITIALISMS; start += 1) {
+    if (!capitalised(words[start]!)) continue;
+    let names = 1;
+    for (let end = start + 1; end < words.length && names < 3; end += 1) {
+      const word = words[end]!;
+      if (INITIALISM_CONNECTORS.has(word.toLowerCase())) continue;
+      if (!capitalised(word)) break;
+      names += 1;
+      const span = words.slice(start, end + 1);
+      const covered = span.filter(capitalised).map((entry) => entry.toLowerCase());
+      for (const letters of [span.map((entry) => entry[0]!), span.filter(capitalised).map((entry) => entry[0]!)]) {
+        const initialism = letters.join('').toLowerCase();
+        if (initialism.length < 3 || initialism.length > 5 || found.has(initialism) || found.size >= MAX_INITIALISMS) continue;
+        found.set(initialism, covered);
+      }
+    }
+  }
+  return found;
 }
 
 // Term groups for minimum-signal filtering: each group is one query concept —
@@ -114,6 +164,7 @@ export function sourceIndexFtsTermGroups(
 ): ReadonlyArray<readonly string[]> {
   const seen = new Set<string>();
   const groups: string[][] = [];
+  const groupOf = new Map<string, string[]>();
   let total = 0;
   const expandedTermLimit = options.expandedTermLimit ?? 24;
   const groupLimit = Math.max(1, Math.trunc(options.groupLimit ?? Number.MAX_SAFE_INTEGER));
@@ -136,13 +187,26 @@ export function sourceIndexFtsTermGroups(
       group.push(normalized);
       total += 1;
     }
-    if (group.length > 0) groups.push(group);
+    if (group.length > 0) {
+      groups.push(group);
+      groupOf.set(raw, group);
+    }
+  }
+  // An initialism stands for each word it spans: a file named by it matches
+  // each of those concepts, as a file carrying the words would.
+  for (const [initialism, covered] of queryInitialisms(query)) {
+    for (const word of covered) {
+      const group = groupOf.get(word);
+      if (group && !group.includes(initialism)) group.push(initialism);
+    }
   }
   return groups;
 }
 
-export function sourceIndexFtsGroupQuery(group: readonly string[]): string {
-  return group.map((term) => `"${escapeFtsPhrase(term)}"*`).join(' OR ');
+// `exact` terms (the query's initialisms) match whole tokens only: "loi" is
+// the file named "LOI_…", not every word that starts with it.
+export function sourceIndexFtsGroupQuery(group: readonly string[], exact: ReadonlyMap<string, unknown> | ReadonlySet<string> = new Set()): string {
+  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? '' : '*'}`).join(' OR ');
 }
 
 export function runBoundedFtsTokenizerMigration(

@@ -38,6 +38,13 @@ export const BLOCKED_BY_POLICY_COUNT_KEY = 'qa_blocked_policy';
 export const OUT_OF_CONTENT_SCOPE_COUNT_KEY = 'qa_out_of_content_scope';
 
 /**
+ * Items extraction gave up on for good (damaged, or a format nothing reads),
+ * with nothing left to try. Unlike the policy exits these stay in the
+ * eligible denominator: they are files the system was meant to read.
+ */
+export const UNREADABLE_ITEMS_COUNT_KEY = 'extraction_items_unreadable';
+
+/**
  * Items this corpus holds text for: the per-item numerator of every
  * answer-ready ratio, published by whoever owns the readiness evidence.
  */

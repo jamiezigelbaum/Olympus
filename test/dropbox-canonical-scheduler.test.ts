@@ -201,6 +201,9 @@ describe('canonical Dropbox scheduler', () => {
       'sync:dropbox.personal:/Full:provider-resume',
       'sync:dropbox.personal:/Metadata:provider-resume',
       'plan:dropbox.personal:/Full:candidate-resume',
+      // The pass keeps reading pages toward its plan limit; a page that names
+      // the same next position again ends the scan.
+      'plan:dropbox.personal:/Full:candidate-cursor',
       'extract:dropbox.personal:/Full:local_text',
       'embed',
     ]);

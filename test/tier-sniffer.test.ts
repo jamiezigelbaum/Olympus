@@ -250,6 +250,19 @@ describe('batching, cache and threshold', () => {
     expect(snifferTierKey({ tier: 'private', category: 'ordinary', confidence: 0.1 })).toBe('secure');
   });
 
+  test('a Private verdict with a non-private category is Personal; fail-safe and other stay Private', () => {
+    // Calibration 2026-10-05: the built-in model paired "private" with "work"
+    // on ordinary project notes. The category the prompt defines decides.
+    for (const category of ['work', 'reference', 'ordinary']) {
+      expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('private');
+    }
+    for (const category of ['other', 'intimate', 'family', 'health', 'financial']) {
+      expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('secure');
+    }
+    expect(snifferTierKey({ tier: 'private', category: 'work', confidence: 0.95, failSafe: true })).toBe('secure');
+    expect(snifferTierKey({ tier: 'personal', category: 'ordinary', confidence: 0.95, failSafe: true })).toBe('secure');
+  });
+
   test('never Public: a public verdict, a missing verdict or a repeated one is no verdict', () => {
     const expected = new Set([1, 2, 3]);
     const parsed = parseSnifferBatchResponse(JSON.stringify({ verdicts: [
@@ -262,6 +275,18 @@ describe('batching, cache and threshold', () => {
     expect(parsed.size).toBe(0);
     expect(parseSnifferBatchResponse('not json', expected).size).toBe(0);
     expect(parseSnifferBatchResponse('```json\n{"verdicts":[{"i":1,"tier":"private","category":"legal","confidence":0.8}]}\n```', expected).get(1)).toEqual({ tier: 'private', category: 'legal', confidence: 0.8 });
+  });
+
+  test('a Private answer in the model\'s own words is kept; a Personal one is not', () => {
+    const expected = new Set([1, 2, 3]);
+    const parsed = parseSnifferBatchResponse(JSON.stringify({ verdicts: [
+      { i: 1, tier: 'private', category: 'insurance', confidence: 0.95 },
+      { i: 2, tier: 'private', category: 'spiritual', confidence: 0.95 },
+      { i: 3, tier: 'personal', category: 'spiritual', confidence: 0.95 },
+    ] }), expected);
+    expect(parsed.get(1)).toEqual({ tier: 'private', category: 'financial', confidence: 0.95 });
+    expect(parsed.get(2)).toEqual({ tier: 'private', category: 'other', confidence: 0.95 });
+    expect(parsed.has(3)).toBe(false);
   });
 
   test('an 0.89 Personal answer resolves the item to Private', async () => {
@@ -486,6 +511,174 @@ describe('bounds and the owner-approval gate', () => {
     }
   });
 
+  test('a queue that waits says why, once per change, and a pass that never ends is stopped', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-waiting-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 1, 'therapy');
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      const lines: string[] = [];
+      let busy = true;
+      let clock = 0;
+      let release: (() => void) | undefined;
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'therapy', confidence: 0.9 }));
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model,
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        shouldYield: () => busy,
+        log: (line) => lines.push(line),
+        now: () => new Date(clock),
+        maxPassMs: 60_000,
+      });
+      // Yielding: said once, not on every tick.
+      await service.runOnce();
+      await service.runOnce();
+      expect(lines.filter((line) => line.includes('nothing asked: yielding'))).toHaveLength(1);
+      // Asking again is said once too.
+      busy = false;
+      await service.runOnce();
+      expect(lines).toContain('Olympus tier sniffer: asking again.');
+
+      // A pass whose model call never returns: the next tick past the bound aborts it.
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 2, 'divorce papers');
+      const hanging = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: {
+          async complete(request) {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+              if (request.signal?.aborted) resolve();
+              request.signal?.addEventListener('abort', () => resolve(), { once: true });
+            });
+            throw new Error('aborted');
+          },
+        },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        log: (line) => lines.push(line),
+        now: () => new Date(clock),
+        maxPassMs: 60_000,
+      });
+      const first = hanging.runOnce();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect((await hanging.runOnce()).state).toBe('skipped_running');
+      clock += 61_000;
+      expect((await hanging.runOnce()).state).toBe('skipped_running');
+      expect(lines.some((line) => line.includes('without finishing; it was stopped'))).toBe(true);
+      // The stopped pass settles as preempted (nothing counted against the
+      // items), so the next tick can run a fresh one.
+      expect(await first).toMatchObject({ state: 'ran', report: { stoppedBy: 'preempted' } });
+      release?.();
+      service.stop();
+      hanging.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a pass that ignores its abort is abandoned, and each waiting reason is named in the status', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-heal-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 1, 'therapy');
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      const lines: string[] = [];
+      let clock = 0;
+      let calls = 0;
+      const answering = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'therapy', confidence: 0.9 }));
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: {
+          // The first call never settles and ignores its signal; later calls answer.
+          complete(request) {
+            calls += 1;
+            return calls === 1 ? new Promise(() => {}) : answering.complete(request);
+          },
+        },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        log: (line) => lines.push(line),
+        now: () => new Date(clock),
+        maxPassMs: 60_000,
+        abandonAfterMs: 30_000,
+      });
+      void service.runOnce();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect((await service.runOnce()).state).toBe('skipped_running');
+      expect(service.status().waiting?.reason).toBe('pass_running');
+      clock += 61_000;
+      expect((await service.runOnce()).state).toBe('skipped_running');
+      expect(service.status().waiting?.reason).toBe('pass_stuck');
+      expect(service.backlog().summary).toContain('Nothing asked now: a pass ran too long and was stopped.');
+      // The aborted call never settles: still held off inside the grace...
+      clock += 10_000;
+      expect((await service.runOnce()).state).toBe('skipped_running');
+      // ...and abandoned past it: this tick runs a fresh pass that asks.
+      clock += 30_000;
+      const fresh = await service.runOnce();
+      expect(fresh).toMatchObject({ state: 'ran', report: { calls: 1 } });
+      expect(lines.some((line) => line.includes('was abandoned and a new pass starts'))).toBe(true);
+      expect(service.status().waiting).toBeUndefined();
+      service.stop();
+
+      // Breaker, answers and no model are told apart, content-free.
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 2, 'divorce papers');
+      let breaker = true;
+      let answers = false;
+      let available = true;
+      const reasons = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: answering,
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        breakerOpen: () => breaker,
+        answersInFlight: () => answers,
+        modelAvailable: () => available,
+        modelState: () => 'failed',
+        log: (line) => lines.push(line),
+      });
+      await reasons.runOnce();
+      expect(reasons.status().waiting?.reason).toBe('breaker_open');
+      expect(lines).toContain('Olympus tier sniffer: questions are waiting, nothing asked: the private model is resting after failures.');
+      breaker = false;
+      answers = true;
+      await reasons.runOnce();
+      expect(reasons.backlog().waiting?.reason).toBe('yielding_to_answers');
+      answers = false;
+      available = false;
+      await reasons.runOnce();
+      expect(reasons.status().waiting).toMatchObject({ reason: 'no_model', label: 'the private model is not available (failed)' });
+      available = true;
+      expect(await reasons.runOnce()).toMatchObject({ state: 'ran', report: { calls: 1 } });
+      expect(reasons.status().waiting).toBeUndefined();
+      reasons.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('an approval names lane, profile, model and prompt version: changing any one needs a new approval', () => {
     const base = { recorded_at: '2026-09-23T10:00:00.000Z', what: 'x', model_id: 'm', prompt_version: 'p1', lane: 'local', profile_id: 'local-a', status: 'complete' as const };
     const approved = { ...base, kind: 'classifier_model_decision' as const, approved_by: 'owner' as const };
@@ -503,5 +696,45 @@ describe('bounds and the owner-approval gate', () => {
   test('the prompt version is derived from the prompt text, so an edit is a new version', () => {
     expect(SNIFFER_PROMPT_VERSION).toMatch(/^p-[0-9a-f]{12}$/);
     expect(snifferId(LOCAL_LANE)).toBe(`local:${SNIFFER_PROMPT_VERSION}`);
+  });
+});
+
+describe('vocabulary-only detector hits (owner ruling 2026-10-01)', () => {
+  const FILLER = 'The integral approach maps quadrants and levels of development across many fields of human inquiry, from art and ethics to ecology. '
+    .repeat(12);
+  const BOOK = `${FILLER}In medicine, a purely physical treatment of symptoms ignores the interior quadrants of meaning and culture. ${FILLER}`;
+
+  async function judgedAs(verdict: { tier: string; category: string; confidence: number }) {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+      const decision = classifyItemTiers({
+        signals: { title: 'Introduction to the Integral Approach.pdf' },
+        text: BOOK,
+        subject: subject(1),
+      }, { sniffer });
+      ledger.recordDecision(subject(1), decision);
+      // Held: pending, waiting on the content question, not decided by the words.
+      expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true, contentTier: 'private' });
+      const model = spyModel((_, items) => verdictsFor(items, verdict));
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
+      expect(report.verdictsApplied).toBe(1);
+      expect(model.requests[0]!.prompt).toContain('physical treatment of symptoms');
+      return ledger.getCurrent(subject(1))!;
+    } finally {
+      store.close();
+      ledger.close();
+    }
+  }
+
+  test('the local model calling it ordinary work makes it Personal', async () => {
+    const record = await judgedAs({ tier: 'personal', category: 'work', confidence: 0.95 });
+    expect(record).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+  });
+
+  test('a health category stays Private even when the model pairs it with personal', async () => {
+    const record = await judgedAs({ tier: 'personal', category: 'health', confidence: 0.95 });
+    expect(record).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer' });
   });
 });

@@ -1,198 +1,96 @@
 /**
- * The one seam the worker calls: given the request URL and an already-built
- * view model, return the page's HTML.
+ * The one seam the worker calls for GET /dashboard (unified dashboard phase
+ * 4, owner decision 2026-10-09: the ChatGPT panel is the only dashboard).
  *
- * Detail is a query parameter on /dashboard rather than a path of its own,
+ * - `/dashboard` is the computer's host page around the panel (host-page.ts).
+ * - `?keys`, `?agents`, `?outside-help`, `?connector` are the computer's own
+ *   pages, still rendered here (pages/local.ts, pages/outside-help.ts).
+ * - `?panel-read` is the dashboard tool's result for a locked (dash_) reader.
+ * - Every older page's address (`?source=`, `?background`, `?sensitivity`,
+ *   `?setup`, `?privacy`, `?embedding-ledger`) redirects to /dashboard.
+ *
+ * Each page is a query parameter on /dashboard rather than a path of its own
  * because the read-only dash_ query token is allowlisted by pathname in
- * workers/http.ts — a /dashboard/<id> path would 401 for exactly the reader
- * this page is for. The setup and background pages keep their own
- * always-reachable addresses the same way, as ?setup and ?background.
+ * workers/http.ts: a /dashboard/<page> path would 401 for exactly the reader
+ * a link was handed to.
  */
 import type { SourceDashboardViewModel } from '../source-dashboard.ts';
-import type { OlympusDashboardReadParams, OlympusDashboardReadResult } from '../../control-ui-contract.ts';
-import { dashboardPageSignature, escapeHtml, pageShell } from './components.ts';
-import { dashboardHomeMeta, dashboardIsFirstRun } from './vocabulary.ts';
-import { renderDashboardHomePage, type DashboardPageOptions } from './pages/home.ts';
-import { renderDashboardDetailPage } from './pages/detail.ts';
-import { renderDashboardSetupPage } from './pages/setup.ts';
-import { renderDashboardBackgroundPage } from './pages/background.ts';
-import { renderDashboardSensitivityPage } from './pages/sensitivity.ts';
+import { DASHBOARD_OUTSIDE_HELP_QUERY_PARAM } from './outside-help.ts';
+import {
+  DASHBOARD_HTML_PATH,
+  DASHBOARD_LOCAL_PAGES,
+  DASHBOARD_PANEL_READ_QUERY_PARAM,
+  dashboardHomeHref,
+} from './host-page.ts';
+import {
+  renderDashboardAgentsPage,
+  renderDashboardConnectorPage,
+  renderDashboardKeysPage,
+  type DashboardPageOptions,
+} from './pages/local.ts';
+import { renderDashboardOutsideHelpPage } from './pages/outside-help.ts';
 
-export const DASHBOARD_HTML_PATH = '/dashboard';
-/** ?source=<DashboardSourceCard.source_id> selects the detail page. */
-export const DASHBOARD_DETAIL_QUERY_PARAM = 'source';
-/** ?setup serves the first-run page even after sources are connected. */
-export const DASHBOARD_SETUP_QUERY_PARAM = 'setup';
-/** ?background serves the background lane page. Same path, same auth. */
-export const DASHBOARD_BACKGROUND_QUERY_PARAM = 'background';
-/** ?sensitivity serves the categories-and-tiers page. Same path, same auth. */
-export const DASHBOARD_SENSITIVITY_QUERY_PARAM = 'sensitivity';
+export { DASHBOARD_HTML_PATH };
 
-export interface DashboardHtmlRouteInput {
-  url: URL;
-  view: SourceDashboardViewModel;
-  options?: DashboardPageOptions;
-}
+/**
+ * The addresses of the pages the panel replaced. Each still answers, with a
+ * redirect to /dashboard, so a bookmark or an old link lands on the panel.
+ */
+export const DASHBOARD_LEGACY_QUERY_PARAMS = ['source', 'background', 'sensitivity', 'setup', 'privacy', 'embedding-ledger'] as const;
 
-export interface DashboardHtmlRouteResult {
-  html: string;
-  /** 200, or 404 when ?source names no card on the view model. */
-  status: number;
-}
+export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'agents' | 'outside_help' | 'connector' | 'legacy';
 
 export function isDashboardHtmlRoute(url: URL): boolean {
   return url.pathname === DASHBOARD_HTML_PATH;
 }
 
-export function renderDashboardHtmlRoute(input: DashboardHtmlRouteInput): DashboardHtmlRouteResult {
-  const { url, view } = input;
-  const options = withTokenBasePath(url, input.options);
-  const sourceId = url.searchParams.get(DASHBOARD_DETAIL_QUERY_PARAM);
-  if (sourceId !== null) {
-    const html = renderDashboardDetailPage(view, sourceId, options);
-    if (html !== undefined) return { html, status: 200 };
-    return { html: renderNotFound(view, options), status: 404 };
-  }
-  // Asked for by name, so it serves even on a first run: the lanes are the one
-  // page that can say what is happening before any source finishes.
-  if (url.searchParams.has(DASHBOARD_BACKGROUND_QUERY_PARAM)) {
-    return { html: renderDashboardBackgroundPage(view, options), status: 200 };
-  }
-  // Also asked for by name, and also serves on a first run: what may read a
-  // secure item is a question the owner is entitled to before they connect
-  // anything.
-  if (url.searchParams.has(DASHBOARD_SENSITIVITY_QUERY_PARAM)) {
-    return { html: renderDashboardSensitivityPage(view, options), status: 200 };
-  }
-  if (url.searchParams.has(DASHBOARD_SETUP_QUERY_PARAM) || servesSetupImplicitly(view)) {
-    return { html: renderDashboardSetupPage(view, options), status: 200 };
-  }
-  return { html: renderDashboardHomePage(view, options), status: 200 };
+/** Which page a /dashboard URL names. An older page's address wins, so it always redirects. */
+export function dashboardHtmlRoutePage(url: URL): DashboardHtmlRoutePage {
+  const params = url.searchParams;
+  if (DASHBOARD_LEGACY_QUERY_PARAMS.some((param) => params.has(param))) return 'legacy';
+  if (params.has(DASHBOARD_PANEL_READ_QUERY_PARAM)) return 'panel_read';
+  if (params.has(DASHBOARD_LOCAL_PAGES.keys)) return 'keys';
+  if (params.has(DASHBOARD_LOCAL_PAGES.agents)) return 'agents';
+  if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM)) return 'outside_help';
+  if (params.has(DASHBOARD_LOCAL_PAGES.connector)) return 'connector';
+  return 'host';
 }
 
-/** The existing dashboard renderer projected as inert native-Control-UI HTML. */
-export function renderDashboardControlUi(input: {
-  params: OlympusDashboardReadParams;
-  view: SourceDashboardViewModel;
-  canWrite: boolean;
-  options?: DashboardPageOptions;
-}): OlympusDashboardReadResult {
-  if (input.params.view === 'dispositions') {
-    throw new Error(`Dashboard view ${input.params.view} has its own native renderer.`);
-  }
-  const url = dashboardControlUiUrl(input.params);
-  const rendered = renderDashboardHtmlRoute({
-    url,
-    view: input.view,
-    options: {
-      ...input.options,
-      basePath: DASHBOARD_HTML_PATH,
-      format: 'fragment',
-      controlMode: 'native',
-      canWrite: input.canWrite,
-      readOnly: !input.canWrite,
-    },
-  });
-  const body = input.options?.nativeOAuthAvailable === false
-    ? `<div class="attncard" data-native-oauth-unavailable>OAuth connections are unavailable until the Gateway has a trusted public origin.</div>\n${
-      rendered.html.replaceAll('data-connect-kind="oauth"', 'data-connect-kind="oauth" data-native-oauth-unavailable')
-    }`
-    : rendered.html;
-  return {
-    status: rendered.status,
-    title: dashboardControlUiTitle(input.params, input.view),
-    body,
-    controller: 'dashboard',
-    can_write: input.canWrite,
-    signature: dashboardPageSignature(body),
-    poll_interval_ms: 15_000,
-  };
-}
-
-function dashboardControlUiUrl(params: OlympusDashboardReadParams): URL {
-  const url = new URL('http://olympus.invalid/dashboard');
-  if (params.view === 'source' && params.source_id) url.searchParams.set('source', params.source_id);
-  else if (params.view === 'setup') url.searchParams.set('setup', '');
-  else if (params.view === 'background') url.searchParams.set('background', '');
-  else if (params.view === 'sensitivity') url.searchParams.set('sensitivity', '');
-  return url;
-}
-
-function dashboardControlUiTitle(
-  params: OlympusDashboardReadParams,
-  view: SourceDashboardViewModel,
-): string {
-  if (params.view === 'source') {
-    const source = view.sources.find((entry) => entry.source_id === params.source_id);
-    return source ? `Olympus / ${source.label}` : 'Olympus / Not found';
-  }
-  if (params.view === 'setup') return 'Olympus / Setup';
-  if (params.view === 'background') return 'Olympus / Background';
-  if (params.view === 'sensitivity') return 'Olympus / Sensitivity';
-  return 'Olympus';
-}
-
-/**
- * The read-only dash_ query token is the only way a browser reaches this HTML
- * — a bearer header cannot be typed into an address bar — so every internal
- * link has to carry it or the first click dead-ends on a 401. Folding the
- * token into basePath does that in one place: detail/background/setup hrefs
- * already append with '&' when the base contains '?'.
- */
-function withTokenBasePath(url: URL, options?: DashboardPageOptions): DashboardPageOptions | undefined {
+/** The read-only dash_ token on this URL, if any; every link the page builds carries it. */
+export function dashboardReadToken(url: URL): string | undefined {
   const token = url.searchParams.get('token');
-  // The dash_ prefix is what workers/core/worker-auth.ts stamps on the derived
-  // query token, and http.ts admits that token to GET /dashboard only — it can
-  // never reach a control route. So its presence is the page's one reliable
-  // signal that this reader's controls would 401, and the pages offer links
-  // instead. A caller-supplied basePath (the preview harness, an embedder)
-  // keeps its own path but still gets the read-only reading of the token.
-  const readOnly = token !== null
-    && token.startsWith('dash_')
-    && options?.controlSessionCsrfToken === undefined;
-  const withReadOnly = readOnly ? { ...options, readOnly: true } : options;
-  if (withReadOnly?.basePath !== undefined) return withReadOnly;
-  if (token === null || token === '') return withReadOnly;
-  return { ...withReadOnly, basePath: `${DASHBOARD_HTML_PATH}?token=${encodeURIComponent(token)}` };
+  return token !== null && token.startsWith('dash_') ? token : undefined;
 }
 
-/**
- * The implicit first-run redirect, gated on the install actually being fresh.
- * A fleet-wide credential expiry zeroes connected_sources too (reauth_required
- * cards read as unconfigured), and that owner needs home's Needs-you section —
- * with the degraded-credential detail — not a page that greets them like a new
- * install. Explicit ?setup still serves unconditionally.
- */
-function servesSetupImplicitly(view: SourceDashboardViewModel): boolean {
-  if (!dashboardIsFirstRun(view)) return false;
-  if (view.summary.total_indexed_items > 0) return false;
-  return !view.sources.some((source) =>
-    source.connection.state === 'reauth_required' || source.connection.state === 'awaiting_consent');
+/** Where an older page's address goes: /dashboard, keeping a dash_ reader's token. */
+export function dashboardLegacyRedirect(url: URL): string {
+  return dashboardHomeHref(dashboardReadToken(url));
 }
 
-/** Calm 404: names no ids back at the reader, offers the way home. */
-function renderNotFound(view: SourceDashboardViewModel, options?: DashboardPageOptions): string {
-  const basePath = options?.basePath ?? DASHBOARD_HTML_PATH;
-  return pageShell({
-    title: 'Olympus',
-    crumb: 'Not found',
-    basePath,
-    meta: dashboardHomeMeta(view, options),
-    body: `<div class="foot">No source by that id. <a href="${escapeHtml(basePath)}">Back to the dashboard</a></div>`,
-    ...(options?.format === undefined ? {} : { format: options.format }),
-  });
+/** The computer's local pages. `view` is needed by Keys only. */
+export function renderDashboardLocalPage(
+  page: 'keys' | 'agents' | 'outside_help' | 'connector',
+  input: { url: URL; view?: SourceDashboardViewModel; options?: DashboardPageOptions },
+): string {
+  const options: DashboardPageOptions = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
+  switch (page) {
+    case 'keys':
+      if (!input.view) throw new Error('Keys needs the dashboard view.');
+      return renderDashboardKeysPage(input.view, options);
+    case 'agents':
+      return renderDashboardAgentsPage(options);
+    case 'outside_help':
+      return renderDashboardOutsideHelpPage(options);
+    case 'connector':
+      return renderDashboardConnectorPage(options);
+  }
 }
 
-export { renderDashboardHomePage, type DashboardPageOptions } from './pages/home.ts';
-export { renderDashboardDetailPage } from './pages/detail.ts';
-export { renderDashboardSetupPage } from './pages/setup.ts';
+export type { DashboardPageOptions } from './pages/local.ts';
 export {
-  dashboardBackgroundLanes,
-  renderDashboardBackgroundPage,
-  type DashboardBackgroundLane,
-} from './pages/background.ts';
-export {
-  renderDashboardSensitivityBody,
-  renderDashboardSensitivityPage,
-} from './pages/sensitivity.ts';
+  COMPUTER_HOST_PAGE_CSP,
+  DASHBOARD_PANEL_READ_QUERY_PARAM,
+  DASHBOARD_TOOLS_CALL_PATH,
+  renderComputerHostPage,
+} from './host-page.ts';
 export { DASHBOARD_STATUS_ORDER, type DashboardStatus } from './vocabulary.ts';

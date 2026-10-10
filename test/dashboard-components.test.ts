@@ -1,22 +1,18 @@
 import { describe, expect, test } from 'bun:test';
 import {
   actionButton,
-  attentionRow,
   connectorSheet,
   dashboardControlGate,
   DASHBOARD_CONTROL_GATE_ID,
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
   dashboardPageSignature,
-  dashboardSignature,
   donutGlyph,
   dotGlyph,
   escapeHtml,
   escapeScriptJson,
   externalLink,
   pageShell,
-  progressBar,
   setupRow,
-  sourceCard,
   statusGlyph,
   waitingGlyph,
 } from '../src/workers/dashboard/components.ts';
@@ -67,8 +63,9 @@ describe('donutGlyph', () => {
   test('renders the mockup geometry and the dasharray for a fraction', () => {
     const svg = donutGlyph(0.49);
     expect(svg).toContain('viewBox="0 0 14 14"');
-    expect(svg).toContain('<circle cx="7" cy="7" r="6" stroke="#AE9EF0" stroke-width="1.5"/>');
-    expect(svg).toContain('r="2" stroke="#AE9EF0" stroke-width="4"');
+    // Painted through the theme variable, so the glyph follows light and dark.
+    expect(svg).toContain('<circle cx="7" cy="7" r="6" style="stroke:var(--run-fill)" stroke-width="1.5"/>');
+    expect(svg).toContain('r="2" style="stroke:var(--run-fill)" stroke-width="4"');
     expect(svg).toContain('stroke-dasharray="6.16 12.566"');
     expect(svg).toContain('transform="rotate(-90 7 7)"');
     expect(svg).toContain('aria-hidden="true"');
@@ -86,18 +83,19 @@ describe('donutGlyph', () => {
     expect(donutGlyph(Number.POSITIVE_INFINITY)).toContain('stroke-dasharray="12.57 12.566"');
   });
 
-  test('refuses a color that is not a literal hex', () => {
+  test('refuses a color that is not a literal hex or one theme variable', () => {
     const svg = donutGlyph(0.5, 'red" onload="evil()');
     expect(svg).not.toContain('onload');
-    expect(svg).toContain('#AE9EF0');
+    expect(svg).toContain('var(--run-fill)');
+    expect(donutGlyph(0.5, 'var(--x);background:url(x)')).not.toContain('url(');
   });
 });
 
 describe('waitingGlyph and dotGlyph', () => {
   test('waiting is a grey double ring with no progress claim', () => {
     const svg = waitingGlyph();
-    expect(svg).toContain('<circle cx="7" cy="7" r="6" stroke="#8C8E97" stroke-width="1.5"/>');
-    expect(svg).toContain('<circle cx="7" cy="7" r="2.6" stroke="#8C8E97" stroke-width="1.5"/>');
+    expect(svg).toContain('<circle cx="7" cy="7" r="6" style="stroke:var(--off)" stroke-width="1.5"/>');
+    expect(svg).toContain('<circle cx="7" cy="7" r="2.6" style="stroke:var(--off)" stroke-width="1.5"/>');
     expect(svg).not.toContain('stroke-dasharray');
   });
 
@@ -105,7 +103,7 @@ describe('waitingGlyph and dotGlyph', () => {
     expect(dotGlyph('#6CC08B')).toBe('<span class="dot" style="background:#6CC08B"></span>');
     const hostile = dotGlyph('red;} body{display:none} .x{color:red');
     expect(hostile).not.toContain('display:none');
-    expect(hostile).toContain('#8C8E97');
+    expect(hostile).toContain('var(--off)');
   });
 });
 
@@ -116,75 +114,18 @@ describe('statusGlyph', () => {
 
   test('Working falls back to a plain ring when no fraction is defensible', () => {
     const svg = statusGlyph('Working');
-    expect(svg).toContain('stroke="#AE9EF0"');
+    expect(svg).toContain('style="stroke:var(--run-fill)"');
     expect(svg).not.toContain('stroke-dasharray');
   });
 
   test('the other five words each get their own glyph', () => {
     expect(statusGlyph('Waiting')).toContain('r="2.6"');
-    expect(statusGlyph('Fresh')).toBe('<span class="dot" style="background:#6CC08B"></span>');
-    expect(statusGlyph('Needs you')).toContain('#E3AA45');
-    expect(statusGlyph('Failing')).toContain('#F08276');
-    expect(statusGlyph('Off')).toContain('#30323A');
-  });
-});
-
-describe('sourceCard', () => {
-  test('renders the header glyph, the label, and the sub line', () => {
-    const html = sourceCard({ label: 'Gmail', status: 'Working', subLine: 'indexing', fraction: 0.49 });
-    expect(html).toContain('class="card"');
-    expect(html).toContain('class="hd"');
-    expect(html).toContain('stroke-dasharray="6.16 12.566"');
-    expect(html).toContain('<div class="ln">indexing</div>');
-  });
-
-  test('omits the sub line entirely when there is nothing true to say', () => {
-    const html = sourceCard({ label: 'Readwise', status: 'Fresh', subLine: '' });
-    expect(html).not.toContain('class="ln"');
-  });
-
-  test('makes the whole card the link when a detail page exists, and escapes the href', () => {
-    const html = sourceCard({
-      label: 'Gmail',
-      status: 'Fresh',
-      href: '/dashboard?source=gmail.email&token="x',
-    });
-    // Owner ruling: the hit zone is the card, so the anchor is the card.
-    expect(html).toContain('<a class="card cardlink" href="/dashboard?source=gmail.email&amp;token=&quot;x">');
-    expect(html).not.toContain('<div class="card">');
-    // And the name inside it is plain text, not a nested link.
-    expect(html).not.toContain('<a href=');
-  });
-
-  test('refuses a script-scheme href rather than linking it', () => {
-    const html = sourceCard({ label: 'Gmail', status: 'Fresh', href: 'javascript:evil()' });
-    expect(html).not.toContain('javascript:');
-    expect(html).not.toContain('<a ');
-  });
-
-  test('escapes hostile label and sub line', () => {
-    expectEscaped(sourceCard({ label: HOSTILE, status: 'Fresh', subLine: HOSTILE }));
-  });
-});
-
-describe('control links', () => {
-  test('mints a bounded session before navigating to a protected dashboard page', () => {
-    const html = actionButton({
-      label: 'Edit what gets ingested',
-      kind: 'control_link',
-      href: '/dashboard/dispositions',
-      hint: 'needs the worker token',
-    });
-    expect(html).toContain('data-control-link="/dashboard/dispositions"');
-    expect(html).not.toContain('href=');
-    const controller = mountDashboardController.toString();
-    expect(controller).toContain('data-control-link');
-    expect(controller).toContain('options.navigate(href)');
-  });
-
-  test('refuses scheme-relative and external control destinations', () => {
-    expect(actionButton({ label: 'Bad', kind: 'control_link', href: '//attacker.test/x' })).toBe('');
-    expect(actionButton({ label: 'Bad', kind: 'control_link', href: 'https://attacker.test/x' })).toBe('');
+    expect(statusGlyph('Fresh')).toBe('<span class="dot" style="background:var(--good)"></span>');
+    // Needs you is the warm orange fill, never the text colour.
+    expect(statusGlyph('Needs you')).toContain('var(--warn-fill)');
+    expect(statusGlyph('Failing')).toContain('var(--bad)');
+    // Off is a hollow grey ring: nothing is claimed.
+    expect(statusGlyph('Off')).toBe('<span class="dot hollow"></span>');
   });
 });
 
@@ -246,166 +187,6 @@ describe('dashboard-level control gate', () => {
   });
 });
 
-describe('attentionRow', () => {
-  test('renders label, reason and a control form for the action', () => {
-    const html = attentionRow({
-      label: 'Dropbox',
-      why: 'reauth required',
-      attention: true,
-      action: { label: 'Reauthenticate', kind: 'oauth', source: 'dropbox', primary: true },
-    });
-    expect(html).toContain('class="attncard"');
-    expect(html).toContain('Dropbox');
-    expect(html).toContain('<span class="why"> — reauth required</span>');
-    expect(html).toContain('data-connect-kind="oauth"');
-    expect(html).toContain('<input type="hidden" name="source" value="dropbox">');
-    expect(html).toContain('class="btn primary"');
-  });
-
-  test('a sync action posts to the sync seam, and kind none renders no button', () => {
-    expect(attentionRow({ label: 'Gmail', action: { label: 'Sync now', kind: 'sync_now', source: 'gmail' } }))
-      .toContain('data-sync-kind="sync_now"');
-    const quiet = attentionRow({ label: 'Gmail', action: { label: 'Sync now', kind: 'none' } });
-    expect(quiet).not.toContain('<button');
-  });
-
-  test('an api_key action carries the field the connect route requires', () => {
-    const html = attentionRow({
-      label: 'Readwise',
-      action: { label: 'Connect', kind: 'api_key', source: 'readwise' },
-    });
-    // POST /dashboard/connect/api-key 400s without an `api_key` body field, so
-    // the form must carry it — and never as a visible text input.
-    expect(html).toContain('name="api_key"');
-    expect(html).toContain('type="password"');
-    expect(html).toContain('data-action-message');
-  });
-
-  test('a bounded Disconnect action names retained custody and links provider revocation', () => {
-    const html = attentionRow({
-      label: 'Dropbox',
-      action: {
-        label: 'Disconnect Dropbox',
-        kind: 'disconnect',
-        source: 'dropbox.files',
-        confirmation: 'Indexed data and developer-app registration stay. Provider access is not revoked.',
-        providerRevocationUrl: 'https://www.dropbox.com/account/connected_apps',
-      },
-    });
-    expect(html).toContain('data-disconnect-kind="disconnect"');
-    expect(html).toContain('name="source_id" value="dropbox.files"');
-    expect(html).toContain('Indexed data and developer-app registration stay. Provider access is not revoked.');
-    expect(html).toContain('href="https://www.dropbox.com/account/connected_apps"');
-    expect(html).toContain('>Provider access</a>');
-  });
-
-  test('a bounded Unpair action posts to its own route and links the provider device list', () => {
-    const html = attentionRow({
-      label: 'WhatsApp',
-      action: {
-        label: 'Unpair WhatsApp',
-        kind: 'unpair',
-        source: 'whatsapp.personal.messages',
-        confirmation: 'Removes this computer WhatsApp pairing session. Messages already indexed stay.',
-        providerRevocationUrl: 'https://faq.whatsapp.com/378279804439436',
-        providerLinkLabel: 'WhatsApp linked devices',
-      },
-    });
-    expect(html).toContain('data-unpair-kind="unpair"');
-    expect(html).toContain('name="source_id" value="whatsapp.personal.messages"');
-    expect(html).toContain('Removes this computer WhatsApp pairing session. Messages already indexed stay.');
-    expect(html).toContain('href="https://faq.whatsapp.com/378279804439436"');
-    expect(html).toContain('>WhatsApp linked devices</a>');
-    // Its own route: Unpair removes a paired session, never a broker grant.
-    expect(html).not.toContain('data-disconnect-kind');
-  });
-
-  test('renders nothing for the reason half when no field backs it', () => {
-    const html = attentionRow({ label: 'Gmail' });
-    expect(html).not.toContain('class="why"');
-    expect(html).not.toContain('—');
-  });
-
-  test('carries a progress bar when a percent is given', () => {
-    const html = attentionRow({ label: 'Gmail', barPercent: 8 });
-    expect(html).toContain('class="bar"');
-    expect(html).toContain('style="width:8%"');
-  });
-
-  test('escapes hostile label, reason and action label', () => {
-    expectEscaped(attentionRow({
-      label: HOSTILE,
-      why: HOSTILE,
-      action: { label: HOSTILE, kind: 'api_key', source: HOSTILE },
-    }));
-  });
-
-  test('becomes a whole-row link when it has a destination and no control', () => {
-    const html = attentionRow({
-      label: 'Gmail',
-      why: 'ingestion is stalled',
-      attention: true,
-      href: '/dashboard?source=gmail.email',
-    });
-    expect(html).toContain('<a class="attncard rowzone" href="/dashboard?source=gmail.email">');
-    expect(html).toContain('<span class="go" aria-hidden="true">→</span>');
-    expect(html).not.toContain('<button');
-  });
-
-  test('keeps the control and links only the name when both exist', () => {
-    const html = attentionRow({
-      label: 'Dropbox',
-      why: 'reauth required',
-      href: '/dashboard?source=dropbox.files',
-      action: { label: 'Reauthenticate', kind: 'oauth', source: 'dropbox', primary: true },
-    });
-    // A control inside a link is not a shape HTML allows, so the row stays a
-    // row and its name carries the link.
-    expect(html).not.toContain('<a class="attncard');
-    expect(html).toContain('<a class="name" href="/dashboard?source=dropbox.files">Dropbox</a>');
-    expect(html).toContain('data-connect-kind="oauth"');
-  });
-
-  test('a link action renders a link and its requirement, never a control', () => {
-    const html = attentionRow({
-      label: 'Dropbox',
-      href: '/dashboard?source=dropbox.files',
-      action: {
-        label: 'Reauthenticate',
-        kind: 'link',
-        href: '/dashboard?setup',
-        hint: 'needs the worker token',
-      },
-    });
-    expect(html).toContain('<a class="btn" href="/dashboard?setup">Reconnect</a>');
-    expect(html).toContain('<span class="hint">needs the worker token</span>');
-    expect(html).not.toContain('<form');
-  });
-
-  test('refuses a script-scheme link action rather than rendering it', () => {
-    const html = attentionRow({
-      label: 'Dropbox',
-      action: { label: 'Reauthenticate', kind: 'link', href: 'javascript:evil()' },
-    });
-    expect(html).not.toContain('javascript:');
-    expect(html).not.toContain('class="btn"');
-  });
-
-  test('refuses a script-scheme row href rather than linking the row', () => {
-    const html = attentionRow({ label: 'Gmail', href: 'javascript:evil()' });
-    expect(html).not.toContain('javascript:');
-    expect(html).not.toContain('<a ');
-  });
-
-  test('escapes a hostile row href and link action', () => {
-    expectEscaped(attentionRow({
-      label: HOSTILE,
-      href: `/dashboard?source=${HOSTILE}`,
-      action: { label: HOSTILE, kind: 'link', href: `/dashboard?setup=${HOSTILE}`, hint: HOSTILE },
-    }));
-  });
-});
-
 describe('externalLink', () => {
   test('opens a provider console in its own tab, with the referrer withheld', () => {
     const html = externalLink({ label: 'readwise.io/access_token →', url: 'https://readwise.io/access_token' });
@@ -436,9 +217,11 @@ describe('setupRow', () => {
       action: { label: 'Connect', kind: 'oauth', source: 'google_drive' },
     });
     expect(html).toContain('class="setrow"');
-    expect(html).toContain('class="dot"');
+    // Not connected: a hollow grey ring, and an outlined Connect.
+    expect(html).toContain('class="dot hollow"');
     expect(html).toContain('Documents and folders, indexed and searchable');
     expect(html).toContain('data-connect-kind="oauth"');
+    expect(html).not.toContain('btn primary');
   });
 
   test('a sheet action toggles the named sheet without an inline handler', () => {
@@ -514,22 +297,6 @@ describe('setupRow', () => {
   });
 });
 
-describe('progressBar', () => {
-  test('clamps the percent and labels the bar', () => {
-    expect(progressBar({ percent: 8, label: '8 percent' })).toContain('style="width:8%"');
-    expect(progressBar({ percent: -4, label: 'none' })).toContain('style="width:0%"');
-    expect(progressBar({ percent: 250, label: 'all' })).toContain('style="width:100%"');
-    expect(progressBar({ percent: Number.NaN, label: 'unknown' })).toContain('style="width:0%"');
-    expect(progressBar({ percent: 8, label: '8 percent' })).toContain('aria-valuenow="8"');
-  });
-
-  test('escapes the aria label', () => {
-    const html = progressBar({ percent: 50, label: HOSTILE });
-    expect(html).not.toContain('" onmouseover="');
-    expect(html).toContain('&lt;script&gt;');
-  });
-});
-
 describe('connectorSheet', () => {
   test('renders the prompt box and a copy button bound by data attribute', () => {
     const html = connectorSheet({
@@ -601,50 +368,6 @@ describe('dashboardPageSignature', () => {
     expect(pageShell({ title: 'Olympus', meta: '', body: '<div>one</div>' })).not.toContain('dashboard-poll-signature');
   });
 
-});
-
-describe('dashboardSignature', () => {
-  test('changes with custody, the embedding lane state, and a working row\'s minute of age', () => {
-    const card = fixtureCard();
-    const now = new Date('2026-07-02T12:00:00.000Z');
-    // Locked and unlocked renders of the same sources must not share a
-    // signature, or an expired session leaves a page reading "unlocked".
-    expect(dashboardSignature([card], { now, controlSession: true }))
-      .not.toBe(dashboardSignature([card], { now, controlSession: false }));
-    // The embedding lane's own run state is rendered, so it is signed.
-    const running = { state: 'running', stateLine: 'Embeddings: running now' } as never;
-    const parked = { state: 'parked', stateLine: 'Embeddings: parked' } as never;
-    expect(dashboardSignature([card], { now, embeddingRuntime: running }))
-      .not.toBe(dashboardSignature([card], { now, embeddingRuntime: parked }));
-    // A row that moved forty seconds ago and one that moved ninety seconds ago
-    // print different ages; an hour later the same row prints Stalled.
-    const moving = {
-      ...card,
-      coverage: { ...card.coverage, content_ready_items: Math.max(1, card.coverage.indexed_items - 1) },
-      movement: { extraction_at: '2026-07-02T11:59:20.000Z' },
-    };
-    const olderMove = { ...moving, movement: { extraction_at: '2026-07-02T11:58:30.000Z' } };
-    expect(dashboardSignature([moving], { now })).not.toBe(dashboardSignature([olderMove], { now }));
-    const anHourOn = new Date('2026-07-02T13:00:30.000Z');
-    expect(dashboardSignature([moving], { now })).not.toBe(dashboardSignature([moving], { now: anHourOn }));
-  });
-
-  test('is stable for the same cards and moves when a count moves', () => {
-    const card = fixtureCard();
-    expect(dashboardSignature([card])).toBe(dashboardSignature([fixtureCard()]));
-    const moved = fixtureCard({
-      coverage: { ...card.coverage, indexed_items: card.coverage.indexed_items + 1 },
-    });
-    expect(dashboardSignature([moved])).not.toBe(dashboardSignature([card]));
-  });
-
-  test('moves when a connection state changes without any count changing', () => {
-    const card = fixtureCard();
-    const reauth = fixtureCard({
-      connection: { ...card.connection, state: 'reauth_required', label: 'reauth required' },
-    });
-    expect(dashboardSignature([reauth])).not.toBe(dashboardSignature([card]));
-  });
 });
 
 describe('pageShell', () => {

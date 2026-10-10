@@ -1,0 +1,68 @@
+# Olympus relay front. Installed to /etc/caddy/Caddyfile by deploy/deploy.sh.
+# Caddy obtains and renews the certificate for this one name (HTTP-01) and
+# proxies everything to the relay on loopback. No access log: request lines
+# carry OAuth query strings, which the relay never records either.
+#
+# Written for Caddy 2.6.2 (the Ubuntu package); every directive below exists
+# in that version (caddyconfig/httpcaddyfile/serveroptions.go and
+# modules/caddyhttp/requestbody at tag v2.6.2). A newer Caddy needs no change.
+{
+	# The admin API on a Unix socket only the caddy user (and root) can reach,
+	# never on TCP: a TCP localhost:2019 endpoint is open to every local
+	# process, the relay's included. /run/caddy is created by the systemd
+	# drop-in deploy/caddy-admin.conf. `systemctl reload caddy` (caddy
+	# reload) reads this address from the config and speaks to the socket
+	# (Caddy 2.6.2 cmd/commandfuncs.go AdminAPIRequest; admin.go accepts the
+	# empty Host it sends).
+	admin unix//run/caddy/admin.sock
+	servers {
+		timeouts {
+			# Slow or never-finished request headers are dropped here.
+			read_header 10s
+			# Idle keep-alive connections between requests.
+			idle 2m
+			# The public bound on how long any request may take to arrive,
+			# body included: the edge closes a trickled or never-finished
+			# upload, whatever the relay behind it did. Checked against the
+			# Go and Caddy source (Caddy 2.6.2 and current master alike):
+			# - read_body is Go's http.Server.ReadTimeout, a deadline on the
+			#   whole request. Caddy has no body-only read timeout in any
+			#   release (request_body has only max_size), so upgrading Caddy
+			#   would not give a tighter, stream-safe bound.
+			# - WebSocket (WSS install sessions): Go clears every deadline
+			#   when the connection is hijacked for the upgrade, so sessions
+			#   are not cut.
+			# - HTTP/2 (TLS clients): the deadline covers only the request
+			#   body stream; responses and SSE stream on.
+			# - HTTP/1.1: Go's background read after the body also hits the
+			#   deadline and cancels the request, so a whole HTTP/1.1
+			#   exchange is capped at this value. 36m is above the longest
+			#   exchange the relay allows (responseHeadTimeoutMs 5 min +
+			#   responseTotalTimeoutMs 30 min, server/limits.ts), so no
+			#   answer or stream the relay would deliver is cut; keep it
+			#   above their sum if those change.
+			# Inside this bound the relay itself refuses and times uploads
+			# (upload tickets, byte budget, 30 s absolute and 10 s idle
+			# deadlines) and closes the transport behind every refusal
+			# (connectionIdleTimeoutSeconds, server/limits.ts).
+			read_body 36m
+		}
+	}
+}
+
+mcp.olympusplugin.ai {
+	# The relay's own cap is 1 MiB; anything far larger never reaches it.
+	request_body {
+		max_size 2MB
+	}
+	reverse_proxy 127.0.0.1:8787 {
+		# Stream responses (Server-Sent Events) as they arrive.
+		# The http transport sets no read or write timeout by default, so a
+		# long-lived stream is bounded by the relay's own timers instead.
+		flush_interval -1
+	}
+}
+
+# The olympusplugin.ai static site (site/deploy/Caddyfile.site), installed
+# beside this file by deploy/remote-install.sh.
+import /etc/caddy/olympus-site.caddy

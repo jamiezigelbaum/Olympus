@@ -1,31 +1,23 @@
 // The owner's installed classification inputs, for every lane at once
-// (design section 2.2): the sensitivity map, the owner tier rules
-// (tier-rules.ts) and the privacy-safe sniffer.
+// (design section 2.2): the owner tier rules (tier-rules.ts, which the
+// privacy profile writes) and the privacy-safe sniffer.
 //
-// Before this, only the lanes that passed a map explicitly recorded decisions
-// with it. The worker process configures this once at boot; the connector
-// store then uses it for any sync that does not bring its own classification
-// inputs, so every lane records with the same map, the same rules and the
-// same sniffer. Nothing here is per source.
+// The worker process configures this once at boot; the connector store then
+// uses it for any sync that does not bring its own classification inputs, so
+// every lane records with the same rules and the same sniffer. Nothing here
+// is per source.
 //
 // Unconfigured (tests, one-off scripts), it is absent and stores behave
 // exactly as before.
 //
-// Fail-safe: an INVALID rules file or map (unparseable, half-written, changed
+// Fail-safe: an INVALID rules file (unparseable, half-written, changed
 // mid-read, or writable by anyone but its owner) never falls back to "no
-// rules" or "no map" — that would record the owner's Private folders and
-// categories as Personal. The inputs come back with `unavailableReason` and
-// the LAST GOOD rules and map: a tiered store set holds every new decision
+// rules" — that would record the owner's Private folders as Personal. The
+// inputs come back with `unavailableReason` and the LAST GOOD rules: a tiered store set holds every new decision
 // pending (Private, embedding held) and a plain store records none, until the
 // file is fixed.
 
-import { ownerConfigStamp } from '../../core/owner-config-read.ts';
-import {
-  readOwnerSensitivityMap,
-  resolveSensitivityMapPath,
-  type SensitivityMap,
-} from '../../core/sensitivity-map.ts';
-import { CachedTierSniffer, type SnifferLaneIdentity } from './sniffer.ts';
+import { CachedTierSniffer, snifferPromptVersions, type SnifferLaneIdentity } from './sniffer.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import {
@@ -43,18 +35,26 @@ export interface InstalledTierClassificationOptions {
   env?: Record<string, string | undefined>;
   /** The resolved privacy-safe lane. Absent: no sniffer; flagged items stay pending. */
   lane?: SnifferLaneIdentity;
+  /**
+   * This install has no Public tier (its sovereignty policy defines none:
+   * fresh installs, owner ruling 2026-10-01). Public verdicts become Personal.
+   */
+  retirePublic?: boolean;
+  /**
+   * The owner's own words about privacy (privacy-profile.ts). They key the
+   * sniffer's verdict cache (snifferPromptVersions), so an edit re-asks.
+   */
+  ownerContext?: () => string | undefined;
   now?: () => Date;
 }
 
 export class InstalledTierClassification implements InstalledTierClassificationProvider {
   readonly lane: SnifferLaneIdentity | undefined;
+  readonly retirePublic: boolean;
+  private readonly ownerContext: (() => string | undefined) | undefined;
   private readonly env: Record<string, string | undefined>;
   private readonly now: (() => Date) | undefined;
   private readonly snifferStores = new Map<string, TierSnifferStore>();
-  private mapStamp: string | undefined;
-  /** The last map that read cleanly. */
-  private map: SensitivityMap | undefined;
-  private mapInvalid = false;
   private rulesStamp: string | undefined;
   /** The last rules that read cleanly. */
   private rules: OwnerTierRule[] = [];
@@ -63,6 +63,8 @@ export class InstalledTierClassification implements InstalledTierClassificationP
   constructor(options: InstalledTierClassificationOptions = {}) {
     this.env = options.env ?? process.env;
     this.lane = options.lane;
+    this.retirePublic = options.retirePublic === true;
+    this.ownerContext = options.ownerContext;
     this.now = options.now;
   }
 
@@ -73,22 +75,23 @@ export class InstalledTierClassification implements InstalledTierClassificationP
    */
   forLedger(ledgerPath: string): InstalledStoreTierClassification {
     const rules = this.currentRules();
-    const sensitivityMap = this.currentMap();
-    const unavailableReason = this.rulesInvalid
-      ? 'tier_rules_invalid'
-      : this.mapInvalid ? 'sensitivity_map_invalid' : undefined;
+    const unavailableReason = this.rulesInvalid ? 'tier_rules_invalid' : undefined;
     let sniffer: TierSniffer | undefined;
     if (this.lane && ledgerPath !== ':memory:') {
       try {
-        sniffer = new CachedTierSniffer(this.snifferStoreForLedger(ledgerPath), this.lane);
+        sniffer = new CachedTierSniffer(
+          this.snifferStoreForLedger(ledgerPath),
+          this.lane,
+          snifferPromptVersions(this.ownerContext?.()).cache,
+        );
       } catch {
         // No sniffer store: flagged items stay pending (held Private).
       }
     }
     return {
-      ...(sensitivityMap ? { sensitivityMap } : {}),
       ...(rules.length > 0 ? { rules } : {}),
       ...(sniffer ? { sniffer } : {}),
+      ...(this.retirePublic ? { retirePublic: true } : {}),
       ...(unavailableReason ? { unavailableReason } : {}),
     };
   }
@@ -113,32 +116,6 @@ export class InstalledTierClassification implements InstalledTierClassificationP
       }
     }
     this.snifferStores.clear();
-  }
-
-  /**
-   * The last good map, re-read (through the one owner-map loader) only when
-   * the file's stamp changes, so every lane sees an edit at its next pass.
-   * An unusable file keeps the last good map and marks the inputs invalid; a
-   * torn read is retried at the next call because its stamp is not kept.
-   */
-  private currentMap(): SensitivityMap | undefined {
-    const stamp = ownerConfigStamp(resolveSensitivityMapPath({ env: this.env }));
-    if (stamp !== this.mapStamp) {
-      const read = readOwnerSensitivityMap(this.env);
-      if (read.status === 'ok') {
-        this.map = read.map;
-        this.mapInvalid = false;
-        this.mapStamp = read.stamp;
-      } else if (read.status === 'missing') {
-        this.map = undefined;
-        this.mapInvalid = false;
-        this.mapStamp = stamp;
-      } else {
-        this.mapInvalid = true;
-        this.mapStamp = read.reason === 'torn_read' ? undefined : stamp;
-      }
-    }
-    return this.map;
   }
 
   /** The last good rules, reloaded when the file changes; an unusable file marks the inputs invalid. */

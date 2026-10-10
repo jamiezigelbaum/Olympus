@@ -6,10 +6,19 @@ export function listMcpTools(config: OlympusConfig, surface: Extract<OperationSu
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  annotations: { readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean };
 }> {
   return exposedOperations(operations, { config, surface }).map((operation) => ({
     name: operation.name,
     description: operationDescription(operation, { config }),
     inputSchema: operationToolSchema(operation, { config }),
+    // Explicit hints (ChatGPT review asks for all three). Olympus tools read
+    // or act on the owner's own index and models; none deletes anything.
+    // Only ask_anonymously reaches a provider outside (openWorld).
+    annotations: {
+      readOnlyHint: !operation.mutating,
+      destructiveHint: false,
+      openWorldHint: operation.openWorld === true,
+    },
   }));
 }

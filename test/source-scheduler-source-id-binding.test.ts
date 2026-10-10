@@ -12,6 +12,7 @@ import {
   createWhatsAppSchedulerSource,
   createXBookmarksSchedulerSource,
   sourceSchedulerConstructionLogLines,
+  sourceSchedulerEnabledLogLine,
   SCHEDULER_SOURCE_IDS,
 } from '../src/workers/source-scheduler.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
@@ -179,6 +180,19 @@ describe('scheduler source id binding', () => {
 });
 
 describe('scheduler construction boot receipt', () => {
+  test('the enabled line prints the sources that will actually run, not the allowlist length', () => {
+    // No allowlist: every constructed source runs. This read "0 selected".
+    expect(sourceSchedulerEnabledLogLine({
+      constructedSourceIds: [SCHEDULER_SOURCE_IDS.dropbox],
+      selectedSourceIds: [],
+    })).toBe('In-process source scheduler enabled for 1 constructed source(s); 1 selected.');
+    // An allowlist selects only the constructed sources it names.
+    expect(sourceSchedulerEnabledLogLine({
+      constructedSourceIds: [SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.gmail],
+      selectedSourceIds: [SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.readwise],
+    })).toBe('In-process source scheduler enabled for 2 constructed source(s); 1 selected.');
+  });
+
   test('names every lane, its outcome, and a reason token', () => {
     const lines = sourceSchedulerConstructionLogLines({
       decisions: [

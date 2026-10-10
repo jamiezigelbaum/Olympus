@@ -1,0 +1,764 @@
+// The built-in embedding provider: a small model that runs inside the Olympus
+// process, needs no account, no extra app and no network once installed, and
+// sends nothing anywhere. The model and its runtime download once, on first
+// use, into the Olympus data directory (see assets.ts).
+
+import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
+import { dirname, join } from 'node:path';
+import { OperationError } from '../../../core/operation-error.ts';
+import { resolveEmbeddingEpoch } from '../embedding-identity.ts';
+import { isMediaCachePath } from '../../../core/media-cache.ts';
+import {
+  SourceEmbeddingInputsFailedError,
+  TransientSourceEmbeddingError,
+  type SourceEmbeddingImageInput,
+  type SourceEmbeddingInput,
+  type SourceEmbeddingProvider,
+  type SourceEmbeddingTaskType,
+} from '../embeddings.ts';
+import {
+  BuiltInEmbeddingInstallError,
+  builtInEmbeddingPaths,
+  installBuiltInEmbedding,
+  readBuiltInEmbeddingStatus,
+  reportBuiltInEmbeddingState,
+  type BuiltInEmbeddingFailureReason,
+  type BuiltInEmbeddingInstallerOptions,
+  type BuiltInEmbeddingStatus,
+  type InstalledBuiltInEmbedding,
+} from './assets.ts';
+import {
+  BUILT_IN_EMBEDDING_MODEL,
+  BUILT_IN_EMBEDDING_MODELS,
+  builtInEmbeddingModel,
+  LITERT_RUNTIME_PACK,
+  type BuiltInEmbeddingModelSpec,
+} from './manifest.ts';
+import {
+  LiteRtImagesUnavailableError,
+  LiteRtPictureEngineFaultError,
+  startLiteRtEmbedder,
+  type LiteRtEmbedder,
+  type LiteRtEmbedderOptions,
+  type LiteRtEmbedItem,
+} from './litert-runtime.ts';
+import { onnxRuntimeFromDirectory, type EmbeddingRuntime, type EmbeddingSession } from './runtime.ts';
+import { WordPieceTokenizer } from './wordpiece.ts';
+
+export const BUILT_IN_EMBEDDING_PROVIDER = 'built-in';
+export const BUILT_IN_EMBEDDING_THREADS_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_THREADS';
+/** `cpu` keeps a LiteRT model off the GPU. */
+export const BUILT_IN_EMBEDDING_DEVICE_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_DEVICE';
+
+/** A document longer than one model window is read as up to this many windows. */
+const MAX_WINDOWS_PER_DOCUMENT = 8;
+/**
+ * Padded tokens per forward pass; bounds peak memory independent of input.
+ * It also keeps a GPU pass under the ~2,700-token batch past which some
+ * WebGPU kernels exceed the GPU's dispatch limit.
+ * Measured on an M3 (arctic-m int8, 4 threads): 8,192 tokens peaked near
+ * 1.5 GB RSS, 2,048 near 0.7 GB, at the same throughput.
+ */
+const MAX_BATCH_TOKENS = 2_048;
+const MAX_BATCH_ROWS = 32;
+/** Inputs per LiteRT call: a question waits behind at most one of these. */
+const LITERT_BATCH = 8;
+/** After a failed install, wait this long before trying again. */
+const RETRY_AFTER_FAILURE_MS = 2 * 60_000;
+/**
+ * An image encoder that fails the known-good picture this many times in a row
+ * (each on a fresh helper) holds pictures for PICTURE_HOLD_MS, so text keeps
+ * embedding instead of every pass stopping at the first photo.
+ */
+export const PICTURE_ENGINE_FAULT_LIMIT = 2;
+export const PICTURE_HOLD_MS = 60 * 60_000;
+
+export interface BuiltInSourceEmbeddingProviderOptions {
+  env?: Record<string, string | undefined>;
+  model?: BuiltInEmbeddingModelSpec;
+  /** Defaults to ONNX Runtime loaded from the installed pack. */
+  runtime?: (installed: InstalledBuiltInEmbedding) => EmbeddingRuntime;
+  /** Starts a LiteRT model's helper; defaults to the real one. */
+  liteRt?: (options: LiteRtEmbedderOptions) => Promise<LiteRtEmbedder>;
+  /** Defaults to the pinned downloader. */
+  install?: (options: BuiltInEmbeddingInstallerOptions) => Promise<InstalledBuiltInEmbedding>;
+  installerOptions?: Omit<BuiltInEmbeddingInstallerOptions, 'env' | 'model'>;
+  threads?: number;
+  epochId?: string;
+  now?: () => number;
+}
+
+interface OnnxModel { kind: 'onnx'; session: EmbeddingSession; tokenizer: WindowTokenizer }
+type LoadedModel = OnnxModel | { kind: 'litert'; embedder: LiteRtEmbedder };
+
+/** A tokenizer as the windowing sees it: content ids, and the special ids around every window. */
+interface WindowTokenizer {
+  tokenize(text: string): number[];
+  /** `[CLS]` or `<bos>`. */
+  startId: number;
+  /** `[SEP]` or `<eos>`. */
+  endId: number;
+  padId: number;
+}
+
+interface Window {
+  input: number;
+  ids: number[];
+}
+
+export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
+  provider: string;
+  modelId: string;
+  dimension: number;
+  configHash: string;
+  epochId: string;
+  backend: 'local';
+  /** Forward passes this process may run in parallel. */
+  readonly threads: number;
+  /** A LiteRT model tries the GPU first (`auto`) unless the owner keeps it on the CPU. */
+  readonly device: 'auto' | 'cpu';
+
+  private spec: BuiltInEmbeddingModelSpec;
+  private env: Record<string, string | undefined>;
+  private runtimeFactory: (installed: InstalledBuiltInEmbedding) => EmbeddingRuntime;
+  private liteRtFactory: (options: LiteRtEmbedderOptions) => Promise<LiteRtEmbedder>;
+  private install: (options: BuiltInEmbeddingInstallerOptions) => Promise<InstalledBuiltInEmbedding>;
+  private installerOptions: Omit<BuiltInEmbeddingInstallerOptions, 'env' | 'model'>;
+  private now: () => number;
+  private loading: Promise<LoadedModel> | undefined;
+  private loaded: LoadedModel | undefined;
+  private lastFailure: { atMs: number; error: Error } | undefined;
+  /** One forward pass runs at a time; these wait for the slot, queries first. */
+  private slotBusy = false;
+  private imageSupportWarned = false;
+  /** Known-good-picture failures in a row, and until when pictures are held after too many. */
+  private pictureFaults: { count: number; heldUntilMs?: number } | undefined;
+  private readonly waiting: { query: Array<() => void>; document: Array<() => void> } = { query: [], document: [] };
+
+  constructor(options: BuiltInSourceEmbeddingProviderOptions = {}) {
+    this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
+    this.env = options.env ?? process.env;
+    this.provider = BUILT_IN_EMBEDDING_PROVIDER;
+    this.backend = 'local';
+    this.modelId = this.spec.modelId;
+    this.dimension = this.spec.dimension;
+    this.threads = resolveThreads(options.threads, this.env);
+    this.device = resolveDevice(this.env);
+    this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
+    this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
+    this.install = options.install ?? installBuiltInEmbedding;
+    this.installerOptions = options.installerOptions ?? {};
+    this.now = options.now ?? Date.now;
+    this.epochId = resolveEmbeddingEpoch({
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      backend: this.backend,
+      ...(options.epochId ? { epochOverride: options.epochId } : {}),
+    });
+    // Keys a WordPiece model never set are left out, so a model's hash (and
+    // the vectors stored under it) does not move when another model is added.
+    this.configHash = createHash('sha256').update(JSON.stringify({
+      provider: this.provider,
+      model: this.modelId,
+      repository: this.spec.repository,
+      revision: this.spec.revision,
+      weights: this.spec.model.sha256,
+      ...(this.spec.vocabulary ? { vocabulary: this.spec.vocabulary.sha256 } : {}),
+      ...(this.spec.runtime === 'litert' ? { runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}` } : {}),
+      dimension: this.dimension,
+      maxTokens: this.spec.maxTokens,
+      pooling: this.spec.pooling,
+      queryPrefix: this.spec.queryPrefix,
+      documentPrefix: this.spec.documentPrefix,
+      // LiteRT reads a longer input in pieces and averages them (set explicitly in the helper).
+      ...(this.spec.runtime === 'litert' ? { overflow: 'chunk-and-average' } : { windows: MAX_WINDOWS_PER_DOCUMENT }),
+      backend: this.backend,
+    })).digest('hex');
+  }
+
+  /** The install/load status, as last written by any process. */
+  status(): BuiltInEmbeddingStatus {
+    return readBuiltInEmbeddingStatus(this.env, this.spec);
+  }
+
+  /** Downloads and loads the model now instead of on first use. */
+  async prepare(): Promise<void> {
+    await this.load();
+  }
+
+  /**
+   * Loads the model and runs one short query through it, so the first
+   * question after a start does not pay for the runtime's first-run setup.
+   */
+  async warm(): Promise<void> {
+    await this.load();
+    await this.embed([{ text: 'warm up' }], { taskType: 'RETRIEVAL_QUERY' });
+  }
+
+  /**
+   * Whether a document's picture can be embedded now: the model reads images
+   * and its helper started the image encoder. Said once in the log when it
+   * cannot, because photos then wait instead of embedding.
+   */
+  async imageSupport(): Promise<boolean> {
+    if (this.spec.runtime !== 'litert' || !this.spec.vision) return false;
+    if (this.picturesHeld()) return false;
+    const model = this.loaded ?? await this.load();
+    const supported = model.kind === 'litert' && model.embedder.vision;
+    if (!supported && !this.imageSupportWarned) {
+      this.imageSupportWarned = true;
+      console.warn('[built-in embedding] the image encoder could not start on this machine; photos keep keyword search and wait for their picture vectors.');
+    }
+    return supported;
+  }
+
+  /** The owner asked to try a failed install again: no back-off wait. */
+  async retry(): Promise<void> {
+    if (!this.loading) this.lastFailure = undefined;
+    await this.load();
+  }
+
+  async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
+    if (inputs.length === 0) return [];
+    // A question must not wait minutes for a first download: start it, and
+    // let the query lane fall back to keyword search until it finishes.
+    if (options.taskType === 'RETRIEVAL_QUERY' && !this.loaded) {
+      const status = this.status();
+      // A LiteRT model's start can take half a minute (its first GPU program
+      // compile), so a question never waits for it; an ONNX load takes a second.
+      if (this.spec.runtime === 'litert' || (status.state !== 'ready' && status.state !== 'loading')) {
+        void this.load().catch(() => undefined);
+        throw new BuiltInEmbeddingNotReadyError(this.status());
+      }
+    }
+    const model = this.loaded ?? await this.load();
+    return this.embedLoaded(model, inputs, options.taskType);
+  }
+
+  private load(): Promise<LoadedModel> {
+    if (this.loading) return this.loading;
+    if (this.lastFailure && this.now() - this.lastFailure.atMs < RETRY_AFTER_FAILURE_MS) {
+      return Promise.reject(this.lastFailure.error);
+    }
+    const loading = this.loadOnce();
+    this.loading = loading;
+    loading.then(
+      (model) => {
+        this.loaded = model;
+        this.lastFailure = undefined;
+      },
+      (error: Error) => {
+        this.lastFailure = { atMs: this.now(), error };
+        if (this.loading === loading) this.loading = undefined;
+      },
+    );
+    return loading;
+  }
+
+  private async loadOnce(): Promise<LoadedModel> {
+    const reporterOptions = {
+      env: this.env,
+      model: this.spec,
+      ...(this.installerOptions.now ? { now: this.installerOptions.now } : {}),
+      ...(this.installerOptions.onProgress ? { onProgress: this.installerOptions.onProgress } : {}),
+    };
+    let installed: InstalledBuiltInEmbedding;
+    try {
+      installed = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
+    } catch (error) {
+      throw builtInEmbeddingOperationError(error);
+    }
+    try {
+      reportBuiltInEmbeddingState(reporterOptions, 'loading');
+      let model: LoadedModel;
+      if (this.spec.runtime === 'litert') {
+        if (!installed.libraryPath) throw new Error('the LiteRT-LM runtime is not installed.');
+        const embedder = await this.liteRtFactory({
+          library: installed.libraryPath,
+          model: installed.modelPath,
+          // LiteRT keeps compiled GPU programs here, so later starts take seconds.
+          cacheDir: join(dirname(installed.modelPath), 'cache'),
+          threads: this.threads,
+          device: this.device,
+          maxInputTokens: this.spec.maxTokens,
+          ...(this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}),
+        });
+        model = { kind: 'litert', embedder };
+      } else {
+        if (!installed.vocabularyPath) throw new Error('the model vocabulary is not installed.');
+        const tokenizer = loadTokenizer(installed.vocabularyPath);
+        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+        model = { kind: 'onnx', session, tokenizer };
+      }
+      reportBuiltInEmbeddingState(reporterOptions, 'ready');
+      return model;
+    } catch (error) {
+      const failure = new BuiltInEmbeddingInstallError(
+        'runtime_load_failed',
+        `The built-in search model could not start: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      reportBuiltInEmbeddingState(reporterOptions, 'failed', { reason: failure.reason, message: failure.message });
+      throw builtInEmbeddingOperationError(failure);
+    }
+  }
+
+  /**
+   * One forward pass at a time per process, so the thread cap is the CPU cap.
+   * A question's pass goes before every waiting document pass: a search never
+   * waits behind a whole indexing batch (32 documents of several windows
+   * each), only behind the one pass already running. Indexing right after a
+   * start once held a ChatGPT question's Private search past its deadline.
+   */
+  private async withSlot<T>(taskType: SourceEmbeddingTaskType, run: () => Promise<T>): Promise<T> {
+    if (this.slotBusy) {
+      await new Promise<void>((resolve) => this.waiting[taskType === 'RETRIEVAL_QUERY' ? 'query' : 'document'].push(resolve));
+    } else {
+      this.slotBusy = true;
+    }
+    try {
+      return await run();
+    } finally {
+      const next = this.waiting.query.shift() ?? this.waiting.document.shift();
+      // The slot passes straight to the next pass; it is free only when none waits.
+      if (next) next();
+      else this.slotBusy = false;
+    }
+  }
+
+  private async embedLoaded(
+    model: LoadedModel,
+    inputs: SourceEmbeddingInput[],
+    taskType: SourceEmbeddingTaskType,
+  ): Promise<number[][]> {
+    if (model.kind === 'litert') return this.embedLiteRt(model.embedder, inputs, taskType);
+    const windowTokens = this.spec.maxTokens - 2;
+    const windows: Window[] = [];
+    inputs.forEach((input, index) => {
+      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
+      const maxWindows = taskType === 'RETRIEVAL_QUERY' ? 1 : MAX_WINDOWS_PER_DOCUMENT;
+      const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
+      for (let window = 0; window < count; window += 1) {
+        windows.push({
+          input: index,
+          ids: [model.tokenizer.startId, ...ids.slice(window * windowTokens, (window + 1) * windowTokens), model.tokenizer.endId],
+        });
+      }
+    });
+
+    const sums = inputs.map(() => new Float64Array(this.dimension));
+    for (const batch of planBatches(windows)) {
+      const vectors = await this.withSlot(taskType, () => this.forward(model, batch));
+      batch.forEach((window, row) => {
+        const vector = vectors[row]!;
+        const weight = window.ids.length - 2;
+        const sum = sums[window.input]!;
+        for (let d = 0; d < this.dimension; d += 1) sum[d]! += vector[d]! * Math.max(1, weight);
+      });
+    }
+    return sums.map((sum) => normalize(sum));
+  }
+
+  /**
+   * The documents' vectors, plus each picture's image-only vector from the
+   * same LiteRT call: one more item per picture in the batch, so the photo
+   * judge (media-judge.ts) costs no extra round trip.
+   */
+  async embedWithImageVectors(inputs: SourceEmbeddingInput[]): Promise<{ vectors: number[][]; imageVectors: Array<number[] | undefined> }> {
+    if (inputs.length === 0) return { vectors: [], imageVectors: [] };
+    const model = this.loaded ?? await this.load();
+    if (model.kind !== 'litert' || !this.spec.vision) {
+      return { vectors: await this.embedLoaded(model, inputs, 'RETRIEVAL_DOCUMENT'), imageVectors: inputs.map(() => undefined) };
+    }
+    const extra = inputs.flatMap((input, index) => (input.image && isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []));
+    const { vectors, failed } = await this.liteRtVectors(
+      model.embedder,
+      [...this.liteRtItems(inputs, 'RETRIEVAL_DOCUMENT'), ...extra.map((index) => ({ text: '', image: inputs[index]!.image!.path }))],
+      'RETRIEVAL_DOCUMENT',
+      new Set(this.refusedPictures(inputs)),
+    );
+    const documentFailures = failed.filter((index) => index < inputs.length);
+    if (documentFailures.length > 0) throw new SourceEmbeddingInputsFailedError(documentFailures, 'image_unreadable');
+    const imageVectors: Array<number[] | undefined> = inputs.map(() => undefined);
+    extra.forEach((input, row) => {
+      imageVectors[input] = vectors[inputs.length + row];
+    });
+    return { vectors: vectors.slice(0, inputs.length) as number[][], imageVectors };
+  }
+
+  /** Each picture's image-only vector (undefined for one the encoder could not read). */
+  async embedImageVectors(images: SourceEmbeddingImageInput[]): Promise<Array<number[] | undefined>> {
+    if (images.length === 0) return [];
+    const model = this.loaded ?? await this.load();
+    if (model.kind !== 'litert' || !this.spec.vision) {
+      throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), 'image_encoder_unavailable', 'held');
+    }
+    const refused = new Set(images.flatMap((image, index) => (isMediaCachePath(image.path, image.sha256) ? [] : [index])));
+    const live = images.flatMap((image, index) => (refused.has(index) ? [] : [{ index, image }]));
+    const out: Array<number[] | undefined> = images.map(() => undefined);
+    if (live.length === 0) return out;
+    const { vectors } = await this.liteRtVectors(model.embedder, live.map(({ image }) => ({ text: '', image: image.path })), 'RETRIEVAL_DOCUMENT', new Set());
+    live.forEach(({ index }, row) => {
+      out[index] = vectors[row];
+    });
+    return out;
+  }
+
+  /** Text embedded exactly as given, with no task prefix (the photo judge's descriptions). */
+  async embedPromptTexts(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const model = this.loaded ?? await this.load();
+    if (model.kind !== 'litert') throw new Error('The photo judge needs the LiteRT model.');
+    const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, 'RETRIEVAL_DOCUMENT', new Set());
+    if (failed.length > 0) throw new Error('The photo judge\'s descriptions could not be embedded.');
+    return vectors as number[][];
+  }
+
+  /** Inputs whose picture is not the media cache's own file: they fail on their own, never read. */
+  private refusedPictures(inputs: readonly SourceEmbeddingInput[]): number[] {
+    if (!this.spec.vision) return [];
+    return inputs.flatMap((input, index) => (input.image && !isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []));
+  }
+
+  private liteRtItems(inputs: readonly SourceEmbeddingInput[], taskType: SourceEmbeddingTaskType): LiteRtEmbedItem[] {
+    return inputs.map((input) => {
+      const text = promptText(this.spec, input, taskType);
+      if (taskType !== 'RETRIEVAL_DOCUMENT' || !this.spec.vision || !input.image) return text;
+      return { text, image: input.image.path };
+    });
+  }
+
+  /**
+   * LiteRT tokenizes, windows and pools itself; this only frames the prompts
+   * and keeps the pass order. A document with a picture, on a model that reads
+   * images, is its usual prompt plus the picture, embedded together.
+   */
+  private async embedLiteRt(
+    embedder: LiteRtEmbedder,
+    inputs: SourceEmbeddingInput[],
+    taskType: SourceEmbeddingTaskType,
+  ): Promise<number[][]> {
+    const { vectors, failed } = await this.liteRtVectors(
+      embedder,
+      this.liteRtItems(inputs, taskType),
+      taskType,
+      new Set(taskType === 'RETRIEVAL_DOCUMENT' ? this.refusedPictures(inputs) : []),
+    );
+    if (failed.length > 0) throw new SourceEmbeddingInputsFailedError(failed, 'image_unreadable');
+    return vectors as number[][];
+  }
+
+  /**
+   * Runs items through the helper in batches. A picture is sent only from
+   * inside the media cache, named for its digest: a `refused` item is sent as
+   * its text alone and reported failed. An item whose picture could not be
+   * read is reported failed (its vector undefined); the encoder not running
+   * holds every picture (SourceEmbeddingInputsFailedError, held).
+   */
+  private async liteRtVectors(
+    embedder: LiteRtEmbedder,
+    prompts: readonly LiteRtEmbedItem[],
+    taskType: SourceEmbeddingTaskType,
+    refused: ReadonlySet<number>,
+  ): Promise<{ vectors: Array<number[] | undefined>; failed: number[] }> {
+    const out: Array<number[] | undefined> = [];
+    const pictures = prompts.flatMap((prompt, index) => (typeof prompt !== 'string' && !refused.has(index) ? [index] : []));
+    if (pictures.length > 0 && this.picturesHeld()) {
+      throw new SourceEmbeddingInputsFailedError(pictures, 'image_encoder_failing', 'held');
+    }
+    const failed: number[] = [...refused];
+    for (let offset = 0; offset < prompts.length; offset += LITERT_BATCH) {
+      const batch = prompts.slice(offset, offset + LITERT_BATCH)
+        .map((prompt, row) => (refused.has(offset + row) && typeof prompt !== 'string' ? prompt.text : prompt));
+      const batchPictures = batch.flatMap((prompt, row) => (typeof prompt !== 'string' ? [offset + row] : []));
+      let vectors: Float32Array[];
+      try {
+        vectors = await this.withSlot(taskType, () => embedder.embed(batch));
+        if (batchPictures.length > 0) this.pictureFaults = undefined;
+      } catch (error) {
+        if (error instanceof LiteRtPictureEngineFaultError) {
+          // The helper was replaced; the next try runs on a fresh one. Once
+          // the encoder has failed the known-good picture often enough in a
+          // row, pictures are held (nothing recorded against them) and the
+          // caller embeds the text.
+          const count = (this.pictureFaults?.count ?? 0) + 1;
+          if (count < PICTURE_ENGINE_FAULT_LIMIT) {
+            this.pictureFaults = { count };
+            offset -= LITERT_BATCH; // The same batch again.
+            continue;
+          }
+          this.pictureFaults = { count: 0, heldUntilMs: this.now() + PICTURE_HOLD_MS };
+          console.warn(`[built-in embedding] the image encoder keeps failing a known-good picture; photos wait ${PICTURE_HOLD_MS / 60_000} minutes while text keeps embedding.`);
+          throw new SourceEmbeddingInputsFailedError(pictures, 'image_encoder_failing', 'held');
+        }
+        if (error instanceof LiteRtImagesUnavailableError) {
+          // Held, not failed: the pictures wait for the encoder to run again.
+          throw new SourceEmbeddingInputsFailedError(
+            error.indexes.map((index) => offset + index),
+            'image_encoder_unavailable',
+            'held',
+          );
+        }
+        throw new OperationError(
+          'source_index_error',
+          `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`,
+          'This is a local runtime failure; Olympus restarts the model on the next try.',
+        );
+      }
+      for (const [row, vector] of vectors.entries()) {
+        if (vector.length === 0) {
+          // This input's picture could not be read; the rest of the batch is fine.
+          failed.push(offset + row);
+          out.push(undefined);
+          continue;
+        }
+        if (vector.length !== this.dimension) {
+          throw new OperationError('source_index_error', `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
+        }
+        out.push(refused.has(offset + row) ? undefined : normalize(vector));
+      }
+    }
+    return { vectors: out, failed: [...new Set(failed)].sort((left, right) => left - right) };
+  }
+
+
+  /** Whether pictures are held after the image encoder kept failing the known-good picture. */
+  private picturesHeld(): boolean {
+    const heldUntilMs = this.pictureFaults?.heldUntilMs;
+    return heldUntilMs !== undefined && this.now() < heldUntilMs;
+  }
+
+  private async forward(model: OnnxModel, batch: Window[]): Promise<Float64Array[]> {
+    const rows = batch.length;
+    const length = Math.max(...batch.map((window) => window.ids.length));
+    const inputIds = new BigInt64Array(rows * length);
+    const attentionMask = new BigInt64Array(rows * length);
+    const tokenTypeIds = new BigInt64Array(rows * length);
+    if (model.tokenizer.padId !== 0) inputIds.fill(BigInt(model.tokenizer.padId));
+    batch.forEach((window, row) => {
+      window.ids.forEach((id, column) => {
+        inputIds[row * length + column] = BigInt(id);
+        attentionMask[row * length + column] = 1n;
+      });
+    });
+    let output;
+    try {
+      output = await model.session.run({ inputIds, attentionMask, tokenTypeIds, batchSize: rows, sequenceLength: length });
+    } catch (error) {
+      throw new OperationError(
+        'source_index_error',
+        `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`,
+        'This is a local runtime failure; restarting Olympus reloads the model.',
+      );
+    }
+    const expected = [rows, length, this.dimension];
+    if (output.dims.length !== expected.length || output.dims.some((size, axis) => size !== expected[axis])) {
+      throw new OperationError(
+        'source_index_error',
+        `The built-in search model returned shape [${output.dims.join(', ')}], expected [${expected.join(', ')}].`,
+      );
+    }
+    const hidden = this.dimension;
+    return batch.map((window, row) => {
+      const vector = new Float64Array(hidden);
+      const base = row * length * hidden;
+      if (this.spec.pooling === 'cls') {
+        for (let d = 0; d < hidden; d += 1) vector[d] = output.data[base + d]!;
+      } else {
+        for (let token = 0; token < window.ids.length; token += 1) {
+          const offset = base + token * hidden;
+          for (let d = 0; d < hidden; d += 1) vector[d]! += output.data[offset + d]!;
+        }
+        for (let d = 0; d < hidden; d += 1) vector[d]! /= window.ids.length;
+      }
+      return Float64Array.from(normalize(vector));
+    });
+  }
+}
+
+function loadTokenizer(path: string): WindowTokenizer {
+  const tokenizer = new WordPieceTokenizer(readFileSync(path, 'utf8'));
+  return {
+    tokenize: (text) => tokenizer.tokenize(text),
+    startId: tokenizer.clsId,
+    endId: tokenizer.sepId,
+    padId: tokenizer.padId,
+  };
+}
+
+/** The text a model reads for one input: its task prefix, then the title and text as the model was trained to see them. */
+function promptText(spec: BuiltInEmbeddingModelSpec, input: SourceEmbeddingInput, taskType: SourceEmbeddingTaskType): string {
+  if (taskType === 'RETRIEVAL_QUERY') return `${spec.queryPrefix}${input.title ? `${input.title}\n` : ''}${input.text}`;
+  if (spec.documentPrefix.includes('{title}')) {
+    const title = input.title?.replace(/\s+/g, ' ').trim() || 'none';
+    return `${spec.documentPrefix.replace('{title}', () => title)}${input.text}`;
+  }
+  return `${spec.documentPrefix}${input.title ? `${input.title}\n` : ''}${input.text}`;
+}
+
+/** Thrown for a query while the model is still downloading; the query lane degrades to keyword search. */
+export class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
+  readonly status: BuiltInEmbeddingStatus;
+
+  constructor(status: BuiltInEmbeddingStatus) {
+    super(BUILT_IN_EMBEDDING_PROVIDER, 'timeout', 0);
+    this.name = 'BuiltInEmbeddingNotReadyError';
+    this.status = status;
+    this.message = status.state === 'failed'
+      ? `The built-in search model is not available: ${status.failure?.message ?? 'install failed'}.`
+      : `The built-in search model is still being prepared (${status.percent}%).`;
+    this.suggestion = 'Answers use keyword search until it is ready; nothing needs to be done.';
+  }
+}
+
+export interface BuiltInEmbeddingAttention {
+  id: 'built-in-embedding';
+  reason: BuiltInEmbeddingFailureReason;
+  message: string;
+}
+
+/**
+ * The needs-you item for a failed install, or nothing while it is healthy or
+ * still in progress. The dashboard owns the wording; this owns the facts.
+ */
+export function builtInEmbeddingAttention(status: BuiltInEmbeddingStatus): BuiltInEmbeddingAttention | undefined {
+  if (status.state !== 'failed' || !status.failure) return undefined;
+  return { id: 'built-in-embedding', reason: status.failure.reason, message: status.failure.message };
+}
+
+function builtInEmbeddingOperationError(error: unknown): OperationError {
+  if (error instanceof OperationError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  const reason = error instanceof BuiltInEmbeddingInstallError ? error.reason : undefined;
+  return new OperationError(
+    'source_index_error',
+    message,
+    reason === 'unsupported_platform'
+      ? 'Choose another embedding provider for this machine in the model settings.'
+      : reason === 'download_failed'
+        ? 'Check the internet connection; Olympus tries the download again automatically.'
+        : reason === 'disk_write_failed'
+          ? 'Free some disk space; Olympus tries again automatically.'
+          : 'Olympus removes the bad file and downloads it again automatically.',
+  );
+}
+
+function planBatches(windows: Window[]): Window[][] {
+  const ordered = [...windows].sort((left, right) => right.ids.length - left.ids.length);
+  const batches: Window[][] = [];
+  let current: Window[] = [];
+  let currentLength = 0;
+  for (const window of ordered) {
+    const length = Math.max(currentLength, window.ids.length);
+    if (current.length > 0 && (current.length >= MAX_BATCH_ROWS || length * (current.length + 1) > MAX_BATCH_TOKENS)) {
+      batches.push(current);
+      current = [];
+      currentLength = 0;
+    }
+    current.push(window);
+    currentLength = Math.max(currentLength, window.ids.length);
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+function normalize(vector: ArrayLike<number>): number[] {
+  let norm = 0;
+  for (let index = 0; index < vector.length; index += 1) norm += vector[index]! * vector[index]!;
+  norm = Math.sqrt(norm);
+  const out = new Array<number>(vector.length);
+  for (let index = 0; index < vector.length; index += 1) out[index] = norm > 0 ? vector[index]! / norm : 0;
+  return out;
+}
+
+function resolveDevice(env: Record<string, string | undefined>): 'auto' | 'cpu' {
+  const configured = env[BUILT_IN_EMBEDDING_DEVICE_ENV]?.trim().toLowerCase();
+  if (configured && configured !== 'cpu' && configured !== 'auto') {
+    throw new OperationError('config_error', `${BUILT_IN_EMBEDDING_DEVICE_ENV} must be "auto" or "cpu".`);
+  }
+  return configured === 'cpu' ? 'cpu' : 'auto';
+}
+
+function resolveThreads(explicit: number | undefined, env: Record<string, string | undefined>): number {
+  const configured = explicit ?? (env[BUILT_IN_EMBEDDING_THREADS_ENV]?.trim()
+    ? Number(env[BUILT_IN_EMBEDDING_THREADS_ENV])
+    : undefined);
+  if (configured !== undefined) {
+    if (!Number.isSafeInteger(configured) || configured < 1) {
+      throw new OperationError(
+        'config_error',
+        `${BUILT_IN_EMBEDDING_THREADS_ENV} must be a positive whole number.`,
+      );
+    }
+    return configured;
+  }
+  // Half the cores, at most four: indexing runs in the background and should
+  // never make the machine feel busy.
+  return Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
+}
+
+// One model per process and data directory: every trust domain that resolves
+// to the built-in profile shares the session, its memory, and its thread cap.
+let sharedProviders: Map<string, BuiltInSourceEmbeddingProvider> | undefined;
+
+/**
+ * The process-wide built-in provider for a configured model id. Refuses a
+ * model id this build does not ship, so a config written by a newer Olympus
+ * cannot silently embed under an identity it does not match.
+ */
+export function sharedBuiltInSourceEmbeddingProvider(options: {
+  modelId: string;
+  env?: Record<string, string | undefined>;
+}): BuiltInSourceEmbeddingProvider {
+  const model = builtInEmbeddingModel(options.modelId);
+  if (!model) {
+    throw new OperationError(
+      'config_error',
+      `This version of Olympus does not include the built-in embedding model "${options.modelId}".`,
+      `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(', ')} for the built-in profile, or update Olympus.`,
+    );
+  }
+  const env = options.env ?? process.env;
+  const key = `${builtInEmbeddingPaths(env).root}\u0000${options.modelId}`;
+  sharedProviders ??= new Map();
+  let provider = sharedProviders.get(key);
+  if (!provider) {
+    provider = new BuiltInSourceEmbeddingProvider({ env, model });
+    sharedProviders.set(key, provider);
+  }
+  return provider;
+}
+
+/**
+ * The dashboard contract's `models.embedding` for the built-in model:
+ * installing, verifying and loading all read as `downloading`.
+ */
+export function builtInEmbeddingDashboardState(
+  status: BuiltInEmbeddingStatus,
+): {
+  kind: 'built_in';
+  state: 'downloading' | 'verifying' | 'ready' | 'failed';
+  percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  failedReason?: ModelInstallFailedReason;
+} {
+  if (status.state === 'ready') return { kind: 'built_in', state: 'ready' };
+  if (status.state === 'failed') {
+    const failedReason = modelInstallFailedReason(status.failure);
+    // A full disk keeps the download's size, so the dashboard can say how much to free.
+    const bytes = failedReason === 'disk_full' && status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {};
+    return { kind: 'built_in', state: 'failed', failedReason, ...bytes };
+  }
+  // Loading the verified model into memory is the last step of checking it.
+  const state = status.state === 'verifying' || status.state === 'loading' ? 'verifying' : 'downloading';
+  return {
+    kind: 'built_in',
+    state,
+    percent: status.percent,
+    ...(status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {}),
+  };
+}

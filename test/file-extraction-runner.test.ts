@@ -60,14 +60,22 @@ import {
   EXTRACTION_EGRESS_REFUSED_TRUST_TIER,
   EXTRACTION_ERROR_KIND_EMPTY_OUTPUT,
   EXTRACTION_ERROR_KIND_EXTRACTOR_THREW,
+  EXTRACTION_ERROR_KIND_INTERNAL_ERROR,
   EXTRACTION_ERROR_KIND_LEASE_LOST,
+  EXTRACTION_ERROR_KIND_RECORD_REFUSED,
+  EXTRACTION_ERROR_KIND_SINK_FAILED,
+  EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT,
   EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR,
   EXTRACTION_PAUSE_CONSECUTIVE_FAILURES,
   EXTRACTION_PAUSE_HEALTH_PROBE,
+  PLAN_REFUSED_EXTRACTOR_VERSION,
+  PLAN_REFUSED_ITEM_FIELD,
+  PLAN_REFUSED_ROUTING_FAILED,
   createFileExtractionRunner,
   evaluateExtractionEgress,
   type ExtractionRunnerCorpus,
 } from '../src/workers/file-extraction/runner.ts';
+import { ModelEndpointRedirectError } from '../src/core/model-transport.ts';
 import type {
   ExtractionCandidatePage,
   ExtractionItemRef,
@@ -358,6 +366,30 @@ describe('extraction runner: one bad item never aborts a run', () => {
     }
   });
 
+  test('a thrown model-endpoint redirect settles with its own kind, not as a generic throw', async () => {
+    const jobs = jobStore();
+    try {
+      enqueue(jobs, 1);
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          async extract() {
+            throw new ModelEndpointRedirectError(302);
+          },
+        })],
+      });
+
+      const result = await runner.run({ ...LANE });
+
+      expect(result.counts.failed_retryable).toBe(1);
+      const failed = result.records.find((record) => record.status === 'failed_retryable')!;
+      expect(failed.errorKind).toBe(EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT);
+      expect(EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT).toBe('model_endpoint_redirect');
+    } finally {
+      jobs.close();
+    }
+  });
+
   test('an unregistered extractor kind settles that job terminally, not the run', async () => {
     const jobs = jobStore();
     try {
@@ -446,6 +478,338 @@ describe('extraction runner: settlement comes from the source, never re-derived'
 
       expect(result.counts.indexed).toBe(3);
       expect(seen.sort()).toEqual(['application/pdf', 'application/pdf', 'image/png']);
+    } finally {
+      jobs.close();
+    }
+  });
+});
+
+describe('extraction runner: one refused bucket never fails a plan pass', () => {
+  // 2026-10-07: an image-scoped extractor version the job store refused
+  // (`+` is not a safe key part) threw out of plan(), so every Dropbox
+  // extract pass failed and no file was queued at all.
+  test('a bucket the job store refuses is counted and the other buckets are queued', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          versionFor: (mimeType) => (mimeType?.startsWith('image/') ? `${FAKE_VERSION}+not-a-safe-key-part` : FAKE_VERSION),
+        })],
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return { candidates: [ref(1), ref(2, { mimeType: 'image/jpeg', name: 'photo.jpg' })], done: true };
+            },
+          }),
+        },
+      });
+      const errors: string[] = [];
+      const original = console.error;
+      console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+      let plan;
+      try {
+        plan = await runner.plan({ ...LANE, limit: 10, extractorKind: FAKE_KIND });
+      } finally {
+        console.error = original;
+      }
+      expect(plan).toMatchObject({ candidates: 2, jobsQueued: 1, jobsRefused: 1 });
+      expect(errors.some((line) => line.includes('plan_bucket_refused') && line.includes('safe identifier'))).toBe(true);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('a still image whose picture has no Private store to land in is never queued', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return {
+                candidates: [
+                  ref(1),
+                  ref(2, { mimeType: 'image/jpeg', name: 'photo.jpg' }),
+                  ref(3, { mimeType: 'image/heic', name: 'routed.heic' }),
+                ],
+                done: true,
+              };
+            },
+          }),
+          refusesImageContent: (itemRef) => itemRef.providerItemId !== 'item-3',
+        },
+      });
+      const plan = await runner.plan({ ...LANE, limit: 10, extractorKind: FAKE_KIND });
+      expect(plan).toMatchObject({ candidates: 3, jobsQueued: 2, jobsSkippedImageNotPrivate: 1 });
+      const leased = jobs.lease({ ...LANE, workerId: 'w', limit: 10 }).leasedJobs.map((job) => job.ref.providerItemId).sort();
+      expect(leased).toEqual(['item-1', 'item-3']);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('a request-wide invalid value fails the plan instead of counting every bucket as refused', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor()],
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return { candidates: [ref(1), ref(2)], done: true };
+            },
+          }),
+        },
+      });
+      await expect(runner.plan({ ...LANE, limit: 10, extractorKind: FAKE_KIND, priority: -1 })).rejects.toThrow('priority');
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('a refused version reports its categorical reason and does not stop a second bucket', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          versionFor: (mimeType) => (mimeType === 'image/jpeg' ? `${FAKE_VERSION}+image` : FAKE_VERSION),
+        })],
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return {
+                candidates: [
+                  ref(1, { mimeType: 'image/jpeg', name: 'a.jpg' }),
+                  ref(2),
+                  ref(3, { mimeType: 'image/jpeg', name: 'b.jpg' }),
+                  ref(4),
+                ],
+                done: true,
+              };
+            },
+          }),
+        },
+      });
+      const errors: string[] = [];
+      const original = console.error;
+      console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+      let plan;
+      try {
+        plan = await runner.plan({ ...LANE, limit: 10, extractorKind: FAKE_KIND });
+      } finally {
+        console.error = original;
+      }
+      expect(plan).toMatchObject({
+        candidates: 4,
+        jobsQueued: 2,
+        jobsRefused: 2,
+        jobsRefusedByReason: { [PLAN_REFUSED_EXTRACTOR_VERSION]: 2 },
+      });
+      const line = errors.find((entry) => entry.includes('plan_bucket_refused'));
+      expect(line).toContain(`reason_kind=${PLAN_REFUSED_EXTRACTOR_VERSION}`);
+      expect(line).toContain('field=extractorVersion');
+      expect(line).toContain('candidates=2');
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('one ref with a bad field is refused alone; the good refs of its bucket are queued', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return { candidates: [ref(1), ref(2, { providerItemId: '' }), ref(3), ref(4, { sizeBytes: -1 })], done: true };
+            },
+          }),
+        },
+      });
+      const errors: string[] = [];
+      const original = console.error;
+      console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+      let plan;
+      try {
+        plan = await runner.plan({ ...LANE, limit: 10, extractorKind: FAKE_KIND });
+      } finally {
+        console.error = original;
+      }
+      expect(plan).toMatchObject({
+        candidates: 4,
+        jobsQueued: 2,
+        jobsRefused: 2,
+        jobsRefusedByReason: { [PLAN_REFUSED_ITEM_FIELD]: 2 },
+      });
+      // One bounded line per bucket, not one per refused ref.
+      const lines = errors.filter((entry) => entry.includes('plan_bucket_refused'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(`reason_kind=${PLAN_REFUSED_ITEM_FIELD}`);
+      expect(lines[0]).toContain('candidates=2');
+      const run = await runner.run({ ...LANE });
+      expect(run.records.map((record) => record.status)).toEqual(['indexed', 'indexed']);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('a routing throw for one candidate is counted and the rest are queued', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          versionFor: (mimeType) => {
+            if (mimeType === 'application/x-broken') throw new Error('versionFor defect');
+            return FAKE_VERSION;
+          },
+        })],
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return { candidates: [ref(1), ref(2, { mimeType: 'application/x-broken' })], done: true };
+            },
+          }),
+        },
+      });
+      const original = console.error;
+      console.error = () => {};
+      let plan;
+      try {
+        plan = await runner.plan({ ...LANE, limit: 10, extractorKind: FAKE_KIND });
+      } finally {
+        console.error = original;
+      }
+      expect(plan).toMatchObject({
+        jobsQueued: 1,
+        jobsRefused: 1,
+        jobsRefusedByReason: { [PLAN_REFUSED_ROUTING_FAILED]: 1 },
+      });
+    } finally {
+      jobs.close();
+    }
+  });
+});
+
+describe('extraction runner: a throw in one job settles that job and the batch goes on', () => {
+  // Lease order is not insertion order, so assert by counts and by the one failed record.
+  function expectOneRetryable(result: Awaited<ReturnType<ReturnType<typeof runnerFor>['run']>>, errorKind: string): void {
+    expect(result.paused).toBe(false);
+    expect(result.counts.indexed).toBe(2);
+    expect(result.counts.failed_retryable).toBe(1);
+    expect(result.records.find((record) => record.status === 'failed_retryable')?.errorKind).toBe(errorKind);
+  }
+
+  async function quietly<T>(work: () => Promise<T>): Promise<{ value: T; errors: string[] }> {
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+    try {
+      return { value: await work(), errors };
+    } finally {
+      console.error = original;
+    }
+  }
+
+  test('a sink that throws a programming error settles that job retryable', async () => {
+    const jobs = jobStore();
+    try {
+      enqueue(jobs, 3);
+      const inner = recordingSink();
+      const runner = runnerFor({
+        jobs,
+        corpus: {
+          sink: {
+            async accept(request) {
+              if (request.ref.providerItemId === 'item-2') throw new TypeError('sink defect');
+              return inner.accept(request);
+            },
+          },
+        },
+      });
+      const result = await runner.run({ ...LANE });
+      expect(result.processedJobs).toBe(3);
+      expectOneRetryable(result, EXTRACTION_ERROR_KIND_SINK_FAILED);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('a media release that throws does not change the outcome or stop the batch', async () => {
+    const jobs = jobStore();
+    try {
+      enqueue(jobs, 3);
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          async extract(input) {
+            if (input.ref.providerItemId !== 'item-2') return { status: 'indexed', text: 'text' };
+            const media = {
+              sha256: 'a'.repeat(64),
+              mimeType: 'image/jpeg' as const,
+              stagingHolder: 'staging-holder',
+              get path(): string { throw new Error('media release defect'); },
+            };
+            return { status: 'indexed', text: 'photo text', media };
+          },
+        })],
+      });
+      const { value: result, errors } = await quietly(() => runner.run({ ...LANE }));
+      expect(result.processedJobs).toBe(3);
+      expect(result.records.map((record) => record.status)).toEqual(['indexed', 'indexed', 'indexed']);
+      expect(errors.some((line) => line.includes('media_release_failed'))).toBe(true);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('an unexpected throw in one job settles it as an internal error', async () => {
+    const jobs = jobStore();
+    try {
+      enqueue(jobs, 3);
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          async extract(input) {
+            // An indexed output with no text: the settle path dereferences it.
+            if (input.ref.providerItemId === 'item-2') return { status: 'indexed' } as unknown as ExtractorOutput;
+            return { status: 'indexed', text: 'text' };
+          },
+        })],
+      });
+      const { value: result, errors } = await quietly(() => runner.run({ ...LANE }));
+      expect(result.processedJobs).toBe(3);
+      expectOneRetryable(result, EXTRACTION_ERROR_KIND_INTERNAL_ERROR);
+      expect(errors.some((line) => line.includes('job_internal_error'))).toBe(true);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('an outcome the store refuses is recorded again as a plain retryable failure', async () => {
+    const jobs = jobStore();
+    try {
+      enqueue(jobs, 3);
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          async extract(input) {
+            if (input.ref.providerItemId === 'item-2') return { status: 'failed_retryable', errorKind: 'not a safe token!' };
+            return { status: 'indexed', text: 'text' };
+          },
+        })],
+      });
+      const { value: result, errors } = await quietly(() => runner.run({ ...LANE }));
+      expect(result.processedJobs).toBe(3);
+      expectOneRetryable(result, EXTRACTION_ERROR_KIND_RECORD_REFUSED);
+      expect(errors.some((line) => line.includes('record_refused'))).toBe(true);
+      // The store holds the plain retryable settlement, not a stuck lease.
+      expect(jobs.counts(LANE).find((count) => count.status === 'leased')).toBeUndefined();
     } finally {
       jobs.close();
     }

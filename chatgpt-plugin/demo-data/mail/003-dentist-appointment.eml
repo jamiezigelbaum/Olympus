@@ -1,0 +1,17 @@
+From: Brightside Dental <appointments@dental.example.org>
+To: Robin Vale <robin.vale@example.com>
+Date: Wed, 16 Sep 2026 08:00:00 +0000
+Subject: Appointment confirmed: Wed 21 October, 9:30
+Message-ID: <003-dentist-appointment@demo.example.com>
+X-Olympus-Demo: synthetic sample data, fictional people
+X-Olympus-Demo-Intended-Tier: Personal
+Content-Type: text/plain; charset=utf-8
+
+Hello Robin,
+
+Your check-up and cleaning with Dr. Mendes is confirmed for Wednesday 21 October 2026
+at 9:30 at Brightside Dental, 220 Harbour Road. Please arrive 10 minutes early.
+
+To reschedule, reply to this email at least 24 hours before.
+
+Brightside Dental (fictional)

@@ -8,12 +8,24 @@ export type OperationCallerSurface = 'native' | 'mcp' | 'cli' | 'remote';
 
 export const OPERATION_CALLER_SURFACES: readonly OperationCallerSurface[] = ['native', 'mcp', 'cli', 'remote'];
 
+/**
+ * Who hosts the calling agent, when a surface can tell: OpenAI (a ChatGPT
+ * grant, by the relay's pinned client ids) or Anthropic (a Claude client, by
+ * its MCP client name). It chooses which anonymous-answer model setting a
+ * question takes (never the provider that holds the conversation); it grants
+ * nothing, so a label-based guess is harmless.
+ */
+export type OperationCallerProvider = 'openai' | 'anthropic';
+export const OPERATION_CALLER_PROVIDERS: readonly OperationCallerProvider[] = ['openai', 'anthropic'];
+
 export interface OperationCaller {
   surface: OperationCallerSurface;
   /** Stable id of an owner-approved connection (remote surfaces). */
   connectionId?: string;
   /** Human label, e.g. the MCP client's name or a connection's display name. */
   displayName?: string;
+  /** Who hosts the agent, when the surface can tell. */
+  provider?: OperationCallerProvider;
 }
 
 /** The worker HTTP wire shape of {@link OperationCaller}. */
@@ -21,6 +33,7 @@ export interface OperationCallerWire {
   surface: OperationCallerSurface;
   connection_id?: string;
   display_name?: string;
+  provider?: OperationCallerProvider;
 }
 
 export const OPERATION_CALLER_DISPLAY_NAME_MAX = 80;
@@ -40,12 +53,25 @@ export function sanitizeCallerDisplayName(value: unknown): string | undefined {
   return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
 }
 
+/**
+ * The hosting provider an agent's self-reported name suggests ("claude-code",
+ * "Claude Desktop", "ChatGPT", "codex"); undefined for anything else. A
+ * ChatGPT grant is recognised by its client id instead (remote-mcp.ts).
+ */
+export function callerProviderFromLabel(label: string | undefined): OperationCallerProvider | undefined {
+  if (!label) return undefined;
+  if (/claude|anthropic/i.test(label)) return 'anthropic';
+  if (/chatgpt|openai|codex/i.test(label)) return 'openai';
+  return undefined;
+}
+
 export function operationCallerToWire(caller: OperationCaller): OperationCallerWire {
   const displayName = sanitizeCallerDisplayName(caller.displayName);
   return {
     surface: caller.surface,
     ...(caller.connectionId ? { connection_id: caller.connectionId } : {}),
     ...(displayName ? { display_name: displayName } : {}),
+    ...(caller.provider ? { provider: caller.provider } : {}),
   };
 }
 
@@ -61,7 +87,7 @@ export function parseOperationCallerWire(
     return { ok: false, message: 'caller must be an object when provided.' };
   }
   const record = value as Record<string, unknown>;
-  const unknownFields = Object.keys(record).filter((key) => !['surface', 'connection_id', 'display_name'].includes(key));
+  const unknownFields = Object.keys(record).filter((key) => !['surface', 'connection_id', 'display_name', 'provider'].includes(key));
   if (unknownFields.length > 0) {
     return { ok: false, message: `caller contains undeclared fields: ${unknownFields.sort().join(', ')}.` };
   }
@@ -87,12 +113,20 @@ export function parseOperationCallerWire(
       return { ok: false, message: 'caller.display_name must be a non-empty string when provided.' };
     }
   }
+  let provider: OperationCallerProvider | undefined;
+  if (record.provider !== undefined) {
+    if (typeof record.provider !== 'string' || !(OPERATION_CALLER_PROVIDERS as readonly string[]).includes(record.provider)) {
+      return { ok: false, message: `caller.provider must be one of: ${OPERATION_CALLER_PROVIDERS.join(', ')}.` };
+    }
+    provider = record.provider as OperationCallerProvider;
+  }
   return {
     ok: true,
     caller: {
       surface: record.surface as OperationCallerSurface,
       ...(connectionId ? { connection_id: connectionId } : {}),
       ...(displayName ? { display_name: displayName } : {}),
+      ...(provider ? { provider } : {}),
     },
   };
 }

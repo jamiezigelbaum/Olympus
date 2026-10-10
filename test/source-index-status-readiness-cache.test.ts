@@ -120,7 +120,8 @@ describe('connector-store status readiness', () => {
     if (!metadataScope.allowed || !contentScope.allowed || !contentScope.filters) return;
     const store = new LocalConnectorStore({
       dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local',
-      exclusions: dropboxCanonicalIngestionMatcher(defaultDropboxIngestionPolicy(), {
+      // A machine that cannot prepare pictures (this lane's CI): still images stay names-only.
+      exclusions: dropboxCanonicalIngestionMatcher(defaultDropboxIngestionPolicy({ stillImagesRead: false }), {
         [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: '/tmp/olympus-status-test-missing-exclusions.json',
       }),
     });

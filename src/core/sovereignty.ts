@@ -1,13 +1,27 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { withFileLeaseSync } from './file-lease.ts';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OperationError } from './operation-error.ts';
+import { assertLocalModelIdNotCloudForwarding } from './local-model-policy.ts';
 import { parseOptionalBooleanEnv } from './config.ts';
 import { normalizeSecretRef } from './secret-store.ts';
 import { assertModelTrustTierAllowed } from './source-model-policy.ts';
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import type { SourceTrustDomain, SourceTrustTier } from './source-index/types.ts';
+import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL } from '../workers/source-index/built-in-embedding/manifest.ts';
+
+const BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
+import {
+  assertZkapiDaemonBaseUrl,
+  loopbackPort,
+  parseZkapiConsultSettings,
+  registerZkapiDaemonPorts,
+  ZKAPI_DAEMON_DEFAULT_PORT,
+  type ZkapiConsultSettings,
+} from './zkapi-consult-settings.ts';
 
 export {
   assertEvidenceCandidateModelEligible,
@@ -28,13 +42,35 @@ export type SovereigntyProfileProvider =
   | 'google-gemini'
   | 'venice'
   | 'anthropic'
-  | 'openai-compatible';
+  | 'openai-compatible'
+  // The in-process embedding model: embedding only, always local trust, no
+  // endpoint and no credential.
+  | 'built-in'
+  // Experimental anonymous transport for consults only (design track Z). Its
+  // trust is fixed at standard_cloud and it never serves an evidence role.
+  | 'zkapi';
+
+const SUPPORTED_PROVIDERS: readonly SovereigntyProfileProvider[] = [
+  'local-openai-compatible',
+  'openclaw-infer',
+  'google-gemini',
+  'venice',
+  'anthropic',
+  'openai-compatible',
+  'built-in',
+  'zkapi',
+];
 
 interface SovereigntyModelProfileBase {
   trust: SovereigntyProfileTrust;
   baseUrl?: string;
   secretRef?: string;
-  purpose?: 'analyst' | 'embedding' | 'vision' | 'classification';
+  // `consult` carries one approved question and never raw evidence: a consult
+  // profile is refused for every analyst route, embedding, vision and
+  // classification role.
+  purpose?: 'analyst' | 'embedding' | 'vision' | 'classification' | 'consult';
+  /** Settings of a `zkapi` profile; refused on any other provider. */
+  zkapi?: ZkapiConsultSettings;
 }
 
 export interface SovereigntyOpenClawInferModelProfile extends SovereigntyModelProfileBase {
@@ -260,10 +296,17 @@ export function createSovereigntyEngine(
 
 export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): SovereigntyConfig {
   const config = parseSovereigntyConfig(rawConfig, 'sovereignty config');
+  const daemonPorts = zkapiDaemonPorts(config);
+  registerZkapiDaemonPorts(daemonPorts);
   for (const [id, profile] of Object.entries(config.modelProfiles)) {
-    validateProfile(id, profile);
+    validateProfile(id, profile, daemonPorts);
   }
+  const publicRetired = isPublicTierRetired(config);
   for (const domain of BUILTIN_DOMAINS) {
+    // An install without a Public tier (fresh installs, owner ruling
+    // 2026-10-01) leaves public_safe out of BOTH routes and retrieval;
+    // leaving out only one half is still an error.
+    if (domain === 'public_safe' && publicRetired) continue;
     const route = config.routes[domain];
     if (!route) {
       throw new OperationError('config_error', `sovereignty.routes.${domain} is required.`);
@@ -283,6 +326,13 @@ export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): Soverei
     validateAnalystPoolShape(pool, domain);
     for (const profileId of pool.members) {
       const resolved = resolveProfile(config, profileId, `route ${domain}`);
+      assertNotConsultOnly(resolved, `the ${domain} analyst route`);
+      if (resolved.profile.provider === 'built-in') {
+        throw new OperationError(
+          'config_error',
+          `sovereignty.routes.${domain} cannot use the built-in embedding profile "${profileId}" as an analyst.`,
+        );
+      }
       if (!profileAllowedForDomain(resolved.profile, domain)) {
         throw new OperationError(
           'config_error',
@@ -301,6 +351,17 @@ export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): Soverei
     validateRetrievalPolicy(config, domain, retrieval);
   }
   return config;
+}
+
+/**
+ * Whether this policy has no Public tier: it defines neither a public_safe
+ * route nor a public_safe retrieval policy. Fresh installs are written this
+ * way (owner ruling 2026-10-01: Personal, Private and Secret only; anything
+ * that would be Public is Personal). Every earlier policy defines both and
+ * keeps its Public tier unchanged.
+ */
+export function isPublicTierRetired(config: Pick<SovereigntyConfig, 'routes' | 'retrieval'>): boolean {
+  return config.routes.public_safe === undefined && config.retrieval.trustDomains.public_safe === undefined;
 }
 
 export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | undefined> = process.env): SovereigntyConfig {
@@ -380,6 +441,13 @@ export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | und
         ?? 'env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
       purpose: 'embedding',
     };
+  } else if (embeddingProvider === 'built-in') {
+    profiles['built-in-embedding'] = {
+      provider: 'built-in',
+      trust: 'local',
+      model: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_MODEL_ID,
+      purpose: 'embedding',
+    };
   } else if (embeddingProvider === 'venice') {
     profiles['venice-source-embedding'] = {
       provider: 'venice',
@@ -401,12 +469,16 @@ export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | und
     ? 'gemini-source-embedding'
     : embeddingProvider === 'local-openai-compatible'
       ? 'local-source-embedding'
-      : null;
+      : embeddingProvider === 'built-in'
+        ? 'built-in-embedding'
+        : null;
   const secureEmbeddingProfile = embeddingProvider === 'local-openai-compatible'
     ? 'local-source-embedding'
     : embeddingProvider === 'venice'
       ? 'venice-source-embedding'
-      : null;
+      : embeddingProvider === 'built-in'
+        ? 'built-in-embedding'
+        : null;
   const secureEmbeddingTrust: SovereigntyProfileTrust[] = embeddingProvider === 'venice'
     ? ['encrypted_cloud']
     : ['local'];
@@ -494,21 +566,116 @@ export function writeSovereigntyConfigFile(input: {
     );
   }
   const config = validateSovereigntyConfig(input.config);
-  // ~/.olympus is the owner's private policy directory: sovereignty.json and
-  // the sensitivity map the install guide has an agent write next to it. It
-  // must exist after setup, and at 0700 -- created with the process umask it
-  // was world-readable, which is the wrong custody for the directory that
-  // holds a sensitivity map.
+  // ~/.olympus is the owner's private policy directory: sovereignty.json, the
+  // privacy profile and the tier rules. It must exist after setup, and at
+  // 0700 -- created with the process umask it was world-readable, which is
+  // the wrong custody for the directory that holds the owner's privacy rules.
+  publishSovereigntyConfigFile(path, config);
+  return path;
+}
+
+/**
+ * The one way a policy file is published: the directory owner-only, then an
+ * atomic durable replace (temp file at 0600, fsync, rename, directory fsync),
+ * so a crash or a failed write leaves the old policy intact, never a torn
+ * one. Owner-only every time it is written, not only the first time.
+ */
+function publishSovereigntyConfigFile(path: string, config: SovereigntyConfig, onPublished?: () => void): void {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  // The mode argument applies at CREATION only, so a --force overwrite left an
-  // existing world-readable policy file exactly as world-readable as it found
-  // it. This file records how sensitive data is handled; it is owner-only every
-  // time it is written, not only the first time.
+  __sovereigntyFileTestHooks.beforePublish?.(path);
+  writePrivateFileAtomicSync(path, `${JSON.stringify(config, null, 2)}\n`, {
+    onPublished: () => {
+      onPublished?.();
+      __sovereigntyFileTestHooks.afterPublish?.(path);
+    },
+  });
   chmodSync(path, 0o600);
-  return path;
+}
+
+/** Test seams: just before the atomic replace of a policy file, and just after its rename (the publish point). */
+export const __sovereigntyFileTestHooks: {
+  beforePublish: ((path: string) => void) | undefined;
+  afterPublish: ((path: string) => void) | undefined;
+} = { beforePublish: undefined, afterPublish: undefined };
+
+export type SovereigntyConfigUpdate =
+  | {
+    readonly ok: true;
+    readonly config: SovereigntyConfig;
+    readonly changed: boolean;
+    /** The new policy was published, then a later step (directory flush, mode, lease release) failed; `config` is what the file reads now. */
+    readonly publishedDespiteError?: true;
+  }
+  | {
+    readonly ok: false;
+    /** `uncertain`: something failed after the publish point and the file does not read back as the new policy. */
+    readonly reason: 'conflict' | 'unreadable' | 'uncertain';
+    readonly current?: SovereigntyConfig;
+  };
+
+/**
+ * Change an owner's policy file as one transaction: take the file lease,
+ * re-read the file as it is now, let `patch` return the next policy from
+ * that current one (patching only the fields it owns), validate, and commit
+ * atomically. Nothing is ever written from a boot-time snapshot. `expect`
+ * lets a caller refuse a stale edit: when the current file differs from the
+ * policy the caller's view was built on, nothing is written and the current
+ * policy is handed back. `patch` returning the same object means no change.
+ */
+export function updateSovereigntyConfigFile(input: {
+  path: string;
+  expect?: SovereigntyConfig;
+  patch: (current: SovereigntyConfig) => SovereigntyConfig;
+}): SovereigntyConfigUpdate {
+  // Failures split at the publish point (the rename). Before it, nothing
+  // changed and the error is the caller's (a validation refusal, an
+  // unreadable file). After it, the new policy may be live even though the
+  // directory flush, the mode or the lease release threw: the file is read
+  // back and reported as published, or as uncertain. Never as untouched.
+  let published = false;
+  let validated: SovereigntyConfig | undefined;
+  const afterPublish = (): SovereigntyConfigUpdate => {
+    try {
+      const actual = validateSovereigntyConfig(JSON.parse(readFileSync(input.path, 'utf8')) as SovereigntyConfig);
+      if (validated && JSON.stringify(actual) === JSON.stringify(validated)) {
+        return { ok: true, config: actual, changed: true, publishedDespiteError: true };
+      }
+      return { ok: false, reason: 'uncertain', current: actual };
+    } catch {
+      return { ok: false, reason: 'uncertain' };
+    }
+  };
+  try {
+    return withFileLeaseSync(input.path, (lease) => {
+      let current: SovereigntyConfig;
+      try {
+        current = validateSovereigntyConfig(JSON.parse(readFileSync(input.path, 'utf8')) as SovereigntyConfig);
+      } catch {
+        return { ok: false as const, reason: 'unreadable' as const };
+      }
+      // Compared in normalized form: the file may hold the un-normalized
+      // spelling the owner wrote, the caller the validated one.
+      if (input.expect && JSON.stringify(validateSovereigntyConfig(input.expect)) !== JSON.stringify(current)) {
+        return { ok: false as const, reason: 'conflict' as const, current };
+      }
+      const next = input.patch(current);
+      if (next === current) return { ok: true as const, config: current, changed: false };
+      const toPublish = validateSovereigntyConfig(next);
+      validated = toPublish;
+      try {
+        lease.commit(() => publishSovereigntyConfigFile(input.path, toPublish, () => { published = true; }));
+      } catch (error) {
+        if (!published) throw error;
+        return afterPublish();
+      }
+      return { ok: true as const, config: toPublish, changed: true };
+    }, { acquireTimeoutMs: 5_000 });
+  } catch (error) {
+    if (published) return afterPublish();
+    throw error;
+  }
 }
 
 export function loadSovereigntyPreset(name: SovereigntyPresetName): SovereigntyConfig {
@@ -593,6 +760,14 @@ function parseProfiles(value: unknown, label: string): Record<string, Sovereignt
     if (typeof profile.purpose === 'string') {
       parsedProfile.purpose = profile.purpose as NonNullable<SovereigntyModelProfile['purpose']>;
     }
+    if (provider === 'zkapi') {
+      parsedProfile.zkapi = parseZkapiConsultSettings(profile.zkapi, `${label}.modelProfiles.${id}.zkapi`);
+    } else if (profile.zkapi !== undefined) {
+      throw new OperationError(
+        'config_error',
+        `${label}.modelProfiles.${id}.zkapi is only valid on a provider "zkapi" profile.`,
+      );
+    }
     profiles[id] = parsedProfile;
   }
   return profiles;
@@ -671,13 +846,18 @@ function parseTrustDomainPolicy(record: Record<string, unknown>, label: string):
   return policy;
 }
 
-function validateProfile(id: string, profile: SovereigntyModelProfile): void {
+function validateProfile(id: string, profile: SovereigntyModelProfile, daemonPorts: ReadonlySet<number>): void {
   if (!id.trim()) throw new OperationError('config_error', 'Sovereignty model profile ids must not be empty.');
-  if (!['local-openai-compatible', 'openclaw-infer', 'google-gemini', 'venice', 'anthropic', 'openai-compatible'].includes(profile.provider)) {
+  if (!SUPPORTED_PROVIDERS.includes(profile.provider)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" has unsupported provider "${profile.provider}".`);
   }
   if (!['local', 'encrypted_cloud', 'standard_cloud'].includes(profile.trust)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
+  }
+  if (profile.provider === 'zkapi') validateZkapiProfile(id, profile);
+  if (profile.provider === 'built-in') {
+    validateBuiltInProfile(id, profile);
+    return;
   }
   if (profile.trust === 'local' && profile.provider !== 'local-openai-compatible') {
     throw new OperationError(
@@ -700,8 +880,19 @@ function validateProfile(id: string, profile: SovereigntyModelProfile): void {
   if (profile.baseUrl !== undefined && !/^https?:\/\//.test(profile.baseUrl)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" baseUrl must be an HTTP(S) URL.`);
   }
-  if (profile.trust === 'local' || profile.provider === 'local-openai-compatible') {
+  if (profile.provider !== 'zkapi' && (profile.trust === 'local' || profile.provider === 'local-openai-compatible')) {
     assertLocalProfileBaseUrl(id, profile.baseUrl);
+    assertLocalModelIdNotCloudForwarding(`Sovereignty local profile "${id}"`, profile.model ?? '');
+  }
+  // Any provider, any declared trust: a profile whose endpoint is a zkAPI
+  // daemon would send its content through the consult transport's daemon.
+  const daemonPort = profile.provider === 'zkapi' ? undefined : loopbackPort(profile.baseUrl);
+  if (daemonPort !== undefined && daemonPorts.has(daemonPort)) {
+    throw new OperationError(
+      'config_error',
+      `Sovereignty profile "${id}" points at port ${daemonPort}, where the zkAPI daemon serves.`,
+      'zkapi-clientd forwards every request to cloud providers through OpenRouter, so a loopback address there is not a local model or a direct provider. Move that server to another port.',
+    );
   }
   const rawProfile = profile as unknown as Record<string, unknown>;
   if (rawProfile.apiKey !== undefined || rawProfile.secret !== undefined) {
@@ -713,6 +904,24 @@ function validateProfile(id: string, profile: SovereigntyModelProfile): void {
   }
   if (profile.secretRef !== undefined && !normalizeSecretRef(profile.secretRef)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" secretRef must use env:NAME or store:key.`);
+  }
+}
+
+function validateBuiltInProfile(id: string, profile: SovereigntyModelProfile): void {
+  if (profile.trust !== 'local') {
+    throw new OperationError('config_error', `Sovereignty profile "${id}" uses the built-in model, which is always local trust.`);
+  }
+  if (profile.baseUrl !== undefined || profile.secretRef !== undefined) {
+    throw new OperationError(
+      'config_error',
+      `Sovereignty profile "${id}" uses the built-in model, which takes no baseUrl or secretRef.`,
+    );
+  }
+  if (profile.purpose !== undefined && profile.purpose !== 'embedding') {
+    throw new OperationError('config_error', `Sovereignty profile "${id}" uses the built-in model, which only embeds.`);
+  }
+  if (!profile.model?.trim()) {
+    throw new OperationError('config_error', `Sovereignty profile "${id}" requires a model.`);
   }
 }
 
@@ -739,6 +948,50 @@ function assertLocalProfileBaseUrl(id: string, baseUrl: string | undefined): voi
       'Use 127.0.0.1, ::1, or localhost for local analyst profiles.',
     );
   }
+}
+
+function validateZkapiProfile(id: string, profile: SovereigntyModelProfile): void {
+  // A loopback address proves nothing here: the daemon forwards to OpenRouter
+  // and the upstream model, which read every prompt.
+  if (profile.trust !== 'standard_cloud') {
+    throw new OperationError(
+      'config_error',
+      `Sovereignty zkapi profile "${id}" must declare trust "standard_cloud".`,
+      'zkAPI hides who paid, not what was asked: the cloud provider reads the request, whatever the loopback address.',
+    );
+  }
+  if (profile.purpose !== 'consult') {
+    throw new OperationError(
+      'config_error',
+      `Sovereignty zkapi profile "${id}" must declare purpose "consult".`,
+      'zkAPI is a consult-only transport; it may never serve an analyst, embedding, vision or classification role.',
+    );
+  }
+  assertZkapiDaemonBaseUrl(id, profile.baseUrl);
+}
+
+function zkapiDaemonPorts(config: SovereigntyConfig): Set<number> {
+  const ports = new Set<number>([ZKAPI_DAEMON_DEFAULT_PORT]);
+  for (const profile of Object.values(config.modelProfiles)) {
+    if (profile.provider !== 'zkapi') continue;
+    const port = loopbackPort(profile.baseUrl);
+    if (port !== undefined) ports.add(port);
+  }
+  return ports;
+}
+
+/** A consult profile carries one approved question, never evidence. */
+export function isConsultOnlyProfile(profile: SovereigntyModelProfile): boolean {
+  return profile.provider === 'zkapi' || profile.purpose === 'consult';
+}
+
+function assertNotConsultOnly(resolved: SovereigntyResolvedProfile, role: string): void {
+  if (!isConsultOnlyProfile(resolved.profile)) return;
+  throw new OperationError(
+    'config_error',
+    `Consult-only profile "${resolved.id}" cannot serve ${role}.`,
+    'A consult profile (provider zkapi or purpose consult) carries one approved question and never evidence; choose an analyst or embedding profile for this role.',
+  );
 }
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -773,6 +1026,7 @@ function validateRetrievalPolicy(
   }
   if (policy.embeddingProfile) {
     const resolved = resolveProfile(config, policy.embeddingProfile, `retrieval policy ${domain}`);
+    assertNotConsultOnly(resolved, `the ${domain} embedding policy`);
     if (!policy.allowedEmbeddingTrust.includes(resolved.profile.trust)) {
       throw new OperationError('config_error', `${domain} embedding profile "${policy.embeddingProfile}" is outside allowedEmbeddingTrust.`);
     }
@@ -800,6 +1054,7 @@ function profileAllowedForDomain(
   profile: SovereigntyModelProfile,
   domain: (typeof BUILTIN_DOMAINS)[number],
 ): boolean {
+  if (isConsultOnlyProfile(profile)) return false;
   // The secure pool is an approved set, not a generic encrypted-cloud class:
   // this deployment permits loopback local analysts and Venice at its
   // separately enforced Private+ catalog floor. Other providers and ordinary

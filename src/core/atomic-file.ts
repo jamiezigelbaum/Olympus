@@ -47,7 +47,7 @@ export async function writePrivateFileAtomic(path: string, text: string): Promis
 }
 
 /** The synchronous twin, for callers already committed to sync file access. */
-export function writePrivateFileAtomicSync(path: string, text: string): void {
+export function writePrivateFileAtomicSync(path: string, text: string, options: { onPublished?: () => void } = {}): void {
   const temp = temporaryPathFor(path);
   try {
     const descriptor = openSync(temp, 'wx', 0o600);
@@ -58,6 +58,11 @@ export function writePrivateFileAtomicSync(path: string, text: string): void {
       closeSync(descriptor);
     }
     renameSync(temp, path);
+    // The rename is the publish: from here the new contents are what any
+    // reader sees, whatever the directory flush below does. A caller that
+    // must tell "nothing changed" from "published, then something failed"
+    // learns it here.
+    options.onPublished?.();
   } catch (error) {
     try {
       rmSync(temp, { force: true });

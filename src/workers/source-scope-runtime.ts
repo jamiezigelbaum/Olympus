@@ -368,6 +368,23 @@ export function scopeBoundEmbeddingProvider(
     assertBindingCurrent() {
       authority.assertRefCurrent(ref);
     },
+    // A class method is not an own property, so the spread above drops it.
+    ...(provider.imageSupport ? { imageSupport: () => provider.imageSupport!() } : {}),
+    // The photo judge's methods read no source data beyond the picture the
+    // embed lane already hands over; they check the approval the same way.
+    ...(provider.embedWithImageVectors ? {
+      embedWithImageVectors: (inputs: Parameters<NonNullable<SourceEmbeddingProvider['embedWithImageVectors']>>[0]) => {
+        authority.assertRefCurrent(ref);
+        return provider.embedWithImageVectors!(inputs);
+      },
+    } : {}),
+    ...(provider.embedImageVectors ? {
+      embedImageVectors: (images: Parameters<NonNullable<SourceEmbeddingProvider['embedImageVectors']>>[0]) => {
+        authority.assertRefCurrent(ref);
+        return provider.embedImageVectors!(images);
+      },
+    } : {}),
+    ...(provider.embedPromptTexts ? { embedPromptTexts: (texts: string[]) => provider.embedPromptTexts!(texts) } : {}),
   };
 }
 

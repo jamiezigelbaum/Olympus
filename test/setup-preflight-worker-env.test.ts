@@ -10,20 +10,32 @@
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { defaultConfig } from '../src/core/config.ts';
 import { runDoctor } from '../src/core/doctor.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';
-import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { createSovereigntyEngine } from '../src/core/sovereignty.ts';
+import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import { writeManagedWorkerEnvSecret } from '../src/core/worker-service.ts';
 
 const EMPTY_STORE = { getSync: () => undefined, get: async () => undefined };
+// Never the developer's own connected-handle registry: a real connected source
+// with no scheduler entry turned source_scheduler_status red on a dev machine.
+const NO_HANDLES = () => ({ version: 1 as const, handles: [] });
+// ...nor its pending OAuth state, nor the ingestion-health baseline doctor
+// WRITES: both default under os.homedir(), which a test cannot redirect.
+function doctorStatePaths(envPath: string) {
+  return {
+    oauthStateDir: join(dirname(envPath), 'pending-oauth'),
+    ingestionHealthStatePath: join(dirname(envPath), 'source-ingestion-doctor-state.json'),
+  };
+}
 
 describe('preflight over the managed worker environment', () => {
   test('a key stored in worker.env is present; an empty worker.env still asks for it', async () => {
     await withWorkerEnv(async (envPath) => {
-      const config = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config;
+      const config = createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')).config;
 
       const before = await setupPreflight({
         config,
@@ -54,7 +66,7 @@ describe('preflight over the managed worker environment', () => {
 
   test('a shell key cannot satisfy a missing managed-worker credential', async () => {
     await withWorkerEnv(async (envPath) => {
-      const config = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config;
+      const config = createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')).config;
       const unmet = await setupPreflight({
         config,
         env: {
@@ -75,7 +87,7 @@ describe('preflight over the managed worker environment', () => {
         value: 'stored-gemini-key',
         envPath,
       });
-      const config = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config;
+      const config = createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')).config;
 
       // The persisted value proves availability to the supervised worker.
       const both = await setupPreflight({
@@ -92,7 +104,7 @@ describe('preflight over the managed worker environment', () => {
     // A caller that hands in a scoped environment must not silently pick up the
     // process owner's install, which is what makes these tests hermetic.
     const unmet = await setupPreflight({
-      config: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config,
+      config: createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')).config,
       env: {},
       secretStore: EMPTY_STORE,
     });
@@ -100,7 +112,7 @@ describe('preflight over the managed worker environment', () => {
 
     // A standalone preflight still supports a deliberately scoped runtime env.
     const standalone = await setupPreflight({
-      config: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config,
+      config: createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')).config,
       env: { GEMINI_API_KEY: 'standalone-runtime-key' },
       secretStore: EMPTY_STORE,
     });
@@ -112,13 +124,15 @@ describe('preflight over the managed worker environment', () => {
       const config = defaultConfig();
       config.email.enabled = false;
       config.sourceIndex.enabled = false;
-      config.sovereignty = { policy: loadSovereigntyPreset('no-sensitive') };
+      config.sovereignty = { policy: loadPreBuiltInPreset('no-sensitive') };
       const result = await runDoctor({
         config,
         delphi: healthyDelphi(),
         env: { GEMINI_API_KEY: 'shell-key' },
         secretStore: EMPTY_STORE,
         workerEnvPath: envPath,
+        readHandleRegistry: NO_HANDLES,
+        ...doctorStatePaths(envPath),
       });
       expect(result.checks.find((check) => check.name === 'sovereignty_prerequisites')?.ok).toBe(false);
     });
@@ -128,7 +142,7 @@ describe('preflight over the managed worker environment', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-preflight-unmanaged-'));
     try {
       const unmet = await setupPreflight({
-        config: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config,
+        config: createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')).config,
         env: { HOME: home, GEMINI_API_KEY: 'runtime-key' },
         secretStore: EMPTY_STORE,
       });
@@ -184,6 +198,8 @@ describe('preflight over the managed worker environment', () => {
           env: {},
           secretStore: EMPTY_STORE,
           workerEnvPath: envPath,
+          readHandleRegistry: NO_HANDLES,
+          ...doctorStatePaths(envPath),
           handleRegistry: registry,
           fetchImpl,
         });
@@ -242,6 +258,8 @@ describe('preflight over the managed worker environment', () => {
           env: {},
           secretStore: EMPTY_STORE,
           workerEnvPath: envPath,
+          readHandleRegistry: NO_HANDLES,
+          ...doctorStatePaths(envPath),
           fetchImpl,
         });
         return result.checks.find((check) => check.name === 'source_scheduler_status')!;
@@ -269,7 +287,7 @@ describe('preflight over the managed worker environment', () => {
       const config = defaultConfig();
       config.email.enabled = false;
       config.sourceIndex.enabled = false;
-      config.sovereignty = { policy: loadSovereigntyPreset('no-sensitive') };
+      config.sovereignty = { policy: loadPreBuiltInPreset('no-sensitive') };
 
       const before = await runDoctor({
         config,
@@ -277,6 +295,8 @@ describe('preflight over the managed worker environment', () => {
         env: {},
         secretStore: EMPTY_STORE,
         workerEnvPath: envPath,
+        readHandleRegistry: NO_HANDLES,
+        ...doctorStatePaths(envPath),
       });
       const beforeCheck = before.checks.find((check) => check.name === 'sovereignty_prerequisites')!;
       expect(beforeCheck.ok).toBe(false);
@@ -294,6 +314,8 @@ describe('preflight over the managed worker environment', () => {
         env: {},
         secretStore: EMPTY_STORE,
         workerEnvPath: envPath,
+        readHandleRegistry: NO_HANDLES,
+        ...doctorStatePaths(envPath),
       });
       expect(after.checks.find((check) => check.name === 'sovereignty_prerequisites')?.ok).toBe(true);
     });

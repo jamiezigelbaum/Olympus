@@ -19,7 +19,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
-import { readOwnerSensitivityMap, USER_FACING_TIER_MAPPING } from '../src/core/sensitivity-map.ts';
 import {
   createSovereigntyEngine,
   loadSovereigntyPreset,
@@ -51,6 +50,7 @@ import { createSourceIndexStatusHandler } from '../src/workers/source-index/stat
 import { TierSnifferService, tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { loadOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
 import { tierSnifferPathForLedger, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool.ts';
@@ -84,19 +84,11 @@ function workspace(prefix = 'olympus-tier-p2-review-'): string {
   return dir;
 }
 
-function mapJson(keywords: string[]): string {
+/** The owner's rules file: one always-Private file path. */
+function rulesJson(pathPrefix: string): string {
   return JSON.stringify({
-    schemaVersion: 2,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories: [{
-      id: 'owner-private',
-      label: 'owner private',
-      targetTierName: 'secure',
-      targetTrustTier: USER_FACING_TIER_MAPPING.secure.targetTrustTier,
-      targetTrustDomain: USER_FACING_TIER_MAPPING.secure.targetTrustDomain,
-      examples: ['example'],
-      match: { keywords, senderPatterns: [], pathPatterns: [] },
-    }],
+    schemaVersion: 1,
+    rules: [{ id: 'owner-private', match: { pathPrefix }, tier: 'secure', strength: 'prior' }],
   }, null, 2);
 }
 
@@ -121,31 +113,30 @@ function answering(answer: (material: string) => { tier: string; category: strin
   };
 }
 
-describe('1. an unusable map fails closed', () => {
-  test('a trailing comma, a partial write or a group-writable file is invalid, never "no map"', () => {
+describe('1. an unusable rules file fails closed', () => {
+  test('a trailing comma, a partial write or a group-writable file is refused, never "no rules"', () => {
     const dir = workspace();
-    const path = join(dir, 'map.json');
-    const env = { OLYMPUS_SENSITIVITY_MAP_PATH: path };
-    expect(readOwnerSensitivityMap(env).status).toBe('missing');
-    writeFileSync(path, mapJson(['zebracorn']));
+    const path = join(dir, 'tier-rules.json');
+    expect(loadOwnerTierRules({ path, allowMissing: true })).toEqual([]);
+    writeFileSync(path, rulesJson('/Files/zebracorn budget'));
     chmodSync(path, 0o600);
-    expect(readOwnerSensitivityMap(env).status).toBe('ok');
-    writeFileSync(path, withTrailingComma(mapJson(['zebracorn'])));
-    expect(readOwnerSensitivityMap(env)).toMatchObject({ status: 'invalid', reason: 'invalid_map' });
-    const full = mapJson(['zebracorn']);
+    expect(loadOwnerTierRules({ path })).toHaveLength(1);
+    writeFileSync(path, withTrailingComma(rulesJson('/Files/zebracorn budget')));
+    expect(() => loadOwnerTierRules({ path })).toThrow(/not valid JSON/u);
+    const full = rulesJson('/Files/zebracorn budget');
     writeFileSync(path, full.slice(0, Math.floor(full.length / 2)));
-    expect(readOwnerSensitivityMap(env)).toMatchObject({ status: 'invalid', reason: 'invalid_map' });
+    expect(() => loadOwnerTierRules({ path })).toThrow(/not valid JSON/u);
     writeFileSync(path, full);
     chmodSync(path, 0o664);
-    expect(readOwnerSensitivityMap(env)).toMatchObject({ status: 'invalid', reason: 'unsafe_permissions' });
+    expect(() => loadOwnerTierRules({ path })).toThrow(/writable by someone other than their owner/u);
   });
 
-  test('a tiered set holds new items pending while the map is broken, and the last good map still judges', async () => {
+  test('a tiered set holds new items pending while the rules file is broken, and the last good rules still judge', async () => {
     const dir = workspace();
-    const mapPath = join(dir, 'map.json');
-    writeFileSync(mapPath, mapJson(['zebracorn']));
-    chmodSync(mapPath, 0o600);
-    configureInstalledTierClassification({ env: { OLYMPUS_SENSITIVITY_MAP_PATH: mapPath, OLYMPUS_TIER_RULES_PATH: join(dir, 'none.json') } });
+    const rulesPath = join(dir, 'tier-rules.json');
+    writeFileSync(rulesPath, rulesJson('/Files/zebracorn budget'));
+    chmodSync(rulesPath, 0o600);
+    configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: rulesPath } });
     const fixture = openTierFixture(dir, { embed: false });
     cleanups.push(() => fixture.close());
     const specs: FixtureSpec[] = [];
@@ -156,28 +147,28 @@ describe('1. an unusable map fails closed', () => {
     await sync();
     expect(copies('garden-1')).toEqual([[CORPORA.internal, 'current', false]]);
 
-    // The owner saves the map with a trailing comma.
-    writeFileSync(mapPath, withTrailingComma(mapJson(['zebracorn'])));
+    // The owner saves the rules with a trailing comma.
+    writeFileSync(rulesPath, withTrailingComma(rulesJson('/Files/zebracorn budget')));
     specs.push(
       { id: 'garden-2', name: 'garden plan', text: 'Peas along the fence.' },
       { id: 'zebracorn-1', name: 'zebracorn budget', text: 'Figures for the quarter.' },
     );
     await sync();
     expect(copies('garden-2')).toEqual([[CORPORA.secure_local, 'current', true]]);
-    expect(fixture.ledger.getCurrent(identityOf('garden-2'))?.reasons).toContain('metadata:sensitivity_map_invalid');
-    // The last good map still raises its category.
-    expect(fixture.ledger.getCurrent(identityOf('zebracorn-1'))?.reasons).toContain('metadata:sensitivity_map:owner-private');
+    expect(fixture.ledger.getCurrent(identityOf('garden-2'))?.reasons).toContain('metadata:tier_rules_invalid');
+    // The last good rules still raise their file.
+    expect(fixture.ledger.getCurrent(identityOf('zebracorn-1'))?.reasons).toContain('metadata:owner_rule:pathPrefix:owner-private:prior');
     expect(copies('zebracorn-1')).toEqual([[CORPORA.secure_local, 'current', true]]);
 
     // A partial write: the same.
-    const full = mapJson(['zebracorn']);
-    writeFileSync(mapPath, full.slice(0, Math.floor(full.length / 2)));
+    const full = rulesJson('/Files/zebracorn budget');
+    writeFileSync(rulesPath, full.slice(0, Math.floor(full.length / 2)));
     specs.push({ id: 'garden-3', name: 'garden shed', text: 'New hinges.' });
     await sync();
     expect(copies('garden-3')).toEqual([[CORPORA.secure_local, 'current', true]]);
 
     // Fixed: new items route by their tiers again.
-    writeFileSync(mapPath, full);
+    writeFileSync(rulesPath, full);
     specs.push({ id: 'garden-4', name: 'garden hose', text: 'Twenty metres.' });
     await sync();
     expect(copies('garden-4')).toEqual([[CORPORA.internal, 'current', false]]);

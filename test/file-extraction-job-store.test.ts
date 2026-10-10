@@ -392,6 +392,25 @@ describe('extraction job store: record, retry and lost leases', () => {
     expect(delayMs).toBeLessThanOrEqual(DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS * 1_000 + 1_000);
   });
 
+  test('nextRetryAt names the lane\'s earliest backoff still ahead, and nothing once it is due', () => {
+    const { store, dbPath } = newStore();
+    expect(store.nextRetryAt(LANE)).toBeUndefined();
+    const first = enqueueOne(store, 'item-a');
+    const second = enqueueOne(store, 'item-b');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId: first, status: 'failed_retryable', errorKind: 'extractor_timeout' });
+    store.record({ jobId: second, status: 'failed_retryable', errorKind: 'extractor_timeout' });
+    const soon = isoSecondsFromNow(60);
+    backdate(dbPath, first, { next_retry_at: isoSecondsFromNow(600) });
+    backdate(dbPath, second, { next_retry_at: soon });
+    expect(store.nextRetryAt(LANE)).toBe(soon);
+
+    // A retry already due is the next run's ordinary work, not a wake time.
+    backdate(dbPath, second, { next_retry_at: isoSecondsFromNow(-1) });
+    expect(store.nextRetryAt(LANE)).not.toBe(soon);
+    expect(Date.parse(store.nextRetryAt(LANE)!)).toBeGreaterThan(Date.now());
+  });
+
   test('backoff scales with the attempt count', () => {
     // The one-hour ceiling is unreachable in practice and that is faithful to
     // the queue this ports: escalation to terminal fires at three attempts,
@@ -946,7 +965,9 @@ describe('extraction job store: corpus readiness', () => {
       leasedJobs: 0,
       failedRetryableJobs: 0,
       failedTerminalJobs: 2,
-      failedActionableJobs: 1,
+      // 'broken' has nothing left to try: it is unreadable, not homework.
+      failedActionableJobs: 0,
+      unreadableItems: 1,
       retryableDueJobs: 0,
     });
     // Another corpus's jobs are not this corpus's readiness.
@@ -958,8 +979,65 @@ describe('extraction job store: corpus readiness', () => {
       failedRetryableJobs: 0,
       failedTerminalJobs: 0,
       failedActionableJobs: 0,
+      unreadableItems: 0,
       retryableDueJobs: 0,
     });
+  });
+
+  test('a settled failure is unreadable, not actionable, on both readiness paths', () => {
+    const { store } = newStore();
+    // Settled: failed for good, nothing queued, leased or retryable behind it.
+    settle(store, 'damaged', 'failed_terminal');
+    settle(store, 'damaged-twice', 'failed_terminal');
+    settle(store, 'damaged-twice', 'failed_terminal', 'local_ocr');
+    // A policy exit wins the item: fenced, not unreadable, and not homework.
+    settle(store, 'fenced-broken', 'failed_terminal');
+    settle(store, 'fenced-broken', 'blocked_policy', 'local_ocr');
+    // Still in progress: a retry is booked, so the failure stays actionable.
+    const retrying = enqueueOne(store, 'retrying');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId: retrying, status: 'failed_retryable', errorKind: 'extractor_unavailable' });
+    // A terminal failure with another extractor still queued is not settled.
+    settle(store, 'second-try', 'failed_terminal');
+    enqueueOne(store, 'second-try', { kind: 'local_ocr' });
+
+    const expected = {
+      blockedByPolicyItems: 1,
+      unreadableItems: 2,
+      failedRetryableJobs: 1,
+      failedTerminalJobs: 5,
+      // The retryable job, and second-try's terminal one while its retry waits.
+      failedActionableJobs: 2,
+    };
+    expect(store.corpusReadiness(LANE.corpusId)).toMatchObject(expected);
+    expect(store.scopedReadiness([LANE])).toMatchObject(expected);
+    expect(createExtractionReadinessLedger(store).snapshotForCorpus(LANE.corpusId)?.counts).toMatchObject({
+      extraction_jobs_failed_actionable: 2,
+      extraction_items_unreadable: 2,
+    });
+  });
+
+  test('a terminal failure the runner will still retry is not unreadable yet', () => {
+    const { store, dbPath } = newStore();
+    // A once-ever reread for this lane's error kind, and an escalation to OCR.
+    const paths = [
+      { extractorKind: KIND, lastErrorKinds: ['extractor_crashed'] },
+      { extractorKind: 'pdf_text', lastErrorKinds: ['extractor_crashed'], escalateToExtractorKind: 'local_ocr' },
+    ];
+    settle(store, 'reread-pending', 'failed_terminal');
+    const spent = enqueueOne(store, 'reread-spent');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId: spent, status: 'failed_terminal', errorKind: 'extractor_crashed' });
+    backdate(dbPath, spent, { janitor_terminal_requeue_count: 1 });
+    settle(store, 'escalation-pending', 'failed_terminal', 'pdf_text');
+    settle(store, 'escalation-spent', 'failed_terminal', 'pdf_text');
+    settle(store, 'escalation-spent', 'failed_terminal', 'local_ocr');
+
+    const expected = { unreadableItems: 2, failedActionableJobs: 2 };
+    expect(store.corpusReadiness(LANE.corpusId, new Date(), { terminalRetryPaths: paths })).toMatchObject(expected);
+    expect(store.scopedReadiness([LANE], { terminalRetryPaths: paths })).toMatchObject(expected);
+    // Without the paths every one of them is settled.
+    expect(store.corpusReadiness(LANE.corpusId)).toMatchObject({ unreadableItems: 4, failedActionableJobs: 0 });
   });
 
   test('publishes those verdicts under the count keys the coverage math reads', () => {
@@ -976,7 +1054,8 @@ describe('extraction job store: corpus readiness', () => {
       extraction_jobs_queued_actionable: 1,
       extraction_jobs_leased: 0,
       extraction_jobs_failed: 1,
-      extraction_jobs_failed_actionable: 1,
+      extraction_jobs_failed_actionable: 0,
+      extraction_items_unreadable: 1,
       extraction_jobs_retryable_due_actionable: 0,
     });
   });

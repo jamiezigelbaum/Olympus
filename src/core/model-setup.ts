@@ -1,3 +1,4 @@
+import { modelEndpointFetch } from './model-transport.ts';
 import { fetchBoundedText } from './http-timeout.ts';
 import type {
   SovereigntyConfig,
@@ -62,7 +63,7 @@ const CARD_COPY: Record<ModelSetupCard['id'], {
 }> = {
   gemini: {
     label: 'Gemini',
-    missing: 'Gemini makes Public and Personal content searchable. Add its API key to continue.',
+    missing: 'Gemini makes everything you have not marked private searchable. Add its API key to continue.',
     applying: 'Applying the Gemini key.',
     ready: 'The Gemini key is connected.',
   },
@@ -409,7 +410,7 @@ export class ModelSetupService {
   private async requestJson(url: string, init: RequestInit, apiKey?: string): Promise<unknown> {
     const headers = new Headers(init.headers);
     if (apiKey) headers.set('Authorization', `Bearer ${apiKey}`);
-    const { response, text } = await fetchBoundedText(this.fetchImpl, url, {
+    const { response, text } = await fetchBoundedText(modelEndpointFetch(this.fetchImpl), url, {
       ...init,
       headers,
       redirect: 'error',

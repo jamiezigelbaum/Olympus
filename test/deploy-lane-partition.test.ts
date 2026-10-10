@@ -56,6 +56,7 @@ describe('test lane partition', () => {
     expect(() => testLaneFor(invocation)).toThrow(/must declare/);
     expect(() => testLaneFor('// OLYMPUS_TEST_LANE: go\nconst x = 1;')).toThrow(/no detected/);
     expect(() => testLaneFor('// OLYMPUS_TEST_LANE: rust\nconst x = 1;')).toThrow(/Unsupported/);
+    expect(testLaneFor('// OLYMPUS_TEST_LANE: deploy\nconst x = 1;')).toBe('deploy');
   });
 
   test('this guard runs in the fast lane, since it is the gate it protects', () => {
@@ -93,9 +94,14 @@ describe('test lane partition', () => {
     expect(buildTestLaneCommand(['one.test.ts', 'two.test.ts'])).toEqual([
       'bun',
       'test',
+      '--parallel',
+      '--timeout=15000',
       join('test', 'one.test.ts'),
       join('test', 'two.test.ts'),
     ]);
+    // Process-spawning lanes stay serial.
+    expect(buildTestLaneCommand(['one.test.ts'], undefined, 'deploy')).toEqual(['bun', 'test', join('test', 'one.test.ts')]);
+    expect(buildTestLaneCommand(['one.test.ts'], undefined, 'go')).toEqual(['bun', 'test', join('test', 'one.test.ts')]);
     expect(parseTestLaneArgs(['go'])).toEqual({ lane: 'go' });
   });
 

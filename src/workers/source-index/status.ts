@@ -15,7 +15,11 @@ import {
   type ConnectorStoreStatus,
   type ConnectorStoreSyncRun,
 } from '../connector-store/index.ts';
-import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
+import type {
+  CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON,
+  ConnectorStoreStatusScope,
+} from '../connector-store/local-index.ts';
+import type { SourceEmbeddingBackend } from './embeddings.ts';
 import {
   defineGmailSecureLocalCorpus,
   defineGoogleDriveDocsCorpus,
@@ -165,6 +169,17 @@ export interface SourceIndexCorpusStatusBase {
       estimated_cost_usd: number;
       price_source: 'config' | 'default_unverified';
     };
+    /**
+     * Chunks the serving embedder may not receive because their row is
+     * Private by its own tier and the embedder is not approved for Private
+     * content (a local embedder or the approved Venice lane). They stay
+     * unembedded on purpose: counted in missing_chunks, never in the backlog
+     * estimate, and never a reason for refresh_needed. Counts only.
+     */
+    private_tier_withheld?: {
+      chunks: number;
+      reason: typeof CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
+    };
   };
   content_extraction_throughput?: ContentExtractionThroughputSignal;
   /**
@@ -252,6 +267,10 @@ export interface SourceIndexTierClassificationStatus {
   remaining_questions: number;
   summary: string;
   awaiting_owner_approval: boolean;
+  /** Why the sniffer asked nothing while questions wait (content-free code, label, since). */
+  waiting_reason?: string;
+  waiting_label?: string;
+  waiting_since?: string;
 }
 
 /**
@@ -332,6 +351,7 @@ export function createSourceIndexStatusHandler(
             availability.embeddingEpoch ?? null,
             availability.reason ?? null,
             availability.backend ?? null,
+            availability.provider ?? null,
           ],
           statusScope ?? null,
         ]);
@@ -356,7 +376,7 @@ export function createSourceIndexStatusHandler(
           : configuredCorpusStatus(corpus);
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId
-          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId)
+          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope)
           : enforced;
         const resolved = store && corpus.family === 'file'
           ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true
@@ -644,15 +664,30 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
   status: T,
   store: LocalConnectorStore,
   modelId: string,
+  availability: SourceIndexHybridAvailability,
+  scope: ConnectorStoreStatusScope | undefined,
 ): T {
   const parity = status.embedding_parity;
   if (!parity?.required) return status;
-  const backlog = store.embeddingBacklogEstimate(modelId);
+  // With the serving embedder known, rows it may not receive (Private by
+  // their own tier) are reported as withheld, not as a backlog it owes.
+  const embedder = availability.backend !== undefined && availability.provider !== undefined
+    ? { modelId, provider: availability.provider, backend: availability.backend as SourceEmbeddingBackend }
+    : undefined;
+  // The same scoped population as the parity counts above (store.status(scope)).
+  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope);
+  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,
     embedding_parity: {
       ...parity,
+      ...(withheld && withheld.chunks > 0
+        ? {
+            refresh_needed: parity.refresh_needed && parity.missing_chunks > withheld.chunks,
+            private_tier_withheld: { chunks: withheld.chunks, reason: withheld.reason },
+          }
+        : {}),
       backlog_estimate: {
         model_id: modelId,
         missing_chunks: backlog.missingChunks,

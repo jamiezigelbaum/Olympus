@@ -12,12 +12,18 @@ Read the current step in full before carrying it out. Immediately before an
 operator-facing transition, read its required message block directly; do not
 use a remembered summary of this guide as the user-facing copy.
 
+This guide is the OpenClaw install path. If your operator wants Olympus in
+ChatGPT, stop here: the ChatGPT plugin's own `olympus-setup` skill installs
+the standalone engine on their Mac, and the README's "Olympus for ChatGPT"
+section is the user guide. That path needs no OpenClaw.
+
 ## Normal setup sequence
 
 Choose the privacy posture with the operator, run setup (which registers and
 starts the base worker), ask for the privacy classifier approval, verify the
-worker, run the required gateway restart, and open the dashboard's Setup page. Its **Models** section comes first: Gemini
-and Venice keys are entered there, and existing local models have an
+worker, run the required gateway restart, and open the dashboard's Setup page. Search indexing needs no setup: the
+embedding model is built into Olympus and downloads itself once on first use. Its **Models** section comes first: Venice
+and any opt-in Gemini keys are entered there, and existing local models have an
 agent-assisted configuration starting point plus **Check readiness**. Missing
 model keys are expected at this stage; do not block the dashboard handoff or
 send browser users to terminal key commands. Source connections unlock only
@@ -490,7 +496,7 @@ about to reuse carries a recorded caveat (for example "rotate this key
 before treating it as clean"), surface the caveat and let the operator
 decide; silently discarding it is a security failure. The gates named
 here are examples, not an exhaustive list: EVERY decision gate in Steps
-2–6 — the tier explainer, the sensitivity dialogue, the posture choice,
+2–6 — the tier explainer, the privacy conversation, the posture choice,
 per-credential consent, the worker pre-explanation — runs on the restore
 path exactly as on a fresh one. Pre-filled, though: on restore each
 gate is a confirm-or-change of the remembered answer — not a
@@ -518,8 +524,8 @@ what each posture means for THEIR data, what it requires, and its trade-off
 the posture as a multiple-choice question, a pick-list, or a choice in a
 question tool (OpenClaw's Ask User tool, a button prompt, or similar) until
 all three have happened in chat, in this order: the required four-tier
-explanation below was delivered in full, the sensitivity conversation ran and
-the operator confirmed the map, and the four-option posture walkthrough was
+explanation below was delivered in full, the privacy conversation ran and
+the operator confirmed what you read back, and the four-option posture walkthrough was
 delivered in full. A question tool is a way to collect the answer after that,
 never a substitute for it. When you do use one, each option label is the
 plain-language description from the walkthrough (for example "Venice —
@@ -527,10 +533,10 @@ Private content goes only to Venice"), never a bare preset id and never a
 compressed menu such as "Local, cloud, local only…".
 
 **Required user-facing four-tier explanation.** Deliver this entire block
-before asking any sensitivity or posture question. The point of each tier is
+before asking any privacy or posture question. The point of each tier is
 what happens *differently* to data in it — never present a tier as a bare list of
 category examples. This message both explains the model and opens the
-sensitivity conversation:
+privacy conversation:
 
 > Here's how Olympus treats your data — then you'll tell me about your
 > preferences.
@@ -563,17 +569,20 @@ sensitivity conversation:
 > The tiers are fixed, but what goes *in* them is personal — one person's
 > "eh, whatever" is another person's Private. So tell me about your data:
 > what do you want your assistant to know about, and what are you
-> protective of? Talk normally — I'll turn what you say into your personal
-> sensitivity map and read it back to you before anything gets saved.
+> protective of? Talk normally — I'll read back what I heard, and once
+> Olympus is running we'll put it in your Privacy settings together.
 
-**Operator mechanics — sensitivity mapping.** Iterate on that conversation,
-voice-friendly, until the operator confirms. This conversation is the path for
-the map: the dashboard does not edit it (its Sensitivity page only shows the
-saved categories, read-only), so do not send the operator there to write one.
-What the dashboard does own is per-source choice, made later in Step 6: which
-folders Drive and Dropbox may read, and Gmail's mail window, skipped categories
-and labels, and "always Private" and "skip" senders. Leave those to the
-dashboard pickers; do not copy them into the map or into tier rules now.
+**Operator mechanics — the privacy conversation.** Iterate on that
+conversation, voice-friendly, until the operator confirms. Its result is the
+operator's **privacy profile**, the only privacy configuration Olympus reads
+(the legacy sensitivity map file was retired on 2026-10-03; do not write
+`~/.olympus/sensitivity-map.json`, nothing reads it). The profile is saved
+later, in Step 6, from the dashboard's **Privacy** section (or ChatGPT's
+`olympus_privacy_set`): the owner's own words for "What's private for you?",
+plus folders, Gmail labels and senders that are always Private. Per-source
+choices also live there and in the source pickers: which folders Drive and
+Dropbox may read, and Gmail's mail window, skipped categories and labels, and
+"always Private" and "skip" senders. Nothing is written in this step.
 Help the operator untangle two different questions:
 
 - where data is stored today
@@ -584,8 +593,8 @@ Olympus question is not "does Google store this email?" The question is
 "may models reason over the therapy thread inside Gmail, and if so only in
 which lane?"
 
-Reflect back a proposed map before writing anything — in sentences, in
-the operator's own words, never as a `tier: item, item, item` cram-list:
+Reflect back what you heard before moving on — in sentences, in the
+operator's own words, never as a `tier: item, item, item` cram-list:
 
 > Here's what I heard. Your blog and anything you've published stays
 > Public. Day-to-day email, calendars, and work projects are Personal —
@@ -598,106 +607,12 @@ Keep revising until the operator says yes. Default categories to **Private**
 unless the operator explicitly says **Secrets**. Olympus judges every item
 twice: its names (title, path, subject, sender, labels) are Personal unless
 something raises them, and its content is judged separately and raised to
-Private or Secrets on evidence. The map feeds both judgments, so a health
-category can make a scan's text Private while its file name, matching
-nothing, stays Personal. The map is written before
-`olympus setup` runs, so its directory does not exist yet on a fresh
-machine — create it first, or the write fails with `ENOENT`. Create it
-**owner-only**: this directory holds the operator's sensitivity map, and a
-default umask would leave it world-readable.
+Private or Secrets on evidence. Secrets are found by the secret detector;
+there is no "always Secret" setting. Keep a short note of the confirmed
+answer for Step 6: the description in the operator's words, and any folders,
+labels or senders they named as always Private.
 
-```bash
-mkdir -p ~/.olympus && chmod 700 ~/.olympus
-```
-
-That `chmod` covers the DIRECTORY. The map file inside it is a second
-thing, and it matters: nothing in Olympus WRITES this file — you do — so
-it lands at your umask, which is 0644 on a clean macOS install. A 0700
-directory hides it from other users but not from anything running as the
-operator, and the file is a list of what they consider sensitive and what
-it looks like. Set the mode yourself right after writing it:
-
-```bash
-chmod 600 ~/.olympus/sensitivity-map.json
-```
-
-`olympus sensitivity validate` also enforces this: it is the one command
-that opens the map by name, so it leaves the file 0600 and reports both
-`permissions` (a 4-digit octal string) and `permissionsTightened: true`
-when it had to change anything. It refuses to chmod through a symlink or
-a non-regular file. Doing it yourself first means `permissionsTightened`
-never appears — which is the result you want, not a step you can skip.
-
-`olympus setup` creates the same directory at mode 0700, but it runs after
-this step. (If you skip ahead and `olympus sensitivity validate` cannot
-find the map, its own remedy names the directory and says setup creates
-it.) Then write `~/.olympus/sensitivity-map.json` using schemaVersion 2:
-
-```json
-{
-  "schemaVersion": 2,
-  "userFacingTiers": {
-    "public": { "targetTrustTier": "S0", "targetTrustDomain": "public_safe" },
-    "private": { "targetTrustTier": "S3", "targetTrustDomain": "internal" },
-    "secure": { "targetTrustTier": "S4", "targetTrustDomain": "secure_local" },
-    "secrets": { "targetTrustTier": "S5", "targetTrustDomain": "secure_local" }
-  },
-  "categories": [
-    {
-      "id": "therapy",
-      "label": "Therapy",
-      "targetTierName": "secure",
-      "targetTrustTier": "S4",
-      "targetTrustDomain": "secure_local",
-      "examples": ["therapy emails", "session notes"],
-      "notes": "Operator confirmed therapy material should stay secure.",
-      "match": {
-        "keywords": ["therapy", "therapist"],
-        "senderPatterns": [],
-        "pathPatterns": []
-      }
-    }
-  ]
-}
-```
-
-**Stored keys are legacy; labels are display-only.** The JSON above uses the
-legacy machine keys. Never write a key you invented to match a display label:
-the stored `private` key means **Personal** data, and sensitive **Private**
-data is still written as `secure`. Never write `private` (or `targetTierName`
-`private`) for sensitive Private data. The validator rejects mismatched target
-fields; preserve this exact mapping:
-
-| Stored key (JSON) | Trust tier / domain | Display label |
-|---|---|---|
-| `public` | `S0` / `public_safe` | Public |
-| `private` | `S3` / `internal` | Personal |
-| `secure` | `S4` / `secure_local` | Private |
-| `secrets` | `S5` / `secure_local` | Secrets |
-
-So a therapy category is written with `"targetTierName": "secure"` — never
-`"targetTierName": "private"` — even though you will describe that result to
-the operator as Private.
-
-A schemaVersion 2 map can target all four tiers. Private and Secrets
-categories raise matching items. Public and Personal categories are lowering
-guidance that any raise still beats, and content can never be lowered by
-them. Personal is already the default, so do not write a Personal category.
-Write a Public category only for material the operator names as published
-(a blog folder, say), and match it with `pathPatterns` (a folder path or
-folder key). Keywords never lower a tier: a lowering category matches only
-on a path pattern or a sender, so a keyword in a Public or Personal category
-has no effect. Lower on a sender only for authenticated or low-stakes
-senders: a From address can be spoofed, so a forged sender must never be able
-to pull real mail down a tier. An older schemaVersion 1 map still loads and
-stays raise-only.
-Validate it before continuing:
-
-```bash
-olympus sensitivity validate
-```
-
-Only after the map validates, ask the posture question. **Do not lead
+Only after the operator confirms, ask the posture question. **Do not lead
 with a recommendation.** A recommendation must come from the operator's
 own answer, so first ask:
 
@@ -705,7 +620,7 @@ own answer, so first ask:
 
 This moment — not earlier — is when local models enter the conversation.
 Do not mention machine checks, detected runtimes, or postures during the
-tier explainer or the sensitivity conversation; an unprompted "I checked
+tier explainer or the privacy conversation; an unprompted "I checked
 this machine for Ollama" lands as a non sequitur.
 
 If you detected a local runtime, it is a conversational observation to
@@ -748,24 +663,23 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    machine first; Venice is the approved second step when the local lane
 >    cannot answer. Requires: a local runtime with lots of fast memory —
 >    MLX, llama.cpp, Ollama, LM Studio and similar expose the local endpoint
->    Olympus uses — plus a Venice API key (pay-as-you-go) and a Gemini API
->    key (free tier available) for Public and Personal search indexing.
+>    Olympus uses — plus a Venice API key (pay-as-you-go). Search indexing
+>    uses the model built into Olympus: no key, nothing leaves the machine.
 >    Trade-off: strongest owner-controlled first step, with private-cloud escalation available;
 >    speed and first-pass quality depend on your machine.
 >
 > 2. **Local models** (`local-only`) — Private questions are answered
 >    only on your own machine. Venice is not used. Requires: the same local
->    runtime with lots of fast memory, plus a Gemini API key (free tier
->    available) for Public and Personal search indexing. Trade-off: no
+>    runtime with lots of fast memory. Search indexing uses the model built
+>    into Olympus. Trade-off: no
 >    Private-tier cloud escalation; if the local lane cannot answer, Olympus reports the gap.
 >
 > 3. **Venice** (`private-cloud-only`) — recommended if you do
 >    not run local models. Private content goes only to Venice, on its
->    Private model path — `kimi-k3` for answers and a separately approved
->    Private embedding model for Private search. Requires: a
->    Venice API key (pay-as-you-go) and a Gemini API key (free tier
->    available). Venice protects your Private tier while Gemini indexes only
->    your Public and Personal data; Private content never goes to Gemini.
+>    Private model path — `kimi-k3` for answers. Search indexing for every
+>    tier uses the model built into Olympus, on this machine. Requires: a
+>    Venice API key (pay-as-you-go). Private content never goes to Gemini;
+>    a separately approved Venice Private embedding model stays an opt-in.
 >    Trade-off: no local-model requirement
 >    or local fallback; you are choosing a privacy-focused cloud provider
 >    for Private answers and embeddings, on that provider's word rather than on
@@ -776,8 +690,8 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    indexed, and no model — local, private cloud, or ordinary cloud —
 >    sees it. When a question touches health, finances, or legal matters,
 >    you get an honest "that's not indexed" instead of an answer. Requires:
->    a Gemini API key (free tier available) for Public and Personal
->    source indexing.
+>    nothing; Public and Personal content is indexed by the model built
+>    into Olympus.
 >    Trade-off: a real hole in what your assistant can do, in exchange for
 >    maximum caution.
 >
@@ -957,7 +871,8 @@ normal browser flow a missing Gemini or Venice key there is expected: report
 it as "finished in the dashboard's Models section" and continue. Follow the
 key remedies below only in the headless fallback. Typical items:
 
-- Gemini API key (source embeddings, all presets; headless fallback only):
+- Gemini API key (only when the operator opted into Gemini embeddings instead
+  of the built-in model; headless fallback only):
   ask the operator to obtain a key from https://aistudio.google.com and provide it (or
   source it per the credential-sourcing rule above). Connect it via
   stdin, exactly like the Venice key, so it never reaches shell history,
@@ -1127,7 +1042,7 @@ ask:
 
 > One more privacy choice. Olympus sorts most of your items with rules on this
 > machine. When an item's name looks like it might be private — a word from
-> your sensitivity map, or a sensitive-sounding file or folder name — it asks
+> something you named as private, or a sensitive-sounding file or folder name — it asks
 > a private model to decide Personal or Private before indexing it for
 > search. It sends one item at a time: its title, folder path and folder
 > names, labels and sender, and, when the content itself looks sensitive, a
@@ -1607,6 +1522,15 @@ for the source the operator selects and only its approved scope. If the
 operator explicitly needs the documented headless fallback, ask which source
 that fallback should connect.
 
+**Save the privacy conversation in the Privacy section.** The Step 2
+conversation is saved here, in the dashboard's **Privacy** section, the only
+privacy configuration Olympus reads: the operator's own words for "What's
+private for you?", and any folders, Gmail labels or senders they named as
+always Private (offered once the source is connected, since those come from
+its pickers). Read the note back and let the operator press save; do not save
+it for them. Never write a `~/.olympus/sensitivity-map.json` file: it was
+retired on 2026-10-03 and nothing reads it.
+
 **Drive, Dropbox and Gmail require scope approval before ingestion.**
 Connecting an account grants access for the picker; it does not approve
 indexing the account. Until the operator saves a scope the card reads
@@ -1761,9 +1685,12 @@ Dashboard card meanings:
 
 ### Google / Gmail / Drive
 
-Normal Google setup is one click: the packaged publisher-owned Desktop client
-ID is already present. The operator clicks **Connect**, signs in to Google, and
-approves the source-specific read scope. Google may show the documented
+Normal Google setup is one click: Olympus's own publisher Google app is
+already present (it connects through Olympus's sign-in relay, from any
+dashboard address or from ChatGPT), and the packaged publisher-owned Desktop
+client ID is already present for direct and earlier-connected installs. The
+operator clicks **Connect**, signs in to Google, and approves the
+source-specific read scope. Google may show the documented
 unverified-app warning during the small pilot; the Gmail and Drive connect
 sheets carry a note about it. Explain it plainly and let the operator decide
 whether to continue. After consent, Gmail and Drive wait for the scope choice
@@ -2041,7 +1968,7 @@ the step is DONE, not broken.
    a bare menu of preset names.** The plain-language walkthrough in Step 2
    is part of the gate; the operator decides only after hearing what each
    posture means for their data. A question tool or pick-list is allowed
-   only after the four-tier explanation, the sensitivity conversation and
+   only after the four-tier explanation, the privacy conversation and
    the posture walkthrough have all been delivered in chat, and its labels
    are the plain-language descriptions, never preset ids.
 2. **Never echo, log, or store secrets in plain text.** Keys go through
@@ -2111,12 +2038,11 @@ Only when the operator asks for it. Do not offer it as part of installation.
 - Agents in a vendor's cloud need remote access. If the panel says remote
   access is off, say so plainly and send the operator to **Turn on remote
   access** in the same Agents section. That button is the normal path: it
-  shows Let's Encrypt's subscriber agreement, records the operator's own
-  acceptance, and changes `remote.enabled` through OpenClaw's config write, so
-  the operator needs no terminal. Never accept the agreement for them (do not
-  run `olympus connections terms --accept` on their behalf), and do not turn
-  remote access on yourself without its own consent (Rule one). The relay
-  (`connect.olympusplugin.ai`) is the default; `remote.publicBaseUrl` is only
+  changes `remote.enabled` through OpenClaw's config write, so the operator
+  needs no terminal. There is no certificate agreement to accept: the relay
+  holds the only certificate. Do not turn remote access on yourself without
+  its own consent (Rule one). The relay
+  (`mcp.olympusplugin.ai`) is the default; `remote.publicBaseUrl` is only
   for an operator who runs their own tunnel, set with `openclaw config set`
   and the validate-then-restart order in Step 5.
   `olympus connections status` says what remote access that is on is waiting

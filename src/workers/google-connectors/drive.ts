@@ -12,7 +12,6 @@ import {
   sourceInvocationProvenance,
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import {
   createSourceExclusionMatcher,
   loadSourceIngestionExclusions,
@@ -470,7 +469,14 @@ export class GoogleDriveSourceConnector implements SourceConnector {
       // size as a string. Absent or unparseable stays absent - the gate treats
       // sizeless items as unevaluable for media rules rather than guessing.
       ...(file.size !== undefined && Number.isFinite(Number(file.size)) ? { sizeBytes: Number(file.size) } : {}),
-      ...(file.createdTime ? { authoredAt: file.createdTime } : {}),
+      // authoredAt is the item's date downstream: citations show it and
+      // versions of one document order by it. For a file that is when its
+      // content was last written - Drive's modifiedTime, as Dropbox's
+      // client_modified - not when the file object was made. A creation date
+      // ranks an original edited after someone copied it as older than the
+      // stale "Copy of". Creation falls back only when no edit time is sent.
+      ...(file.modifiedTime ?? file.createdTime ? { authoredAt: file.modifiedTime ?? file.createdTime } : {}),
+      ...(file.createdTime ? { createdAt: file.createdTime } : {}),
       ...(file.modifiedTime ? { updatedAt: file.modifiedTime, serverModifiedAt: file.modifiedTime } : {}),
       ...(file.driveId ? { driveId: file.driveId } : {}),
       // `parents` stays: it is the provider's own immediate-parent list and
@@ -609,13 +615,10 @@ export class GoogleDriveSourceConnector implements SourceConnector {
   }
 }
 
-export function googleDriveConnectorStoreClassification(
-  sensitivityMap: SensitivityMap | undefined,
-): ConnectorStoreClassificationOptions {
+export function googleDriveConnectorStoreClassification(): ConnectorStoreClassificationOptions {
   return {
     baselineTrustTier: 'S3',
     baselineTrustDomain: 'internal',
-    ...(sensitivityMap ? { sensitivityMap } : {}),
   };
 }
 

@@ -3,29 +3,22 @@ import {
   DASHBOARD_CONTRAST_PAIRS,
   DASHBOARD_STATUS_COLORS,
   DASHBOARD_THEME_CSS,
+  DASHBOARD_STATUS_TOKENS,
   DASHBOARD_THEME_TOKENS,
+  DASHBOARD_THEME_TOKENS_LIGHT,
   DASHBOARD_TYPE_SCALE,
+  dashboardThemeVariable,
 } from '../src/workers/dashboard/theme.ts';
 import {
   AGENT_CONNECT_CSS,
-  BACKGROUND_CSS,
-  DASHBOARD_NAV_CSS,
-  DASHBOARD_POLICY_CSS,
-  DASHBOARD_PROGRESS_CSS,
-  DISPOSITIONS_CSS,
+  DASHBOARD_OUTSIDE_HELP_CSS,
+  LOCAL_PAGE_CSS,
   MODEL_SETUP_CSS,
-  SETUP_JOURNEY_CSS,
 } from '../src/workers/dashboard/static-styles.ts';
 import {
-  DASHBOARD_LANE_CSS,
-  attentionRow,
-  backgroundRow,
   connectorSheet,
-  laneRow,
   pageShell,
-  progressBar,
   setupRow,
-  sourceCard,
 } from '../src/workers/dashboard/components.ts';
 import {
   DASHBOARD_STATUS_ORDER,
@@ -47,10 +40,12 @@ const MOCKUP_TOKENS: Array<[string, string]> = [
   ['--t3', '#A9ABB3'],
   ['--t4', '#8C8E97'],
   ['--good', '#6CC08B'],
-  ['--warn', '#E3AA45'],
-  ['--run', '#AE9EF0'],
+  ['--warn', '#FB8C3C'],
+  ['--run', '#FACC15'],
   ['--bad', '#F08276'],
   ['--off', '#8C8E97'],
+  ['--run-fill', '#FACC15'],
+  ['--warn-fill', '#FB8C3C'],
   ['--warn-bg', '#261E10'],
   ['--warn-line', '#8A6A2A'],
   ['--err-bg', '#2B1614'],
@@ -62,6 +57,8 @@ const MOCKUP_TOKENS: Array<[string, string]> = [
   ['--field', '#6A6D77'],
   ['--selected', '#2C4485'],
 ];
+
+const ALL_SHEETS = [DASHBOARD_THEME_CSS, LOCAL_PAGE_CSS, AGENT_CONNECT_CSS, MODEL_SETUP_CSS, DASHBOARD_OUTSIDE_HELP_CSS].join('\n');
 
 /** WCAG 2.x relative luminance and contrast ratio. */
 function luminance(hex: string): number {
@@ -81,26 +78,42 @@ describe('dashboard contrast (WCAG AA)', () => {
     expect(contrast('#777777', '#FFFFFF')).toBeCloseTo(4.48, 2);
   });
 
-  test('every text and component colour meets AA on every surface it is painted on', () => {
-    const failures = DASHBOARD_CONTRAST_PAIRS
-      .map(({ fg, bg, min }) => ({ pair: `${fg} on ${bg}`, ratio: contrast(DASHBOARD_THEME_TOKENS[fg], DASHBOARD_THEME_TOKENS[bg]), min }))
-      .filter(({ ratio, min }) => ratio < min)
-      .map(({ pair, ratio, min }) => `${pair}: ${ratio.toFixed(2)} < ${min}`);
-    expect(failures).toEqual([]);
+  test('every text and component colour meets AA on every surface it is painted on, in both themes', () => {
+    for (const palette of [DASHBOARD_THEME_TOKENS, DASHBOARD_THEME_TOKENS_LIGHT]) {
+      const failures = DASHBOARD_CONTRAST_PAIRS
+        .map(({ fg, bg, min }) => ({ pair: `${fg} on ${bg}`, ratio: contrast(palette[fg], palette[bg]), min }))
+        .filter(({ ratio, min }) => ratio < min)
+        .map(({ pair, ratio, min }) => `${pair}: ${ratio.toFixed(2)} < ${min}`);
+      expect(failures).toEqual([]);
+    }
     expect(DASHBOARD_CONTRAST_PAIRS.length).toBeGreaterThan(40);
+  });
+
+  test('status fills are the owner\'s colours: yellow in progress, orange needs you', () => {
+    // Owner rule, 2026-10-02: the same colours as the ChatGPT dashboard.
+    expect(DASHBOARD_THEME_TOKENS_LIGHT.runFill).toBe('#F5C518');
+    expect(DASHBOARD_THEME_TOKENS.runFill).toBe('#FACC15');
+    expect(DASHBOARD_THEME_TOKENS_LIGHT.warnFill).toBe('#EA6C0A');
+    expect(DASHBOARD_THEME_TOKENS.warnFill).toBe('#FB8C3C');
+    // A fill is never used as words: the light yellow is unreadable as text.
+    expect(ALL_SHEETS).not.toMatch(/(?<![-\w])color:\s*var\(--(?:run|warn)-fill\)/);
+  });
+
+  test('no notice anywhere is a coloured side stripe', () => {
+    const stripes = [...ALL_SHEETS.matchAll(/border-left:\s*([0-9.]+)px\s+solid\s+var\(--([a-z0-9-]+)\)/g)]
+      .filter((match) => Number(match[1]) > 1 || /^(warn|run|bad|good|link|accent)/.test(match[2]!));
+    expect(stripes.map((match) => match[0])).toEqual([]);
   });
 
   test('the stylesheets paint text only from tokens', () => {
     // A literal colour would be a pair the check above never sees.
-    const sheets = [DASHBOARD_THEME_CSS, DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS, DASHBOARD_NAV_CSS,
-      BACKGROUND_CSS, DISPOSITIONS_CSS, AGENT_CONNECT_CSS, MODEL_SETUP_CSS, SETUP_JOURNEY_CSS].join('\n');
+    const sheets = ALL_SHEETS;
     const literalText = [...sheets.matchAll(/(?<![-\w])color:\s*(#[0-9A-Fa-f]{3,8})/g)].map((match) => match[1]);
     expect(literalText).toEqual([]);
   });
 
   test('every font size is one of the five type-scale tokens', () => {
-    const sheets = [DASHBOARD_THEME_CSS, DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS, DASHBOARD_NAV_CSS,
-      BACKGROUND_CSS, DISPOSITIONS_CSS, AGENT_CONNECT_CSS, MODEL_SETUP_CSS, SETUP_JOURNEY_CSS].join('\n');
+    const sheets = ALL_SHEETS;
     const sizes = new Set([...sheets.matchAll(/font-size:\s*([^;}]+)/g)].map((match) => match[1]!.trim()));
     const allowed = new Set(Object.keys(DASHBOARD_TYPE_SCALE).map((name) => `var(--fs-${name})`));
     // Two decorative glyphs (the inspector folder and the blocked-control lock)
@@ -118,25 +131,29 @@ describe('dashboard theme tokens', () => {
     }
   });
 
-  test('keeps the token object and the stylesheet on the same values', () => {
+  test('keeps the token objects and the stylesheet on the same values, light theme included', () => {
     for (const value of Object.values(DASHBOARD_THEME_TOKENS)) {
       expect(DASHBOARD_THEME_CSS).toContain(value);
     }
+    const light = DASHBOARD_THEME_CSS.slice(DASHBOARD_THEME_CSS.indexOf('@media (prefers-color-scheme: light)'));
+    for (const [name, value] of Object.entries(DASHBOARD_THEME_TOKENS_LIGHT)) {
+      expect(light).toContain(`${dashboardThemeVariable(name as keyof typeof DASHBOARD_THEME_TOKENS)}: ${value};`);
+    }
+    expect(Object.keys(DASHBOARD_THEME_TOKENS_LIGHT).sort()).toEqual(Object.keys(DASHBOARD_THEME_TOKENS).sort());
   });
 
-  test('colors every status word from a token', () => {
-    const tokenValues = new Set<string>(Object.values(DASHBOARD_THEME_TOKENS));
+  test('colors every status word through a theme variable', () => {
     for (const status of DASHBOARD_STATUS_ORDER) {
-      const color = DASHBOARD_STATUS_COLORS[status];
-      expect(tokenValues.has(color)).toBe(true);
+      expect(DASHBOARD_STATUS_COLORS[status]).toBe(`var(${dashboardThemeVariable(DASHBOARD_STATUS_TOKENS[status])})`);
     }
   });
 
-  test('agrees with the vocabulary about which token colors which status', () => {
+  test('agrees with the vocabulary about which colour each status takes', () => {
+    // The vocabulary names the hue; the theme picks its fill token.
+    const fill: Record<string, string> = { good: 'good', run: 'runFill', warn: 'warnFill', bad: 'bad', off: 'off', line: 'off' };
     for (const status of DASHBOARD_STATUS_ORDER) {
       const presentation = DASHBOARD_STATUS_PRESENTATION[status];
-      const token = DASHBOARD_THEME_TOKENS[presentation.colorToken];
-      expect(DASHBOARD_STATUS_COLORS[status]).toBe(token);
+      expect(DASHBOARD_STATUS_TOKENS[status]).toBe(fill[presentation.colorToken] as never);
     }
   });
 
@@ -207,28 +224,17 @@ describe('dashboard stylesheet', () => {
   test('every class the components emit has a rule to land on', () => {
     // The drift this pins: a component emitting a class no stylesheet styles
     // (the old a.cardlink), or a rule pointing at markup nothing emits.
-    const css = DASHBOARD_THEME_CSS + DASHBOARD_LANE_CSS;
+    const css = DASHBOARD_THEME_CSS + LOCAL_PAGE_CSS;
     const samples = [
-      pageShell({ title: 'Olympus', crumb: 'Gmail', meta: 'Working', body: '' }),
-      sourceCard({ label: 'Gmail', status: 'Working', subLine: 'indexing', fraction: 0.5, href: '/dashboard?source=g' }),
-      attentionRow({
-        label: 'Dropbox',
-        why: 'reauth required',
-        attention: false,
-        barPercent: 8,
-        action: { label: 'Connect', kind: 'api_key', source: 'readwise' },
-      }),
+      pageShell({ title: 'Olympus', crumb: 'Keys', meta: 'Working', body: '' }),
       setupRow({ label: 'Readwise', blurb: '', action: { label: 'Connect', kind: 'api_key', source: 'readwise' } }),
       setupRow({ label: 'Something else', blurb: 'Build it', action: { label: 'Build', kind: 'none', sheet: 'x' } }),
       connectorSheet({ id: 'x', heading: 'h', intro: 'i', promptText: 'p', copyButtonLabel: 'Copy' }),
-      laneRow({ name: 'Syncs', facts: 'all on schedule', percent: 50, strip: [{ tone: 'good', label: 'Gmail' }], stripLabel: 'runs' }),
-      backgroundRow({ href: '/dashboard?background', label: 'Background', lines: [{ name: 'Embeddings', facts: '50%', percent: 50 }] }),
-      progressBar({ percent: 8, label: '8 percent' }),
     ].join('\n');
     const classes = new Set(
       [...samples.matchAll(/class="([^"]+)"/g)].flatMap((match) => (match[1] ?? '').split(/\s+/)),
     );
-    expect(classes.size).toBeGreaterThan(10);
+    expect(classes.size).toBeGreaterThan(5);
     for (const token of classes) {
       expect(`${token}: ${new RegExp(`\\.${token}(?![\\w-])`).test(css)}`).toBe(`${token}: true`);
     }

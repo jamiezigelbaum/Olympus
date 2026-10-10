@@ -80,6 +80,14 @@ const EMBEDDING_PROVIDER_FAMILIES: readonly EmbeddingProviderFamily[] = [
     epochProviderToken: 'venice',
     dimensionToken: 'declared',
   },
+  {
+    // The in-process model (built-in-embedding/). Its model id already pins
+    // the upstream revision and quantization, so a new model is a new id and
+    // therefore a new epoch.
+    providerKind: 'built-in',
+    epochProviderToken: 'built-in',
+    dimensionToken: 'declared',
+  },
 ];
 
 // Any provider without a declared family — the deterministic test providers,
@@ -179,6 +187,21 @@ export const CANONICAL_EMBEDDING_IDENTITIES: readonly CanonicalEmbeddingIdentity
     modelId: 'text-embedding-qwen3-8b',
     backend: 'cloud',
     dimension: 4096,
+  }),
+  // Owner-approved 2026-10-01: the zero-setup default for new installs until
+  // 2026-10-06; installs that embedded with it keep it.
+  canonicalIdentity({
+    provider: 'built-in',
+    modelId: 'arctic-embed-m-v1.5-int8-e58a8f7',
+    backend: 'local',
+    dimension: 768,
+  }),
+  // Owner-approved 2026-10-06: EmbeddingGemma 2, the zero-setup default for new installs.
+  canonicalIdentity({
+    provider: 'built-in',
+    modelId: 'embeddinggemma-2-litert-24d962e',
+    backend: 'local',
+    dimension: 768,
   }),
 ];
 

@@ -15,6 +15,10 @@
 //   is no less protected on the way to an extractor than every item was
 //   before per-tier routing).
 //
+// A lane with more than one legacy store serves each through its own corpus
+// (`home`): that corpus lists its own store, and the most private one also the
+// stores only routed items use, so every item is listed by exactly one corpus.
+//
 // Everything here is source-neutral: nothing branches on which source a store
 // belongs to.
 
@@ -60,9 +64,19 @@ export interface TieredExtractionView {
   ): boolean;
   /** The tier egress decisions read: never below Private for a routed item. */
   itemTrustTier(localItemId: string): SourceTrustTier | undefined;
+  /**
+   * Whether the item's picture content has nowhere to land: an item the set
+   * never routed lands in the legacy store holding it, which keeps a picture
+   * only when it is the Private store. A routed item's content goes where its
+   * content tier decides (a picture's is Private by default).
+   */
+  refusesImageContent(localItemId: string): boolean;
 }
 
-export function tieredExtractionView(set: TieredStoreSet): TieredExtractionView {
+export function tieredExtractionView(
+  set: TieredStoreSet,
+  options: { home?: SourceTrustDomain } = {},
+): TieredExtractionView {
   const legacyDomains = (): SourceTrustDomain[] =>
     TIER_DOMAIN_ORDER.filter((domain) => set.legSpec(domain)?.legacy === true);
   const routedDomains = (): SourceTrustDomain[] =>
@@ -70,6 +84,14 @@ export function tieredExtractionView(set: TieredStoreSet): TieredExtractionView 
   // Legacy stores first, so a cursor with no prefix (every checkpoint written
   // before per-tier routing) resumes the legacy store exactly where it was.
   const order = (): SourceTrustDomain[] => [...legacyDomains(), ...routedDomains()];
+  // The stores this corpus lists: all of them, or its home store, plus the
+  // routed-only stores when home is the lane's most private legacy store.
+  const listed = (): SourceTrustDomain[] => {
+    const home = options.home;
+    if (home === undefined) return order();
+    if (set.legSpec(home)?.legacy !== true) throw new Error('A tiered extraction view\'s home must be one of the lane\'s legacy stores.');
+    return home === legacyDomains().at(-1) ? [home, ...routedDomains()] : [home];
+  };
 
   const storesHoldingRow = (localItemId: string): LocalConnectorStore[] =>
     order().flatMap((domain) => {
@@ -94,7 +116,7 @@ export function tieredExtractionView(set: TieredStoreSet): TieredExtractionView 
 
   return {
     extractionCandidates(options) {
-      const domains = order();
+      const domains = listed();
       let index = 0;
       let cursor = options.cursor;
       if (cursor?.startsWith(TIER_CURSOR_PREFIX)) {
@@ -168,6 +190,18 @@ export function tieredExtractionView(set: TieredStoreSet): TieredExtractionView 
       }
       if (!routed) return tier;
       return tier === undefined || TRUST_TIER_RANK[tier] < TRUST_TIER_RANK.S4 ? 'S4' : tier;
+    },
+
+    refusesImageContent(localItemId) {
+      const holders = storesHoldingRow(localItemId);
+      const first = holders[0]?.activeLocalItemRow(localItemId);
+      // Unknown here: the sink decides, as it always did.
+      if (!first || set.ledger.isRouted(first.identity)) return false;
+      // The store the sink lands it in: this corpus's home store when it holds
+      // it, else the first legacy store holding it (tiered-store-sink.ts).
+      const legacyHolders = holders.filter((store) => set.legSpec(store.trustDomain)?.legacy === true);
+      const landing = legacyHolders.find((store) => store.trustDomain === options.home) ?? legacyHolders[0];
+      return landing !== undefined && landing.trustDomain !== 'secure_local';
     },
   };
 }

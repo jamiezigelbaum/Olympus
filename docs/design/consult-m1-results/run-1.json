@@ -1,0 +1,152 @@
+{
+  "generatedAt": "2026-10-07T12:41:43.584Z",
+  "requested": 1,
+  "model": "openai/gpt-5-mini",
+  "questions": [
+    "What is the boiling point of water at sea level in Celsius?"
+  ],
+  "runs": [
+    {
+      "run": 1,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 28688,
+      "stageMs": {
+        "leaseAcquireMs": 3,
+        "confinementSelfTestMs": 3182,
+        "torBootstrapMs": 9609,
+        "daemonReadyMs": 308,
+        "daemonVerifyMs": 168,
+        "policyWarmMs": 10450,
+        "reservationMs": 109,
+        "dispatchToFirstByteMs": 28686,
+        "firstByteToCompletionMs": 2,
+        "correlationWaitMs": 0,
+        "settlementWaitMs": 19105,
+        "torStopMs": 102,
+        "postStopProbeMs": 1,
+        "teardownMs": 103,
+        "totalMs": 71875
+      }
+    }
+  ],
+  "summary": {
+    "runs": 1,
+    "succeeded": 1,
+    "failed": 0,
+    "failuresByCode": {},
+    "totalWorstCaseReservedUsd": 6,
+    "stages": [
+      {
+        "stage": "leaseAcquireMs",
+        "label": "lease acquire",
+        "runs": 1,
+        "medianMs": 3,
+        "p95Ms": 3
+      },
+      {
+        "stage": "confinementSelfTestMs",
+        "label": "confinement self-test",
+        "runs": 1,
+        "medianMs": 3182,
+        "p95Ms": 3182
+      },
+      {
+        "stage": "torBootstrapMs",
+        "label": "Tor start to bootstrapped",
+        "runs": 1,
+        "medianMs": 9609,
+        "p95Ms": 9609
+      },
+      {
+        "stage": "daemonReadyMs",
+        "label": "daemon start to ready",
+        "runs": 1,
+        "medianMs": 308,
+        "p95Ms": 308
+      },
+      {
+        "stage": "daemonVerifyMs",
+        "label": "daemon verification",
+        "runs": 1,
+        "medianMs": 168,
+        "p95Ms": 168
+      },
+      {
+        "stage": "policyWarmMs",
+        "label": "models/policy warm",
+        "runs": 1,
+        "medianMs": 10450,
+        "p95Ms": 10450
+      },
+      {
+        "stage": "reservationMs",
+        "label": "reservation",
+        "runs": 1,
+        "medianMs": 109,
+        "p95Ms": 109
+      },
+      {
+        "stage": "dispatchToFirstByteMs",
+        "label": "dispatch to first byte",
+        "runs": 1,
+        "medianMs": 28686,
+        "p95Ms": 28686
+      },
+      {
+        "stage": "firstByteToCompletionMs",
+        "label": "first byte to completion",
+        "runs": 1,
+        "medianMs": 2,
+        "p95Ms": 2
+      },
+      {
+        "stage": "correlationWaitMs",
+        "label": "request correlation wait",
+        "runs": 1,
+        "medianMs": 0,
+        "p95Ms": 0
+      },
+      {
+        "stage": "settlementWaitMs",
+        "label": "settlement wait",
+        "runs": 1,
+        "medianMs": 19105,
+        "p95Ms": 19105
+      },
+      {
+        "stage": "torStopMs",
+        "label": "Tor stop",
+        "runs": 1,
+        "medianMs": 102,
+        "p95Ms": 102
+      },
+      {
+        "stage": "postStopProbeMs",
+        "label": "post-stop probe",
+        "runs": 1,
+        "medianMs": 1,
+        "p95Ms": 1
+      },
+      {
+        "stage": "teardownMs",
+        "label": "teardown",
+        "runs": 1,
+        "medianMs": 103,
+        "p95Ms": 103
+      },
+      {
+        "stage": "totalMs",
+        "label": "total",
+        "runs": 1,
+        "medianMs": 71875,
+        "p95Ms": 71875
+      }
+    ]
+  }
+}

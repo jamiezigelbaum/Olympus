@@ -23,6 +23,7 @@ import { chmodSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../src/core/source-index/types.ts';
+import { buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
 import { closeSqliteStore } from '../src/core/sqlite-store.ts';
 import { TierLedger, type TierLedgerIdentity } from '../src/workers/classification/tier-ledger.ts';
 import type { TierDecision } from '../src/workers/classification/tier-classifier.ts';
@@ -1001,7 +1002,7 @@ describe('tier migration review fixes', () => {
     expect(replanned.supersededPlans).toContain(plan.planId);
   });
 
-  test('the move primitive refuses to overwrite a superseded copy kept in its destination', async () => {
+  test('the move primitive refuses to overwrite a superseded copy kept in its destination, unless it holds the same text', async () => {
     const context = await rehearsal();
     const read = lanes(context, 'read');
     read.lanes[1]!.set.ledger.setOverride(identityOf('rehearsal-library', 'launch'), { kind: 'tier', tier: 'public' });
@@ -1012,16 +1013,58 @@ describe('tier migration review fixes', () => {
       planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
       selector: 'source:rehearsal.library',
     });
-    // Launch is now Public; its Personal copy is kept, superseded. Moving it
-    // back to Personal would overwrite that kept copy: refused.
+    // Launch is now Public; its Personal copy is kept, superseded. When that
+    // kept copy holds other text than the Public one, moving back to Personal
+    // would overwrite it: refused.
     const set = write.lanes[1]!.set;
     const launch = identityOf('rehearsal-library', 'launch');
-    await expect(moveTieredItem({
+    const kept = new Database(context.library.internal);
+    const launchChunks = `item_pk IN (SELECT item_pk FROM items WHERE provider_item_id = '${launch.providerItemId}')`;
+    const original = kept.query(`SELECT chunk_pk, content_hash FROM chunks WHERE ${launchChunks}`).all() as Array<{ chunk_pk: number; content_hash: string }>;
+    expect(original.length).toBeGreaterThan(0);
+    kept.query(`UPDATE chunks SET content_hash = 'an older text' WHERE ${launchChunks}`).run();
+    const move = () => moveTieredItem({
       set,
       identity: { ...launch, family: 'readwise', localItemId: `${ACCOUNT}:launch` },
       target: { metadataTier: 'private', contentTier: 'private' },
-    })).rejects.toThrow(TierMoveRefusedError);
+    });
+    await expect(move()).rejects.toThrow(TierMoveRefusedError);
     expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.public_safe]);
+    expect(set.ledger.getCurrent(launch)).toMatchObject({ state: 'current', contentTier: 'public' });
+
+    // The same text as the source: the store keeps it in place, nothing is
+    // lost, and the move back proceeds.
+    for (const row of original) kept.query('UPDATE chunks SET content_hash = ? WHERE chunk_pk = ?').run(row.content_hash, row.chunk_pk);
+    closeSqliteStore(kept);
+    await expect(move()).resolves.toMatchObject({ outcome: 'moved' });
+    expect(set.ledger.getCurrent(launch)).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
+  });
+
+  test('the migration moves an item back into a store whose kept copy holds the same text', async () => {
+    const context = await rehearsal();
+    const launch = identityOf('rehearsal-library', 'launch');
+    const migrate = async (tier: 'public' | 'private') => {
+      const read = lanes(context, 'read');
+      const ledger = read.lanes[1]!.set.ledger;
+      ledger.setOverride(launch, { kind: 'tier', tier });
+      // A routed item moves when its re-decision queues the move.
+      const record = ledger.getCurrent(launch);
+      if (record?.routed && record.contentTier !== tier) ledger.beginMove(launch, { metadataTier: tier, contentTier: tier }, record.generation);
+      const plan = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+      await approveTierMigration({ planId: plan.planId, lanes: read.lanes, inputs: context.inputs, paths: context.paths });
+      const write = lanes(context, 'write');
+      return runTierMigration({
+        planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+        selector: 'source:rehearsal.library',
+      });
+    };
+    await migrate('public');
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.public_safe]);
+    // Its Personal copy is kept, superseded, with the same text: nothing to
+    // lose, so the move back is not skipped.
+    expect(await migrate('private')).toMatchObject({ moved: 1, skipped: 0 });
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
   });
 });
 
@@ -1197,21 +1240,23 @@ describe('tier migration P3 follow-ups', () => {
 });
 
 describe('tier migration reads the owner inputs through the P2 loaders, fail closed', () => {
-  test('an invalid map or rules file refuses to plan; valid rules reach the plan; an unapproved sniffer refuses', async () => {
+  test('an invalid rules file refuses to plan; valid rules reach the plan; an unapproved sniffer refuses', async () => {
     const context = await rehearsal();
-    const mapPath = join(context.dir, 'sensitivity-map.json');
     const rulesPath = join(context.dir, 'tier-rules.json');
+    const baseEnv = { HOME: context.dir, XDG_DATA_HOME: context.dir, OLYMPUS_TIER_RULES_PATH: rulesPath };
+    // The sovereignty loader's default path is the process owner's
+    // ~/.olympus/sovereignty.json (os.homedir(), not env.HOME), so the sniffer
+    // lane would come from the developer's own policy. Pin it to the policy the
+    // env bridge builds from this same environment: same lane, no real HOME.
+    const sovereigntyPath = join(context.dir, 'sovereignty.json');
+    writeFileSync(sovereigntyPath, JSON.stringify(buildEnvBridgeSovereigntyConfig(baseEnv)), { mode: 0o600 });
     const cli = (env: Record<string, string | undefined>) => ({
-      env: { HOME: context.dir, XDG_DATA_HOME: context.dir, OLYMPUS_SENSITIVITY_MAP_PATH: mapPath, OLYMPUS_TIER_RULES_PATH: rulesPath, ...env },
+      env: { ...baseEnv, OLYMPUS_SOVEREIGNTY_CONFIG: sovereigntyPath, ...env },
       laneSpecs: context.specs,
       domainIdentity: context.domainIdentity,
       paths: context.paths,
       itemDelayMs: 0,
     });
-    writeFileSync(mapPath, '{ "schemaVersion": 2, ');
-    chmodSync(mapPath, 0o600);
-    await expect(runTierMigrateCommand(['plan'], cli({}))).rejects.toThrow(/sensitivity map is unusable/u);
-    rmSync(mapPath);
     writeFileSync(rulesPath, '{ not json');
     chmodSync(rulesPath, 0o600);
     await expect(runTierMigrateCommand(['plan'], cli({}))).rejects.toThrow(/Tier rules/u);

@@ -144,8 +144,10 @@ describe('buildEvidencePack', () => {
     });
 
     expect(pack.candidates[0]!.chunks).toEqual([]);
-    // Trust tier falls back to the corpus default sensitivity (internal -> S3).
-    expect(pack.candidates[0]!.trustTier).toBe('S3');
+    // No provider answer and no tier on the hit: the item's tier is unknown,
+    // so it is judged S4 in its corpus's domain, never the lower S3 default.
+    expect(pack.candidates[0]!.trustTier).toBe('S4');
+    expect(pack.candidates[0]!.trustDomain).toBe('internal');
     expect(pack.coverage.extractionGaps.some((g) => g.includes('no extractable content'))).toBe(true);
   });
 

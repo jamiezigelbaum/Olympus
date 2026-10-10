@@ -13,7 +13,8 @@ export type EvalQuestionShape =
   | 'cross_source_synthesis' // combine two or more sources into one answer
   | 'summary_or_sentiment' // gist or tone of a thread/document
   | 'coverage_negative' // expected answer is an honest "I have nothing on this"
-  | 'gap_honesty'; // some evidence is unextractable; analyst must say so
+  | 'gap_honesty' // some evidence is unextractable; analyst must say so
+  | 'version_conflict'; // several versions of one document disagree; newest named by date, or each version's value
 
 export interface EvalExpectedEvidence {
   corpusId: string;

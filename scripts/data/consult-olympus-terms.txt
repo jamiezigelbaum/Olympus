@@ -1,0 +1,209 @@
+# Olympus-authored consult vocabulary: source for the olympus-terms pack.
+# Built by: bun scripts/build-consult-vocabulary.ts olympus-terms <out-dir> scripts/data/consult-olympus-terms.txt
+# One entry per line; "#" starts a comment line. Each entry is split into
+# letter runs exactly as the gate tokenizes a question, so "Wi-Fi" lists the
+# words "wi" and "fi", "VO2" lists "vo", "UTF-8" lists "utf". Runs of one
+# letter are dropped (the gate admits single letters anyway).
+# Rule for adding an entry: a general, non-personal term (a unit, file format,
+# protocol, device or network term, or a stable general proper term) that an
+# ordinary background question uses and no shipped pack holds. Do not add
+# names of people, places smaller than a country, organisations or brands.
+#
+# Units the CLDR pack does not hold (its generator drops proper nouns)
+Celsius
+Fahrenheit
+Rankine
+BTU
+BTUs
+ATM
+# File formats
+DOCX
+XLSX
+XLS
+PPTX
+PPT
+ODT
+RTF
+TXT
+TSV
+YAML
+JPEG
+JPG
+PNG
+GIF
+SVG
+BMP
+WebP
+HEIC
+MP3
+MP4
+AAC
+FLAC
+WAV
+MKV
+MOV
+AVI
+RAR
+GZIP
+ASCII
+Unicode
+UTF-8
+UUID
+RSS
+# Protocols and network terms
+Bluetooth
+Wi-Fi
+Ethernet
+LAN
+WLAN
+NFC
+IMAP
+SMTP
+SFTP
+DHCP
+NAT
+VLAN
+ARP
+SNMP
+LDAP
+CalDAV
+CardDAV
+WebDAV
+WebRTC
+VoIP
+VoLTE
+LTE
+GSM
+CDMA
+GNSS
+RFID
+SAML
+SSO
+TOTP
+HOTP
+FIDO
+FIDO2
+WebAuthn
+# Devices, storage and hardware
+HDD
+HDMI
+DisplayPort
+FireWire
+SATA
+NVMe
+UEFI
+PCIe
+DDR
+DDR5
+SDRAM
+NAND
+eMMC
+microSD
+SDXC
+eSIM
+ROM
+SoC
+NPU
+TPU
+OLED
+LCD
+QLED
+HDR
+DVD
+CD-ROM
+Blu-ray
+# Software and platforms
+iOS
+iPadOS
+macOS
+Linux
+Unix
+SDK
+CLI
+GUI
+IDE
+SaaS
+PaaS
+IaaS
+OCR
+LLM
+LLMs
+VR
+TV
+QR
+UPC
+SKU
+# Home, trades and vehicles
+HVAC
+PEX
+PVC
+CPVC
+GFCI
+AFCI
+LEDs
+SUV
+EVs
+# Health, fitness and testing
+VO2
+HRV
+BMR
+TDEE
+LDL
+HDL
+HbA1c
+CRP
+TSH
+PSA
+CBC
+EEG
+IQ
+EQ
+# Education, money and tax
+GPA
+GRE
+GMAT
+LSAT
+MCAT
+IEP
+FAFSA
+HSA
+FSA
+IBAN
+ACH
+LLC
+LLP
+EIN
+ITIN
+# Stable general proper terms (decision 2026-10-07)
+Roth
+Mediterranean
+Montessori
+Schengen
+Majeure
+# Supranational and physical regions (owner direction 2026-10-07)
+Scandinavia
+Scandinavian
+Nordic
+Balkans
+Benelux
+Sahara
+Alps
+Andes
+Himalayas
+Caribbean
+Pacific
+Atlantic
+Arctic
+Antarctic
+Antarctica
+Europe
+Asia
+Africa
+Oceania
+Eurozone
+Baltic
+Iberia
+Siberia
+Patagonia
+Amazon
+Rockies

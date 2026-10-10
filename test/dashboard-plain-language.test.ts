@@ -1,12 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import { readResult } from '../scripts/control-ui-preview.ts';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
 import type { ModelSetupView } from '../src/core/model-setup.ts';
-import { renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
-import { dashboardIndexingProgress } from '../src/workers/dashboard/pages/background.ts';
-import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
-import { dashboardEtaWords, dashboardIndexingLine } from '../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_PICKER_COPY } from '../src/workers/dashboard/vocabulary.ts';
+import { renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
 
 /**
  * Owner-facing pages speak the owner's language (dashboard UX review,
@@ -35,41 +32,48 @@ function jargonIn(html: string): string[] {
     .filter((line) => JARGON.test(line));
 }
 
-const SETUP_STATES = ['partial', 'full', 'fresh', 'models', 'models-applying', 'first-install', 'connect-dropbox-refused'];
+const SETUP_STATES = ['partial', 'full', 'fresh', 'models', 'models-applying', 'first-install', 'connect-dropbox-refused', 'review', 'review-unconfigured'];
+
+/**
+ * The older scope and tier words (holistic review 2026-10-02, item 21): a
+ * folder is fully indexed, names only or skipped, and the owner's tiers are
+ * Personal, Private and Secrets. The storage enums keep their old names; the
+ * pages never print them.
+ */
+const LEGACY = /\b(Full ingestion|Metadata only|metadata only|invisible|Public)\b/;
+
+function legacyIn(html: string): string[] {
+  return ownerFacingText(html)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => LEGACY.test(line));
+}
 
 describe('owner-facing dashboard pages carry no implementation jargon outside Details', () => {
-  for (const view of ['home', 'background'] as const) {
-    test(`native ${view}`, () => {
-      const page = readResult({ view }, true);
-      expect(jargonIn(page.body)).toEqual([]);
-    });
-  }
+  // Unified dashboard phase 4: the panel is the dashboard (its own words are
+  // checked in the ChatGPT tests); the computer's own pages are checked here.
   for (const state of SETUP_STATES) {
-    test(`native setup (${state})`, () => {
-      const page = readResult({ view: 'setup' }, true, state);
-      expect(jargonIn(page.body)).toEqual([]);
-    });
-  }
-  for (const [route, state] of [['/dashboard', 'full'], ['/dashboard?background', 'full'], ['/dashboard?setup', 'partial'], ['/dashboard?setup', 'models']] as const) {
-    test(`standalone ${route} (${state})`, () => {
-      const { html } = renderDashboardHtmlRoute({
-        url: new URL(`http://olympus.test${route}`),
-        view: buildDashboardPreviewView(state),
-        options: { now: DASHBOARD_PREVIEW_NOW },
-      });
-      expect(jargonIn(html)).toEqual([]);
+    test(`Keys, Agents and Build a connector speak plainly (${state})`, () => {
+      const url = new URL('http://worker.test/dashboard?keys');
+      for (const page of ['keys', 'agents', 'connector'] as const) {
+        const html = renderDashboardLocalPage(page, { url, view: buildDashboardPreviewView(state), options: { now: DASHBOARD_PREVIEW_NOW } });
+        expect(jargonIn(html)).toEqual([]);
+        expect(legacyIn(html)).toEqual([]);
+      }
     });
   }
 
-  for (const params of [{ view: 'dispositions', source_id: 'dropbox.files' }, { view: 'dispositions' }] as const) {
-    test(`native folder picker (${'source_id' in params ? params.source_id : 'all sources'})`, () => {
-      const page = readResult(params, true);
-      expect(jargonIn(page.body)).toEqual([]);
-      // The picker's choices name what happens to a folder, in the review's words.
-      expect(page.body).toContain('Names only<span>Searchable by name and date</span>');
-      expect(page.body).not.toContain('Metadata only');
-    });
-  }
+  test('the folder picker\'s words, which the browser renders from the page, carry no jargon', () => {
+    const words = (value: unknown): string[] => typeof value === 'string' ? [value]
+      : Array.isArray(value) ? value.flatMap(words)
+        : value && typeof value === 'object' ? Object.values(value).flatMap(words) : [];
+    expect(jargonIn(words(DASHBOARD_PICKER_COPY).map((line) => `<p>${line}</p>`).join(''))).toEqual([]);
+  });
+
+  test('the legacy check itself catches the old words', () => {
+    expect(legacyIn('<span>Metadata only</span><span>Full ingestion</span>')).toEqual(['Metadata only', 'Full ingestion']);
+    expect(legacyIn('<td>Public</td>')).toEqual(['Public']);
+  });
 
   test('the check itself catches jargon outside Details and ignores it inside', () => {
     expect(jargonIn('<p>Embeddings 98% done</p>')).toEqual(['Embeddings 98% done']);
@@ -78,98 +82,11 @@ describe('owner-facing dashboard pages carry no implementation jargon outside De
   });
 });
 
-describe('the indexing progress line', () => {
-  const NOW = DASHBOARD_PREVIEW_NOW;
-  function view(backlog: { chunks: number; embedded_chunks: number; missing_chunks: number }, extra: Record<string, unknown> = {}) {
-    const base = buildDashboardPreviewView('full');
-    return {
-      ...base,
-      // No card publishes a per-item count here, so no item count may appear.
-      sources: base.sources.map((source) => ({ ...source, coverage: { ...source.coverage, embedded_files: undefined } })),
-      background_work: { embedding_backlog: { ...backlog, refresh_needed: false }, ...extra },
-    } as unknown as ReturnType<typeof buildDashboardPreviewView>;
-  }
-  const moving = (count: number) => ({
-    lanes: [{
-      id: 'embedding-drain', name: 'Embedding drain', unit: 'chunks', reportsLive: true, phase: 'embedding',
-      lastActivityAt: new Date(NOW.getTime() - 8_000),
-      samples: [
-        { at: new Date(NOW.getTime() - 5 * 60_000), count, heartbeatSeq: 1 },
-        { at: NOW, count: count + 6_200, heartbeatSeq: 2 },
-      ],
-    }],
-    guardActions: [],
-  });
-  const runtime = (state: string) => ({
-    embeddingRuntime: {
-      state, stateLine: `Embeddings: ${state}`, scheduleLine: 'No fixed hours.',
-      overrideOn: false, override: 'none', overridePath: '/preview/override',
-    },
-  });
-  const line = (v: ReturnType<typeof view>, options: Record<string, unknown> = {}) => {
-    const progress = dashboardIndexingProgress(v, { now: NOW, ...options }, NOW);
-    return progress === undefined ? undefined : dashboardIndexingLine(progress);
-  };
-
-  test('reads percent done and an estimate only once a rate is measured', () => {
-    const v = view({ chunks: 1_000_000, embedded_chunks: 851_200, missing_chunks: 148_800 });
-    // 6,200 in five minutes is 1,240 a minute: 148,800 left is two hours.
-    expect(line(v, { backgroundRuntime: moving(100_000) })).toBe('Indexing — 85% done, about 2 hours');
-    // Running, but no rate yet: an honest "estimating", never a guessed time.
-    expect(line(v, runtime('running'))).toBe('Indexing — 85% done, estimating time left…');
-  });
-
-  test('never relabels chunks as items, and counts items only from a per-item field', () => {
-    const v = view({ chunks: 208_212, embedded_chunks: 204_157, missing_chunks: 4_055 });
-    expect(line(v, runtime('running'))).not.toContain('4,055');
-    const withFiles = {
-      ...v,
-      sources: v.sources.map((source) => source.embedding_backlog === undefined ? source
-        : { ...source, coverage: { ...source.coverage, content_ready_items: 120, embedded_files: 100 } }),
-    };
-    const indexing = withFiles.sources.filter((source) => source.embedding_backlog !== undefined).length;
-    expect(indexing).toBeGreaterThan(0);
-    expect(line(withFiles, runtime('running')))
-      .toBe(`Indexing — 98% done, ${indexing * 20} items left, estimating time left…`);
-  });
-
-  test('says stalled when the lane stopped moving, and paused when something parked it', () => {
-    const v = view({ chunks: 200_000, embedded_chunks: 70_000, missing_chunks: 130_000 });
-    const stopped = moving(88_000);
-    stopped.lanes[0]!.samples[1]!.count = 88_000;
-    stopped.lanes[0]!.samples[0]!.at = new Date(NOW.getTime() - 12 * 60_000);
-    expect(line(v, { backgroundRuntime: stopped })).toBe('Indexing — 35% done, stalled');
-    expect(line(v, runtime('parked')))
-      .toBe('Indexing — 35% done, paused');
-    expect(line(view({ chunks: 200_000, embedded_chunks: 70_000, missing_chunks: 130_000 }, { embedding_lane_state: 'embedding_lane_disabled' })))
-      .toBe('Indexing — 35% done, switched off');
-  });
-
-  test('handles zero and changing totals without inventing a number', () => {
-    expect(line(view({ chunks: 0, embedded_chunks: 0, missing_chunks: 0 }))).toBe('Indexing — up to date');
-    expect(line(view({ chunks: 500, embedded_chunks: 500, missing_chunks: 0 }))).toBe('Indexing — up to date');
-    // New material grew the total: the percent drops, it never reads above 100
-    // or below 0, and the line still says where it stands.
-    const grown = line(view({ chunks: 400_000, embedded_chunks: 210_000, missing_chunks: 190_000 }), runtime('running'));
-    expect(grown).toBe('Indexing — 52% done, estimating time left…');
-    const overCounted = line(view({ chunks: 100, embedded_chunks: 140, missing_chunks: 5 }), runtime('running'));
-    expect(overCounted).toBe('Indexing — 100% done, estimating time left…');
-  });
-
-  test('rounds an estimate to the precision a rate measured over minutes has', () => {
-    expect(dashboardEtaWords(50_000)).toBe('about a minute');
-    expect(dashboardEtaWords(17 * 60_000)).toBe('about 17 minutes');
-    expect(dashboardEtaWords(70 * 60_000)).toBe('about an hour');
-    expect(dashboardEtaWords(5 * 3_600_000)).toBe('about 5 hours');
-    expect(dashboardEtaWords(50 * 3_600_000)).toBe('about 2 days');
-  });
-});
-
-describe('the Setup blocker', () => {
+describe('the Keys blocker', () => {
   function setup(cards: ModelSetupView['cards']): string {
     const view = buildDashboardPreviewView('fresh');
     view.model_setup = { ready: false, checked_at: DASHBOARD_PREVIEW_NOW.toISOString(), cards };
-    return renderDashboardSetupPage(view, { now: DASHBOARD_PREVIEW_NOW });
+    return renderDashboardLocalPage('keys', { url: new URL('http://worker.test/dashboard?keys'), view, options: { now: DASHBOARD_PREVIEW_NOW } });
   }
   const local = (state: ModelSetupView['cards'][number]['state']) =>
     [{ id: 'local' as const, label: 'Local models', required: true, state, detail: 'Local detail.' }];

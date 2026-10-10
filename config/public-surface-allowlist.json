@@ -58,11 +58,6 @@
       "retire_when": "Never; drop this entry only when the module is deleted."
     },
     {
-      "path": "src/workers/dashboard/pages/embedding-ledger.ts",
-      "reason": "Reached only from OLYMPUS_PUBLIC_RUNTIME_EXCLUDE spans: private-runtime code the public build strips.",
-      "retire_when": "The private runtime is retired, or the feature is promoted to the public surface."
-    },
-    {
       "path": "src/core/openshell-posture.ts",
       "reason": "Reached only by a repository script that the package does not ship. scripts/openshell-posture-proof.ts.",
       "retire_when": "The script moves to the ops repository or is deleted."

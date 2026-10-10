@@ -1,5 +1,28 @@
 # Olympus Uninstall and Data Deletion
 
+## Olympus for ChatGPT on a Mac
+
+An engine installed with `curl -fsSL https://olympusplugin.ai/install.sh | sh`
+is removed with:
+
+```bash
+curl -fsSL https://olympusplugin.ai/uninstall.sh | sh
+```
+
+It unloads the engine with `launchctl bootout` and, only once launchd
+confirms it no longer has the agent, removes its LaunchAgent; it uses system
+tools only and never runs the installed Bun. Then it deletes `~/Library/Application Support/Olympus` (the app,
+the previous app and the Bun runtime), the `~/.local/bin/olympus` command the
+installer wrote, and the PATH line it added to `~/.zprofile` or
+`~/.bash_profile`. It keeps settings and data (`~/.olympus`,
+`~/.config/olympus`, `~/.local/share/openclaw/olympus`,
+`~/Library/Logs/Olympus`) and lists them. To delete the data too, run
+`olympus engine stop` and then `olympus data delete --all` (preview with
+`--dry-run`) before uninstalling. The rest of this page covers the OpenClaw
+worker.
+
+## OpenClaw worker
+
 Olympus separates stopping/removing its supervised worker from deleting user
 data. The lifecycle command is safe to rerun and retains credentials, source
 configuration, indexes, embeddings, caches, and reports:

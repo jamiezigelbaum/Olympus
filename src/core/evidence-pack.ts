@@ -42,6 +42,8 @@ import {
 } from './source-index/router.ts';
 import {
   buildSourceSensitivity,
+  isSecureSensitivity,
+  SOURCE_TRUST_TIERS,
   type RetrievalDegradation,
   type RetrievalLaneAudit,
   type SourceIndexProvenance,
@@ -66,6 +68,12 @@ export interface LocalContentRequest {
   trustDomain: SourceTrustDomain;
   maxChars?: number;
   query?: string;
+  /**
+   * For an item longer than `maxChars`: at most this many of its passages
+   * (the provider's own small default otherwise). A caller reading one item
+   * in depth raises it so the budget is filled with the item's text.
+   */
+  maxPassages?: number;
 }
 
 export interface LocalContentBlock {
@@ -75,6 +83,15 @@ export interface LocalContentBlock {
   facts?: readonly StructuredEvidenceFact[];
   truncated?: boolean;
   coverageGaps?: readonly string[];
+  // The owner chose to keep this item's contents unread (a folder set to
+  // Names only, or a metadata-only ingestion rule). Its name still matches;
+  // its missing text is a settled choice, not a failed read, and coverage
+  // reports it apart from items Olympus genuinely could not read.
+  namesOnly?: boolean;
+  // The item's contents are tiered Private (held by a secure_local copy) and
+  // only its name is in this tier. Not a failed read and not a Names-only
+  // choice: coverage counts it apart from both.
+  contentPrivate?: boolean;
   // Locator (path/url) for the item, supplied by the LOCAL provider only. The
   // routed search membrane stays path-free; the locator enters via this local
   // lane, lives on the internal pack, and reaches Castor only through the
@@ -162,6 +179,10 @@ export interface BuildEvidencePackInput {
   secretLocations?: (query: string, searchedCorpora: readonly string[]) => readonly SecretLocationNote[];
   // Counts of items still pending classification in the searched corpora.
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
+  // Leave out every candidate that is secure by isSecureSensitivity (an S4
+  // item in an ordinary corpus included), with its extraction gap: the
+  // ordinary-route rebuild after the private route was unavailable.
+  excludeSecureSensitivity?: boolean;
   now?: () => Date;
 }
 
@@ -194,6 +215,10 @@ export interface EvidencePackBuildDetail {
   pack: EvidencePack;
   candidateCorpusIds: readonly string[];
   laneAudits: readonly RetrievalLaneAudit[];
+  // Members of laneAudits (by object identity) from a corpus that contributed
+  // anything secure (router.ts secureLaneAudits). Kept whole here for
+  // diagnostics; an answer analyzed on an ordinary route does not return them.
+  secureLaneAudits: readonly RetrievalLaneAudit[];
   skippedCorpora: readonly SourceIndexSkippedCorpus[];
   // Counts-only markers for lanes that did not contribute. Merged across every
   // routed run this build performed, because a build can fan out more than
@@ -215,12 +240,33 @@ export interface EvidencePackBuildDetail {
   // answer. Empty when every searched corpus is fully readable, or when no
   // provider can report it cheaply.
   corpusReadabilityGaps?: readonly CorpusReadabilityGap[];
+  // Indexes into pack.candidates whose contents the owner keeps unread on
+  // purpose (LocalContentBlock.namesOnly). Counts and indexes only.
+  namesOnlyCandidateIndexes?: readonly number[];
+  // Indexes into pack.candidates whose contents are tiered Private
+  // (LocalContentBlock.contentPrivate). Counts and indexes only.
+  contentPrivateCandidateIndexes?: readonly number[];
+  // Located candidates with no readable content for a reason other than the
+  // owner's Names only choice: no provider, nothing returned, or no text.
+  // Truncated and policy-denied candidates are not counted here.
+  unreadCandidates?: number;
   // Four-tier classification (P1b), beside the pack by the same precedent:
   // Secrets that matched the question, by location only, and counts of
   // searched items whose tier is not final yet. Neither enters the pack, so
   // neither reaches the Analyst.
   secretLocations?: readonly SecretLocationNote[];
   classificationCoverage?: readonly ClassificationCoverageNote[];
+  // True when this build met secure material anywhere (isSecureSensitivity):
+  // in any routed run of the build, before its visibility gate, budget or
+  // trim (router.ts encounteredSecureLocal: a secure corpus's hit or positive
+  // count, or a count reporting secure or unknown rows); a hydrated candidate
+  // (provider upgrades included) or its cached facts; or a policy-denied item
+  // (classification unknown, so counted). Its candidates, gaps and counts
+  // reach the model through every leg's pack whatever fitting keeps, so the
+  // release gate reads this rather than tracking what a leg was shown. A
+  // Private corpus that was skipped or matched nothing contributed no text and
+  // does not set it. Each build has its own flag: a rebuild starts clean.
+  encounteredSecureLocal: boolean;
 }
 
 export async function buildEvidencePack(input: BuildEvidencePackInput): Promise<EvidencePack> {
@@ -250,6 +296,13 @@ export async function buildEvidencePackDetailed(
   const extractionGaps: string[] = [];
   const policyDeniedCoverageGaps: string[] = [];
   let policyDeniedCandidates = 0;
+  const namesOnlyCandidateIndexes: number[] = [];
+  const contentPrivateCandidateIndexes: number[] = [];
+  let unreadCandidates = 0;
+  // An exclusion rebuild is judged by what it keeps, not by what the router
+  // met: every secure candidate and every secure-inclusive count is left out
+  // below, so only what remains (and a policy denial) can set its flag.
+  let encounteredSecureLocal = input.excludeSecureSensitivity ? false : routed.encounteredSecureLocal;
 
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(
@@ -285,6 +338,7 @@ export async function buildEvidencePackDetailed(
 
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
+      encounteredSecureLocal = true;
       policyDeniedCandidates += 1;
       const gap = `${hit.corpusId} ${SOURCE_MODEL_POLICY_GAP_SUFFIX}`;
       extractionGaps.push(gap);
@@ -292,10 +346,14 @@ export async function buildEvidencePackDetailed(
       continue;
     }
 
-    const sensitivity =
-      content?.sensitivity ??
-      input.registry.get(hit.corpusId)?.defaultSensitivity ??
-      conservativeSensitivity(hit.trustDomain);
+    // No provider answered for this item: judge it by its own tier when the
+    // hit carries one, never by a lower corpus default; an item of unknown
+    // tier is judged S4 (secure by isSecureSensitivity), so its title never
+    // reaches an ordinary analyst or ordinary released evidence.
+    const sensitivity = content?.sensitivity ?? hitFallbackSensitivity(
+      hit,
+      input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain),
+    );
     assertNoTrustDomainDowngrade(hit, sensitivity);
 
     const enrichedProvenance = content?.locatorUri && !provenance.citation?.uri
@@ -321,6 +379,13 @@ export async function buildEvidencePackDetailed(
     // it instead returns S5 content, that is an invariant failure: hard-stop
     // the entire build rather than misreporting it as an extraction miss.
     assertEvidenceCandidateModelEligible(candidate);
+    if (isSecureSensitivity(candidate)) {
+      if (input.excludeSecureSensitivity) continue;
+      encounteredSecureLocal = true;
+    }
+    if (content?.namesOnly === true) namesOnlyCandidateIndexes.push(candidates.length);
+    else if (content?.contentPrivate === true) contentPrivateCandidateIndexes.push(candidates.length);
+    else if (!provider || !content || content.chunks.length === 0) unreadCandidates += 1;
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
 
@@ -331,7 +396,7 @@ export async function buildEvidencePackDetailed(
   const matchCounts = coverageMatchCounts(
     routed.matchCounts,
     candidateCorpusIds,
-    candidates.some((candidate) => candidate.trustDomain === 'secure_local'),
+    candidates.some((candidate) => isSecureSensitivity(candidate)),
   );
   const coverage: EvidenceCoverage = {
     searchedCorpora: routed.searchedCorpora,
@@ -355,12 +420,18 @@ export async function buildEvidencePackDetailed(
     .filter((note) => note.pendingClassificationItems > 0);
 
   const builtAt = (input.now ?? (() => new Date()))().toISOString();
+  const laneAudits = policyDeniedCandidates > 0
+    ? contentFreePolicyLaneAudits(routed.laneAudits)
+    : routed.laneAudits;
+  // The policy rewrite maps audits one to one, so the secure ones keep their
+  // place.
+  const secureRouted = new Set(routed.secureLaneAudits);
+  const secureLaneAudits = laneAudits.filter((_, index) => secureRouted.has(routed.laneAudits[index]!));
   return {
     pack: { question: input.question, candidates, coverage, builtAt },
     candidateCorpusIds,
-    laneAudits: policyDeniedCandidates > 0
-      ? contentFreePolicyLaneAudits(routed.laneAudits)
-      : routed.laneAudits,
+    laneAudits,
+    secureLaneAudits,
     skippedCorpora: routed.skippedCorpora,
     // Survives the policy-filter rewrite above: a degradation marker is already
     // counts-only, so there is nothing in it for that rewrite to protect, and
@@ -369,6 +440,10 @@ export async function buildEvidencePackDetailed(
     policyDeniedCandidates,
     policyDeniedCoverageGaps,
     corpusReadabilityGaps,
+    namesOnlyCandidateIndexes,
+    contentPrivateCandidateIndexes,
+    unreadCandidates,
+    encounteredSecureLocal,
     ...(secretLocations.length > 0 ? { secretLocations } : {}),
     ...(classificationCoverage.length > 0 ? { classificationCoverage } : {}),
   };
@@ -430,13 +505,23 @@ export function clipChunksToUtf8Bytes(chunks: readonly string[], maxBytes: numbe
 // evidence, because only such a pack is routed to the private analyst lane.
 // A pack with no secure_local candidate may go to an ordinary cloud analyst,
 // and even a count of private matches must not reach it.
+// The count rule, decided once here so every consumer gets it: a count is
+// secure-inclusive when its corpus is secure_local, or its rows include a
+// secure item, or it does not report row sensitivity (secureMatchedItems
+// missing). A pack with a secure candidate goes to the secure pool and keeps
+// every count. Any other pack (an ordinary route, an exclusion rebuild) drops
+// secure-inclusive counts whole rather than restating a remainder: the
+// readable-content split of the secure rows is not carried, so a remainder
+// could not be restated exactly. So a pack carries secure-derived coverage
+// exactly when it holds a secure candidate, which is what `localOnly` and
+// private_context_used read.
 function coverageMatchCounts(
   counts: readonly SourceIndexRoutedMatchCount[] | undefined,
   candidateCorpusIds: readonly string[],
   packHasSecureLocal: boolean,
 ): EvidenceCoverageMatchCount[] {
   return (counts ?? [])
-    .filter((count) => packHasSecureLocal || count.trustDomain !== 'secure_local')
+    .filter((count) => packHasSecureLocal || !countIsSecureInclusive(count))
     .map((count) => {
     const inEvidence = candidateCorpusIds.filter((corpusId) => corpusId === count.corpusId).length;
     return {
@@ -450,6 +535,12 @@ function coverageMatchCounts(
       inEvidence,
     };
   });
+}
+
+function countIsSecureInclusive(count: SourceIndexRoutedMatchCount): boolean {
+  return isSecureSensitivity(count)
+    || count.secureMatchedItems === undefined
+    || count.secureMatchedItems > 0;
 }
 
 async function corpusReadabilityGapsFor(
@@ -544,6 +635,7 @@ const MAX_SEARCH_QUERIES = 3;
 type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
+  | 'encounteredSecureLocal' | 'secureLaneAudits'
 >;
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
@@ -551,10 +643,13 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
   const skippedCorpora: SourceIndexSkippedCorpus[] = [];
   const laneAudits: RetrievalLaneAudit[] = [];
   const searched = new Set<string>();
+  let encounteredSecureLocal = false;
 
   for (const selected of input.selectedItems ?? []) {
     const corpus = input.registry.get(selected.corpusId);
     if (!corpus) {
+      // Skipped whole: no hit, no candidate, no title. Only the caller's own
+      // corpus id and a reason code reach coverage, so it sets no flag.
       skippedCorpora.push({ corpusId: selected.corpusId, trustDomain: 'secure_local', reason: 'no_adapter' });
       continue;
     }
@@ -571,6 +666,7 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
       continue;
     }
     searched.add(corpus.corpusId);
+    if (isSecureSensitivity(corpus.defaultSensitivity)) encounteredSecureLocal = true;
     hits.push({
       corpusId: corpus.corpusId,
       trustDomain: corpus.trustDomain,
@@ -584,8 +680,9 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
     });
   }
 
+  const secureLaneAudits: RetrievalLaneAudit[] = [];
   for (const corpusId of searched) {
-    laneAudits.push({
+    const audit: RetrievalLaneAudit = {
       laneName: `${corpusId}:selected_evidence`,
       laneType: 'metadata',
       candidateCount: hits.filter((hit) => hit.corpusId === corpusId).length,
@@ -593,7 +690,10 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
       backend: 'selected_evidence',
       localOnly: true,
       rawExposed: false,
-    });
+    };
+    laneAudits.push(audit);
+    const corpus = input.registry.get(corpusId);
+    if (corpus && isSecureSensitivity(corpus.defaultSensitivity)) secureLaneAudits.push(audit);
   }
 
   return {
@@ -601,9 +701,13 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
     searchedCorpora: [...searched],
     skippedCorpora,
     laneAudits,
+    secureLaneAudits,
     // Caller-selected items bypass retrieval entirely: no lane ran, so no lane
     // was lost. Reporting a degradation here would be a false alarm.
     degradations: [],
+    // A selected hit carries no tier of its own; hydration below judges it
+    // again (an item no provider answers for counts as secure).
+    encounteredSecureLocal,
   };
 }
 
@@ -675,10 +779,13 @@ async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedS
     // keeping only literalRun's skips hid every such loss.
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
+    secureLaneAudits: runs.flatMap((run) => [...run.secureLaneAudits]),
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
     // The literal question's counts, not a merge across planner rephrasings:
     // the breadth reported is for what the owner asked.
     ...(literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}),
+    // Every run of this build, expansions included: what any of them met.
+    encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
   };
 }
 
@@ -817,6 +924,19 @@ function locatorLabel(hit: SourceIndexRoutedSearchHit): string {
 // treated as secure_local so it can never be under-classified into a cloud lane.
 function conservativeSensitivity(trustDomain: SourceTrustDomain): SourceSensitivity {
   return buildSourceSensitivity({ trustTier: conservativeTierForDomain(trustDomain), trustDomain });
+}
+
+// The corpus default, raised to the hit's own tier when that is stricter. A
+// hit with no tier of its own is raised to S4: unknown counts as secure.
+function hitFallbackSensitivity(
+  hit: SourceIndexRoutedSearchHit,
+  corpusDefault: SourceSensitivity,
+): SourceSensitivity {
+  const tier = hit.trustTier ?? 'S4';
+  if (SOURCE_TRUST_TIERS.indexOf(tier) <= SOURCE_TRUST_TIERS.indexOf(corpusDefault.trustTier)) {
+    return corpusDefault;
+  }
+  return buildSourceSensitivity({ trustTier: tier, trustDomain: corpusDefault.trustDomain });
 }
 
 function conservativeTierForDomain(trustDomain: SourceTrustDomain): SourceTrustTier {

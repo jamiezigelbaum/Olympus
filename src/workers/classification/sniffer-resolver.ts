@@ -36,6 +36,7 @@ import {
   snifferId,
   snifferMaterialCarriesSecret,
   snifferMaterialLooksLikeInjection,
+  cachedSnifferVerdictHolds,
   snifferReasonCode,
   snifferTierKey,
 } from './sniffer.ts';
@@ -151,6 +152,12 @@ export interface SnifferPassOptions {
   lane: SnifferLane;
   model: AnalystModel;
   promptVersion?: string;
+  /**
+   * The owner's own words about what is private for them, quoted into the
+   * prompt as data. Pass `promptVersion` from `snifferPromptVersions(ownerContext).cache`
+   * with it, so the verdicts are cached under these words.
+   */
+  ownerContext?: string;
   budget?: SnifferCallBudget;
   maxCallsPerPass?: number;
   /** Pending ledger rows read per store per pass. */
@@ -244,7 +251,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (applied?.outcome === 'stale_map') {
       // The map changed while this was being asked: re-ask under the new one.
       const row = item.target.ledger.getCurrent(item.question);
-      if (row) item.target.sniffer.rekey(item.question, item.question.pass, row.mapRevision);
+      const rejudge = item.question.pass === 'content' ? item.target.ledger.rejudgeQuestion(item.question) : undefined;
+      if (row) item.target.sniffer.rekey(item.question, item.question.pass, rejudge?.decision.mapRevision ?? row.mapRevision);
       report.staleRekeyed += 1;
       return;
     }
@@ -267,13 +275,33 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   // STALE: it is re-keyed to the current revision and asked again (never
   // answered with a verdict judged under the old map, and never left to
   // wait forever for a re-sync).
+  // A row mid-move is neither: its move carries the open question with it
+  // (the queued decision's flags), so the question waits, kept, until the
+  // move lands the item held and pending.
+  const midMove = (target: SnifferTarget, question: SnifferQuestion): boolean => {
+    const row = target.ledger.getCurrent(question);
+    return row !== undefined && row.state === 'moving' && row.decidedBy !== 'override'
+      && openPasses(row).includes(question.pass);
+  };
+  // A re-judge question (tier-rejudge.ts) is open on a row that stays
+  // `current` where it was: the item was visible all along, and the answer
+  // settles the decision the re-judge kept beside the row, under that
+  // decision's map revision.
   const stillOpen = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     const row = target.ledger.getCurrent(question);
-    const open = row !== undefined && row.state === 'pending' && row.decidedBy !== 'override'
-      && openPasses(row).includes(question.pass);
-    if (open && row.mapRevision !== question.mapRevision) {
-      target.sniffer.rekey(question, question.pass, row.mapRevision);
-      question.mapRevision = row.mapRevision;
+    if (row === undefined || row.decidedBy === 'override') return false;
+    let expectedMap = row.mapRevision;
+    let open = row.state === 'pending' && openPasses(row).includes(question.pass);
+    if (!open && question.pass === 'content' && row.state === 'current') {
+      const rejudge = target.ledger.rejudgeQuestion(question);
+      if (rejudge) {
+        open = true;
+        expectedMap = rejudge.decision.mapRevision;
+      }
+    }
+    if (open && expectedMap !== question.mapRevision) {
+      target.sniffer.rekey(question, question.pass, expectedMap);
+      question.mapRevision = expectedMap;
       question.attempts = 0;
       report.staleRekeyed += 1;
     }
@@ -288,6 +316,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   for (const target of options.targets) {
     for (const question of target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500 })) {
       report.pendingSeen += 1;
+      if (midMove(target, question)) continue;
       // Queued material whose question is no longer open (the item was
       // re-synced, overridden, deleted or re-decided) must not linger.
       if (!stillOpen(target, question)) {
@@ -310,7 +339,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         continue;
       }
       const cached = target.sniffer.getVerdict(keyOf(question));
-      if (cached) {
+      if (cached && cachedSnifferVerdictHolds(cached)) {
         apply({ target, question }, cached);
         report.cacheHits += 1;
         continue;
@@ -332,6 +361,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     // never sent.
     const open = work[pass].filter((item) => {
       if (stillOpen(item.target, item.question)) return true;
+      if (midMove(item.target, item.question)) return false;
       item.target.sniffer.deleteQuestion(item.question, pass);
       report.staleDropped += 1;
       return false;
@@ -348,7 +378,11 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       // Re-checked at every dispatch: a policy that changed under a running
       // worker still cannot route possibly-private names to a cloud model.
       assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-      const prompt = buildSnifferBatchPrompt(pass, batch.map((group, index) => ({ i: index + 1, material: group[0]!.question.material })));
+      const prompt = buildSnifferBatchPrompt(
+        pass,
+        batch.map((group, index) => ({ i: index + 1, material: group[0]!.question.material })),
+        options.ownerContext,
+      );
       report.calls += 1;
       report.itemsAsked += batch.length;
       report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;

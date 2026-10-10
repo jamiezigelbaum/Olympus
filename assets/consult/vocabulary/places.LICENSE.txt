@@ -1,0 +1,8 @@
+Pack: places.txt.gz
+Source: GeoNames gazetteer data, https://www.geonames.org/, downloaded 2026-10-07 from https://download.geonames.org/export/dump/ :
+  cities15000.zip (populated places with 15,000 or more inhabitants; SHA-256 865724f89e3274c5172df2f6068596dfb25bb604737ac2711b5ca6d31aebbf32)
+  admin1CodesASCII.txt (first-level administrative regions; SHA-256 1da92a6323a5fec3176f3f743bf4cf4040fd56a876da55e46fbca23c863aa60a)
+Content: the "name" and "asciiname" columns only, split into letter words and lower-cased; no alternate names, coordinates, populations or identifiers are kept.
+Generator: scripts/build-consult-vocabulary.ts (pack places), in the public Olympus source repository.
+Licence: Creative Commons Attribution 4.0 International (CC BY 4.0), https://creativecommons.org/licenses/by/4.0/
+Attribution: This pack contains words derived from GeoNames (https://www.geonames.org/), licensed under CC BY 4.0. The words were extracted and merged into a sorted word list; no endorsement by GeoNames is implied.

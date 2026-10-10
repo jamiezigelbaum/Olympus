@@ -7,6 +7,8 @@ export interface FileExtractionPlanResponse {
   jobs_forced: number;
   jobs_skipped_too_large: number;
   jobs_unroutable: number;
+  // Candidates whose group the job store refused. They are counted and logged, and the pass goes on.
+  jobs_refused: number;
   extractor_kinds: readonly string[];
   next_cursor?: string;
   done: boolean;

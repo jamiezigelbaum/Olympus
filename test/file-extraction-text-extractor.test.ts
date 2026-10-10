@@ -15,6 +15,7 @@ import {
   TEXT_EXTRACTOR_KIND,
   TEXT_EXTRACTOR_VERSION,
   createTextExtractor,
+  pdfTextLooksUndecoded,
 } from '../src/workers/file-extraction/extractors/text.ts';
 import {
   extractorInput,
@@ -321,16 +322,42 @@ describe('text extractor: WordprocessingML', () => {
     expect(result.status).toBe('empty_output');
   });
 
-  test('a corrupt container is retryable and leaks nothing about the item', async () => {
+  test('a corrupt container settles terminal and leaks nothing about the item', async () => {
     const result = await createTextExtractor().extract(extractorInput({
       bytes: textBytes('not a zip archive'),
       mimeType: DOCX_MIME_TYPE,
       ref: { name: 'Corrupt Contract.docx' },
     }));
-    expect(result.status).toBe('failed_retryable');
-    if (result.status !== 'failed_retryable') return;
-    expect(result.errorKind).toBe('structured_extraction_failed');
+    expect(result.status).toBe('failed_terminal');
+    if (result.status !== 'failed_terminal') return;
+    expect(result.errorKind).toBe('office_document_damaged');
     expect(JSON.stringify(result)).not.toContain('Corrupt Contract');
+  });
+
+  test('a truncated copy (entries present, directory cut off) is damaged, not retried', async () => {
+    // The live case: a partial copy keeps its leading entries and loses the
+    // central directory at the end. The same bytes fail every attempt.
+    const whole = storedZipBytes({ 'word/document.xml': wordDocument(['Signed terms']) });
+    const truncated = whole.subarray(0, whole.byteLength - 40);
+    const result = await createTextExtractor().extract(extractorInput({
+      bytes: truncated,
+      mimeType: DOCX_MIME_TYPE,
+    }));
+    expect(result.status).toBe('failed_terminal');
+    if (result.status !== 'failed_terminal') return;
+    expect(result.errorKind).toBe('office_document_damaged');
+  });
+
+  test('a password-protected file (compound-file container) is reported as encrypted', async () => {
+    const compound = new Uint8Array(512);
+    compound.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+    const result = await createTextExtractor().extract(extractorInput({
+      bytes: compound,
+      mimeType: DOCX_MIME_TYPE,
+    }));
+    expect(result.status).toBe('failed_terminal');
+    if (result.status !== 'failed_terminal') return;
+    expect(result.errorKind).toBe('office_document_encrypted');
   });
 });
 
@@ -520,6 +547,17 @@ describe('text extractor: PDF text layer', () => {
       bytes: pdfWithoutContent(),
       mimeType: PDF_MIME,
     }))).rejects.toThrow(/pdftotext is not installed/);
+  });
+
+  test('glyph ids from a composite font are not text: the inline decoder reports no text layer', async () => {
+    // A CID font draws two-byte glyph ids; read as text they are control characters.
+    const result = await createTextExtractor().extract(extractorInput({
+      bytes: pdfWithFlateTextStream('BT /F1 12 Tf 72 720 Td [<0003001100120013000400050006>] TJ ET'),
+      mimeType: PDF_MIME,
+    }));
+    expect(result.status).toBe('empty_output');
+    expect(pdfTextLooksUndecoded('Alpha Beta\nGamma\tDelta')).toBe(false);
+    expect(pdfTextLooksUndecoded('\u0003\u0011\u0012Ab\u0013\u0004')).toBe(true);
   });
 
   test('a PDF with neither text nor image markers is empty output', async () => {

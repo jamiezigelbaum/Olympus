@@ -41,14 +41,13 @@ import { dirname, join } from 'node:path';
 import type { SourceClassificationSignals } from '../../core/contracts.ts';
 import { trustDomainPrior } from '../../core/classification-signals.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../core/source-index/types.ts';
 import type {
   ConnectorStoreEmbeddingAuthoritySnapshot,
   ConnectorStoreMigrationItem,
   LocalConnectorStore,
 } from '../connector-store/local-index.ts';
-import { moveTieredItem, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
+import { moveTieredItem, sameText, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
 import { secretsDisposition, settleSecretsCopies, type SecretsDisposition } from '../connector-store/secrets-disposition.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import {
@@ -112,7 +111,6 @@ export interface TierMigrationLane {
 
 /** The owner's classification inputs. `revision` covers everything but per-item overrides (read from the ledgers). */
 export interface TierMigrationInputs {
-  sensitivityMap?: SensitivityMap;
   rules?: readonly OwnerTierRule[];
   /** Only the owner-approved privacy-safe sniffer, and only when the owner asks for it. */
   sniffer?: TierSniffer;
@@ -707,15 +705,18 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
           }
           const override = ledger.getOverride(item.identity);
           const sniffer = laneSniffer;
+          // A photo's picture judgment, when the photo judge made one here.
+          const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
           const decision = classifyItemTiers(
             {
               signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
               provider: item.identity.provider,
               text: item.chunks.map((chunk) => chunk.text).join(''),
+              ...(item.mimeType ? { mimeType: item.mimeType } : {}),
+              ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
               subject: item.identity,
             },
             {
-              ...(options.inputs.sensitivityMap ? { sensitivityMap: options.inputs.sensitivityMap } : {}),
               ...(options.inputs.rules ? { rules: options.inputs.rules } : {}),
               ...(sniffer ? { sniffer } : {}),
               ...(override ? { override } : {}),
@@ -1709,11 +1710,13 @@ async function migrateOne(
   }
   // A destination store that still keeps a SUPERSEDED copy of this item (an
   // earlier move's) would have it overwritten: nothing superseded is lost
-  // before an approved purge, so the item waits.
+  // before an approved purge, so the item waits. A kept copy holding the
+  // source's very text loses nothing (the move primitive's own rule).
   const existing = ledger.copies(proposal.identity);
   for (const copy of placement) {
     if (sources.some((source) => source.corpusId === copy.corpusId)) continue;
-    if (existing.some((row) => row.corpusId === copy.corpusId && row.state === 'superseded')) {
+    if (existing.some((row) => row.corpusId === copy.corpusId && row.state === 'superseded')
+      && !sameText(set.store(copy.trustDomain)?.exportItemCopy(proposal.identity), exported)) {
       return { kind: 'skipped', reason: 'destination_keeps_superseded_copy' };
     }
   }

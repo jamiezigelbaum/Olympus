@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import type { SensitivityMap } from '../src/core/sensitivity-map.ts';
 import {
   LocalConnectorStore,
   createConnectorStoreContentProvider,
@@ -21,46 +20,6 @@ import type {
   SourceEmbeddingProvider,
 } from '../src/workers/source-index/embeddings.ts';
 
-const SENSITIVITY_MAP: SensitivityMap = {
-  schemaVersion: 1,
-  userFacingTiers: {
-    public: { targetTrustTier: 'S0', targetTrustDomain: 'public_safe' },
-    private: { targetTrustTier: 'S3', targetTrustDomain: 'internal' },
-    secure: { targetTrustTier: 'S4', targetTrustDomain: 'secure_local' },
-    secrets: { targetTrustTier: 'S5', targetTrustDomain: 'secure_local' },
-  },
-  categories: [
-    {
-      id: 'therapy',
-      label: 'Therapy',
-      targetTierName: 'secure',
-      targetTrustTier: 'S4',
-      targetTrustDomain: 'secure_local',
-      examples: ['therapy notes'],
-      notes: '',
-      match: {
-        keywords: ['therapy'],
-        senderPatterns: [],
-        pathPatterns: [],
-      },
-    },
-    {
-      id: 'password-manager-export',
-      label: 'Password Manager Export',
-      targetTierName: 'secrets',
-      targetTrustTier: 'S5',
-      targetTrustDomain: 'secure_local',
-      examples: ['password-manager-export.csv'],
-      notes: '',
-      match: {
-        keywords: [],
-        senderPatterns: [],
-        pathPatterns: ['password-manager-export'],
-      },
-    },
-  ],
-};
-
 describe('Google connector-store ingestion', () => {
   test('syncs Gmail messages into internal and secure lanes according to per-item classification', async () => {
     const internalStore = new LocalConnectorStore({
@@ -80,7 +39,6 @@ describe('Google connector-store ingestion', () => {
       internalStore,
       secureStore,
       account: 'personal',
-      sensitivityMap: SENSITIVITY_MAP,
       apiClient: client,
     });
 
@@ -141,7 +99,6 @@ describe('Google connector-store ingestion', () => {
       internalStore,
       secureStore,
       account: 'personal',
-      sensitivityMap: SENSITIVITY_MAP,
       apiClient: client,
     });
 
@@ -236,7 +193,8 @@ function fakeDriveClient(): CountingDriveApiClient {
   const text = new Map([
     ['file-plain', 'Apollo roadmap notes for the connector-store launch.'],
     ['file-therapy', 'Therapy worksheet and private care notes.'],
-    ['file-passwords', 'account,username,password\nexample,alice,secret'],
+    // A real secret in the text: the secret detector decides Secrets.
+    ['file-passwords', 'account,username,password\nexample,alice,secret\n-----BEGIN RSA ' + 'PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'],
   ]);
   return {
     listCalls: 0,

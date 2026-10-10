@@ -265,10 +265,33 @@ export interface ExtractorInput {
 export interface ExtractorIndexedOutput {
   status: 'indexed';
   text: string;
+  /**
+   * A prepared media copy the item's content is also searched by (today a
+   * photo, reduced to a JPEG in the owner-only media cache). It travels with
+   * the text to the store, which attaches it to the item's first chunk so
+   * the embedding lane can hand it to a model that reads images.
+   */
+  media?: ExtractedMedia;
   derivations?: readonly ExtractionDerivation[];
   warnings?: readonly string[];
   egressDestination?: ExtractionApprovedRemoteDestination;
   errorKind?: never;
+}
+
+/**
+ * A prepared media file in the owner-only media cache, content-addressed by
+ * the SHA-256 of its bytes.
+ */
+export interface ExtractedMedia {
+  path: string;
+  sha256: string;
+  mimeType: 'image/jpeg';
+  /**
+   * The extraction's own hold on the cached file, taken when it was written.
+   * The runner releases it once the result is stored or refused, so a file
+   * no store took is removed and a file a store took is kept.
+   */
+  stagingHolder?: string;
 }
 
 /**
@@ -332,10 +355,45 @@ export interface Extractor {
   readonly kind: string;
   readonly version: string;
   readonly needsBytes: boolean;
+  /**
+   * The version a job for this media type is queued under, when it differs
+   * from `version`: a capability added for one media type (pictures read for
+   * media search) re-reads only items of that type, once.
+   */
+  versionFor?(mimeType: string | undefined): string;
   readonly egress: ExtractionEgress;
   readonly approvedRemoteDestination?: ExtractionApprovedRemoteDestination;
   accepts(mimeType: string | undefined, name?: string): boolean;
   extract(input: ExtractorInput): Promise<ExtractorOutput>;
+  /**
+   * Optional: how this lane names items it had to leave unread for want of
+   * a reader, so the runner can read each of them once more when the reader
+   * becomes available. Absent means the lane never leaves items unread.
+   */
+  readonly reread?: ExtractorRereadPolicy;
+}
+
+/**
+ * Items a lane settled unread because its reader was missing (not because
+ * of the file): `metadata_only` jobs whose derivation carries one of
+ * `unreadWarnings`, and `failed_terminal` jobs whose last error kind is one
+ * of `unreadTerminalErrorKinds`. The runner asks `prepare()` only when such
+ * jobs exist; `ready` requeues each of them once.
+ */
+export interface ExtractorRereadPolicy {
+  readonly unreadWarnings: readonly string[];
+  readonly unreadTerminalErrorKinds: readonly string[];
+  /**
+   * Warnings that mean "the reader was not ready yet" (as opposed to "there
+   * was no reader"). A job carrying one is read again whenever the reader is
+   * ready, without spending its once-ever requeue: it was never read.
+   */
+  readonly notReadyWarnings?: readonly string[];
+  /**
+   * Synchronous and cheap. May start getting the reader ready in the
+   * background (a first-use download); answers whether it is ready now.
+   */
+  prepare(): 'ready' | 'pending' | 'unavailable';
 }
 
 export interface ExtractorRegistry {
@@ -396,6 +454,19 @@ export interface ExtractorRegistryConfig {
   ocr?: {
     ocrTimeoutMs?: number;
     pdfRenderTimeoutMs?: number;
+    /**
+     * `auto` (default): the built-in Vision engine on macOS, tesseract
+     * elsewhere. `tesseract`: the installed commands even on a Mac.
+     */
+    engine?: 'auto' | 'tesseract';
+    /**
+     * Page cap for the built-in engine; pages past it are recorded, not read.
+     */
+    maxPages?: number;
+    /**
+     * Overrides `process.platform` for engine selection, for tests.
+     */
+    platform?: NodeJS.Platform;
   };
   vlmPdf?: {
     client?: VlmClient;
@@ -424,7 +495,61 @@ export interface ExtractorRegistryConfig {
     command?: string;
     timeoutMs?: number;
     maxTranscriptChars?: number;
+    /**
+     * The on-device transcription engine, constructed by the wiring layer.
+     * Used only when no command is configured: an owner's command wins.
+     */
+    builtIn?: BuiltInTranscriptionEngine;
   };
+  /**
+   * Image preparation for media search (docs/design/photo-embeddings.md).
+   * Without a cache directory, or off macOS, images keep today's behaviour.
+   */
+  media?: {
+    /**
+     * Owner-only, content-addressed directory the prepared copies live in.
+     */
+    cacheDir?: string;
+    /**
+     * Overrides `process.platform`, for tests.
+     */
+    platform?: NodeJS.Platform;
+    timeoutMs?: number;
+    maxInputBytes?: number;
+  };
+}
+
+/**
+ * The built-in transcriber as the registry sees it: a transcriber that can
+ * say whether it is ready, start getting ready, and stop its server.
+ * `transcribe` rejects with the engine's pending or unavailable errors (see
+ * extractors/built-in-transcriber.ts) rather than burning a retry.
+ */
+export interface BuiltInTranscriptionEngine {
+  transcribe(input: { inputPath: string; mimeType?: string; deadlineAt?: number }): Promise<{
+    text: string;
+    language?: string;
+    warnings?: readonly string[];
+  }>;
+  prepare(): 'ready' | 'pending' | 'unavailable';
+  stop(): Promise<void>;
+  /**
+   * Calls `listener` each time an install finishes and the engine becomes
+   * ready, so the wiring layer can wake the work that waited for it.
+   */
+  onReady?(listener: () => void): void;
+  /**
+   * The owner asked for the model now (the dashboard's Download now): start
+   * the install whether or not any audio waits for it. The memory and disk
+   * gates still apply; a failed install's backoff is skipped once per failure.
+   */
+  downloadNow?(): 'ready' | 'pending' | 'loading' | 'unavailable';
+  /**
+   * Whether this process is downloading or checking the model right now. A
+   * status file that says "downloading" while this is false was left by a
+   * process that stopped mid-download.
+   */
+  installing?(): boolean;
 }
 
 // --- Seam 3: the sink ------------------------------------------------------
@@ -508,6 +633,10 @@ export interface ExtractionSinkRequest {
    */
   fetchedAt: string;
   derivations?: readonly ExtractionDerivation[];
+  /**
+   * The prepared media copy the extractor produced with this text, if any.
+   */
+  media?: ExtractedMedia;
   metadata?: Readonly<Record<string, unknown>>;
   /**
    * The claim this text was produced under, carried to the corpus mutation

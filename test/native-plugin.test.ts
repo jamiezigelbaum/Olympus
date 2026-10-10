@@ -91,6 +91,12 @@ describe('native OpenClaw plugin adapter', () => {
     let requests = 0;
     const ambient = process.env.OLYMPUS_WORKER_AUTH_TOKEN;
     process.env.OLYMPUS_WORKER_AUTH_TOKEN = 'ambient-credential';
+    // Starting every service starts the remote relay service too, which writes
+    // remote access status under the data root: never the owner's real one
+    // (2026-10-01: this test said "off" over a live engine's relay status).
+    const ambientDataHome = process.env.XDG_DATA_HOME;
+    const dataHome = mkdtempSync(join(tmpdir(), 'olympus-native-plugin-data-'));
+    process.env.XDG_DATA_HOME = dataHome;
     globalThis.fetch = (async () => { requests += 1; throw new Error('unexpected transport'); }) as unknown as typeof fetch;
     try {
       plugin.register({
@@ -119,6 +125,9 @@ describe('native OpenClaw plugin adapter', () => {
       if (ambient === undefined) delete process.env.OLYMPUS_WORKER_AUTH_TOKEN;
       else process.env.OLYMPUS_WORKER_AUTH_TOKEN = ambient;
       await Promise.all(services.map((service) => service.stop()));
+      if (ambientDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = ambientDataHome;
+      rmSync(dataHome, { recursive: true, force: true });
     }
   });
 
@@ -480,7 +489,7 @@ describe('native OpenClaw plugin adapter', () => {
   test('keeps source-checkout licensing and release version metadata aligned', () => {
     expect(pkg).toMatchObject({ name: 'olympus-source-checkout', private: true });
     expect(pkg.license).toBe('MIT');
-    expect(pkg.version).toBe('0.4.0-beta.11');
+    expect(pkg.version).toBe('1.0.0-rc.3');
     expect(manifest.version).toBe(pkg.version);
   });
 
@@ -645,6 +654,7 @@ describe('native OpenClaw plugin adapter', () => {
       'source_watches',
       'source_watch_cancel',
       'olympus_doctor',
+      'ask_anonymously',
     ]);
   });
 
@@ -666,6 +676,7 @@ describe('native OpenClaw plugin adapter', () => {
       'argus_list_models',
       'argus_complete',
       'olympus_doctor',
+      'ask_anonymously',
     ]);
   });
 

@@ -43,12 +43,19 @@ import type {
 } from '../../core/evidence-pack.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import {
+  isMediaCachePath,
+  mediaCacheDir,
+  releaseMediaCacheFile,
+  retainMediaCacheFile,
+  stillImagePreparationAvailable,
+  sweepMediaCache,
+} from '../../core/media-cache.ts';
+import {
   assertSqliteSchemaCanOpen,
   currentStoreMigrations,
   readSqliteSchemaVersion,
   runSqliteMigrations,
 } from '../../core/sqlite-migrations.ts';
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { classifyItemTier, type ClassifyItemTierInput } from '../classification/engine.ts';
 import {
   TierLedger,
@@ -58,7 +65,7 @@ import {
   type TierCopy,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
-import { classifyContentTier, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { classifyContentTier, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -77,12 +84,14 @@ import {
   SOURCE_INDEX_FTS5_TOKENIZER,
   runBoundedFtsTokenizerMigration,
   sourceIndexFtsGroupQuery,
+  queryInitialisms,
   sourceIndexFtsQuery,
   sourceIndexFtsTermGroups,
   type SourceIndexFtsMigrationSpec,
 } from '../../core/source-index/fts.ts';
 import {
   boundedSourceIndexChunks,
+  compactPassageWhitespace,
   sourceIndexChunkQueryTerms,
   sourceIndexChunkTermScore,
 } from '../../core/source-index/chunk-selection.ts';
@@ -109,10 +118,19 @@ import {
   decodeEmbedding,
   encodeEmbedding,
   isApprovedSecureSourceEmbeddingProvider,
+  SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
+import { ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2 } from '../source-index/built-in-embedding/manifest.ts';
+import {
+  canJudgeMedia,
+  judgeMediaImages,
+  judgeReturnedImageVectors,
+  mediaJudgeId,
+  type MediaJudgment,
+} from '../source-index/media-judge.ts';
 import type {
   SourceIndexCorpusSearchAdapter,
   SourceIndexCorpusSearchRequest,
@@ -123,6 +141,8 @@ import type {
 import {
   buildSourceIndexStorageProfile,
   buildSourceSensitivity,
+  isSecureSensitivity,
+  isSecureTrustTier,
   SOURCE_TRUST_TIERS,
   type RetrievalLaneAudit,
   type SourceFamily,
@@ -155,6 +175,10 @@ const EMBEDDING_BATCH_SIZE = 32;
 const MAX_SELECTED_EMBED_ITEM_IDS = 25_000;
 const MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 const MIN_VECTOR_SCORE = 0.18;
+// The most query concepts a keyword match must contain (see searchItemsDetailed).
+const MAX_REQUIRED_CONCEPTS = 3;
+// Or the share of the query's concept weight (IDF) a keyword match must carry.
+const RARE_CONCEPT_WEIGHT_SHARE = 0.6;
 const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projection-locator-uri');
 // Below this bar, semantic similarity is treated as no evidence. Calibrated
 // against the live corpus (gemini-embedding-2, 2026-07-25: off-domain
@@ -173,6 +197,50 @@ export const DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62;
 const CALIBRATED_CONTENT_PREFERENCE_BARS: ReadonlyMap<string, number> = new Map([
   ['gemini-embedding-2', DEFAULT_SEMANTIC_RELEVANCE_BAR],
 ]);
+// Relevance bars that also gate the vector lane when the adapter sets none:
+// a vector row below its model's bar is no evidence at all (not merely no
+// content preference), so it neither enters fusion nor counts as a match. The
+// built-in model's nearest neighbours are everything with text: without a
+// bar, every question "matched" every embedded item, so a corpus that held
+// any text always answered (2026-10-02: every ChatGPT question reported 12
+// Private matches). Calibrated 2026-10-02 on the owner's corpus copies (the
+// built-in Arctic Embed M v1.5): off-topic questions peak at 0.39 best-cosine
+// against the Private items and 0.37 against the Personal ones, while true
+// positives and paraphrases start at 0.40 (most at 0.43 to 0.56; the weaker
+// true positives are lexical matches, which stand on their own merit).
+//
+// EmbeddingGemma 2 (Google's LiteRT build): 0.73, set 2026-10-07 on copies
+// of the owner's two Dropbox stores. Its cosines sit on a higher, narrower
+// scale than Arctic's. A first calibration on the small health corpus
+// (288 chunks) put off-topic questions at 0.68 at most and answers from 0.71,
+// so 0.69. A blind set written after more files arrived (978 chunks, 40
+// answerable and 10 unanswerable questions) found medical near-misses the
+// corpus does not hold (colonoscopy, allergy test, bone density) at 0.70-0.72:
+// at 0.69 it returned results for 7 unanswerable questions to Arctic's 5. At
+// 0.73 it returned them for the same 5, still finding 36 answers to Arctic's
+// 29. A second, independent blind set (45 answerable, 15 unanswerable, many
+// of them near misses) confirmed 0.73: 42 answers found to Arctic's 38,
+// results for the same 10 unanswerable questions, 67 wrong results to
+// Arctic's 66 (most from keyword search, which both share).
+//
+// Every built-in model needs its own bar before it ships: cosine scales differ
+// by model, and a bar carried over from another model either lets everything
+// match or hides true positives. `test/built-in-embedding.test.ts` fails for a
+// registered built-in model without one.
+const CALIBRATED_SEMANTIC_RELEVANCE_BARS: ReadonlyMap<string, number> = new Map([
+  [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
+  [EMBEDDINGGEMMA_2.modelId, 0.73],
+]);
+
+/** The relevance bar calibrated for a model's vector lane, if one has been. */
+export function calibratedSemanticRelevanceBar(modelId: string): number | undefined {
+  return CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
+}
+
+/** The relevance bar that gates a model's vector lane: the adapter's own, else the model's calibrated one. */
+function semanticRelevanceBarFor(modelId: string, adapterBar?: number): number | undefined {
+  return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
+}
 
 // Media types that name a container rather than a document, for every source
 // that stores its folders as items: the IANA/freedesktop directory type
@@ -187,7 +255,19 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14;
+/** The `sync_runs` connector id of a strip of picture content outside Private stores. */
+export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
+/** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
+const CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60_000;
+/** ... and dropped (the photo embeds as text) after this many failures. */
+const CHUNK_MEDIA_MAX_ATTEMPTS = 3;
+/** Pictures judged on their own per embed pass (about half a second each on an M3). */
+const MEDIA_JUDGE_MAX_PER_PASS = 200;
+/** A picture the judge could not read is judged again after 1 h, 2 h, ... */
+const MEDIA_JUDGE_RETRY_BASE_MS = CHUNK_MEDIA_RETRY_BASE_MS;
+/** ... and left unjudged (Private) after this many tries by one judge. */
+const MEDIA_JUDGE_MAX_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3;
 const CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32;
 
@@ -313,7 +393,7 @@ export function connectorStoreMigrations() {
       },
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 12,
       name: 'connector_store_trusted_source_scope_observation',
       up(db: Database) {
         addColumnIfMissing(db, 'items', 'source_scope_generation', 'TEXT');
@@ -321,7 +401,105 @@ export function connectorStoreMigrations() {
         addColumnIfMissing(db, 'items', 'source_scope_folder_keys_json', 'TEXT');
       },
     },
+    {
+      version: 13,
+      name: 'connector_store_chunk_media',
+      up(db: Database) {
+        // Additive and inert: existing chunks keep NULL media and embed
+        // exactly as before (docs/design/photo-embeddings.md).
+        addColumnIfMissing(db, 'chunks', 'media_path', 'TEXT');
+        addColumnIfMissing(db, 'chunks', 'media_sha256', 'TEXT');
+        createConnectorStoreChunkMediaReleases(db);
+      },
+    },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: 'connector_store_media_judgments',
+      up(db: Database) {
+        // Additive and inert: a new table only. A picture with no judgment
+        // is unjudged, and an unjudged picture rests Private exactly as
+        // before (docs/design/photo-embeddings.md, owner decision 2026-10-08).
+        createConnectorStoreMediaJudgments(db);
+      },
+    },
   ];
+}
+
+/**
+ * The photo judge's verdict per picture this store holds (media-judge.ts),
+ * keyed by the picture's digest like the media cache. `tier_applied` is 0
+ * until the tier set has re-decided the items carrying the picture
+ * (tier-media-judgment-sweep.ts). `attempts` counts the tries that left a
+ * picture unjudged (it is judged again after a back-off, up to a bound);
+ * `tier_checked_at` is when the sweep last found an item carrying it not yet
+ * ready, so waiting judgments go to the back of the queue.
+ */
+function createConnectorStoreMediaJudgments(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS media_judgments (
+      media_sha256 TEXT PRIMARY KEY,
+      verdict TEXT NOT NULL CHECK(verdict IN ('sensitive', 'ordinary', 'unjudged')),
+      category TEXT,
+      margin REAL,
+      scores_json TEXT,
+      judge_id TEXT NOT NULL,
+      reason TEXT,
+      judged_at TEXT NOT NULL,
+      tier_applied INTEGER NOT NULL DEFAULT 0 CHECK(tier_applied IN (0, 1)),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      tier_checked_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_connector_store_media_judgments_unapplied
+      ON media_judgments(media_sha256) WHERE tier_applied = 0;
+  `);
+  // A store migrated to 14 by an earlier build of this schema lacks the
+  // columns added since; every object above is idempotent, and so is this.
+  addColumnIfMissing(db, 'media_judgments', 'attempts', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'media_judgments', 'tier_checked_at', 'TEXT');
+}
+
+/**
+ * Media a deleted chunk referenced, queued by a trigger so every path that
+ * deletes chunks (a replace, a tombstone, a purge) is covered without each
+ * one remembering to. The store drains it after its writes and lets the media
+ * cache drop the file when no chunk here references it any more.
+ */
+function createConnectorStoreChunkMediaReleases(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chunk_media_releases (
+      media_sha256 TEXT PRIMARY KEY,
+      media_path TEXT NOT NULL
+    );
+    -- "Does any chunk still hold this picture" is asked on every release.
+    CREATE INDEX IF NOT EXISTS idx_connector_store_chunks_media
+      ON chunks(media_sha256) WHERE media_sha256 IS NOT NULL;
+    -- Pictures the image encoder could not read: never sent again, so one
+    -- bad photo cannot hold up the rest of a store's embedding.
+    CREATE TABLE IF NOT EXISTS chunk_media_failures (
+      media_sha256 TEXT PRIMARY KEY,
+      reason TEXT NOT NULL,
+      failed_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 1
+    );
+    -- Images this store has stored a reading of since pictures are read: an
+    -- image without a row is read once more (a text-only reading from before),
+    -- one with a row is not listed again, whatever its picture became.
+    CREATE TABLE IF NOT EXISTS image_media_reads (
+      item_pk INTEGER PRIMARY KEY,
+      read_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_chunk_media_release
+    AFTER DELETE ON chunks
+    WHEN OLD.media_sha256 IS NOT NULL AND OLD.media_path IS NOT NULL
+    BEGIN
+      INSERT OR IGNORE INTO chunk_media_releases (media_sha256, media_path)
+      VALUES (OLD.media_sha256, OLD.media_path);
+    END;
+  `);
+  // A store migrated to 13 by an earlier build of this schema lacks the
+  // columns added since; every object above is idempotent, and so is this.
+  addColumnIfMissing(db, 'chunk_media_failures', 'attempts', 'INTEGER NOT NULL DEFAULT 1');
 }
 
 export const CONNECTOR_STORE_FTS_MIGRATION: SourceIndexFtsMigrationSpec = {
@@ -358,6 +536,12 @@ export interface LocalConnectorStoreOptions {
   trustDomain: SourceTrustDomain;
   /** Opens an existing store without migrations, WAL changes, or writes. */
   readOnly?: boolean;
+  /**
+   * Whether this machine reads pictures for media search (defaults to
+   * `stillImagePreparationAvailable()`); decides whether an image read
+   * before pictures were is listed for extraction once more.
+   */
+  stillImagesRead?: boolean;
   /** Clock for owner observations compared with provider snapshot cutoffs. */
   now?: () => Date;
   /**
@@ -748,7 +932,16 @@ export interface ConnectorStoreItemCopy {
   columns: Readonly<Record<(typeof CONNECTOR_STORE_COPY_ITEM_COLUMNS)[number], string | number | null>>;
   trustTier: SourceTrustTier;
   owners: ReadonlyArray<{ connectorId: string; ownershipKind: ConnectorStoreOwnershipKind; firstSeenAt: string; lastSeenAt: string }>;
-  chunks: ReadonlyArray<{ chunkIndex: number; boundedText: string; contentHash: string; embeddingInputHash: string | null }>;
+  chunks: ReadonlyArray<{
+    chunkIndex: number;
+    boundedText: string;
+    contentHash: string;
+    embeddingInputHash: string | null;
+    mediaPath?: string | null;
+    mediaSha256?: string | null;
+    /** The photo judge's verdict on the chunk's picture, when it was judged. */
+    mediaJudgment?: MediaJudgment;
+  }>;
   /** Current vectors only (content hash equal to the chunk's embedding input hash). */
   vectors: ReadonlyArray<{ chunkIndex: number; modelId: string; contentHash: string; embedding: Uint8Array }>;
   /** The write authority each exported model's vectors were minted under. */
@@ -849,7 +1042,6 @@ export type ConnectorStoreCoverageGap =
 export interface ConnectorStoreClassificationOptions {
   baselineTrustTier?: SourceTrustTier;
   baselineTrustDomain?: SourceTrustDomain;
-  sensitivityMap?: SensitivityMap;
   /**
    * Owner tier rules this lane's placement honours. Only RAISING rules
    * (Private, Secrets) move placement: an item a rule makes Private is placed
@@ -1143,6 +1335,20 @@ export interface ConnectorStoreEmbedSummary {
    * embedding task or drain to finish later. A counts-only marker.
    */
   deferredReason?: string;
+  /**
+   * Chunks in the selection that were owed a vector but that this embedder
+   * was not given because their row is Private by its own tier (or carries an
+   * unknown tier) and the embedder is not approved for Private content. They
+   * stay unembedded (lexical search is unaffected). A row Private when the
+   * run started is not in chunksSeen; one that turned Private while an
+   * earlier batch was out is in chunksSeen and chunksSkipped. A chunk that
+   * already holds a current vector is never counted. Present only when
+   * non-zero. Counts only.
+   */
+  privateTierWithheld?: {
+    chunks: number;
+    reason: typeof CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
+  };
   policy: {
     rawSourceExposed: false;
     sourceTextReturned: false;
@@ -1250,7 +1456,7 @@ export async function embedPendingChunks(
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = store.missingEmbeddingItemIds(target.provider.modelId, options.maxItems - queued)
+      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued)
         .filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0) groups.push({ provider: target.provider, localItemIds: missing });
     }
@@ -1379,6 +1585,16 @@ export interface ConnectorStoreSearchRow {
 
 export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
   bestCosine: number;
+}
+
+/**
+ * How much of a keyword query each row matched: the query's distinct
+ * concepts (a term with its synonyms is one concept) and, per row (by local
+ * item id), how many of them the item's name or text contains.
+ */
+export interface ConnectorStoreConceptCoverage {
+  total: number;
+  matched: ReadonlyMap<string, number>;
 }
 
 export interface ConnectorStoreCurrentEmbeddingRow {
@@ -1687,6 +1903,12 @@ export interface ConnectorStoreItemRepresentationExpectation {
   sourceVersion?: string;
   contentHash: string;
   chunkContentHashes: readonly string[];
+  /**
+   * The digest of the media the first chunk carries (a prepared photo), or
+   * absent for text alone. A changed picture behind unchanged text is a
+   * changed representation.
+   */
+  mediaSha256?: string;
   requiredSearchTokens?: readonly string[];
   embeddingModelId?: string;
 }
@@ -1700,6 +1922,24 @@ export interface ConnectorStoreItemRepresentationCoverage {
 export interface ConnectorStoreRepresentationRestoreItem {
   item: RawItem;
   expectation: ConnectorStoreItemRepresentationExpectation;
+  /**
+   * Media the item's content is also searched by, attached to its first
+   * chunk (docs/design/photo-embeddings.md). Its digest must match the
+   * expectation's `mediaSha256`.
+   */
+  media?: ConnectorStoreChunkMedia;
+}
+
+/** A prepared media file in the owner-only media cache, attached to a chunk. */
+export interface ConnectorStoreChunkMedia {
+  path: string;
+  sha256: string;
+  /**
+   * The photo judge's verdict on the picture, when one was made (in any
+   * store of the item's tier set). Only an ordinary verdict lets the picture
+   * rest outside a Private store.
+   */
+  judgment?: MediaJudgment;
 }
 
 /**
@@ -2143,6 +2383,15 @@ export class LocalConnectorStore {
   // not opened it yet). Such a store has no reactions, and saying so is
   // cheaper and more honest than refusing to serve it.
   private reactionsColumnPresent = false;
+  /** Whether `chunks` carries the v13 media columns (a read-only open of an older store does not). */
+  private chunkMediaColumnsPresent = false;
+  /** Whether the v13 `image_media_reads` table is here (a read-only open of an older store has none). */
+  private imageMediaReadsPresent = false;
+  /** Whether the v14 `media_judgments` table is here (a read-only open of an older store has none). */
+  private mediaJudgmentsPresent = false;
+  /** This store's name in the media cache's reference markers. */
+  private readonly mediaHolder: string;
+  private readonly stillImagesRead: boolean;
   // The four-tier ledger. Declared without an initializer on purpose (see the
   // tree-shaking note on trustReconciliationReadyCursors).
   private tierLedgerHandle: TierLedger | undefined;
@@ -2167,6 +2416,8 @@ export class LocalConnectorStore {
   constructor(options: LocalConnectorStoreOptions) {
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
+    this.mediaHolder = this.dbPath === ':memory:' ? `memory:${randomUUID()}` : this.dbPath;
+    this.stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
     this.family = options.family;
     this.trustDomain = options.trustDomain;
     this.now = options.now ?? (() => new Date());
@@ -2215,9 +2466,21 @@ export class LocalConnectorStore {
         refuseUnversionedConnectorStoreSchema(this.db);
         this.migrate();
         runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
+        createConnectorStoreChunkMediaReleases(this.db);
+        createConnectorStoreMediaJudgments(this.db);
         validateConnectorStoreSchema(this.db);
       }
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
+      this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
+      this.imageMediaReadsPresent = this.db.query(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'",
+      ).get() !== null;
+      // A read-only open of a store from an earlier build of v14 (without
+      // every column) reads no judgments: its pictures are unjudged, so Private.
+      const judgmentColumns = this.db.query(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'",
+      ).get() !== null ? tableColumns(this.db, 'media_judgments', false) : [];
+      this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
     } catch (error) {
       closeSqliteStore(this.db);
       throw error;
@@ -2226,6 +2489,7 @@ export class LocalConnectorStore {
 
   close(): void {
     try {
+      this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
@@ -2267,25 +2531,40 @@ export class LocalConnectorStore {
     tierClassification?: ConnectorStoreTierClassification,
   ): boolean {
     try {
-      const inputs = resolveStoreTierClassification(tierClassification, this.tierLedgerPathInUse(), undefined);
+      const inputs = resolveStoreTierClassification(tierClassification, this.tierLedgerPathInUse());
       if (inputs?.unavailableReason) return false;
       const ledger = this.tierLedger();
       if (!ledger) return false;
       const existing = ledger.getCurrent(item.identity);
       if (!existing) return false;
       const override = ledger.getOverride(item.identity);
+      // The item's names travel with the text, as they do in the tiered
+      // sink: the detectors' origin hint and the sniffer read them too.
+      const metadataString = (keys: readonly string[]): string | undefined => {
+        for (const key of keys) {
+          const value = item.metadata[key];
+          if (typeof value === 'string' && value.trim()) return value.trim();
+        }
+        return undefined;
+      };
+      const title = metadataString(['title', 'name', 'subject']);
+      const path = metadataString(['locatorUri', 'pathDisplay']);
       const content = classifyContentTier(
         {
           text,
           metadataTier: existing.metadataTier,
           metadataForced: existing.metadataForced,
           metadataFlagged: existing.metadataFlagged,
+          metadataOwnerDecided: namesDecidedByOwner(existing.reasons),
+          ...(title ? { title } : {}),
+          ...(path ? { path } : {}),
+          mimeType: item.mimeType,
           subject: item.identity,
         },
         {
-          ...(inputs?.sensitivityMap ? { sensitivityMap: inputs.sensitivityMap } : {}),
           ...(inputs?.sniffer ? { sniffer: inputs.sniffer } : {}),
           ...(override ? { override } : {}),
+          ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
       );
       return ledger.recordContentDecision(item.identity, content) !== undefined;
@@ -2448,9 +2727,18 @@ export class LocalConnectorStore {
    * (superseded and staged), and of copies held back from embedding (pending
    * classification). Empty for a store with no routed copies.
    */
-  private tierHiddenItemPks(): { hidden: number[]; held: number[]; metadataLayer: number[]; moving: number } {
+  private tierHiddenItemPks(): {
+    hidden: number[];
+    held: number[];
+    metadataLayer: number[];
+    /** The subset of `metadataLayer` whose text no current copy holds yet: still to be read. */
+    metadataLayerContentUnread: number[];
+    moving: number;
+  } {
     const ledger = this.visibilityLedger();
-    if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return { hidden: [], held: [], metadataLayer: [], moving: 0 };
+    if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
+      return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+    }
     const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }>): number[] => {
       const lookup = this.db.query(`
         SELECT item_pk FROM items
@@ -2479,11 +2767,47 @@ export class LocalConnectorStore {
       // (e.g. kept vectors after a split move) but never serves, counts or
       // embeds them.
       metadataLayer: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer')),
+      metadataLayerContentUnread: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_content_unread')),
       moving: ledger.corpusCopyCounts(this.corpusId).moving,
     };
   }
 
   /** Whether this store's copy of an item may be served for any layer. */
+  /**
+   * True when this store serves an item's name only because the item's
+   * CONTENT is tiered Private: the tier ledger holds its current content copy
+   * in a secure_local store. Says nothing about what that content is.
+   */
+  contentHeldPrivate(localItemId: string): boolean {
+    if (this.trustDomain === 'secure_local') return false;
+    const row = this.db.query(`
+      SELECT provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
+    `).get(localItemId) as {
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+    } | null;
+    if (!row) return false;
+    const identity = {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    };
+    try {
+      const ledger = this.visibilityLedger();
+      if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return false;
+      const copies = ledger.copiesForMany([identity]).get(tierLedgerIdentityKey(identity)) ?? [];
+      return copies.some((copy) => copy.state === 'current'
+        && copy.trustDomain === 'secure_local'
+        && (copy.layers === 'content' || copy.layers === 'both'));
+    } catch {
+      return false;
+    }
+  }
+
   private copyServable(identity: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }): boolean {
     return this.tierVisibleRows([identity], (entry) => entry, () => 'metadata').length > 0
       || this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
@@ -2608,28 +2932,34 @@ export class LocalConnectorStore {
   ): boolean {
     const syncRunId = `connector-tier-copy-${randomUUID()}`;
     const startedAt = nowIso();
-    return this.db.transaction(() => {
-      this.db.query(`
-        INSERT INTO sync_runs (
-          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
-          items_indexed, started_at, completed_at
-        ) VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?, ?)
-      `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
-      return this.tombstoneItem(
-        {
-          identity,
-          mimeType: 'application/octet-stream',
-          content: { kind: 'metadata_only' },
-          metadata: {},
-          fetchedAt: startedAt,
-        },
-        options.connectorId,
-        'observed',
-        syncRunId,
-        options.trustTier,
-        true,
-      );
-    })();
+    try {
+      return this.db.transaction(() => {
+        this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+            items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?, ?)
+        `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
+        return this.tombstoneItem(
+          {
+            identity,
+            mimeType: 'application/octet-stream',
+            content: { kind: 'metadata_only' },
+            metadata: {},
+            fetchedAt: startedAt,
+          },
+          options.connectorId,
+          'observed',
+          syncRunId,
+          options.trustTier,
+          true,
+        );
+      })();
+    } finally {
+      // The pictures its chunks carried (and their judgments) go when no
+      // other chunk here carries them; inside a caller's transaction, after it.
+      if (!this.db.inTransaction) this.releaseUnreferencedChunkMedia();
+    }
   }
 
   /**
@@ -2670,19 +3000,26 @@ export class LocalConnectorStore {
       lastSeenAt: owner.last_seen_at,
     }));
     const chunks = (this.db.query(`
-      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? 'media_path, media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(row.item_pk) as Array<{
       chunk_index: number;
       bounded_text: string;
       content_hash: string;
       embedding_input_hash: string | null;
+      media_path: string | null;
+      media_sha256: string | null;
     }>).map((chunk) => ({
       chunkIndex: chunk.chunk_index,
       boundedText: chunk.bounded_text,
       contentHash: chunk.content_hash,
       embeddingInputHash: chunk.embedding_input_hash,
-    }));
+      ...(chunk.media_path && chunk.media_sha256 ? { mediaPath: chunk.media_path, mediaSha256: chunk.media_sha256 } : {}),
+    })).map((chunk) => {
+      const judgment = chunk.mediaSha256 ? this.mediaJudgment(chunk.mediaSha256) : undefined;
+      return judgment ? { ...chunk, mediaJudgment: judgment } : chunk;
+    });
     const vectors = (this.db.query(`
       SELECT c.chunk_index, e.model_id, e.content_hash, e.embedding
       FROM chunk_embeddings e
@@ -2764,7 +3101,7 @@ export class LocalConnectorStore {
     }
     const syncRunId = `connector-tier-move-${randomUUID()}`;
     const now = nowIso();
-    return this.db.transaction((): ConnectorStoreItemCopyImportSummary => {
+    const imported = this.db.transaction((): ConnectorStoreItemCopyImportSummary => {
       this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
@@ -2809,33 +3146,63 @@ export class LocalConnectorStore {
         `).run(itemPk, owner.connectorId, owner.ownershipKind, syncRunId, syncRunId, owner.firstSeenAt, owner.lastSeenAt);
       }
       const existing = this.db.query(`
-        SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+        SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+          ${this.chunkMediaColumnsPresent ? 'media_sha256' : 'NULL AS media_sha256'}
         FROM chunks WHERE item_pk = ? ORDER BY chunk_index
       `).all(itemPk) as Array<{
         chunk_index: number;
         bounded_text: string;
         content_hash: string;
         embedding_input_hash: string | null;
+        media_sha256: string | null;
       }>;
       const namesOnly = options.layers === 'metadata';
+      // A picture rests in a Private store, or in another store only when the
+      // photo judge found it ordinary (docs/design/photo-embeddings.md): a
+      // copy of an unjudged or sensitive picture into any other store (an
+      // owner's override) keeps the text and drops the picture, and its
+      // chunks are re-hashed below so they embed as text.
+      const keepsMedia = (chunk: ConnectorStoreItemCopy['chunks'][number]): boolean => this.chunkMediaColumnsPresent
+        && (this.trustDomain === 'secure_local' || (this.mediaJudgmentsPresent && chunk.mediaJudgment?.verdict === 'ordinary'));
+      const strippedMedia = copy.chunks.some((chunk) => chunk.mediaSha256 && !keepsMedia(chunk));
       const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
         const current = existing[index];
         return current?.chunk_index === chunk.chunkIndex
           && current.bounded_text === chunk.boundedText
           && current.content_hash === chunk.contentHash
-          && current.embedding_input_hash === chunk.embeddingInputHash;
+          && current.embedding_input_hash === chunk.embeddingInputHash
+          && (current.media_sha256 ?? undefined) === (keepsMedia(chunk) ? chunk.mediaSha256 ?? undefined : undefined);
       });
+      if (!namesOnly) {
+        // The judgment travels with its picture; it was applied where it was made.
+        for (const chunk of copy.chunks) {
+          if (chunk.mediaSha256 && chunk.mediaJudgment && keepsMedia(chunk)) this.writeMediaJudgment(chunk.mediaSha256, chunk.mediaJudgment, true);
+        }
+      }
       let chunksWritten = 0;
       if (!unchanged) {
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(itemPk);
-        const insert = this.db.query(`
-          INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `);
+        const insert = this.chunkMediaColumnsPresent
+          ? this.db.query(`
+            INSERT INTO chunks (
+              item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at,
+              media_path, media_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `)
+          : this.db.query(`
+            INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `);
         for (const chunk of copy.chunks) {
-          insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
+          if (this.chunkMediaColumnsPresent) {
+            insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now,
+              keepsMedia(chunk) ? chunk.mediaPath ?? null : null, keepsMedia(chunk) ? chunk.mediaSha256 ?? null : null);
+          } else {
+            insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
+          }
           chunksWritten += 1;
         }
+        if (strippedMedia) this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
       }
       this.refreshFtsForItem(itemPk);
       const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
@@ -2892,6 +3259,116 @@ export class LocalConnectorStore {
           : {}),
       };
     })();
+    if (options.layers !== 'metadata' && this.chunkMediaColumnsPresent) {
+      for (const chunk of copy.chunks) {
+        if (!chunk.mediaPath || !chunk.mediaSha256) continue;
+        if (this.trustDomain !== 'secure_local' && chunk.mediaJudgment?.verdict !== 'ordinary') continue;
+        retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+      }
+    }
+    this.releaseUnreferencedChunkMedia();
+    return imported;
+  }
+
+  /**
+   * Judges pictures this store holds that have no judgment yet: photos
+   * embedded before the judge existed, and any the combined call above could
+   * not judge. A bounded number per pass; the encoder not running (or any
+   * other failure) leaves the rest for a later pass with nothing recorded,
+   * and a picture the encoder cannot read is recorded unjudged (it stays
+   * Private).
+   */
+  private async judgeUnjudgedMedia(
+    provider: Parameters<typeof judgeMediaImages>[0],
+    rows: ReadonlyArray<{ media_path: string | null; media_sha256: string | null }>,
+    assertAuthorized: (() => void | Promise<void>) | undefined,
+  ): Promise<number> {
+    const judgeId = mediaJudgeId(provider);
+    const seen = new Set<string>();
+    const images: Array<{ path: string; sha256: string; mimeType: string }> = [];
+    for (const row of rows) {
+      if (images.length >= MEDIA_JUDGE_MAX_PER_PASS) break;
+      const sha = row.media_sha256;
+      if (!sha || !row.media_path || seen.has(sha)) continue;
+      seen.add(sha);
+      if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha)) continue;
+      if (!isMediaCachePath(row.media_path, sha) || !existsSync(row.media_path)) continue;
+      images.push({ path: row.media_path, sha256: sha, mimeType: 'image/jpeg' });
+    }
+    let judged = 0;
+    for (let offset = 0; offset < images.length; offset += EMBEDDING_BATCH_SIZE) {
+      const batch = images.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+      let judgments: MediaJudgment[];
+      try {
+        await assertAuthorized?.();
+        judgments = await judgeMediaImages(provider, batch);
+      } catch {
+        // Held (the encoder is not running), an engine fault, or a lost
+        // approval: nothing is recorded, and a later pass tries again.
+        return judged;
+      }
+      this.db.transaction(() => {
+        batch.forEach((image, index) => {
+          const judgment = judgments[index]!;
+          // Unjudged: nothing for the tier set to change (it stays Private),
+          // and it is tried again after a back-off, a bounded number of times.
+          this.writeMediaJudgment(image.sha256, judgment, judgment.verdict === 'unjudged');
+          judged += 1;
+        });
+      })();
+    }
+    return judged;
+  }
+
+  /** The stored row's embedding seasoning, for re-hashing chunk inputs. */
+  /** Whether a picture failed recently enough to wait before it is sent again. */
+  private chunkMediaBackingOff(mediaSha256: string): boolean {
+    const row = this.db.query('SELECT failed_at, attempts FROM chunk_media_failures WHERE media_sha256 = ?')
+      .get(mediaSha256) as { failed_at: string; attempts: number } | null;
+    if (!row) return false;
+    const waitMs = CHUNK_MEDIA_RETRY_BASE_MS * 2 ** Math.max(0, row.attempts - 1);
+    return this.now().getTime() - Date.parse(row.failed_at) < waitMs;
+  }
+
+  /**
+   * Counts one failure of a picture. After CHUNK_MEDIA_MAX_ATTEMPTS the
+   * picture is dropped from every chunk carrying it, so the photo embeds as
+   * text; it comes back with the next extraction of a changed file.
+   */
+  private recordChunkMediaFailure(mediaSha256: string, reason: string): void {
+    const failedAt = this.now().toISOString();
+    this.db.query(`
+      INSERT INTO chunk_media_failures (media_sha256, reason, failed_at, attempts) VALUES (?, ?, ?, 1)
+      ON CONFLICT(media_sha256) DO UPDATE SET
+        reason = excluded.reason, failed_at = excluded.failed_at, attempts = chunk_media_failures.attempts + 1
+    `).run(mediaSha256, reason, failedAt);
+    const attempts = (this.db.query('SELECT attempts FROM chunk_media_failures WHERE media_sha256 = ?')
+      .get(mediaSha256) as { attempts: number }).attempts;
+    if (attempts < CHUNK_MEDIA_MAX_ATTEMPTS) return;
+    const chunks = this.db.query('SELECT chunk_pk, item_pk FROM chunks WHERE media_sha256 = ?')
+      .all(mediaSha256) as Array<{ chunk_pk: number; item_pk: number }>;
+    for (const chunk of chunks) this.clearChunkMedia(chunk.chunk_pk, chunk.item_pk);
+    this.db.query('DELETE FROM chunk_media_failures WHERE media_sha256 = ?').run(mediaSha256);
+  }
+
+  private storedEmbeddingSeasoning(itemPk: number): ConnectorStoreEmbeddingSeasoning {
+    return (this.db.query(`
+      SELECT title, search_text, mime_type, authored_at, updated_at FROM items WHERE item_pk = ?
+    `).get(itemPk) as ConnectorStoreEmbeddingSeasoning | null) ?? {
+      title: null, search_text: null, mime_type: null, authored_at: null, updated_at: null,
+    };
+  }
+
+  /**
+   * Drops a chunk's picture (its cache file is gone, or the encoder kept
+   * failing on it) and re-hashes the item's chunks: the item keeps and embeds
+   * its text instead of waiting for ever. The picture comes back only with a
+   * new extraction, which a changed file brings; nothing re-queues it, so the
+   * photo is not read again and again.
+   */
+  private clearChunkMedia(chunkPk: number, itemPk: number): void {
+    this.db.query('UPDATE chunks SET media_path = NULL, media_sha256 = NULL WHERE chunk_pk = ?').run(chunkPk);
+    this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
   }
 
   /**
@@ -3080,12 +3557,82 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Removes picture content this store must not hold: in a store that is not
+   * Private, the chunks (text read off a picture, and any picture) of every
+   * still image, as stored before pictures were Private-only (2026-10-07).
+   * Kept: items the owner placed by a per-item override, and items `keep`
+   * names (a tiered set's routed items, which it moves instead). Idempotent;
+   * a run that removed anything leaves a `sync_runs` note with its count.
+   * Returns the items stripped.
+   */
+  stripImageContentOutsidePrivate(options: {
+    keep?: (identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>) => boolean;
+  } = {}): number {
+    if (this.trustDomain === 'secure_local') return 0;
+    const rows = this.db.query(`
+      SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND LOWER(i.mime_type) LIKE 'image/%'
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        ${this.mediaJudgmentsPresent && this.chunkMediaColumnsPresent ? `
+        AND NOT EXISTS (
+          SELECT 1 FROM chunks c JOIN media_judgments j ON j.media_sha256 = c.media_sha256
+          WHERE c.item_pk = i.item_pk AND j.verdict = 'ordinary'
+        )` : ''}
+    `).all() as Array<{
+      item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+    }>;
+    const ledger = this.tierLedger();
+    let stripped = 0;
+    try {
+      for (const row of rows) {
+        const identity = {
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+        };
+        if (options.keep?.(identity)) continue;
+        if (ledger?.getOverride(identity)) continue;
+        this.db.transaction(() => {
+          this.db.query('DELETE FROM chunk_embeddings WHERE item_pk = ?').run(row.item_pk);
+          this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
+          this.refreshFtsForItem(row.item_pk);
+        })();
+        stripped += 1;
+      }
+      if (stripped > 0) {
+        const at = this.now().toISOString();
+        this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
+        `).run(`image-content-private-only-${randomUUID()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+      }
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+    return stripped;
+  }
+
+  /**
    * Strip the kept text of a names-only copy (the owner-approved tier
    * migration purge): its chunks, their FTS rows and every vector go; the item
    * row (its names) stays. Returns the chunks removed. The caller has checked
    * the tier ledger says this copy serves names only.
    */
   stripCopyContent(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): number {
+    try {
+      return this.stripCopyContentHeld(identity);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private stripCopyContentHeld(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
   ): number {
     return this.db.transaction((): number => {
@@ -3297,6 +3844,13 @@ export class LocalConnectorStore {
    * source-neutral metadata capability: it never reads chunks or source text,
    * and it states its population precisely instead of claiming provider-wide
    * completeness the local store cannot prove.
+   *
+   * The population is the rows this store may serve at its own scope. In a
+   * store that is not itself Private (the only kind source_index_status
+   * aggregates), a row that is Private by its own tier (isSecureSensitivity,
+   * an unknown tier included) never contributes a sender, a label, a count or
+   * a date. In any store, neither does a copy the tier ledger keeps out of
+   * view (superseded, staged, or held for classification).
    */
   senderAggregation(options: ConnectorStoreSenderAggregationOptions): ConnectorStoreSenderAggregation {
     if (this.family !== 'chat') {
@@ -3310,8 +3864,20 @@ export class LocalConnectorStore {
     if (!Number.isInteger(maxSenders) || maxSenders < 1 || maxSenders > 100) {
       throw new Error('Connector store sender aggregation maxSenders must be an integer from 1 to 100.');
     }
-    const providerClause = provider ? 'AND i.provider = ?' : '';
-    const scopeParams = [accountScope, conversationId, ...(provider ? [provider] : [])];
+    const scopeTiers = isSecureSensitivity({ trustDomain: this.trustDomain })
+      ? SOURCE_TRUST_TIERS
+      : SOURCE_TRUST_TIERS.filter((trustTier) => !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier }));
+    const tierHidden = this.tierHiddenItemPks();
+    const providerClause = `${provider ? 'AND i.provider = ?' : ''}
+          AND i.trust_tier IN (SELECT value FROM json_each(?))
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))`;
+    const scopeParams = [
+      accountScope,
+      conversationId,
+      ...(provider ? [provider] : []),
+      JSON.stringify(scopeTiers),
+      JSON.stringify([...tierHidden.hidden, ...tierHidden.held]),
+    ];
     const summary = this.db.query(`
       SELECT
         COUNT(*) AS indexed_items,
@@ -3814,6 +4380,16 @@ export class LocalConnectorStore {
     const selectedFilters = connectorStoreFilterSql(options.filters);
     let lastExaminedPk = normalizeExtractionCandidateCursor(options.cursor);
 
+    // A picture is read for media search where this machine can prepare it,
+    // and only into a Private store. A still image this store holds as text
+    // alone from BEFORE pictures were read (no `image_media_reads` row) is a
+    // candidate once more; the text lane queues it under its image-scoped
+    // version. Every image reading stored since records a row, so an image
+    // that ends without a picture (a tiny one, a dropped one) is not listed
+    // again pass after pass.
+    const imagesWithoutPicture = this.imageMediaReadsPresent
+      && this.trustDomain === 'secure_local'
+      && this.stillImagesRead;
     // With no media-type filter every scanned row is a match, so one query of
     // exactly `limit` rows is enough. With a filter the scan has to be able to
     // run past non-matching rows, hence a wider window.
@@ -3830,7 +4406,12 @@ export class LocalConnectorStore {
         AND LOWER(i.mime_type) <> 'inode/directory'
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
-        AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk))
+        AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${imagesWithoutPicture ? `OR (
+            LOWER(i.mime_type) LIKE 'image/%'
+            AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
+            AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk AND c.media_sha256 IS NOT NULL)
+          )` : ''})
         ${selectedFilters.sql}
       ORDER BY i.item_pk
       LIMIT ?
@@ -3956,6 +4537,7 @@ export class LocalConnectorStore {
     }
     const chunks = this.db.query(`
       SELECT c.chunk_index, c.content_hash,
+        ${this.chunkMediaColumnsPresent ? 'c.media_sha256' : 'NULL AS media_sha256'},
         CASE WHEN ? IS NULL THEN 1 ELSE EXISTS (
           SELECT 1 FROM chunk_embeddings embedding
           WHERE embedding.chunk_pk = c.chunk_pk
@@ -3972,12 +4554,15 @@ export class LocalConnectorStore {
     ) as Array<{
       chunk_index: number;
       content_hash: string;
+      media_sha256: string | null;
       embedding_current: number;
     }>;
     const exactChunks = chunks.filter((chunk) => (
       chunk.chunk_index >= 0
       && chunk.chunk_index < expectation.chunkContentHashes.length
       && chunk.content_hash === expectation.chunkContentHashes[chunk.chunk_index]
+      // The media rides on the first chunk only.
+      && (chunk.media_sha256 ?? undefined) === (chunk.chunk_index === 0 ? expectation.mediaSha256 : undefined)
     ));
     const chunksIndexed = exactChunks.length;
     const chunksEmbeddingCurrent = exactChunks.filter(
@@ -4266,6 +4851,9 @@ export class LocalConnectorStore {
       if (!sameSourceItemIdentity(item.identity, record.expectation.sourceItem)) {
         throw new Error('Representation restore expectation identity does not match its item.');
       }
+      if (record.media?.sha256 !== record.expectation.mediaSha256) {
+        throw new Error('Representation restore media does not match its expectation.');
+      }
       const key = sourceItemIdentityKey(item.identity);
       if (seenIdentities.has(key)) {
         throw new Error('Representation restore contains a duplicate item identity.');
@@ -4273,7 +4861,7 @@ export class LocalConnectorStore {
       seenIdentities.add(key);
     }
 
-    return this.db.transaction(() => {
+    const summary = this.db.transaction((): ConnectorStoreRepresentationRestoreSummary => {
       const syncRunId = `connector-representation-restore-${randomUUID()}`;
       const startedAt = this.now().toISOString();
       this.db.query(`
@@ -4398,6 +4986,12 @@ export class LocalConnectorStore {
         }
 
         if (this.itemRepresentationCoverage(record.expectation).complete) {
+          // Read again with nothing new (a tiny picture's same text): still a
+          // reading, so the image is not listed for one more.
+          if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+            this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
+              .run(existing.item_pk, this.now().toISOString());
+          }
           itemsUnchanged += 1;
           continue;
         }
@@ -4419,8 +5013,12 @@ export class LocalConnectorStore {
           options.preserveStoredSearchText === true,
           options.preserveStoredSearchTextOwnedFacets === true,
         );
-        this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars);
+        this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars, record.media);
         this.refreshFtsForItem(upsert.itemPk);
+        if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+          this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
+            .run(upsert.itemPk, this.now().toISOString());
+        }
         chunksAwaitingEmbedding += (this.db.query(`
           SELECT COUNT(*) AS count
           FROM chunks c
@@ -4460,6 +5058,262 @@ export class LocalConnectorStore {
         skippedProviderItemIds: skippedProviderItemIds.sort(),
       };
     })();
+    // References are taken once the content is committed: a rolled-back
+    // restore leaves no marker behind. The extraction's own staging hold
+    // keeps the file until then.
+    for (const record of options.items) {
+      if (record.media && summary.restoredProviderItemIds.includes(record.item.identity.providerItemId)) {
+        retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
+      } else if (record.media && this.chunkMediaColumnsPresent) {
+        const present = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
+          .get(record.media.sha256) as { present: number } | null;
+        if (present) retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
+      }
+    }
+    this.releaseUnreferencedChunkMedia();
+    return summary;
+  }
+
+  /**
+   * Holds again, once per process, every cache file this store's chunks
+   * reference: the marker then carries this store's name (so the sweep can
+   * tell it from a store that is gone), and a marker an earlier build named by
+   * a path other than the store's real path is replaced. Best effort.
+   */
+  private reassertChunkMediaHolds(): void {
+    if (!this.chunkMediaColumnsPresent) return;
+    reassertedMediaHolders ??= new Set();
+    if (reassertedMediaHolders.has(this.mediaHolder)) return;
+    try {
+      const rows = this.db.query(`
+        SELECT DISTINCT media_path, media_sha256 FROM chunks
+        WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
+      `).all() as Array<{ media_path: string; media_sha256: string }>;
+      for (const row of rows) {
+        if (existsSync(row.media_path)) retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
+      }
+      reassertedMediaHolders.add(this.mediaHolder);
+    } catch {
+      // Next pass.
+    }
+  }
+
+  /**
+   * Keeps the media cache in step with this store's chunks. A chunk write
+   * that attaches media retains it (this store's marker beside the file);
+   * here, media no chunk here references any more (queued by the delete
+   * trigger) is given up, and the cache removes a file when its last holder
+   * goes. Best effort and cheap when nothing changed: a failure only keeps a
+   * file longer.
+   */
+  private releaseUnreferencedChunkMedia(): void {
+    if (!this.chunkMediaColumnsPresent) return;
+    try {
+      // Page by page until the queue is empty: a bulk purge or strip can queue
+      // far more than one page, and the store may be deleted right after.
+      for (;;) {
+      const queued = this.db.query('SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000')
+        .all() as Array<{ media_sha256: string; media_path: string }>;
+      if (queued.length === 0) break;
+      for (const entry of queued) {
+        const referenced = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
+          .get(entry.media_sha256) as { present: number } | null;
+        // The media cache refuses any path that is not its own `<sha256>.jpg`.
+        if (!referenced) {
+          releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+          // The judgment goes with the last chunk that carried the picture.
+          if (this.mediaJudgmentsPresent) this.db.query('DELETE FROM media_judgments WHERE media_sha256 = ?').run(entry.media_sha256);
+        }
+        this.db.query('DELETE FROM chunk_media_releases WHERE media_sha256 = ?').run(entry.media_sha256);
+      }
+      }
+    } catch {
+      // Kept longer, never lost: the queue row stays for the next pass.
+    }
+  }
+
+  /**
+   * Whether this picture needs no judging now: its stored judgment was made
+   * by the judge `judgeId` names and is a verdict, or it is unjudged and
+   * either waiting out its back-off or out of tries. One made by another
+   * prompt set, threshold or model is stale and the picture is judged again
+   * (until then, its stored verdict stands).
+   */
+  private mediaJudgmentSettled(mediaSha256: string, judgeId: string): boolean {
+    if (!this.mediaJudgmentsPresent) return false;
+    const row = this.db.query('SELECT verdict, judge_id, judged_at, attempts FROM media_judgments WHERE media_sha256 = ?')
+      .get(mediaSha256) as { verdict: MediaJudgment['verdict']; judge_id: string; judged_at: string; attempts: number } | null;
+    if (!row || row.judge_id !== judgeId) return false;
+    if (row.verdict !== 'unjudged' || row.attempts >= MEDIA_JUDGE_MAX_ATTEMPTS) return true;
+    const waitMs = MEDIA_JUDGE_RETRY_BASE_MS * 2 ** Math.max(0, row.attempts - 1);
+    return this.now().getTime() - Date.parse(row.judged_at) < waitMs;
+  }
+
+  /** The photo judge's verdict on a picture this store holds, by its digest; undefined when it was never judged here. */
+  mediaJudgment(mediaSha256: string): MediaJudgment | undefined {
+    if (!this.mediaJudgmentsPresent) return undefined;
+    const row = this.db.query(`
+      SELECT verdict, category, margin, scores_json, judge_id, reason FROM media_judgments WHERE media_sha256 = ?
+    `).get(mediaSha256) as {
+      verdict: MediaJudgment['verdict']; category: string | null; margin: number | null;
+      scores_json: string | null; judge_id: string; reason: string | null;
+    } | null;
+    if (!row) return undefined;
+    let scores: MediaJudgment['scores'];
+    try {
+      scores = row.scores_json ? JSON.parse(row.scores_json) as MediaJudgment['scores'] : undefined;
+    } catch {
+      scores = undefined;
+    }
+    return {
+      verdict: row.verdict,
+      ...(row.category ? { category: row.category as NonNullable<MediaJudgment['category']> } : {}),
+      ...(row.margin !== null ? { margin: row.margin } : {}),
+      ...(scores ? { scores } : {}),
+      judgeId: row.judge_id,
+      ...(row.reason ? { reason: row.reason } : {}),
+    };
+  }
+
+  /**
+   * The judgment of the picture an item's content carries (its first chunk's
+   * media), or undefined: no picture, or one never judged. Either way the
+   * classifier then treats the picture as unjudged.
+   */
+  imageJudgmentForItem(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): MediaJudgment | undefined {
+    if (!this.chunkMediaColumnsPresent || !this.mediaJudgmentsPresent) return undefined;
+    const row = this.db.query(`
+      SELECT c.media_sha256
+      FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0 AND c.media_sha256 IS NOT NULL
+      ORDER BY c.chunk_index LIMIT 1
+    `).get(
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    ) as { media_sha256: string } | null;
+    return row ? this.mediaJudgment(row.media_sha256) : undefined;
+  }
+
+  /**
+   * Records a picture's judgment. `applied`: the tier set has nothing left to
+   * re-decide for it (a judgment that travelled with a copy, or one recorded
+   * where the decision was already made with it). An unjudged result counts
+   * one more try by the same judge (the first by a new one); a verdict clears
+   * the count. A changed verdict goes to the front of the sweep's queue and
+   * is always left for the sweep; a first judgment is left for it unless
+   * `applied`.
+   */
+  private writeMediaJudgment(mediaSha256: string, judgment: MediaJudgment, applied: boolean): void {
+    if (!this.mediaJudgmentsPresent) return;
+    this.db.query(`
+      INSERT INTO media_judgments (
+        media_sha256, verdict, category, margin, scores_json, judge_id, reason, judged_at, tier_applied, attempts
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(media_sha256) DO UPDATE SET
+        attempts = CASE
+          WHEN excluded.verdict <> 'unjudged' THEN 0
+          WHEN media_judgments.verdict = 'unjudged' AND media_judgments.judge_id = excluded.judge_id
+            THEN media_judgments.attempts + 1
+          ELSE 1
+        END,
+        tier_checked_at = CASE WHEN media_judgments.verdict = excluded.verdict THEN media_judgments.tier_checked_at ELSE NULL END,
+        verdict = excluded.verdict, category = excluded.category, margin = excluded.margin,
+        scores_json = excluded.scores_json, judge_id = excluded.judge_id, reason = excluded.reason,
+        judged_at = excluded.judged_at,
+        tier_applied = CASE
+          -- The same judgment again leaves a pending re-decision pending: only
+          -- the sweep closes it (re-deciding twice is harmless).
+          WHEN media_judgments.verdict = excluded.verdict
+            AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
+          -- A changed judgment (an ordinary verdict that no longer holds, or
+          -- a sensitive one a newer judge could not make) is re-decided by the
+          -- sweep, whatever the writer thought, so every item's tier and its
+          -- reason follow the judgment the store now holds.
+          ELSE 0
+        END
+    `).run(
+      mediaSha256,
+      judgment.verdict,
+      judgment.category ?? null,
+      judgment.margin ?? null,
+      judgment.scores ? JSON.stringify(judgment.scores) : null,
+      judgment.judgeId,
+      judgment.reason ?? null,
+      this.now().toISOString(),
+      applied ? 1 : 0,
+      judgment.verdict === 'unjudged' ? 1 : 0,
+    );
+  }
+
+  /**
+   * Judgments the tier set has not yet applied, with the active items whose
+   * content carries each picture (tier-media-judgment-sweep.ts). Bounded:
+   * never-checked judgments first, then those that have waited longest, so
+   * judgments whose items are not ready cannot starve the rest.
+   */
+  unappliedMediaJudgments(limit = 200): Array<{
+    mediaSha256: string;
+    judgment: MediaJudgment;
+    items: Array<Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>>;
+  }> {
+    if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent) return [];
+    const rows = this.db.query(`
+      SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0
+      ORDER BY tier_checked_at IS NOT NULL, tier_checked_at, media_sha256 LIMIT ?
+    `).all(Math.max(1, limit)) as Array<{ media_sha256: string }>;
+    return rows.flatMap((row) => {
+      const judgment = this.mediaJudgment(row.media_sha256);
+      if (!judgment) return [];
+      const items = (this.db.query(`
+        SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        WHERE c.media_sha256 = ? AND i.tombstoned = 0
+      `).all(row.media_sha256) as Array<{
+        provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+      }>).map((item) => ({
+        provider: item.provider,
+        accountScope: item.account_scope,
+        providerItemId: item.provider_item_id,
+        ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
+      }));
+      return [{ mediaSha256: row.media_sha256, judgment, items }];
+    });
+  }
+
+  /**
+   * Sends judgments the tier set could not apply yet (an item mid-move or
+   * waiting on its names) to the back of the queue.
+   */
+  markMediaJudgmentsWaiting(mediaSha256s: readonly string[]): void {
+    if (!this.mediaJudgmentsPresent || mediaSha256s.length === 0) return;
+    const update = this.db.query('UPDATE media_judgments SET tier_checked_at = ? WHERE media_sha256 = ? AND tier_applied = 0');
+    const checkedAt = this.now().toISOString();
+    this.db.transaction(() => {
+      for (const sha of mediaSha256s) update.run(checkedAt, sha);
+    })();
+  }
+
+  /**
+   * Marks judgments as applied by the tier set: each only while the stored
+   * judgment is still the one the sweep applied. One replaced in between
+   * (judged again by the embed lane) stays unapplied for the next sweep.
+   */
+  markMediaJudgmentsApplied(applied: ReadonlyArray<{ mediaSha256: string; judgment: MediaJudgment }>): void {
+    if (!this.mediaJudgmentsPresent || applied.length === 0) return;
+    const update = this.db.query(`
+      UPDATE media_judgments SET tier_applied = 1
+      WHERE media_sha256 = ? AND verdict = ? AND category IS ? AND judge_id = ?
+    `);
+    this.db.transaction(() => {
+      for (const entry of applied) {
+        update.run(entry.mediaSha256, entry.judgment.verdict, entry.judgment.category ?? null, entry.judgment.judgeId);
+      }
+    })();
   }
 
   /**
@@ -4486,6 +5340,14 @@ export class LocalConnectorStore {
    * the identities beyond their coordinates.
    */
   relinquishItems(options: ConnectorStoreRelinquishOptions): ConnectorStoreRelinquishSummary {
+    try {
+      return this.relinquishItemsHeld(options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private relinquishItemsHeld(options: ConnectorStoreRelinquishOptions): ConnectorStoreRelinquishSummary {
     const syncConnectorId = requireNonEmpty(options.syncConnectorId, 'Relinquish sync connector id');
     const ownerConnectorId = requireNonEmpty(options.ownerConnectorId, 'Relinquish owner connector id');
     return this.db.transaction(() => {
@@ -4841,6 +5703,17 @@ export class LocalConnectorStore {
     dryRun: boolean;
     purgeUnevaluable?: boolean;
   }): ConnectorStorePurgeSummary {
+    try {
+      return this.purgeExcludedItemsHeld(options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private purgeExcludedItemsHeld(options: {
+    dryRun: boolean;
+    purgeUnevaluable?: boolean;
+  }): ConnectorStorePurgeSummary {
     if (!this.exclusions.active) {
       return emptyPurgeSummary(this.corpusId, options.dryRun, this.exclusions);
     }
@@ -4922,6 +5795,17 @@ export class LocalConnectorStore {
    * row instead would silently convert metadata-only into invisible.
    */
   stripMetadataOnlyRepresentations(options: {
+    dryRun: boolean;
+    stripUnevaluable?: boolean;
+  }): ConnectorStoreMetadataOnlyStripSummary {
+    try {
+      return this.stripMetadataOnlyRepresentationsHeld(options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private stripMetadataOnlyRepresentationsHeld(options: {
     dryRun: boolean;
     stripUnevaluable?: boolean;
   }): ConnectorStoreMetadataOnlyStripSummary {
@@ -5593,6 +6477,18 @@ export class LocalConnectorStore {
     connector: SourceConnector,
     options?: ConnectorStoreSyncOptions,
   ): Promise<ConnectorStoreSyncSummary> {
+    // A sync can tombstone or replace items; their pictures are released here.
+    try {
+      return await this.syncFromConnectorHeld(connector, options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private async syncFromConnectorHeld(
+    connector: SourceConnector,
+    options?: ConnectorStoreSyncOptions,
+  ): Promise<ConnectorStoreSyncSummary> {
     if (connector.family !== this.family) {
       throw new Error(
         `Connector store ${this.corpusId} is declared for family "${this.family}" `
@@ -5608,7 +6504,6 @@ export class LocalConnectorStore {
     const tierClassification = resolveStoreTierClassification(
       options?.tierClassification,
       this.tierLedgerPathInUse(),
-      classification?.sensitivityMap,
     );
     const tierRouting = options?.tierRouting;
     let itemsRoutedElsewhere = 0;
@@ -6758,8 +7653,9 @@ export class LocalConnectorStore {
     item: RawItem,
     itemPk: number,
     maxChunkChars: number,
+    media?: ConnectorStoreChunkMedia,
   ): { chunksIndexed: number; ftsContentChanged: boolean } {
-    return this.indexItemText(item, itemPk, maxChunkChars, textFromRawItem(item));
+    return this.indexItemText(item, itemPk, maxChunkChars, textFromRawItem(item), media);
   }
 
   // Citation-safe item metadata that seasons an embedding input, read from the
@@ -6792,6 +7688,7 @@ export class LocalConnectorStore {
     itemPk: number,
     maxChunkChars: number,
     text: string | undefined,
+    media?: ConnectorStoreChunkMedia,
   ): { chunksIndexed: number; ftsContentChanged: boolean } {
     // The single funnel every chunk this store writes passes through, which is
     // why the metadata-only refusal lives here rather than at each caller. A
@@ -6820,26 +7717,54 @@ export class LocalConnectorStore {
     // not repeat — a reaction aggregate preserved across a reaction-free emit.
     const seasoning = this.itemEmbeddingSeasoning(itemPk, item);
     const chunks = chunkText(text, maxChunkChars);
-    const desired = chunks.map((chunk, index) => ({
-      index,
-      text: chunk,
-      hash: hashString(chunk),
-      embeddingHash: hashString(buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk })),
-    }));
+    if (media && !this.chunkMediaColumnsPresent) {
+      throw new Error('Connector store chunks cannot carry media before the v13 schema.');
+    }
+    // A picture rests in a Private store, or in another store only with the
+    // photo judge's ordinary verdict on it, never on the absence of one
+    // (docs/design/photo-embeddings.md).
+    // Written unapplied: other items may carry the same picture, and the
+    // sweep re-decides each of them (a no-op for this one).
+    if (media?.judgment && media.judgment.verdict !== 'unjudged' && this.mediaJudgmentsPresent) {
+      this.writeMediaJudgment(media.sha256, media.judgment, false);
+    }
+    if (media && this.trustDomain !== 'secure_local' && this.mediaJudgment(media.sha256)?.verdict !== 'ordinary') {
+      throw new Error('Connector store chunks carry picture media outside a Private store only when the photo judge found it ordinary.');
+    }
+    // Media (a prepared photo) rides on the first chunk, and its digest is
+    // part of that chunk's embedding input: a changed picture re-embeds.
+    const desired = chunks.map((chunk, index) => {
+      const chunkMedia = index === 0 ? media : undefined;
+      return {
+        index,
+        text: chunk,
+        hash: hashString(chunk),
+        media: chunkMedia,
+        embeddingHash: connectorStoreChunkEmbeddingInputHash(
+          buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk }),
+          chunkMedia?.sha256,
+        ),
+      };
+    });
     const existing = this.db.query(`
-      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? 'media_path, media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(itemPk) as Array<{
       chunk_index: number;
       bounded_text: string;
       content_hash: string;
       embedding_input_hash: string | null;
+      media_path: string | null;
+      media_sha256: string | null;
     }>;
     const contentUnchanged = existing.length === desired.length && desired.every((chunk, index) => {
       const current = existing[index];
       return current?.chunk_index === chunk.index
         && current.bounded_text === chunk.text
-        && current.content_hash === chunk.hash;
+        && current.content_hash === chunk.hash
+        && (current.media_sha256 ?? undefined) === chunk.media?.sha256
+        && (current.media_path ?? undefined) === chunk.media?.path;
     });
     if (contentUnchanged) {
       const update = this.db.query(`
@@ -6862,14 +7787,26 @@ export class LocalConnectorStore {
     this.db.transaction(() => {
       this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(itemPk);
       const now = nowIso();
-      const insert = this.db.query(`
-        INSERT INTO chunks (
-          item_pk, chunk_index, bounded_text, content_hash,
-          embedding_input_hash, indexed_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-      `);
+      const insert = this.chunkMediaColumnsPresent
+        ? this.db.query(`
+          INSERT INTO chunks (
+            item_pk, chunk_index, bounded_text, content_hash,
+            embedding_input_hash, indexed_at, media_path, media_sha256
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        : this.db.query(`
+          INSERT INTO chunks (
+            item_pk, chunk_index, bounded_text, content_hash,
+            embedding_input_hash, indexed_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `);
       for (const chunk of desired) {
-        insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
+        if (this.chunkMediaColumnsPresent) {
+          insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now,
+            chunk.media?.path ?? null, chunk.media?.sha256 ?? null);
+        } else {
+          insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
+        }
       }
       this.refreshFtsForItem(itemPk);
     })();
@@ -6903,20 +7840,23 @@ export class LocalConnectorStore {
     seasoning: ConnectorStoreEmbeddingSeasoning,
   ): number {
     const chunks = this.db.query(`
-      SELECT chunk_index, bounded_text, embedding_input_hash
+      SELECT chunk_index, bounded_text, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? 'media_sha256' : 'NULL AS media_sha256'}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(itemPk) as Array<{
       chunk_index: number;
       bounded_text: string;
       embedding_input_hash: string | null;
+      media_sha256: string | null;
     }>;
     const update = this.db.query(
       'UPDATE chunks SET embedding_input_hash = ? WHERE item_pk = ? AND chunk_index = ?',
     );
     let invalidated = 0;
     for (const chunk of chunks) {
-      const embeddingHash = hashString(
+      const embeddingHash = connectorStoreChunkEmbeddingInputHash(
         buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk.bounded_text }),
+        chunk.media_sha256 ?? undefined,
       );
       if (chunk.embedding_input_hash === embeddingHash) continue;
       update.run(embeddingHash, itemPk, chunk.chunk_index);
@@ -7054,11 +7994,21 @@ export class LocalConnectorStore {
    * oldest chunk first, at most `limit`, never one marked failed. The same
    * exclusions every embedder keeps: deleted, tier-hidden, held for
    * classification, and metadata-only copies. Secrets are never stored as text.
+   * Rows Private by their own tier are left out when the embedder is not
+   * approved for Private content: they are withheld, not pending, so the sweep
+   * never picks them up again and they never hold the rest of the backlog.
    */
-  missingEmbeddingItemIds(modelId: string, limit: number): string[] {
+  missingEmbeddingItemIds(
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    limit: number,
+  ): string[] {
     if (limit <= 0) return [];
+    const modelId = embedder.modelId;
     const failed = this.embeddingFailureState;
-    const { filter, params } = this.embeddingTierExclusionFilter();
+    const tierExclusion = this.embeddingTierExclusionFilter();
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const filter = `${tierExclusion.filter} ${privateTier.filter}`;
+    const params = [...tierExclusion.params, ...privateTier.params];
     const rows = this.db.query(`
       SELECT i.local_item_id AS local_item_id
       FROM chunks c
@@ -7078,12 +8028,43 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Of these items, the ones that still owe an embedding on `modelId`: live
+   * (not tombstoned) with at least one chunk lacking a current vector. A
+   * targeted currency check for named items, not a capped scan, so an item is
+   * never reported done merely because other, older items fill a page. It
+   * ignores the visibility exclusions on purpose: an item hidden or held right
+   * now still owes its vectors once released.
+   */
+  embeddingOwedItemIds(modelId: string, localItemIds: readonly string[]): string[] {
+    if (localItemIds.length === 0) return [];
+    const rows = this.db.query(`
+      SELECT DISTINCT i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND i.local_item_id IN (SELECT value FROM json_each(?))
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+    `).all(modelId, JSON.stringify(localItemIds)) as Array<{ local_item_id: string }>;
+    return rows.map((row) => row.local_item_id);
+  }
+
+  /**
    * The chunks still waiting for a vector on `modelId`, and a token estimate of
    * embedding them (characters / 4, the estimate every planner here uses).
-   * Same exclusions as missingEmbeddingItemIds.
+   * Same exclusions as missingEmbeddingItemIds; with the embedder named, rows
+   * it may not receive (Private by their own tier) are not a backlog it owes.
    */
-  embeddingBacklogEstimate(modelId: string): { missingChunks: number; estimatedTokens: number } {
-    const { filter, params } = this.embeddingTierExclusionFilter();
+  embeddingBacklogEstimate(
+    modelId: string,
+    embedder?: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>,
+    scope?: ConnectorStoreStatusScope,
+  ): { missingChunks: number; estimatedTokens: number } {
+    const tierExclusion = this.embeddingTierExclusionFilter();
+    const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
+    const scoped = statusScopeContentFilter(scope);
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...scoped.params];
     const row = this.db.query(`
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
@@ -7128,6 +8109,89 @@ export class LocalConnectorStore {
       : { filter: '', params: [] };
   }
 
+  /**
+   * The rows of an embedding batch this embedder may still receive, judged
+   * from the store as it is now: a row whose item is now Private by its own
+   * tier (or carries an unknown tier) is counted `privateTier`; one now
+   * deleted or kept out of view by the tier ledger is counted `notVisible`.
+   * Synchronous, so the caller can dispatch with no await in between.
+   */
+  private embeddingBatchRecheck<T extends { item_pk: number }>(
+    batch: readonly T[],
+    embeddableTiers: readonly SourceTrustTier[],
+  ): { kept: T[]; privateTier: number; notVisible: number } {
+    const itemPks = [...new Set(batch.map((row) => row.item_pk))];
+    const current = new Map((this.db.query(`
+      SELECT item_pk, trust_tier, tombstoned FROM items
+      WHERE item_pk IN (SELECT value FROM json_each(?))
+    `).all(JSON.stringify(itemPks)) as Array<{ item_pk: number; trust_tier: string; tombstoned: number }>)
+      .map((row) => [row.item_pk, row] as const));
+    const tierHidden = this.tierHiddenItemPks();
+    const hidden = new Set([...tierHidden.hidden, ...tierHidden.held, ...tierHidden.metadataLayer]);
+    const kept: T[] = [];
+    let privateTier = 0;
+    let notVisible = 0;
+    for (const row of batch) {
+      const item = current.get(row.item_pk);
+      if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
+        notVisible += 1;
+      } else if (!(embeddableTiers as readonly string[]).includes(item.trust_tier)) {
+        privateTier += 1;
+      } else {
+        kept.push(row);
+      }
+    }
+    return { kept, privateTier, notVisible };
+  }
+
+  /**
+   * SQL that keeps only rows this embedder may receive: every row when it is
+   * approved for Private content, otherwise only rows whose own stored tier is
+   * not Private (connectorStoreEmbeddableRowTiers). Expects items aliased `i`.
+   */
+  private privateTierEmbeddingFilter(
+    embedder: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>,
+  ): { filter: string; params: string[] } {
+    const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
+    return tiers === undefined
+      ? { filter: '', params: [] }
+      : { filter: 'AND i.trust_tier IN (SELECT value FROM json_each(?))', params: [JSON.stringify(tiers)] };
+  }
+
+  /**
+   * Chunks still without a current vector on this embedder's model that it
+   * may not receive because their row is Private by its own tier, and how many
+   * items they belong to. Zero for an embedder approved for Private content.
+   * Same live, tier-visible population as missingEmbeddingItemIds. Counts only.
+   */
+  privateTierEmbeddingWithheld(
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    scope?: ConnectorStoreStatusScope,
+  ): {
+    items: number;
+    chunks: number;
+    reason: typeof CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
+  } {
+    const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
+    const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
+    if (tiers === undefined) return { items: 0, chunks: 0, reason };
+    const tierExclusion = this.embeddingTierExclusionFilter();
+    const scoped = statusScopeContentFilter(scope);
+    const filter = `${tierExclusion.filter} ${scoped.filter}`;
+    const params = [...tierExclusion.params, ...scoped.params];
+    const row = this.db.query(`
+      SELECT COUNT(*) AS chunks, COUNT(DISTINCT c.item_pk) AS items
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        AND i.trust_tier NOT IN (SELECT value FROM json_each(?))
+        ${filter}
+    `).get(embedder.modelId, JSON.stringify(tiers), ...params) as { chunks: number; items: number };
+    return { items: row.items, chunks: row.chunks, reason };
+  }
+
   /** Why embedding on this store is currently deferred, when it is. */
   embeddingDeferredReason(): string | undefined {
     return this.embeddingDeferral;
@@ -7168,6 +8232,12 @@ export class LocalConnectorStore {
     }
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
     await options.assertAuthorized?.();
+    // Media no chunk here references any more is released before an embed
+    // pass, and copies nothing holds are swept (at most hourly), so the
+    // regular drain also keeps the media cache tidy.
+    this.releaseUnreferencedChunkMedia();
+    this.reassertChunkMediaHolds();
+    sweepMediaCacheThrottled();
     const limit = normalizeEmbedLimit(options.limit);
     const journalId = normalizeMaintenanceJournalId(options.journalId);
     const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(
@@ -7224,11 +8294,35 @@ export class LocalConnectorStore {
     )) {
       throw new Error('Connector store embedding journal provider changed.');
     }
-    const rows = this.embeddingSourceRows(
+    const selectedRows = this.embeddingSourceRows(
       options.localItemIds,
       options.accountScope,
       options.filters,
     );
+    // A row that is Private by its own stored tier (or carries a tier the
+    // store does not recognise) never reaches an embedder that is not approved
+    // for Private content, whatever the store's domain. It stays unembedded,
+    // counted under a content-free reason; it is not an error, so it is not
+    // retried, and its lexical search is unaffected.
+    const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+    const rows = embeddableTiers === undefined
+      ? selectedRows
+      : selectedRows.filter((row) => (embeddableTiers as readonly string[]).includes(row.trust_tier));
+    // Counted only when the chunk is otherwise owed a vector: one that already
+    // holds a current vector is not withheld work (privateTierEmbeddingWithheld
+    // counts the same population).
+    let privateTierWithheldChunks = 0;
+    if (rows.length !== selectedRows.length) {
+      const kept = new Set(rows);
+      const currentVector = this.db.query(
+        'SELECT content_hash FROM chunk_embeddings WHERE chunk_pk = ? AND model_id = ?',
+      );
+      for (const row of selectedRows) {
+        if (kept.has(row)) continue;
+        const existing = currentVector.get(row.chunk_pk, provider.modelId) as { content_hash: string } | null;
+        if (existing?.content_hash !== row.content_hash) privateTierWithheldChunks += 1;
+      }
+    }
     const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
     const inputSha256 = connectorStoreEmbeddingInputSha256(rows);
     if (priorCounts && (
@@ -7348,6 +8442,14 @@ export class LocalConnectorStore {
         priorCounts.chunksSeen - priorCounts.chunksEmbedded,
       );
     }
+    // In a limited pass, a picture that will be held anyway (the image encoder
+    // is not running, or the picture is backing off) takes no place in the
+    // window: a store whose backlog starts with photos still embeds its text.
+    let readsImages: boolean | undefined;
+    if (limit !== undefined && provider.imageSupport && rows.some((row) => row.media_sha256)) {
+      readsImages = await provider.imageSupport();
+    }
+    let heldPictures = 0;
     const pending: typeof rows = [];
     let skipped = 0;
     for (const row of rows) {
@@ -7359,6 +8461,11 @@ export class LocalConnectorStore {
         skipped += 1;
         continue;
       }
+      if (limit !== undefined && row.media_sha256
+        && (readsImages === false || this.chunkMediaBackingOff(row.media_sha256))) {
+        heldPictures += 1;
+        continue;
+      }
       pending.push(row);
     }
 
@@ -7366,14 +8473,119 @@ export class LocalConnectorStore {
     // Chunks a concurrent writer removed or re-chunked while their vectors
     // were in flight. They were seen and not embedded, so they are reported as
     // skipped rather than silently dropped out of the counts.
-    let staleSkipped = 0;
+    let staleSkipped = heldPictures;
+    // The photo judge (media-judge.ts): only a provider whose model reads
+    // pictures can judge them; with any other, every picture stays unjudged
+    // (and its item Private).
+    const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
+    // One judgment per picture per pass: several items carrying the same
+    // picture are one try, not several.
+    const judgedThisPass = new Set<string>();
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-      const batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+      let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
-      const vectors = await provider.embed(batch.map((row) => ({
+      // The rows were selected before any provider round trip, and ordinary
+      // item and classification writes are not serialized by the embedding
+      // lease, so a row can turn Private (or be hidden) while an earlier batch
+      // is out. Re-read each row's current tier and visibility right before
+      // its batch is dispatched, with no await in between.
+      if (embeddableTiers !== undefined) {
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
+        privateTierWithheldChunks += recheck.privateTier;
+        // Seen and not embedded: skipped, and the Private ones also withheld.
+        staleSkipped += recheck.notVisible + recheck.privateTier;
+        batch = recheck.kept;
+        if (batch.length === 0) continue;
+      }
+      // Pictures, for a provider whose model reads them (one that does not
+      // embeds a photo's text and ignores the picture). A chunk is never
+      // embedded as text alone under an input hash that names its picture:
+      //  - the image encoder is not running (or a restart brought it back
+      //    without it): the chunk is held (seen, skipped, nothing recorded);
+      //  - its picture failed recently: it waits out a back-off, so one bad
+      //    photo cannot hold up the rest of the store; after
+      //    CHUNK_MEDIA_MAX_ATTEMPTS failures the picture is dropped and the
+      //    photo embeds as text;
+      //  - its cache file is gone (or not where the cache keeps files): the
+      //    picture is dropped and the item re-hashed, so it embeds as text.
+      // An engine fault is not a picture failure: the provider throws it and
+      // this pass stops with nothing recorded.
+      if (provider.imageSupport && batch.some((row) => row.media_sha256)) {
+        readsImages ??= await provider.imageSupport();
+        const skip = new Set<(typeof batch)[number]>();
+        for (const row of batch) {
+          if (!row.media_sha256) continue;
+          if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
+            skip.add(row);
+          } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync(row.media_path)) {
+            this.clearChunkMedia(row.chunk_pk, row.item_pk);
+            skip.add(row);
+          }
+        }
+        if (skip.size > 0) {
+          staleSkipped += skip.size;
+          batch = batch.filter((row) => !skip.has(row));
+          if (batch.length === 0) continue;
+        }
+      }
+      const inputsFor = (rows: typeof batch) => rows.map((row) => ({
         ...(row.title ? { title: row.title } : {}),
         text: buildConnectorStoreEmbeddingText(row),
-      })), { taskType: 'RETRIEVAL_DOCUMENT' });
+        // A chunk with a prepared photo hands it to the provider; one that
+        // reads images embeds both together, every other embeds the text.
+        ...(row.media_path && row.media_sha256
+          ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: 'image/jpeg' } }
+          : {}),
+      }));
+      let vectors: number[][];
+      // Pictures not yet judged are judged from the same model call: the
+      // provider hands back each picture's image-only vector too.
+      const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined
+        && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
+      let judgedBatch: Map<number, MediaJudgment> | undefined;
+      try {
+        if (judgeNow) {
+          const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
+          vectors = returned.vectors;
+          judgedBatch = new Map();
+          // Only pictures that need judging now: a settled verdict, or an
+          // unjudged one waiting out its back-off, is left as it is.
+          const currentJudge = mediaJudgeId(judging!);
+          const wanted = batch.flatMap((row, index) => (row.media_sha256 && returned.imageVectors[index]
+            && !this.mediaJudgmentSettled(row.media_sha256, currentJudge) ? [index] : []));
+          if (wanted.length > 0) {
+            try {
+              const judgments = await judgeReturnedImageVectors(judging!, wanted.map((index) => returned.imageVectors[index]));
+              wanted.forEach((index, row) => {
+                // Recorded whatever the verdict: an unjudged one is the
+                // picture's first try, and waits out its back-off.
+                judgedBatch!.set(batch[index]!.chunk_pk, judgments[row]!);
+              });
+            } catch {
+              // The descriptions could not be embedded: judged on a later pass.
+            }
+          }
+        } else {
+          vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
+        }
+      } catch (error) {
+        if (!(error instanceof SourceEmbeddingInputsFailedError)) throw error;
+        const failedRows = new Set(error.failedIndexes.map((index) => batch[index]).filter((row) => row !== undefined));
+        if (error.disposition === 'held') {
+          // The encoder is not running now: hold every photo for this pass.
+          readsImages = false;
+          for (const row of batch) if (row.media_sha256) failedRows.add(row);
+        } else {
+          // Pictures the encoder could not read: counted, retried later.
+          for (const row of failedRows) {
+            if (row.media_sha256) this.recordChunkMediaFailure(row.media_sha256, error.reason);
+          }
+        }
+        staleSkipped += failedRows.size;
+        batch = batch.filter((row) => !failedRows.has(row));
+        if (batch.length === 0) continue;
+        vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
+      }
       if (vectors.length !== batch.length) {
         throw new Error('Connector store embedding provider returned the wrong number of vectors.');
       }
@@ -7422,7 +8634,16 @@ export class LocalConnectorStore {
             row.item_pk,
             row.content_hash,
           );
-          if (write.changes > 0) written += 1;
+          if (write.changes > 0) {
+            written += 1;
+            const judgment = judgedBatch?.get(row.chunk_pk);
+            // Unjudged: nothing for the tier set to change unless it replaces
+            // another verdict (the upsert leaves that for the sweep).
+            if (judgment && row.media_sha256 && !judgedThisPass.has(row.media_sha256)) {
+              judgedThisPass.add(row.media_sha256);
+              this.writeMediaJudgment(row.media_sha256, judgment, judgment.verdict === 'unjudged');
+            }
+          }
         }
         if (journalId) {
           const cumulative = embedded + written;
@@ -7468,6 +8689,10 @@ export class LocalConnectorStore {
       staleSkipped += batch.length - written;
     }
     skipped += staleSkipped;
+    if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
+      readsImages ??= await judging.imageSupport!();
+      if (readsImages) await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
+    }
     if (journalId) {
       const completedAt = this.now().toISOString();
       const cursor = embeddingMaintenanceJournal(
@@ -7505,7 +8730,7 @@ export class LocalConnectorStore {
       skipped = rows.length - embedded;
     }
     this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch);
-    return connectorStoreEmbedSummary(
+    const summary = connectorStoreEmbedSummary(
       this.corpusId,
       this.trustDomain,
       provider,
@@ -7513,6 +8738,15 @@ export class LocalConnectorStore {
       embedded,
       skipped,
     );
+    return privateTierWithheldChunks > 0
+      ? {
+          ...summary,
+          privateTierWithheld: {
+            chunks: privateTierWithheldChunks,
+            reason: CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON,
+          },
+        }
+      : summary;
   }
 
 
@@ -7775,7 +9009,7 @@ export class LocalConnectorStore {
       ) as { cursor: string | null; audit_receipt_sha256: string | null } | null;
       if (!existing) return;
       if (!parseConnectorStoreEmbeddingWriteAuthority(existing.cursor).currencyRebuildPending) return;
-      if (this.embeddingModelCurrencyIncomplete(provider.modelId)) return;
+      if (this.embeddingModelCurrencyIncomplete(provider)) return;
       this.assertEmbeddingWriteAuthority(provider, providerEpoch);
       const cursor = connectorStoreEmbeddingWriteAuthority(provider, providerEpoch);
       const cleared = this.db.query(`
@@ -7803,7 +9037,12 @@ export class LocalConnectorStore {
    * so "complete" here means exactly what "servable" means there. One indexed
    * existence query, stopped at the first outstanding chunk.
    */
-  private embeddingModelCurrencyIncomplete(modelId: string): boolean {
+  private embeddingModelCurrencyIncomplete(
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+  ): boolean {
+    // A row withheld from this embedder by its own Private tier is never
+    // going to get a vector from it, so it is not currency debt it owes.
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
     const row = this.db.query(`
       SELECT 1 AS pending
       FROM chunks c
@@ -7812,8 +9051,9 @@ export class LocalConnectorStore {
         ON emb.chunk_pk = c.chunk_pk AND emb.model_id = ?
       WHERE i.tombstoned = 0
         AND (emb.chunk_pk IS NULL OR emb.content_hash <> c.embedding_input_hash)
+        ${privateTier.filter}
       LIMIT 1
-    `).get(modelId) as { pending: number } | null;
+    `).get(embedder.modelId, ...privateTier.params) as { pending: number } | null;
     return row !== null;
   }
 
@@ -8190,6 +9430,9 @@ export class LocalConnectorStore {
     mime_type: string | null;
     authored_at: string | null;
     updated_at: string | null;
+    trust_tier: string;
+    media_path: string | null;
+    media_sha256: string | null;
   }> {
     const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
     if (selectedLocalItemIds && selectedLocalItemIds.length === 0) return [];
@@ -8217,7 +9460,9 @@ export class LocalConnectorStore {
         i.search_text,
         i.mime_type,
         i.authored_at,
-        i.updated_at
+        i.updated_at,
+        i.trust_tier,
+        ${this.chunkMediaColumnsPresent ? 'c.media_path, c.media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
@@ -8241,6 +9486,9 @@ export class LocalConnectorStore {
       mime_type: string | null;
       authored_at: string | null;
       updated_at: string | null;
+      trust_tier: string;
+      media_path: string | null;
+      media_sha256: string | null;
     }>;
   }
 
@@ -8311,13 +9559,14 @@ export class LocalConnectorStore {
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
     ftsOptions: { prefix?: boolean; contentOnly?: boolean } = {},
-  ): { rows: ConnectorStoreSearchRow[]; saturated: boolean } {
+  ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
     const terms = toFtsQuery(query, ftsOptions);
-    if (!terms) return { rows: [], saturated: false };
+    if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = sourceIndexFtsTermGroups(query);
+    const exact = queryInitialisms(query);
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
@@ -8358,13 +9607,23 @@ export class LocalConnectorStore {
     // single concept is lexical noise, not evidence (live incident
     // 2026-07-25: a bookmark was cited for a four-concept question on the
     // strength of the lone word "schedule"). Distinct concept groups —
-    // raw token plus synonyms — must match at least twice.
+    // raw token plus synonyms — must all match, or three of them for a
+    // longer question (a long question is not held to every word). A
+    // candidate that matches fewer still counts when the concepts it matches
+    // carry most of the question's weight: a concept few items in this store
+    // contain says more than one most of them do (inverse document
+    // frequency). So a file named for the one rare word of "AI sycophancy" is
+    // found without "AI", while two common words of a question are noise:
+    // "June 2026 blood work" matched a diet guide on "blood" and "work", and
+    // "omega-3 level" matched every guide that says "3" and "level".
+    const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
     let selected = rows;
+    const matchedGroups = new Map<number, number>();
+    const matchedGroupIndexes = new Map<number, number[]>();
     if (minimumSignal && rows.length > 0) {
       const pks = rows.map((row) => row.item_pk);
       const placeholders = pks.map(() => '?').join(', ');
-      const matchedGroups = new Map<number, number>();
-      for (const group of groups) {
+      for (const [groupIndex, group] of groups.entries()) {
         const hits = this.db.query(`
           SELECT DISTINCT connector_store_fts.item_pk
           FROM connector_store_fts
@@ -8372,12 +9631,20 @@ export class LocalConnectorStore {
           WHERE connector_store_fts MATCH ?
             AND connector_store_fts.item_pk IN (${placeholders})
             ${selectedFtsScope.sql}
-        `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
+        `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
         for (const hit of hits) {
           matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+          matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
         }
       }
-      selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
+      const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+      const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
+      selected = rows.filter((row) => {
+        if (enough(row)) return true;
+        if (!weights) return false;
+        const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index]!, 0);
+        return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+      });
     }
     selected = this.tierVisibleRows(
       selected,
@@ -8392,8 +9659,9 @@ export class LocalConnectorStore {
       (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
     );
     const spanTerms = queryTermsForSpan(query);
+    const kept = selected.slice(0, limit);
     return {
-      rows: selected.slice(0, limit).map((row) => {
+      rows: kept.map((row) => {
         const base = searchRowFromItemRow(row);
         const chunk = row.chunk_pk === null || row.chunk_pk === undefined
           ? undefined
@@ -8401,7 +9669,33 @@ export class LocalConnectorStore {
         return chunk ? { ...base, chunk } : base;
       }),
       saturated: rows.length >= fetchLimit || selected.length > limit,
+      // How many of the query's concepts each row matched (in its name or its
+      // text). A single-concept query has nothing to count: every row matched it.
+      concepts: {
+        total: groups.length,
+        matched: new Map(kept.map((row) => [
+          row.local_item_id,
+          minimumSignal ? (matchedGroups.get(row.item_pk) ?? 0) : groups.length,
+        ])),
+      },
     };
+  }
+
+  /**
+   * Each query concept's weight in this store: its inverse document frequency,
+   * ln((items + 1) / (items containing it + 0.5)). A concept no item contains
+   * weighs the most, so the question's missing words still count against a
+   * partial match.
+   */
+  private conceptWeights(groups: ReadonlyArray<readonly string[]>, exact: ReadonlyMap<string, unknown>): { of: number[]; total: number } {
+    const items = (this.db.query('SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0').get() as { count: number }).count;
+    const of = groups.map((group) => {
+      const { count } = this.db.query(
+        'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
+      ).get(sourceIndexFtsGroupQuery(group, exact)) as { count: number };
+      return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+    });
+    return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
   }
 
   /**
@@ -8506,6 +9800,87 @@ export class LocalConnectorStore {
     ).map((row) => searchRowFromItemRow(row));
   }
 
+  /**
+   * A bounded window of live rows that are Private by their OWN stored tier
+   * (S4 and S4+; S5 is Secrets and never listed). The scan covers item_pk in
+   * (after, after + window], so its cost is bounded by `window` whatever the
+   * table holds (no trust_tier index exists); `next` is where the following
+   * call resumes, absent once the end of the table was reached. Identities
+   * only, never text. Used by the Private-row re-home pass (tier-row-rehome.ts).
+   */
+  privateTierRowWindow(options: { after?: number; window: number; limit: number }): {
+    rows: Array<{ itemPk: number; storedTier: SourceTrustTier; identity: SourceItemIdentity }>;
+    next?: number;
+  } {
+    const after = Math.max(0, Math.floor(options.after ?? 0));
+    const window = Math.max(1, Math.floor(options.window));
+    const limit = Math.max(1, Math.floor(options.limit));
+    const upper = after + window;
+    const top = (this.db.query('SELECT MAX(item_pk) AS top FROM items').get() as { top: number | null } | null)?.top ?? 0;
+    const rows = this.db.query(`
+      SELECT item_pk, trust_tier, family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
+      FROM items
+      WHERE item_pk > ? AND item_pk <= ? AND tombstoned = 0 AND trust_tier IN ('S4', 'S4+')
+      ORDER BY item_pk
+      LIMIT ?
+    `).all(after, upper, limit) as Array<ItemRow & { item_pk: number }>;
+    const full = rows.length >= limit;
+    const last = rows.at(-1);
+    // A full page resumes right after its last row; otherwise after the window.
+    const resume = full && last ? last.item_pk : upper;
+    return {
+      rows: rows.map((row) => ({
+        itemPk: row.item_pk,
+        storedTier: trustTierFromRow(row.trust_tier),
+        identity: sourceItemFromRow(row),
+      })),
+      ...(resume < top ? { next: resume } : {}),
+    };
+  }
+
+  /**
+   * Whether this store serves an item's CONTENT right now, without reading
+   * it: the item exists and is not tombstoned; its stored tier is a known
+   * tier below S5; no metadata-only owner rule covers its path (evaluated
+   * now, so the rule applies before any strip has run); it still has stored
+   * text (at least one chunk row); and the tier ledger keeps this store's
+   * copy current WITH the content layer (a copy that serves only names, or a
+   * superseded or staged one, does not). Item, chunk-existence and ledger
+   * reads only: no chunk text is loaded. Fails closed (false) when the ledger
+   * cannot be read or the stored tier is unknown.
+   */
+  contentServedNow(localItemId: string): boolean {
+    const row = this.db.query(`
+      SELECT item_pk, trust_tier, locator_uri, provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0
+    `).get(localItemId) as {
+      item_pk: number;
+      trust_tier: string;
+      locator_uri: string | null;
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+    } | null;
+    if (!row) return false;
+    try {
+      if (trustTierFromRow(row.trust_tier) === 'S5') return false;
+    } catch {
+      return false;
+    }
+    if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined) !== undefined) return false;
+    const hasText = this.db.query('SELECT EXISTS (SELECT 1 FROM chunks WHERE item_pk = ?) AS present').get(row.item_pk) as { present: number } | null;
+    if (!hasText?.present) return false;
+    const identity = {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    };
+    return this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+  }
+
   // Local content lane for the evidence-pack provider: bounded chunks, the
   // stored trust tier, and the locator uri. Tombstoned/unknown items yield
   // undefined so the pack records an honest extraction gap.
@@ -8513,14 +9888,18 @@ export class LocalConnectorStore {
     localItemId: string,
     maxChars?: number,
     passageFocus?: ConnectorStorePassageFocus,
+    // Names only: the item's stored tier and locator, never its text. For an
+    // item the owner's scope keeps unread, so no chunk row is even selected.
+    options: { withoutContent?: boolean } = {},
   ): ConnectorStoreLocalContent | undefined {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
-        provider_conversation_id,
+        provider_conversation_id, title,
         ${this.reactionsColumnPresent ? 'reactions_json' : 'NULL AS reactions_json'}
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId) as {
       item_pk: number;
+      title: string | null;
       trust_tier: string;
       locator_uri: string | null;
       mime_type: string;
@@ -8544,16 +9923,42 @@ export class LocalConnectorStore {
     if (!this.copyServable(identity)) {
       return undefined;
     }
-    const servesContent = this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    const servesContent = options.withoutContent !== true
+      && this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    const queryVector = passageFocus?.queryVector;
+    const vectorModelId = passageFocus?.queryVectorModelId;
+    const scoreByVector = queryVector !== undefined && queryVector.length > 0 && vectorModelId !== undefined;
     const chunkRows = servesContent
-      ? this.db.query(
-        'SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
-      ).all(row.item_pk) as Array<{ bounded_text: string }>
+      ? (scoreByVector
+        ? this.db.query(`
+          SELECT c.bounded_text, e.embedding
+          FROM chunks c
+          LEFT JOIN chunk_embeddings e
+            ON e.chunk_pk = c.chunk_pk AND e.model_id = ? AND e.content_hash = c.embedding_input_hash
+          WHERE c.item_pk = ? ORDER BY c.chunk_index
+        `).all(vectorModelId, row.item_pk)
+        : this.db.query(
+          'SELECT bounded_text, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
+        ).all(row.item_pk)) as Array<{ bounded_text: string; embedding: unknown }>
       : [];
+    // Cosine of each chunk's current vector to the query; undefined where the
+    // chunk has none (or one of another width), so it ranks after the rest.
+    const relevance = scoreByVector
+      ? chunkRows.map((chunk) => {
+          if (chunk.embedding === null || chunk.embedding === undefined) return undefined;
+          const vector = decodeEmbedding(chunk.embedding);
+          return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
+        })
+      : undefined;
     const { chunks, truncated } = selectEvidencePassages(
-      chunkRows.map((chunk) => chunk.bounded_text),
+      // Layout padding (OCR and PDF text keep column alignment as runs of
+      // spaces) is not evidence; dropping it lets the same budget carry
+      // several times the text (2026-10-02 live Private store: 36% padding
+      // overall, 69% in one scanned report).
+      chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)),
       maxChars,
       passageFocus,
+      { title: row.title, ...(relevance ? { relevance } : {}) },
     );
     // Item-level context seam: the reaction line is prepended as its own
     // leading block rather than written into a chunk. Chunks stay a faithful
@@ -8562,7 +9967,9 @@ export class LocalConnectorStore {
     // a released citation can carry "confirmed by 👍 ×2". It rides ahead of
     // the char budget deliberately: it is bounded and it is the only part of
     // the evidence a truncation must never silently drop.
-    const reactionLine = renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json));
+    const reactionLine = servesContent
+      ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json))
+      : undefined;
     return {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
@@ -8615,6 +10022,20 @@ export class LocalConnectorStore {
       ${namesOnlyNotIn}`;
     const parityWhere = `${contentWhere}
       ${heldNotIn}`;
+    // Which files the scope asks to be read. A names copy whose text no copy
+    // holds yet is still waiting to be read, so it counts here even though it
+    // stays out of every text, chunk and parity count above: counting it as
+    // names only reported a freshly chosen Full folder as already finished.
+    const unread = new Set(tier.metadataLayerContentUnread);
+    const keptNamesOnlyPks = tier.metadataLayer.filter((pk) => !unread.has(pk));
+    const fileNamesOnlyNotIn = keptNamesOnlyPks.length > 0
+      ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
+      : '';
+    const fileScopeWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${contentFilters.sql}
+      ${hiddenNotIn}
+      ${fileNamesOnlyNotIn}`;
     const jsonList = (pks: readonly number[]): string[] => (pks.length > 0 ? [JSON.stringify(pks)] : []);
     const itemParams = [...(accountScope ? [accountScope] : []), ...itemFilters.params, ...jsonList(tier.hidden)];
     const contentParams = [
@@ -8624,6 +10045,12 @@ export class LocalConnectorStore {
       ...jsonList(tier.metadataLayer),
     ];
     const parityParams = [...contentParams, ...jsonList(tier.held)];
+    const fileScopeParams = [
+      ...(accountScope ? [accountScope] : []),
+      ...contentFilters.params,
+      ...jsonList(tier.hidden),
+      ...jsonList(keptNamesOnlyPks),
+    ];
     const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -8654,7 +10081,7 @@ export class LocalConnectorStore {
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND LOWER(i.mime_type) <> 'inode/directory'
-            ${contentWhere}
+            ${fileScopeWhere}
         ) AS full_ingestion_files
     `).get(
       ...itemParams,
@@ -8664,7 +10091,7 @@ export class LocalConnectorStore {
       ...parityParams,
       ...parityParams,
       ...contentParams,
-      ...contentParams,
+      ...fileScopeParams,
     ) as {
       items: number;
       files: number;
@@ -8683,8 +10110,8 @@ export class LocalConnectorStore {
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
-          ${contentWhere}
-      `).all(...contentParams) as Array<{
+          ${fileScopeWhere}
+      `).all(...fileScopeParams) as Array<{
         locator_uri: string | null;
         title: string | null;
         mime_type: string | null;
@@ -8952,6 +10379,7 @@ export async function syncAndEmbedFromConnector(
         chunksSeen: embed.chunksSeen + batch.chunksSeen,
         chunksEmbedded: embed.chunksEmbedded + batch.chunksEmbedded,
         chunksSkipped: embed.chunksSkipped + batch.chunksSkipped,
+        ...mergedPrivateTierWithheld(embed, batch),
       }
       : batch;
   }
@@ -9103,19 +10531,22 @@ export function createConnectorStoreCorpusAdapter(
           rawExposed: false,
         };
       }
+      const lanes = [
+        { name: 'keyword', items: rows },
+        { name: 'recency', items: recencyRows },
+      ];
       const fused = fuseRankedCandidateLanes({
-        lanes: [
-          { name: 'keyword', items: rows },
-          { name: 'recency', items: recencyRows },
-        ],
+        lanes,
         getId: (row) => row.sourceItem.localItemId,
-        limit: Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS)),
+        limit: allCandidates(lanes),
         tieBreaker: connectorStoreCandidateComparator(lexicalContentPreference),
       });
+      const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
+        candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
       const hits = withPinnedNewestChatHits({
         store,
         recencyRows,
-        hits: contentFirstCandidates(fused).map((candidate) => connectorStoreHitFromRow(
+        hits: rankedCandidates(fused, request.maxResults, complete).map((candidate) => connectorStoreHitFromRow(
           store,
           candidate.item,
           candidate.score,
@@ -9176,6 +10607,58 @@ export function createConnectorStoreCorpusAdapter(
       backend: embeddingProvider.backend,
     };
   };
+  // The vector lane alone, without its relevance bar: the nearest items to
+  // the query in meaning, whatever their cosine, as candidates and never as
+  // matches. Same scope and filters as the search. A short question in one
+  // language can sit just under the bar against the item that answers it in
+  // another (2026-10-10: "Letter of Intent notary" peaked at 0.725 under
+  // EmbeddingGemma 2's 0.73, so no vector row entered and the Spanish letter
+  // was never found), so a consumer that ranks on its own reads them too.
+  adapter.semanticNeighbours = async (request) => {
+    assertConnectorStoreCorpusRequest(store, request);
+    const startedAt = Date.now();
+    const none = { matchedItems: 0, contentMatchedItems: 0, saturated: false };
+    if (
+      !embeddingProvider
+      || (options.retrievalMode ?? 'hybrid') !== 'hybrid'
+      || (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
+      || !store.hasEmbeddings(embeddingProvider.modelId)
+    ) {
+      return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
+    }
+    const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
+    const lane = await store.vectorSearchLane(
+      request.query,
+      embeddingProvider,
+      maxResults,
+      options.accountScope,
+      filters,
+      request.deadlineAtMs,
+    );
+    return {
+      hits: lane.rows.map((row) => connectorStoreHitFromRow(
+        store,
+        row,
+        row.bestCosine,
+        options.resultProjector,
+        filters?.locatorPathScope,
+      )),
+      latencyMs: Date.now() - startedAt,
+      laneAudits: [{
+        laneName: `${store.corpusId}:connector_store_vector_neighbours`,
+        laneType: 'semantic',
+        candidateCount: lane.rows.length,
+        returnedCount: lane.rows.length,
+        ...(lane.skippedReason !== undefined ? { skippedReason: lane.skippedReason } : {}),
+        modelId: embeddingProvider.modelId,
+        backend: VECTOR_BACKEND,
+        localOnly: true,
+        rawExposed: false,
+      }],
+      matchCount: none,
+      rawExposed: false,
+    };
+  };
   return adapter;
 }
 
@@ -9229,6 +10712,8 @@ function connectorStoreHitFromRow(
     provenance: provenanceFromSearchRow(store.corpusId, row),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
     score,
+    // Every lane's hit (keyword, semantic, recency, pinned) is built here.
+    trustTier: row.trustTier,
     rawExposed: false,
   };
 }
@@ -9309,36 +10794,44 @@ async function hybridConnectorStoreSearch(
   // common-token FTS saturation gives off-domain questions nonzero keyword
   // rows, so a keyword-empty arming condition never fires on exactly the
   // questions the bar exists for).
-  const gateArmed = semanticRelevanceBar !== undefined;
+  const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
+  const gateArmed = relevanceBar !== undefined;
   const vectorRows = gateArmed
-    ? scoredVectorRows.filter((row) => row.bestCosine >= semanticRelevanceBar)
+    ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
     : scoredVectorRows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
   const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
-  const contentBar = semanticRelevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
-  const contentPreference = connectorStoreContentPreference(new Set(contentBar === undefined
+  const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
+  const vettedVectorItemIds = new Set(contentBar === undefined
     ? []
     : vectorRows
       .filter((row) => row.bestCosine >= contentBar)
-      .map((row) => row.sourceItem.localItemId)));
+      .map((row) => row.sourceItem.localItemId));
+  const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
 
+  const lanes = [
+    { name: 'keyword', items: keywordRows },
+    { name: 'vector', items: vectorRows },
+    ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows }] : []),
+  ];
   const fused = fuseRankedCandidateLanes({
-    lanes: [
-      { name: 'keyword', items: keywordRows },
-      { name: 'vector', items: vectorRows },
-      ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows }] : []),
-    ],
+    lanes,
     getId: (row) => row.sourceItem.localItemId,
-    limit: maxResults,
+    limit: allCandidates(lanes),
     tieBreaker: connectorStoreCandidateComparator(contentPreference),
   });
+  const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => {
+    const id = candidate.item.sourceItem.localItemId;
+    return (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(id))
+      || (candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(id));
+  };
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: contentFirstCandidates(fused, contentPreference).map((candidate) => connectorStoreHitFromRow(
+    hits: rankedCandidates(fused, maxResults, complete, contentPreference).map((candidate) => connectorStoreHitFromRow(
       store,
       candidate.item,
       candidate.score,
@@ -9408,11 +10901,15 @@ function hybridMatchCount(
   gateArmed: boolean,
 ): SourceIndexCorpusMatchCount {
   if (!gateArmed) return keyword;
-  const semanticOnly = vectorRows.filter((row) => !lexicalItemIds.has(row.sourceItem.localItemId)).length;
+  const semanticOnlyRows = vectorRows.filter((row) => !lexicalItemIds.has(row.sourceItem.localItemId));
+  const semanticOnly = semanticOnlyRows.length;
   return {
     matchedItems: keyword.matchedItems + semanticOnly,
     contentMatchedItems: keyword.contentMatchedItems + semanticOnly,
     saturated: keyword.saturated,
+    ...(keyword.secureMatchedItems !== undefined
+      ? { secureMatchedItems: keyword.secureMatchedItems + semanticOnlyRows.filter(connectorStoreRowIsSecureTier).length }
+      : {}),
   };
 }
 
@@ -9457,13 +10954,23 @@ function connectorStoreKeywordLaneRows(
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
   ftsOptions: { prefix?: boolean } = {},
-): { rows: ConnectorStoreSearchRow[]; matchCount: SourceIndexCorpusMatchCount; matchedItemIds: ReadonlySet<string> } {
+): {
+  rows: ConnectorStoreSearchRow[];
+  matchCount: SourceIndexCorpusMatchCount;
+  matchedItemIds: ReadonlySet<string>;
+  completeItemIds: ReadonlySet<string>;
+} {
   const plain = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
   const rows = plain.rows;
   const content = rows.every(connectorStoreRowHasContent)
-    ? { rows: [], saturated: false }
+    ? { rows: [], saturated: false, concepts: plain.concepts }
     : store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
   const contentRows = content.rows;
+  // Rows that match every concept of the question, in their name or text.
+  const complete = new Set<string>();
+  for (const concepts of [plain.concepts, content.concepts]) {
+    for (const [id, matched] of concepts.matched) if (matched >= concepts.total) complete.add(id);
+  }
   const seen = new Set<string>();
   const merged: ConnectorStoreSearchRow[] = [];
   for (const row of [
@@ -9475,14 +10982,22 @@ function connectorStoreKeywordLaneRows(
     seen.add(row.sourceItem.localItemId);
     merged.push(row);
   }
+  // Content first only among equals: a readable item that matches part of
+  // the question does not outrank a name that matches all of it.
+  const ordered = [
+    ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
+    ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
+  ];
   return {
-    rows: merged.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
+    rows: ordered.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
     matchCount: {
       matchedItems: merged.length,
       contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
       saturated: plain.saturated || content.saturated,
+      secureMatchedItems: merged.filter(connectorStoreRowIsSecureTier).length,
     },
     matchedItemIds: seen,
+    completeItemIds: complete,
   };
 }
 
@@ -9492,6 +11007,12 @@ function connectorStoreKeywordLaneRows(
 // or metadata-only item.
 function connectorStoreRowHasContent(row: ConnectorStoreSearchRow): boolean {
   return row.chunk !== undefined;
+}
+
+// A row's own tier, which is the tier its content is served at; the store's
+// trust domain is the corpus default the router already judges.
+function connectorStoreRowIsSecureTier(row: ConnectorStoreSearchRow): boolean {
+  return isSecureTrustTier(row.trustTier);
 }
 
 // Which candidates earn content preference. A lexical match on a content
@@ -9513,16 +11034,28 @@ function connectorStoreContentPreference(vettedVectorItemIds: ReadonlySet<string
 
 const lexicalContentPreference: ContentPreference = connectorStoreContentPreference(new Set());
 
-// Fusion decides which candidates make the cut; within it, a title-only or
-// metadata-only item never outranks one the Analyst can actually read.
-function contentFirstCandidates(
+// The final order and cut over fusion's order. A candidate that matches the
+// whole question (every concept of it in its name or text, or a vetted vector
+// hit) comes before one that matches only part of it; within each, a
+// title-only or metadata-only item never outranks one the Analyst can
+// actually read. So a readable document never buries the file named for the
+// question just because it shares one of the question's words, and a name
+// never buries a document that answers the question as fully.
+function rankedCandidates(
   candidates: readonly FusedRankedCandidate<ConnectorStoreSearchRow>[],
+  limit: number,
+  complete: (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean,
   hasContent: ContentPreference = lexicalContentPreference,
 ): FusedRankedCandidate<ConnectorStoreSearchRow>[] {
-  return [
-    ...candidates.filter(hasContent),
-    ...candidates.filter((candidate) => !hasContent(candidate)),
-  ];
+  const tiers: FusedRankedCandidate<ConnectorStoreSearchRow>[][] = [[], [], [], []];
+  for (const candidate of candidates) {
+    tiers[(complete(candidate) ? 0 : 2) + (hasContent(candidate) ? 0 : 1)]!.push(candidate);
+  }
+  return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+}
+
+function allCandidates(lanes: ReadonlyArray<{ items: readonly unknown[] }>): number {
+  return Math.max(1, lanes.reduce((total, lane) => total + lane.items.length, 0));
 }
 
 // RRF tie-breaker: a content-preferred candidate first (a vetted vector hit on
@@ -9627,17 +11160,79 @@ function connectorStoreKeywordLaneAudit(
 export interface ConnectorStoreContentProviderOptions {
   store: LocalConnectorStore;
   accountScope?: string;
+  // The scope whose contents may be read.
   filters?: ConnectorStoreSearchFilters;
+  // The wider scope whose NAMES are searchable. An item inside it but outside
+  // `filters` (or any item in it when `contentAllowed` is false) sits in a
+  // folder the owner set to Names only: the provider returns it without text,
+  // marked `namesOnly`, so coverage says "kept unread by choice" rather than
+  // "could not be read". Omitted, nothing is reported as Names only.
+  metadataFilters?: ConnectorStoreSearchFilters;
+  contentAllowed?: boolean;
+  /**
+   * The store's own embedding provider (the one its vector lane searches
+   * with), used only to rank a long item's passages by similarity to the
+   * query. Share one memoizeQueryEmbeddings() wrapper with the adapter so the
+   * query is embedded once. A Private store only accepts an approved provider.
+   */
+  embeddingProvider?: SourceEmbeddingProvider;
 }
+
+// The coverage sentence for an item in a Names-only folder. Source-agnostic:
+// it names the owner's choice, never the folder.
+// The coverage sentence for an item whose name is in this tier and whose
+// contents are tiered Private: read only by the Private lane, never here.
+export const CONNECTOR_STORE_CONTENT_PRIVATE_GAP =
+  "this item's contents are marked Private; only its name is in this tier.";
+
+export const CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP =
+  "the owner set this item's folder to Names only; its name is searchable and its contents are not read.";
 
 // LocalContentProvider over the store: bounded chunks, the item's stored
 // sensitivity, and the stored locator uri. Local by construction — every read
 // goes to the store's sqlite file; nothing here touches the network.
+/**
+ * A connector store's content provider, plus `contentServable`: whether it
+ * would serve an item's content now under this provider's scope, answered
+ * from the item row, the scope filters and the tier ledger only (no chunk is
+ * loaded, no passage selected). The private answer panel's eligibility guard
+ * asks it before every model input.
+ */
+export interface ConnectorStoreContentProvider extends LocalContentProvider {
+  contentServable(request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain }): boolean;
+}
+
 export function createConnectorStoreContentProvider(
   options: ConnectorStoreContentProviderOptions,
-): LocalContentProvider {
+): ConnectorStoreContentProvider {
   const { store } = options;
+  const embeddingProvider = options.embeddingProvider
+    && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider))
+    ? options.embeddingProvider
+    : undefined;
+  // The query's vector for passage ranking, or nothing. Never fails the read:
+  // without it, passages fall back to lexical and document order.
+  let storeHasVectors: boolean | undefined;
+  const queryVector = async (query: string | undefined): Promise<readonly number[] | undefined> => {
+    const text = query?.trim();
+    if (!embeddingProvider || !text) return undefined;
+    try {
+      storeHasVectors ??= store.hasEmbeddings(embeddingProvider.modelId);
+      if (!storeHasVectors) return undefined;
+      const [vector] = await embeddingProvider.embed([{ text }], { taskType: 'RETRIEVAL_QUERY' });
+      return vector && vector.length === embeddingProvider.dimension ? vector : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   return {
+    contentServable(request) {
+      if (request.trustDomain !== store.trustDomain) return false;
+      const localItemId = request.provenance.sourceItem.localItemId.trim();
+      if (!localItemId || options.contentAllowed === false) return false;
+      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return false;
+      return store.contentServedNow(localItemId);
+    },
     async fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined> {
       if (request.trustDomain !== store.trustDomain) {
         throw new Error(
@@ -9647,13 +11242,54 @@ export function createConnectorStoreContentProvider(
       }
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
-      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return undefined;
+      const contentInScope = options.contentAllowed !== false
+        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
+      if (!contentInScope) {
+        if (!options.metadataFilters
+          || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
+          return undefined;
+        }
+        const names = store.localContent(localItemId, request.maxChars, undefined, { withoutContent: true });
+        if (!names) return undefined;
+        // Content tiered Private is not the owner's Names-only choice: the
+        // answer to it is the Private lane's, and coverage says so.
+        if (store.contentHeldPrivate(localItemId)) {
+          return {
+            sensitivity: buildSourceSensitivity({ trustTier: names.trustTier, trustDomain: store.trustDomain }),
+            chunks: [],
+            contentPrivate: true,
+            coverageGaps: [CONNECTOR_STORE_CONTENT_PRIVATE_GAP],
+            ...(names.locatorUri ? { locatorUri: names.locatorUri } : {}),
+          };
+        }
+        return {
+          sensitivity: buildSourceSensitivity({ trustTier: names.trustTier, trustDomain: store.trustDomain }),
+          chunks: [],
+          namesOnly: true,
+          coverageGaps: [CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP],
+          ...(names.locatorUri ? { locatorUri: names.locatorUri } : {}),
+        };
+      }
       const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
+      const anchorLane = request.provenance.chunk?.span?.lane;
+      const vector = await queryVector(request.query);
       const content = store.localContent(localItemId, request.maxChars, {
         ...(request.query?.trim() ? { query: request.query } : {}),
+        ...(request.maxPassages !== undefined ? { maxPassages: request.maxPassages } : {}),
         ...(anchorChunkIndex !== undefined ? { anchorChunkIndex } : {}),
+        ...(anchorLane === 'keyword' || anchorLane === 'semantic' ? { anchorLane } : {}),
+        ...(vector && embeddingProvider ? { queryVector: vector, queryVectorModelId: embeddingProvider.modelId } : {}),
       });
       if (!content) return undefined;
+      if (content.chunks.length === 0 && store.contentHeldPrivate(localItemId)) {
+        return {
+          sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
+          chunks: [],
+          contentPrivate: true,
+          coverageGaps: [CONNECTOR_STORE_CONTENT_PRIVATE_GAP],
+          ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
+        };
+      }
       // An item with no chunks has two very different explanations and the
       // Analyst acts differently on each: "extraction is pending" invites a
       // retry and reads as a stalled lane, while "the owner indexes this
@@ -9669,6 +11305,7 @@ export function createConnectorStoreContentProvider(
         chunks: content.chunks,
         ...(content.truncated ? { truncated: true } : {}),
         ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
+        ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),
         ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
       };
     },
@@ -9745,7 +11382,6 @@ function assertConnectorStoreStorageProfile(profile: SourceIndexStorageProfile):
 interface NormalizedConnectorStoreClassification {
   baselineTrustTier: SourceTrustTier;
   baselineTrustDomain: SourceTrustDomain;
-  sensitivityMap?: SensitivityMap;
   ownerRules?: readonly OwnerTierRule[];
 }
 
@@ -9756,7 +11392,6 @@ function normalizeClassificationOptions(
   return {
     baselineTrustTier: options.baselineTrustTier ?? 'S3',
     baselineTrustDomain: options.baselineTrustDomain ?? 'internal',
-    ...(options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),
     ...(options.ownerRules?.length ? { ownerRules: [...options.ownerRules] } : {}),
   };
 }
@@ -9783,10 +11418,10 @@ function classifyConnectorStoreItem(
 ): SourceSensitivity {
   if (!classification) return placeInExistingStore(item, placement, storeTrustDomain);
 
-  // The SHARED per-item engine, not just the sensitivity map.
+  // The SHARED per-item engine.
   //
-  // This policy used to run the map alone and then fall straight to its
-  // baseline. Every connector-store lane configures an `internal` baseline, so
+  // This policy once ran the (since retired) sensitivity map alone and then
+  // fell straight to its baseline. Every connector-store lane configures an `internal` baseline, so
   // the engine's conservative detectors — credentials, financial, health,
   // identity — never ran on a store lane at all: a bank statement classified
   // as ordinary internal mail and became cloud-embedding eligible, and a
@@ -9794,13 +11429,7 @@ function classifyConnectorStoreItem(
   // the S5 rule in the sync loop. The mail and file connectors then shipped a
   // detector-backed classify() for exactly this decision; supplying a policy
   // silently replaced it with the weaker half.
-  //
-  // The engine consults the map itself, and in its own order: a credential
-  // finding outranks a map category (fail closed), which is the one behaviour
-  // this changes for a map that was already configured.
-  const classified = classifyItemTier(classificationInputFromRawItem(item), {
-    ...(classification.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : {}),
-  });
+  const classified = classifyItemTier(classificationInputFromRawItem(item));
   // The S5 floor outranks every rule: a secret is tombstoned, never placed.
   if (classified.tier === 'S5') {
     return buildSourceSensitivity({ trustTier: 'S5', trustDomain: 'secure_local' });
@@ -9812,12 +11441,6 @@ function classifyConnectorStoreItem(
     (rule.tier === 'secure' || rule.tier === 'secrets')
     && ownerRuleMatches(rule, placementSignalsFromRawItem(item), item.identity.provider))) {
     return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
-  }
-  if (classified.decidedBy === 'sensitivity_map') {
-    return buildSourceSensitivity({
-      trustTier: classified.tier,
-      trustDomain: classified.trustDomain,
-    });
   }
   // Raise-only above the lane's baseline. The engine's own floor is
   // secure_local for everything it cannot positively call clean, and adopting
@@ -9867,12 +11490,11 @@ function classificationInputFromRawItem(item: RawItem): ClassifyItemTierInput {
   // rather than being folded into the text haystack.
   const labels = metadataStringArray(item.metadata, 'labels');
   // The item's own name is part of its path, so it belongs in the haystack the
-  // sensitivity map's path patterns are tested against — JOINED, not chosen
-  // between. Picking the first available signal meant a source that publishes a
+  // detectors' path hints read — JOINED, not chosen between. Picking the first available signal meant a source that publishes a
   // locator URL but no folder path (any provider whose paths are built from
   // opaque folder ids) had its filename invisible to path matching, so a file
-  // called `password-manager-export.csv` classified as ordinary. Matching is
-  // substring containment and this classifier only ever RAISES a tier, so a
+  // called `password-manager-export.csv` classified as ordinary. This
+  // classifier only ever RAISES a tier, so a
   // longer haystack can tighten a decision and can never loosen one.
   const path = [
     metadataString(item.metadata, 'pathDisplay')
@@ -10328,6 +11950,33 @@ function connectorStoreEmbeddingInputSha256(
   return digest.digest('hex');
 }
 
+/**
+ * The content population a status scope counts parity over (status():
+ * contentAllowed, account, content filters), for counts that must agree with
+ * that parity. The tier-ledger exclusions are applied by the caller.
+ */
+function statusScopeContentFilter(scope: ConnectorStoreStatusScope | undefined): { filter: string; params: string[] } {
+  if (!scope) return { filter: '', params: [] };
+  const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+  const contentFilters = connectorStoreFilterSql(scope.contentFilters);
+  return {
+    filter: `${scope.contentAllowed === false ? 'AND 0' : ''}
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${contentFilters.sql}`,
+    params: [...(accountScope ? [accountScope] : []), ...contentFilters.params],
+  };
+}
+
+function mergedPrivateTierWithheld(
+  a: ConnectorStoreEmbedSummary,
+  b: ConnectorStoreEmbedSummary,
+): Pick<ConnectorStoreEmbedSummary, 'privateTierWithheld'> {
+  const chunks = (a.privateTierWithheld?.chunks ?? 0) + (b.privateTierWithheld?.chunks ?? 0);
+  return chunks > 0
+    ? { privateTierWithheld: { chunks, reason: CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON } }
+    : {};
+}
+
 function connectorStoreEmbedSummary(
   corpusId: string,
   trustDomain: SourceTrustDomain,
@@ -10563,46 +12212,136 @@ export interface ConnectorStorePassageFocus {
   query?: string;
   /** The chunk a retrieval lane matched (keyword or vector), kept first. */
   anchorChunkIndex?: number;
+  /**
+   * Which lane matched the anchor chunk. A keyword anchor is kept only when
+   * its own text carries a discriminating query term: a match through the
+   * item's name lands on an arbitrary chunk (bm25 favours the shortest), so it
+   * says nothing about which passage answers.
+   */
+  anchorLane?: 'keyword' | 'semantic';
+  /**
+   * The query's embedding, with the model it was made by. Present, each chunk
+   * holding a current vector of that model is scored by cosine, which picks
+   * the item's most query-like passages when no query term singles one out.
+   */
+  queryVector?: readonly number[];
+  queryVectorModelId?: string;
+  /** At most this many passages (MAX_PASSAGES_PER_CANDIDATE by default). */
+  maxPassages?: number;
 }
 
 // At most this many passages from one item, so a long document contributes
 // its best few passages rather than a smear of every chunk.
 const MAX_PASSAGES_PER_CANDIDATE = 3;
+// Chunks this close to the best by embedding share the passage budget (see
+// selectEvidencePassages). The panel's lead gap on the same cosine scale.
+const PASSAGE_TIE_MARGIN = 0.03;
 
 // An item that fits its budget is returned whole, exactly as before. A longer
 // one yields its best passages instead of its first ones: the chunk a
 // retrieval lane matched, then the chunks densest in query terms, kept in
-// document order and clipped around their term windows. With neither signal
-// (no query terms, no anchor) the prefix is the only defensible choice.
+// document order and clipped around their term windows.
+//
+// Only terms that discriminate WITHIN the item count. A term the item's own
+// name carries explains why the item matched, not which passage answers: a
+// dated file name puts its date in every page header of a scanned report, and
+// windows around those dates were page headers, not the report's values
+// (2026-10-02 live: three header slivers per report). With no
+// discriminating term, the passages are the chunks most similar to the query
+// by embedding (when the store holds vectors), else the item from the top,
+// as whole contiguous text rather than slivers.
 function selectEvidencePassages(
   chunks: readonly string[],
   maxChars: number | undefined,
   focus: ConnectorStorePassageFocus | undefined,
+  context: { title?: string | null; relevance?: readonly (number | undefined)[] } = {},
 ): { chunks: readonly string[]; truncated: boolean } {
   if (maxChars === undefined || maxChars <= 0) return budgetChunks(chunks, maxChars);
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus) return budgetChunks(chunks, maxChars);
-  const termGroups = focus.query ? sourceIndexChunkQueryTerms(focus.query) : [];
-  const anchor = focus.anchorChunkIndex !== undefined
+  const termGroups = withoutNameTerms(focus.query ? sourceIndexChunkQueryTerms(focus.query) : [], context.title);
+  const lexical = chunks.map((text) => (termGroups.length > 0 ? sourceIndexChunkTermScore(text, termGroups) : 0));
+  const relevance = (index: number): number => context.relevance?.[index] ?? Number.NEGATIVE_INFINITY;
+  const anchorIndex = focus.anchorChunkIndex !== undefined
     && focus.anchorChunkIndex >= 0
     && focus.anchorChunkIndex < chunks.length
     ? focus.anchorChunkIndex
     : undefined;
-  const scored = chunks
-    .map((text, index) => ({ index, score: termGroups.length > 0 ? sourceIndexChunkTermScore(text, termGroups) : 0 }))
-    .filter((entry) => entry.score > 0 && entry.index !== anchor)
-    .sort((left, right) => right.score - left.score || left.index - right.index);
-  const picked = [
-    ...(anchor !== undefined ? [anchor] : []),
-    ...scored.map((entry) => entry.index),
-  ].slice(0, MAX_PASSAGES_PER_CANDIDATE);
-  if (picked.length === 0) return budgetChunks(chunks, maxChars);
-  const bounded = boundedSourceIndexChunks(
-    picked.sort((left, right) => left - right).map((index) => chunks[index]!),
-    maxChars,
-    termGroups,
-  );
-  return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+  const anchor = anchorIndex !== undefined && (focus.anchorLane !== 'keyword' || lexical[anchorIndex]! > 0)
+    ? anchorIndex
+    : undefined;
+  if (lexical.some((score) => score > 0)) {
+    const scored = lexical
+      .map((score, index) => ({ index, score }))
+      .filter((entry) => entry.score > 0 && entry.index !== anchor)
+      .sort((left, right) => right.score - left.score
+        || relevance(right.index) - relevance(left.index)
+        || left.index - right.index);
+    const picked = [
+      ...(anchor !== undefined ? [anchor] : []),
+      ...scored.map((entry) => entry.index),
+    ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
+    const bounded = boundedSourceIndexChunks(
+      picked.sort((left, right) => left - right).map((index) => chunks[index]!),
+      maxChars,
+      termGroups,
+    );
+    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+  }
+  // Most relevant first (the anchor, then by embedding), filled whole until
+  // the budget runs out, then read in document order. Chunks within
+  // PASSAGE_TIE_MARGIN of the best by embedding are a near-tie: they share
+  // the budget (the shorter whole, the rest an equal share from their start)
+  // rather than the first taking it all. A question in one language over a
+  // document in another matches no query term, so the embedding alone
+  // ranks, and its near-ties do not say which passage answers (2026-10-10
+  // live: a Spanish letter of intent's opening chunk at 0.740 took the whole
+  // budget from the deed and expenses clause at 0.732).
+  const ranked = chunks
+    .map((_, index) => index)
+    .sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0)
+      || relevance(right) - relevance(left)
+      || left - right);
+  const kept = new Map<number, string>();
+  let remaining = maxChars;
+  const best = Math.max(...ranked.map(relevance));
+  const tied = Number.isFinite(best)
+    ? ranked
+      .filter((index) => index === anchor || relevance(index) >= best - PASSAGE_TIE_MARGIN)
+      .slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)))
+    : [];
+  if (tied.length > 1) {
+    const byLength = [...tied].sort((left, right) => chunks[left]!.length - chunks[right]!.length || left - right);
+    byLength.forEach((index, position) => {
+      const included = chunks[index]!.slice(0, Math.floor(remaining / (byLength.length - position)));
+      kept.set(index, included);
+      remaining -= included.length;
+    });
+  }
+  for (const index of ranked) {
+    if (remaining <= 0) break;
+    if (kept.has(index)) continue;
+    const text = chunks[index]!;
+    const included = text.length > remaining ? text.slice(0, remaining) : text;
+    kept.set(index, included);
+    remaining -= included.length;
+  }
+  const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  return {
+    chunks: ordered.map(([, text]) => text),
+    truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index]!.length),
+  };
+}
+
+// Query term groups minus those the item's name carries (see above).
+function withoutNameTerms(
+  termGroups: ReadonlyArray<readonly string[]>,
+  title: string | null | undefined,
+): ReadonlyArray<readonly string[]> {
+  if (!title) return termGroups;
+  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
+  if (nameTokens.size === 0) return termGroups;
+  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
 }
 
 function budgetChunks(
@@ -10660,6 +12399,34 @@ function assertConnectorStoreEmbeddingBackend(
   }
 }
 
+/**
+ * The content-free reason a row stays unembedded because its own tier is
+ * Private and the embedder is not approved for Private content.
+ */
+export const CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON =
+  'private_tier_requires_private_embedder' as const;
+
+/**
+ * The row half of the trust rule. The store-level assertion above decides by
+ * the store's domain alone, so a row that is Private by its OWN tier (an S4
+ * row a lane's placement or a corpus default put in a Personal store) would
+ * otherwise reach any embedder the store accepts. This is the same approval
+ * the store level uses for a secure_local store
+ * (isApprovedSecureSourceEmbeddingProvider), applied per row with the one
+ * definition of Private (isSecureSensitivity).
+ *
+ * Returns the stored tiers such an embedder may receive, or undefined when the
+ * embedder is approved for Private content and no row is withheld. A tier the
+ * store does not recognise is never in the list (unknown counts as Private).
+ */
+function connectorStoreEmbeddableRowTiers(
+  trustDomain: SourceTrustDomain,
+  provider: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>,
+): readonly SourceTrustTier[] | undefined {
+  if (isApprovedSecureSourceEmbeddingProvider(provider)) return undefined;
+  return SOURCE_TRUST_TIERS.filter((trustTier) => !isSecureSensitivity({ trustDomain, trustTier }));
+}
+
 
 /**
  * One tiny round trip proving the provider is alive and answers with the
@@ -10696,6 +12463,30 @@ interface ConnectorStoreEmbeddingSeasoning {
   mime_type: string | null;
   authored_at: string | null;
   updated_at: string | null;
+}
+
+let lastMediaCacheSweepMs = 0;
+/** Stores whose media holds this process has re-asserted (lazy: see embeddingQueueState). */
+let reassertedMediaHolders: Set<string> | undefined;
+/** The media cache's orphan sweep, at most once an hour per process. Best effort. */
+function sweepMediaCacheThrottled(): void {
+  const now = Date.now();
+  if (now - lastMediaCacheSweepMs < 60 * 60_000) return;
+  lastMediaCacheSweepMs = now;
+  try {
+    sweepMediaCache(mediaCacheDir());
+  } catch {
+    // Next time.
+  }
+}
+
+/**
+ * A chunk's embedding input hash: the embedding text, and the digest of the
+ * picture the model reads beside it when the chunk carries one. Text alone
+ * hashes exactly as it always has, so no stored vector moves.
+ */
+export function connectorStoreChunkEmbeddingInputHash(embeddingText: string, mediaSha256?: string): string {
+  return mediaSha256 ? hashString(`${embeddingText}\n\u0000image:sha256:${mediaSha256}`) : hashString(embeddingText);
 }
 
 // Embedding text mirrors the Dropbox lane: citation-safe metadata header plus
@@ -11553,6 +13344,18 @@ const CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
   'locator_identity_index_state',
   'connector_store_locator_identity_insert',
   'connector_store_locator_identity_update',
+  'chunk_media_releases',
+  'connector_store_chunk_media_release',
+  'idx_connector_store_chunks_media',
+  'chunk_media_failures',
+  'image_media_reads',
+  'media_judgments',
+  'idx_connector_store_media_judgments_unapplied',
+] as const;
+
+const CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
+  'chunk_pk', 'item_pk', 'chunk_index', 'bounded_text', 'content_hash',
+  'embedding_input_hash', 'indexed_at', 'media_path', 'media_sha256',
 ] as const;
 
 const CONNECTOR_STORE_REQUIRED_COLUMNS = {
@@ -11650,7 +13453,16 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   if (version === 9) validateConnectorStoreV9Schema(db);
   if (version === 10) validateConnectorStoreV10Schema(db);
   if (version === 11) validateConnectorStoreV11Schema(db);
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) validateConnectorStoreSchema(db);
+  if (version === 12) validateConnectorStoreV12Schema(db);
+  // Only the chunk shape here: the media tables, index and trigger are
+  // created idempotently after migration (an earlier build of version 13 may
+  // lack some), then the whole schema is checked.
+  if (version === 13) {
+    validateConnectorStoreV12Schema(db, 'v13', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  }
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+    validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  }
 }
 
 function validateConnectorStoreV6Schema(db: Database): void {
@@ -11659,22 +13471,42 @@ function validateConnectorStoreV6Schema(db: Database): void {
 }
 
 function validateConnectorStoreSchema(db: Database): void {
-  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, 'v12');
+  validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
+  assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
+  assertExactTableColumns(db, 'image_media_reads', ['item_pk', 'read_at'], false, 'v13');
+  assertIndexColumns(db, 'idx_connector_store_chunks_media', ['media_sha256'], 'v13');
+  assertTriggerExists(db, 'connector_store_chunk_media_release', 'v13');
+  assertExactTableColumns(db, 'media_judgments', [...CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS], false, 'v14');
+  assertIndexColumns(db, 'idx_connector_store_media_judgments_unapplied', ['media_sha256'], 'v14');
+}
+
+const CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS = [
+  'media_sha256', 'verdict', 'category', 'margin', 'scores_json', 'judge_id', 'reason', 'judged_at', 'tier_applied',
+  'attempts', 'tier_checked_at',
+] as const;
+
+function validateConnectorStoreV12Schema(
+  db: Database,
+  versionLabel = 'v12',
+  chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
+): void {
+  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
   assertExactTableColumns(
     db,
     'embedding_models',
     CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS,
     false,
-    'v12',
+    versionLabel,
   );
   assertExactTableColumns(
     db,
     'item_write_claims',
     CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS,
     false,
-    'v12',
+    versionLabel,
   );
-  validateConnectorStoreLocatorIdentitySchema(db, 'v12');
+  validateConnectorStoreLocatorIdentitySchema(db, versionLabel);
 }
 
 function validateConnectorStoreV11Schema(db: Database): void {
@@ -11752,8 +13584,9 @@ function validateConnectorStoreItemSchema(
   db: Database,
   itemColumns: readonly string[],
   versionLabel: string,
+  chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
 ): void {
-  validateConnectorStoreSchemaShape(db, itemColumns, true, versionLabel);
+  validateConnectorStoreSchemaShape(db, itemColumns, true, versionLabel, chunkColumns);
   validateConnectorStoreFtsOwnership(db, versionLabel);
   assertIndexColumns(db, 'idx_connector_store_items_sender_id', ['sender_id'], versionLabel);
   assertIndexColumns(db, 'idx_connector_store_items_sender_label', ['sender_label'], versionLabel);
@@ -11790,10 +13623,11 @@ function validateConnectorStoreSchemaShape(
   itemColumns: readonly string[],
   conversationScoped: boolean,
   versionLabel: string,
+  chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
 ): void {
   assertExactTableColumns(db, 'items', itemColumns, true, versionLabel);
   for (const [table, columns] of Object.entries(CONNECTOR_STORE_REQUIRED_COLUMNS)) {
-    assertExactTableColumns(db, table, columns, false, versionLabel);
+    assertExactTableColumns(db, table, table === 'chunks' ? chunkColumns : columns, false, versionLabel);
   }
   assertIndexColumns(db, 'idx_items_local_item_id', ['local_item_id'], versionLabel);
   assertIndexColumns(

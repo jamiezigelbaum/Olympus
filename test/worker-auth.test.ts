@@ -44,7 +44,7 @@ describe('worker HTTP bind and auth', () => {
         [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://gateway.example',
       },
     }));
-    await guarded(new Request('http://worker.test/dashboard/ui', {
+    await guarded(new Request('http://worker.test/dashboard/panel', {
       headers: {
         Authorization: 'Bearer worker-secret',
         [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'http://non-loopback.example',
@@ -176,27 +176,22 @@ describe('worker HTTP bind and auth', () => {
     expect(seen[0]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(payload.csrf_token);
     seen.length = 0;
 
-    const directRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions'));
+    // No GET control route is left (the folder picker's JSON went with the
+    // old picker page, 2026-10-09): a session cookie opens no data read.
+    const directRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions.json'));
     expect(directRead.status).toBe(401);
-
-    const wrongReadOrigin = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions', {
-      headers: { Cookie: cookie, Referer: 'http://attacker.test/dashboard' },
+    const cookieRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions.json', {
+      headers: { Cookie: cookie, Referer: 'http://127.0.0.1:17777/dashboard' },
     }));
-    expect(wrongReadOrigin.status).toBe(403);
-
-    const allowedRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions', {
-      headers: { Cookie: cookie, Referer: 'http://127.0.0.1:17777/dashboard?source=dropbox.files' },
-    }));
-    expect(allowedRead.status).toBe(200);
-    expect(seen).toHaveLength(1);
-    expect(seen[0]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(payload.csrf_token);
+    expect(cookieRead.status).toBe(401);
+    expect(seen).toHaveLength(0);
 
     const missingCsrf = await fetch(new Request('http://127.0.0.1:17777/dashboard/sync-now', {
       method: 'POST',
       headers: { Cookie: cookie, Origin: 'http://127.0.0.1:17777' },
     }));
     expect(missingCsrf.status).toBe(403);
-    expect(seen).toHaveLength(1);
+    expect(seen).toHaveLength(0);
 
     const wrongOrigin = await fetch(new Request('http://127.0.0.1:17777/dashboard/sync-now', {
       method: 'POST',
@@ -207,7 +202,7 @@ describe('worker HTTP bind and auth', () => {
       },
     }));
     expect(wrongOrigin.status).toBe(403);
-    expect(seen).toHaveLength(1);
+    expect(seen).toHaveLength(0);
 
     const allowed = await fetch(new Request('http://127.0.0.1:17777/dashboard/sync-now', {
       method: 'POST',
@@ -218,7 +213,7 @@ describe('worker HTTP bind and auth', () => {
       },
     }));
     expect(allowed.status).toBe(200);
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(1);
 
     now += 30 * 24 * 60 * 60_000 + 1_000;
     const expired = await fetch(new Request('http://127.0.0.1:17777/dashboard/sync-now', {
@@ -230,7 +225,7 @@ describe('worker HTTP bind and auth', () => {
       },
     }));
     expect(expired.status).toBe(401);
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(1);
   });
 
   test('a control session has a fixed thirty-day life, survives a worker restart, and can be locked', async () => {
@@ -245,7 +240,10 @@ describe('worker HTTP bind and auth', () => {
         headers: { 'Content-Type': 'application/json' },
       });
     };
-    const fetch = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now });
+    // The control-session secret the worker keeps in its state file
+    // (core/dashboard-session-secret.ts); both instances below load the same one.
+    const sessionSecret = 'test-session-secret-shared-across-restarts';
+    const fetch = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now, sessionSecret });
 
     const mint = await fetch(new Request(`${origin}/dashboard/control/session`, {
       method: 'POST',
@@ -267,10 +265,14 @@ describe('worker HTTP bind and auth', () => {
       `${cookie}; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=${20 * 24 * 60 * 60}`,
     );
 
-    // Nothing is stored on the worker: a fresh handler with the same token
-    // accepts the cookie, so a restart does not log the browser out.
-    const restarted = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now });
+    // Nothing is stored on the worker but its signing secret: a fresh handler
+    // loading the same secret accepts the cookie, so a restart does not log the
+    // browser out. The bearer alone is not enough (the secret is not derived
+    // from it): a restart without the secret file ends every session.
+    const restarted = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now, sessionSecret });
     expect((await restarted(control())).status).toBe(200);
+    const withoutSecret = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now });
+    expect((await withoutSecret(control())).status).toBe(401);
 
     // The picker keepalive proves custody without the bearer and changes nothing.
     const keepalive = await fetch(new Request(`${origin}/dashboard/control/session`, {
@@ -298,7 +300,7 @@ describe('worker HTTP bind and auth', () => {
     // A validly signed cookie dated in the future is refused past five
     // minutes of skew: minted on a fast clock, verified on the real one.
     const mintOn = async (clockMs: number) => {
-      const ahead = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => clockMs });
+      const ahead = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => clockMs, sessionSecret });
       const minted = await ahead(new Request(`${origin}/dashboard/control/session`, {
         method: 'POST',
         headers: { Authorization: 'Bearer worker-secret', Origin: origin },
@@ -315,8 +317,8 @@ describe('worker HTTP bind and auth', () => {
     expect((await fetch(skewControl(await mintOn(now + 4 * 60_000)))).status).toBe(200);
     expect((await fetch(skewControl(await mintOn(now + 6 * 60_000)))).status).toBe(401);
 
-    // Rotating the worker token revokes every session at once.
-    const rotatedToken = withWorkerBearerAuth(handler, { authToken: 'worker-secret-2', now: () => now });
+    // Rotating the worker token revokes every session at once, secret file or not.
+    const rotatedToken = withWorkerBearerAuth(handler, { authToken: 'worker-secret-2', now: () => now, sessionSecret });
     expect((await rotatedToken(control())).status).toBe(401);
 
     // Lock clears this browser's cookie; it takes the same custody proof as

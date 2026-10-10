@@ -55,9 +55,9 @@ export function createFakeSnifferModel(): AnalystModel & { stats: FakeSnifferSta
       const items = request.prompt
         .split('\n')
         .filter((line) => line.startsWith('{'))
-        .map((line) => JSON.parse(line) as { i: number; names?: string; excerpt?: string });
+        .map((line) => JSON.parse(line) as FakeSnifferItem);
       stats.items += items.length;
-      const materials = items.map((item) => item.names ?? item.excerpt ?? '');
+      const materials = items.map(materialOf);
       if (materials.some(obeys)) {
         stats.complied += 1;
         stats.compliedMaxBatch = Math.max(stats.compliedMaxBatch, items.length);
@@ -70,7 +70,7 @@ export function createFakeSnifferModel(): AnalystModel & { stats: FakeSnifferSta
         return { text: 'Sure! Here is my assessment of the items.', modelId: 'eval-fake-sniffer' };
       }
       const verdicts = items.flatMap((item) => {
-        const material = item.names ?? item.excerpt ?? '';
+        const material = materialOf(item);
         if (/garbled/i.test(material)) {
           return stableBucket(material) % 2 === 0 ? [] : [{ i: item.i, tier: 'private', category: 'made-up', confidence: 0.9 }];
         }
@@ -81,8 +81,20 @@ export function createFakeSnifferModel(): AnalystModel & { stats: FakeSnifferSta
   };
 }
 
-function verdictFor(item: { i: number; names?: string; excerpt?: string }): Record<string, unknown> {
-  const material = item.names ?? item.excerpt ?? '';
+/** One batched item as the prompt carries it: names (pass 1) or a document's names and excerpt (pass 2). */
+interface FakeSnifferItem {
+  i: number;
+  names?: string;
+  excerpt?: string;
+  document?: string;
+}
+
+function materialOf(item: FakeSnifferItem): string {
+  return item.names ?? item.document ?? item.excerpt ?? '';
+}
+
+function verdictFor(item: FakeSnifferItem): Record<string, unknown> {
+  const material = materialOf(item);
   const bucket = stableBucket(material);
   const hit = PRIVATE_VOCABULARY.find(([pattern]) => pattern.test(material));
   if (hit) {

@@ -20,6 +20,13 @@ export interface EmailTransportRequestOptions {
    * analyst is not cut off by a lane default the caller already out-waited.
    */
   timeoutMs?: number;
+  /**
+   * A higher ceiling than MAX_EMAIL_REQUEST_TIMEOUT_MS for this one request.
+   * Only for a caller that is not inside the OpenClaw Gateway (its lane timer
+   * must stay at or under 600s): the anonymous ask off the Gateway waits for
+   * a whole zkAPI session.
+   */
+  maxTimeoutMs?: number;
 }
 
 export interface EmailTransport {
@@ -38,6 +45,29 @@ export type SourceIndexAnswerCorpusId = string;
 export type SourceIndexStatusCorpusId = string;
 export type SourceIndexSearchCorpusId = string;
 export type SourceIndexSearchAttachmentType = 'image' | 'video' | 'audio' | 'file' | 'link' | 'other';
+
+export interface ConsultAskClientOptions {
+  question: string;
+  level?: 'strict' | 'standard';
+  cleanup?: 'as_written' | 'light_cleanup' | 'custom';
+  remember?: boolean;
+  model?: string;
+  timeoutMs?: number;
+  /** Raises the lane ceiling for this ask; only off the OpenClaw Gateway (see EmailTransportRequestOptions.maxTimeoutMs). */
+  maxTimeoutMs?: number;
+  /** The calling agent: its hosting provider chooses the model setting (never the provider that holds the conversation). */
+  caller?: OperationCaller;
+  signal?: AbortSignal;
+}
+
+/**
+ * A zkAPI session may take many minutes: the owner's writer (up to its
+ * timeout, 3 min by default), the route becoming ready (2 min), the consult
+ * (6 min by default, configurable up to 30), then settlement. Off the
+ * Gateway the ask waits the job deadline (20 min); inside it the lane stays
+ * at the Gateway's 10-minute ceiling, which is also the tool watchdog's.
+ */
+export const CONSULT_ASK_CLIENT_TIMEOUT_MS = 20 * 60_000;
 
 export interface SourceIndexAnswerOptions {
   question: string;
@@ -303,6 +333,11 @@ export interface SourceIndexSearchResult {
     raw_source_exposed: false;
     source_text_returned: boolean;
     locators_requested?: boolean;
+    /**
+     * Hits withheld because their row is Private by its own tier while the
+     * search read no Private store. A count only; never what they were.
+     */
+    private_tier_withheld?: number;
   };
   policy: {
     raw_source_exposed: false;
@@ -372,6 +407,37 @@ export class EmailClient {
   ) {
     this.config = config;
     this.transport = transport;
+  }
+
+  /**
+   * "Ask anonymously": one typed question prepared at the chosen level and
+   * sent through zkAPI by the worker (core/consult-ask.ts). The worker's
+   * outcome, refusals included, comes back as a result, never as an error.
+   */
+  async askAnonymously(options: ConsultAskClientOptions): Promise<unknown> {
+    if (!this.config.email.enabled) {
+      throw new OperationError(
+        'email_not_configured',
+        'Private source worker is disabled.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before asking anonymously.',
+      );
+    }
+    return this.transport.requestJson(`${this.config.email.baseUrl}/consult/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      ...(options.signal ? { signal: options.signal } : {}),
+      body: JSON.stringify({
+        question: options.question,
+        ...(options.level ? { level: options.level } : {}),
+        ...(options.cleanup ? { cleanup: options.cleanup } : {}),
+        ...(options.remember !== undefined ? { remember: options.remember } : {}),
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.caller ? { caller: operationCallerToWire(options.caller) } : {}),
+      }),
+    }, {
+      timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS,
+      ...(options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}),
+    });
   }
 
   async sourceAnswer(options: SourceIndexAnswerOptions): Promise<SourceIndexAnswerResult> {
@@ -682,10 +748,11 @@ export const MAX_EMAIL_REQUEST_TIMEOUT_MS = 600_000;
 // match, up to MAX_EMAIL_REQUEST_TIMEOUT_MS; a shorter caller value never trims
 // the configured lane budget. A configured value of 0 means "no lane timeout"
 // and stays that way.
-export function effectiveEmailRequestTimeoutMs(configuredMs: number, requestedMs: number | undefined): number {
+export function effectiveEmailRequestTimeoutMs(configuredMs: number, requestedMs: number | undefined, maxMs = MAX_EMAIL_REQUEST_TIMEOUT_MS): number {
   if (!(configuredMs > 0)) return configuredMs;
   if (requestedMs === undefined || !Number.isFinite(requestedMs) || requestedMs <= configuredMs) return configuredMs;
-  return Math.min(Math.floor(requestedMs), Math.max(configuredMs, MAX_EMAIL_REQUEST_TIMEOUT_MS));
+  const ceiling = Number.isFinite(maxMs) && maxMs > MAX_EMAIL_REQUEST_TIMEOUT_MS ? maxMs : MAX_EMAIL_REQUEST_TIMEOUT_MS;
+  return Math.min(Math.floor(requestedMs), Math.max(configuredMs, ceiling));
 }
 
 export class DirectHttpEmailTransport implements EmailTransport {
@@ -702,7 +769,7 @@ export class DirectHttpEmailTransport implements EmailTransport {
   }
 
   async requestJson(url: string, init: RequestInit, options?: EmailTransportRequestOptions): Promise<unknown> {
-    const timeoutMs = effectiveEmailRequestTimeoutMs(this.timeoutMs, options?.timeoutMs);
+    const timeoutMs = effectiveEmailRequestTimeoutMs(this.timeoutMs, options?.timeoutMs, options?.maxTimeoutMs);
     let response: Response;
     try {
       const authToken = typeof this.authToken === 'function' ? this.authToken() : this.authToken;
@@ -1315,6 +1382,10 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
       raw_source_exposed: false,
       source_text_returned: sourceTextReturned,
       ...(typeof audit.locators_requested === 'boolean' ? { locators_requested: audit.locators_requested } : {}),
+      ...(typeof audit.private_tier_withheld === 'number' && Number.isSafeInteger(audit.private_tier_withheld)
+        && audit.private_tier_withheld > 0
+        ? { private_tier_withheld: audit.private_tier_withheld }
+        : {}),
     },
     policy: {
       raw_source_exposed: false,

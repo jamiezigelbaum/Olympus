@@ -69,6 +69,7 @@ import {
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import { workerServicePaths, type WorkerServiceState } from './core/worker-service.ts';
 import { closeSqliteStore } from './core/sqlite-store.ts';
+import { isMediaCachePath, mediaCacheDir, mediaHolderName, releaseMediaCacheFile } from './core/media-cache.ts';
 import type { ConnectedHandleRegistry } from './workers/credential-broker/connected-handles.ts';
 
 export interface LifecyclePathContext {
@@ -184,7 +185,7 @@ export interface DataDeleteResult {
 export interface DataDeleteCustody {
   requirement: 'source_disconnected' | 'worker_inactive';
   ready: boolean;
-  observed: 'disconnected' | 'connected' | WorkerServiceState | 'unknown_registry' | 'relay_running';
+  observed: 'disconnected' | 'connected' | WorkerServiceState | 'unknown_registry' | 'relay_running' | 'engine_loaded';
   next_action?: string;
 }
 
@@ -608,6 +609,15 @@ export function deleteOlympusData(options: {
   for (const target of uniqueDeleteTargets) {
     if (existsSync(target.path)) assertDeleteTargetSafe(target);
   }
+  // A source's photo copies live in the shared media cache. Every store's
+  // references are read before anything is deleted; each copy is released
+  // only once its stores are gone, and removed unless another source's store
+  // still holds it. A store that survives (a failed removal) keeps its holds;
+  // one interrupted after deletion leaves markers the cache sweep drops,
+  // because their holder is gone.
+  const sourceMedia = selectedSource
+    ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? [])
+    : [];
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);
@@ -618,6 +628,7 @@ export function deleteOlympusData(options: {
       rmSync(target.path, { recursive: target.allowRecursive, force: true });
     }
   }
+  removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
 
   return {
     ok: true,
@@ -646,6 +657,11 @@ export function deleteOlympusDataWithCustody(options: {
   workerState?: WorkerServiceState;
   /** A remote-access relay child is running (it would recreate its keys and keep forwarding). */
   relayRunning?: boolean;
+  /**
+   * The standalone engine's LaunchAgent is loaded. Running or not, launchd
+   * keeps it alive and would start its worker again mid-delete.
+   */
+  engineLoaded?: boolean;
 } & LifecyclePathContext): DataDeleteWithCustodyResult {
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
@@ -655,7 +671,9 @@ export function deleteOlympusDataWithCustody(options: {
         ? `Disconnect ${options.sourceId} before deleting its local data.`
         : custody.observed === 'relay_running'
           ? 'Turn remote access off before deleting local data: the relay process is still running.'
-          : 'Stop or uninstall the Olympus worker before deleting local data.',
+          : custody.observed === 'engine_loaded'
+            ? 'Stop the Olympus engine before deleting local data: launchd would start it again.'
+            : 'Stop or uninstall the Olympus worker before deleting local data.',
       custody.next_action,
     );
   }
@@ -671,6 +689,7 @@ export function dataDeleteCustody(options: {
   connectedRegistry?: ConnectedHandleRegistry;
   workerState?: WorkerServiceState;
   relayRunning?: boolean;
+  engineLoaded?: boolean;
 }): DataDeleteCustody {
   if (options.all === true && options.sourceId) {
     throw new OperationError('invalid_params', 'Use either --all or --source, not both.');
@@ -711,6 +730,14 @@ export function dataDeleteCustody(options: {
         };
   }
 
+  if (options.engineLoaded === true) {
+    return {
+      requirement: 'worker_inactive',
+      ready: false,
+      observed: 'engine_loaded',
+      next_action: 'Run olympus engine stop (it stays stopped until olympus engine start), check olympus engine status, then retry.',
+    };
+  }
   const workerState = options.workerState;
   const ready = workerState === 'inactive' || workerState === 'missing';
   // Like the worker, the remote-access relay child must be down: it holds its
@@ -804,6 +831,10 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     // OLYMPUS_REMOTE_CONNECTIONS_DB_PATH or XDG_DATA_HOME can put it outside
     // the known roots below.
     ...remoteConnectionsDeleteTargets(context),
+    // Prepared photo copies (docs/design/photo-embeddings.md). Named on its
+    // own because OLYMPUS_MEDIA_CACHE_DIR or XDG_DATA_HOME can put it outside
+    // the known roots; it is always a directory Olympus created for itself.
+    ...mediaCacheDeleteTargets(context),
     ...knownOlympusDataRoots(context).map((path): DeleteTarget => ({
       path,
       kind: 'known_root',
@@ -811,11 +842,113 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     })),
     serviceUnitTarget(workerServicePaths('darwin', home).unitPath),
     serviceUnitTarget(workerServicePaths('linux', home).unitPath),
-    ...globExisting(join(home, 'Library', 'LaunchAgents'), /^(?:com|org)\.openclaw\.olympus.*\.plist$/)
+    ...globExisting(join(home, 'Library', 'LaunchAgents'), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/)
       .map(serviceUnitTarget),
     ...globExisting(join(home, '.config', 'systemd', 'user'), /^olympus.*\.(service|timer)$/)
       .map(serviceUnitTarget),
   ];
+}
+
+function mediaCacheDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
+  try {
+    return [{ path: mediaCacheDir(envForContext(context)), kind: 'known_root', allowRecursive: true }];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Releases the media-cache copies the given connector stores reference (the
+ * store's own reference marker, as LocalConnectorStore holds it: named by the
+ * store's real path, whatever spelling of it this process was given) and
+ * returns the copies removed, or those a dry run would release. A path is
+ * checked to be a media-cache file by its shape, not against this process's
+ * configured cache directory, which may differ from the worker's.
+ *
+ * Every store is read before anything is deleted or released: a store that
+ * cannot be read stops the delete with every marker still in place.
+ */
+type SourceMediaHolds = Array<{
+  storePath: string;
+  holder: string;
+  rows: Array<{ media_path: string; media_sha256: string }>;
+}>;
+
+function readSourceMedia(storePaths: readonly string[]): SourceMediaHolds {
+  const held: SourceMediaHolds = [];
+  for (const storePath of storePaths) {
+    if (storePath === ':memory:' || !existsSync(storePath)) continue;
+    // A file that is not SQLite at all holds no references. One that is, and
+    // cannot be read (corrupt, locked past the timeout), stops the delete:
+    // deleting it would orphan its pictures' markers, so the sweep would
+    // never remove those Private copies.
+    if (!looksLikeSqlite(storePath)) continue;
+    const unreadable = () => new OperationError(
+      'invalid_params',
+      `Cannot read the picture references in ${storePath}; nothing was deleted.`,
+      'Stop the Olympus worker (olympus worker stop) so the store is not busy, or repair the store, then retry.',
+    );
+    let rows: Array<{ media_path: string; media_sha256: string }> = [];
+    let db: Database;
+    try {
+      db = new Database(storePath, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000;');
+    } catch {
+      throw unreadable();
+    }
+    try {
+      const columns = (db.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
+      if (columns.includes('media_sha256')) {
+        rows = db.query(`
+          SELECT DISTINCT media_path, media_sha256 FROM chunks
+          WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
+        `).all() as Array<{ media_path: string; media_sha256: string }>;
+      }
+    } catch {
+      throw unreadable();
+    } finally {
+      closeSqliteStore(db);
+    }
+    // Named now, while the store exists: its real path is its marker's name,
+    // and a deleted file has none.
+    held.push({ storePath, holder: mediaHolderName(storePath), rows });
+  }
+  return held;
+}
+
+function releaseSourceMedia(held: SourceMediaHolds, dryRun: boolean): string[] {
+  const released: string[] = [];
+  for (const { storePath, holder, rows } of held) {
+    for (const row of rows) {
+      if (!isMediaCachePath(row.media_path, row.media_sha256)) continue;
+      if (dryRun) {
+        if (existsSync(row.media_path)) released.push(row.media_path);
+      } else {
+        // Under its real path, and under the path as given for a marker an
+        // earlier build named by its spelling.
+        const removedByHolder = releaseMediaCacheFile(row.media_path, row.media_sha256, holder);
+        const removedBySpelling = holder !== storePath
+          && releaseMediaCacheFile(row.media_path, row.media_sha256, storePath);
+        if (removedByHolder || removedBySpelling) released.push(row.media_path);
+      }
+    }
+  }
+  return released;
+}
+
+function looksLikeSqlite(path: string): boolean {
+  try {
+    const fd = openSync(path, 'r');
+    try {
+      const header = Buffer.alloc(16);
+      const read = readSync(fd, header, 0, 16, 0);
+      return read === 16 && header.toString('latin1') === 'SQLite format 3\u0000';
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 
 function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePathContext): DeleteTarget[] {

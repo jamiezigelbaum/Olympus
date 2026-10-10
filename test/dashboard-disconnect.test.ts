@@ -416,7 +416,7 @@ describe('bounded dashboard Disconnect', () => {
     }
   });
 
-  test('waits for an in-flight manual read before Disconnect reports success', async () => {
+  test('refuses Disconnect while a manual read is running, then disconnects once it ends', async () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-dashboard-manual-disconnect-race-'));
     const registryPath = join(root, 'handles.json');
     upsertConnectedHandle({
@@ -444,23 +444,28 @@ describe('bounded dashboard Disconnect', () => {
       },
     });
     try {
-      const sync = worker.fetch(jsonRequest('/dashboard/sync-now', { source: 'readwise' }));
+      // Sync now answers at once and reads outside the grant lock
+      // (2026-10-09), so Disconnect no longer queues behind it: it is refused
+      // like a running scheduled read, custody untouched, and the retry after
+      // the read ends succeeds.
+      const sync = await worker.fetch(jsonRequest('/dashboard/sync-now', { source: 'readwise' }));
+      expect(sync.status).toBe(200);
       await readEntered.promise;
-      let disconnectReturned = false;
-      const disconnect = worker.fetch(jsonRequest('/dashboard/disconnect', {
+      const refused = await worker.fetch(jsonRequest('/dashboard/disconnect', {
         source_id: 'readwise.library',
         acknowledge: true,
-      })).then((response) => {
-        disconnectReturned = true;
-        return response;
-      });
-      await Promise.resolve();
-      expect(disconnectReturned).toBe(false);
+      }));
+      expect(refused.status).toBe(409);
+      await expect(refused.json()).resolves.toMatchObject({ error: { code: 'disconnect_source_busy' } });
+      expect(readConnectedHandleRegistry(registryPath).handles.map((handle) => handle.handle)).toEqual(['readwise.personal']);
 
       releaseRead.resolve();
-      expect((await sync).status).toBe(200);
-      expect((await disconnect).status).toBe(200);
-      expect(disconnectReturned).toBe(true);
+      let disconnect = refused;
+      for (let i = 0; i < 200 && disconnect.status === 409; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        disconnect = await worker.fetch(jsonRequest('/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true }));
+      }
+      expect(disconnect.status).toBe(200);
       expect(readConnectedHandleRegistry(registryPath).handles).toEqual([]);
     } finally {
       releaseRead.resolve();

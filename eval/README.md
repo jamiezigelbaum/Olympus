@@ -20,7 +20,7 @@ eval protects.
 
 [`questions/held-out.json`](questions/held-out.json) holds generic questions
 with `{placeholders}` so the set stays reusable by any operator, not bespoke to
-one corpus. Eight question *shapes* (see [`types.ts`](types.ts)) each probe a
+one corpus. Nine question *shapes* (see [`types.ts`](types.ts)) each probe a
 generalization trap the per-question approach failed:
 
 - `value_lookup` — a specific value on a specific date/record
@@ -31,6 +31,9 @@ generalization trap the per-question approach failed:
 - `summary_or_sentiment` — gist or tone of a thread/document
 - `coverage_negative` — the honest answer is "I have nothing on this"
 - `gap_honesty` — some evidence is unextractable; the analyst must say so
+- `version_conflict` — several versions of one document disagree; the answer
+  gives the newest version's value and names it by date (or each version's
+  value), and repeated runs state the same facts
 
 ## How to run it against a real corpus
 
@@ -242,3 +245,12 @@ estimated tokens.
 The fake sniffer proves the wiring, not a model's judgment: it has two
 deliberate error modes (under-confident Personal, and Personal paired with a
 hard category) that the threshold and the hard-category guard must absorb.
+
+## Built-in private model benchmark
+
+[`private-model-bench.ts`](private-model-bench.ts) runs the built-in private
+model (`built_in` analyst) over a synthetic Private question set built from the
+fictional demo data in `chatgpt-plugin/demo-data`, graded with this eval's
+answer and citation rules, and reports tokens/s, time to first token, peak RAM
+and pass count. Results and the chosen defaults live in
+[`../docs/design/private-model-benchmark.md`](../docs/design/private-model-benchmark.md).

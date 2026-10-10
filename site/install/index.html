@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Install Olympus on your Mac</title>
+  <meta name="description" content="Install Olympus on your Mac with one line in Terminal, connect it to ChatGPT, and uninstall it.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
+      <nav class="site" aria-label="Main">
+        <ul>
+        <li><a href="/">Home</a></li>
+        <li><a href="/install/" aria-current="page">Install</a></li>
+        <li><a href="/help/mac-offline/">Help</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>Install Olympus on your Mac</h1>
+      <p class="lede">Olympus runs on your Mac and answers your questions in ChatGPT. Installing it takes one line in Terminal.</p>
+
+      <h2>Before you start</h2>
+      <ul>
+        <li>A Mac with Apple silicon (M1 or later). Macs with an Intel processor are not supported.</li>
+        <li>macOS 13 Ventura or later.</li>
+        <li>The ChatGPT desktop app.</li>
+      </ul>
+
+      <h2 id="install">Install</h2>
+      <p>Open <strong>Terminal</strong> (in Applications, then Utilities), paste this line, and press Return:</p>
+      <pre><code>curl -fsSL https://olympusplugin.ai/install.sh | sh</code></pre>
+      <p>It takes a minute or two. When it says <strong>Olympus is installed and running</strong>, go back to ChatGPT. Running the same line again later updates Olympus, or repairs it if it stopped. You can <a href="/install.sh">read the installer</a> before you run it.</p>
+
+      <h2>Then connect ChatGPT</h2>
+      <ol class="flow">
+        <li><strong>Add Olympus in ChatGPT.</strong> In the ChatGPT desktop app, add the Olympus plugin and ask: <em>Connect Olympus</em>.</li>
+        <li><strong>Approve ChatGPT on your Mac.</strong> An Olympus approval page opens in your Mac's browser. Click <strong>Approve</strong>. That click is how Olympus knows the Mac is yours: there is no code to copy and no account to create.</li>
+        <li><strong>Connect your sources.</strong> Open the Olympus dashboard in the ChatGPT sidebar and connect Dropbox, Gmail or Google Drive, signing in with the accounts you already have. Other sources the dashboard lists, such as X bookmarks or Readwise, are <a href="/help/on-your-computer/#connect">connected on your computer</a>. Indexing starts on its own.</li>
+      </ol>
+
+      <h2>What the installer does</h2>
+      <ul>
+        <li>Installs Olympus for your macOS user only. It needs no administrator password and changes nothing outside your home folder.</li>
+        <li>Downloads two things over a secure connection, and checks each against a published checksum before using it: Bun, the runtime Olympus runs on (about 24 MB), and Olympus itself (about 5 MB). If either does not match, it stops and changes nothing.</li>
+        <li>Starts Olympus in the background as a per-user login item (a LaunchAgent), so it is running whenever you are logged in, and checks that it really started.</li>
+        <li>Adds the <code>olympus</code> command, and a line to your shell profile so Terminal finds it.</li>
+        <li>If an update does not start, puts the previous version back.</li>
+      </ul>
+      <p>After that, Olympus downloads its built-in models in the background:</p>
+      <ul>
+        <li>A model used to search your items on the Mac (about 225 MB).</li>
+        <li>A private answer model that stays on the Mac: about 1.3 GB with 8 GB of memory, about 2.7 GB with 16 GB or more. It downloads only while the disk has room for it plus 2 GB to spare.</li>
+      </ul>
+      <p>Nothing from your files leaves the Mac during install.</p>
+
+      <h2>Check that it is running</h2>
+      <p>In a new Terminal window:</p>
+      <pre><code>olympus engine status</code></pre>
+      <p>Look for <code>"ok": true</code>. If something is missing, the <code>missing</code> list says what to do next. See also <a href="/help/mac-offline/">what to do when ChatGPT says your computer is offline</a>.</p>
+
+      <h2 id="where">Where Olympus keeps things</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th scope="col">Folder</th><th scope="col">What is in it</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>~/Library/Application Support/Olympus</code></td><td>The Olympus app, the previous version, and the Bun runtime</td></tr>
+            <tr><td><code>~/.local/bin/olympus</code></td><td>The <code>olympus</code> command</td></tr>
+            <tr><td><code>~/Library/LaunchAgents/ai.olympusplugin.engine.plist</code></td><td>The login item that keeps Olympus running</td></tr>
+            <tr><td><code>~/.olympus</code></td><td>Olympus settings and your privacy choices</td></tr>
+            <tr><td><code>~/.config/olympus</code></td><td>Settings for Olympus's background worker</td></tr>
+            <tr><td><code>~/.local/share/openclaw/olympus</code></td><td>Your index, the built-in models, and this Mac's connection keys</td></tr>
+            <tr><td><code>~/Library/Logs/Olympus</code></td><td>Logs, including <code>install.log</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="uninstall">Uninstall</h2>
+      <p>In Terminal:</p>
+      <pre><code>curl -fsSL https://olympusplugin.ai/uninstall.sh | sh</code></pre>
+      <p>This stops Olympus, removes its login item, and deletes the app, the runtime, the <code>olympus</code> command and the line the installer added to your shell profile. It keeps your data and settings, and lists where they are. To only stop Olympus and remove its login item, keeping the app, run <code>olympus engine uninstall</code> instead.</p>
+      <p>To delete your data too, do this <strong>before</strong> uninstalling. It cannot be undone:</p>
+      <pre><code>olympus engine stop
+olympus data delete --all</code></pre>
+      <p>Add <code>--dry-run</code> to the second line first to see what it will remove. To disconnect ChatGPT, remove Olympus in ChatGPT. See <a href="/privacy/#controls">Your controls</a> in the privacy policy for more.</p>
+    </div>
+  </main>
+  <footer class="site">
+    <div class="wrap">
+      <ul>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        <li><a href="/terms/">Terms</a></li>
+      </ul>
+      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
+    </div>
+  </footer>
+</body>
+</html>

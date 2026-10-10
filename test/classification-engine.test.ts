@@ -7,41 +7,8 @@ import {
   type ClassifyItemTierInput,
   type ItemTierScorer,
 } from '../src/workers/classification/index.ts';
-import {
-  USER_FACING_TIER_MAPPING,
-  type SensitivityMap,
-} from '../src/core/sensitivity-map.ts';
-
 function item(overrides: Partial<ClassifyItemTierInput> = {}): ClassifyItemTierInput {
   return { text: '', ...overrides };
-}
-
-function map(category: {
-  id: string;
-  targetTierName: 'secure' | 'secrets';
-  targetTrustTier: 'S4' | 'S5';
-  keywords?: string[];
-  senderPatterns?: string[];
-  pathPatterns?: string[];
-}): SensitivityMap {
-  return {
-    schemaVersion: 1,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories: [{
-      id: category.id,
-      label: category.id,
-      targetTierName: category.targetTierName,
-      targetTrustTier: category.targetTrustTier,
-      targetTrustDomain: 'secure_local',
-      examples: ['example'],
-      notes: 'must not appear in signals',
-      match: {
-        keywords: category.keywords ?? [],
-        senderPatterns: category.senderPatterns ?? [],
-        pathPatterns: category.pathPatterns ?? [],
-      },
-    }],
-  };
 }
 
 describe('per-item tier classification engine', () => {
@@ -302,72 +269,6 @@ describe('per-item tier classification engine', () => {
       expect(result).toMatchObject({ tier: 'S4', trustDomain: 'secure_local', decidedBy: 'sensitive_detector' });
       expect(result.signals).toContain('financial:card_luhn');
       expect(result.signals).not.toContain('clean:commerce_notice');
-    });
-  });
-
-  describe('operator sensitivity map guidance (raise-only)', () => {
-    test('map keyword hit raises a would-be internal item to secure_local', () => {
-      const result = classifyItemTier(item({
-        subject: 'Weekly digest',
-        sender: 'newsletter@service.example',
-        labels: ['CATEGORY_UPDATES'],
-        text: 'Reminder: bring the therapy forms tomorrow.',
-      }), {
-        sensitivityMap: map({
-          id: 'therapy',
-          targetTierName: 'secure',
-          targetTrustTier: 'S4',
-          keywords: ['therapy'],
-        }),
-      });
-
-      expect(result).toMatchObject({
-        tier: 'S4',
-        trustDomain: 'secure_local',
-        decidedBy: 'sensitivity_map',
-      });
-      expect(result.signals).toEqual(['sensitivity_map:therapy']);
-    });
-
-    test('secrets category yields S5 and exposes only the category id signal', () => {
-      const result = classifyItemTier(item({
-        sender: 'keeper@example.com',
-        text: 'This is routine scheduling about vault access.',
-      }), {
-        sensitivityMap: map({
-          id: 'home-vault',
-          targetTierName: 'secrets',
-          targetTrustTier: 'S5',
-          senderPatterns: ['keeper@example.com'],
-        }),
-      });
-
-      expect(result).toMatchObject({
-        tier: 'S5',
-        trustDomain: 'secure_local',
-        decidedBy: 'sensitivity_map',
-      });
-      expect(result.signals).toEqual(['sensitivity_map:home-vault']);
-      expect(JSON.stringify(result)).not.toContain('routine scheduling');
-      expect(JSON.stringify(result)).not.toContain('must not appear');
-    });
-
-    test('clean rules can never downgrade a map hit', () => {
-      const result = classifyItemTier(item({
-        path: '/2 Areas/Work/public-roadmap.md',
-        text: 'Project update: therapy budget topic for the offsite.',
-      }), {
-        sensitivityMap: map({
-          id: 'therapy',
-          targetTierName: 'secure',
-          targetTrustTier: 'S4',
-          keywords: ['therapy'],
-        }),
-      });
-
-      expect(result.decidedBy).toBe('sensitivity_map');
-      expect(result.trustDomain).toBe('secure_local');
-      expect(result.signals).not.toContain('clean:work_coordination');
     });
   });
 

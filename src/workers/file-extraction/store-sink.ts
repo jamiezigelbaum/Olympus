@@ -27,6 +27,8 @@
 
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { RawItem } from '../../core/contracts.ts';
+import { isImageMediaType } from '../classification/tier-classifier.ts';
+import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
   SourceItemIdentity,
@@ -86,6 +88,15 @@ export const EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = 'store_item_tier_move_qu
  * stored nowhere and only its location is kept.
  */
 export const EXTRACTION_SINK_SKIPPED_SECRETS = 'store_item_secrets';
+/**
+ * A still image's content (its picture, and any text read off it) rests only
+ * in a Private store unless the photo judge found the picture ordinary
+ * (docs/design/photo-embeddings.md). A store of any other trust domain refuses
+ * an unjudged or sensitive picture, whatever lane wrote to it; the item keeps
+ * its names. A tiered store set routes such content to its Private store
+ * instead, so this is the backstop for a lane that has no such set.
+ */
+export const EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = 'store_image_content_private_only';
 
 /**
  * Maps the two store refusals a healthy sink can race into onto skip tokens,
@@ -152,6 +163,16 @@ export interface ConnectorStoreExtractionSinkOptions {
    * content copy, so it turns this off.
    */
   recordContentTier?: boolean;
+  /**
+   * The photo judge's verdict on a picture, by its digest. Supplied only by a
+   * sink that has already run the content rules (account and card numbers)
+   * on the text read off the picture, i.e. a tiered store set, which looks in
+   * every store of the set since a picture is judged where it was first
+   * embedded (its Private store) and may land in another. Without it the
+   * sink is plain: it attaches this store's own record to the picture but
+   * never lets picture content into a store outside Private.
+   */
+  mediaJudgment?: (mediaSha256: string) => MediaJudgment | undefined;
 }
 
 /**
@@ -161,6 +182,11 @@ export interface ConnectorStoreExtractionSinkOptions {
 export interface ExtractionSinkPlan {
   item: RawItem;
   expectation: ConnectorStoreItemRepresentationExpectation;
+  /**
+   * The prepared media copy, attached by the store to the item's first chunk,
+   * with the photo judge's verdict on it when there is one.
+   */
+  media?: { path: string; sha256: string; judgment?: MediaJudgment };
 }
 
 /**
@@ -200,6 +226,7 @@ function identityForRef(
 export function buildExtractionRepresentationExpectation(
   identity: SourceItemIdentity,
   text: string,
+  mediaSha256?: string,
 ): ConnectorStoreItemRepresentationExpectation {
   return {
     sourceItem: identity,
@@ -209,6 +236,7 @@ export function buildExtractionRepresentationExpectation(
       text,
       CONNECTOR_STORE_DEFAULT_MAX_CHUNK_CHARS,
     ).map(connectorStoreHashString),
+    ...(mediaSha256 ? { mediaSha256 } : {}),
   };
 }
 
@@ -285,6 +313,23 @@ export function createConnectorStoreExtractionSink(
       // complete short-circuits before classification, so relying on the throw
       // would let an ineligible item report success purely because a previous
       // pass had already stored its text.
+      // The judge's verdict on the picture travels with it to the store; only
+      // an ordinary verdict lets a picture (and the text read off it) rest
+      // outside a Private store, and only through a sink that has run the
+      // content rules on that text (a tiered store set). A plain sink runs no
+      // rules, so it never lets picture content outside a Private store. No
+      // verdict is never taken for ordinary.
+      const judgment = plan.media ? (options.mediaJudgment ?? ((sha: string) => store.mediaJudgment(sha)))(plan.media.sha256) : undefined;
+      if (plan.media && judgment) plan.media = { ...plan.media, judgment };
+      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== 'secure_local'
+        && !(options.mediaJudgment && plan.media && judgment?.verdict === 'ordinary')) {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY,
+        };
+      }
       const sensitivity = options.classify(plan.item);
       if (sensitivity.trustDomain !== store.trustDomain || sensitivity.trustTier === 'S5') {
         return {
@@ -324,7 +369,7 @@ export function createConnectorStoreExtractionSink(
       let summary;
       try {
         summary = store.restoreItemRepresentations({
-          items: [{ item: plan.item, expectation: plan.expectation }],
+          items: [{ item: plan.item, expectation: plan.expectation, ...(plan.media ? { media: plan.media } : {}) }],
           syncConnectorId: options.syncConnectorId,
           ownerConnectorId: options.ownerConnectorId,
           ownershipKind: options.ownershipKind,
@@ -490,6 +535,7 @@ export function planExtractionSinkWrite(
       metadata: metadataForItem(stored, ref, request.metadata),
       fetchedAt: request.fetchedAt,
     },
-    expectation: buildExtractionRepresentationExpectation(identity, text),
+    expectation: buildExtractionRepresentationExpectation(identity, text, request.media?.sha256),
+    ...(request.media ? { media: { path: request.media.path, sha256: request.media.sha256 } } : {}),
   };
 }

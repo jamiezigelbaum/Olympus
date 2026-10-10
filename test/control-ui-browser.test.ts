@@ -1,16 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import plugin, { setInertBody } from '../src/control-ui.ts';
-import type {
-  OlympusDashboardControlResult,
-  OlympusDashboardReadResult,
-} from '../src/control-ui-contract.ts';
-import {
-  mountDashboardController,
-  mountDispositionsController,
-} from '../src/control-ui/browser-controller.ts';
-import { buildDispositionsPreviewView } from '../scripts/control-ui-preview.ts';
-import { renderSourceDispositionsControlUi } from '../src/workers/source-dispositions.ts';
+import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
+import { mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
 import { connectSetupSheet } from '../src/workers/dashboard/components.ts';
 
 const GLOBALS = [
@@ -57,7 +48,7 @@ afterEach(() => {
   happyWindow.close();
 });
 
-function result(body: string, signature: string, canWrite = true): OlympusDashboardReadResult {
+function result(body: string, signature: string, canWrite = true): OlympusDashboardPageRead {
   return {
     status: 200,
     title: 'Olympus',
@@ -752,8 +743,8 @@ describe('dashboard controller DOM lifetime', () => {
     root.innerHTML = '<form data-connect-kind="api_key"><input name="source" type="hidden" value="readwise">'
       + '<input name="api_key" type="password"><button type="submit">Connect</button></form>';
     document.body.append(root);
-    let resolveRefresh!: (value: OlympusDashboardReadResult) => void;
-    const pendingRefresh = new Promise<OlympusDashboardReadResult>((resolve) => { resolveRefresh = resolve; });
+    let resolveRefresh!: (value: OlympusDashboardPageRead) => void;
+    const pendingRefresh = new Promise<OlympusDashboardPageRead>((resolve) => { resolveRefresh = resolve; });
     const controller = mountDashboardController({
       root,
       transport: { control: noControl },
@@ -779,7 +770,7 @@ describe('dashboard controller DOM lifetime', () => {
     controller.dispose();
   });
 
-  test('poll replacement is sanitized, navigation respects modifiers, and disposal retires listeners', async () => {
+  test('poll replacement lands, navigation respects modifiers, and disposal retires listeners', async () => {
     const root = document.createElement('div');
     root.innerHTML = '<a href="/dashboard?setup">Setup</a>';
     document.body.append(root);
@@ -792,9 +783,8 @@ describe('dashboard controller DOM lifetime', () => {
       navigate(href) { navigations.push(href); },
       async refresh() {
         reads += 1;
-        return result('<img src="x" onerror="globalThis.pwned=1"><script>globalThis.pwned=2</script><p id="safe">safe</p>', 'next');
+        return result('<p id="safe">safe</p>', 'next');
       },
-      replaceHtml: setInertBody,
       returnUrl: 'https://gateway.test/',
       canWrite: true,
       signal: abort.signal,
@@ -808,8 +798,6 @@ describe('dashboard controller DOM lifetime', () => {
     expect(navigations).toEqual(['/dashboard?setup']);
 
     await controller.refresh();
-    expect(root.querySelector('script')).toBeNull();
-    expect(root.querySelector('img')?.hasAttribute('onerror')).toBe(false);
     expect(root.querySelector('#safe')?.textContent).toBe('safe');
 
     abort.abort();
@@ -817,427 +805,5 @@ describe('dashboard controller DOM lifetime', () => {
     root.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await controller.refresh();
     expect(reads).toBe(readCount);
-  });
-});
-
-describe('folder picker DOM lifetime', () => {
-  test('unchanged and changed polls preserve selected folder, search, open state and focus', async () => {
-    const initial = renderSourceDispositionsControlUi(buildDispositionsPreviewView(), true);
-    const root = document.createElement('div');
-    root.innerHTML = initial.body;
-    document.body.append(root);
-    const queue = [initial, { ...initial, signature: 'changed' }];
-    const controller = mountDispositionsController({
-      root,
-      transport: { control: noControl },
-      navigate() {},
-      async refresh() { return queue.shift(); },
-      returnUrl: 'https://gateway.test/?view=dispositions',
-      canWrite: true,
-      signal: new AbortController().signal,
-      signature: initial.signature,
-      pollIntervalMs: 0,
-    });
-    const finance = Array.from(root.querySelectorAll<HTMLElement>('.folder-row'))
-      .find((row) => row.dataset.path === '/2 Areas/Finances')!;
-    finance.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    const search = root.querySelector<HTMLInputElement>('[data-folder-search]')!;
-    search.value = 'fin';
-    search.dispatchEvent(new Event('input', { bubbles: true }));
-    const choice = root.querySelector<HTMLButtonElement>('[data-picker-state="metadata_only"]')!;
-    choice.focus();
-
-    await controller.refresh();
-    expect(root.querySelector('[data-picker-state="metadata_only"]')).toBe(choice);
-    expect(document.activeElement).toBe(choice);
-    expect(root.querySelector<HTMLFormElement>('form')?.dataset.selectedPath).toBe('/2 Areas/Finances');
-
-    await controller.refresh();
-    expect(root.querySelector<HTMLInputElement>('[data-folder-search]')?.value).toBe('fin');
-    expect(root.querySelector<HTMLFormElement>('form')?.dataset.selectedPath).toBe('/2 Areas/Finances');
-    expect(root.querySelector<HTMLDetailsElement>('details')?.open).toBe(true);
-    expect(root.querySelector('[data-picker-state="metadata_only"]')).not.toBe(choice);
-    expect((document.activeElement as HTMLElement | null)?.dataset.pickerState).toBe('metadata_only');
-    controller.dispose();
-  });
-
-  test('a failed save and ordinary poll retain dirty folder choices', async () => {
-    const initial = renderSourceDispositionsControlUi(buildDispositionsPreviewView(), true);
-    const root = document.createElement('div');
-    root.innerHTML = initial.body;
-    document.body.append(root);
-    let reads = 0;
-    const controller = mountDispositionsController({
-      root,
-      transport: { control: async () => ({ status: 500, body: { error: { message: 'Save failed safely.' } } }) },
-      navigate() {},
-      async refresh() { reads += 1; return { ...initial, signature: 'changed' }; },
-      returnUrl: 'https://gateway.test/?view=dispositions',
-      canWrite: true,
-      signal: new AbortController().signal,
-      signature: initial.signature,
-      pollIntervalMs: 0,
-    });
-    const finance = Array.from(root.querySelectorAll<HTMLElement>('.folder-row'))
-      .find((row) => row.dataset.path === '/2 Areas/Finances')!;
-    finance.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    root.querySelector<HTMLButtonElement>('[data-picker-state="exclude"]')!
-      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    const form = root.querySelector<HTMLFormElement>('form')!;
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await happyWindow.happyDOM.waitUntilComplete();
-    expect(root.querySelector('#save-message')?.textContent).toBe('Save failed safely.');
-    expect(form.querySelector<HTMLInputElement>('input[value="exclude"][data-path="/2 Areas/Finances"]')?.checked).toBe(true);
-
-    await controller.refresh();
-    expect(reads).toBe(0);
-    expect(root.contains(form)).toBe(true);
-    expect(form.querySelector<HTMLInputElement>('input[value="exclude"][data-path="/2 Areas/Finances"]')?.checked).toBe(true);
-    controller.dispose();
-  });
-
-  test('a folder edit made while refresh is pending is not replaced by the response', async () => {
-    const initial = renderSourceDispositionsControlUi(buildDispositionsPreviewView(), true);
-    const root = document.createElement('div');
-    root.innerHTML = initial.body;
-    document.body.append(root);
-    let resolveRefresh!: (value: OlympusDashboardReadResult) => void;
-    const pendingRefresh = new Promise<OlympusDashboardReadResult>((resolve) => { resolveRefresh = resolve; });
-    const controller = mountDispositionsController({
-      root,
-      transport: { control: noControl },
-      navigate() {},
-      refresh: () => pendingRefresh,
-      returnUrl: 'https://gateway.test/?view=dispositions',
-      canWrite: true,
-      signal: new AbortController().signal,
-      signature: initial.signature,
-      pollIntervalMs: 0,
-    });
-
-    const refreshing = controller.refresh();
-    const finance = Array.from(root.querySelectorAll<HTMLElement>('.folder-row'))
-      .find((row) => row.dataset.path === '/2 Areas/Finances')!;
-    finance.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    root.querySelector<HTMLButtonElement>('[data-picker-state="exclude"]')!
-      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    resolveRefresh({ ...initial, signature: 'next' });
-    await refreshing;
-
-    const form = root.querySelector<HTMLFormElement>('form[data-dispositions-source]')!;
-    expect(form.dataset.selectedPath).toBe('/2 Areas/Finances');
-    expect(form.querySelector<HTMLInputElement>('input[value="exclude"][data-path="/2 Areas/Finances"]')?.checked)
-      .toBe(true);
-    controller.dispose();
-  });
-});
-
-describe('native host subscription', () => {
-  test('an unrelated host snapshot does not reload the mounted page', async () => {
-    const container = document.createElement('div');
-    document.body.append(container);
-    let page: { mount(container: HTMLElement, context: never): { dispose(): void } } | undefined;
-    let subscriber: (() => void) | undefined;
-    let reads = 0;
-    const connection = { connected: true, canRead: true, canWrite: true };
-    const host = {
-      connection,
-      request: async () => {
-        reads += 1;
-        return result('<p>stable</p>', 'stable');
-      },
-      subscribe(listener: () => void) { subscriber = listener; return () => { subscriber = undefined; }; },
-      navigation: { openPage() {}, pageHref: () => 'https://gateway.test/?view=home' },
-      ui: {
-        registerPage(value: typeof page) { page = value; return () => {}; },
-        registerNavigation() { return () => {}; },
-      },
-    };
-    const disposePlugin = plugin.activate(host as never) as () => void;
-    const mounted = page!.mount(container, {
-      host,
-      signal: new AbortController().signal,
-      props: { view: 'home' },
-      presented: true,
-    } as never);
-    await happyWindow.happyDOM.waitUntilComplete();
-    expect(reads).toBe(1);
-    subscriber?.();
-    await happyWindow.happyDOM.waitUntilComplete();
-    expect(reads).toBe(1);
-    mounted.dispose();
-    disposePlugin();
-  });
-});
-
-test('Setup card background navigates while embedded controls remain independent', () => {
-  const root = document.createElement('div'); root.innerHTML = '<div data-dashboard-href="/dashboard?source=dropbox.files"><span class="card-copy">Dropbox status</span><button type="button">Connect</button></div>'; document.body.append(root);
-  const navigation: string[] = [];
-  const controller = mountDashboardController({ root, transport: { async control() { return { status: 200, body: { ok: true } }; } }, navigate: (href) => navigation.push(href), refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
-  root.querySelector('.card-copy')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-  root.querySelector('button')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-  expect(navigation).toEqual(['/dashboard?source=dropbox.files']); controller.dispose();
-});
-
-describe('folder scope before ingestion', () => {
-  function scopeRoot(canWrite = true) {
-    const view = buildDispositionsPreviewView();
-    view.sources = [];
-    view.folder_scopes = [{
-      source_id: 'google_drive.docs', disposition_source_id: 'google_drive.personal', label: 'Google Drive',
-      connected: true, status: 'scope_pending', account_generation: 'account-one', scope_revision: 'revision-one',
-    }];
-    const rendered = renderSourceDispositionsControlUi(view, canWrite);
-    const root = document.createElement('div'); root.innerHTML = rendered.body; document.body.append(root);
-    return { root, form: root.querySelector<HTMLFormElement>('form[data-folder-scope-source]')! };
-  }
-
-  function page(key = 'opaque-folder-A', revision = 'revision-one'): OlympusDashboardReadResult {
-    return {
-      ...result('', 'browse'), controller: 'dispositions', scope_browser: {
-        source_id: 'google_drive.docs', account_generation: 'account-one', scope_revision: revision,
-        status: 'scope_pending', nodes: [{ key, name: key === 'opaque-folder-A' ? 'Work <img src=x>' : 'Child', kind: 'folder', has_children: true, selectable: true }],
-        selections: [], whole_account_selected: false,
-      },
-    };
-  }
-
-  function click(root: ParentNode, selector: string) {
-    const target = root.querySelector<HTMLElement>(selector);
-    expect(target).not.toBeNull();
-    target!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-  }
-
-  test('opens Dropbox directly, switches providers without ingestion, and routes native exit links', async () => {
-    const view = buildDispositionsPreviewView(); view.sources = [];
-    view.folder_scopes = [
-      { source_id: 'google_drive.docs', disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: true, status: 'scope_pending' },
-      { source_id: 'dropbox.files', disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'scope_pending', account_generation: 'account-one', scope_revision: 'revision-one' },
-    ];
-    const root = document.createElement('div'); root.innerHTML = renderSourceDispositionsControlUi(view, true, 'dropbox.files').body; document.body.append(root);
-    const reads: unknown[] = []; const writes: unknown[] = []; const navigation: string[] = [];
-    const controller = mountDispositionsController({ root,
-      transport: { async read(params) { reads.push(params); const response = page(); response.scope_browser!.source_id = params.source_id as 'dropbox.files'; return response; }, async control(params) { writes.push(params); return { status: 200, body: { ok: true } }; } },
-      navigate: (href) => navigation.push(href), refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
-      signal: new AbortController().signal, pollIntervalMs: 0,
-    });
-    const drive = root.querySelector<HTMLElement>('[data-scope-panel="google_drive.docs"]')!;
-    const dropbox = root.querySelector<HTMLElement>('[data-scope-panel="dropbox.files"]')!;
-    expect(dropbox.hidden).toBe(false); expect(drive.hidden).toBe(true);
-    expect(Array.from(dropbox.querySelectorAll('.location'), (node) => node.textContent)).toEqual(['◆Google Drive', '◆Dropbox']);
-    expect(reads).toHaveLength(1);
-    await happyWindow.happyDOM.waitUntilComplete();
-    click(dropbox, '[data-scope-select]'); click(dropbox, '[data-scope-state="metadata_only"]');
-    click(dropbox, '[data-scope-switch="google_drive.docs"]');
-    await happyWindow.happyDOM.waitUntilComplete();
-    expect(drive.hidden).toBe(false); expect(dropbox.hidden).toBe(true);
-    const connect = drive.querySelector<HTMLAnchorElement>('.scope-back a')!;
-    connect.dataset.olympusNav = connect.getAttribute('href')!; connect.href = 'https://gateway.test/native-page';
-    connect.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    expect(navigation).toEqual(['/dashboard?source=google_drive.docs']);
-    click(root, '.dnav a[href="/dashboard"]');
-    click(drive, '.scope-back a');
-    expect(navigation.slice(1)).toEqual(['/dashboard', '/dashboard?source=google_drive.docs']);
-    const modified = new MouseEvent('click', { bubbles: true, cancelable: true, metaKey: true });
-    connect.dispatchEvent(modified); expect(modified.defaultPrevented).toBe(false);
-    click(drive, '[data-scope-switch="dropbox.files"]');
-    expect(dropbox.hidden).toBe(false);
-    expect(dropbox.querySelector('.scope-folder-status')?.textContent).toBe('Names only');
-    expect(reads).toHaveLength(2); expect(writes).toHaveLength(0);
-    controller.dispose();
-  });
-
-  test('Locations lists connected providers only while a direct disconnected page still offers Connect', () => {
-    const view = buildDispositionsPreviewView(); view.sources = [];
-    view.folder_scopes = [
-      { source_id: 'google_drive.docs', disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: false, status: 'scope_pending' },
-      { source_id: 'dropbox.files', disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'scope_pending' },
-    ];
-    const root = document.createElement('div');
-    root.innerHTML = renderSourceDispositionsControlUi(view, true, 'dropbox.files').body;
-    const dropbox = root.querySelector('[data-scope-panel="dropbox.files"]')!;
-    expect(Array.from(dropbox.querySelectorAll('.location'), node => node.textContent)).toEqual(['◆Dropbox']);
-    expect(root.querySelector('[data-scope-switch="google_drive.docs"]')).toBeNull();
-    root.innerHTML = renderSourceDispositionsControlUi(view, true, 'google_drive.docs').body;
-    const drive = root.querySelector<HTMLElement>('[data-scope-panel="google_drive.docs"]')!;
-    expect(drive.hidden).toBe(false);
-    expect(drive.textContent).toContain('Connect Google Drive');
-  });
-
-  test('folder siblings sort alphabetically with natural numbers at every depth', async () => {
-    const { root } = scopeRoot();
-    const controller = mountDispositionsController({
-      root, transport: { async read(params) {
-        const response = page();
-        const parent = 'parent_key' in params ? params.parent_key : undefined;
-        response.scope_browser!.nodes = (parent ? ['Child 10', 'child 2', 'Apple'] : ['Zebra', 'alpha 10', 'Alpha 2', 'alpha'])
-          .map(name => ({ key: `${parent || 'root'}/${name}`, name, kind: 'folder' as const, selectable: true, has_children: !parent }));
-        return response;
-      }, async control() { throw new Error('Browsing must not change scope'); } },
-      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
-      signal: new AbortController().signal, pollIntervalMs: 0,
-    });
-    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
-    expect(Array.from(root.querySelectorAll('[data-scope-select]'), n => n.textContent)).toEqual(['alpha', 'Alpha 2', 'alpha 10', 'Zebra']);
-    click(root, '[data-scope-open]'); await happyWindow.happyDOM.waitUntilComplete();
-    expect(Array.from(root.querySelectorAll('[data-scope-select]'), n => n.textContent)).toEqual(['alpha', 'Apple', 'child 2', 'Child 10', 'Alpha 2', 'alpha 10', 'Zebra']);
-    controller.dispose();
-  });
-
-  test('loads folder names when opened while ingestion still requires explicit approval', async () => {
-    const { root, form } = scopeRoot();
-    const reads: unknown[] = []; const writes: unknown[] = []; const navigation: string[] = [];
-    const controller = mountDispositionsController({
-      root, transport: { async read(params) { reads.push(params); return page(); }, async control(params) { writes.push(params); return { status: 200, body: { ok: true } }; } },
-      navigate: (href) => navigation.push(href), refresh: async () => undefined,
-      returnUrl: 'https://gateway.test/?view=dispositions', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0,
-    });
-    expect(root.querySelector('.finder-window .finder-sidebar')).not.toBeNull();
-    expect(root.querySelector('.finder-window .finder-main')).not.toBeNull();
-    expect(root.querySelector('.finder-window .finder-inspector')).not.toBeNull();
-    expect(reads).toHaveLength(1); expect(writes).toHaveLength(0);
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    expect(writes).toHaveLength(0);
-    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
-    expect(reads).toEqual([{ view: 'dispositions', action: 'browse_folder_scope', source_id: 'google_drive.docs' }]);
-    expect(root.querySelector('[data-scope-nodes] img')).toBeNull();
-    expect(root.querySelector('[data-scope-select]')?.textContent).toBe('Work <img src=x>');
-    const folder = root.querySelector<HTMLButtonElement>('[data-scope-select]')!; folder.focus();
-    click(root, '[data-scope-select]');
-    expect(document.activeElement).toBe(folder);
-    click(root, '[data-scope-state="metadata_only"]');
-    expect(writes).toHaveLength(0);
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await happyWindow.happyDOM.waitUntilComplete();
-    expect(writes).toEqual([{
-      action: 'approve_source_scope_and_start', source_id: 'google_drive.docs', account_generation: 'account-one',
-      expected_scope_revision: 'revision-one', selections: [{ key: 'opaque-folder-A', state: 'metadata_only', ancestor_keys: [] }],
-      whole_account: false, explicit_whole_account_confirmation: false,
-    }]);
-    expect(navigation).toEqual(['/dashboard?source=google_drive.docs']);
-    controller.dispose();
-  });
-
-  test('shows loading, avoids duplicate automatic requests, and Update preserves draft choices', async () => {
-    const { root, form } = scopeRoot();
-    let complete!: (value: ReturnType<typeof page>) => void;
-    const pending = new Promise<ReturnType<typeof page>>(resolve => { complete = resolve; });
-    let reads = 0; let writes = 0;
-    const controller = mountDispositionsController({ root,
-      transport: { read: async () => { reads += 1; return pending; }, async control() { writes += 1; return { status: 200, body: { ok: true } }; } },
-      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
-      signal: new AbortController().signal, pollIntervalMs: 0,
-    });
-    expect(reads).toBe(1);
-    expect(root.querySelector<HTMLElement>('[data-scope-loading]')?.hidden).toBe(false);
-    expect(root.querySelector('[data-scope-nodes]')?.getAttribute('aria-busy')).toBe('true');
-    expect(root.querySelector('[data-scope-browse-root]')?.textContent).toBe('Update');
-    controller.update({ canWrite: true });
-    expect(reads).toBe(1);
-    expect(writes).toBe(0);
-    complete(page()); await happyWindow.happyDOM.waitUntilComplete();
-    expect(root.querySelector<HTMLElement>('[data-scope-loading]')?.hidden).toBe(true);
-    click(root, '[data-scope-select]'); click(root, '[data-scope-state="metadata_only"]');
-    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
-    expect(reads).toBe(2);
-    expect(root.querySelector('.scope-folder-status')?.textContent).toBe('Names only');
-    expect(writes).toBe(0);
-    expect(form.querySelector('[data-scope-nodes]')?.getAttribute('aria-busy')).toBe('false');
-    controller.dispose();
-  });
-
-  test('never automatically loads folders for a read-only or hidden page', async () => {
-    for (const input of [{ canWrite: false, presented: true }, { canWrite: true, presented: false }]) {
-      const { root } = scopeRoot(); let reads = 0;
-      const controller = mountDispositionsController({ root,
-        transport: { async read() { reads += 1; return page(); }, async control() { throw new Error('unexpected mutation'); } },
-        navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', ...input,
-        signal: new AbortController().signal, pollIntervalMs: 0,
-      });
-      await happyWindow.happyDOM.waitUntilComplete();
-      expect(reads).toBe(0); controller.dispose();
-    }
-  });
-
-  test('whole-account use needs a separate explicit confirmation and read-only callers cannot activate', async () => {
-    const { root, form } = scopeRoot(); let writes = 0;
-    const controller = mountDispositionsController({ root,
-      transport: { read: async () => page(), async control() { writes += 1; return { status: 200, body: { ok: true } }; } },
-      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
-      signal: new AbortController().signal, pollIntervalMs: 0,
-    });
-    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
-    const whole = root.querySelector<HTMLInputElement>('[data-scope-whole-account]')!;
-    whole.checked = true; whole.dispatchEvent(new Event('input', { bubbles: true }));
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    expect(writes).toBe(0);
-    const confirmation = root.querySelector<HTMLInputElement>('[data-scope-whole-confirm]')!;
-    confirmation.checked = true; confirmation.dispatchEvent(new Event('input', { bubbles: true }));
-    controller.update({ canWrite: false });
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    expect(writes).toBe(0);
-    controller.update({ canWrite: true });
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await happyWindow.happyDOM.waitUntilComplete();
-    expect(writes).toBe(1); controller.dispose();
-  });
-
-  test('keeps choices across lazy navigation and enforces inherited metadata-only controls', async () => {
-    const { root, form } = scopeRoot(); const reads: unknown[] = []; const writes: unknown[] = [];
-    const controller = mountDispositionsController({ root,
-      transport: { async read(params) { reads.push(params); return page('parent_key' in params && params.parent_key ? 'opaque-folder-B' : 'opaque-folder-A'); }, async control(params) { writes.push(params); return { status: 200, body: { ok: true } }; } },
-      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
-      signal: new AbortController().signal, pollIntervalMs: 0,
-    });
-    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
-    click(root, '[data-scope-select]'); click(root, '[data-scope-state="metadata_only"]');
-    click(root, '[data-scope-open]'); await happyWindow.happyDOM.waitUntilComplete();
-    expect(reads.at(-1)).toEqual({ view: 'dispositions', action: 'browse_folder_scope', source_id: 'google_drive.docs', parent_key: 'opaque-folder-A' });
-    click(root, '[data-scope-select="opaque-folder-B"]');
-    expect(root.querySelector<HTMLButtonElement>('[data-scope-state="ingest"]')!.disabled).toBe(true);
-    click(root, '[data-scope-state="exclude"]');
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await happyWindow.happyDOM.waitUntilComplete();
-    expect((writes[0] as { selections: unknown[] }).selections).toEqual([
-      { key: 'opaque-folder-A', state: 'metadata_only', ancestor_keys: [] },
-      { key: 'opaque-folder-B', state: 'exclude', ancestor_keys: ['opaque-folder-A'] },
-    ]);
-    controller.dispose();
-  });
-
-  test.each([true, false])('narrowing a parent saves inherited restrictions for saved children, expanded=%s', async (expandChild) => {
-    const { root, form } = scopeRoot(); const writes: unknown[] = [];
-    const controller = mountDispositionsController({ root,
-      transport: { async read(params) {
-        const response = page('parent_key' in params && params.parent_key ? 'opaque-folder-B' : 'opaque-folder-A');
-        response.scope_browser!.selections = [{ key: 'opaque-folder-A', state: 'ingest', ancestor_keys: [] }, { key: 'opaque-folder-B', state: 'ingest', ancestor_keys: ['opaque-folder-A'] }];
-        return response;
-      }, async control(params) { writes.push(params); return { status: 200, body: { ok: true } }; } },
-      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
-      signal: new AbortController().signal, pollIntervalMs: 0,
-    });
-    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
-    if (expandChild) { click(root, '[data-scope-open]'); await happyWindow.happyDOM.waitUntilComplete(); }
-    click(root, '[data-scope-select="opaque-folder-A"]'); click(root, '[data-scope-state="metadata_only"]');
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await happyWindow.happyDOM.waitUntilComplete();
-    expect((writes[0] as { selections: unknown[] }).selections).toEqual([
-      { key: 'opaque-folder-A', state: 'metadata_only', ancestor_keys: [] },
-      { key: 'opaque-folder-B', state: 'metadata_only', ancestor_keys: ['opaque-folder-A'] },
-    ]);
-    controller.dispose();
-  });
-
-  test('refuses stale account/scope responses and never activates merely by cancelling', async () => {
-    const { root, form } = scopeRoot(); let count = 0; let writes = 0;
-    const controller = mountDispositionsController({ root,
-      transport: { async read() { count += 1; return page('opaque-folder-A', count === 1 ? 'revision-one' : 'revision-two'); }, async control() { writes += 1; return { status: 200, body: { ok: true } }; } },
-      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
-      signal: new AbortController().signal, pollIntervalMs: 0,
-    });
-    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
-    click(root, '[data-scope-select]'); click(root, '[data-scope-state="ingest"]');
-    click(root, '[data-scope-open]'); await happyWindow.happyDOM.waitUntilComplete();
-    expect(root.querySelector('[data-scope-message]')?.textContent).toContain('changed');
-    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); expect(writes).toBe(0);
-    click(root, '[data-scope-cancel]'); expect(writes).toBe(0); controller.dispose();
   });
 });

@@ -26,17 +26,22 @@ import type {
   ExtractorRegistryConfig,
   VlmProbeRequest,
 } from './types.ts';
+import type { ExtractionTerminalRetryPath } from './job-store.ts';
 import {
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS,
   OCR_EXTRACTOR_KIND,
+  createImageOcr,
   createOcrExtractor,
   createPdfOcr,
+  type OcrEngineOptions,
 } from './extractors/ocr.ts';
 import {
   REMOTE_VLM_EXTRACTOR_KINDS,
   createRemoteVlmExtractor,
 } from './extractors/remote-vlm.ts';
 import { TEXT_EXTRACTOR_KIND, createTextExtractor } from './extractors/text.ts';
+import { createImagePreparation } from './extractors/image-prepare.ts';
+import { stillImagePreparationAvailable } from '../../core/media-cache.ts';
 import {
   TRANSCRIPTION_EXTRACTOR_KIND,
   createTranscriptionExtractor,
@@ -105,6 +110,18 @@ export type ExtractionHealthProbeMap = ReadonlyMap<string, () => Promise<void>>;
 export function createDefaultExtractorRegistry(
   config: ExtractorRegistryConfig = {},
 ): ExtractorRegistry {
+  const ocrEngine: OcrEngineOptions = {
+    ...(config.ocr?.engine !== undefined ? { preference: config.ocr.engine } : {}),
+    ...(config.ocr?.maxPages !== undefined ? { maxPages: config.ocr.maxPages } : {}),
+    ...(config.ocr?.platform !== undefined ? { platform: config.ocr.platform } : {}),
+  };
+  const ocrShared = {
+    engine: ocrEngine,
+    ...(config.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config.ocr.ocrTimeoutMs } : {}),
+    ...(config.text?.maxBoundedTextChars !== undefined
+      ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
+      : {}),
+  };
   const extractors: Extractor[] = [
     createTranscriptionExtractor({
       ...(config.transcription?.command !== undefined ? { command: config.transcription.command } : {}),
@@ -112,6 +129,7 @@ export function createDefaultExtractorRegistry(
       ...(config.transcription?.maxTranscriptChars !== undefined
         ? { maxTranscriptChars: config.transcription.maxTranscriptChars }
         : {}),
+      ...(config.transcription?.builtIn !== undefined ? { builtIn: config.transcription.builtIn } : {}),
     }),
     createTextExtractor({
       ...(config.text?.pdfTextCommand !== undefined ? { pdfTextCommand: config.text.pdfTextCommand } : {}),
@@ -120,20 +138,27 @@ export function createDefaultExtractorRegistry(
         ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
         : {}),
       // A PDF with no text layer is a scan; the text lane reads it by OCR
-      // rather than leaving it for an escalation nothing ever requests.
-      pdfOcr: createPdfOcr({
-        ...(config.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config.ocr.ocrTimeoutMs } : {}),
-        ...(config.text?.maxBoundedTextChars !== undefined
-          ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
-          : {}),
-      }),
-    }),
-    createOcrExtractor({
-      ...(config.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config.ocr.ocrTimeoutMs } : {}),
-      ...(config.text?.maxBoundedTextChars !== undefined
-        ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
+      // rather than leaving it for an escalation nothing ever requests. On a
+      // Mac the same holds for an image: the built-in engine reads its text.
+      pdfOcr: createPdfOcr(ocrShared),
+      imageOcr: createImageOcr(ocrShared),
+      // On a Mac a still image is also prepared for media search (a JPEG in
+      // the owner-only media cache), so its picture can be embedded. The
+      // preparation tool ships with macOS only; elsewhere images stay as
+      // they were.
+      ...(config.media?.cacheDir && (config.media.platform !== undefined
+        ? config.media.platform === 'darwin'
+        : stillImagePreparationAvailable())
+        ? {
+          imagePreparation: createImagePreparation({
+            cacheDir: config.media.cacheDir,
+            ...(config.media.timeoutMs !== undefined ? { timeoutMs: config.media.timeoutMs } : {}),
+            ...(config.media.maxInputBytes !== undefined ? { maxInputBytes: config.media.maxInputBytes } : {}),
+          }),
+        }
         : {}),
     }),
+    createOcrExtractor(ocrShared),
     createVlmPdfExtractor({
       ...(config.vlmPdf?.client ? { client: config.vlmPdf.client } : {}),
       ...(config.vlmPdf?.prompt !== undefined ? { prompt: config.vlmPdf.prompt } : {}),
@@ -285,4 +310,28 @@ export function defaultTerminalReclassificationRules(
     toExtractorVersion: target.version,
     reason: `deterministic ${lastErrorKind} reroute to ${toExtractorKind}`,
   }));
+}
+
+/**
+ * Every terminal failure the runner will still try once more, for the
+ * readiness counts: a lane's own once-ever reread, and each escalation rule.
+ * An item holding one is not yet "can't be read" (PR #191 review).
+ */
+export function terminalRetryPaths(
+  registry: ExtractorRegistry,
+  rules: readonly ExtractionReclassificationRule[],
+): ExtractionTerminalRetryPath[] {
+  const paths: ExtractionTerminalRetryPath[] = [];
+  for (const extractor of registry.list()) {
+    const kinds = extractor.reread?.unreadTerminalErrorKinds ?? [];
+    if (kinds.length > 0) paths.push({ extractorKind: extractor.kind, lastErrorKinds: [...kinds] });
+  }
+  for (const rule of rules) {
+    paths.push({
+      extractorKind: rule.fromExtractorKind,
+      lastErrorKinds: [rule.lastErrorKind],
+      escalateToExtractorKind: rule.toExtractorKind,
+    });
+  }
+  return paths;
 }

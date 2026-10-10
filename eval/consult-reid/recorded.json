@@ -1,0 +1,99 @@
+{
+  "source": "real-writer",
+  "model": "qwen3.5-4b-q4_k_m-e87f176 (llama.cpp b11320)",
+  "promptSha256": "5029a68875b5a85d32af15516dd80ac5708acd9886c4f735cdd333ea595766c8",
+  "recordedAt": "2026-10-07T22:23:43.682Z",
+  "level": "unnamed",
+  "outputs": {
+    "pilot-erdheim": {
+      "kind": "questions",
+      "questions": [
+        "Does vemurafenib commonly cause dizziness or vision problems that make harbour piloting unsafe?",
+        "Can a pilot with Erdheim-Chester disease on vemurafenib legally continue working in their current role?",
+        "Is there a specific medical guideline for harbour pilots taking vemurafenib regarding safety risks?"
+      ],
+      "ms": 7770
+    },
+    "teacher-narcolepsy": {
+      "kind": "questions",
+      "questions": [
+        "Does a general safety clause force a teacher to reveal narcolepsy?",
+        "What legal protections exist for a teacher with narcolepsy?",
+        "Can a school legally require disclosure of narcolepsy?"
+      ],
+      "ms": 2492
+    },
+    "farrier-insurance": {
+      "kind": "questions",
+      "questions": [
+        "Does an own occupation policy pay while recovering from hand surgery for a manual worker?",
+        "Is a hand contracture considered a disability under the policy terms?",
+        "Will the deferred period start immediately after the surgery or only after recovery begins?"
+      ],
+      "ms": 2624
+    },
+    "organist-tax": {
+      "kind": "questions",
+      "questions": [
+        "Can a self employed musician with otosclerosis claim hearing aids as a business expense?",
+        "Does the need to hear music for work qualify hearing aids as a deductible business cost?",
+        "Will a self employed organist and piano tuner be able to claim hearing aids for work purposes?"
+      ],
+      "ms": 3216
+    },
+    "ranger-lyme": {
+      "kind": "questions",
+      "questions": [
+        "Does a ranger's outdoor work in tick areas count as industrial disease for benefits?",
+        "Can late Lyme disease affecting nerves qualify as an industrial injury?",
+        "Are benefits available for Lyme disease contracted during outdoor ranger duties?"
+      ],
+      "ms": 2397
+    },
+    "surgeon-tremor": {
+      "kind": "questions",
+      "questions": [
+        "Does a surgeon with essential tremor need to report it to the regulator?",
+        "Can a surgeon continue operating while on beta blockers for tremor?",
+        "Is a new tremor diagnosis reportable if the surgeon is already on a beta blocker?"
+      ],
+      "ms": 3165
+    },
+    "fisher-pension": {
+      "kind": "questions",
+      "questions": [
+        "Does the serious ill health rule allow taking a lump sum pension early for a life expectancy of a few years?",
+        "Can a member with a terminal illness access their full fund as a lump sum before normal retirement age?",
+        "Is there a specific provision for early lump sum access when a medical condition has a short life expectancy?"
+      ],
+      "ms": 4030
+    },
+    "midwife-hepb": {
+      "kind": "questions",
+      "questions": [
+        "What is the maximum viral load level that permits a midwife to perform exposure prone procedures?",
+        "Does a low viral load automatically grant clearance for all ward duties regardless of the specific procedure type?",
+        "Can a hospital legally stop a midwife from working on a ward solely based on hepatitis B status without a specific clearance threshold?"
+      ],
+      "ms": 3862
+    },
+    "baker-coeliac-lease": {
+      "kind": "questions",
+      "questions": [
+        "Does a tenant have the right to end a commercial lease early due to a serious medical condition?",
+        "Can a landlord legally refuse a tenant's request to leave early for health reasons?",
+        "Is there a legal exception allowing a tenant to break a lease without penalty for severe illness?"
+      ],
+      "ms": 3527
+    },
+    "driver-epilepsy": {
+      "kind": "questions",
+      "questions": [
+        "What is the minimum seizure-free period required before a bus driver can return to work after a first unprovoked seizure?",
+        "Does a normal brain scan result change the minimum seizure-free period needed to resume driving a bus?",
+        "Can a bus driver return to work after a first unprovoked seizure if no medication is prescribed and the scan is normal?"
+      ],
+      "ms": 4545
+    }
+  }
+}

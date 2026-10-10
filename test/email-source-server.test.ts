@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { createSovereigntyEngine } from '../src/core/sovereignty.ts';
+import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import {
   createCloudSourceIndexEmbeddingProviderFromEnv,
@@ -56,12 +57,12 @@ describe('canonical source-worker server configuration', () => {
   });
 
   test('private-cloud-only selects Venice for secure embeddings while local-only stays local', () => {
-    const privateCloud = createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only'));
+    const privateCloud = createSovereigntyEngine(loadPreBuiltInPreset('private-cloud-only'));
     expect(privateCloud.resolveEmbeddingProfile('secure_local')).toMatchObject({
       id: 'venice-source-embedding',
       profile: { provider: 'venice', trust: 'encrypted_cloud', purpose: 'embedding' },
     });
-    const localOnly = createSovereigntyEngine(loadSovereigntyPreset('local-only'));
+    const localOnly = createSovereigntyEngine(loadPreBuiltInPreset('local-only'));
     expect(localOnly.resolveEmbeddingProfile('secure_local')).toMatchObject({
       id: 'local-source-embedding',
       profile: { provider: 'local-openai-compatible', trust: 'local', purpose: 'embedding' },
@@ -74,7 +75,7 @@ describe('canonical source-worker server configuration', () => {
       warn: () => undefined,
     });
     const provider = createSourceIndexEmbeddingProviderFromSovereignty(
-      createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only')),
+      createSovereigntyEngine(loadPreBuiltInPreset('private-cloud-only')),
       'secure_local',
       {},
       resolver,
@@ -100,7 +101,7 @@ describe('canonical source-worker server configuration', () => {
     });
     expect(inferred?.configHash).toBe(explicit?.configHash);
     const preset = createSourceIndexEmbeddingProviderFromSovereignty(
-      createSovereigntyEngine(loadSovereigntyPreset('local-only')), 'secure_local', {},
+      createSovereigntyEngine(loadPreBuiltInPreset('local-only')), 'secure_local', {},
     );
     for (const provider of [inferred, preset]) {
       expect(provider).toMatchObject({
@@ -138,10 +139,10 @@ describe('canonical source-worker server configuration', () => {
     expect(createCloudSourceIndexEmbeddingProviderFromEnv(env)?.dimension).toBe(768);
     expect(createCloudSourceIndexEmbeddingProviderFromEnv(env, 'OLYMPUS_TEST')?.dimension).toBe(1536);
     expect(createSourceIndexEmbeddingProviderFromSovereignty(
-      createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')), 'internal', env,
+      createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')), 'internal', env,
     )?.dimension).toBe(768);
     expect(createSourceIndexEmbeddingProviderFromSovereignty(
-      createSovereigntyEngine(loadSovereigntyPreset('local-only')), 'secure_local',
+      createSovereigntyEngine(loadPreBuiltInPreset('local-only')), 'secure_local',
       { OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY: '1024' },
     )).toMatchObject({ dimension: 1024, epochId: 'local:openai-compatible:secure-local-qwen3-embed:1024' });
   });
@@ -182,7 +183,7 @@ describe('canonical source-worker server configuration', () => {
       GEMINI_API_KEY: 'fixture-key', OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH: localEpoch,
     })).toThrow('cannot label cloud provider');
     expect(createSourceIndexEmbeddingProviderFromSovereignty(
-      createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')), 'internal',
+      createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')), 'internal',
       { OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: 'fixture-key', OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH: localEpoch },
     )?.epochId).toBe('cloud:google-gemini:gemini-embedding-2:provider-reported');
   });

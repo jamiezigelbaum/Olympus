@@ -18,6 +18,7 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   'source_watches',
   'source_watch_cancel',
   'olympus_doctor',
+  'ask_anonymously',
 ] as const;
 
 // `source_answer_result` collects a slow source_answer that handed off to a
@@ -36,6 +37,7 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
   'source_index_status',
   'source_index_search',
   'olympus_doctor',
+  'ask_anonymously',
 ] as const;
 
 // Operation names, not typed command lines. `olympus_doctor` is exposed to the
@@ -49,12 +51,18 @@ export const V0_4_PUBLIC_CLI_OPERATIONS = [
   'source_index_status',
   'source_index_search',
   'olympus_doctor',
+  'ask_anonymously',
 ] as const;
 
+// `ask_anonymously` (one typed question through zkAPI, owner decision
+// 2026-10-10) is on every agent surface, so a user can ask from whichever
+// agent they already use; a slow route hands off like source_answer and is
+// collected with source_answer_result.
 export const V0_4_HERMES_MCP_TOOLS = [
   'source_answer',
   'source_answer_result',
   'source_index_status',
+  'ask_anonymously',
 ] as const;
 
 // Remote MCP (`/mcp` on the worker, reached by agents outside this machine
@@ -120,7 +128,6 @@ export const V0_4_PUBLIC_SOURCE_IDS = [
 export const V0_4_PUBLIC_CLI_COMMANDS = [
   'setup',
   'sovereignty init',
-  'sensitivity validate',
   'worker install',
   'worker status',
   'worker start',
@@ -130,6 +137,15 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'worker upgrade',
   'worker uninstall',
   'worker run',
+  'engine install',
+  'engine uninstall',
+  'engine status',
+  'engine restart',
+  'engine logs',
+  'engine stop',
+  'engine start',
+  'engine rollback',
+  'engine verify',
   'connect google',
   'connect gmail',
   'connect google-drive',
@@ -145,8 +161,11 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'connections list',
   'connections revoke',
   'connections status',
-  'connections terms',
   'dashboard',
+  'open',
+  'open-handler install',
+  'open-handler uninstall',
+  'open-handler status',
   'source answer',
   'source index status',
   'source index search',
@@ -160,9 +179,12 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'tier classifier',
   'tier migrate',
   'doctor',
+  'ask',
   'argus ping',
   'argus list',
   'argus complete',
+  'zkapi install-tools',
+  'zkapi test-writer',
   'serve',
 ] as const;
 
@@ -180,6 +202,7 @@ export const V0_4_PACKAGE_INTERNAL_CLI_HELPERS = [
   '__oauth-detached-child',
   '__worker-service-run',
   '__relay-service-run',
+  '__engine-run',
 ] as const;
 
 export interface PublicDashboardRoute {
@@ -191,16 +214,17 @@ export interface PublicDashboardRoute {
 export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'GET', path: '/dashboard' },
   { method: 'GET', path: '/dashboard.json' },
-  { method: 'GET', path: '/dashboard/ui' },
   { method: 'GET', path: '/dashboard/auth-check' },
+  { method: 'GET', path: '/dashboard/panel' },
   // The standalone opening handoff: a public constant page, a bearer-only
   // mint, and a ticket-authenticated redeem. See core/dashboard-launch.ts.
   { method: 'GET', path: '/dashboard/launch' },
   { method: 'POST', path: '/dashboard/control/launch' },
   { method: 'POST', path: '/dashboard/control/launch/redeem' },
   { method: 'POST', path: '/dashboard/control/session' },
-  { method: 'GET', path: '/dashboard/dispositions' },
-  { method: 'GET', path: '/dashboard/dispositions.json' },
+  // The local-only mint behind the Outside help card: no bearer accepted,
+  // loopback origin only; its sessions alone reach the consult routes.
+  { method: 'POST', path: '/dashboard/control/session/local' },
   { method: 'POST', path: '/dashboard/dispositions' },
   { method: 'GET', path: '/oauth/callback/', prefix: true },
   { method: 'POST', path: '/dashboard/connect/oauth/start' },
@@ -209,6 +233,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/models/check' },
   { method: 'POST', path: '/dashboard/sync-now' },
   { method: 'POST', path: '/dashboard/embedding-priority' },
+  { method: 'POST', path: '/dashboard/tools/call' },
   { method: 'POST', path: '/dashboard/disconnect' },
   { method: 'POST', path: '/dashboard/unpair' },
   // Remote agent connections: mint a pairing code, create a key (shown once),
@@ -218,6 +243,19 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/agents/keys' },
   { method: 'POST', path: '/dashboard/agents/revoke' },
   { method: 'POST', path: '/dashboard/agents/remote-access' },
+  // Outside help (the Mac dashboard card, stage C5): the one place consults
+  // are turned on. Control session only; the Gateway bearer is refused at the
+  // HTTP boundary (workers/http.ts DASHBOARD_CONSULT_CONTROL_PATHS).
+  { method: 'POST', path: '/dashboard/consult' },
+  { method: 'POST', path: '/dashboard/consult/route' },
+  { method: 'POST', path: '/dashboard/consult/route/add' },
+  { method: 'POST', path: '/dashboard/consult/recover' },
+  { method: 'POST', path: '/dashboard/consult/abandon' },
+  { method: 'POST', path: '/dashboard/consult/tools/install' },
+  { method: 'POST', path: '/dashboard/consult/writer' },
+  { method: 'POST', path: '/dashboard/consult/writer/test' },
+  { method: 'POST', path: '/dashboard/consult/standard' },
+  { method: 'POST', path: '/dashboard/consult/ask' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [
@@ -236,6 +274,32 @@ export const V0_4_CANONICAL_DOCUMENTS = [
 export const V0_4_PUBLIC_PACKAGE_FILES = [
   'assets/icon.png',
   'assets/olympus-banner.png',
+  // Consult gate vocabulary packs (src/core/consult-gate.ts), each beside its
+  // licence file, listed one by one; docs/THIRD_PARTY_DATA.md describes them.
+  'assets/consult/vocabulary/cldr-countries.txt.gz',
+  'assets/consult/vocabulary/cldr-countries.LICENSE.txt',
+  'assets/consult/vocabulary/cldr-units.txt.gz',
+  'assets/consult/vocabulary/cldr-units.LICENSE.txt',
+  'assets/consult/vocabulary/en-esdb.txt.gz',
+  'assets/consult/vocabulary/en-esdb.LICENSE.txt',
+  'assets/consult/vocabulary/es-hunspell.txt.gz',
+  'assets/consult/vocabulary/es-hunspell.LICENSE.txt',
+  'assets/consult/vocabulary/fr-grammalecte.txt.gz',
+  'assets/consult/vocabulary/fr-grammalecte.LICENSE.txt',
+  'assets/consult/vocabulary/nl-opentaal.txt.gz',
+  'assets/consult/vocabulary/nl-opentaal.LICENSE.txt',
+  'assets/consult/vocabulary/olympus-terms.txt.gz',
+  'assets/consult/vocabulary/olympus-terms.LICENSE.txt',
+  'assets/consult/vocabulary/places.txt.gz',
+  'assets/consult/vocabulary/places.LICENSE.txt',
+  'assets/consult/vocabulary/pt-br-hunspell.txt.gz',
+  'assets/consult/vocabulary/pt-br-hunspell.LICENSE.txt',
+  'assets/consult/vocabulary/pt-pt-hunspell.txt.gz',
+  'assets/consult/vocabulary/pt-pt-hunspell.LICENSE.txt',
+  'assets/consult/vocabulary/rx-brands.txt.gz',
+  'assets/consult/vocabulary/rx-brands.LICENSE.txt',
+  'assets/consult/vocabulary/rx-ingredients.txt.gz',
+  'assets/consult/vocabulary/rx-ingredients.LICENSE.txt',
   'package.json',
   'openclaw.plugin.json',
   'index.js',
@@ -248,9 +312,11 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'dist/index.js',
   'dist/cli.js',
   'dist/embedding-drain.js',
+  'dist/litert-helper.js',
   'dist/control-ui/index.js',
   'scripts/telegram-pair.py',
   'scripts/telegram-telethon-reader.py',
+  'scripts/macos-vision-ocr.js',
   'config/systemd/user/olympus-whisper-transcribe.sh',
   'tools/whatsapp-bridge/main.go',
   'tools/whatsapp-bridge/go.mod',
@@ -275,6 +341,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'docs/SOVEREIGNTY_CONFIG.md',
   'docs/UNINSTALL.md',
   'docs/V0_4_RELEASE.md',
+  'docs/THIRD_PARTY_DATA.md',
 ] as const;
 
 const PUBLIC_OPERATION_NAMES = {

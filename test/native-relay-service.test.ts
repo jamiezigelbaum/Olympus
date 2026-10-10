@@ -1,9 +1,9 @@
 /**
  * The native relay service end to end over loopback: the Gateway-side service
  * spawns the real relay runtime (through a fixture standing in for
- * `cli.js __relay-service-run`), which connects to a real test relay, waits for
- * the subscriber agreement, obtains a certificate from a mock ACME CA, and
- * publishes the public base URL the worker then serves without a restart.
+ * `cli.js __relay-service-run`), which keeps a session to a real test relay
+ * and publishes the public base URL and install id the worker then serves
+ * without a restart. Requests reach the worker only through that session.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -14,33 +14,26 @@ import { join } from 'node:path';
 import { createNativeRelayService } from '../src/core/native-relay-service.ts';
 import type { NativeProcessServiceDefinition } from '../src/core/native-process-service.ts';
 import {
-  createRelayRequestVerifier,
   createRemotePublicUrlSource,
+  emptyRemoteAccessStatus,
   readRemoteAccessStatus,
-  recordTermsAcceptance,
   remoteAccessDir,
   remoteAccessStatusView,
   resolveRemoteAccessUrls,
   type RemoteAccessStatusFile,
+  writeRemoteAccessStatus,
 } from '../src/core/remote-access.ts';
 import { remoteAccessFromStatus } from '../src/workers/agent-connections.ts';
-import { MemoryDnsProvider } from '../connect-relay/server/dns.ts';
 import { MemoryInstallRegistry } from '../connect-relay/server/registry.ts';
 import { startRelay, type RelayHandle } from '../connect-relay/server/relay.ts';
-import { startMockAcme, type MockAcme } from '../connect-relay/test/helpers/mock-acme.ts';
-import { agentRequest } from '../connect-relay/test/helpers/net.ts';
-import { createTestCa, type TestCa } from '../connect-relay/test/helpers/pki.ts';
+import { mintCredential } from '../connect-relay/shared/tokens.ts';
 
 setDefaultTimeout(60_000);
 
-const ZONE = 'connect.olympus.test';
-const CONTROL_HOST = `relay.${ZONE}`;
+const RELAY_HOST = 'mcp.olympus.test';
 const CHILD = join(import.meta.dir, 'fixtures', 'relay', 'relay-runtime-child.ts');
 const CRASHING_CHILD = join(import.meta.dir, 'fixtures', 'relay', 'crashing-relay-child.ts');
 
-let ca: TestCa;
-let acme: MockAcme;
-let dns: MemoryDnsProvider;
 let relay: RelayHandle;
 let worker: http.Server;
 let workerBaseUrl: string;
@@ -50,17 +43,7 @@ const services: NativeProcessServiceDefinition[] = [];
 const savedXdg = process.env.XDG_DATA_HOME;
 
 beforeAll(async () => {
-  ca = createTestCa();
-  dns = new MemoryDnsProvider();
-  acme = await startMockAcme({ lookupTxt: (name) => dns.lookupTxt(name), signCsr: (der) => ca.signCsr(der) });
-  relay = await startRelay({
-    zone: ZONE,
-    controlHost: CONTROL_HOST,
-    controlTls: ca.issue(CONTROL_HOST, `data.${CONTROL_HOST}`),
-    registry: new MemoryInstallRegistry(),
-    dns,
-    listen: { host: '127.0.0.1', port: 0 },
-  });
+  relay = await startRelay({ publicHost: RELAY_HOST, registry: new MemoryInstallRegistry(), listen: { host: '127.0.0.1', port: 0 } });
   worker = http.createServer((req, res) => {
     workerRequests.push({ url: req.url, headers: req.headers });
     req.resume();
@@ -80,9 +63,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   await relay.close();
-  await acme.close();
   await new Promise<void>((resolve) => worker.close(() => resolve()));
-  ca.cleanup();
 });
 
 /** An isolated data root; the service reads it from its (process + worker.env) environment. */
@@ -108,8 +89,6 @@ function relayService(
     workerEnvPath,
     childEnv: {
       TEST_RELAY_PORT: String(relay.port),
-      TEST_RELAY_CA: ca.cert,
-      TEST_ACME_DIRECTORY: acme.directoryUrl,
       ...overrides.childEnv,
     },
     startupTimeoutMs: 20_000,
@@ -140,63 +119,60 @@ async function until<T>(read: () => T | undefined, accept: (value: T) => boolean
 }
 
 describe('native relay service', () => {
-  test('keeps a relay session, waits for the agreement, gets a certificate, and publishes the public URL live', async () => {
+  test('keeps a relay session and publishes the public URL and install id live; requests arrive marked', async () => {
     const { dataHome, workerEnvPath, dir } = fixtureRoot();
     // The worker's live view, created before the relay is up: no restart later.
     const publicUrls = createRemotePublicUrlSource({ XDG_DATA_HOME: dataHome }, { minIntervalMs: 0 });
-    const trustRelay = createRelayRequestVerifier({ XDG_DATA_HOME: dataHome }, { minIntervalMs: 0 });
     expect(publicUrls.current()).toBeUndefined();
 
     const events: string[] = [];
-    const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE });
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST });
     await service.start({ serviceHealth: healthRecorder(events) });
     expect(events).toEqual(['failure:Olympus remote relay is starting.', 'clear']);
 
-    // Session up, but no ACME order before the owner accepts the agreement.
-    const waiting = await until(() => readRemoteAccessStatus(dir), (s) => s.certificate?.state === 'awaiting_terms');
-    expect(waiting.relay?.state).toBe('online');
-    expect(waiting.terms_url).toBe(acme.directoryUrl.replace('/directory', '/terms/v1.pdf'));
-    expect(waiting.public_base_url).toBeNull();
-    expect(acme.issued).toHaveLength(0);
-    expect(publicUrls.current()).toBeUndefined();
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-    for (const file of ['status.json', 'relay-auth', 'install-key.pem', 'tls-key.pem']) {
-      expect(statSync(join(dir, file)).mode & 0o777).toBe(0o600);
-    }
-
-    recordTermsAcceptance(dir, waiting.terms_url!);
-    const serving = await until(() => readRemoteAccessStatus(dir), (s) => s.public_base_url !== null);
-    const hostname = `${serving.install_id}.${ZONE}`;
-    expect(serving).toMatchObject({
+    const online = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
+    expect(online).toMatchObject({
       mode: 'relay',
-      hostname,
-      public_base_url: `https://${hostname}`,
-      relay: { state: 'online' },
-      certificate: { state: 'serving' },
+      relay_host: RELAY_HOST,
+      public_base_url: `https://${RELAY_HOST}`,
       local_url: new URL(workerBaseUrl).origin,
     });
-    expect(Date.parse(serving.certificate!.not_after!)).toBeGreaterThan(Date.now());
-    expect(acme.issued).toEqual([hostname]);
+    expect(online.install_id).toMatch(/^[a-z2-7]{32}$/);
+    expect(Date.parse(online.last_connected_at!)).toBeGreaterThan(Date.now() - 60_000);
+    expect(relay.onlineInstalls()).toEqual([online.install_id!]);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    for (const file of ['status.json', 'install-key.pem']) {
+      expect(statSync(join(dir, file)).mode & 0o777).toBe(0o600);
+    }
+    // The per-boot relay secret is never written down.
+    expect(() => statSync(join(dir, 'relay-auth'))).toThrow();
 
-    // The worker's source now answers the relay origin: issuer and resource.
-    expect(publicUrls.current()).toMatchObject({ issuer: `https://${hostname}`, resource: `https://${hostname}/mcp` });
+    // The worker's source now answers the relay origin, with this install's id.
+    expect(publicUrls.current()).toMatchObject({
+      issuer: `https://${RELAY_HOST}`,
+      resource: `https://${RELAY_HOST}/mcp`,
+      installId: online.install_id,
+    });
 
-    // A hosted agent reaches the worker; the forwarded request carries the
-    // install's secret (never the agent's forged copy), which the worker trusts.
-    const response = await agentRequest({
-      port: relay.port,
-      servername: hostname,
-      ca: ca.cert,
-      path: '/openapi.json',
-      headers: { 'x-olympus-relay-auth': 'forged-by-agent', 'x-forwarded-for': '203.0.113.7' },
+    // A hosted agent reaches the worker through the relay; the forwarded
+    // request carries the relay marker (never the caller's forged copy).
+    const response = await fetch(`${relay.url}/mcp`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${mintCredential('access', online.install_id!)}`,
+        'content-type': 'application/json',
+        'x-olympus-relay': 'forged-by-caller',
+        'x-forwarded-for': '203.0.113.7',
+      },
+      body: '{}',
     });
     expect(response.status).toBe(200);
     const seen = workerRequests.at(-1)!;
-    const secret = readFileSync(join(dir, 'relay-auth'), 'utf8').trim();
-    expect(seen.headers['x-olympus-relay-auth']).toBe(secret);
-    expect(trustRelay(new Request('http://127.0.0.1/openapi.json', { headers: seen.headers as Record<string, string> }))).toBe(true);
+    expect(seen.url).toBe('/mcp');
+    expect(seen.headers['x-olympus-relay']).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(seen.headers['x-forwarded-for']).toBeUndefined();
 
-    // Stop clears the public URL: the worker stops advertising a dead address.
+    // Stop clears the public URL: the worker stops advertising OAuth.
     await service.stop();
     const stopped = readRemoteAccessStatus(dir)!;
     expect(stopped.relay?.state).toBe('stopped');
@@ -204,24 +180,20 @@ describe('native relay service', () => {
     expect(publicUrls.current()).toBeUndefined();
   });
 
-  test('restarts a crashed relay child with backoff and reuses the stored certificate', async () => {
+  test('restarts a crashed relay child with backoff and keeps the install identity', async () => {
     const { workerEnvPath, dir } = fixtureRoot();
-    recordTermsAcceptance(dir, acme.directoryUrl.replace('/directory', '/terms/v1.pdf'));
-    const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE });
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST });
     await service.start({});
-    const first = await until(() => readRemoteAccessStatus(dir), (s) => s.public_base_url !== null);
-    const issued = acme.issued.length;
+    const first = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
 
     process.kill(first.pid!, 'SIGKILL');
     const second = await until(
       () => readRemoteAccessStatus(dir),
-      (s: RemoteAccessStatusFile) => s.instance_id !== first.instance_id && s.public_base_url !== null,
+      (s: RemoteAccessStatusFile) => s.instance_id !== first.instance_id && s.relay?.state === 'online',
     );
     expect(second.pid).not.toBe(first.pid);
     expect(second.install_id).toBe(first.install_id);
     expect(second.public_base_url).toBe(first.public_base_url);
-    // Fresh certificate on disk: no second order.
-    expect(acme.issued.length).toBe(issued);
   });
 
   test('a child that crashes soon after ready keeps backing off instead of hammering the relay', async () => {
@@ -229,7 +201,7 @@ describe('native relay service', () => {
       const { root, workerEnvPath } = fixtureRoot();
       const log = join(root, 'spawns.log');
       writeFileSync(log, '');
-      const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE }, {
+      const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST }, {
         executablePath: CRASHING_CHILD,
         restartDelaysMs: [100, 800, 5_000],
         childEnv: { TEST_SPAWN_LOG: log },
@@ -253,11 +225,10 @@ describe('native relay service', () => {
 
   test('a crash withdraws the public URL at once, before the backoff relaunch', async () => {
     const { dataHome, workerEnvPath, dir } = fixtureRoot();
-    recordTermsAcceptance(dir, acme.directoryUrl.replace('/directory', '/terms/v1.pdf'));
     const publicUrls = createRemotePublicUrlSource({ XDG_DATA_HOME: dataHome }, { minIntervalMs: 0 });
-    const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE }, { restartDelaysMs: [3_000] });
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST }, { restartDelaysMs: [3_000] });
     await service.start({});
-    const first = await until(() => readRemoteAccessStatus(dir), (s) => s.public_base_url !== null);
+    const first = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
     expect(publicUrls.current()).toBeDefined();
 
     process.kill(first.pid!, 'SIGKILL');
@@ -271,37 +242,10 @@ describe('native relay service', () => {
     expect(back.public_base_url).toBe(first.public_base_url);
   });
 
-  test('a subscriber agreement the CA changes mid-session needs a new acceptance before any order', async () => {
-    const { workerEnvPath, dir } = fixtureRoot();
-    const v1 = acme.directoryUrl.replace('/directory', '/terms/v1.pdf');
-    const v2 = acme.directoryUrl.replace('/directory', '/terms/v2.pdf');
-    const issued = acme.issued.length;
-    try {
-      const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE });
-      await service.start({});
-      await until(() => readRemoteAccessStatus(dir), (s) => s.certificate?.state === 'awaiting_terms' && s.terms_url === v1);
-
-      // The CA publishes v2 while the owner is still reading v1.
-      acme.setTermsOfService('/terms/v2.pdf');
-      recordTermsAcceptance(dir, v1);
-      const renewed = await until(() => readRemoteAccessStatus(dir), (s) => s.terms_url === v2);
-      expect(renewed.certificate?.state).toBe('awaiting_terms');
-      expect(renewed.public_base_url).toBeNull();
-      await Bun.sleep(300);
-      expect(acme.issued.length).toBe(issued);
-
-      recordTermsAcceptance(dir, v2);
-      await until(() => readRemoteAccessStatus(dir), (s) => s.public_base_url !== null);
-      expect(acme.issued.length).toBe(issued + 1);
-    } finally {
-      acme.setTermsOfService('/terms/v1.pdf');
-    }
-  });
-
   test('refuses a relay and a manual public URL together, by name, and starts nothing', async () => {
     const { workerEnvPath, dir } = fixtureRoot();
     const events: string[] = [];
-    const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE, publicBaseUrl: 'https://tunnel.example' });
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST, publicBaseUrl: 'https://tunnel.example' });
     await expect(service.start({ serviceHealth: healthRecorder(events) })).rejects.toThrow('mutually exclusive');
     expect(events).toHaveLength(1);
     expect(events[0]).toContain('remote.relayHost and remote.publicBaseUrl are mutually exclusive');
@@ -329,7 +273,7 @@ describe('native relay service', () => {
     const { workerEnvPath, dir } = fixtureRoot();
     writeFileSync(workerEnvPath, 'OLYMPUS_PUBLIC_BASE_URL=https://old-tunnel.example\n', { mode: 0o600 });
     const events: string[] = [];
-    const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE });
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST });
     await expect(service.start({ serviceHealth: healthRecorder(events) })).rejects.toThrow('worker.env');
     expect(readRemoteAccessStatus(dir)?.error).toContain('OLYMPUS_PUBLIC_BASE_URL in worker.env');
   });
@@ -346,10 +290,11 @@ describe('native relay service', () => {
     const service = relayService(workerEnvPath, { enabled: true }, { childEnv: { TEST_RELAY_PORT: String(port) } });
     await service.start({ serviceHealth: healthRecorder(events) });
     const first = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'offline');
-    expect(first.relay_host).toBe('connect.olympusplugin.ai');
-    expect(first.relay?.reason).toContain('ECONNREFUSED');
+    expect(first.relay_host).toBe('mcp.olympusplugin.ai');
+    expect(first.relay?.reason).toBe('could not reach the relay');
     expect(first.relay?.retry_in_ms).toBeGreaterThan(0);
-    expect(first.public_base_url).toBeNull();
+    // The issuer does not move with the network; reachability is relay.state.
+    expect(first.public_base_url).toBe('https://mcp.olympusplugin.ai');
 
     // Across many reconnect attempts (50–200 ms backoff in the fixture) the
     // same child keeps running and the status stays "offline" with its reason.
@@ -370,7 +315,6 @@ describe('native relay service', () => {
     expect(events.filter((event) => event.startsWith('failure') && !event.includes('is starting'))).toEqual([]);
 
     const view = remoteAccessStatusView({
-      dir,
       status: readRemoteAccessStatus(dir),
       urls: resolveRemoteAccessUrls({ layeredEnv: {}, env: {}, status: readRemoteAccessStatus(dir), configuredWorkerBaseUrl: workerBaseUrl }),
     });
@@ -382,24 +326,84 @@ describe('native relay service', () => {
     });
   });
 
-  test('an upgraded config with remote.enabled and no agreement makes nothing public: no DNS record, ACME account or order', async () => {
-    // Before the default relay host, { enabled: true } alone was an error that
-    // kept remote access off; now it connects. The test relay's zone stands in
-    // for connect.olympusplugin.ai so the session actually comes up.
-    const { dir, workerEnvPath } = fixtureRoot();
-    const accountsBefore = acme.accounts;
-    const issuedBefore = acme.issued.length;
-    const service = relayService(workerEnvPath, { enabled: true, relayHost: ZONE });
+  test('a relay restart (a redeploy): the same child reconnects, serves a request, and status goes offline then online', async () => {
+    const { workerEnvPath, dir } = fixtureRoot();
+    const registry = new MemoryInstallRegistry();
+    const own = await startRelay({ publicHost: RELAY_HOST, registry, listen: { host: '127.0.0.1', port: 0 } });
+    const port = own.port;
+    let current: RelayHandle = own;
+    try {
+      const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST }, { childEnv: { TEST_RELAY_PORT: String(port) } });
+      await service.start({});
+      const first = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
+
+      await current.close();
+      const down = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'offline');
+      expect(down).toMatchObject({ mode: 'relay', pid: first.pid, instance_id: first.instance_id });
+      await Bun.sleep(600);
+
+      // The registry survives the restart, as the production log does.
+      current = await startRelay({ publicHost: RELAY_HOST, registry, listen: { host: '127.0.0.1', port } });
+      const back = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
+      // The same child, not a supervisor restart: the session itself recovered.
+      expect(back).toMatchObject({ mode: 'relay', pid: first.pid, instance_id: first.instance_id, install_id: first.install_id });
+      expect(Date.parse(back.last_connected_at!)).toBeGreaterThan(Date.parse(first.last_connected_at!));
+
+      const response = await fetch(`${current.url}/mcp`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${mintCredential('access', back.install_id!)}`, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(response.status).toBe(200);
+      expect(workerRequests.at(-1)?.url).toBe('/mcp');
+    } finally {
+      await current.close();
+    }
+  });
+
+  test('a dead relay child is reported to host health, then cleared once its replacement is ready', async () => {
+    const { workerEnvPath, dir } = fixtureRoot();
+    const events: string[] = [];
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST }, { restartDelaysMs: [300] });
+    await service.start({ serviceHealth: healthRecorder(events) });
+    const first = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
+    events.length = 0;
+    process.kill(first.pid!, 'SIGKILL');
+    await until(() => events, (seen) => seen.includes('failure:Olympus remote relay exited unexpectedly.'), 5_000);
+    await until(() => readRemoteAccessStatus(dir), (s) => s.instance_id !== first.instance_id && s.relay?.state === 'online');
+    await until(() => events, (seen) => seen.at(-1) === 'clear', 5_000);
+  });
+
+  test('another supervisor with remote access off never says "off" over a live relay; a clobbered status is re-asserted', async () => {
+    const { workerEnvPath, dir } = fixtureRoot();
+    const service = relayService(workerEnvPath, { enabled: true, relayHost: RELAY_HOST }, { childEnv: { TEST_STATUS_REFRESH_MS: '100' } });
     await service.start({});
-    const waiting = await until(() => readRemoteAccessStatus(dir), (s) => s.certificate?.state === 'awaiting_terms' && s.install_id !== null);
-    expect(waiting.relay?.state).toBe('online');
-    await Bun.sleep(300);
-    const hostname = `${waiting.install_id}.${ZONE}`;
-    expect(acme.accounts).toBe(accountsBefore);
-    expect(acme.issued.length).toBe(issuedBefore);
-    expect(dns.addresses.has(hostname)).toBe(false);
-    expect(dns.txt.has(`_acme-challenge.${hostname}`)).toBe(false);
-    expect(readRemoteAccessStatus(dir)?.public_base_url).toBeNull();
+    const online = await until(() => readRemoteAccessStatus(dir), (s) => s.relay?.state === 'online');
+
+    // 2026-10-01: a test run starting every plugin service against the real
+    // data root (remote access off in its config) wrote "off" over the live
+    // engine's relay status, which then read off until an engine restart.
+    const foreign = relayService(workerEnvPath, { enabled: false });
+    await foreign.start({});
+    expect(readRemoteAccessStatus(dir)).toMatchObject({ mode: 'relay', instance_id: online.instance_id, pid: online.pid });
+    await foreign.stop();
+
+    // Whatever overwrites it anyway, the live child puts its own status back.
+    writeRemoteAccessStatus(dir, emptyRemoteAccessStatus('off'));
+    const healed = await until(() => readRemoteAccessStatus(dir), (s) => s.mode === 'relay', 5_000);
+    expect(healed).toMatchObject({
+      instance_id: online.instance_id,
+      pid: online.pid,
+      install_id: online.install_id,
+      public_base_url: `https://${RELAY_HOST}`,
+      relay: { state: 'online' },
+    });
+
+    // Its own supervisor turning remote access off still reads off.
+    await service.stop();
+    const off = relayService(workerEnvPath, { enabled: false });
+    await off.start({});
+    expect(readRemoteAccessStatus(dir)).toMatchObject({ mode: 'off', relay: null, pid: null });
   });
 
   test('remote access that was never turned on writes nothing', async () => {

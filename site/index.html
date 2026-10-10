@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Olympus: ask ChatGPT about your own mail, files and notes</title>
+  <meta name="description" content="Olympus is a private knowledge engine on your Mac. ChatGPT can ask it questions; your data stays on your Mac.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
+      <nav class="site" aria-label="Main">
+        <ul>
+        <li><a href="/" aria-current="page">Home</a></li>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/help/mac-offline/">Help</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>Ask ChatGPT about your own mail, files and notes.</h1>
+      <p class="lede">Olympus is a private knowledge engine that runs on your Mac. ChatGPT can ask it questions. Your data stays on your Mac.</p>
+      <div class="cta">
+        <a class="button" href="/install/">Install on your Mac</a>
+        <a class="button secondary" href="/privacy/">How your data is handled</a>
+      </div>
+
+      <h2>What it does</h2>
+      <p>Olympus reads the sources you choose: accounts you already have such as Dropbox, Gmail and Google Drive, and sources such as X bookmarks or Readwise that you set up on your Mac. It builds a search index on your Mac. When you ask ChatGPT something like "what did Sam send me about the lease?", ChatGPT asks Olympus, and Olympus answers with citations to your own items.</p>
+
+      <ul class="points">
+        <li><strong>Your index stays on your Mac.</strong> Olympus has no cloud copy of your mail, files or notes. Only what a question needs leaves the Mac, and only to the ChatGPT conversation you are in.</li>
+        <li><strong>Private and Secret items never go to ChatGPT.</strong> Olympus sorts every item into one of three tiers: Personal, Private or Secret. ChatGPT only ever receives Personal material. Private items are answered on your Mac and shown only to you, in a private Olympus panel that is never sent to ChatGPT. Secrets such as passwords and keys are never read by any model.</li>
+        <li><strong>You approve ChatGPT on your Mac.</strong> Connecting ChatGPT takes one click on an approval page that opens on your Mac. There is no Olympus account and no password to create.</li>
+        <li><strong>One secure connection.</strong> ChatGPT reaches your Mac through the Olympus relay at <code>mcp.olympusplugin.ai</code>. The relay forwards requests over an encrypted connection your Mac opens. It stores no content and logs no content or tokens.</li>
+      </ul>
+
+      <h2>The three tiers</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th scope="col">Tier</th><th scope="col">Examples</th><th scope="col">Can ChatGPT see it?</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Personal</td><td>Everyday mail, meeting notes, plans, receipts for ordinary purchases, newsletters and saved articles</td><td>Yes, when it helps answer your question</td></tr>
+            <tr><td>Private</td><td>Health, money, legal and identity matters, and whatever you tell Olympus is private for you</td><td>No. Answered on your Mac, in a private panel only you see</td></tr>
+            <tr><td>Secret</td><td>Passwords, recovery codes, private keys</td><td>No. Never read by any model</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="meta">Olympus judges each item on its own, not each folder or account. When Private items match a question, ChatGPT is told only that some matching items are Private; the answer from them appears in the Olympus panel under ChatGPT's reply, visible only to you. A Private item's file name can still be visible to ChatGPT; what it says never is.</p>
+
+      <h2>What you need</h2>
+      <ul>
+        <li>A Mac running a recent version of macOS.</li>
+        <li>ChatGPT, with the Olympus plugin added. Installing uses the ChatGPT desktop app for Mac.</li>
+        <li>Your Mac awake and online when you ask. If it is asleep, ChatGPT will say <a href="/help/mac-offline/">your Mac is offline</a>.</li>
+      </ul>
+    </div>
+  </main>
+  <footer class="site">
+    <div class="wrap">
+      <ul>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        <li><a href="/terms/">Terms</a></li>
+      </ul>
+      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
+    </div>
+  </footer>
+</body>
+</html>

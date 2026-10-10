@@ -7,7 +7,6 @@
  * "Private source worker does not support Sync now for google-drive".
  */
 import { describe, expect, test } from 'bun:test';
-import { dashboardAttentionBanner } from '../src/workers/dashboard/attention.ts';
 import {
   buildSourceDashboardViewModel,
   type SourceDashboardViewModel,
@@ -16,27 +15,6 @@ import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sove
 import type { DashboardSourceCard } from '../src/workers/source-dashboard.ts';
 
 const NOW = new Date('2026-09-04T12:00:00.000Z');
-
-describe('Sync now the worker cannot run', () => {
-  test('is not offered, and the banner does not advise pressing it', () => {
-    const later = new Date(NOW.getTime() + 25 * 3_600_000);
-    const card = justConnectedCard({ sync_now_available: false });
-    const banner = dashboardAttentionBanner(card, { now: later, setupPath: '/dashboard/setup' });
-
-    expect(banner?.kind).toBe('lane_stuck');
-    expect(banner?.action).toBeUndefined();
-    expect(banner?.sentence).not.toContain('Try a sync now');
-    expect(banner?.sentence).toContain('Ask your agent to look at the lane.');
-
-    // Declared available, the control and its advice both come back.
-    const offered = dashboardAttentionBanner(
-      justConnectedCard({ sync_now_available: true }),
-      { now: later, setupPath: '/dashboard/setup' },
-    );
-    expect(offered?.action).toMatchObject({ kind: 'sync_now', source: 'google-drive' });
-    expect(offered?.sentence).toContain('Try a sync now');
-  });
-});
 
 
 /**

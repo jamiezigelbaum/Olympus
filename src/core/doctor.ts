@@ -5,6 +5,7 @@
 // every check returns statuses and counts only — never tokens, source text,
 // or packets. Each check is isolated, and runDoctor itself never throws.
 
+import { fetchModelEndpoint } from './model-transport.ts';
 import {
   configWithEnvironmentOverrides,
   parseOptionalBooleanEnv,
@@ -15,6 +16,10 @@ import {
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { inspectEngine } from './engine-service.ts';
+import { resolveOpenClawExecutable } from './openclaw-executable.ts';
+import { workerServicePaths } from './worker-service.ts';
 import type { DelphiClient } from './delphi.ts';
 import {
   environmentWithWorkerSetupEnv,
@@ -51,6 +56,22 @@ import {
   publicSourceDoctorLanes,
 } from './public-source-capabilities.ts';
 import { createSourceCorpusRegistry } from './source-corpus-registry.ts';
+import { createDefaultSecretStore, normalizeSecretRef } from './secret-store.ts';
+import {
+  defaultZkapiStatePath,
+  zkapiConsultReadiness,
+  zkapiStageRows,
+  type ZkapiConsultReadiness,
+} from './consult-transport-zkapi.ts';
+import {
+  consultVocabularyFileStatus,
+  type ConsultVocabularyFileStatus,
+} from './consult-gate.ts';
+import {
+  consultGateOptionsFromSettings,
+  readConsultSettings,
+  type ConsultSettingsRead,
+} from './consult-settings.ts';
 
 export interface DoctorCheck {
   name: string;
@@ -80,6 +101,47 @@ export interface DoctorDeps {
    * never reads the developer's own install.
    */
   workerEnvPath?: string;
+  /** The persistent zkAPI consult ledger; defaults beside sovereignty.json. */
+  zkapiStatePath?: string;
+  /** The consult vocabulary pack states; defaults to hashing the installed packs. */
+  consultVocabularyStatus?: () => readonly ConsultVocabularyFileStatus[];
+  /**
+   * What hosts the engine on this machine. Optional so a test never inspects
+   * the developer's own launchd; the `olympus doctor` operation passes
+   * `defaultDoctorHostProbe`.
+   */
+  hostProbe?: () => DoctorHostFacts | Promise<DoctorHostFacts>;
+}
+
+export interface DoctorHostFacts {
+  /** Absolute `openclaw` executable, when one is installed. */
+  openclawPath?: string;
+  /** The standalone engine LaunchAgent (macOS). */
+  engine: { installed: boolean; state: string };
+  /** The legacy worker unit from `olympus worker install`. */
+  legacyWorkerUnit: boolean;
+  /** Doctor is running inside the OpenClaw Gateway (the native tool surface). */
+  insideOpenClaw?: boolean;
+}
+
+export function defaultDoctorHostProbe(
+  env: Record<string, string | undefined> = process.env,
+  options: { insideOpenClaw?: boolean } = {},
+): DoctorHostFacts {
+  const home = env.HOME?.trim() || homedir();
+  const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
+  const engine = process.platform === 'darwin'
+    ? inspectEngine({ homeDir: home })
+    : { installed: false, state: 'not_loaded' };
+  const legacyWorkerUnit = process.platform === 'darwin' || process.platform === 'linux'
+    ? existsSync(workerServicePaths(process.platform, home).unitPath)
+    : false;
+  return {
+    ...(openclawPath ? { openclawPath } : {}),
+    engine: { installed: engine.installed, state: engine.state },
+    legacyWorkerUnit,
+    ...(options.insideOpenClaw ? { insideOpenClaw: true } : {}),
+  };
 }
 
 export interface DoctorResult {
@@ -123,6 +185,7 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     ? input
     : doctorDepsWithLayeredEnvironment(input, inputEnv);
   const checks = [
+    ...(deps.hostProbe ? [await safeCheck('host', () => hostCheck(deps))] : []),
     await safeCheck('dependencies', () => dependencyCheck(deps)),
     await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck('sovereignty_prerequisites', () => sovereigntyPrerequisiteCheck(deps)),
@@ -132,6 +195,9 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     await safeCheck('credential_reauthorization_backlog', () => credentialReauthorizationBacklogCheck(deps)),
     await safeCheck('argus_model_pool', () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck('sovereignty_model_lanes', () => sovereigntyModelLaneCheck(deps)),
+    await safeCheck('zkapi_consult_transport', () => zkapiConsultTransportCheck(deps)),
+    await safeCheck('consult_settings', () => consultSettingsCheck(deps)),
+    await safeCheck('consult_vocabulary', () => consultVocabularyCheck(deps)),
     await safeCheck('email_worker', () => emailWorkerCheck(deps)),
     await safeCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
     await safeCheck('dropbox_content_extraction_throughput', () => dropboxContentExtractionThroughputCheck(deps)),
@@ -340,6 +406,9 @@ async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const commandExists = deps.commandExists ?? defaultCommandExists;
   const bun = await commandExists('bun');
   const node = await commandExists('node');
+  // Node runs the plugin inside an OpenClaw host; the standalone engine and
+  // the CLI run on Bun alone.
+  const openclaw = await commandExists('openclaw');
   const gog = await commandExists('gog');
   const op = await commandExists('op');
   const python3 = await commandExists('python3');
@@ -349,9 +418,10 @@ async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const go = await commandExists('go');
   const missingRequired = [
     bun ? undefined : 'bun',
-    node ? undefined : 'node',
+    node || !openclaw ? undefined : 'node',
   ].filter((value): value is string => !!value);
   const optionalMissing = [
+    node || openclaw ? undefined : 'node (only for an OpenClaw host)',
     gog ? undefined : 'gog',
     op ? undefined : 'op',
     telethon ? undefined : 'python-telethon',
@@ -370,6 +440,79 @@ async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     ok: true,
     detail: `Required dependencies are present. Optional dependency gaps: ${optionalMissing.join(', ') || 'none'}.`,
   };
+}
+
+/**
+ * Which host runs the engine, and what is missing for it. OpenClaw is one
+ * optional host; the standalone engine LaunchAgent is the other. Without
+ * OpenClaw, nothing that needs it may be configured: today that is only the
+ * `openclaw infer` cloud analyst.
+ */
+async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const facts = await deps.hostProbe!();
+  const hosts: string[] = [];
+  if (facts.engine.installed) hosts.push(`standalone engine (${facts.engine.state})`);
+  if (facts.insideOpenClaw) hosts.push('OpenClaw (this Gateway)');
+  else if (facts.openclawPath) hosts.push(`OpenClaw (${facts.openclawPath})`);
+  if (facts.legacyWorkerUnit) hosts.push('worker unit from olympus worker install');
+  const hasOpenClaw = Boolean(facts.insideOpenClaw || facts.openclawPath);
+  const openclaw = facts.insideOpenClaw
+    ? 'Running inside OpenClaw'
+    : facts.openclawPath ? `OpenClaw is installed at ${facts.openclawPath}` : 'OpenClaw is not installed (optional)';
+  const cloudViaOpenClaw = cloudAnalystUsesOpenClaw(deps);
+  if (hosts.length === 0) {
+    return {
+      name: 'host',
+      ok: false,
+      detail: 'Nothing runs the Olympus engine on this machine: the standalone engine is not installed and OpenClaw is not installed.',
+      hint: 'On a Mac, run olympus engine install. With OpenClaw, install the Olympus plugin there instead.',
+    };
+  }
+  if (facts.engine.installed && facts.engine.state !== 'running' && !hasOpenClaw) {
+    return {
+      name: 'host',
+      ok: false,
+      detail: `The standalone engine is installed but ${facts.engine.state.replace('_', ' ')}. ${openclaw}.`,
+      hint: 'Run olympus engine logs to see why, then olympus engine install to load it again.',
+    };
+  }
+  // The standalone preset (engine install seeds it) names the openclaw infer
+  // analyst but needs no answer model: through ChatGPT, olympus_search
+  // returns evidence and ChatGPT answers, so the absent analyst is not a fault.
+  if (cloudViaOpenClaw === 'policy' && !hasOpenClaw && facts.engine.installed) {
+    return {
+      name: 'host',
+      ok: true,
+      detail: `Hosted by ${hosts.join(', ')}. ${openclaw}. No answer model runs on this Mac: ChatGPT answers from Olympus search.`,
+    };
+  }
+  if (cloudViaOpenClaw && !hasOpenClaw) {
+    return {
+      name: 'host',
+      ok: false,
+      detail: `Hosted by ${hosts.join(', ')}. The cloud analyst is set to answer through openclaw infer, but OpenClaw is not installed, so those answers fall back to the local analyst.`,
+      hint: 'Without OpenClaw, ChatGPT answers Public and Personal questions from Olympus evidence: remove OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED from worker.env and any openclaw-infer profile from sovereignty.json.',
+    };
+  }
+  return {
+    name: 'host',
+    ok: true,
+    detail: `Hosted by ${hosts.join(', ')}. ${openclaw}.`,
+  };
+}
+
+/** Where an `openclaw infer` analyst comes from: the worker environment, the policy file, or nowhere. */
+function cloudAnalystUsesOpenClaw(deps: DoctorDeps): 'env' | 'policy' | undefined {
+  const env = deps.env ?? process.env;
+  if (/^(1|true|yes|on)$/i.test(env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED?.trim() ?? '')) return 'env';
+  try {
+    const engine = doctorSovereigntyEngine(deps);
+    return engine && Object.values(engine.config.modelProfiles).some((profile) => profile.provider === 'openclaw-infer')
+      ? 'policy'
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function sovereigntyModelLaneCheck(deps: DoctorDeps): Promise<DoctorCheck> {
@@ -396,7 +539,7 @@ async function sovereigntyModelLaneCheck(deps: DoctorDeps): Promise<DoctorCheck>
     const baseUrl = profile.baseUrl!;
     const modelsUrl = `${baseUrl.replace(/\/$/, '')}/models`;
     try {
-      const response = await fetchImpl(modelsUrl, { method: 'GET' });
+      const response = await fetchModelEndpoint(fetchImpl, modelsUrl, { method: 'GET' });
       if (!response.ok) problems.push(`${profileId} at ${modelsUrl} returned HTTP ${response.status}`);
     } catch (error) {
       problems.push(`${profileId} at ${modelsUrl} failed: ${errorDetail(error)}`);
@@ -415,6 +558,194 @@ async function sovereigntyModelLaneCheck(deps: DoctorDeps): Promise<DoctorCheck>
     ok: true,
     detail: `Configured local sovereignty model lanes are reachable (${profiles.length} profile${profiles.length === 1 ? '' : 's'} checked).`,
   };
+}
+
+/**
+ * The experimental zkAPI consult transport, content-free. Doctor starts no Tor,
+ * no daemon and no inference: it reports the executables and the daemon's
+ * self-reported version, whether the daemon and Tor ports are free (Olympus
+ * runs its own of each per consult), the risk acknowledgements, the estimated
+ * note expiry, today's request count and worst-case spend, and what the last
+ * consult verified. It never presents the daemon's API key.
+ */
+async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const name = 'zkapi_consult_transport';
+  const engine = doctorSovereigntyEngine(deps);
+  const profiles = engine
+    ? Object.entries(engine.config.modelProfiles).filter(([, profile]) => profile.provider === 'zkapi')
+    : [];
+  if (profiles.length === 0) {
+    return { name, ok: true, detail: 'Not configured: the experimental zkAPI consult transport is off.' };
+  }
+  const env = deps.env ?? process.env;
+  const home = env.HOME?.trim();
+  const statePath = deps.zkapiStatePath ?? (home ? defaultZkapiStatePath(home) : defaultZkapiStatePath());
+  const lines: string[] = [];
+  let ok = true;
+  for (const [profileId, profile] of profiles) {
+    const readiness = await zkapiConsultReadiness({
+      baseUrl: profile.baseUrl!,
+      model: 'model' in profile && profile.model ? profile.model : '',
+      settings: profile.zkapi!,
+      statePath,
+      env,
+      apiKeyPresent: secretRefPresent(profile.secretRef, env, deps),
+      ...(deps.now ? { now: deps.now } : {}),
+    });
+    if (readiness.blockers.length > 0) ok = false;
+    lines.push(`${profileId}: ${describeZkapiReadiness(readiness)}`);
+  }
+  return {
+    name,
+    ok,
+    detail: `zkAPI consult transport (experimental, consults only; no consult is sent until the consult lane lands): ${lines.join(' | ')}`,
+    ...(ok
+      ? {}
+      : {
+        hint: [
+          lines.some((line) => line.includes('UNRESOLVED SESSION'))
+            ? 'A recovery-only zkAPI session is needed before another consult, run against the wallet directory that holds the fence. Until the consult lane offers it, run the developer harness from the Olympus checkout: bun scripts/zkapi-consult-recover.ts --yes (one content-free request, counted at $6). A fence whose wallet can no longer run can only be abandoned explicitly with that script\'s --abandon option; an unsettled lease may then settle under another session\'s identity.'
+            : undefined,
+          lines.some((line) => line.includes('STRANDED PROCESSES'))
+            ? 'An earlier session left processes Olympus could not prove its own. Find the listed process groups (ps -o pid,pgid,command -g <pgid>), stop them yourself, or reboot; the next session then sees them gone. Never delete the zkAPI ledger to clear this.'
+            : undefined,
+          'Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon.',
+        ].filter((part): part is string => part !== undefined).join(' '),
+      }),
+  };
+}
+
+/**
+ * The outside-help (consult) settings in ~/.olympus/consult.json, content-free:
+ * off, on (with its revision) or invalid (with a reason code). Read the way
+ * every consult use reads them, from the HOME in the environment doctor was
+ * handed. A missing file is the normal off state; an invalid one also keeps
+ * outside help off, and fails doctor so the owner sees it.
+ */
+async function consultSettingsCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const name = 'consult_settings';
+  const read = doctorConsultSettings(deps);
+  const prefix = 'Outside help (no consult is sent until the consult lane lands):';
+  if (read.state === 'absent') return { name, ok: true, detail: `${prefix} off (no settings file).` };
+  if (read.state === 'invalid') {
+    return {
+      name,
+      ok: false,
+      detail: `${prefix} off, because the settings file is invalid (${read.reason}).`,
+      hint: 'Outside help stays off until ~/.olympus/consult.json is a regular file owned by you, not writable by others, holding exactly the consult settings schema. Remove the file to return to the default.',
+    };
+  }
+  return {
+    name,
+    ok: true,
+    detail: `${prefix} ${read.settings.enabled ? 'on' : 'off'} (settings revision ${read.settings.revision}).`,
+  };
+}
+
+function doctorConsultSettings(deps: DoctorDeps): ConsultSettingsRead {
+  return readConsultSettings(deps.env === undefined ? {} : { env: deps.env });
+}
+
+/**
+ * The consult outbound gate's vocabulary packs, content-free: for the consult
+ * languages and domain packs in the consult settings (the defaults when there
+ * is no valid settings file), whether each selected pack is present and
+ * matches its pinned hash. Doctor hashes the compressed files only; it loads
+ * no word list. A missing pack is informational while nothing calls the gate;
+ * a pack that is present but altered, oversized or unreadable is an integrity
+ * failure and fails doctor.
+ */
+async function consultVocabularyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const name = 'consult_vocabulary';
+  const settings = doctorConsultSettings(deps);
+  const configured = settings.state === 'valid';
+  const status = deps.consultVocabularyStatus
+    ? deps.consultVocabularyStatus()
+    : consultVocabularyFileStatus(consultGateOptionsFromSettings(settings.settings), deps.env ?? process.env);
+  const integrityFailure = status.some((entry) => entry.state !== 'verified' && entry.state !== 'missing');
+  // Bundled packs ship with Olympus, so a missing or altered one means the
+  // install is damaged. German and Italian are optional packs the owner builds
+  // locally; for those the fix is the install procedure, not a reinstall.
+  const bundledAltered = status.some((entry) => entry.origin === 'shipped' && entry.state !== 'verified' && entry.state !== 'missing');
+  const bundledMissing = status.some((entry) => entry.origin === 'shipped' && entry.state === 'missing');
+  const userPacks = status.filter((entry) => entry.origin === 'user' && entry.state !== 'verified').map((entry) => entry.id);
+  const hints = [
+    bundledAltered
+      ? 'A bundled vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/.'
+      : bundledMissing
+        ? 'A bundled vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/.'
+        : undefined,
+    userPacks.length > 0
+      ? `The optional language pack${userPacks.length === 1 ? '' : 's'} ${userPacks.join(', ')} ${userPacks.length === 1 ? 'is' : 'are'} not installed or not intact, so words in that language stay refused. Install ${userPacks.length === 1 ? 'it' : 'them'} with scripts/install-consult-language-pack.ts (de or it) from an Olympus checkout.`
+      : undefined,
+  ].filter((part): part is string => part !== undefined);
+  const hint = hints.length > 0 ? hints.join(' ') : undefined;
+  return {
+    name,
+    ok: !integrityFailure,
+    detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${settings.settings.languages.join(', ')} (${configured ? 'configured' : 'default'}); ${status.map((entry) => `${entry.id} ${entry.state}`).join(', ')}.`,
+    ...(hint ? { hint } : {}),
+  };
+}
+
+function describeZkapiReadiness(readiness: ZkapiConsultReadiness): string {
+  const daemon = readiness.daemonExecutable
+    ? `zkapi-clientd ${readiness.daemonVersion ?? 'version unknown'}`
+    : 'zkapi-clientd not found';
+  const tor = readiness.tor === 'off'
+    ? 'Tor off'
+    : readiness.torExecutable ? 'tor found (a fresh client per consult)' : 'tor not found';
+  const confinement = `confinement on this platform: ${readiness.confinement.limit}`;
+  const ports = `daemon port ${readiness.daemonPort === 'free' ? 'free' : 'IN USE'}${readiness.torPort === 'not_used' ? '' : `, Tor port ${readiness.torPort === 'free' ? 'free' : 'IN USE'}`}`;
+  const key = readiness.apiKeyConfigured ? 'local API key configured' : 'local API key NOT configured';
+  const money = readiness.money;
+  const acks = `acknowledgements ${money.acknowledgements.complete ? 'complete' : 'incomplete'} (${money.acknowledgements.accepted}/${money.acknowledgements.required})`;
+  const expiry = money.expiryEstimate;
+  const expiryText = expiry.state === 'active'
+    ? `estimated expiry ${expiry.expiryDate} from the confirmed funding date (${expiry.daysLeft} day${expiry.daysLeft === 1 ? '' : 's'} left, notice ${expiry.notice})`
+    : expiry.state === 'expired'
+      ? `estimated expiry PASSED on ${expiry.expiryDate}; an unwithdrawn note becomes claimable by the operator`
+      : expiry.state === 'invalid'
+        ? 'funding date invalid'
+        : 'funding date not recorded';
+  const deposit = money.depositAboveSuggestedCeiling ? '; deposit is above the suggested ceiling' : '';
+  const requestLimit = readiness.requestsToday.cap !== undefined ? `limit ${readiness.requestsToday.cap}` : 'no limit set';
+  const spendLimit = readiness.spendToday.capUsd !== undefined ? `limit $${readiness.spendToday.capUsd.toFixed(2)}` : 'no limit set';
+  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts its model's hold, up to $6.00)`;
+  const fence = readiness.fences.length > 0
+    ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ''})` : ''}${entry.thisWallet ? ', this wallet' : ', another wallet'}`).join('; ')}; run a recovery-only session before another consult`
+    : 'no unresolved session';
+  const stranded = readiness.stranded
+    ? readiness.stranded.supervisorRunning
+      ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})`
+      : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(', ') || 'no group recorded'}`
+    : '';
+  const last = readiness.lastSession
+    ? `last ${readiness.lastSession.recovery ? 'recovery session' : 'consult'} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}${stageTimings(readiness.lastSession.stageMs)}`
+    : 'no consult run yet';
+  const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(', ')}` : '; ready';
+  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+}
+
+function stageTimings(timings: Parameters<typeof zkapiStageRows>[0]): string {
+  const rows = zkapiStageRows(timings);
+  return rows.length > 0 ? `, stage timings ${rows.map((row) => `${row.label} ${row.ms} ms`).join(', ')}` : '';
+}
+
+function secretRefPresent(
+  secretRef: string | undefined,
+  env: Record<string, string | undefined>,
+  deps: DoctorDeps,
+): boolean {
+  const ref = normalizeSecretRef(secretRef ?? '');
+  if (!ref) return false;
+  if (ref.kind === 'env') return Boolean(env[ref.key]?.trim());
+  const store = deps.secretStore ?? createDefaultSecretStore({ env });
+  try {
+    return Boolean(store.getSync?.(ref.key)?.trim());
+  } catch {
+    return false;
+  }
 }
 
 async function sovereigntyPrerequisiteCheck(deps: DoctorDeps): Promise<DoctorCheck> {

@@ -10,6 +10,7 @@ const CHUNK_WINDOW_PROSE_TERMS = new Set([
   'answers',
   'can',
   'could',
+  'did',
   'document',
   'documents',
   'does',
@@ -21,6 +22,8 @@ const CHUNK_WINDOW_PROSE_TERMS = new Set([
   'here',
   'how',
   'list',
+  // The product's own name addresses the tool ("use Olympus"), not the text.
+  'olympus',
   'please',
   'report',
   'reports',
@@ -35,6 +38,7 @@ const CHUNK_WINDOW_PROSE_TERMS = new Set([
   'there',
   'these',
   'this',
+  'use',
   'value',
   'values',
   'will',
@@ -151,4 +155,16 @@ function chunkWindowScore(
     occurrences += count;
   }
   return { distinctGroups, occurrences };
+}
+
+/**
+ * A passage without its layout padding: runs of spaces and tabs become one
+ * space, trailing spaces leave each line, and blank-line runs shrink to one
+ * blank line. Words, numbers and line structure are untouched.
+ */
+export function compactPassageWhitespace(text: string): string {
+  return text
+    .replace(/[^\S\n]+\n/g, '\n')
+    .replace(/[^\S\n]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n');
 }

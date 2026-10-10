@@ -1,0 +1,747 @@
+/**
+ * The ChatGPT dashboard view-model, version 1: `structuredContent` of the
+ * `olympus_dashboard` tool, rendered by `ui://olympus/dashboard`. The engine
+ * produces every state except `mac_offline` and `not_connected` (the relay
+ * answers those) and `relay_unavailable` (the UI derives it when a tool call
+ * fails). See docs/design/chatgpt-plugin.md.
+ *
+ * `not_connected` is a caller with no Olympus token: the relay cannot tell an
+ * owner who installed Olympus but has not linked ChatGPT from one who has no
+ * install, so it offers Connect and carries the install link beside it.
+ * `not_installed` stays in the union for UI compatibility; nothing produces it.
+ *
+ * Copy: the UI owns the wording of the connection states (the relay renders
+ * two of them without vocabulary.ts). Every other sentence comes from
+ * src/workers/dashboard/vocabulary.ts, which the dashboard lane owns. Nothing
+ * tiered Private or Secret is ever included, folder names included: every
+ * value passes the allowlisted response builder before it leaves the engine
+ * (structuredContent, _meta, errors alike).
+ *
+ * Not states here, by design: OAuth revoked (ChatGPT itself shows reconnect on
+ * 401).
+ * Stale status is derived by the UI from `generatedAt`. Multiple Macs per
+ * ChatGPT account is v2.
+ */
+import type { DashboardStatus, DashboardUnreadableReasonCode } from '../dashboard/vocabulary.ts';
+
+export type ConnectionState = 'not_connected' | 'not_installed' | 'installing' | 'ready' | 'mac_offline' | 'relay_unavailable';
+
+export interface DashboardFix {
+  label: string;
+  /**
+   * Run through tools/call from the UI. Every Fix the engine sends names one
+   * with its `args` (a Setup tool below, or `olympus_dashboard` to check
+   * again); optional in the type only so the UI can render its own fixtures.
+   */
+  tool?: string;
+  args?: Record<string, unknown>;
+  /**
+   * olympusplugin.ai only: openExternal needs the plugin's redirect domains.
+   * Beside a tool, it is the page for a repair only the computer can make:
+   * since 2026-10-09 the /open/ page that opens Olympus on the computer
+   * there (open/connect/<source>/, open/fix/<section>/; core/open-targets.ts),
+   * which falls back to help/on-your-computer/. The UI links it next to the
+   * control ("Fix this on your computer").
+   */
+  href?: string;
+  /**
+   * Contract v1 addition (2026-10-09): the control itself opens `href` (Connect
+   * or Reconnect for a source set up on the computer, such as X or Readwise)
+   * instead of calling `tool`, which is then only the fallback for a panel
+   * that predates this field.
+   */
+  openHref?: true;
+  /** Shown on a disabled control. */
+  disabledReason?: string;
+  /** The UI confirms first; matches the tool's destructive annotation. */
+  destructive?: boolean;
+}
+
+export interface DashboardItem {
+  id: string;
+  sentence: string;
+  fix: DashboardFix;
+}
+
+/** Why a source's ingestion is not moving. Fixed codes; the UI owns the words. */
+export type SourceStalledReason =
+  /** The source's sign-in is missing or expired: fix is `olympus_connect_source`. */
+  | 'waiting_for_credentials'
+  /** No folders or mail chosen yet: fix is `olympus_scope_list`. */
+  | 'scope_pending'
+  /** The provider keeps failing or refusing reads; it retries on its own. */
+  | 'provider_unavailable'
+  /** Indexing waits for the built-in search model to finish downloading. */
+  | 'model_downloading';
+
+/**
+ * One source's ingestion, at the first stage that is not finished:
+ * `listing` (finding the provider's items), `reading` (text extracted),
+ * `indexing` (searchable on the current model), or `done`. `done`/`total`
+ * count `unit` at that stage; `total` is 0 while it is not known yet (a first
+ * listing), and then `percent` is 0 too unless the listing's own walk is
+ * sized (folders), when `percent` is that walk's share. Items kept as names
+ * only (metadata-only folders) are finished once listed: they are never
+ * counted as unread.
+ */
+export interface SourceProgress {
+  stage: 'listing' | 'reading' | 'indexing' | 'done';
+  unit: 'files' | 'messages' | 'items';
+  done: number;
+  total: number;
+  percent: number;
+  stalled: boolean;
+  /** Only when `stalled`, and only when the reason is known. */
+  stalledReason?: SourceStalledReason;
+}
+
+export interface DashboardSource {
+  id: string;
+  label: string;
+  group: 'local' | 'cloud';
+  status: DashboardStatus;
+  detail?: string;
+  lastSyncAt?: string;
+  primary?: DashboardFix;
+  /**
+   * Present only while a sign-in started for this source is still outstanding
+   * (a connect link or OAuth start the owner has not finished). `expiresAt` is
+   * when that attempt lapses (ISO). While present, `status` is `Needs you`,
+   * `primary` is `olympus_connect_source {source}` (a fresh link replaces the
+   * outstanding one), and Disconnect in `menu` cancels the attempt.
+   */
+  connecting?: { expiresAt: string };
+  /**
+   * Connected sources only (absent for Off and while `connecting`). Honesty
+   * rule: `status` is never `Fresh` while `progress.stage` is not `done`; it
+   * is `Working` while listing, reading or indexing, and `Needs you` when
+   * stalled on `waiting_for_credentials` or `scope_pending`, with `primary`
+   * the matching fix.
+   */
+  progress?: SourceProgress;
+  /** Secondary actions for the ⋯ menu. */
+  menu?: DashboardFix[];
+  /**
+   * In-scope items extraction gave up on for good (damaged, or a format
+   * nothing reads). A fact, not a problem: `detail` already says it in words.
+   * Counts and reasons only, never a file name or path; absent when zero.
+   * Contract v1 addition (2026-10-09): this was a bare count. `reasons` is a
+   * closed list (today one code: the engine records a single permanent
+   * failure) whose counts add up to `count`; `many` is set past the share
+   * where it stops being a few damaged files. A reader that still gets a bare
+   * number treats it as `{count}` with no reasons.
+   */
+  unreadable?: DashboardUnreadable;
+  /**
+   * The owner's last Sync now press, while it is still news (about ten
+   * minutes, and only until a later sync). `newItems` is absent when the lane
+   * reports no changed-item count. Counts and a closed outcome only.
+   * `checking` (contract v1 addition, 2026-10-09): the press started a sync
+   * that has not finished yet; `at` is when it started. Sync now answers at
+   * once (`olympus_sync_source`), and the result arrives here on a later read.
+   */
+  lastManualSync?: { at: string; outcome: ManualSyncOutcome; newItems?: number };
+}
+
+export interface DashboardUnreadable {
+  count: number;
+  reasons: Array<{ code: DashboardUnreadableReasonCode; count: number }>;
+  many?: true;
+}
+
+/** A Sync now press's state on the row: `checking` while its sync runs, then what it found. */
+export type ManualSyncOutcome = 'checking' | 'checked' | 'failed' | 'busy';
+
+export interface DashboardViewModelV1 {
+  v: 1;
+  /** State and data only: the UI holds the copy for connection states. */
+  connection: {
+    state: ConnectionState;
+    /** ISO time; `mac_offline` only. */
+    lastSeenAt?: string;
+    /**
+     * `connect` (`not_connected` only) has no href: the dashboard result
+     * carries `_meta["mcp/www_authenticate"]`, ChatGPT's own linking trigger.
+     */
+    action?: { id: 'connect' | 'install' | 'open_olympus' | 'wake_mac' | 'retry'; href?: string };
+    /** `not_connected` only: where to install Olympus when it is not on the Mac yet. */
+    installHref?: string;
+    /** `installing` only: model download, first index. */
+    progress?: { percent: number; label: string };
+  };
+  /** At most one banner. */
+  blocker?: DashboardItem;
+  /** Includes an unreachable local model; models never block on their own. */
+  needsYou: DashboardItem[];
+  /**
+   * Server-ordered, one list: sources that need the owner first, then
+   * connected sources, then sources not connected yet (2026-10-09). `group`
+   * stays on each source for older panels; the panel no longer heads groups.
+   */
+  sources: DashboardSource[];
+  /** The sum of every connected source's `progress`; absent once all are `done`. */
+  progress?: {
+    /** What is being counted, and whether this is the first build or a refresh. */
+    unit: 'files' | 'messages' | 'items';
+    phase: 'initial' | 'refresh';
+    /** Searchable (indexed) items over the in-scope total: read but unindexed is not done. */
+    percent: number;
+    itemsLeft: number;
+    /** Only once a rate has been measured. */
+    etaSeconds?: number;
+    stalled: boolean;
+    details: Array<{ stage: string; unit: 'files' | 'messages' | 'items'; done: number; total: number }>;
+  };
+  models: {
+    embedding: {
+      kind: 'built_in' | 'custom';
+      /** `verifying`: the downloaded files are being checked against their pinned checksums. */
+      state: ModelInstallState;
+      /** `downloading` and `verifying` only. */
+      percent?: number;
+      /** `downloading` and `verifying` (built-in) only, when known. */
+      bytesDone?: number;
+      bytesTotal?: number;
+      /** `failed` (built-in) only; its fix is a `model:embedding` needsYou item (`olympus_model_retry`). */
+      failedReason?: ModelInstallFailedReason;
+    };
+    answers?: {
+      kind: 'built_in' | 'venice' | 'local';
+      label: string;
+      ready: boolean;
+      /** Built-in only, while it is not ready. A failed install's fix is a `model:answers` needsYou item. */
+      install?: ModelInstall;
+    };
+    /**
+     * The built-in transcription model (contract v1 addition, 2026-10-09),
+     * when it is this machine's transcriber. Absent otherwise.
+     */
+    transcription?: TranscriptionModelView;
+    /** Status only in ChatGPT: carries `disabledReason` (models change on the computer). */
+    change?: DashboardFix;
+  };
+  /**
+   * The owner's privacy settings (olympus_privacy_get / olympus_privacy_set):
+   * whether they have been set yet, and how many items wait for the privacy
+   * check (held Private until judged). While `configured` is false,
+   * `needsYou` carries `{id: 'privacy:setup'}` whose fix is
+   * `olympus_privacy_get`. Counts only; never a description or a rule.
+   */
+  privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
+  generatedAt: string;
+}
+
+/**
+ * The built-in transcription model's line in Models (contract v1 addition,
+ * 2026-10-09). `not_needed`: never started because the chosen sources hold no
+ * audio; `not_downloaded`: no readable record it is on disk; `interrupted`: a
+ * download stopped part way; `load_failed`: downloaded but would not start.
+ * `download` is its one control: Download now (`olympus_model_retry {model:
+ * 'transcription'}`) while it is not needed, not downloaded, interrupted or
+ * failed, or Try again after `load_failed`.
+ */
+export interface TranscriptionModelView {
+  state: 'not_needed' | 'not_downloaded' | 'interrupted' | 'downloading' | 'verifying' | 'ready' | 'failed' | 'load_failed';
+  /** `downloading` and `verifying` only. */
+  percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  /** `failed` only. */
+  failedReason?: ModelInstallFailedReason;
+  download?: DashboardFix;
+}
+
+/** A built-in model's install (contract v1 addition, 2026-10-01). */
+export type ModelInstallState = 'downloading' | 'verifying' | 'ready' | 'failed';
+/** Fixed codes only, never the installer's message. */
+export type ModelInstallFailedReason = 'disk_full' | 'network' | 'checksum' | 'unknown';
+export interface ModelInstall {
+  state: ModelInstallState;
+  /** 0-100. */
+  percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  /** `failed` only. */
+  failedReason?: ModelInstallFailedReason;
+}
+
+export const DASHBOARD_TOOL_NAME = 'olympus_dashboard';
+/** Retrieval only: the released evidence ChatGPT answers from (SearchResult). */
+export const SEARCH_TOOL_NAME = 'olympus_search';
+export const DASHBOARD_RESOURCE_URI = 'ui://olympus/dashboard';
+
+/* ------------------------------------------------------------------ */
+/* Setup from ChatGPT (contract v1 additions, 2026-10-01)              */
+/* ------------------------------------------------------------------ */
+/*
+ * Every tool below needs the owner's Olympus connection (oauth2). Results
+ * follow one rule: `structuredContent` and text carry no folder, label or
+ * sender names and no secrets. Picker data (names, and the opaque keys and
+ * cursors, which for Dropbox are paths) travels only in the picker tools'
+ * result `_meta[SCOPE_UI_META_KEY]` (owner decision 2026-10-01: names may
+ * reach ChatGPT only through olympus_scope_list / olympus_scope_set, shown in
+ * the widget). ChatGPT hands `_meta` to the widget, not the model.
+ * Secrets-tier locations (owner tier rules with tier Secrets) are left out
+ * even there, and their saved choices are kept on save. No API key is ever
+ * entered through ChatGPT (owner decision 2026-10-01): v1 runs keyless on the
+ * built-in models, and keyed providers (Venice, Readwise) are set up only on
+ * the Mac, in Olympus's own settings.
+ *
+ * Links: every `openUrl` is `https://mcp.olympusplugin.ai/go/<one-time id>`
+ * (single use, 10 minutes). Open it with `openExternal`; the plugin's only
+ * redirect domain is mcp.olympusplugin.ai.
+ */
+
+export const CONNECT_SOURCE_TOOL_NAME = 'olympus_connect_source';
+export const SCOPE_LIST_TOOL_NAME = 'olympus_scope_list';
+export const SCOPE_SET_TOOL_NAME = 'olympus_scope_set';
+export const DISCONNECT_SOURCE_TOOL_NAME = 'olympus_disconnect_source';
+export const MODEL_SET_TOOL_NAME = 'olympus_model_set';
+/**
+ * App-only: restarts a built-in model's install (`{model: 'embedding' |
+ * 'answers' | 'transcription'}`; `transcription` added 2026-10-09, where it
+ * also starts the first download ahead of any audio).
+ */
+export const MODEL_RETRY_TOOL_NAME = 'olympus_model_retry';
+
+/**
+ * App-only (contract v1 addition, 2026-10-09): Sync now for one connected
+ * source (`{source_id}`). It starts the sync and answers at once
+ * (`SyncSourceResult`); what the sync found arrives as the source's
+ * `lastManualSync` on a later `olympus_dashboard` read. At most one run per
+ * source a minute; it skips Olympus's own daily budget (owner ruling), never
+ * the provider's.
+ */
+export const SYNC_SOURCE_TOOL_NAME = 'olympus_sync_source';
+
+/* ------------------------------------------------------------------ */
+/* Olympus's own hosts (unified dashboard phase 4, 2026-10-09)          */
+/* ------------------------------------------------------------------ */
+/*
+ * The same `ui://olympus/dashboard` page also runs inside two hosts Olympus
+ * owns: the local dashboard at /dashboard on the computer, and the native
+ * OpenClaw Control UI tab. Each answers `ui/initialize` the way ChatGPT does
+ * and adds one namespaced `hostContext` key, so the panel can tell it is not
+ * in ChatGPT. ChatGPT never sends the key; every field is optional.
+ */
+
+/** The `hostContext` key an Olympus host adds. */
+export const OLYMPUS_HOST_CONTEXT_KEY = 'olympus/host';
+
+export interface OlympusHostContext {
+  /** `computer`: /dashboard on the computer; `openclaw`: the Control UI tab. */
+  kind: 'computer' | 'openclaw';
+  /** The local dashboard controls are locked: every control is disabled with the locked reason. */
+  readOnly?: boolean;
+  /** Computer only: the local pages the "On this computer" section opens. */
+  links?: Partial<Record<'keys' | 'agents' | 'outsideHelp' | 'connector', string>>;
+}
+
+/**
+ * Computer only: the `olympus_dashboard` result's `_meta` key carrying what
+ * only the computer shows (Index faster's position, which paired chat apps
+ * Unpair can end). ChatGPT never sees it.
+ */
+export const COMPUTER_META_KEY = 'olympus/computer';
+
+export interface ComputerDashboardMeta {
+  /** Present while the overnight guard reports a known state; `on` is the operator override. */
+  indexFaster?: { on: boolean };
+  /**
+   * The paired chat apps (Telegram, WhatsApp) whose pairing session this
+   * computer holds, so Unpair can end it: the ⋯ menu entry, and the engine's
+   * own confirmation sentence (what stays, and where to unlink the device).
+   */
+  unpair?: ComputerUnpairEntry[];
+}
+
+export interface ComputerUnpairEntry {
+  sourceId: string;
+  label: string;
+  confirmation: string;
+}
+
+/**
+ * Computer only, never listed to ChatGPT: Index faster (`{on}`), the
+ * embedding-priority override the Background page used to switch.
+ */
+export const INDEX_FASTER_TOOL_NAME = 'olympus_index_faster';
+
+/**
+ * Computer only, never listed to ChatGPT: Unpair (`{source_id}`) for a paired
+ * chat app, the worker's POST /dashboard/unpair. Pairing happens on the
+ * computer, so ending it does too (design, 2026-10-09).
+ */
+export const UNPAIR_SOURCE_TOOL_NAME = 'olympus_unpair_source';
+
+/**
+ * Every tool the panel calls, and so the only tools an Olympus host runs for
+ * it (POST /dashboard/tools/call, the Control UI's gateway method). Search and
+ * the answer tools are the conversation's, not the panel's.
+ */
+export const PANEL_TOOL_NAMES = [
+  DASHBOARD_TOOL_NAME,
+  CONNECT_SOURCE_TOOL_NAME,
+  SCOPE_LIST_TOOL_NAME,
+  SCOPE_SET_TOOL_NAME,
+  DISCONNECT_SOURCE_TOOL_NAME,
+  MODEL_SET_TOOL_NAME,
+  MODEL_RETRY_TOOL_NAME,
+  'olympus_privacy_get',
+  'olympus_privacy_set',
+  SYNC_SOURCE_TOOL_NAME,
+] as const;
+
+/** The computer adds Index faster and Unpair to the panel's tools. */
+export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
+
+/** The `_meta` key carrying the picker's names to the widget only. */
+export const SCOPE_UI_META_KEY = 'olympus/scope';
+
+/** Sources a person can connect from ChatGPT with Olympus's own (publisher) apps. */
+export type ChatGptOAuthSource = 'gmail' | 'google-drive' | 'dropbox';
+export type ChatGptFolderSourceId = 'google_drive.docs' | 'dropbox.files';
+export type ChatGptMailSourceId = 'gmail.email';
+export type ChatGptScopeSourceId = ChatGptFolderSourceId | ChatGptMailSourceId;
+export type ChatGptDisconnectSourceId =
+  | 'gmail.email'
+  | 'google_drive.docs'
+  | 'dropbox.files'
+  | 'x.bookmarks'
+  | 'readwise.library';
+
+/**
+ * `olympus_connect_source {source}` → structuredContent. The provider's sign-in
+ * completes on the engine whichever device opened the link (the provider
+ * returns through auth.olympusplugin.ai and the relay to this Mac). The source
+ * then shows `Needs you` until its folders or mail are chosen.
+ */
+export interface ConnectSourceResult {
+  status: 'open_link';
+  source: ChatGptOAuthSource;
+  openUrl: string;
+  expiresAt: string;
+}
+
+export type ScopeSelectionState = 'ingest' | 'metadata_only' | 'exclude';
+
+export interface ScopeSelection {
+  /** Opaque provider key from a node. */
+  key: string;
+  state: ScopeSelectionState;
+  /** Root-to-parent keys, as the list returned them, for nearest-choice evaluation. */
+  ancestor_keys?: string[];
+}
+
+/** One folder (only in `_meta`). */
+export interface ScopeFolderNode {
+  key: string;
+  parent_key?: string;
+  name: string;
+  kind: 'folder';
+  has_children: boolean;
+  selectable: boolean;
+  /**
+   * Forwarded from the provider's listing when it reports them (the Dropbox
+   * and Drive folder listings do not today); absent otherwise.
+   */
+  size_bytes?: number;
+  file_count?: number;
+}
+
+/**
+ * `olympus_scope_list {source_id: Drive|Dropbox, parent_key?, cursor?}`: one
+ * level. Mixed is computed by the UI from `selections` and keys. Same
+ * semantics as the Mac's folder picker (control-ui-contract.ts
+ * OlympusFolderScopeBrowseResult).
+ */
+export interface FolderScopeList {
+  kind: 'folders';
+  source_id: ChatGptFolderSourceId;
+  account_generation: string;
+  scope_revision: string;
+  status: 'scope_pending' | 'approved';
+  nodes: ScopeFolderNode[];
+  next_cursor?: string;
+  /** With `next_cursor`: how many more folders follow this page ("N more"). */
+  remaining?: number;
+  /**
+   * The level holds more folders than Olympus reads at once, so some are not
+   * listed at all (not on this page or any later one); `remaining` counts
+   * only the folders that were read.
+   */
+  truncated?: true;
+  selections: ScopeSelection[];
+  whole_account_selected: boolean;
+}
+
+export type MailWindow = '6m' | '1y' | '2y' | '5y' | 'all';
+export type MailCategory = 'primary' | 'social' | 'promotions' | 'updates' | 'forums';
+
+/** The mail picker's choices (control-ui-contract.ts OlympusMailScopeDraft). */
+export interface MailScopeDraft {
+  window: MailWindow;
+  skipped_categories: MailCategory[];
+  skipped_labels: Array<{ id: string; name: string }>;
+  always_private_senders: string[];
+  skip_senders: string[];
+}
+
+/**
+ * `olympus_scope_list {source_id: 'gmail.email', draft?}`: the saved choices
+ * (or `draft`, to refresh the estimate) with the labels to choose from.
+ */
+export interface MailScopeList {
+  kind: 'mail';
+  source_id: ChatGptMailSourceId;
+  account_generation: string;
+  scope_revision: string;
+  status: 'scope_pending' | 'approved';
+  draft: MailScopeDraft;
+  /** Labels the person may skip. */
+  labels: Array<{ id: string; name: string; system: boolean }>;
+  categories: Array<{ category: MailCategory; messages_total?: number }>;
+  /** Frequent senders in a sample, to mark Private or skip. */
+  sender_suggestions: Array<{ sender: string; sample_messages: number }>;
+  /** Gmail's own estimate for this draft: full-content and metadata-only messages. */
+  estimate?: { content_messages: number; metadata_messages: number; total_messages: number };
+}
+
+/** The full picker data: `_meta[SCOPE_UI_META_KEY]` of a scope tool result. */
+export type ScopeList = FolderScopeList | MailScopeList;
+
+/** A scope tool's `structuredContent`: counts and opaque revision ids only. */
+export interface ScopeSummary {
+  kind: 'folders' | 'mail';
+  source_id: ChatGptScopeSourceId;
+  status: 'scope_pending' | 'approved';
+  account_generation: string;
+  scope_revision: string;
+  /** Folders: on this page. Mail: labels offered. */
+  shown: number;
+  has_more: boolean;
+  /** Saved or drafted choices, counted. */
+  choices: number;
+  whole_account_selected: boolean;
+  estimate?: MailScopeList['estimate'];
+}
+
+/**
+ * `olympus_scope_set`: folders `{source_id, account_generation, scope_revision,
+ * selections, whole_account_selected, confirm_whole_account?}` or mail
+ * `{source_id: 'gmail.email', account_generation, scope_revision, mail}`.
+ * Saves through the same compare-and-swap the Mac picker uses, then starts
+ * indexing. Whole account needs `confirm_whole_account: true` (the UI's own
+ * visible confirmation).
+ */
+export type ScopeSetResult =
+  | { status: 'saved'; source_id: ChatGptScopeSourceId; scope_revision: string; indexing_started: boolean }
+  /** Someone changed the scope first: `current` counts the fresh list, whose data is in `_meta`. */
+  | { status: 'conflict'; source_id: ChatGptScopeSourceId; current: ScopeSummary };
+
+/** Sources Sync now can run for from ChatGPT. */
+export type ChatGptSyncSourceId = ChatGptDisconnectSourceId;
+
+/**
+ * `olympus_sync_source {source_id}` → structuredContent. `checking`: a sync
+ * started; `busy`: one was already running, so nothing new started;
+ * `too_soon`: this source was pressed less than a minute ago. Counts and
+ * enums only, never a file or folder name.
+ */
+export interface SyncSourceResult {
+  status: 'checking' | 'busy' | 'too_soon';
+  source_id: ChatGptSyncSourceId;
+}
+
+/** `olympus_disconnect_source {source_id}` (destructive: the UI confirms). Indexed data stays. */
+export interface DisconnectSourceResult {
+  status: 'disconnected';
+  source_id: ChatGptDisconnectSourceId;
+}
+
+/**
+ * `olympus_model_set {embedding?: 'built_in', answers?: 'local' | 'venice'}`:
+ * switches between options already configured on the Mac; it never takes a
+ * key. Embeddings: the built-in model only; moving an index that embeds with
+ * another model is a re-embed and is refused (`embedding_change_needs_approval`).
+ * Answers: Venice only when its key is already on the Mac, local only when a
+ * local answer model is configured (`model_not_configured` otherwise); the
+ * engine's worker restarts to apply it. The panel's Models row is status
+ * only: `models.change` carries `disabledReason` (change models on the Mac).
+ */
+export interface ModelSetResult {
+  status: 'applied' | 'unchanged';
+  embedding: 'built_in' | 'custom';
+  answers?: 'local' | 'venice';
+  /** The worker restarts to apply the change; the dashboard reads `installing` briefly. */
+  restarting: boolean;
+}
+
+/**
+ * `olympus_model_retry {model: 'embedding' | 'answers' | 'transcription'}`
+ * (app-only): starts the built-in model's install again after it failed (it
+ * resumes a partial download); for `transcription` it is also Download now,
+ * ahead of any audio. Answers at once; the dashboard shows the install's
+ * progress. `model_not_configured` when that model is not the built-in one
+ * here.
+ */
+export interface ModelRetryResult {
+  status: 'retrying';
+  model: 'embedding' | 'answers' | 'transcription';
+}
+
+/* ------------------------------------------------------------------ */
+/* Privacy settings (contract v1 addition, 2026-10-01)                 */
+/* ------------------------------------------------------------------ */
+/*
+ * Set once in setup, inside ChatGPT ("In your own words, what's private for
+ * you?"), and editable later from the dashboard; not in the folder picker.
+ * Tiers: Personal (reaches ChatGPT through olympus_search), Private (stays on
+ * the Mac; the private answer panel only) and Secret (detected automatically,
+ * never leaves). Rules name folders, labels or senders that are ALWAYS
+ * Private; the description is the owner's own words, which the private
+ * classifier on the Mac reads.
+ *
+ * Names: a rule's `key`, `value` and `display` travel only in
+ * `_meta[PRIVACY_META_KEY]`, like the picker. `structuredContent` carries
+ * the description (owner-approved: OpenAI may see category words) and counts.
+ */
+
+export const PRIVACY_GET_TOOL_NAME = 'olympus_privacy_get';
+export const PRIVACY_SET_TOOL_NAME = 'olympus_privacy_set';
+/** The `_meta` key carrying the privacy rules to the widget only. */
+export const PRIVACY_META_KEY = 'olympus/privacy';
+
+export type PrivacyRuleKind = 'folder' | 'label' | 'sender';
+
+/** A folder that is always Private: the picker's opaque node key. */
+export interface PrivacyFolderRule {
+  kind: 'folder';
+  source_id: ChatGptFolderSourceId;
+  key: string;
+  /** The folder's name when the UI sent it; only ever in `_meta`. */
+  display?: string;
+}
+
+/** A Gmail label that is always Private: its id, and its name as `value`. */
+export interface PrivacyLabelRule {
+  kind: 'label';
+  source_id: 'gmail.email';
+  key: string;
+  value: string;
+}
+
+/** A sender that is always Private: an address or a whole `@domain`. */
+export interface PrivacySenderRule {
+  kind: 'sender';
+  source_id: 'gmail.email';
+  value: string;
+}
+
+/**
+ * One always-Private rule, as `olympus_privacy_set` takes it and
+ * `olympus_privacy_get` returns it (only in `_meta[PRIVACY_META_KEY]`).
+ * Caps: 100 rules; key 1024 characters; label name and display 200; sender
+ * an address or `@domain` of at most 240.
+ */
+export type PrivacyRuleView = PrivacyFolderRule | PrivacyLabelRule | PrivacySenderRule;
+
+/** `olympus_privacy_get {}` → `_meta[PRIVACY_META_KEY]`; also `olympus_privacy_set`'s. */
+export interface PrivacySettings {
+  /** False until the owner has saved privacy settings once. */
+  configured: boolean;
+  /** The owner's own words; empty until set. At most 2000 characters. */
+  description: string;
+  /** At most 100. */
+  rules: PrivacyRuleView[];
+  /** Items waiting for the privacy check (held Private, keyword-searchable, not embedded). */
+  pendingCount: number;
+  /**
+   * olympus_privacy_get only: the panel's confirmation for a save that
+   * lowers protection (see PrivacySetInput). In `_meta`, so the model never
+   * sees it.
+   */
+  confirmation?: string;
+  /**
+   * Opaque compare-and-swap token over the saved settings (description and
+   * every rule, Secrets-location rules included). Send it back as
+   * `olympus_privacy_set {revision}`; a save against an older one is refused
+   * with status `conflict` and the current settings.
+   */
+  revision?: string;
+}
+
+/** A privacy tool's `structuredContent`: the description and counts, never a rule. */
+export interface PrivacySummary {
+  /** `conflict`: not saved, the settings changed since `revision`; `_meta` carries the current ones. */
+  status: 'current' | 'saved' | 'conflict';
+  configured: boolean;
+  description: string;
+  ruleCount: number;
+  pendingCount: number;
+}
+
+/**
+ * `olympus_privacy_set {description?, rules?}`: each field given replaces
+ * the saved one; the other stays. `rules` is the whole list (the UI sends
+ * every rule it shows). Validated and size-capped (description 2000
+ * characters, 100 rules, display 200); `invalid_params` otherwise. Saving
+ * applies the rules to classification at the next sync.
+ *
+ * Owner-only (review P-1, 2026-10-02): the tool is hidden from the model, and
+ * a save that removes a saved rule or changes the description is refused
+ * (`privacy_owner_only`) unless it carries `confirmation` from a recent
+ * olympus_privacy_get (30 minutes, spent by the save). Adding rules needs
+ * no confirmation.
+ *
+ * With `revision`, the save happens only if the settings still match it
+ * (compare-and-swap, like `olympus_scope_set`'s `scope_revision`): two open
+ * panels cannot silently overwrite each other's always-Private rules.
+ */
+export interface PrivacySetInput {
+  description?: string;
+  rules?: PrivacyRuleView[];
+  confirmation?: string;
+  /** The `revision` the panel was showing; optional for now, checked when given. */
+  revision?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* olympus_search                                                      */
+/* ------------------------------------------------------------------ */
+
+/** One released item: Public or Personal only; `url` only where the release gate let it through. */
+export interface SearchEvidence {
+  /** Citation id for ChatGPT's answer, `E1`, `E2`, ... */
+  id: string;
+  /** The product's name for the source (Gmail, Google Drive, Files, ...). */
+  source: string;
+  title?: string;
+  url?: string;
+  date?: string;
+  excerpt?: string;
+}
+
+/** `olympus_search {question, limit?}` → structuredContent. */
+export interface SearchResult {
+  status: 'found' | 'none';
+  evidence: SearchEvidence[];
+  coverage: {
+    searchedSources: number;
+    unreadableItems: number;
+    /** Matches in folders the owner set to Names only (contents not read on purpose). */
+    namesOnlyItems: number;
+    partiallyReadItems: number;
+    /** Items in the searched sources whose privacy tier is still open (held from search until decided). */
+    unclassifiedItems: number;
+    /** Model-facing: when to bring these counts up (only if asked why something is missing, or the answer depends on it). */
+    instruction: string;
+  };
+  /**
+   * Fixed sentences the reply may need: a Private match, items held back,
+   * instruction-like excerpts, and the Names-only hint only when Names-only
+   * matches are why nothing could be answered. Coverage counts are not
+   * recited here; they sit in `coverage`.
+   */
+  notes: string[];
+}

@@ -29,10 +29,11 @@ import {
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { classifyContentTier, maxTier, type TierDecision } from '../classification/tier-classifier.ts';
+import { classifyContentTier, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
 import type { TierCopy, TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
+import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
 import {
   TIER_DOMAIN_ORDER,
@@ -63,6 +64,12 @@ export interface TieredStoreExtractionSinkOptions {
   ownershipKind: ConnectorStoreOwnershipKind;
   claims?: ExtractionClaimReader;
   tierClassification?: ConnectorStoreTierClassification;
+  /**
+   * The legacy store this sink's corpus serves, in a lane with several: an
+   * item the set never routed lands there when that store holds it, exactly
+   * as the corpus's plain sink did.
+   */
+  home?: SourceTrustDomain;
 }
 
 export function createTieredStoreExtractionSink(options: TieredStoreExtractionSinkOptions): ExtractionSink {
@@ -71,7 +78,15 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
   // names at listing: the set's own classification unless one is given,
   // resolved per landing so an edited map or rules file applies at once.
   const classificationNow = (): ConnectorStoreTierClassification | undefined => options.tierClassification ?? set.classification();
-  const sinkFor = (store: LocalConnectorStore, recordContentTier: boolean, tierClassification: ConnectorStoreTierClassification | undefined): ExtractionSink =>
+  // `contentRulesRan`: the landing has judged the text with the content rules
+  // (classifyContentTier), so the sink may let an ordinary picture rest
+  // outside Private. A legacy landing runs no rules, so it never may.
+  const sinkFor = (
+    store: LocalConnectorStore,
+    recordContentTier: boolean,
+    tierClassification: ConnectorStoreTierClassification | undefined,
+    contentRulesRan: boolean,
+  ): ExtractionSink =>
     createConnectorStoreExtractionSink({
       store,
       classify: (item: RawItem) => buildSourceSensitivity({
@@ -87,6 +102,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       ...(options.claims ? { claims: options.claims } : {}),
       ...(tierClassification ? { tierClassification } : {}),
       ...(recordContentTier ? {} : { recordContentTier: false }),
+      ...(contentRulesRan ? { mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256) } : {}),
     });
 
   return {
@@ -103,9 +119,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       const identity = stored ?? { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId };
       const ledger = set.ledger;
       if (!ledger.isRouted(identity)) {
-        const legacy = legacyStoreFor(set, ref.localItemId);
+        const legacy = legacyStoreFor(set, ref.localItemId, options.home);
         if (!legacy) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-        return sinkFor(legacy, true, classificationNow()).accept(request);
+        return sinkFor(legacy, true, classificationNow(), false).accept(request);
       }
 
       const record = ledger.getCurrent(identity);
@@ -122,20 +138,26 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       const override = ledger.getOverride(identity);
       const itemTitle = stringMetadata(plan.item, ['title', 'name', 'subject']);
       const itemPath = stringMetadata(plan.item, ['locatorUri', 'pathDisplay']);
+      // The photo judge's verdict on this exact picture, wherever in the set
+      // it was judged. None: the picture is unjudged and its content Private.
+      const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
       const content = classifyContentTier(
         {
           text: request.text,
           metadataTier: record.metadataTier,
           metadataForced: record.metadataForced,
           metadataFlagged: record.metadataFlagged,
+          metadataOwnerDecided: namesDecidedByOwner(record.reasons),
           ...(itemTitle ? { title: itemTitle } : {}),
           ...(itemPath ? { path: itemPath } : {}),
+          mimeType: plan.item.mimeType,
+          ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
           subject: identity,
         },
         {
-          ...(tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {}),
           ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
           ...(override ? { override } : {}),
+          ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },
       );
       // An unusable map or rules file: the content decision is held pending
@@ -183,7 +205,11 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
 
-      const placement = set.placementFor(decision);
+      // A first landing places the item as one whose text arrives after
+      // listing (its names stay), also in a lane where only some items' does.
+      // A re-judgment places it as every caller with only a decision does, so
+      // the two never disagree into a move and back.
+      const placement = set.placementFor(decision, record.contentRead ? {} : { contentArrivesLater: true });
       const contentCopy = placement.copies.find((copy) => copy.layers !== 'metadata');
       const contentStore = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;
       if (!contentCopy || !contentStore) return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
@@ -195,7 +221,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
-        const result = await sinkFor(contentStore, false, tierClassification).accept(request);
+        const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
         if (result.accepted) ledger.recordRoutedPlacement(identity, decision, placement);
         return result;
       }
@@ -239,7 +265,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           },
         );
       }
-      const result = await sinkFor(contentStore, false, tierClassification).accept(request);
+      const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
       if (!result.accepted) return result;
       ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: record.generation });
       return result;
@@ -247,16 +273,38 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
   };
 }
 
+/**
+ * The photo judge's verdict on a picture across the stores of the set. A
+ * store may keep an older verdict (a hidden copy left behind by a move is
+ * never judged again), so the most cautious one wins: sensitive, then
+ * unjudged, and ordinary only when no store holds anything else.
+ */
+function setMediaJudgment(set: TieredStoreSet, mediaSha256: string): MediaJudgment | undefined {
+  const rank = { sensitive: 2, unjudged: 1, ordinary: 0 } as const;
+  let chosen: MediaJudgment | undefined;
+  for (const domain of [...TIER_DOMAIN_ORDER].reverse()) {
+    const judgment = set.store(domain)?.mediaJudgment(mediaSha256);
+    if (judgment && (!chosen || rank[judgment.verdict] > rank[chosen.verdict])) chosen = judgment;
+  }
+  return chosen;
+}
+
 function skipped(skippedReason: string): ExtractionSinkResult {
   return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason };
 }
 
 /**
- * The lane's own store that holds a legacy item's row: the first legacy leg
- * with the row, else the first legacy leg (the plain sink then reports the
- * item missing exactly as before).
+ * The lane's own store that holds a legacy item's row: the home store when it
+ * holds it, else the first legacy leg with the row, else the first legacy leg
+ * (the plain sink then reports the item missing exactly as before).
  */
-function legacyStoreFor(set: TieredStoreSet, localItemId: string): LocalConnectorStore | undefined {
+function legacyStoreFor(
+  set: TieredStoreSet,
+  localItemId: string,
+  home?: SourceTrustDomain,
+): LocalConnectorStore | undefined {
+  const homeStore = home !== undefined && set.legSpec(home)?.legacy === true ? set.store(home) : undefined;
+  if (homeStore?.activeLocalItemRow(localItemId)) return homeStore;
   const legacy = TIER_DOMAIN_ORDER
     .filter((domain: SourceTrustDomain) => set.legSpec(domain)?.legacy === true)
     .flatMap((domain) => {

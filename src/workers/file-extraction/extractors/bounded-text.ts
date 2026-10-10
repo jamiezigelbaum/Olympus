@@ -64,7 +64,7 @@ export const IMAGE_MIME_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The eight structural artifact kinds the production lane produces. The landed
+ * The structural artifact kinds the production lane produces. The landed
  * `ExtractionArtifactKind` has six values, so this token is carried verbatim
  * inside `structuralRef` and the six-value kind is derived from the structural
  * pointer. See `artifactKindForStructuralKind` for the mapping and the leg
@@ -78,6 +78,7 @@ export type DerivedArtifactToken =
   | 'sheet'
   | 'image_ocr'
   | 'image_vlm'
+  | 'image_media'
   | 'media_descriptor';
 
 /**

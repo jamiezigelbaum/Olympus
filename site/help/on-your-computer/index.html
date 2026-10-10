@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fix it on your computer - Olympus help</title>
+  <meta name="description" content="What to do when the Olympus dashboard in ChatGPT says to fix something on your computer.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
+      <nav class="site" aria-label="Main">
+        <ul>
+        <li><a href="/">Home</a></li>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/help/mac-offline/" aria-current="page">Help</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>Fix it on your computer</h1>
+      <p class="lede">A few things can only be set up on your computer, because they need a key or a pairing that never goes through ChatGPT. When the Olympus dashboard in ChatGPT says to do something on your computer, this page says what.</p>
+
+      <h2 id="open-olympus">Open Olympus on your computer</h2>
+      <p>From the Olympus dashboard in ChatGPT, <strong>Connect</strong> and <strong>Fix this on your computer</strong> open Olympus on your computer for you: if your browser asks whether to open Olympus, choose <strong>Open</strong>. If nothing opens (on a phone, or with an older Olympus), open Terminal on your computer and run:</p>
+      <pre><code>olympus dashboard</code></pre>
+      <p>It opens the Olympus dashboard in your computer's browser. The link works once, for 15 minutes; run the command again for a new one. If Terminal says Olympus is not running, see <a href="/help/mac-offline/">ChatGPT says your computer is offline</a>.</p>
+
+      <h2 id="connect">Connect a source ChatGPT can't connect</h2>
+      <p>ChatGPT connects Gmail, Google Drive and Dropbox. These sources are connected on your computer instead:</p>
+      <ul>
+        <li><strong>X bookmarks</strong> use an X developer app of your own.</li>
+        <li><strong>Readwise</strong> uses your Readwise access token, pasted on your computer.</li>
+        <li><strong>Telegram</strong> and <strong>WhatsApp</strong> pair with your computer.</li>
+      </ul>
+      <p><a href="#open-olympus">Open Olympus on your computer</a>, find the source under <strong>Sources</strong> and choose <strong>Connect</strong>; the page walks you through it. Then choose <strong>Check again</strong> in the dashboard in ChatGPT.</p>
+
+      <h2 id="reconnect">Reconnect a source</h2>
+      <p>When X bookmarks or Readwise stop syncing because their sign-in or token expired, <a href="#open-olympus">open Olympus on your computer</a>, find the source under <strong>Sources</strong> and reconnect it (for Readwise, paste a new token). Gmail, Google Drive and Dropbox reconnect from ChatGPT with <strong>Reconnect</strong>.</p>
+
+      <h2 id="answers">Answers have stopped working</h2>
+      <p>This means the answer model you set up on your computer cannot be reached. <a href="#open-olympus">Open Olympus on your computer</a> and look under <strong>Models</strong>:</p>
+      <ul>
+        <li>If you use <strong>Venice</strong>, check that its key is still valid and your account has credit, and paste a new key if needed.</li>
+        <li>If you use a <strong>local model</strong>, make sure the model server it names is running on your computer.</li>
+      </ul>
+      <p>Then choose <strong>Check again</strong> in the dashboard in ChatGPT. Personal answers in ChatGPT keep working meanwhile.</p>
+
+      <h2 id="search">Search has stopped working</h2>
+      <p>Your computer uses a custom search (embedding) model that cannot be reached. Make sure the model server it names under <strong>Models</strong> is running on your computer, then choose <strong>Check again</strong>. Changing the search model means indexing everything again, so Olympus only does that on your computer, when you ask.</p>
+
+      <h2 id="models">Change models</h2>
+      <p>Models and their keys are set up on your computer, never in ChatGPT: <a href="#open-olympus">open Olympus on your computer</a> and use <strong>Models</strong>. The built-in models need no setup.</p>
+
+      <h2>Still stuck?</h2>
+      <p><a href="/support/">Contact support</a> and include the output of <code>olympus engine status</code>. Check it first: it contains file paths on your computer, but no message content.</p>
+    </div>
+  </main>
+  <footer class="site">
+    <div class="wrap">
+      <ul>
+        <li><a href="/install/">Install</a></li>
+        <li><a href="/support/">Support</a></li>
+        <li><a href="/privacy/">Privacy</a></li>
+        <li><a href="/terms/">Terms</a></li>
+      </ul>
+      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -17,12 +17,14 @@
 import {
   BLOCKED_BY_POLICY_COUNT_KEY,
   METADATA_ONLY_EXPECTED_COUNT_KEY,
+  UNREADABLE_ITEMS_COUNT_KEY,
 } from '../dashboard/answer-ready-coverage.ts';
 import type { SourceIndexReadinessLedger } from '../source-index/status.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
 import type {
   ExtractionCorpusReadiness,
   ExtractionLaneKey,
+  ExtractionTerminalRetryPath,
   LocalFileExtractionJobStore,
 } from './job-store.ts';
 import type { ExtractionItemRef } from './types.ts';
@@ -46,6 +48,9 @@ export function createExtractionReadinessLedger(
     lanesForCorpus?: (corpusId: string) => readonly ExtractionLaneKey[] | undefined;
     // Current store identity/scope fence for scoped queue rows.
     currentItem?: (ref: ExtractionItemRef) => boolean;
+    // Terminal failures the runner will still retry: their items are not
+    // counted as unreadable until that last try has run.
+    terminalRetryPaths?: readonly ExtractionTerminalRetryPath[];
   } = {},
 ): SourceIndexReadinessLedger {
   return {
@@ -56,6 +61,7 @@ export function createExtractionReadinessLedger(
         try {
           return readinessSnapshot(jobs.scopedReadiness(lanes, {
             ...(options.currentItem ? { currentItem: options.currentItem } : {}),
+            ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
           }));
         } catch {
           return undefined;
@@ -63,7 +69,9 @@ export function createExtractionReadinessLedger(
       }
       let readiness: ExtractionCorpusReadiness;
       try {
-        readiness = jobs.corpusReadiness(corpusId);
+        readiness = jobs.corpusReadiness(corpusId, new Date(), {
+          ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
+        });
       } catch {
         // A status poll must not fail because the queue is momentarily
         // unreadable. Absent counts leave the coverage math on its own honest
@@ -87,6 +95,7 @@ function readinessSnapshot(
       extraction_jobs_leased: readiness.leasedJobs,
       extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
       extraction_jobs_failed_actionable: readiness.failedActionableJobs,
+      [UNREADABLE_ITEMS_COUNT_KEY]: readiness.unreadableItems,
       extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs,
     },
     contentExtractionThroughput: {

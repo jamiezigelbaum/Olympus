@@ -169,6 +169,12 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   // the seam, in the family's own module, where this guard does not reach.
   'src/core/file-extraction-source.ts',
   'src/core/evidence-pack.ts',
+  // The consult outbound gate (docs/design/frontier-consult-lane.md, A.4). It
+  // judges a question that may leave the machine against everything the writer
+  // saw. A rule that learned one provider's or one domain's shapes would be a
+  // rule every other corpus silently does not get, so it is held to the same
+  // neutrality as the answer spine, and its regexes are inventoried below.
+  'src/core/consult-gate.ts',
   // The folder-exclusion gate. Every file-storage family needs the identical
   // capability, and a gate that learned one provider's idioms would be a gate
   // the next provider silently does not get. Enrolling it here is what makes
@@ -184,9 +190,13 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/core/source-index/retrieval.ts',
   'src/core/source-index/router.ts',
   'src/core/source-index/selected-item-safety.ts',
+  'src/workers/file-extraction/extractors/apple-vision-ocr.ts',
+  'src/workers/file-extraction/extractors/audio-wav.ts',
   'src/workers/file-extraction/extractors/bounded-text.ts',
+  'src/workers/file-extraction/extractors/built-in-transcriber.ts',
   'src/workers/file-extraction/extractors/command-runner.ts',
   'src/workers/file-extraction/extractors/document-formats.ts',
+  'src/workers/file-extraction/extractors/image-prepare.ts',
   'src/workers/file-extraction/extractors/ocr.ts',
   'src/workers/file-extraction/extractors/openai-compatible-client.ts',
   'src/workers/file-extraction/extractors/pdf-render.ts',
@@ -262,6 +272,8 @@ const FORBIDDEN_SHARED_DOMAIN_TOKENS: ReadonlyArray<{ label: string; pattern: Re
 const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
   ['src/core/analyst.ts', new Set([
     'isUnsupportedNoContentAnswer',
+    // Ends a cut answer at a sentence or word boundary: punctuation only, no question semantics.
+    'clampAnswer',
     'compactSourceText',
     'stripCodeFences',
   ])],
@@ -270,6 +282,43 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
   ])],
   ['src/core/query-planner.ts', new Set([
     'stripCodeFences',
+  ])],
+  // The consult outbound gate. Every pattern is a character class, a written
+  // shape (date, number, host, path, version, encoded run), or the question's
+  // own punctuation. None reads meaning, routes on a topic, or names a source.
+  ['src/core/consult-gate.ts', new Set([
+    'characterReasons',
+    'scriptReasons',
+    'scriptOf',
+    'questionStructureReasons',
+    'hasEncodedBlob',
+    'hasIdentifierShape',
+    'hasTechnicalFingerprint',
+    'hasUnknownWord',
+    'loadConsultVocabulary',
+    'userManifestEntries',
+    'hasNumberWord',
+    'classifyPath',
+    'isKnownProvenancePath',
+    'pathSegment',
+    'consultWriterContextFromPack',
+    'asciiDigits',
+    'caseFold',
+    'foldText',
+    'forEachToken',
+    'questionModel',
+    'decodedViews',
+    'compareWithSnapshot',
+    'labelledSecretValues',
+    'hostnames',
+    'dateKeys',
+    'dayNumber',
+    'yearNumber',
+    'figureKeys',
+    // Address spans: a house number near a street word (a shape, any language).
+    'addressSpans',
+    // The owner's own numbers: a digit run's written shape (owner ruling 2026-10-08).
+    'askedWords',
   ])],
   ['src/core/source-index/selected-item-safety.ts', new Set([
     'normalizeSelectedItemField',
@@ -379,8 +428,8 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
  * `test-results/` and a developer's checkout does not.
  */
 const REPO_CONTENT_DIRECTORIES = [
-  '.claude', '.github', 'assets', 'bin', 'config', 'connect-relay', 'dist', 'docs', 'eval', 'exchange',
-  'integrations', 'relay', 'scripts', 'skills', 'src', 'test', 'tools',
+  '.claude', '.github', 'assets', 'bin', 'chatgpt-plugin', 'config', 'connect-relay', 'dist', 'docs', 'eval', 'exchange',
+  'integrations', 'relay', 'scripts', 'site', 'skills', 'src', 'test', 'tools',
 ];
 
 function repoContentFiles(): string[] {
@@ -410,6 +459,39 @@ function moduleSpecifiers(activePath: string, deletedPath: string): string[] {
   if (!specifier.startsWith('.')) specifier = `./${specifier}`;
   return [specifier, specifier.slice(0, -3)];
 }
+
+/**
+ * Every string a file could satisfy `content.includes(`${q}${x}${q}`)` with,
+ * for an `x` holding no quote character (' " `): the text between each quote
+ * character and the next quote character of any kind, when both are the same
+ * character. Built once per file so the literal half of the Slice 2 guard is a
+ * set lookup per deleted path instead of three full-content scans; candidates
+ * that do contain a quote character fall back to the original scan, so the
+ * answer is identical either way.
+ */
+function quoteDelimitedSegments(content: string): Set<string> {
+  const segments = new Set<string>();
+  let open = -1;
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+    if (char !== "'" && char !== '"' && char !== '`') continue;
+    if (open >= 0 && content[open] === char) segments.add(content.slice(open + 1, index));
+    open = index;
+  }
+  return segments;
+}
+
+const QUOTE_CHARACTER = /['"`]/;
+
+function quotedOccurrence(content: string, segments: Set<string>, candidate: string): boolean {
+  if (QUOTE_CHARACTER.test(candidate)) {
+    return content.includes(`'${candidate}'`) || content.includes(`"${candidate}"`) || content.includes(`\`${candidate}\``);
+  }
+  return segments.has(candidate);
+}
+
+/** Per-test budget for the tests that read the whole tree; bun's 5 s default is too tight on a loaded machine. */
+const TREE_WALK_TIMEOUT_MS = 60_000;
 
 function functionNameByLine(content: string): string[] {
   const names: string[] = [];
@@ -550,36 +632,49 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     // path; the redacted half runs the same check inverted — pull every quoted
     // literal out of the file, resolve relative specifiers, and hash.
     const offenders: string[] = [];
+    const literalVerdicts = new Map<string, boolean>();
+    const relativeVerdictsByDirectory = new Map<string, Map<string, boolean>>();
+    const relativeLiteralVerdicts = (directory: string): Map<string, boolean> => {
+      let verdicts = relativeVerdictsByDirectory.get(directory);
+      if (!verdicts) relativeVerdictsByDirectory.set(directory, verdicts = new Map());
+      return verdicts;
+    };
     for (const activePath of [...activePaths].sort()) {
       if (SLICE_2_RECEIPT_ONLY_LEDGERS.has(activePath)) continue;
       const content = read(activePath);
+      const segments = quoteDelimitedSegments(content);
       for (const deletedPath of deletedPaths) {
         const candidates = [
           deletedPath,
           ...moduleSpecifiers(activePath, deletedPath),
         ];
-        if (candidates.some((candidate) => (
-          content.includes(`'${candidate}'`)
-          || content.includes(`"${candidate}"`)
-          || content.includes(`\`${candidate}\``)
-        ))) {
+        if (candidates.some((candidate) => quotedOccurrence(content, segments, candidate))) {
           offenders.push(`${activePath} -> ${deletedPath}`);
         }
       }
       for (const literal of quotedLiterals(content)) {
-        const byPath = redactedPathOffenders(referenceCandidates(activePath, literal), redactedDigests).length > 0;
-        // Also the bare filename, which catches join()/interpolated paths whose
-        // only literal fragment is the name. See literalBasename() for the
-        // residual this still does not cover.
-        const basename = literalBasename(literal);
-        const byBasename = basename !== undefined && redactedBasenames.has(pathDigest(basename));
-        if (byPath || byBasename) {
+        // The verdict depends on the importing directory only for a relative
+        // specifier, so it is computed once per (directory, literal).
+        const relativeSpecifier = literal.startsWith('./') || literal.startsWith('../');
+        const verdicts = relativeSpecifier ? relativeLiteralVerdicts(dirname(activePath)) : literalVerdicts;
+        let hit = verdicts.get(literal);
+        if (hit === undefined) {
+          const byPath = redactedPathOffenders(referenceCandidates(activePath, literal), redactedDigests).length > 0;
+          // Also the bare filename, which catches join()/interpolated paths whose
+          // only literal fragment is the name. See literalBasename() for the
+          // residual this still does not cover.
+          const basename = literalBasename(literal);
+          const byBasename = basename !== undefined && redactedBasenames.has(pathDigest(basename));
+          hit = byPath || byBasename;
+          verdicts.set(literal, hit);
+        }
+        if (hit) {
           offenders.push(`${activePath} -> <redacted retired path>`);
         }
       }
     }
     expect(offenders).toEqual([]);
-  });
+  }, TREE_WALK_TIMEOUT_MS);
 
   test('the retired-path sweep covers every tracked repository path', () => {
     // The expectation is the TRACKED tree — exactly what the flip publishes —
@@ -602,7 +697,7 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     // skip rule cannot quietly carve a hole in it.
     const swept = new Set(repoContentFiles());
     expect(tracked.filter((rel) => !swept.has(rel))).toEqual([]);
-  });
+  }, TREE_WALK_TIMEOUT_MS);
 
   test('the redacted half of the Slice 2 guard fires on a retired name it never spells', () => {
     // The nineteen redacted names cannot be written here either, so the

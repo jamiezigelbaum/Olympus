@@ -1,6 +1,6 @@
 // Owner tier rules (design docs/design/per-item-four-tier-classification.md,
-// section 2.4): `~/.olympus/tier-rules.json`, owner-only, validated like the
-// sensitivity map.
+// section 2.4): `~/.olympus/tier-rules.json`, owner-only, validated on every
+// read.
 //
 //   {
 //     "schemaVersion": 1,
@@ -14,7 +14,7 @@
 // - `match` holds exactly one of pathPrefix | folderKey | label | sender | chat.
 //   Each is a PROVIDER identifier (a folder id, a label id, a chat key, an
 //   address), so a rule survives re-syncs, renames and rebuilds.
-// - `tier` uses the schema-v1 keys the sensitivity map uses: public (Public),
+// - `tier` uses the schema-v1 tier keys: public (Public),
 //   private (Personal), secure (Private), secrets (Secrets).
 // - `strength`: `prior` sets the resting tier and item-level raises still
 //   apply (the default); `force` fixes it, and only Secrets can still raise it.
@@ -82,7 +82,7 @@ export function resolveTierRulesPath(options: Pick<TierRulesLoadOptions, 'path' 
  */
 export function loadOwnerTierRules(options: TierRulesLoadOptions = {}): OwnerTierRule[] {
   const path = resolveTierRulesPath(options);
-  // The same guarded read as the sensitivity map: a file anyone but its owner
+  // The guarded owner-config read (owner-config-read.ts): a file anyone but its owner
   // can write, or one that changed while it was read, is refused, never used.
   const read = readOwnerConfigFile(path);
   if (read.status === 'missing') {

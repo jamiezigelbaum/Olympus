@@ -1,6 +1,6 @@
 import { DelphiClient } from './delphi.ts';
-import { runDoctor } from './doctor.ts';
-import { EmailClient, type SourceAnswerSelectedItemOption } from './email.ts';
+import { defaultDoctorHostProbe, runDoctor, type DoctorHostFacts } from './doctor.ts';
+import { EmailClient, type SourceAnswerSelectedItemOption, CONSULT_ASK_CLIENT_TIMEOUT_MS } from './email.ts';
 import { defaultConfig, type OlympusConfig } from './config.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
 import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
@@ -14,7 +14,7 @@ import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
 import type { OperationCaller } from './operation-caller.ts';
-import type { SourceAnswerJobScope } from './source-answer-jobs.ts';
+import type { SourceAnswerJobScope, SourceAnswerPending } from './source-answer-jobs.ts';
 
 type SourceIndexAnswerCorpusId = string;
 type SourceIndexStatusCorpusId = string;
@@ -47,6 +47,14 @@ export interface OperationContext {
    * hands off to a background job; without it, it waits as it always has.
    */
   sourceAnswerJobs?: SourceAnswerJobScope;
+  /**
+   * The calling surface's cancellation for this one call (OpenClaw's tool
+   * signal). An ask without a job hand-off runs under it, so a cancel before
+   * dispatch sends nothing and reserves nothing.
+   */
+  signal?: AbortSignal;
+  /** Test seam for olympus_doctor's host check; production probes this machine. */
+  doctorHostProbe?: () => DoctorHostFacts;
 }
 
 export interface Operation {
@@ -55,6 +63,8 @@ export interface Operation {
   params: Record<string, ParamDef>;
   handler: (ctx: OperationContext, params: Record<string, unknown>) => Promise<unknown>;
   mutating: boolean;
+  /** The operation reaches outside the owner's own index and models (a paid question to a provider); generic MCP publishes openWorldHint from it. */
+  openWorld?: true;
   availability?: (config: OlympusConfig) => boolean;
   nativeExposure?: 'always' | 'sourceIndexEnabledOnly';
   /**
@@ -146,6 +156,18 @@ const SOURCE_ANSWER_PARAMS = {
 
 const SOURCE_ANSWER_RESULT_PARAMS = {
   job_id: { type: 'string', required: true, description: 'The job_id a source_answer call returned with status "working".' },
+} satisfies Record<string, ParamDef>;
+
+const ASK_ANONYMOUSLY_PARAMS = {
+  question: { type: 'string', required: true, description: 'The question, in the user\'s words. Nothing else is sent: no documents, no history, no account.' },
+  level: {
+    type: 'string',
+    description: 'How the question is prepared before it leaves: "strict" (the user\'s own model rewrites it into general questions first; nothing identifying can be sent) or "standard" (their words, prepared as they chose). Omit to use the level the user chose before; the first call without one returns needs_choice.',
+  },
+  cleanup: { type: 'string', description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
+  remember: { type: 'boolean', description: 'Save this level (and cleanup) as the default for later questions, so the user is not asked again.' },
+  model: { type: 'string', description: 'A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; a model from the provider hosting this conversation is refused. Omit to use the model configured for this provider.' },
+  timeoutMs: { type: 'number', description: 'How long to wait for the answer, in milliseconds (default 1200000; a zkAPI route can take minutes; inside OpenClaw the wait is capped at 600000).' },
 } satisfies Record<string, ParamDef>;
 
 export const operations: Operation[] = [
@@ -292,19 +314,21 @@ export const operations: Operation[] = [
         ...(signal ? { signal } : {}),
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? jobs.registry.run(jobs, answer) : answer();
+      return jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal);
     },
   },
   {
     name: 'source_answer_result',
     description: [
-      'Get the answer to a source_answer call that returned {"status": "working", "job_id": ...}.',
-      'Returns the finished answer exactly as source_answer would have (same release rules, citations and coverage), the same error it would have raised, or {"status": "working"} again after waiting up to about a minute; then call it again.',
+      'Get the answer to a source_answer or ask_anonymously call that returned {"status": "working", "job_id": ...}.',
+      'Returns the finished answer exactly as that call would have (same release rules, citations and coverage), the same error it would have raised, or {"status": "working"} again after waiting up to about a minute; then call it again.',
       'A job_id works only for the connection that asked, and expires about 15 minutes after the answer is ready.',
     ].join(' '),
     params: SOURCE_ANSWER_RESULT_PARAMS,
     mutating: false,
-    nativeExposure: 'sourceIndexEnabledOnly',
+    // The collector reads no source: it is exposed wherever a handed-off
+    // call can be (ask_anonymously hands off with the source index off too).
+    nativeExposure: 'always',
     cliHints: { name: 'source answer result', positional: ['job_id'] },
     handler: async (ctx, params) => {
       assertNoUndeclaredParams(SOURCE_ANSWER_RESULT_PARAMS, params, 'Source answer result');
@@ -552,9 +576,92 @@ export const operations: Operation[] = [
     mutating: false,
     nativeExposure: 'always',
     cliHints: { name: 'doctor' },
-    handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env }),
+    handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === 'native' })) }),
+  },
+  {
+    name: 'ask_anonymously',
+    description: [
+      'Ask a frontier model one question anonymously through zkAPI, paid per question from the user\'s own zkAPI balance; nothing identifies them and the provider cannot tie it to an account.',
+      'Use it only when the user asks to ask anonymously, privately or through Olympus zkAPI, or to use a named model without being tracked. Only the question goes out: no documents, no history.',
+      'Returns {ok: true, reply, sent, level, rewritten, model}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent". The model is one from another provider than the one hosting this conversation.',
+      'Returns {ok: false, code: "needs_choice", message, options} the first time: ask the user once (Strict or Standard), then call again with level, and remember=true to keep it.',
+      'Any other {ok: false, message} is a refusal to tell the user in those words (a secret in the question, no route set up, the daily spend limit).',
+      'A zkAPI answer can take minutes: pass timeoutMs 600000 where you can. If the result is {"status": "working", "job_id": ...}, the answer is still coming: call source_answer_result with that job_id (again while it says working) rather than asking again.',
+    ].join(' '),
+    params: ASK_ANONYMOUSLY_PARAMS,
+    // Not read-only: it spends from the user's zkAPI balance, sends text to a
+    // provider and may store a preference; a client that auto-approves
+    // read-only tools must not auto-approve this one.
+    mutating: true,
+    openWorld: true,
+    nativeExposure: 'always',
+    cliHints: { name: 'ask', positional: ['question'], stdin: 'question' },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(ASK_ANONYMOUSLY_PARAMS, params, 'Ask anonymously');
+      const question = asString(params.question, 'question');
+      const level = optionalAskLevel(params.level);
+      const cleanup = optionalAskCleanup(params.cleanup);
+      const remember = optionalBoolean(params.remember, 'remember');
+      const model = optionalString(params.model);
+      const timeoutMs = optionalNumber(params.timeoutMs, 'timeoutMs');
+      // Inside the OpenClaw Gateway the lane timer must stay at its ceiling
+      // (email.ts); everywhere else the ask may wait for the whole session.
+      const insideGateway = ctx.caller?.surface === 'native';
+      const ask = (signal?: AbortSignal) => ctx.email.askAnonymously({
+        question,
+        ...(level !== undefined ? { level } : {}),
+        ...(cleanup !== undefined ? { cleanup } : {}),
+        ...(remember !== undefined ? { remember } : {}),
+        ...(model !== undefined ? { model } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(insideGateway ? {} : { maxTimeoutMs: CONSULT_ASK_CLIENT_TIMEOUT_MS }),
+        ...(ctx.caller ? { caller: ctx.caller } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      const jobs = ctx.sourceAnswerJobs;
+      return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
+    },
   },
 ];
+
+/**
+ * Runs `work` under the job registry, and until the job hands off also under
+ * the caller's own cancellation (OpenClaw's tool signal, stdio MCP's request
+ * signal; the remote surface links its transport instead). After hand-off the
+ * caller may go away without ending the work, as the registry promises.
+ */
+function runUnderCaller<T>(
+  jobs: SourceAnswerJobScope,
+  caller: AbortSignal | undefined,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T | SourceAnswerPending> {
+  if (!caller) return jobs.registry.run(jobs, work);
+  let following = true;
+  const scope: SourceAnswerJobScope = { ...jobs, detachFromClient: () => { following = false; jobs.detachFromClient?.(); } };
+  return jobs.registry.run(scope, (signal) => {
+    const controller = new AbortController();
+    const onJob = () => controller.abort(signal.reason);
+    const onCaller = () => { if (following) controller.abort(caller.reason); };
+    if (signal.aborted) onJob(); else signal.addEventListener('abort', onJob, { once: true });
+    if (caller.aborted) onCaller(); else caller.addEventListener('abort', onCaller, { once: true });
+    return work(controller.signal).finally(() => {
+      signal.removeEventListener('abort', onJob);
+      caller.removeEventListener('abort', onCaller);
+    });
+  });
+}
+
+function optionalAskLevel(value: unknown): 'strict' | 'standard' | undefined {
+  const level = optionalString(value);
+  if (level === undefined || level === 'strict' || level === 'standard') return level;
+  throw new OperationError('invalid_params', 'level must be "strict" or "standard".');
+}
+
+function optionalAskCleanup(value: unknown): 'as_written' | 'light_cleanup' | 'custom' | undefined {
+  const cleanup = optionalString(value);
+  if (cleanup === undefined || cleanup === 'as_written' || cleanup === 'light_cleanup' || cleanup === 'custom') return cleanup;
+  throw new OperationError('invalid_params', 'cleanup must be "as_written", "light_cleanup" or "custom".');
+}
 
 function optionalSourceIndexAnswerCorpusId(value: unknown, config: OlympusConfig): SourceIndexAnswerCorpusId | undefined {
   const corpusId = optionalString(value);

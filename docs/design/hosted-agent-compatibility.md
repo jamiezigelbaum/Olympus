@@ -1,5 +1,11 @@
 # Hosted-agent compatibility
 
+> **Partly superseded (2026-10-01).** ChatGPT now reaches Olympus as a plugin
+> through relay v2 (`mcp.olympusplugin.ai`), specified in
+> [chatgpt-plugin.md](chatgpt-plugin.md), which replaces the hosted-relay parts
+> of this design. Claude, Grok and Muse are out of scope for Olympus 1.0. Kept
+> as the record of the hosted-agent design.
+
 Status: design, owner-approved to build on 2026-09-24. This is v0.5 scope: v0.4
 excludes assistant harnesses beyond OpenClaw and Hermes-via-MCP (see
 [V0_4_RELEASE.md](../V0_4_RELEASE.md#not-v04)). Nothing here changes the v0.4
@@ -77,8 +83,8 @@ entry ("Grok asked…"), so the owner can see what each connection asked.
 | Grok and Grok Bot | Remote MCP. It is a custom connector (Business/Enterprise), or through the xAI API, which uses header auth. | Paste the URL and approve, or paste the URL and a token. |
 | Muse | OpenAPI plus a static bearer token (Muse has no OAuth or native MCP yet). | Paste the URL and token from `olympus connections add muse`. |
 
-Remote tool list: `source_answer`, `source_answer_result` and
-`source_index_status`, the same narrowed
+Remote tool list: `source_answer`, `source_answer_result`,
+`source_index_status` and `ask_anonymously`, the same narrowed
 list Hermes gets (`V0_4_HERMES_MCP_TOOLS`). Source watches remain native-only
 because their delivery depends on OpenClaw's session routing.
 
@@ -317,7 +323,7 @@ client ships modern-only.
 ## Build sequence
 
 Each slice is its own pull request. Security, auth and install surfaces are
-critical-class and need an independent review receipt.
+critical-class and need an independent review.
 
 1. **Calling-agent attribution.**
    - Generalize the release destination from the single-agent `castor` name to

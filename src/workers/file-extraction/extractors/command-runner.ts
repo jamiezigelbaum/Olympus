@@ -30,6 +30,8 @@
 
 import { Buffer } from 'node:buffer';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 
 export interface ExtractionCommandRunRequest {
   command: string;
@@ -169,13 +171,67 @@ export interface ExtractionCommandRunInternals {
   kill?: ExtractionKillFn;
 }
 
+/**
+ * Where package managers put the extraction tools when the service's PATH
+ * does not name them. A launchd agent starts with a minimal PATH (the
+ * runtime's own directory and the system directories), so a Homebrew
+ * `pdftotext`, `pdftoppm` or `tesseract` the owner installed is invisible to
+ * it: every PDF then fell back to the inline text-layer decoder, which reads
+ * CID-font PDFs as control characters (fresh-install diagnosis, 2026-10-01).
+ */
+export const EXTRACTION_COMMAND_FALLBACK_DIRS: readonly string[] = ['/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin'];
+
+const resolvedCommands = new Map<string, string>();
+
+/**
+ * The absolute path of a bare command name: the first executable regular
+ * file named `command` on PATH, then in the fallback directories. A command
+ * that already names a path, or one found nowhere, is returned unchanged (the
+ * spawn then fails with ENOENT exactly as before, and callers degrade).
+ */
+export function resolveExtractionCommand(
+  command: string,
+  options: { path?: string; fallbackDirs?: readonly string[]; isExecutable?: (path: string) => boolean } = {},
+): string {
+  if (!command || command.includes('/') || command.includes('\\')) return command;
+  const path = options.path ?? process.env.PATH ?? '';
+  const fallbackDirs = options.fallbackDirs ?? EXTRACTION_COMMAND_FALLBACK_DIRS;
+  const cacheable = options.path === undefined && options.fallbackDirs === undefined && options.isExecutable === undefined;
+  const cacheKey = `${path}\u0000${command}`;
+  if (cacheable) {
+    const cached = resolvedCommands.get(cacheKey);
+    if (cached) return cached;
+  }
+  const isExecutable = options.isExecutable ?? executableFile;
+  const directories = [...path.split(delimiter).filter(Boolean), ...fallbackDirs];
+  for (const directory of directories) {
+    const candidate = join(directory, command);
+    if (isExecutable(candidate)) {
+      if (cacheable) resolvedCommands.set(cacheKey, candidate);
+      return candidate;
+    }
+  }
+  return command;
+}
+
+function executableFile(path: string): boolean {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runExtractionCommand(
   request: ExtractionCommandRunRequest,
   internals: ExtractionCommandRunInternals = {},
 ): Promise<ExtractionCommandRunResult> {
   const kill = internals.kill ?? process.kill;
+  const command = resolveExtractionCommand(request.command);
   return new Promise((resolve, reject) => {
-    const child = spawn(request.command, request.args, {
+    const child = spawn(command, request.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });

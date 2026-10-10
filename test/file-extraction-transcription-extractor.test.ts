@@ -21,6 +21,7 @@ import {
   TRANSCRIBE_TERMINAL_EXIT_KINDS,
   TRANSCRIPTION_EXTRACTOR_KIND,
   TRANSCRIPTION_EXTRACTOR_VERSION,
+  TRANSCRIPTION_REQUIRED_WARNING,
   TranscriptionTerminalError,
   WhisperCommandTranscriber,
   createTranscriptionExtractor,
@@ -220,14 +221,18 @@ describe('transcription extractor: transcripts', () => {
     expect(result.errorKind).toBe('transcribe_command_timeout_kill_failed');
   });
 
-  test('an unconfigured transcriber is retryable under a bounded token', async () => {
+  test('an unconfigured transcriber leaves the audio named and visibly transcription_required', async () => {
     const result = await createTranscriptionExtractor().extract(extractorInput({
       bytes: textBytes('audio'),
       mimeType: AUDIO_MIME,
     }));
-    expect(result.status).toBe('failed_retryable');
-    if (result.status !== 'failed_retryable') return;
-    expect(result.errorKind).toBe('transcriber_not_configured');
+    // Not a failure: no attempt budget is spent on a setup the owner chose.
+    expect(result.status).toBe('metadata_only');
+    if (result.status !== 'metadata_only') return;
+    expect(result.warnings).toEqual([TRANSCRIPTION_REQUIRED_WARNING]);
+    expect(result.derivations).toHaveLength(1);
+    expect(result.derivations![0]!.warnings).toContain(TRANSCRIPTION_REQUIRED_WARNING);
+    expect(result.derivations![0]!.structuralRef).toMatchObject({ artifact: 'media_descriptor', mimeType: AUDIO_MIME });
   });
 
   test('neither bytes nor a path is a terminal invariant failure', async () => {

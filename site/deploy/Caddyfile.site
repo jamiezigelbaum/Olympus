@@ -1,0 +1,54 @@
+# olympusplugin.ai static site. Site blocks only (no global options), so it
+# can sit beside the relay's Caddyfile on the same host, for example as
+# /etc/caddy/olympus-site.caddy pulled in with one line at the end of the
+# main Caddyfile:
+#
+#   import /etc/caddy/olympus-site.caddy
+#
+# Written for Caddy 2.6.2 (Ubuntu's package). Caddy issues and renews the
+# certificates for both names over HTTP-01 on its own.
+#
+# No access log: Caddy writes access logs only for sites with a `log`
+# directive, and neither block below has one. Keep it that way; the privacy
+# policy says the site keeps no access log.
+
+olympusplugin.ai {
+	root * /srv/olympus-site
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		-Server
+	}
+
+	# Deploy files never ship (deploy.sh excludes them), but refuse them anyway.
+	@hidden path /deploy/* /.*
+	respond @hidden 404
+
+	# The help page for fixes only the computer can make moved on 2026-10-09
+	# (Mac became computer). A server redirect keeps the #section the panel's
+	# links carry; the stub page at the old path covers a host whose Caddy
+	# configuration has not been reloaded yet.
+	redir /help/on-your-mac /help/on-your-computer/ permanent
+	redir /help/on-your-mac/ /help/on-your-computer/ permanent
+
+	encode gzip
+	file_server
+
+	handle_errors {
+		@notfound expression "{http.error.status_code} == 404"
+		rewrite @notfound /404.html
+		file_server
+	}
+}
+
+www.olympusplugin.ai {
+	header Strict-Transport-Security "max-age=31536000"
+	redir https://olympusplugin.ai{uri} permanent
+}

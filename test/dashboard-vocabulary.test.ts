@@ -628,7 +628,7 @@ describe('attention lines', () => {
     })).toBe("can't sign in · fixed · restart Olympus to use it");
   });
 
-  test('point a pending consent at the tab it is waiting on', () => {
+  test('say what to do about a pending sign-in and how long its link lasts, never which tab to look in', () => {
     const source = card({
       label: 'Dropbox',
       connection: {
@@ -642,7 +642,7 @@ describe('attention lines', () => {
       },
     });
     expect(dashboardAttentionLine(source))
-      .toBe('waiting for you to approve in the Dropbox tab · expires in 9m');
+      .toBe('finish signing in to Dropbox · link expires in 9 min');
   });
 
   test('drop the expiry clause once the attempt has run out', () => {
@@ -658,7 +658,7 @@ describe('attention lines', () => {
         },
       },
     });
-    expect(dashboardAttentionLine(source)).toBe('waiting for you to approve in the Dropbox tab');
+    expect(dashboardAttentionLine(source)).toBe('finish signing in to Dropbox');
   });
 
   test('say reauth required rather than restating the readiness sentence', () => {
@@ -671,7 +671,7 @@ describe('attention lines', () => {
 
   test('carry the machine failure the readiness label names', () => {
     const source = card({ answer_readiness: { state: 'needs_attention', label: 'Content extraction is stalled' } });
-    expect(dashboardAttentionLine(source)).toBe('paused — reading files has stalled');
+    expect(dashboardAttentionLine(source)).toBe('reading files has stalled');
   });
 
   // Was: "count the stuck work when nothing names a cause", pinning "3 items

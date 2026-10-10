@@ -12,11 +12,11 @@
 //   signal never rescues an item a raising signal flagged.
 // - Secrets outrank everything except an explicit per-item owner override.
 // - Public needs positive evidence (a public link, a published item, an owner
-//   rule or a map category). Absence of sensitive signals is never enough.
+//   rule). Absence of sensitive signals is never enough.
 // - The classifier reads SIGNAL KINDS only. It never branches on which source
 //   an item came from; test/tier-classifier-source-agnostic.test.ts enforces it.
 // - Reasons are content-free codes: finding kinds, fixed vocabulary families,
-//   owner rule and map category ids. Never a title, path, sender or text.
+//   owner rule ids. Never a title, path, sender or text.
 // - Deterministic. The privacy-safe sniffer is a seam (TierSniffer). The
 //   shipped sniffer (sniffer.ts) answers synchronously from a verdict cache;
 //   a miss answers "undecided", which leaves the tier where the deterministic
@@ -28,20 +28,35 @@ import type {
   SourceClassificationTier,
 } from '../../core/contracts.ts';
 import {
-  isRaisingSensitivityTier,
-  matchSensitivityMapTiers,
-  sensitivityMapRevision,
-  type SensitivityMap,
-} from '../../core/sensitivity-map.ts';
-import {
   detectSecretFindingKinds,
   detectSensitiveContent,
   namesLookPossiblyPrivate,
 } from './engine.ts';
 import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
+import { pathPrefixMatches } from '../../core/location-rules.ts';
 
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
-export const TIER_CLASSIFIER_VERSION = '2026-09-23.p2';
+// 2026-10-01.p2: vocabulary-only detector hits go to the privacy-safe model
+// (borderline) instead of final-deciding Private, when a model can be asked.
+// 2026-10-01.p3: when a model can be asked, EVERY item whose text was read is
+// judged by it (with the item's names) before it may be Personal; a routed
+// item decided under an older version is judged again (tier-rejudge.ts).
+// 2026-10-02.p4: the card detector needs a card's shape (whole number, card
+// grouping, issuer prefix and length, and for an unbroken run card words
+// nearby or no numeric table around it), and the sniffer's injection screen
+// needs the steering half of an instruction (comparison signs, "all lines"
+// and "confidence" alone no longer count). Items decided under p3 are judged
+// again, so a document either rule misfired on gets a real verdict.
+export const TIER_CLASSIFIER_VERSION = '2026-10-02.p4';
+
+/**
+ * The `mapRevision` every decision records. The legacy sensitivity map was
+ * retired on 2026-10-03 (owner ruling: the privacy profile is the only
+ * privacy path), so this is always `none`. The field stays because the tier
+ * ledger and the sniffer verdict cache key on it; a fresh install never had
+ * any other value.
+ */
+export const TIER_MAP_REVISION = 'none';
 
 export type TierKey = SourceClassificationTier;
 
@@ -122,7 +137,7 @@ export interface TierSnifferRequest {
    * the classifier does not ask the sniffer about an item it found a secret in.
    */
   material?: string;
-  /** The sensitivity map revision the question is asked under (a cache-key part). */
+  /** Always TIER_MAP_REVISION (a cache-key part kept from the retired sensitivity map). */
   mapRevision?: string;
   subject?: TierSnifferSubject;
 }
@@ -153,6 +168,22 @@ export const UNDECIDED_TIER_SNIFFER: TierSniffer = Object.freeze({
 export const SNIFFER_NAMES_MAX_CHARS = 400;
 /** Longest text excerpt handed to the sniffer (pass 2): a short excerpt, never the document. */
 export const SNIFFER_EXCERPT_MAX_CHARS = 1_200;
+/**
+ * The content-free flag of an excerpt question asked only because the text
+ * was read (no name flag, no borderline family): every read item is judged
+ * when a privacy-safe model can be asked.
+ */
+export const CONTENT_READ_SNIFFER_FLAG = 'content:read';
+
+/**
+ * What the sniffer reads in pass 2: the item's names (title, folder path,
+ * sender), when known, then the excerpt. The names are a signal of their own
+ * (a records folder, a dated test title) that the text alone may not carry.
+ */
+export function snifferContentMaterial(names: string, excerpt: string): string {
+  const trimmed = names.trim();
+  return trimmed ? `Names: ${trimmed}\nExcerpt: ${excerpt}` : excerpt;
+}
 
 // --- Input / output -----------------------------------------------------------
 
@@ -165,15 +196,81 @@ export interface TierClassificationInput {
   provider?: string;
   /** Full extracted text for pass 2. Absent means pass 2 has nothing to read. */
   text?: string;
+  /**
+   * The owner keeps this item's content unread (a names-only disposition):
+   * its text never arrives, so pass 2 never runs (design 2.2: pass 2 is only
+   * for items approved for full ingestion). The names decide both layers and
+   * nothing waits on the text, so the item is never left pending forever.
+   */
+  namesOnly?: boolean;
+  /**
+   * The item's media type. A still image's content (its picture, and any
+   * text read off it) rests Private unless the photo judge found the picture
+   * ordinary (`imageJudgment`).
+   */
+  mimeType?: string;
+  /** The photo judge's verdict on a still image's picture (media-judge.ts). Absent: unjudged. */
+  imageJudgment?: ImageJudgmentSignal;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
 
+/**
+ * The photo judge's verdict on a still image's picture, as this classifier
+ * reads it (the judge itself is source-index/media-judge.ts).
+ */
+export interface ImageJudgmentSignal {
+  verdict: 'sensitive' | 'ordinary' | 'unjudged';
+  category?: string;
+}
+
+/**
+ * An UNJUDGED photo's content is Private, whatever text was read off it
+ * (docs/design/photo-embeddings.md, owner decisions 2026-10-07 and
+ * 2026-10-08): a picture no judge has looked at, or one that could not be
+ * judged (no image encoder, off macOS, the judge failed), stays Private. The
+ * names keep their own tier; only Secrets (a secret read in the picture's
+ * text) and the owner's per-item override decide otherwise.
+ */
+export const IMAGE_PRIVATE_DEFAULT_REASON = 'content:image_private_default';
+/** A photo the judge found sensitive is Private: `content:image_sensitive:<category>`. */
+export const IMAGE_SENSITIVE_REASON_PREFIX = 'content:image_sensitive:';
+/**
+ * A photo the judge found ordinary is judged like any other file: its text
+ * (OCR) through the usual rules, Personal by default. This reason marks that
+ * the picture was judged.
+ */
+export const IMAGE_ORDINARY_REASON = 'content:image_ordinary';
+
+/** Whether a media type is a still image, whose content rests Private unless its picture is judged ordinary. */
+export function isImageMediaType(mimeType: string | undefined): boolean {
+  return (mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? '').startsWith('image/');
+}
+
 export interface TierClassificationOptions {
-  sensitivityMap?: SensitivityMap;
   rules?: readonly OwnerTierRule[];
   override?: ItemTierOverride;
   sniffer?: TierSniffer;
+  /**
+   * This install has no Public tier (a fresh install, owner ruling
+   * 2026-10-01): anything that would be Public is Personal. Every other
+   * step is unchanged; only the final Public verdict is lifted.
+   */
+  retirePublic?: boolean;
+}
+
+/** The reason code recorded when a Public verdict is lifted to Personal on an install without a Public tier. */
+export const PUBLIC_RETIRED_REASON = 'tier:public_retired';
+
+/** A decision with Public lifted to Personal (no Public tier on this install). Pure. */
+export function withPublicRetired<T extends { metadataTier: TierKey; contentTier: TierKey; reasons: string[] }>(decision: T): T {
+  if (decision.metadataTier !== 'public' && decision.contentTier !== 'public') return decision;
+  return {
+    ...decision,
+    metadataTier: decision.metadataTier === 'public' ? 'private' : decision.metadataTier,
+    contentTier: decision.contentTier === 'public' ? 'private' : decision.contentTier,
+    reasons: [...decision.reasons, PUBLIC_RETIRED_REASON],
+  };
 }
 
 export type TierDecisionState = 'pending' | 'current';
@@ -231,7 +328,6 @@ export type TierDecidedBy =
   | 'owner_rule'
   | 'source_floor'
   | 'source_prior'
-  | 'sensitivity_map'
   | 'public_evidence'
   | 'sensitive_detector'
   | 'sniffer'
@@ -243,11 +339,19 @@ export function classifyItemTiers(
   input: TierClassificationInput,
   options: TierClassificationOptions = {},
 ): TierDecision {
+  const decision = classifyItemTiersWithPublic(input, options);
+  return options.retirePublic ? withPublicRetired(decision) : decision;
+}
+
+function classifyItemTiersWithPublic(
+  input: TierClassificationInput,
+  options: TierClassificationOptions,
+): TierDecision {
   const signals = input.signals;
   const sniffer = options.sniffer ?? UNDECIDED_TIER_SNIFFER;
   const base = {
     engineVersion: TIER_CLASSIFIER_VERSION,
-    mapRevision: sensitivityMapRevision(options.sensitivityMap),
+    mapRevision: TIER_MAP_REVISION,
     snifferId: sniffer.id,
   };
   const text = input.text?.trim() ? input.text : undefined;
@@ -274,14 +378,13 @@ export function classifyItemTiers(
   const clearedReason = secretsCleared ? ['override:item:not_secret'] : [];
 
   const names = namesOf(signals);
-  const matchInput = mapMatchInput(signals);
+  const matchInput = namesMatchInput(signals);
 
   // ---------------------------------------------------------------- pass 1 --
   const metadata = metadataPass({
     signals,
     provider: input.provider,
     names,
-    matchInput,
     options,
     secretsCleared,
     sniffer,
@@ -293,7 +396,11 @@ export function classifyItemTiers(
   const content = contentPass({
     signals,
     text,
+    ...(input.namesOnly ? { namesOnly: true } : {}),
+    ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
+    ...(input.imageJudgment ? { imageJudgment: input.imageJudgment } : {}),
     matchInput,
+    names: snifferNames(signals),
     metadata,
     options,
     secretsCleared,
@@ -303,7 +410,10 @@ export function classifyItemTiers(
   });
 
   const contentRead = text !== undefined || metadata.tier === 'secrets';
-  const contentPending = content.pending || !contentRead;
+  // Unread text keeps the content decision open, unless the owner chose that
+  // it is never read: then the names are the whole decision.
+  const namesOnly = input.namesOnly === true && text === undefined;
+  const contentPending = content.pending || (!contentRead && !namesOnly);
   return {
     ...base,
     metadataTier: metadata.tier,
@@ -333,6 +443,11 @@ export interface ContentTierInput {
   metadataForced: boolean;
   metadataFlagged: boolean;
   /**
+   * An owner rule settled the names' tier: the text is then not sent to the
+   * sniffer just because it was read (`namesDecidedByOwner`).
+   */
+  metadataOwnerDecided?: boolean;
+  /**
    * The item's names, when the caller has them: they travel with the text so
    * a detector's origin hint and a title's vocabulary still count, exactly
    * as they do when the text arrives with the listing.
@@ -340,6 +455,10 @@ export interface ContentTierInput {
   title?: string;
   path?: string;
   sender?: string;
+  /** The item's media type: a still image's content rests Private unless judged ordinary. */
+  mimeType?: string;
+  /** The photo judge's verdict on a still image's picture. Absent: unjudged. */
+  imageJudgment?: ImageJudgmentSignal;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
@@ -361,17 +480,31 @@ export function classifyContentTier(
   const sniffer = options.sniffer ?? UNDECIDED_TIER_SNIFFER;
   const base = {
     engineVersion: TIER_CLASSIFIER_VERSION,
-    mapRevision: sensitivityMapRevision(options.sensitivityMap),
+    mapRevision: TIER_MAP_REVISION,
     snifferId: sniffer.id,
   };
   if (options.override?.kind === 'tier') {
-    return { ...base, contentTier: options.override.tier, decidedBy: 'override', reasons: [`override:item:${options.override.tier}`], contentPending: false };
+    const tier = options.retirePublic && options.override.tier === 'public' ? 'private' : options.override.tier;
+    return {
+      ...base,
+      contentTier: tier,
+      decidedBy: 'override',
+      reasons: [`override:item:${options.override.tier}`, ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [])],
+      contentPending: false,
+    };
   }
   const text = input.text.trim() ? input.text : undefined;
   const content = contentPass({
     signals: {},
     text,
-    matchInput: mapMatchInput({
+    ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
+    ...(input.imageJudgment ? { imageJudgment: input.imageJudgment } : {}),
+    matchInput: namesMatchInput({
+      ...(input.title?.trim() ? { title: input.title } : {}),
+      ...(input.path?.trim() ? { path: input.path } : {}),
+      ...(input.sender?.trim() ? { sender: input.sender } : {}),
+    }),
+    names: snifferNames({
       ...(input.title?.trim() ? { title: input.title } : {}),
       ...(input.path?.trim() ? { path: input.path } : {}),
       ...(input.sender?.trim() ? { sender: input.sender } : {}),
@@ -383,6 +516,7 @@ export function classifyContentTier(
       pending: false,
       forced: input.metadataForced,
       flags: input.metadataFlagged ? ['names:recorded'] : [],
+      ...(input.metadataOwnerDecided ? { ownerDecided: true } : {}),
     },
     options,
     secretsCleared: options.override?.kind === 'not_secret',
@@ -390,11 +524,12 @@ export function classifyContentTier(
     mapRevision: base.mapRevision,
     ...(input.subject ? { subject: input.subject } : {}),
   });
+  const lifted = options.retirePublic === true && content.tier === 'public';
   return {
     ...base,
-    contentTier: content.tier,
+    contentTier: lifted ? 'private' : content.tier,
     decidedBy: content.decidedBy,
-    reasons: content.reasons,
+    reasons: lifted ? [...content.reasons, PUBLIC_RETIRED_REASON] : content.reasons,
     contentPending: content.pending || text === undefined,
   };
 }
@@ -410,13 +545,24 @@ interface PassResult {
   flags: string[];
   /** The owner rule that set (prior) or fixed (force) the tier, if any. */
   ownerRule?: TierOwnerRuleMatch;
+  /** An owner rule settled the names' tier (no read-only sniffer question). */
+  ownerDecided?: boolean;
+}
+
+/**
+ * Whether recorded reasons show an OWNER RULE settled the names' tier (a
+ * prior rule; a force rule is `metadataForced`). Such an item is not sent to
+ * the sniffer only because its text was read: the owner already said where
+ * it belongs.
+ */
+export function namesDecidedByOwner(reasons: readonly string[]): boolean {
+  return reasons.some((reason) => reason.startsWith('metadata:owner_rule:'));
 }
 
 function metadataPass(args: {
   signals: SourceClassificationSignals;
   provider: string | undefined;
   names: string;
-  matchInput: MapMatchInput;
   options: TierClassificationOptions;
   secretsCleared: boolean;
   sniffer: TierSniffer;
@@ -500,24 +646,8 @@ function metadataPass(args: {
     raises.push({ tier: signals.floor.tier, decidedBy: 'source_floor', reason: floorReason! });
   }
 
-  // [5] Sensitivity map v2 on the names. Raising and lowering categories.
-  // Raising categories see the title; lowering categories see only the real
-  // path, folder keys and sender (sensitivity-map.ts, matchSensitivityMapTiers).
-  const mapMatches = matchSensitivityMapTiers(options.sensitivityMap, {
-    ...(signals.title?.trim() ? { title: signals.title } : {}),
-    ...(signals.sender?.trim() ? { sender: signals.sender } : {}),
-    ...(signals.path?.trim() ? { path: signals.path } : {}),
-    ...(signals.folderKeys && signals.folderKeys.length > 0 ? { folderKeys: signals.folderKeys } : {}),
-  });
-  for (const match of mapMatches) {
-    const verdict: Verdict = {
-      tier: match.tierName,
-      decidedBy: 'sensitivity_map',
-      reason: `metadata:sensitivity_map:${match.categoryId}`,
-    };
-    if (tierRank(match.tierName) > tierRank(resting.tier)) raises.push(verdict);
-    else lowers.push(verdict);
-  }
+  // [5] Retired: the legacy sensitivity map (2026-10-03). Owner folder,
+  // label and sender rules (step [3], the privacy profile) replace it.
 
   // [6] Deterministic public evidence.
   if (signals.sharing === 'public_link' || signals.sharing === 'published') {
@@ -527,11 +657,8 @@ function metadataPass(args: {
   let decided = resolveVerdicts(resting, raises, lowers, restingIsConfigured);
 
   // [7] Sniffer, only when names look possibly private and nothing already
-  // made them Private. Only an owner PERSONAL-target category answers the
-  // sniffer's question for it; a Public-target match (say a broad /work/
-  // folder) never silences a possibly-private name inside it.
-  const ownerSaidPersonal = mapMatches.some((match) => match.tierName === 'private');
-  const flags = ownerSaidPersonal ? [] : namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
+  // made them Private.
+  const flags = namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
   let pending = false;
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
@@ -562,6 +689,7 @@ function metadataPass(args: {
     pending,
     forced: false,
     flags,
+    ...(priorRule ? { ownerDecided: true } : {}),
     ...(priorRule ? { ownerRule: { kind: priorRule.match.kind, tier: priorRule.tier, strength: 'prior' as const } } : {}),
   };
 }
@@ -569,7 +697,14 @@ function metadataPass(args: {
 function contentPass(args: {
   signals: SourceClassificationSignals;
   text: string | undefined;
-  matchInput: MapMatchInput;
+  /** The owner keeps the content unread (TierClassificationInput.namesOnly). */
+  namesOnly?: boolean;
+  /** The item is a still image: its content rests Private unless its picture was judged ordinary. */
+  image?: boolean;
+  imageJudgment?: ImageJudgmentSignal;
+  matchInput: NamesMatchInput;
+  /** The item's names (title, folder path, sender), bounded: they travel with the excerpt. */
+  names: string;
   metadata: PassResult;
   options: TierClassificationOptions;
   secretsCleared: boolean;
@@ -587,8 +722,10 @@ function contentPass(args: {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
-      reasons: ['content:unread'],
-      pending: metadata.pending,
+      reasons: [args.namesOnly ? 'content:names_only' : 'content:unread'],
+      // Names only: the content IS the names' tier, and a names verdict
+      // settles both; nothing is left open on the text.
+      pending: args.namesOnly ? false : metadata.pending,
     };
   }
 
@@ -605,6 +742,25 @@ function contentPass(args: {
     }
   }
 
+  // A still image's content is Private unless the photo judge found its
+  // picture ordinary: an unjudged picture, and a sensitive one, rest Private
+  // whatever their text says and whatever rule set the names (only Secrets,
+  // above, and the per-item override, before either pass, decide otherwise).
+  // An ordinary picture's text goes through the usual rules below, so an
+  // account or card number read off it still makes it Private.
+  const imageOrdinary = args.image === true && args.imageJudgment?.verdict === 'ordinary';
+  if (args.image && args.imageJudgment?.verdict === 'sensitive') {
+    return {
+      tier: maxTier(metadata.tier, 'secure'),
+      decidedBy: 'default',
+      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`],
+      pending: false,
+    };
+  }
+  if (args.image && !imageOrdinary) {
+    return { tier: maxTier(metadata.tier, 'secure'), decidedBy: 'default', reasons: [IMAGE_PRIVATE_DEFAULT_REASON], pending: false };
+  }
+
   // A force rule fixes the tier; only Secrets (above) may still raise it.
   if (metadata.forced) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [], pending: false };
@@ -615,47 +771,64 @@ function contentPass(args: {
   // [10] Deterministic sensitive detectors on the text. Names travel with the
   // text so the health origin hint and a title's vocabulary still count; the
   // content tier is at least the metadata tier, so this can only raise.
+  //
+  // Structured hits (a Luhn-valid card, an IBAN, a routing or account number,
+  // an SSN, a passport or NIF number) raise to Private at once. Vocabulary
+  // alone ("treatment", "symptoms", "invoice") does not prove an item private
+  // (owner ruling 2026-10-01: a book chapter that mentions treatment is not a
+  // private answer): when a privacy-safe model can be asked, those families
+  // are borderline and step [12] asks it. With no model to ask, vocabulary
+  // still raises to Private, so nothing words flagged reaches Personal
+  // without a model's judgment.
   const detection = detectSensitiveContent({
     text,
     ...(args.matchInput.title ? { title: args.matchInput.title } : {}),
     ...(args.matchInput.sender ? { sender: args.matchInput.sender } : {}),
     ...(args.matchInput.path ? { path: args.matchInput.path } : {}),
   });
-  if (detection.signals.length > 0) {
+  const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
+  if (detection.signals.length > 0 || (detection.vocabulary.length > 0 && !canAskSniffer)) {
     decided = maxVerdict(decided, {
       tier: 'secure',
       decidedBy: 'sensitive_detector',
-      reasons: detectorReasons(detection.signals),
+      reasons: detectorReasons([...detection.signals, ...detection.vocabulary]),
     });
   }
 
-  // [11] Sensitivity map v2 on the text. Content only raises, so a lowering
-  // category is ignored here.
-  const mapMatches = matchSensitivityMapTiers(args.options.sensitivityMap, { text });
-  for (const match of mapMatches) {
-    // Content only raises: a lowering category never applies to the text.
-    if (!isRaisingSensitivityTier(match.tierName)) continue;
-    if (tierRank(match.tierName) <= tierRank(decided.tier)) continue;
-    decided = maxVerdict(decided, {
-      tier: match.tierName,
-      decidedBy: 'sensitivity_map',
-      reason: `content:sensitivity_map:${match.categoryId}`,
-    });
-  }
+  // [11] Retired with the legacy sensitivity map (2026-10-03).
 
-  // [12] Sniffer on a short excerpt, only when pass 1 flagged the item or a
-  // detector family came close, and only while the content is below Private.
+  // [12] Sniffer on a short excerpt plus the item's names, while the content
+  // is below Private.
+  //
+  // With a privacy-safe model to ask, EVERY item whose text was read is asked
+  // (owner ruling 2026-10-01, p3): a person's own lab report, statement or
+  // filled form often carries none of the detector vocabulary (reference
+  // ranges, mg/dL, another language), so "no detector fired" never proves an
+  // item Personal. Until the model answers, the item is pending (held
+  // Private). Structured detections, owner rules and overrides still decide
+  // at once (above), and the model is never asked about Private content; an
+  // item whose names an owner rule settled is not asked only because its text was read.
+  //
+  // Without a privacy-safe model to ask (no private lane), only items whose
+  // NAMES were flagged wait (owner ruling 2026-10-01: unflagged items are
+  // Personal at once); a borderline word in the text alone is not a flag, and
+  // vocabulary raised to Private in step [10].
+  //
+  // A borderline family from vocabulary is asked about with the passages the
+  // detector matched, not just the document's opening, so a model can see the
+  // medical or financial text that tripped it.
   let pending = false;
   const flags = [
     ...metadata.flags,
-    ...detection.borderline.map((family) => `content:borderline:${family}`),
+    ...(canAskSniffer ? detection.borderline.map((family) => `content:borderline:${family}`) : []),
   ];
+  if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true) flags.push(CONTENT_READ_SNIFFER_FLAG);
   const reasons = [...decided.reasons];
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
       pass: 'content',
       flags,
-      material: snifferExcerpt(text),
+      material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary))),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });
@@ -669,7 +842,15 @@ function contentPass(args: {
     }
   }
   if (reasons.length === 0) reasons.push('content:no_raise');
+  if (imageOrdinary) reasons.unshift(IMAGE_ORDINARY_REASON);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+
+/** A category code safe in a reason string (the judge's own codes pass unchanged). */
+function imageCategoryCode(category: string | undefined): string {
+  const allowed = 'abcdefghijklmnopqrstuvwxyz0123456789_';
+  const code = [...(category ?? '').toLowerCase()].filter((char) => allowed.includes(char)).join('');
+  return code || 'unspecified';
 }
 
 // --- Helpers ------------------------------------------------------------------
@@ -762,7 +943,7 @@ export function ownerRuleMatches(
   if (!value) return false;
   switch (rule.match.kind) {
     case 'pathPrefix':
-      return (signals.path ?? '').trim().toLowerCase().startsWith(value);
+      return pathPrefixMatches(signals.path, value);
     case 'folderKey':
     case 'chat':
       return (signals.folderKeys ?? []).some((key) => key.trim().toLowerCase() === value);
@@ -790,18 +971,18 @@ function detectorReasons(signals: readonly string[]): string[] {
   return [...codes].sort();
 }
 
-interface MapMatchInput {
+interface NamesMatchInput {
   title?: string;
   sender?: string;
   path?: string;
 }
 
-function mapMatchInput(signals: SourceClassificationSignals): MapMatchInput {
+function namesMatchInput(signals: SourceClassificationSignals): NamesMatchInput {
   const title = signals.title?.trim();
   const sender = signals.sender?.trim();
-  // A source without a folder path still has a name, and the name is the
-  // path-shaped signal map path patterns are written against. Joined, never
-  // chosen between, so a longer haystack can only add matches.
+  // A source without a folder path still has a name, and the detectors' path
+  // hint reads both. Joined, never chosen between, so a longer haystack can
+  // only add matches.
   const path = [signals.path?.trim(), title].filter((part): part is string => Boolean(part)).join('\n');
   return {
     ...(title ? { title } : {}),
@@ -810,7 +991,7 @@ function mapMatchInput(signals: SourceClassificationSignals): MapMatchInput {
   };
 }
 
-/** The names the sniffer may read in pass 1, bounded. The sender is metadata too. */
+/** The names the sniffer may read (pass 1, and with the excerpt in pass 2), bounded. The sender is metadata too. */
 function snifferNames(signals: SourceClassificationSignals): string {
   const joined = [
     signals.title,
@@ -824,9 +1005,54 @@ function snifferNames(signals: SourceClassificationSignals): string {
   return joined.slice(0, SNIFFER_NAMES_MAX_CHARS);
 }
 
-/** A short excerpt of the text for pass 2: the start of the document, bounded. */
-function snifferExcerpt(text: string): string {
-  return text.replace(/\s+/g, ' ').trim().slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+/** How much of the document's opening a focused excerpt keeps before the matched passages. */
+const SNIFFER_EXCERPT_HEAD_CHARS = 600;
+/** Most matched passages a focused excerpt carries. */
+const SNIFFER_EXCERPT_MAX_FOCUS = 2;
+const SNIFFER_EXCERPT_GAP = ' … ';
+
+/**
+ * A short excerpt of the text for pass 2, bounded by SNIFFER_EXCERPT_MAX_CHARS.
+ * Without focus terms it is the start of the document. With them (the words a
+ * vocabulary detector matched), it is the opening plus a short passage around
+ * the first match of each term past the opening, so the model reads what the
+ * detector saw. Still an excerpt, never the document.
+ */
+function snifferExcerpt(text: string, focusTerms: readonly string[] = []): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (focusTerms.length === 0 || flat.length <= SNIFFER_EXCERPT_MAX_CHARS) {
+    return flat.slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+  }
+  const head = flat.slice(0, SNIFFER_EXCERPT_HEAD_CHARS);
+  const positions: number[] = [];
+  for (const term of focusTerms) {
+    const pattern = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    const found = pattern.exec(flat.slice(head.length));
+    if (found) positions.push(head.length + found.index);
+  }
+  const focus = [...new Set(positions)].sort((a, b) => a - b).slice(0, SNIFFER_EXCERPT_MAX_FOCUS);
+  if (focus.length === 0) return flat.slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+  const window = Math.floor(
+    (SNIFFER_EXCERPT_MAX_CHARS - head.length - SNIFFER_EXCERPT_GAP.length * focus.length) / focus.length,
+  );
+  const parts = [head];
+  let cursor = head.length;
+  for (const position of focus) {
+    const start = Math.max(cursor, position - Math.floor(window / 2));
+    const end = Math.min(flat.length, start + window);
+    if (end <= start) continue;
+    parts.push(flat.slice(start, end));
+    cursor = end;
+  }
+  return parts.join(SNIFFER_EXCERPT_GAP).slice(0, SNIFFER_EXCERPT_MAX_CHARS);
+}
+
+/** The matched words of vocabulary signals (`health:vocabulary:treatment` → `treatment`). */
+function vocabularyTerms(signals: readonly string[]): string[] {
+  return signals
+    .filter((signal) => signal.split(':')[1] === 'vocabulary')
+    .map((signal) => signal.split(':').slice(2).join(':'))
+    .filter((term) => term.length > 0);
 }
 
 function namesOf(signals: SourceClassificationSignals): string {

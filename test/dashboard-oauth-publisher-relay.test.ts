@@ -10,10 +10,10 @@
 // must be the identical string or the providers refuse the exchange.
 
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
@@ -34,11 +34,10 @@ import {
   DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
 } from '../src/core/publisher-oauth-client.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { OLYMPUS_DASHBOARD_CONTROL_METHOD } from '../src/control-ui-contract.ts';
+import { OLYMPUS_DASHBOARD_TOOL_METHOD } from '../src/control-ui-contract.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import {
   registerOlympusDashboardGateway,
-  requestDashboardRead,
 } from '../src/core/control-ui-gateway.ts';
 import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
 import {
@@ -47,6 +46,17 @@ import {
   type DashboardSourceAction,
 } from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { packagedGooglePilotClientId } from '../src/core/google-pilot-client.ts';
+import { CONNECT_SOURCE_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
+import type { ModelSetupView } from '../src/core/model-setup.ts';
+import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
+import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
+import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
+import type { ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
+import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { SetupBackendError } from '../src/workers/chatgpt/setup-tools.ts';
 import {
   createGatewayCallbackPeerHeader,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
@@ -93,7 +103,13 @@ interface Fixture {
 
 function fixture(
   initialSecrets: Record<string, string> = {},
-  options: { attemptExpiresInMs?: number; secretReads?: string[]; secretWrites?: string[] } = {},
+  options: {
+    attemptExpiresInMs?: number;
+    secretReads?: string[];
+    secretWrites?: string[];
+    handback?: { origin: string; installId: string };
+    modelSetup?: () => ModelSetupView;
+  } = {},
 ): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-worker-'));
   dirs.push(dir);
@@ -124,6 +140,23 @@ function fixture(
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
   const registryPath = join(dir, 'handles.json');
+  // The panel's tools, as server.ts wires them: the native tab's Connect runs
+  // through POST /dashboard/tools/call into the worker's own OAuth start.
+  let workerFetch: (request: Request) => Promise<Response> = async () => new Response(null, { status: 503 });
+  const panelTools = createDashboardPanelTools({
+    surface: () => ({ dashboardView: async () => await (await workerFetch(new Request('http://olympus-worker.internal/dashboard.json'))).json() }) as unknown as ChatGptSurfaceOptions,
+    setup: createChatGptSetupBackend({
+      workerFetch: (request) => workerFetch(request),
+      handoffs: createChatGptHandoffs(),
+      publicUrls: () => undefined,
+      sovereignty: { config: loadSovereigntyPreset('no-sensitive'), source: 'preset' },
+      credentialPresent: () => false,
+      requestReload: () => false,
+    }),
+    workerFetch: (request) => workerFetch(request),
+    makeContext: () => ({}) as never,
+    indexFasterState: async () => undefined,
+  });
   const worker = createEmailSourceWorker({
     sourceIndexStatus: { async status() { return fixtureStatus(); } },
     sourceDashboard: {
@@ -131,6 +164,9 @@ function fixture(
       registryPath,
       secretStore,
       oauthFetch,
+      panelTools,
+      ...(options.handback ? { oauthHandback: () => options.handback } : {}),
+      ...(options.modelSetup ? { modelSetup: options.modelSetup } : {}),
       // Only used by the 'expired state' scenario below: the real starter,
       // with its honest ~10-minute expiry replaced by a near-immediate one, so
       // the test can wait a few milliseconds instead of ten real minutes to
@@ -145,6 +181,7 @@ function fixture(
       }),
     },
   });
+  workerFetch = worker.fetch;
   return {
     fetch: withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' }),
     secretStore,
@@ -196,6 +233,82 @@ function statePayload(state: string): Record<string, unknown> {
 }
 
 describe('publisher-client relay flow', () => {
+  test('Disconnect from ChatGPT on a source mid-sign-in cancels the sign-in and succeeds', async () => {
+    const instance = fixture({}, { handback: { origin: 'https://mcp.olympusplugin.ai', installId: 'install-fixture' } });
+    const backend = createChatGptSetupBackend({
+      workerFetch: (request) => {
+        const headers = new Headers(request.headers);
+        headers.set('Authorization', 'Bearer dashboard-secret');
+        return instance.fetch(new Request(request, { headers }));
+      },
+      handoffs: createChatGptHandoffs(),
+      publicUrls: () => undefined,
+      sovereignty: { config: loadSovereigntyPreset('no-sensitive'), source: 'preset' },
+      credentialPresent: () => false,
+      requestReload: () => false,
+    });
+    await backend.startOAuth('dropbox');
+    await expect(backend.disconnect('dropbox.files')).resolves.toBeUndefined();
+    // The attempt is gone: nothing is left to cancel, and a second Disconnect
+    // honestly reports there is nothing connected.
+    const again = await instance.fetch(new Request(`${DASHBOARD_ORIGIN}/dashboard/connect/oauth/cancel`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer dashboard-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'dropbox' }),
+    }));
+    expect((await again.json()).cancelled).toBe(false);
+    const second = await backend.disconnect('dropbox.files').catch((error) => error);
+    expect(second).toBeInstanceOf(SetupBackendError);
+    expect((second as SetupBackendError).code).toBe('source_not_connected');
+  });
+
+  test('ChatGPT sign-in: start → relay handback success → the dashboard has no connecting row, and the page says what to do next', async () => {
+    // Owner fresh-install test, 2026-10-01: the browser said "Connected
+    // dropbox" but the ChatGPT dashboard still showed the row connecting.
+    const RELAY = 'https://mcp.olympusplugin.ai';
+    const instance = fixture({}, { handback: { origin: RELAY, installId: 'install-fixture' } });
+    const chatgptView = async () => {
+      const response = await instance.fetch(new Request(`${DASHBOARD_ORIGIN}/dashboard.json`, {
+        headers: { Authorization: 'Bearer dashboard-secret' },
+      }));
+      expect(response.status).toBe(200);
+      const view = buildChatGptDashboardViewModel(await response.json() as SourceDashboardViewModel);
+      return view.sources.find((source) => source.id === 'dropbox.files')!;
+    };
+    const started = await authorizationUrl(await startConnect(instance, { handback: 'relay' }));
+    expect((await chatgptView()).connecting).toBeDefined();
+    const state = started.searchParams.get('state')!;
+    const page = await instance.fetch(new Request(`${RELAY}/oauth/callback/dropbox?code=relay-code-1&state=${encodeURIComponent(state)}`));
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('Dropbox connected');
+    expect(html).toContain('Go back to ChatGPT; your Olympus dashboard updates on its own.');
+    expect(html).not.toContain('Connected dropbox');
+    expect(html).toContain('<style>');
+    const after = await chatgptView();
+    expect(after.connecting).toBeUndefined();
+    expect(after.status).not.toBe('Off');
+    // Never "Open sign-in again" over a finished sign-in.
+    expect(after.primary?.tool).not.toBe('olympus_connect_source');
+  });
+
+  test('a ChatGPT (relay) sign-in starts while answer models are not set up; the Mac dashboard path stays gated', async () => {
+    // Owner live test, 2026-10-01: a Venice analyst named without its key
+    // refused Connect from ChatGPT with model_setup_required.
+    const notReady = (): ModelSetupView => ({
+      ready: false,
+      checked_at: '2026-10-01T12:00:00.000Z',
+      cards: [{ id: 'venice', label: 'Venice', required: true, state: 'not_configured', detail: 'Private model processing.' }],
+    });
+    const instance = fixture({}, { handback: { origin: 'https://mcp.olympusplugin.ai', installId: 'install-fixture' }, modelSetup: notReady });
+    const relayed = await startConnect(instance, { handback: 'relay' });
+    expect(relayed.status).toBe(200);
+    expect(new URL((await relayed.json()).authorization_url).origin).toBe('https://www.dropbox.com');
+    const local = await startConnect(fixture({}, { modelSetup: notReady }));
+    expect(local.status).toBe(409);
+    expect((await local.json()).error.code).toBe('model_setup_required');
+  });
+
   test('start sends the publisher app key, the relay URL, and a signed state naming this dashboard', async () => {
     const instance = fixture();
     const url = await authorizationUrl(await startConnect(instance));
@@ -247,7 +360,7 @@ describe('publisher-client relay flow', () => {
     expect(done.status).toBe(200);
     expect(done.headers.get('Referrer-Policy')).toBe('no-referrer');
     const donePage = await done.text();
-    expect(donePage).toContain('Connected dropbox');
+    expect(donePage).toContain('Dropbox connected');
     expect(donePage).not.toContain('relay-code-1');
     expect(donePage).not.toContain(state);
 
@@ -659,6 +772,30 @@ async function dashboardJson(instance: Fixture, origin = DASHBOARD_ORIGIN) {
   return await response.json();
 }
 
+/**
+ * An Olympus 1.0 release build: no Google Desktop pilot client anywhere — not
+ * in the environment, not substituted into the bundle, not in source.
+ */
+async function withoutPilotClient(run: () => Promise<void>): Promise<void> {
+  const previous = process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
+  const previousWeb = process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
+  delete process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
+  delete process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
+  // Source now ships the beta.11 Desktop client as its default; a release
+  // built with the explicit `none` choice has no Desktop client at all. Stand
+  // that build in by making the packaged resolution return nothing.
+  const pilotModule = await import('../src/core/google-pilot-client.ts');
+  const packaged = spyOn(pilotModule, 'packagedGooglePilotClientId').mockReturnValue(undefined);
+  try {
+    expect(packagedGooglePilotClientId()).toBeUndefined();
+    await run();
+  } finally {
+    packaged.mockRestore();
+    if (previous !== undefined) process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = previous;
+    if (previousWeb !== undefined) process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID = previousWeb;
+  }
+}
+
 async function withPilotClient(run: () => Promise<void>): Promise<void> {
   const previous = process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
   process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = PILOT_CLIENT_ID;
@@ -1012,8 +1149,7 @@ describe('publisher-mode card', () => {
 // walkthrough with the pilot client id prefilled, because the card shape was
 // gated on the native render having an OAuth origin, and that origin existed
 // only when gateway.publicOrigin was configured.
-describe('native OpenClaw page offers the same publisher one-click connect', () => {
-  const PUBLISHER_SHEETS = ['connect-gmail-email', 'connect-google_drive-docs', 'connect-dropbox-files'] as const;
+describe('the native OpenClaw tab connects in one click through the Gateway', () => {
   const LOOPBACK_BROWSER_ORIGIN = 'http://localhost:19989';
   // What OpenClaw records at the operator's WebSocket handshake for a browser
   // behind an SSH port forward: its Origin, the Host it arrived with, and a
@@ -1030,36 +1166,6 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
 
   function bridge(instance: Fixture) {
     return async (url: RequestInfo | URL, init?: RequestInit) => instance.fetch(new Request(url, init));
-  }
-
-  async function nativeSetupBody(instance: Fixture, browserOrigin?: Record<string, unknown>): Promise<string> {
-    const result = await requestDashboardRead({
-      params: { view: 'setup' },
-      canWrite: true,
-      config: nativeWorkerConfig(),
-      openClawConfig: FRESH_GATEWAY,
-      ...(browserOrigin === undefined ? {} : { browserOrigin }),
-      fetchImpl: bridge(instance),
-    });
-    expect(result.status).toBe(200);
-    return result.body;
-  }
-
-  function sheet(body: string, id: string): string {
-    const start = body.indexOf(`<div class="sheet" id="${id}"`);
-    expect(start).toBeGreaterThanOrEqual(0);
-    const next = body.indexOf('<div class="sheet"', start + 1);
-    return body.slice(start, next === -1 ? undefined : next);
-  }
-
-  function expectPublisherSheet(markup: string): void {
-    // The one-click form leads and asks for nothing: no client id field.
-    const firstForm = markup.slice(markup.indexOf('<form'), markup.indexOf('</form>'));
-    expect(firstForm).toContain('data-oauth-autostart');
-    expect(firstForm).not.toContain('name="client_id"');
-    // Bring-your-own is still there, one disclosure down.
-    expect(markup).toContain(`<summary>${PUBLISHER_ADVANCED_BYO_SUMMARY}</summary>`);
-    expect(markup.indexOf('name="client_id"')).toBeGreaterThan(markup.indexOf('<details'));
   }
 
   function gateway(instance: Fixture, openClawConfig: unknown) {
@@ -1081,15 +1187,20 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     registered: ReturnType<typeof gateway>,
     openClawConfig: unknown,
     browserOrigin: Record<string, unknown> = LOCAL_BROWSER,
+    source: 'dropbox' | 'gmail' | 'google-drive' = 'dropbox',
   ): Promise<{ status: number; body: Record<string, any> }> {
+    // The panel's Connect, as the tab's frame sends it (control-ui.ts).
     const calls: unknown[][] = [];
-    await registered.methods.get(OLYMPUS_DASHBOARD_CONTROL_METHOD)!({
-      params: { action: 'start_oauth', source: 'dropbox' },
+    await registered.methods.get(OLYMPUS_DASHBOARD_TOOL_METHOD)!({
+      params: { name: CONNECT_SOURCE_TOOL_NAME, arguments: { source } },
       client: { connect: { scopes: ['operator.write'] }, browserOrigin },
       context: { getRuntimeConfig: () => openClawConfig },
       respond: (...args: unknown[]) => calls.push(args),
     });
-    return calls[0]?.[1] as { status: number; body: Record<string, any> };
+    expect(calls[0]?.[0]).toBe(true);
+    const result = calls[0]?.[1] as { isError?: boolean; structuredContent?: Record<string, any> };
+    if (result.isError) return { status: 409, body: { error: { code: result.structuredContent?.error } } };
+    return { status: 200, body: { authorization_url: result.structuredContent?.openUrl } };
   }
 
   async function callbackThroughGateway(
@@ -1122,34 +1233,11 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     }
   });
 
-  test('a loopback Gateway with no publicOrigin renders the same publisher cards, enabled', async () => {
-    const body = await nativeSetupBody(fixture(), LOCAL_BROWSER);
-    for (const id of PUBLISHER_SHEETS) expectPublisherSheet(sheet(body, id));
-    expect(body).not.toContain('id="setup-dropbox-files"');
-    expect(body).not.toContain('data-native-oauth-unavailable');
-  });
-
-  test('without any trusted origin the cards stay publisher-shaped and are marked unavailable', async () => {
-    const body = await nativeSetupBody(fixture());
-    for (const id of PUBLISHER_SHEETS) expectPublisherSheet(sheet(body, id));
-    expect(body).not.toContain('id="setup-dropbox-files"');
-    expect(body).toContain('OAuth connections are unavailable until the Gateway has a trusted public origin.');
-  });
-
-  test('a remote browser origin is not a substitute for gateway.publicOrigin', async () => {
-    const body = await nativeSetupBody(fixture(), {
-      origin: 'https://gateway.tailnet.example', requestHost: 'gateway.tailnet.example', isLocalClient: false,
-    });
-    expect(body).toContain('data-native-oauth-unavailable');
-    expect(body).not.toContain('https://gateway.tailnet.example/oauth/callback/');
-  });
-
   test('a loopback-shaped origin is refused from a non-local client or a different Host', async () => {
     for (const browserOrigin of [
       { ...LOCAL_BROWSER, isLocalClient: false },
       { ...LOCAL_BROWSER, requestHost: 'localhost:28000' },
     ]) {
-      expect(await nativeSetupBody(fixture(), browserOrigin)).toContain('data-native-oauth-unavailable');
       const instance = fixture();
       const started = await startThroughGateway(gateway(instance, FRESH_GATEWAY), FRESH_GATEWAY, browserOrigin);
       expect(started.status).toBe(409);
@@ -1178,6 +1266,20 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     expect(instance.exchanges).toHaveLength(1);
     expect(instance.exchanges[0]?.get('code')).toBe('relay-code-native');
     expect(instance.exchanges[0]?.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+  });
+
+  test('with no Google Desktop client, the native tab still connects Gmail and Drive in one click through the Gateway', async () => {
+    await withoutPilotClient(async () => {
+      for (const source of ['gmail', 'google-drive'] as const) {
+        const instance = fixture();
+        const started = await startThroughGateway(gateway(instance, FRESH_GATEWAY), FRESH_GATEWAY, LOCAL_BROWSER, source);
+        expect(started.status).toBe(200);
+        const authorization = new URL(started.body.authorization_url);
+        expect(authorization.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+        expect(authorization.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+        expect(statePayload(authorization.searchParams.get('state')!)).toMatchObject({ origin: LOOPBACK_BROWSER_ORIGIN, source });
+      }
+    });
   });
 
   test('a callback arriving on a different origin than the flow signed is refused', async () => {
@@ -1351,3 +1453,148 @@ function memorySecretStore(
     },
   };
 }
+
+describe('sign-in started from ChatGPT (relay hand-back)', () => {
+  const RELAY_ORIGIN = 'https://mcp.olympusplugin.ai';
+  const INSTALL_ID = 'abcdefghijklmnopqrstuvwxyz234567';
+
+  test('the state names the relay origin and a nonce the relay can route by install', async () => {
+    const instance = fixture({}, { handback: { origin: RELAY_ORIGIN, installId: INSTALL_ID } });
+    const url = await authorizationUrl(await startConnect(instance, { handback: 'relay' }));
+    expect(url.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+    const payload = statePayload(url.searchParams.get('state')!);
+    expect(payload.origin).toBe(RELAY_ORIGIN);
+    expect(payload.nonce).toMatch(new RegExp(`^${INSTALL_ID}_[A-Za-z0-9_-]{43}$`));
+  });
+
+  test('the bounced callback, arriving at the loopback worker, completes and says done in place', async () => {
+    const instance = fixture({}, { handback: { origin: RELAY_ORIGIN, installId: INSTALL_ID } });
+    const state = (await authorizationUrl(await startConnect(instance, { handback: 'relay' }))).searchParams.get('state')!;
+    const callback = await instance.fetch(new Request(
+      `http://127.0.0.1:8010/oauth/callback/dropbox?code=handback-code&state=${encodeURIComponent(state)}`,
+      { headers: { 'x-olympus-relay': 'relay-secret' } },
+    ));
+    expect(callback.status).toBe(200);
+    const page = await callback.text();
+    expect(page).toContain('Dropbox connected');
+    expect(page).toContain('https://chatgpt.com/');
+    expect(instance.exchanges).toHaveLength(1);
+    expect(instance.exchanges[0]!.get('code')).toBe('handback-code');
+    // The state is single use.
+    const replay = await instance.fetch(new Request(
+      `http://127.0.0.1:8010/oauth/callback/dropbox?code=again&state=${encodeURIComponent(state)}`,
+    ));
+    expect(replay.status).toBe(410);
+  });
+
+  test('a state naming the relay is refused by an ordinary dashboard flow, and hand-back is refused when unavailable', async () => {
+    const plain = fixture();
+    expect((await startConnect(plain, { handback: 'relay' })).status).toBe(409);
+    const instance = fixture({}, { handback: { origin: RELAY_ORIGIN, installId: INSTALL_ID } });
+    const started = await authorizationUrl(await startConnect(instance));
+    const payload = statePayload(started.searchParams.get('state')!);
+    const forged = rawRelayState({ ...payload, origin: RELAY_ORIGIN }, await currentRelayKey(instance));
+    const callback = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(forged)}`,
+    ));
+    expect(callback.status).toBe(410);
+    expect(instance.exchanges).toHaveLength(0);
+  });
+
+  test('an owner-registered app cannot hand back through the relay', async () => {
+    const instance = fixture({}, { handback: { origin: RELAY_ORIGIN, installId: INSTALL_ID } });
+    const started = await startConnect(instance, { handback: 'relay', client_id: 'my-own-dropbox-app' });
+    expect(started.status).toBe(409);
+    expect((await started.json()).error.code).toBe('oauth_handback_unavailable');
+  });
+});
+
+// Olympus 1.0 release builds ship without the Google Desktop pilot client
+// (owner decision, 2026-10-03), conditional on no host losing one-click Google
+// sign-in. Every Gmail/Drive connect path goes through
+// /dashboard/connect/oauth/start, which picks the publisher Web client and the
+// relay; these tests pin that for each host with no Desktop id present.
+describe('Gmail and Google Drive with no Google Desktop client (Olympus 1.0 release)', () => {
+  const GOOGLE_CARDS = ['gmail.email', 'google_drive.docs'] as const;
+  const DASHBOARD_ORIGINS = [...GOOGLE_LOOPBACK_ORIGINS, DASHBOARD_ORIGIN] as const;
+
+  test('the standalone dashboard offers one-click publisher Connect for Gmail and Drive on every origin, never Set up', async () => {
+    await withoutPilotClient(async () => {
+      for (const origin of DASHBOARD_ORIGINS) {
+        const view = await dashboardJson(fixture(), origin);
+        for (const sourceId of GOOGLE_CARDS) {
+          const card = view.sources.find((source: { source_id: string }) => source.source_id === sourceId);
+          expect(card.connection.state).not.toBe('needs_setup');
+          expect(card.connection.action).toMatchObject({ kind: 'oauth', label: 'Connect', publisher_client: true });
+          expect(card.connection.action.known_client_id).toBeUndefined();
+          expect(card.connection.action.instructions.fields).toEqual([]);
+        }
+        // The page-level Google status must not send a reader to bring-your-own
+        // over cards that connect in one click.
+        expect(view.google_pilot.mode).toBe('shared_pilot');
+        expect(view.google_pilot.warning).toContain('unverified app');
+      }
+    });
+  });
+
+  test('Connect completes on every dashboard origin through the Web client, the relay and the publisher exchange', async () => {
+    await withoutPilotClient(async () => {
+      for (const origin of DASHBOARD_ORIGINS) {
+        for (const source of ['gmail', 'google-drive'] as const) {
+          const callbackOrigin = origin.startsWith('http:') ? 'http://127.0.0.1:18789' : origin;
+          const instance = fixture();
+          const started = await authorizationUrl(await startConnect(instance, { source }, origin));
+          expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+          expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+          const state = started.searchParams.get('state')!;
+          expect(statePayload(state)).toMatchObject({ origin: callbackOrigin, source });
+          const callback = await instance.fetch(new Request(
+            `${callbackOrigin}/oauth/callback/${source}?code=${source}-code&state=${encodeURIComponent(state)}`,
+          ));
+          expect(callback.status).toBe(303);
+          expect(instance.exchangeUrls).toEqual([DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL]);
+          expect(instance.exchanges[0]!.has('client_secret')).toBe(false);
+          const handles = readConnectedHandleRegistry(instance.registryPath).handles;
+          expect(handles.some((handle) => handle.oauth2Refresh?.exchangeVia === 'publisher_endpoint')).toBe(true);
+        }
+      }
+    });
+  });
+
+  test('ChatGPT olympus_connect_source starts Gmail and Drive through the relay hand-back', async () => {
+    await withoutPilotClient(async () => {
+      const RELAY = 'https://mcp.olympusplugin.ai';
+      const instance = fixture({}, { handback: { origin: RELAY, installId: 'abcdefghijklmnopqrstuvwxyz234567' } });
+      const view = buildChatGptDashboardViewModel(await dashboardJson(instance) as SourceDashboardViewModel);
+      for (const sourceId of GOOGLE_CARDS) {
+        const card = view.sources.find((source) => source.id === sourceId)!;
+        expect(card.primary?.tool).toBe(CONNECT_SOURCE_TOOL_NAME);
+      }
+      const backend = createChatGptSetupBackend({
+        workerFetch: (request) => {
+          const headers = new Headers(request.headers);
+          headers.set('Authorization', 'Bearer dashboard-secret');
+          return instance.fetch(new Request(request, { headers }));
+        },
+        handoffs: createChatGptHandoffs(),
+        publicUrls: () => undefined,
+        sovereignty: { config: loadSovereigntyPreset('no-sensitive'), source: 'preset' },
+        credentialPresent: () => false,
+        requestReload: () => false,
+      });
+      for (const source of ['gmail', 'google-drive'] as const) {
+        const started = new URL((await backend.startOAuth(source)).authorizationUrl);
+        expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+        expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+        expect(statePayload(started.searchParams.get('state')!)).toMatchObject({ origin: RELAY, source });
+      }
+    });
+  });
+
+  test('only the dashboard worker reads the Desktop client; no CLI, MCP, ChatGPT or OpenClaw path depends on it', () => {
+    const importers = Array.from(new Bun.Glob('src/**/*.ts').scanSync({ cwd: join(import.meta.dir, '..') }))
+      .filter((path) => readFileSync(join(import.meta.dir, '..', path), 'utf8').match(/from '[^']*google-pilot-client(?:\.ts)?'/) !== null)
+      .sort();
+    expect(importers).toEqual(['src/workers/email-source/index.ts']);
+  });
+});

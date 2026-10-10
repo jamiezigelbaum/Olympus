@@ -1,292 +1,33 @@
-/** Browser-safe static styles shared by standalone and native dashboard surfaces. */
-export const DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; color: inherit; text-decoration: none; }
-.bgrow .bgl { display: grid; grid-template-columns: 20px 110px 1fr 220px; gap: 12px; align-items: center; padding: 4px 28px 4px 0; }
-.bgrow .bgl::before { content: ''; }
-.bgrow .nm { font-weight: 500; font-size: var(--fs-body); color: var(--t2); }
-.bgrow .fx { color: var(--t3); font-size: var(--fs-caption); }
-.bgrow .go { position: absolute; right: 16px; top: 14px; color: var(--t4); font-size: var(--fs-body); }
-.bgrow:hover .go, .bgrow:focus-visible .go { color: var(--link); }
-.bgrow:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-.minibar { display: block; width: 64px; height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; justify-self: end; }
-.minibar i { display: block; height: 100%; background: var(--run); }
-/* A bar always carries its number: the percent sits beside the track. */
-.labeledbar { display: flex; align-items: center; gap: 8px; justify-self: stretch; }
-.labeledbar .minibar { flex: 1; width: auto; }
-.labeledbar .pct { color: var(--t1); font-size: var(--fs-caption); font-weight: 600; font-variant-numeric: tabular-nums; min-width: 4ch; text-align: right; }
-.lanerow { display: grid; grid-template-columns: 110px 64px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.lanerow .nm { font-weight: 500; font-size: var(--fs-body); color: var(--t2); }
-.lanerow .st { color: var(--t3); font-size: var(--fs-caption); }
-.lanerow .minibar { justify-self: start; }
-.lanestrip { display: flex; gap: 2px; }
-.lanestrip i { display: block; width: 7px; height: 20px; border-radius: 2px; }
-.disp { font-family: system-ui, sans-serif; font-size: var(--fs-caption); letter-spacing: .04em; }
-.disp.heal { color: var(--good); }
-.disp.attn { color: var(--warn); }
+/** Browser-safe static styles for the computer's own dashboard pages (pages/local.ts, pages/outside-help.ts). */
+
+/** The row list and the page title and notes, after the ChatGPT panel's rows. */
+export const LOCAL_PAGE_CSS = `
+.srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
+.srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.srow .smain { grid-column: 1; grid-row: 1; min-width: 0; }
+.srow .sact { grid-column: 2; grid-row: 1; flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.srow .sact form { margin: 0; }
+.srow .sline { margin: 4px 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.srow .sline.strong { margin-left: 0; color: var(--t1); font-size: var(--fs-row); }
+.srow.nodot .sline { margin-left: 0; }
+.privacy { max-width: 760px; }
+.privacy .sect { margin-top: 24px; }
+.ptitle { font-size: var(--fs-title); font-weight: 650; margin: 8px 0 6px; color: var(--t1); }
+.pintro { color: var(--t2); margin: 0 0 18px; max-width: 72ch; }
+.pnote { color: var(--t2); margin: 0 0 12px; }
+.plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
+.ptextline { flex: 1 1 240px; width: auto; }
+.ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pbuttons a.btn { text-decoration: none; }
 @media (max-width: 700px) {
-  .lanerow { grid-template-columns: 110px 1fr; }
-  .lanerow .minibar, .lanerow .lanestrip { display: none; }
-  /* The go arrow is absolutely positioned at the right edge, so the facts
-     column keeps clear of it rather than running underneath. */
-  .bgrow .bgl { grid-template-columns: 1fr auto; padding-right: 18px; }
-  .bgrow .bgl::before { display: none; }
-  .bgrow .labeledbar { grid-column: 1 / -1; }
+  .srow { grid-template-columns: minmax(0, 1fr); }
+  .srow .sact { grid-column: 1; grid-row: 2; justify-content: flex-start; }
 }
 `;
 
-export const DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520px; }
-.phase .ph { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.phase .pn { font-size: var(--fs-caption); font-weight: 600; color: var(--t2); }
-.phase .pv { font-size: var(--fs-caption); color: var(--t3); font-variant-numeric: tabular-nums; text-align: right; }
-.phase .bar { max-width: none; margin-top: 6px; height: 5px; border-radius: 3px; }
-.phase .pv .st { display: inline-block; margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--line2); font-weight: 600; color: var(--t2); }
-.phase.done .pv .st { color: var(--good); }
-.phase.working .pv .st { color: var(--run); }
-.phase.stalled .pv .st { color: var(--warn); }
-.phase.waiting .pv .st { color: var(--t4); }
-.phase.waiting .bar { background: var(--line2); }
-.phase.waiting .bar i { display: none; }
-.bar.indet.working { position: relative; }
-.bar.indet.working i { width: 34%; background: var(--run); animation: dashsweep 1.6s ease-in-out infinite; }
-@keyframes dashsweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(294%); } }
-.settled { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; color: var(--t2); font-size: var(--fs-body); max-width: 520px; }
-.banner { margin-bottom: 6px; }
-.advanced { border-top: 1px solid var(--line); margin-top: 28px; padding-top: 4px; }
-.advanced > summary { font-size: var(--fs-body); font-weight: 600; color: var(--t2); cursor: pointer; padding: 12px 0; list-style: none; }
-.advanced > summary::-webkit-details-marker { display: none; }
-.advanced > summary::before { content: '\\25B8 '; display: inline-block; transition: transform .12s ease; }
-.advanced[open] > summary::before { transform: rotate(90deg); }
-.advanced > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-@media (prefers-reduced-motion: reduce) {
-  .bar.indet.working i { animation: none; width: 100%; background: var(--line2); }
-}
-`;
 
-export const DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.catrow .name { font-weight: 600; color: var(--t2); }
-.catrow .what { color: var(--t4); font-size: var(--fs-caption); }
-.catrow .tier { color: var(--t3); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
-.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
-.scoperow .rid { font-family: var(--mono); font-size: var(--fs-caption); font-weight: 600; color: var(--t2); }
-.scoperow .what { color: var(--t3); font-size: var(--fs-caption); }
-.sect.gap { margin-top: 44px; }
-.quiet { color: var(--t4); font-size: var(--fs-caption); margin: -2px 0 10px; max-width: 66ch; }
-.quiet.after { margin: 8px 0 0; }
-.tiersnote { color: var(--t3); font-size: var(--fs-caption); margin: 0 0 12px; max-width: 66ch; }
-.tiernote { font-size: var(--fs-caption); margin-top: 10px; }
-.pm { color: var(--t4); }
-.pm.yes { color: var(--good); }
-.tname { color: var(--t1); font-weight: 600; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 11px; color: var(--t3); font-size: var(--fs-caption); }
-.chip b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
-.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-@media (max-width: 700px) {
-  .catrow { grid-template-columns: 1fr; gap: 4px; }
-}
-`;
-
-export const DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; background: var(--bg); padding-top: 2px; }
-.dnav { position: sticky; top: 39px; z-index: 11; display: flex; gap: 4px; margin: -8px 0 22px; border-bottom: 1px solid var(--line2); background: var(--bg); }
-.dnav .dnavlink { color: var(--t3); text-decoration: none; font-size: var(--fs-caption); padding: 6px 12px 8px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-.dnav .dnavlink:hover { color: var(--link); }
-.dnav .dnavlink:focus-visible { outline: 1px solid var(--link); outline-offset: -2px; border-radius: 4px; }
-.dnav .dnavlink.on { color: var(--t1); border-bottom-color: var(--link-line); }
-`;
-
-export const SETUP_JOURNEY_CSS = `.setupsummary { color: var(--t2); font-size: var(--fs-body); margin: 0 0 18px; }`;
-
-export const BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.lane .lnm { font-weight: 600; font-size: var(--fs-body); color: var(--t2); }
-.lane .lstate { font-size: var(--fs-caption); white-space: nowrap; }
-.lane .lfacts { color: var(--t2); font-size: var(--fs-caption); margin-top: 5px; font-variant-numeric: tabular-nums; }
-.lane .lmove { color: var(--t3); font-size: var(--fs-caption); margin-top: 3px; font-variant-numeric: tabular-nums; }
-.lane .lreason { color: var(--warn); font-size: var(--fs-caption); margin-top: 5px; max-width: 74ch; }
-.lane .lreason.stuck { color: var(--bad); }
-.lane .lreason.unknown { color: var(--t3); }
-.lane .lbar { margin-top: 8px; }
-.lane .lbar .minibar { width: 100%; max-width: 420px; }
-.lane .lbar .labeledbar { max-width: 480px; }
-.lane .lanestrip { margin-top: 8px; }
-.lane .lqueue { margin-top: 8px; border-top: 1px solid var(--line2); padding-top: 7px; }
-.lane .lq { color: var(--t3); font-size: var(--fs-caption); line-height: 1.55; }
-.lane .lq b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
-.lane.quiet { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 9px 14px; }
-.lane.quiet .lquiet { color: var(--t4); font-size: var(--fs-caption); }
-.info { color: var(--t3); font-size: var(--fs-caption); line-height: 1.6; max-width: 74ch; }
-.infolink { margin-top: 8px; font-size: var(--fs-caption); }
-.embblock { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin: -3px 0 7px; }
-.embblock .embstate { font-size: var(--fs-body); font-weight: 500; margin-bottom: 6px; }
-.embblock .embline { color: var(--t3); font-size: var(--fs-caption); line-height: 1.5; margin-bottom: 4px; }
-.embblock .embline.warn { color: var(--warn); }
-.embblock .rowform { margin: 8px 0 6px; }
-@media (max-width: 700px) {
-  .lane .lanehd { flex-wrap: wrap; }
-}
-`;
-
-export const DISPOSITIONS_CSS = `
-      /* The folder and mail pickers. Element rules are scoped with :where()
-         to the picker page, so they keep zero extra specificity and never
-         restyle the dashboard pages that share the native stylesheet. */
-      :root {
-        color-scheme: dark;
-        --accent: var(--link);
-        --accent-strong: var(--link);
-        --accent-soft: var(--panel2);
-        --border: var(--line);
-        --muted: var(--t3);
-        --faint: var(--t4);
-        --card: var(--bg);
-        --radius-card: 10px;
-        --radius-control: 8px;
-      }
-      :where(.picker-page) { color: var(--t1); font-size: var(--fs-body); line-height: 1.55; }
-      :where(.picker-page) h1 { font-size: var(--fs-title); line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
-      :where(.picker-page) h2 { font-size: var(--fs-section); font-weight: 600; margin: 0; }
-      :where(.picker-page) h3 { font-size: var(--fs-row); font-weight: 600; margin: 0; }
-      :where(.picker-page) p { margin: 0; color: var(--t3); max-width: 72ch; }
-      .eyebrow { color: var(--t3); font-size: var(--fs-caption); }
-      .subtle { color: var(--t3); font-size: var(--fs-caption); }
-      :where(.picker-page) code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-size: var(--fs-caption); }
-      .warn-note { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: var(--radius-card); padding: 11px 14px; color: var(--t2); font-size: var(--fs-body); }
-      .warn-note strong { color: var(--t1); }
-      .warn-note::before { content: '! '; color: var(--warn); font-weight: 800; }
-      .node-name { font-weight: 500; }
-      .node-counts { color: var(--t3); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
-      :where(.picker-page) label { display: grid; gap: 5px; color: var(--t3); font-size: var(--fs-caption); }
-      :where(.picker-page) input { border: 1px solid var(--field); border-radius: var(--radius-control); padding: 7px 10px; font: inherit; font-size: var(--fs-body); min-width: 0; background: var(--panel); color: var(--t1); }
-      :where(.picker-page) input::placeholder { color: var(--t4); }
-      :where(.picker-page) button { border: 1px solid var(--link-line); background: transparent; color: var(--link); border-radius: var(--radius-control); padding: 7px 14px; font: inherit; font-size: var(--fs-body); font-weight: 500; cursor: pointer; justify-self: start; }
-      :where(.picker-page) :is(button, input, summary):focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
-      :where(.picker-page) form { display: grid; gap: 10px; }
-      .action-message { color: var(--t3); font-size: var(--fs-caption); min-height: 18px; }
-
-      @media (max-width: 720px) {
-        .node > .children { margin-left: 8px; padding-left: 8px; }
-      }
-
-      .picker-page { max-width: 1180px; margin: 0 auto; padding: 28px 24px 72px; }
-      .picker-header { margin: 0 0 18px; display: grid; gap: 5px; }
-      .picker-header h1 { color: var(--t1); font-size: var(--fs-title); }
-      .picker-header p { color: var(--t3); }
-      .picker-header strong { color: var(--t2); }
-      .source-dispositions { padding: 0; margin: 0 0 14px; border: 0; background: transparent; display: block; }
-      .source-dispositions[hidden] { display: none !important; }
-      .scope-back { margin: 0 0 12px; }
-      .finder-sidebar a.location { text-decoration: none; }
-      .finder-window { min-height: 590px; display: grid; grid-template-columns: 180px minmax(420px, 1fr) 270px; grid-template-rows: 1fr auto; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: 0 12px 38px rgba(0,0,0,.34); }
-      .finder-sidebar { grid-column: 1; grid-row: 1; padding: 15px 10px; background: rgba(255,255,255,.025); border-right: 1px solid var(--line2); }
-      .sidebar-label { padding: 0 9px 8px; color: var(--t4); font-size: var(--fs-caption); font-weight: 600; }
-      .location { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 6px; color: var(--t2); font-size: var(--fs-caption); }
-      .location.selected { background: var(--panel2); color: var(--t1); }
-      .location .folder-icon { color: var(--link); font-size: var(--fs-caption); }
-      .finder-browser { grid-column: 2; grid-row: 1; min-width: 0; border-right: 1px solid var(--line2); }
-      .finder-toolbar { min-height: 68px; display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 12px 16px; border-bottom: 1px solid var(--line2); }
-      .finder-toolbar h2 { color: var(--t1); font-size: var(--fs-row); }
-      .finder-toolbar p { color: var(--t4); font-size: var(--fs-caption); margin-top: 2px; }
-      .finder-toolbar input { width: 180px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font-size: var(--fs-caption); }
-      .finder-columns { display: grid; grid-template-columns: minmax(180px, 1fr) 64px 128px; gap: 10px; padding: 6px 14px 6px 36px; border-bottom: 1px solid var(--line2); color: var(--t4); font-size: var(--fs-caption); }
-      .tree { height: 468px; overflow: auto; display: block; padding: 6px; }
-      /* Under the tree, not inside it: these count folders and items the tree
-         does not list, so a reader who scrolls to the bottom of the tree has
-         not seen them. */
-      .tree-notes { padding: 8px 14px 10px; border-top: 1px solid var(--line2); display: grid; gap: 4px; }
-      .tree-notes .subtle { color: var(--t4); font-size: var(--fs-caption); }
-      .node { border: 0; padding: 0; }
-      .node > .children { margin-left: 18px; padding-left: 0; border-left: 1px solid var(--line2); }
-      details.node > summary.folder-row { list-style: none; }
-      details.node > summary.folder-row::-webkit-details-marker { display: none; }
-      details.node > summary.folder-row::before { content: "\\25B8"; width: 12px; color: var(--t4); font-size: var(--fs-caption); }
-      details.node[open] > summary.folder-row::before { content: "\\25BE"; }
-      .folder-row { min-height: 31px; display: grid; grid-template-columns: 12px 15px minmax(150px, 1fr) 64px 128px; gap: 7px; align-items: center; padding: 4px 8px; border-radius: 6px; cursor: default; color: var(--t2); }
-      .folder-row:hover { background: rgba(255,255,255,.035); }
-      .folder-row.selected { background: var(--selected); color: var(--t1); }
-      .folder-row:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
-      .node.leaf .folder-row .disclosure { width: 12px; }
-      .folder-icon { color: var(--link); font-size: var(--fs-caption); }
-      .node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-      .node-counts, .node-state { color: var(--t3); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
-      .folder-row.selected .node-counts, .folder-row.selected .node-state { color: var(--t1); }
-      .stored-controls { display: none; }
-      .finder-inspector { grid-column: 3; grid-row: 1; padding: 22px 18px; background: rgba(255,255,255,.015); }
-      .finder-inspector [data-inspector-empty] { padding-top: 120px; text-align: center; color: var(--t4); }
-      .inspector-folder { color: var(--link); font-size: 30px; margin-bottom: 10px; }
-      .finder-inspector h3 { color: var(--t1); font-size: var(--fs-row); margin-bottom: 4px; }
-      .inspector-path { color: var(--t4); font-size: var(--fs-caption); overflow-wrap: anywhere; }
-      .inspector-count { color: var(--t3); font-size: var(--fs-caption); margin: 9px 0 18px; }
-      .choice-stack { display: grid; gap: 7px; }
-      .choice-stack button { width: 100%; display: grid; gap: 2px; justify-items: start; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); text-align: left; font-size: var(--fs-caption); }
-      .choice-stack button span { color: var(--t4); font-size: var(--fs-caption); font-weight: 400; }
-      .choice-stack button.on { border-color: var(--link-line); background: var(--panel2); color: var(--t1); }
-      .choice-stack button:disabled { opacity: .38; cursor: not-allowed; }
-      .inspector-note { color: var(--t4); font-size: var(--fs-caption); margin-top: 12px; }
-      .finder-footer { grid-column: 1 / -1; grid-row: 2; min-height: 54px; display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 10px 14px; border-top: 1px solid var(--line2); color: var(--t3); font-size: var(--fs-caption); }
-      .footer-actions { display: flex; gap: 8px; }
-      .finder-footer button { padding: 6px 16px; border: 1px solid var(--link-line); border-radius: 6px; background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); font-size: var(--fs-caption); }
-      .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
-      .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
-      .scope-connection, .scope-browser-note { color: var(--t3); font-size: var(--fs-caption); padding: 8px 12px; }
-      .scope-browser-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line2); }
-      .scope-browser-toolbar button, .scope-browser-list button, [data-scope-more] { color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; cursor: pointer; }
-      .scope-browser-list .scope-folder { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
-      .scope-folder [data-scope-select] { flex: 1; border: 0; background: transparent; padding: 0; color: inherit; text-align: left; overflow-wrap: anywhere; }
-      .scope-folder.selected [data-scope-select] { background: transparent; }
-      .scope-folder [data-scope-open] { padding: 0; width: 14px; border: 0; background: transparent; color: inherit; }
-      .scope-folder-status { color: var(--t3); font-size: var(--fs-caption); }
-      .scope-folder.selected .scope-folder-status { color: var(--t1); }
-      .scope-folder-status.mixed, .node-state.mixed { color: var(--warn); font-weight: 600; }
-      .scope-whole-account, .scope-whole-confirm { margin: 12px; font-size: var(--fs-caption); color: var(--t2); }
-      .scope-whole-account { display: block; }
-      .scope-whole-confirm:not([hidden]) { display: block; color: var(--warn); }
-      [data-folder-scope-source] input[type="checkbox"] { width: auto; display: inline-block; margin: 0 6px 0 0; vertical-align: middle; }
-      [data-folder-scope-source] [hidden] { display: none !important; }
-      .scope-review { border-top: 1px solid var(--line2); margin: 12px; padding-top: 12px; font-size: var(--fs-caption); }
-      .scope-review li { overflow-wrap: anywhere; margin: 5px 0; }
-      [data-folder-scope-source] button:disabled { opacity: .4; cursor: not-allowed; }
-      .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
-      /* Mail scope picker: the same Finder frame, with form groups where the
-         folder tree sits and the estimate where the inspector sits. */
-      .mail-scope-main { grid-column: 2; grid-row: 1; min-width: 0; border-right: 1px solid var(--line2); padding: 6px 0; }
-      .mail-scope-group { border: 0; border-bottom: 1px solid var(--line2); margin: 0; padding: 12px 16px 14px; display: grid; gap: 8px; }
-      .mail-scope-group:last-child { border-bottom: 0; }
-      .mail-scope-group legend { float: left; width: 100%; padding: 0; color: var(--t1); font-size: var(--fs-body); font-weight: 600; }
-      .mail-scope-help { color: var(--t4); font-size: var(--fs-caption); }
-      .mail-scope-options { display: flex; flex-wrap: wrap; gap: 6px; }
-      .mail-scope-option { display: flex; align-items: flex-start; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); font-size: var(--fs-caption); cursor: pointer; }
-      .mail-scope-option:has(input:checked) { border-color: var(--link-line); background: var(--panel2); color: var(--t1); }
-      .mail-scope-option input { width: auto; margin: 2px 0 0; padding: 0; }
-      .mail-scope-option span { display: grid; gap: 1px; }
-      .mail-scope-option small { color: var(--t4); font-size: var(--fs-caption); }
-      .mail-scope-labels { display: flex; flex-wrap: wrap; gap: 6px; max-height: 190px; overflow: auto; }
-      .mail-scope-senders { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      .mail-scope-senders label { display: grid; gap: 4px; color: var(--t2); font-size: var(--fs-caption); }
-      .mail-scope-senders small { color: var(--t4); font-size: var(--fs-caption); }
-      .mail-scope-senders textarea { width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 7px 9px; }
-      .mail-scope-suggestions ul { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; }
-      .mail-scope-suggestions li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 5px; color: var(--t2); font-size: var(--fs-caption); }
-      .mail-scope-suggestions li:hover { background: rgba(255,255,255,.035); }
-      .mail-scope-suggestions .sender { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .mail-scope-suggestions .count { color: var(--t4); font-variant-numeric: tabular-nums; font-size: var(--fs-caption); }
-      .mail-scope-suggestions button { padding: 3px 9px; font-size: var(--fs-caption); color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; }
-      .mail-scope-estimate { display: grid; align-content: start; gap: 10px; }
-      .mail-scope-figures { margin: 0; display: grid; gap: 8px; }
-      .mail-scope-figures div { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line2); padding-bottom: 6px; }
-      .mail-scope-figures dt { color: var(--t3); font-size: var(--fs-caption); }
-      .mail-scope-figures dd { margin: 0; color: var(--t1); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; text-align: right; }
-      .mail-scope-estimate button { justify-self: start; padding: 6px 12px; font-size: var(--fs-caption); color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 6px; }
-      [data-mail-scope-source] [hidden] { display: none !important; }
-      [data-mail-scope-source] button:disabled, [data-mail-scope-source] input:disabled, [data-mail-scope-source] textarea:disabled { opacity: .45; cursor: not-allowed; }
-      @media (max-width: 860px) {
-        .mail-scope-senders { grid-template-columns: 1fr; }
-        .finder-window { grid-template-columns: 130px minmax(300px, 1fr); }
-        .finder-inspector { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--line2); }
-        .finder-footer { grid-row: 3; }
-      }
-`;
-
-
-/* Setup's Agents section: the agent picker is a list of disclosures inside the
+/* The Agents page: the agent picker is a list of disclosures inside the
    Connect an agent sheet, and a pairing code or key is shown once in a
    read-only field beside its own Copy and Done. The remote-access row carries
    Turn on / Turn off, and the agreement panel opens beneath it. */
@@ -317,8 +58,7 @@ export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`;
 
 /**
- * Models section layout, shared by the standalone Setup page and the native
- * Control UI (src/control-ui/styles.ts). A card reads as three lines at most:
+ * Models section layout on the Keys page. A card reads as three lines at most:
  * name and state, what the model is for, then one wrapping action row (key
  * field, Connect, and the "Get a key" link side by side).
  */
@@ -333,4 +73,70 @@ export const MODEL_SETUP_CSS = `
 .modeltools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px}.modeltools p{margin:0;flex-basis:100%}
 .modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
 .modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
+`;
+
+export const DASHBOARD_OUTSIDE_HELP_CSS = `
+.outside .ohlabel { color: var(--t3); font-size: var(--fs-caption); margin: -2px 0 10px; }
+/* The status block: the switch, the route in one line, today's usage. */
+.outside .ohpanel { margin: 0 0 8px; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
+.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; margin: 0 0 4px; }
+.outside .ohstate { display: flex; align-items: center; gap: 10px; margin: 0; font-size: var(--fs-row); font-weight: 600; color: var(--t1); }
+.outside .dot.on { background: var(--good); }
+.outside .dot.off { background: transparent; border: 2px solid var(--off); }
+.outside .dot.attn { background: var(--warn-fill); }
+.outside .ohline { margin: 0 0 0 20px; color: var(--t2); }
+.outside .ohline.good { color: var(--good); font-weight: 600; }
+.outside .ohline.attn, .outside .ohline .attn { color: var(--warn); font-weight: 600; }
+.outside .ohline .attn { font-weight: 500; }
+.outside .ohpanel .ohsmall { margin: 4px 0 0 20px; }
+.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); max-width: 78ch; }
+.outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+/* Problems: one tinted list, a line each, the fix in the line. */
+.outside .ohfix { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.outside .ohfix li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; color: var(--t1); }
+.outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
+.outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.outside .ohfix .ohform { margin: 0; }
+.outside .ohshort { margin: 0 0 4px; padding-left: 20px; color: var(--t1); }
+.outside .ohshort li { margin: 0 0 4px; max-width: 78ch; }
+.outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
+.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; overflow-wrap: anywhere; }
+.outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
+.outside .ohfacts li { margin: 0 0 4px; overflow-wrap: anywhere; }
+/* Secondary sections: one line each (title and a short summary), open only when they need attention. */
+.outside details.ohsect { border-top: 1px solid var(--line); }
+.outside .ohmore { margin: 28px 0 0; }
+.outside .ohmore > details.ohsect:last-child { border-bottom: 1px solid var(--line); }
+.outside details.ohsect > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
+.outside details.ohsect > summary::-webkit-details-marker { display: none; }
+.outside details.ohsect > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
+.outside details.ohsect[open] > summary::before { content: '\\25BE'; }
+.outside details.ohsect > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+.outside .ohsect-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
+.outside .ohsect-title.attn { color: var(--warn); }
+.outside .ohsect-sum { color: var(--t3); font-size: var(--fs-body); }
+.outside .ohsect-sum:empty { display: none; }
+.outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
+.outside .ohsect-body { padding: 0 0 16px 18px; }
+.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0 16px; margin: 0 0 8px; }
+.outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
+.outside .ohform.ohinline { margin: 0 0 12px; }
+.outside .ohform .keyfield { width: 100%; max-width: 220px; }
+.outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
+.outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
+.outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.outside .ohoff { color: var(--t3); }
+.outside .ohfence { display: grid; gap: 10px; margin: 8px 0 0; }
+.outside .ohfence .ohform { grid-template-columns: auto 1fr; align-items: center; }
+.outside .ohfence .ohform .actmsg { grid-column: 1 / -1; }
+.outside .actmsg[data-state="error"] { color: var(--bad); }
+.outside .ohunlock { margin: 0 0 12px; padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohunlock .pnote { margin: 0; color: var(--t1); }
+@media (max-width: 700px) {
+  .outside .ohpanel { padding: 14px; }
+  .outside .ohhead .pbuttons, .outside .ohhead .blocked { width: 100%; }
+  .outside .ohline, .outside .ohpanel .ohsmall { margin-left: 0; }
+  .outside .btn { white-space: normal; text-align: left; }
+  .outside .ohsect-body { padding-left: 0; }
+}
 `;
