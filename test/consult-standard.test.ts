@@ -67,7 +67,12 @@ describe('Ask anonymously', () => {
     const value: ConsultAskDependencies = {
       settings: () => read,
       prepare: async (input) => { calls.prepare.push(input); return prepared; },
-      send: async (question) => { calls.send.push(question); return reply('Usually within two weeks.'); },
+      // Like the transport: final authorization runs just before dispatch; false sends nothing.
+      send: async (question, authorize) => {
+        if (!authorize()) return { ok: false, error: { code: 'authorization_refused', message: 'refused', outcome: 'not_sent', networkIdentity: 'not_verified' } };
+        calls.send.push(question);
+        return reply('Usually within two weeks.');
+      },
     };
     return { value, calls };
   }
@@ -111,5 +116,40 @@ describe('Ask anonymously', () => {
       send: async () => ({ ok: false, error: { code: 'model_unavailable', message: 'not listed', outcome: 'not_sent', networkIdentity: 'not_verified' } }),
     };
     expect(await askAnonymously('What is a deposit?', missing)).toEqual({ ok: false, code: 'model_unavailable', message: 'not listed', sent: 'What is a deposit?' });
+  });
+
+  test('a labelled secret in the typed question stays refused, with or without its label (review of PR #209)', async () => {
+    const plain = deps(settings({ standardMode: 'as_written' }));
+    expect(await askAnonymously('Is password: hunter2 safe?', plain.value)).toMatchObject({ ok: false, code: 'secret_detected' });
+    // The writer dropped the label but kept the value.
+    const dropped = deps(settings(), { kind: 'questions', questions: ['Is hunter2 a safe choice?'], promptTokens: 1, ms: 1 });
+    expect(await askAnonymously('Is password: hunter2 safe?', dropped.value)).toMatchObject({ ok: false, code: 'secret_detected' });
+    expect([...plain.calls.send, ...dropped.calls.send]).toEqual([]);
+  });
+
+  test('a change to the mode, instruction, writer or revision while the question is prepared refuses the send as stale (review of PR #209)', async () => {
+    const changes: Array<Partial<typeof DEFAULT_CONSULT_SETTINGS>> = [
+      { standardMode: 'custom', standardInstruction: 'Two.' },
+      { standardMode: 'as_written' },
+      { writer: { baseUrl: 'http://127.0.0.1:11434/v1', model: 'm' } },
+      { revision: 3, standardMode: 'custom', standardInstruction: 'One.' },
+    ];
+    for (const change of changes) {
+      let current = settings({ standardMode: 'custom', standardInstruction: 'One.' });
+      const d = deps(current);
+      const value: ConsultAskDependencies = {
+        ...d.value,
+        settings: () => current,
+        prepare: async (input) => {
+          current = settings({ standardMode: 'custom', standardInstruction: 'One.', ...change });
+          return { kind: 'questions', questions: [input.question], promptTokens: 1, ms: 1 };
+        },
+      };
+      expect({ change, result: await askAnonymously('What is a deposit?', value) }).toEqual({ change, result: { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale } });
+      expect(d.calls.send).toEqual([]);
+    }
+    // Unchanged: it sends.
+    const same = deps(settings({ standardMode: 'custom', standardInstruction: 'One.' }));
+    expect(await askAnonymously('What is a deposit?', same.value)).toMatchObject({ ok: true });
   });
 });

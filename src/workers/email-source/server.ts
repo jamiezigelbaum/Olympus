@@ -4587,7 +4587,6 @@ export async function main(): Promise<void> {
     {
       const { askAnonymously } = await import('../../core/consult-ask.ts');
       const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS } = await import('../../core/consult-settings.ts');
-      const { sendZkapiConsult } = await import('../../core/consult-transport-zkapi.ts');
       askAnonymouslyNow = (question) => askAnonymously(question, {
         settings: () => readConsultSettings(),
         prepare: (input, writer) => runChosenWriter(input, {
@@ -4596,9 +4595,16 @@ export async function main(): Promise<void> {
           level: 'unnamed',
           writer,
         }),
-        send: async (text) => {
+        // Open, send with final authorization, then wait for settlement:
+        // the one-shot path's steps, with the Ask's settings check at the
+        // transport's authorization boundary (review of PR #209).
+        send: async (text, authorize) => {
           const route = transport('dashboard');
-          return route ? sendZkapiConsult(text, route) : undefined;
+          if (!route) return undefined;
+          const opened = await openZkapiConsultSession(route);
+          if (!opened.ok) return { ok: false, error: opened.error };
+          await opened.session.send(text, { authorize: () => authorize() });
+          return opened.session.finished;
         },
       });
     }

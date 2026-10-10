@@ -81,7 +81,11 @@ at Strict with the built-in writer.
 characters) is prepared by Standard's mode, checked for secrets, and sent
 through the same zkAPI transport, with its caps, acknowledgements and model
 check. The answer and exactly what was sent show on the card. It never
-touches ChatGPT and involves no private evidence (`src/core/consult-ask.ts`).
+touches ChatGPT and involves no private evidence (`src/core/consult-ask.ts`). The
+typed question is the secrets check's context, so a labelled secret in it
+stays refused even when the writer drops the label. The Ask binds the
+settings revision, writer and Standard mode and instruction when it starts;
+the transport's final authorization refuses the send as stale if any changed.
 
 The rulings below (words of the question ChatGPT sent, copied document
 wording and their residuals) governed Standard's full gate and now apply
