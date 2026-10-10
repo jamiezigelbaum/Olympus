@@ -118590,7 +118590,9 @@ function askAnonymouslyToolResult(raw) {
     const level = record3.level === "strict" ? "strict" : "standard";
     const rewritten = record3.rewritten === true;
     const sent = clean(record3.sent, MAX_ANSWER);
-    const note = rewritten ? `Asked anonymously through zkAPI at ${level === "strict" ? "Strict" : "Standard"}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.` : "Asked anonymously through zkAPI at Standard, as written.";
+    const hidden = record3.networkIdentity === "hidden";
+    const how = hidden ? "anonymously" : "through zkAPI with the network address visible (payment privacy only; Tor is off on this route)";
+    const note = rewritten ? `Asked ${how} at ${level === "strict" ? "Strict" : "Standard"}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.` : `Asked ${how} at Standard, as written.`;
     const saveNote = clean(record3.note, 1000);
     return {
       content: [{ type: "text", text: [reply, "", note, ...saveNote ? [`Tell the user: ${saveNote}`] : []].join(`
@@ -118598,7 +118600,9 @@ function askAnonymouslyToolResult(raw) {
       structuredContent: {
         status: "answered",
         answer: reply,
-        anonymous: true,
+        anonymous: hidden,
+        ...typeof record3.route === "string" ? { route: clean(record3.route, 200) } : {},
+        ...record3.networkIdentity === "visible" ? { network_address: "visible" } : {},
         level,
         rewritten,
         ...sent !== undefined ? { sent } : {},
@@ -124363,6 +124367,7 @@ async function askAnonymously(input, deps) {
     sent,
     reply: result.text,
     route: result.routeLabel,
+    networkIdentity: result.networkIdentity,
     level,
     ...strict ? {} : { cleanup },
     rewritten,

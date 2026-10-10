@@ -110,6 +110,8 @@ export type ConsultAskResult =
     readonly sent: string;
     readonly reply: string;
     readonly route: string;
+    /** Whether the network address was hidden (Tor): 'hidden', 'visible' (Tor off: payment privacy only), or 'not_verified'. */
+    readonly networkIdentity: 'hidden' | 'visible' | 'not_verified';
     readonly level: ConsultAskLevel;
     /** Standard only: how the question was prepared. */
     readonly cleanup?: ConsultStandardMode;
@@ -315,6 +317,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     sent,
     reply: result.text,
     route: result.routeLabel,
+    networkIdentity: result.networkIdentity,
     level,
     ...(strict ? {} : { cleanup }),
     rewritten,

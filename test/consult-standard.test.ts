@@ -87,7 +87,7 @@ describe('Ask anonymously', () => {
     const result = await askAnonymously(q('  When will Jo return my deposit?  '), d.value);
     expect(d.calls.prepare).toEqual([{ question: 'When will Jo return my deposit?', answer: '', gaps: [], instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION }]);
     expect(d.calls.send).toEqual(['How long do landlords usually take to return a deposit?']);
-    expect(result).toEqual({ ok: true, sent: 'How long do landlords usually take to return a deposit?', reply: 'Usually within two weeks.', route: 'zkAPI via Tor', level: 'standard', cleanup: 'light_cleanup', rewritten: true, remembered: false });
+    expect(result).toEqual({ ok: true, sent: 'How long do landlords usually take to return a deposit?', reply: 'Usually within two weeks.', route: 'zkAPI via Tor', networkIdentity: 'hidden', level: 'standard', cleanup: 'light_cleanup', rewritten: true, remembered: false });
     expect(d.calls.levels).toEqual(['unnamed']);
     expect(d.calls.sendOptions).toEqual([{ origin: 'dashboard' }]);
   });

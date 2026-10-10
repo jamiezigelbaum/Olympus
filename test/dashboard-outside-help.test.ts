@@ -1256,7 +1256,7 @@ describe('Standard is open, and Ask anonymously (owner decision 2026-10-10)', ()
     let finish!: () => void;
     const gate = new Promise<void>((resolve) => { finish = resolve; });
     const asked: unknown[] = [];
-    const { backend } = adapter({ home: tempHome(), ask: async (input) => { asked.push(input); await gate; return { ok: true, sent: 'How long do deposits take to return?', reply: 'Usually two weeks.', route: 'zkAPI via Tor', level: 'standard', rewritten: true, remembered: false }; } });
+    const { backend } = adapter({ home: tempHome(), ask: async (input) => { asked.push(input); await gate; return { ok: true, sent: 'How long do deposits take to return?', reply: 'Usually two weeks.', route: 'zkAPI via Tor', networkIdentity: 'hidden', level: 'standard', rewritten: true, remembered: false }; } });
     expect(await backend.ask({ question: '   ' })).toMatchObject({ ok: false, code: 'question_empty' });
     expect(await backend.ask({ question: ' When will Jo return my deposit? ' })).toMatchObject({ ok: true });
     expect(await backend.ask({ question: 'again' })).toMatchObject({ ok: false, code: 'ask_running' });

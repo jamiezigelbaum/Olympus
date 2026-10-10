@@ -488,9 +488,13 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     const level = record.level === 'strict' ? 'strict' : 'standard';
     const rewritten = record.rewritten === true;
     const sent = clean(record.sent, MAX_ANSWER);
+    // Anonymous only when the network address was hidden (Tor). With Tor
+    // off the route gives payment privacy only, and the model is told so.
+    const hidden = record.networkIdentity === 'hidden';
+    const how = hidden ? 'anonymously' : 'through zkAPI with the network address visible (payment privacy only; Tor is off on this route)';
     const note = rewritten
-      ? `Asked anonymously through zkAPI at ${level === 'strict' ? 'Strict' : 'Standard'}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.`
-      : 'Asked anonymously through zkAPI at Standard, as written.';
+      ? `Asked ${how} at ${level === 'strict' ? 'Strict' : 'Standard'}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.`
+      : `Asked ${how} at Standard, as written.`;
     // A requested save that failed: told with the answer, so the user is not
     // surprised by the Strict/Standard question next time.
     const saveNote = clean(record.note, 1_000);
@@ -499,7 +503,9 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
       structuredContent: {
         status: 'answered',
         answer: reply,
-        anonymous: true,
+        anonymous: hidden,
+        ...(typeof record.route === 'string' ? { route: clean(record.route, 200) } : {}),
+        ...(record.networkIdentity === 'visible' ? { network_address: 'visible' } : {}),
         level,
         rewritten,
         ...(sent !== undefined ? { sent } : {}),

@@ -139,14 +139,20 @@ describe('ask_anonymously: operation → worker route → core', () => {
 
 describe('ask_anonymously: the ChatGPT result', () => {
   test('an answer carries the reply, how it was asked and what was sent; a rewrite tells the model to say so', () => {
-    const rewritten = askAnonymouslyToolResult({ ok: true, sent: 'How long do deposits take?', reply: 'Two weeks.', route: 'zkAPI via Tor', level: 'strict', rewritten: true, remembered: true });
-    expect(rewritten.structuredContent).toEqual({ status: 'answered', answer: 'Two weeks.', anonymous: true, level: 'strict', rewritten: true, sent: 'How long do deposits take?', remembered: true });
+    const rewritten = askAnonymouslyToolResult({ ok: true, sent: 'How long do deposits take?', reply: 'Two weeks.', route: 'zkAPI via Tor', networkIdentity: 'hidden', level: 'strict', rewritten: true, remembered: true });
+    expect(rewritten.structuredContent).toEqual({ status: 'answered', answer: 'Two weeks.', anonymous: true, route: 'zkAPI via Tor', level: 'strict', rewritten: true, sent: 'How long do deposits take?', remembered: true });
     expect(rewritten.content[0]!.text).toContain('Two weeks.');
     expect(rewritten.content[0]!.text).toContain('rewrote the question');
     expect(rewritten.isError).toBeUndefined();
-    const plain = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y\u0007', route: 'r', level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
-    expect(plain.structuredContent).toEqual({ status: 'answered', answer: 'y', anonymous: true, level: 'standard', rewritten: false, sent: 'x', cleanup: 'as_written' });
+    const plain = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y\u0007', route: 'r', networkIdentity: 'hidden', level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
+    expect(plain.structuredContent).toEqual({ status: 'answered', answer: 'y', anonymous: true, route: 'r', level: 'standard', rewritten: false, sent: 'x', cleanup: 'as_written' });
+    expect(plain.content[0]!.text).toContain('Asked anonymously');
     expect(plain.content[0]!.text).toContain('as written');
+    // Tor off: never called anonymous; the model is told the address was visible.
+    const exposed = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y', route: 'zkAPI, payment privacy only (network address visible)', networkIdentity: 'visible', level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
+    expect(exposed.structuredContent).toMatchObject({ status: 'answered', anonymous: false, network_address: 'visible' });
+    expect(exposed.content[0]!.text).not.toContain('anonymously');
+    expect(exposed.content[0]!.text).toContain('network address visible');
     // A requested save that failed is told with the answer.
     const unsaved = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y', route: 'r', level: 'standard', rewritten: false, remembered: false, note: 'Not saved; choose again next time.' });
     expect(unsaved.structuredContent).toMatchObject({ status: 'answered', note: 'Not saved; choose again next time.' });
