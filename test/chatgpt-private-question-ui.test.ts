@@ -377,6 +377,13 @@ describe('asking', () => {
     // The new job's defaults (Standard, lightly cleaned) and a second question sealed to it, under its own id.
     host.field().value = 'Is ibuprofen safe with a blood thinner?';
     host.field().dispatchEvent(new host.win.Event('input') as unknown as Event);
+    // The host re-delivers the original tool result on every event (live 2026-10-10: typing and the level were reset): the followed job stays.
+    (host.win as any).openai.toolResponseMetadata = metaFor(engine);
+    host.win.dispatchEvent(new host.win.Event('openai:set_globals'));
+    host.push({ _meta: metaFor(engine) });
+    await sleep(20);
+    expect(host.field().value).toBe('Is ibuprofen safe with a blood thinner?');
+    expect(host.anothers).toHaveLength(1);
     host.button(W.send).click();
     await host.until(() => host.asks.length === 2, 'the second ask');
     expect(host.asks[1]!.url).toBe(`${RELAY}/private/${JOB2}/ask`);
