@@ -76,27 +76,31 @@ export const MODEL_SETUP_CSS = `
 `;
 
 export const DASHBOARD_OUTSIDE_HELP_CSS = `
-.outside .ohlabel { color: var(--t3); font-size: var(--fs-caption); margin: -2px 0 10px; }
-/* The status block: the switch, the route in one line, today's usage. */
-.outside .ohpanel { margin: 0 0 8px; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
-.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; margin: 0 0 4px; }
+/* The status line: the state and today's count, the switch beside them. */
+.outside .ohpanel { margin: 0 0 12px; padding: 14px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
+.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
+.outside .ohstatewrap { display: grid; gap: 2px; min-width: 0; flex: 1 1 320px; }
+.outside .ohhead > .pbuttons { flex: none; }
 .outside .ohstate { display: flex; align-items: center; gap: 10px; margin: 0; font-size: var(--fs-row); font-weight: 600; color: var(--t1); }
 .outside .dot.on { background: var(--good); }
 .outside .dot.off { background: transparent; border: 2px solid var(--off); }
 .outside .dot.attn { background: var(--warn-fill); }
-.outside .ohline { margin: 0 0 0 20px; color: var(--t2); }
-.outside .ohline.good { color: var(--good); font-weight: 600; }
-.outside .ohline.attn, .outside .ohline .attn { color: var(--warn); font-weight: 600; }
-.outside .ohline .attn { font-weight: 500; }
-.outside .ohpanel .ohsmall { margin: 4px 0 0 20px; }
+.outside .ohline { margin: 0 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.outside .ohline.attn { color: var(--warn); font-weight: 600; }
 .outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); max-width: 78ch; }
 .outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
-/* Problems: one tinted list, a line each, the fix in the line. */
-.outside .ohfix { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+/* Problems: one tinted list, a line each, its one button in the line. */
+.outside .ohfix { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; }
 .outside .ohfix li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; color: var(--t1); }
 .outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
 .outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
-.outside .ohfix .ohform { margin: 0; }
+.outside .ohfix .ohform { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.outside .ohfix .ohactions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.outside .ohfix .actmsg:empty, .outside .ohpanel .actmsg:empty { display: none; }
+/* The statements, in full only until accepted. */
+.outside .ohaccept { margin: 0 0 12px; padding: 14px 18px; border: 1px solid var(--warn-line); border-radius: 10px; }
+.outside .ohaccept .sect { margin-top: 0; }
+.outside .ohaccept .ohlist { margin-bottom: 4px; }
 .outside .ohshort { margin: 0 0 4px; padding-left: 20px; color: var(--t1); }
 .outside .ohshort li { margin: 0 0 4px; max-width: 78ch; }
 .outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
@@ -105,7 +109,7 @@ export const DASHBOARD_OUTSIDE_HELP_CSS = `
 .outside .ohfacts li { margin: 0 0 4px; overflow-wrap: anywhere; }
 /* Secondary sections: one line each (title and a short summary), open only when they need attention. */
 .outside details.ohsect { border-top: 1px solid var(--line); }
-.outside .ohmore { margin: 28px 0 0; }
+.outside .ohmore { margin: 20px 0 0; }
 .outside .ohmore > details.ohsect:last-child { border-bottom: 1px solid var(--line); }
 .outside details.ohsect > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
 .outside details.ohsect > summary::-webkit-details-marker { display: none; }
@@ -113,7 +117,6 @@ export const DASHBOARD_OUTSIDE_HELP_CSS = `
 .outside details.ohsect[open] > summary::before { content: '\\25BE'; }
 .outside details.ohsect > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
 .outside .ohsect-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
-.outside .ohsect-title.attn { color: var(--warn); }
 .outside .ohsect-sum { color: var(--t3); font-size: var(--fs-body); }
 .outside .ohsect-sum:empty { display: none; }
 .outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
@@ -126,16 +129,14 @@ export const DASHBOARD_OUTSIDE_HELP_CSS = `
 .outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
 .outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .outside .ohoff { color: var(--t3); }
-.outside .ohfence { display: grid; gap: 10px; margin: 8px 0 0; }
-.outside .ohfence .ohform { grid-template-columns: auto 1fr; align-items: center; }
-.outside .ohfence .ohform .actmsg { grid-column: 1 / -1; }
 .outside .actmsg[data-state="error"] { color: var(--bad); }
-.outside .ohunlock { margin: 0 0 12px; padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
-.outside .ohunlock .pnote { margin: 0; color: var(--t1); }
+.outside .ohunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohunlock .hint { color: var(--t2); }
+.outside .ohunlock .actmsg:empty { display: none; }
 @media (max-width: 700px) {
   .outside .ohpanel { padding: 14px; }
   .outside .ohhead .pbuttons, .outside .ohhead .blocked { width: 100%; }
-  .outside .ohline, .outside .ohpanel .ohsmall { margin-left: 0; }
+  .outside .ohline { margin-left: 0; }
   .outside .btn { white-space: normal; text-align: left; }
   .outside .ohsect-body { padding-left: 0; }
 }

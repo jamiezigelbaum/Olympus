@@ -181,10 +181,21 @@ function runCardScript(html: string, answer: (url: string, body: unknown) => Car
 }
 
 describe('the Outside help page: states and copy', () => {
-  test('off, route ready, acknowledged: the disclosure, the steps, the languages and Turn on', () => {
+  test('off, route ready, acknowledged: one status line, no problems, everything else one collapsed line with its value', () => {
     const html = page(status());
     expect(html).toContain('<title>Olympus / Anonymous answers</title>');
     expect(html).toContain(`data-outside-state="off">${W.state.off}<`);
+    // Above the sections: the title and the status line only (owner 2026-10-10: "way too complicated").
+    const firstView = html.slice(html.indexOf('data-outside-help '), html.indexOf('<div class="ohmore">'));
+    expect(firstView).toContain('data-outside-form="enable"');
+    expect(firstView).not.toContain('data-outside-blockers');
+    expect(firstView).not.toContain('data-statement=');
+    expect(firstView).not.toContain('name="level"');
+    expect(firstView).not.toContain(W.intro.replace(/'/g, '&#39;'));
+    // Every section is one closed line; each that has a value shows it.
+    const sections = [...html.matchAll(/<details class="ohsect" id="outside-([a-z]+)" data-outside-section="\1"( open)?>/g)];
+    expect(sections.map((match) => match[1])).toEqual(['before', 'level', 'languages', 'limits', 'statements', 'steps', 'details']);
+    expect(sections.every((match) => match[2] === undefined)).toBe(true);
     // What it is, then the plain privacy line; no "evidence pack" on the page.
     expect(html).toContain(W.intro.replace(/'/g, '&#39;'));
     expect(html).toContain(W.privacy);
@@ -192,7 +203,6 @@ describe('the Outside help page: states and copy', () => {
     // The honesty label keeps "network route not verified".
     expect(visibleText(html)).toContain('network route not verified');
     for (const line of W.disclosure) expect(html).toContain(line.replace(/'/g, '&#39;'));
-    expect(html).toContain('data-outside-route="ready"');
     for (const step of W.steps) expect(visibleText(html)).toContain(step.replace('{secretRef}', 'env:OLYMPUS_ZKAPI_API_KEY').slice(0, 40));
     // The seven setup steps, in the order that worked live (§A.14): one send, activation, relay, require key, api key, key reuse 0.
     const text = visibleText(html);
@@ -221,33 +231,33 @@ describe('the Outside help page: states and copy', () => {
     expect(text).not.toContain('It asks on its own');
     // The revision rides on the card for compare-and-swap.
     expect(html).toContain('data-revision="0"');
-    // The status block: route health in one line and today's usage, the $6 said as a hold.
-    expect(html).toContain(`data-outside-route="ready">${W.routeReady}<`);
-    // Never "spent": only the $6 hold per question is recorded.
+    // The status line: today's usage, the $6 said as a hold. Never "spent": only the hold per question is recorded.
     expect(text).toContain('2 questions today (counted as up to $12 against your limits) · balance expires about 31 Oct (24 days left)');
     expect(html.match(/data-outside-usage>([^<]*)</)?.[1]).not.toContain('spent');
-    // Cost: the real cost first, then the hold, in one line.
+    // Cost: the real cost first, then the hold, in one line (Before you turn this on, and Balance and limits).
     expect(text).toContain(W.costLine);
+    expect(html.slice(html.indexOf('data-outside-section="limits"'))).toContain(W.costLine);
     expect(W.costLine).toBe('A question usually costs a few cents. Up to $6 is held while it runs, and the rest comes back.');
     // The required disclosures stay on the page. "Everything to know first" keeps the fuller detail:
     // automatic timing, the hold counted against limits, no default limit, no top-up, the estimated expiry,
     // the fee buffer, the API key, key reuse, the operator and proof setup, the route not verified.
     const more = html.slice(html.indexOf('data-outside-disclosure-more'));
-    const fuller = visibleText(more.slice(0, more.indexOf('</details>')));
+    const fuller = visibleText(more.slice(0, more.indexOf('</ul>')));
     for (const needle of ['only when you ask your agent to use Olympus zkAPI', 'counts each question at the amount held for its model', 'no daily limit unless you set one', 'There is no top-up', 'estimates the 30-day date',
       'fee buffer', 'require an API key', 'key reuse is on', 'pause deposits and withdrawals', 'proof setup', 'cannot yet confirm the network route is anonymous']) expect(fuller).toContain(needle);
     // And the setup steps name the exact commands.
     for (const needle of ['--key-reuse-window-seconds 0', '--require-api-key', 'balance estimated to expire']) expect(text).toContain(needle);
-    // Two short lines first; the fuller detail one click away.
+    // Before you turn this on: two short lines; the fuller detail ("Everything to know first") inside Details.
     expect(html.match(/<ul class="ohshort" data-outside-disclosure>(.*?)<\/ul>/)?.[1]?.match(/<li>/g)?.length).toBe(2);
-    expect(html).toContain('<details class="howto" data-outside-disclosure-more>');
-    // Accepted at the current wording: one line, the statements behind Review.
-    expect(html).toContain(`data-outside-acknowledged="yes">You accepted the 6 cost and risk statements.<`);
-    expect(html).toContain('data-outside-ack-review');
-    // Nothing to fix: no problem list; secondary sections closed.
+    expect(html.indexOf('data-outside-disclosure-more')).toBeGreaterThan(html.indexOf('data-outside-section="details"'));
+    // Accepted at the current wording: one line, the statements inside it.
+    expect(html).toContain(`<span class="ohsect-title">${W.costTitle}</span><span class="ohsect-sum">You accepted all 6</span>`);
+    expect(html).toContain('data-outside-acknowledged="yes"');
+    // Nothing to fix: no problem list. Each line shows its current value.
     expect(html).not.toContain('data-outside-blockers');
-    for (const id of ['languages', 'limits', 'steps', 'details']) expect(html).toContain(`<details class="ohsect" data-outside-section="${id}"><summary>`);
     expect(text).toContain('No daily limit · paid in on 1 Oct');
+    expect(html).toContain(`<span class="ohsect-title">${W.levelTitle}</span><span class="ohsect-sum">Standard</span>`);
+    expect(html).toContain(`<span class="ohsect-title">${W.languagesTitle}</span><span class="ohsect-sum">English</span>`);
     // Technical facts, inside Details only.
     expect(text).toContain('zkapi-clientd 0.1.6 found');
     expect(text).toContain('2 requests today ($12 counted against your limits)');
@@ -260,10 +270,12 @@ describe('the Outside help page: states and copy', () => {
   test('on: Turn off; the chosen languages are checked; revision carried', () => {
     const html = page(status({ settings: { state: 'on', revision: 3, languages: ['en', 'pt-BR'] } }));
     expect(html).toContain(`data-outside-state="on">${W.state.on}<`);
-    // On: "Before you turn this on" is gone from the first view; its content sits in a collapsed section.
+    // On: "Before you turn this on" is gone; what it is and the fuller detail sit in Details.
     expect(visibleText(html)).not.toContain(W.disclosureTitle);
-    expect(html).toContain('<details class="ohsect" data-outside-section="disclosure"><summary>');
-    for (const line of [...W.disclosureShort, ...W.disclosure]) expect(html).toContain(line.replace(/'/g, '&#39;'));
+    expect(html).not.toContain('data-outside-section="before"');
+    const details = html.slice(html.indexOf('data-outside-section="details"'));
+    expect(details).toContain(W.intro.replace(/'/g, '&#39;'));
+    for (const line of W.disclosure) expect(details).toContain(line.replace(/'/g, '&#39;'));
     expect(html).toContain(`<button type="submit" class="btn" data-outside-enabled="false">${W.turnOff}</button>`);
     expect(html).toContain('name="languages" value="pt-BR" checked>');
     expect(html).toContain('name="languages" value="fr">');
@@ -286,41 +298,46 @@ describe('the Outside help page: states and copy', () => {
     expect(html).toContain(W.addRoute);
     expect(html).toContain(W.enableBlockedRoute);
     expect(html).toContain(`<button type="button" class="btn primary" disabled aria-disabled="true">${W.turnOn}</button>`);
-    // The policy-not-a-file case offers no button and says why.
+    // The policy-not-a-file case cannot add it here: it says why, with the steps as its one button.
     const inline = page(status({ route: { state: 'not_configured', policyWritable: false } }));
     expect(inline).not.toContain('data-outside-form="add-route"');
     expect(inline).toContain(W.policyNotFile);
+    expect(inline).toContain(`data-outside-open="steps">${W.showSteps}</button>`);
   });
 
-  test('blockers read in plain words, one per line; acknowledgements incomplete blocks Turn on', () => {
+  test('blockers read in plain words, one line and one button each; acknowledgements incomplete blocks Turn on', () => {
     const { daemonExecutable: _d, daemonVersion: _v, torExecutable: _t, ...bare } = readiness();
     const blocked: ZkapiConsultReadiness = { ...bare, blockers: ['daemon_not_found', 'tor_not_found', 'daemon_api_key_missing', 'funding_date_missing', 'acknowledgements_incomplete'], apiKeyConfigured: false };
     const html = page(status({ route: configuredRoute({ complete: false, ready: blocked }) }));
-    expect(html).toContain('data-outside-route="blocked"');
     const text = visibleText(html);
-    // One list, a line each with its fix; the status line names the first and counts the rest.
-    expect(html.match(/<ul class="ohfix" data-outside-blockers>(.*?)<\/ul>/)?.[1]?.match(/<li>/g)?.length).toBe(4);
+    // Said once, in the list: the status line never repeats a problem.
+    expect(html).not.toContain('data-outside-route=');
+    expect(html.match(/data-outside-usage>[^<]*</)?.[0]).not.toContain('Not ready');
+    const list = html.match(/<ul class="ohfix" data-outside-blockers[^>]*>(.*?)<\/ul>/)?.[1] ?? '';
+    const lines = list.split('</li>').filter((line) => line.includes('<li'));
+    expect(lines.length).toBe(4);
+    // Every line has exactly one button (the owner rule: never a problem without a way to fix it).
+    for (const line of lines) expect(line.match(/<button /g)?.length).toBe(1);
+    expect(list).toContain(`data-outside-open="limits" data-outside-focus="funding_date">${W.enterFundingDate}</button>`);
+    expect(list.match(/data-outside-open="steps"/g)?.length).toBe(3);
     // The missing statements are said once, beside the statements, never again in the list.
     expect(text).not.toContain(W.blockers.acknowledgements_incomplete);
     expect(text).toContain(W.blockers.daemon_not_found);
     expect(text).toContain(W.blockers.tor_not_found);
     expect(text).toContain(W.blockers.daemon_api_key_missing);
-    expect(text).toContain('Enter the day you paid in under Balance and limits');
-    expect(text).toContain(`Not ready: ${W.blockers.daemon_not_found} (+3 more below)`);
-    // Setup steps and Balance and limits open because they hold the fixes; Details stays closed.
-    expect(html).toContain('<details class="ohsect" data-outside-section="steps" open>');
-    expect(html).toContain('<details class="ohsect" data-outside-section="limits" open>');
-    expect(html).toContain('<details class="ohsect" data-outside-section="details"><summary>');
+    expect(text).toContain(W.blockers.funding_date_missing);
+    // The sections stay closed: each problem's button opens the one that holds its fix.
+    expect(html).not.toMatch(/data-outside-section="[a-z]+" open>/);
     expect(text).toContain('zkapi-clientd not installed');
-    // Not accepted, Standard chosen: the six statements sit inline under What may zkAPI send?,
-    // with one Accept and save; the separate section waits hidden for Strict.
-    expect(html).not.toContain('data-outside-ack-review');
-    const level = html.slice(html.indexOf('data-outside-form="level"'), html.indexOf('</form>', html.indexOf('data-outside-form="level"')));
-    expect(level).toContain('<div class="ohaccept" data-outside-level-acks>');
-    expect(level.match(/<li data-statement=/g)?.length).toBe(6);
-    expect(level.match(/name="acknowledged"/g)?.length).toBe(6);
-    expect(level).toContain(`data-outside-level-save>${W.levelAcceptSave}</button>`);
-    expect(html).toContain('<div data-outside-ack-standalone hidden>');
+    // Not accepted: the six statements in full, under the problems, with one Accept; nowhere else.
+    const accept = html.slice(html.indexOf('data-outside-accept'), html.indexOf('</form>', html.indexOf('data-outside-accept')));
+    expect(accept.match(/<li data-statement=/g)?.length).toBe(6);
+    expect(accept.match(/name="acknowledged"/g)?.length).toBe(6);
+    expect(accept).toContain(`>${W.accept}</button>`);
+    expect(html.match(/<li data-statement=/g)?.length).toBe(6);
+    expect(html.indexOf('data-outside-accept')).toBeGreaterThan(html.indexOf('data-outside-blockers'));
+    expect(html.indexOf('data-outside-accept')).toBeLessThan(html.indexOf('<div class="ohmore">'));
+    expect(html).not.toContain('data-outside-section="statements"');
     expect(html).toContain('data-outside-acknowledged="no"');
     expect(html).toContain(W.enableBlockedAcks);
     expect(html).not.toContain('data-outside-enabled="true"');
@@ -331,25 +348,32 @@ describe('the Outside help page: states and copy', () => {
     expect(outsideHelpBlockerWords('internal_error')).toBe('Not ready yet (internal_error).');
   });
 
-  test('a held fence: the paused state, Recover (confirm, $6) and Abandon (its privacy consequence), each its own form', () => {
+  test('a held fence: the paused state, one line with Recover (confirm, $6) and a quiet Abandon (its privacy consequence)', () => {
     const fences = [{ scope: 'a'.repeat(32), at: '2026-10-07T10:00:00.000Z', thisWallet: true }, { scope: 'b'.repeat(32), at: '2026-10-06T09:00:00.000Z', thisWallet: false }];
     const held = readiness({ blockers: ['unresolved_session', 'unresolved_session_other_wallet'], unresolvedSession: true });
     const value = status({ route: configuredRoute({ ready: held, fences }) });
     expect(summaryOf(value)).toEqual({ state: 'fence_held' });
     const html = page(value);
     expect(html).toContain(`data-outside-state="fence_held">${W.state.fence_held}<`);
-    expect(html).toContain('data-outside-fence');
-    expect(html).toContain(`data-outside-form="recover" data-outside-confirm="${W.recoverConfirm}"`);
-    expect(html).toContain(`<button type="submit" class="btn primary">${W.recover}</button>`);
+    const fence = html.slice(html.indexOf('data-outside-fence'), html.indexOf('</li>', html.indexOf('data-outside-fence')));
+    expect(visibleText(fence)).toContain('An earlier question has not finished paying (held since 7 Oct 10:00).');
+    expect(fence).toContain(`data-outside-form="recover" data-outside-confirm="${W.recoverConfirm}"`);
+    expect(fence).toContain(`<button type="submit" class="btn primary" title="${W.recoverHint}">${W.recover}</button>`);
     expect(html).toContain('reserves up to $6');
-    expect(html).toContain(`data-outside-form="abandon" data-outside-scope="${'a'.repeat(32)}" data-outside-confirm="${W.abandonConfirm.replace(/'/g, '&#39;')}"`);
-    expect(html).toContain(`data-outside-form="abandon" data-outside-scope="${'b'.repeat(32)}"`);
-    expect(visibleText(html)).toContain('may later link two sessions');
-    expect(visibleText(html)).toContain('Held since 2026-10-07 10:00 (this wallet)');
-    expect(visibleText(html)).toContain('Held since 2026-10-06 09:00 (another wallet folder)');
-    // No fence for this wallet: Recover is disabled (recovery must run from the wallet that holds it).
-    const other = page(status({ route: configuredRoute({ ready: held, fences: [fences[1]!] }) }));
-    expect(other).toContain(`<button type="submit" class="btn primary" disabled aria-disabled="true">${W.recover}</button>`);
+    expect(fence).toContain(`data-outside-form="abandon" data-outside-scope="${'a'.repeat(32)}" data-outside-confirm="${W.abandonConfirm.replace(/'/g, '&#39;')}"`);
+    expect(fence).toContain(`class="btn quiet" title="${W.abandonHint}">${W.abandon}</button>`);
+    // The other wallet's payment: its own line, Abandon its one button.
+    const otherLine = html.slice(html.indexOf('data-outside-blocker="unresolved_session_other_wallet"'));
+    expect(visibleText(otherLine.slice(0, otherLine.indexOf('</li>')))).toContain('(held since 6 Oct 09:00)');
+    expect(otherLine.slice(0, otherLine.indexOf('</li>'))).toContain(`data-outside-form="abandon" data-outside-scope="${'b'.repeat(32)}"`);
+    expect(html).not.toContain('data-outside-form="recover" data-outside-confirm="x"');
+    // Both held payments are named in Details too.
+    expect(visibleText(html)).toContain('Unfinished payment held since 7 Oct 10:00 (this wallet)');
+    expect(visibleText(html)).toContain('Unfinished payment held since 6 Oct 09:00 (another wallet folder)');
+    // No fence for this wallet: no Recover at all (recovery must run from the wallet that holds it).
+    const other = page(status({ route: configuredRoute({ ready: readiness({ blockers: ['unresolved_session_other_wallet'] }), fences: [fences[1]!] }) }));
+    expect(other).not.toContain('data-outside-form="recover"');
+    expect(other).toContain(`data-outside-scope="${'b'.repeat(32)}"`);
   });
 
   test('restart pending is said once, at the top', () => {
@@ -357,17 +381,22 @@ describe('the Outside help page: states and copy', () => {
     expect(html).toContain(`data-outside-restart-pending>${W.restartPending}<`);
   });
 
-  test('limits left on: Balance and limits names them, opens when one is reached, and offers No daily limit in one click', () => {
+  test('limits left on: Balance and limits names them; a reached limit is one problem line whose button is No daily limit', () => {
     const capped = readiness({ blockers: ['daily_cap_reached'], requestsToday: { count: 10, cap: 10 }, spendToday: { reservedUsd: 60, capUsd: 10 } });
     const route = { ...configuredRoute({ ready: capped }), dailyRequestCap: 10, dailySpendCapUsd: 10 } as DashboardOutsideHelpStatus['route'];
     const html = page(status({ route }));
     const text = visibleText(html);
-    expect(html).toContain('<details class="ohsect" data-outside-section="limits" open>');
     expect(text).toContain('10 questions a day, $10 a day · paid in on 1 Oct');
     expect(text).toContain('Questions today: 10, counted as up to $60 against your limits.');
-    expect(html).toContain(`data-outside-form="route" data-outside-nolimit><div class="pbuttons"><button type="submit" class="btn primary">${W.removeLimits}</button>`);
-    expect(text).toContain(W.blockers.daily_cap_reached);
-    // No limit set: no button, the plain statement instead, and the section stays closed.
+    const line = html.slice(html.indexOf('data-outside-blocker="daily_cap_reached"'), html.indexOf('</li>', html.indexOf('data-outside-blocker="daily_cap_reached"')));
+    expect(visibleText(line)).toContain(W.blockers.daily_cap_reached);
+    expect(line).toContain(`data-outside-form="route" data-outside-nolimit><button type="submit" class="btn primary">${W.removeLimits}</button>`);
+    expect(html).toContain(`data-outside-form="route" data-outside-nolimit><div class="pbuttons"><button type="submit" class="btn">${W.removeLimits}</button>`);
+    // Both limits reached: one line, one button.
+    const both = page(status({ route: { ...configuredRoute({ ready: readiness({ blockers: ['daily_cap_reached', 'spend_cap_reached'] }) }), dailyRequestCap: 10, dailySpendCapUsd: 10 } as DashboardOutsideHelpStatus['route'] }));
+    expect(both.match(/data-outside-blocker="(daily|spend)_cap_reached"/g)?.length).toBe(1);
+    expect(visibleText(both)).toContain(W.capsReached.replace(/&#39;/g, "'"));
+    // No limit set: no button, the plain statement instead.
     const free = page(status());
     expect(free).not.toContain('<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>');
     expect(visibleText(free)).toContain(W.noLimitIntro);
@@ -423,7 +452,7 @@ describe('the Outside help page: states and copy', () => {
     expect(JSON.parse(posts[2]!.init.body)).toEqual({ enabled: true, revision: 5, level: 'general' });
   });
 
-  test('What may zkAPI send: Standard and Strict with the owner\'s copy, both always selectable; missing statements sit beside Standard', () => {
+  test('What may zkAPI send: one line showing the level; Standard and Strict with the owner\'s copy, both always selectable, a plain Save', () => {
     const html = page(status());
     const text = visibleText(html);
     expect(text).toContain('What may zkAPI send?');
@@ -431,58 +460,57 @@ describe('the Outside help page: states and copy', () => {
       'Strict', 'Your model rewrites it into general questions first (Vitalik Buterin\'s approach).']) expect(text).toContain(line);
     expect(text).not.toContain('without names (recommended)');
     expect(html).toContain('<input type="radio" name="level" value="unnamed" checked>');
-    // Accepted: a plain Save, no statements in the form.
     expect(html).toContain(`data-outside-level-save>${W.levelSave}</button>`);
-    expect(html).not.toContain('<div class="ohaccept"');
-    // Strict saved, statements missing: Standard is still selectable (never a dead radio); its statements
-    // wait hidden beside it, and the separate Cost and risk section shows them with one Accept.
+    // Strict saved, statements missing: Standard is still selectable (never a dead radio), and the
+    // statements are never tied to the level: they sit once, above, with their own Accept.
     const strict = page(status({ settings: { level: 'general' }, route: configuredRoute({ complete: false }) }));
+    expect(strict).toContain(`<span class="ohsect-title">${W.levelTitle}</span><span class="ohsect-sum">Strict</span>`);
     expect(strict).toContain('<input type="radio" name="level" value="general" checked>');
     expect(strict).toContain('<input type="radio" name="level" value="unnamed">');
-    expect(strict).toContain('<div class="ohaccept" data-outside-level-acks hidden>');
     expect(strict).toContain(`data-outside-level-save>${W.levelSave}</button>`);
-    expect(strict).toContain('<div data-outside-ack-standalone>');
+    const levelForm = strict.slice(strict.indexOf('data-outside-form="level"'), strict.indexOf('</form>', strict.indexOf('data-outside-form="level"')));
+    expect(levelForm).not.toContain('data-statement=');
     expect(strict).toContain(`>${W.accept}</button>`);
+    // At Strict the Standard preparation line says it is kept but not used.
+    expect(page({ ...status({ settings: { level: 'general' } }), standard: { mode: 'as_written', preset: 'p', maxChars: 2000 } })).toContain('<span class="ohsect-sum">Exactly as written (used at Standard only)</span>');
     // On with stale statements: on, but paused until they are accepted, said in the status line.
     const paused = status({ settings: { state: 'on', level: 'unnamed' }, route: configuredRoute({ complete: false }) });
     expect(summaryOf(paused)).toEqual({ state: 'needs_acceptance' });
     const pausedHtml = page(paused);
     expect(pausedHtml).toContain(`data-outside-state="needs_acceptance">${W.state.needs_acceptance}<`);
     expect(pausedHtml).toContain(W.turnOff);
+    // On with another problem: paused, the fix below.
+    const blocked = status({ settings: { state: 'on' }, route: configuredRoute({ ready: readiness({ blockers: ['daily_cap_reached'] }) }) });
+    expect(summaryOf(blocked)).toEqual({ state: 'blocked' });
+    expect(page(blocked)).toContain(`data-outside-state="blocked">${W.state.blocked}<`);
   });
 
-  test('the card\'s script: Standard with missing statements reveals them and saves the level, then the statements, in one click', async () => {
-    const value = status({ settings: { state: 'on', revision: 7, level: 'general' }, route: configuredRoute({ complete: false }) });
+  test('the card\'s script: a level save keeps the switch on while paused; Accept posts the statements; a problem\'s button opens its section', async () => {
+    const held = readiness({ blockers: ['unresolved_session', 'funding_date_missing'] });
+    const value = status({ settings: { state: 'on', revision: 7, level: 'general' }, route: configuredRoute({ complete: false, ready: held, fences: [{ scope: 'a'.repeat(32), at: '2026-10-07T10:00:00.000Z', thisWallet: true }] }) });
+    expect(summaryOf(value)).toEqual({ state: 'fence_held' });
     const { document, window, posts, settle } = runCardScript(page(value), (url) => (url.endsWith('/dashboard/consult')
       ? { status: 200, body: { ok: true, status_message: 'Saved.', revision: 8 } }
       : { status: 200, body: { ok: true, status_message: 'Saved. Olympus is restarting.', restarting: true } }));
     const level = document.querySelector('form[data-outside-form="level"]')!;
-    const acks = level.querySelector('[data-outside-level-acks]')!;
-    const standalone = document.querySelector('[data-outside-ack-standalone]')!;
-    expect(acks.hasAttribute('hidden')).toBe(true);
-    expect(standalone.hasAttribute('hidden')).toBe(false);
-    const standard = level.querySelector('input[name="level"][value="unnamed"]') as unknown as { checked: boolean; dispatchEvent: (event: unknown) => void };
     (level.querySelector('input[name="level"][value="general"]') as unknown as { checked: boolean }).checked = false;
-    standard.checked = true;
-    standard.dispatchEvent(new window.Event('change'));
-    // Selecting Standard reveals the statements inline; the button becomes Accept and save.
-    expect(acks.hasAttribute('hidden')).toBe(false);
-    expect(standalone.hasAttribute('hidden')).toBe(true);
-    expect(level.querySelector('[data-outside-level-save]')!.textContent).toBe(W.levelAcceptSave);
+    (level.querySelector('input[name="level"][value="unnamed"]') as unknown as { checked: boolean }).checked = true;
     level.dispatchEvent(new window.Event('submit', { cancelable: true }));
     await settle();
-    expect(posts.map((post) => post.url)).toEqual([DASHBOARD_OUTSIDE_HELP_PATHS.enable, DASHBOARD_OUTSIDE_HELP_PATHS.route]);
+    // Paused by a held payment is still on: saving a level never turns it off.
+    expect(posts.map((post) => post.url)).toEqual([DASHBOARD_OUTSIDE_HELP_PATHS.enable]);
     expect(JSON.parse(posts[0]!.init.body)).toEqual({ enabled: true, revision: 7, level: 'unnamed' });
+    const accept = document.querySelector('form[data-outside-accept]')!;
+    accept.dispatchEvent(new window.Event('submit', { cancelable: true }));
+    await settle();
+    expect(posts[1]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.route);
     expect(JSON.parse(posts[1]!.init.body)).toEqual({ acknowledged: ALL_IDS });
-    expect(level.querySelector('[data-action-message]')!.textContent).toContain('Saved. Olympus is restarting.');
-    // Back to Strict: the plain Save again.
-    const strict = level.querySelector('input[name="level"][value="general"]') as unknown as { checked: boolean; dispatchEvent: (event: unknown) => void };
-    standard.checked = false;
-    strict.checked = true;
-    strict.dispatchEvent(new window.Event('change'));
-    expect(acks.hasAttribute('hidden')).toBe(true);
-    expect(standalone.hasAttribute('hidden')).toBe(false);
-    expect(level.querySelector('[data-outside-level-save]')!.textContent).toBe(W.levelSave);
+    expect(accept.querySelector('[data-action-message]')!.textContent).toContain('Saved. Olympus is restarting.');
+    // Enter the date: opens Balance and limits.
+    const limits = document.querySelector('details[data-outside-section="limits"]') as unknown as { open: boolean };
+    expect(limits.open).toBe(false);
+    (document.querySelector('[data-outside-open="limits"]') as unknown as { click: () => void }).click();
+    expect(limits.open).toBe(true);
   });
 
   test('the card\'s script: every refusal shows the server\'s own words; no words, the status; no answer, says so', async () => {
@@ -511,8 +539,8 @@ describe('the Outside help page: states and copy', () => {
     const html = page(status({ route: configuredRoute({ ready: off }) }));
     const text = visibleText(html);
     expect(text).toContain('Tor off: the route is direct and your network address is visible to the provider');
-    // The status block says it plainly; the Tor wording is in Details.
-    expect(html).toContain(`<span class="attn">${W.addressVisible}</span>`);
+    // The status line says it plainly; the Tor wording is in Details.
+    expect(html).toContain(`data-outside-address-visible>${W.addressVisible}</p>`);
     expect(text).not.toContain('Tor found');
     const { torExecutable: _t, ...noBinary } = readiness({ tor: 'off', torPort: 'not_used' });
     expect(visibleText(page(status({ route: configuredRoute({ ready: noBinary as ZkapiConsultReadiness }) })))).toContain('Tor off: the route is direct');
@@ -521,19 +549,28 @@ describe('the Outside help page: states and copy', () => {
     expect(visibleText(page(status({ route: configuredRoute({ ready: missing as ZkapiConsultReadiness }) })))).toContain('Tor not installed');
   });
 
-  test('a bearer-grade session reads the card but gets the local unlock instead of controls', () => {
-    const html = page(status(), { outsideHelpLocalSession: false });
+  test('a bearer-grade session reads the card; the unlock is its only control, and every fix\'s first click unlocks', async () => {
+    const held = readiness({ blockers: ['unresolved_session'] });
+    const value = status({ settings: { state: 'on' }, route: configuredRoute({ complete: false, ready: held, fences: [{ scope: 'a'.repeat(32), at: '2026-10-07T10:00:00.000Z', thisWallet: true }] }) });
+    const html = page(value, { outsideHelpLocalSession: false });
     expect(html).toContain('data-outside-unlock');
     expect(html).toContain(W.unlock);
     expect(html).toContain(DASHBOARD_LOCAL_CONTROL_SESSION_PATH);
-    // Every control is rendered disabled; only the unlock submits.
-    expect(html).not.toContain('data-outside-enabled="true">');
-    expect(html).toContain('data-outside-enabled="true" disabled aria-disabled="true">');
-    expect(html).not.toContain(`data-outside-save-limits>${W.saveRoute}</button>`);
-    expect(html).toContain(`data-outside-save-limits disabled aria-disabled="true">${W.saveRoute}</button>`);
-    // Still reads every fact and every statement, read-only.
+    // No control posts: the switch, Recover and Accept are shown, but each first opens the session.
+    expect(html).not.toContain('data-outside-enabled=');
+    expect(html).not.toContain('data-outside-form="recover"');
+    expect(html).toContain(`data-outside-needs-unlock>${W.turnOff}</button>`);
+    expect(html).toContain(`data-outside-needs-unlock>${W.recover}</button>`);
+    expect(html).toContain(`data-outside-needs-unlock>${W.accept}</button>`);
+    expect(html).not.toContain(`data-outside-save-limits`);
+    // Still reads every fact and every statement.
     expect(html.match(/<li data-statement=/g)?.length).toBe(6);
-    expect(html).toContain(`data-outside-level-save disabled aria-disabled="true">`);
+    expect(html).toContain('name="level" value="unnamed" checked disabled aria-disabled="true">');
+    // Recover's first click submits the unlock (no credential), nothing else.
+    const { document, posts, settle } = runCardScript(html, () => ({ status: 200, body: { ok: true } }));
+    (document.querySelector('[data-outside-needs-unlock]') as unknown as { click: () => void }).click();
+    await settle();
+    expect(posts.map((post) => post.url)).toEqual([DASHBOARD_OUTSIDE_HELP_PATHS.unlock]);
     // A local-grade session has no unlock to offer.
     expect(page(status())).not.toContain('data-outside-unlock');
   });
@@ -1327,7 +1364,7 @@ describe('Standard is open (owner decision 2026-10-10)', () => {
     expect('ask' in backend).toBe(false);
     const html = page({ ...status(), standard: value.standard! });
     expect(html).toContain('data-outside-form="standard"');
-    expect(visibleText(html)).toContain('How should your model prepare a question before it leaves?');
+    expect(visibleText(html)).toContain(W.standard.title);
     expect(html).not.toContain('data-outside-form="ask"');
     expect(html).not.toContain('/dashboard/consult/ask');
     expect(Object.values(DASHBOARD_OUTSIDE_HELP_PATHS)).not.toContain('/dashboard/consult/ask');

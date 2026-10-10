@@ -32243,8 +32243,9 @@ init_vocabulary();
 init_vocabulary();
 
 // src/workers/dashboard/outside-help.ts
-var LIMIT_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid", "note_expired", "daily_cap_reached", "spend_cap_reached"]);
-var SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on"]);
+var CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
+var FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
+var SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
 var TOOL_BLOCKERS = new Map([["daemon_not_found", "zkapi-clientd"], ["tor_not_found", "tor"]]);
 
 // src/workers/dashboard/host-page.ts
