@@ -111,7 +111,7 @@ describe('the jobs: begin → ask → collect', () => {
   test('a sealed question runs the ask lane and the outcome comes back sealed to the asking key only', async () => {
     const h = harness();
     const meta = (await h.jobs.begin())!;
-    expect(meta).toMatchObject({ v: 1, level: 'standard', cleanup: 'light_cleanup', customInstruction: false, maxChars: PRIVATE_QUESTION_MAX_CHARS });
+    expect(meta).toMatchObject({ v: 1, level: 'strict', cleanup: 'as_written', customInstruction: false, maxChars: PRIVATE_QUESTION_MAX_CHARS });
     expect(meta.jobId).toMatch(new RegExp(`^oly2p\\.${INSTALL}\\.[A-Za-z0-9_-]{43}$`));
     expect(meta.askKey).toMatch(/^[A-Za-z0-9_-]{87}$/);
     expect(h.jobs.has(meta.jobId)).toBe(true);
