@@ -71836,6 +71836,7 @@ function boundConsultWriterInput(input) {
   }
   return Object.freeze({
     question: clean(input.question, CONSULT_WRITER_LIMITS.questionChars),
+    ...input.direct && typeof input.feedback === "string" && input.feedback.trim() ? { feedback: clean(input.feedback, CONSULT_WRITER_FEEDBACK_CHARS) } : {},
     answer: clean(input.answer, CONSULT_WRITER_LIMITS.answerChars),
     gaps: Object.freeze((Array.isArray(input.gaps) ? input.gaps : []).map((gap) => clean(gap, CONSULT_WRITER_LIMITS.gapChars)).filter(Boolean).slice(0, CONSULT_WRITER_LIMITS.gaps)),
     ...evidence.length > 0 ? { evidence: Object.freeze(evidence) } : {},
@@ -71878,7 +71879,9 @@ ${CONSULT_STANDARD_REPLY_FORMAT}` }),
   if (bounded.direct) {
     return Object.freeze([
       Object.freeze({ role: "system", content: consultWriterSystem(level, { direct: true }) }),
-      Object.freeze({ role: "user", content: `Question: ${bounded.question}` })
+      Object.freeze({ role: "user", content: bounded.feedback ? `Question: ${bounded.question}
+
+Your previous draft was refused by the privacy check: ${bounded.feedback} Write the questions again without that; use bands and classes of thing instead.` : `Question: ${bounded.question}` })
     ]);
   }
   const user = [
@@ -72193,7 +72196,7 @@ async function runOwnConsultWriter(input, options) {
     return { kind: "declined", promptTokens: 0, ms };
   return { kind: "questions", questions: reply.questions, promptTokens: 0, ms };
 }
-var CONSULT_WRITER_LIMITS, CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.', CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_DIRECT_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_STRICT_RULES, CONSULT_WRITER_STRICT_FORM = "Form: each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary words of the user's language only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings or spelled-out letters. At most three questions, on one subject, at most 600 bytes and 80 words in all; do not reuse wording between them.", CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_WRITER_SYSTEM_DIRECT, CONSULT_STANDARD_RESPONSE_SCHEMA, CONSULT_WRITER_RESPONSE_SCHEMA;
+var CONSULT_WRITER_LIMITS, CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.', CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_DIRECT_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_STRICT_RULES, CONSULT_WRITER_STRICT_FORM = "Form: each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary words of the user's language only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings or spelled-out letters. At most three questions, on one subject, at most 600 bytes and 80 words in all; do not reuse wording between them.", CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_WRITER_SYSTEM_DIRECT, CONSULT_STANDARD_RESPONSE_SCHEMA, CONSULT_WRITER_RESPONSE_SCHEMA, CONSULT_WRITER_FEEDBACK_CHARS = 240;
 var init_consult_writer = __esm(() => {
   init_model_transport();
   init_local_model_policy();
@@ -118240,6 +118243,8 @@ var init_private_answer_resource = __esm(() => {
 // src/core/consult-ask.ts
 var exports_consult_ask = {};
 __export(exports_consult_ask, {
+  consultGateRetryFeedback: () => consultGateRetryFeedback,
+  consultGateRefusedMessage: () => consultGateRefusedMessage,
   consultAskLevelToSettings: () => consultAskLevelToSettings,
   consultAskLevelFromSettings: () => consultAskLevelFromSettings,
   askAnonymously: () => askAnonymously,
@@ -118253,6 +118258,18 @@ function consultAskLevelToSettings(level) {
 }
 function consultAskLevelFromSettings(level) {
   return level === "general" ? "strict" : "standard";
+}
+function consultGateRetryFeedback(reasons) {
+  if (reasons.length === 0 || !reasons.every((reason) => CONSULT_GATE_RETRY_REASONS.has(reason)))
+    return;
+  const kinds = [...new Set(reasons.map((reason) => CONSULT_GATE_CARRIED[reason]))];
+  return `it kept ${kinds.join(" and ")} from the question.`;
+}
+function consultGateRefusedMessage(reasons) {
+  const kinds = [...new Set(reasons.map((reason) => CONSULT_GATE_CARRIED[reason]).filter((kind) => kind !== undefined))];
+  if (kinds.length === 0 || reasons.some((reason) => CONSULT_GATE_CARRIED[reason] === undefined))
+    return CONSULT_ASK_MESSAGES.gateRefused;
+  return CONSULT_ASK_MESSAGES.gateRefusedCarrying.replace("{what}", kinds.join(" and "));
 }
 function askBinding(read) {
   const settings = read.state === "valid" ? read.settings : undefined;
@@ -118370,15 +118387,34 @@ async function askAnonymously(input, deps) {
     questions = written.questions;
     rewritten = true;
   }
+  const context = { entries: [{ kind: "text", text: typed, path: "writerVisible[]", group: -2 }], overflow: false };
+  const gate = (draft) => evaluateConsultRequest([...draft], context, {}, {}, strict ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: "general", askedQuestionTexts: [typed], net: writer ? "thin" : "full" } : { net: "secrets" });
+  let verdict = gate(questions);
+  const feedback = verdict.decision !== "pass" && strict && rewritten && !writer ? consultGateRetryFeedback(verdict.reasons) : undefined;
+  if (feedback !== undefined) {
+    let again;
+    try {
+      again = await deps.prepare({ question: typed, answer: "", gaps: [], direct: true, feedback }, writer, "general", input.signal);
+    } catch {
+      again = { kind: "failed", reason: "request_failed" };
+    }
+    if (input.signal?.aborted)
+      return { ok: false, code: "cancelled", message: CONSULT_ASK_MESSAGES.cancelled };
+    if (again.kind === "questions") {
+      const second = gate(again.questions);
+      if (second.decision === "pass") {
+        questions = again.questions;
+        verdict = second;
+      }
+    }
+  }
   const sent = questions.join(`
 `);
-  const context = { entries: [{ kind: "text", text: typed, path: "writerVisible[]", group: -2 }], overflow: false };
-  const verdict = evaluateConsultRequest([...questions], context, {}, {}, strict ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: "general", askedQuestionTexts: [typed], net: writer ? "thin" : "full" } : { net: "secrets" });
   if (verdict.decision !== "pass") {
     if ([...verdict.reasons].includes("question_too_many_bytes"))
       return { ok: false, code: "question_too_long", message: CONSULT_ASK_MESSAGES.tooManyBytes, sent };
     const secret = [...verdict.reasons].some((reason) => /secret/i.test(reason));
-    return { ok: false, code: secret || !strict ? "secret_detected" : "gate_refused", message: secret || !strict ? CONSULT_ASK_MESSAGES.secret : CONSULT_ASK_MESSAGES.gateRefused, sent };
+    return { ok: false, code: secret || !strict ? "secret_detected" : "gate_refused", message: secret || !strict ? CONSULT_ASK_MESSAGES.secret : consultGateRefusedMessage(verdict.reasons), sent };
   }
   const bound = askBinding(read);
   let stale = false;
@@ -118427,7 +118463,7 @@ async function askAnonymously(input, deps) {
 function validModelId(value) {
   return typeof value === "string" && value.trim() === value && value.length > 0 && value.length <= MAX_MODEL_ID_CHARS2 && !/[\u0000-\u001F\u007F\s]/.test(value);
 }
-var CONSULT_ASK_MAX_CHARS = 4000, CONSULT_ASK_LEVELS, CONSULT_ASK_CLEANUPS, CONSULT_ASK_MESSAGES, MAX_MODEL_ID_CHARS2 = 128;
+var CONSULT_ASK_MAX_CHARS = 4000, CONSULT_ASK_LEVELS, CONSULT_ASK_CLEANUPS, CONSULT_ASK_MESSAGES, CONSULT_GATE_CARRIED, CONSULT_GATE_RETRY_REASONS, MAX_MODEL_ID_CHARS2 = 128;
 var init_consult_ask = __esm(() => {
   init_consult_gate();
   init_consult_settings();
@@ -118441,6 +118477,7 @@ var init_consult_ask = __esm(() => {
     writerFailed: "Your model could not prepare the question, so nothing was sent.",
     secret: "Not sent: the question looks like it contains a password, key or token.",
     gateRefused: "Not sent: at Strict the rewritten question still carried something identifying, so Olympus held it back. Try Standard, or ask more generally.",
+    gateRefusedCarrying: "Not sent: at Strict the rewritten question still carried {what} from your question, so Olympus held it back. Try Standard, or ask more generally.",
     noRoute: "Set up the zkAPI route first.",
     stale: "The anonymous answers settings changed while the question was being prepared, so nothing was sent. Ask again.",
     needsChoice: "Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.",
@@ -118453,6 +118490,18 @@ var init_consult_ask = __esm(() => {
     cancelled: "The request was cancelled before the question was sent; nothing was charged.",
     tooManyBytes: "Not sent: the question is over 8 KiB once encoded. Shorten it."
   });
+  CONSULT_GATE_CARRIED = {
+    snapshot_figure: "an exact figure",
+    snapshot_date: "a date",
+    snapshot_name: "a name",
+    snapshot_hostname: "a web address",
+    snapshot_identifier: "an identifier",
+    encoded_identifier: "an identifier",
+    identifier_shape: "an identifier",
+    owner_question_copy: "wording copied",
+    shared_token_run: "wording copied"
+  };
+  CONSULT_GATE_RETRY_REASONS = new Set(["snapshot_figure", "snapshot_date", "snapshot_name", "snapshot_hostname", "owner_question_copy", "shared_token_run"]);
 });
 
 // src/workers/chatgpt/private-question-contract.ts

@@ -52,7 +52,17 @@ Two levels:
   the question is to be sent, so it always rewrites, and "nothing" is only
   for a question with no general form. The escalation lane keeps the
   "decide first" form (found live 2026-10-10: the escalation prompt with an
-  empty first answer declined a deposit question).
+  empty first answer declined a deposit question). One redraft (added
+  2026-10-10, after the live private-question test): when the built-in
+  writer's draft fails the full gate only for something copied from the
+  typed question (a figure, date, name, web address or wording), the lane
+  asks the writer once more with that finding as feedback ("it kept an exact
+  figure from the question."), and sends the second draft if it passes. The
+  4B writer kept "40%" from a rent question in the first draft and dropped it
+  in the second, 10 s later. Secrets, identifier shapes and bounds never
+  retry; the owner's own writer never does (its thin net passes figures). A
+  refusal names the kind of thing carried, never the value, since the
+  message also reaches the calling agent through `ask_anonymously`.
 
 ### Standard is open: the user's choice (owner decision, 2026-10-10)
 
