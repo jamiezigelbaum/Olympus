@@ -110,7 +110,8 @@ export interface RemoteOAuthStore {
     tokens: IssuedOAuthTokens;
   };
   verifyAccessToken(token: string, resource: string): OAuthAccessTokenCheck;
-  refresh(input: { refreshToken: string; clientId: string; resource: string }): OAuthRefreshResult;
+  /** `resource`: the resource the refreshed grant must be bound to, or any of several (the grant keeps its own). */
+  refresh(input: { refreshToken: string; clientId: string; resource: string | readonly string[] }): OAuthRefreshResult;
   /** RFC 7009: an access token dies alone; a refresh token takes its grant with it. */
   revokeToken(token: string): void;
   revokeGrant(connectionId: string): void;
@@ -372,7 +373,8 @@ export function createRemoteOAuthStore(
         }
         if (Date.parse(row.expires_at) <= at.getTime()) return { ok: false, reason: 'expired' };
         if (row.client_id !== input.clientId) return { ok: false, reason: 'client_mismatch' };
-        if (row.resource !== input.resource) return { ok: false, reason: 'wrong_audience' };
+        const audiences: readonly string[] = typeof input.resource === 'string' ? [input.resource] : input.resource;
+        if (!audiences.includes(row.resource)) return { ok: false, reason: 'wrong_audience' };
         db.query('UPDATE remote_oauth_tokens SET used_at = ? WHERE token_hash = ?').run(at.toISOString(), row.token_hash);
         // The previous access token retires with its refresh token.
         db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ? AND kind = 'access'").run(row.connection_id);

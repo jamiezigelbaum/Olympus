@@ -29,6 +29,11 @@
  *
  * Routes (exact paths; everything else stays behind the worker bearer):
  * - `GET /.well-known/oauth-protected-resource[/mcp]`  RFC 9728 metadata
+ * - `GET /.well-known/oauth-protected-resource/openai/mcp`  the same for the
+ *   plugin directory's endpoint, its own protected resource
+ *   (connect-relay/shared/directory-tools.ts). Authorization asks for one
+ *   resource (RFC 8707 `resource`; `/mcp` when omitted) and the grant's
+ *   tokens open only that one.
  * - `GET /.well-known/oauth-authorization-server`      RFC 8414 metadata
  * - `GET|POST /connect/authorize`  approval page; code + PKCE S256 + RFC 9207 `iss`
  * - `POST /connect/token`          authorization_code and rotating refresh_token
@@ -56,7 +61,16 @@ import { carriesRelayMarker } from '../../core/remote-access.ts';
 import { isLoopbackAddress, requestPeerAddress } from '../../core/request-peer.ts';
 import type { RemoteConnectionStore } from '../../core/remote-connections.ts';
 import { normalizePairingCode } from '../../core/remote-oauth-store.ts';
-import { currentRemotePublicUrls, isConfiguredResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../../core/remote-public-url.ts';
+import type { McpSurface } from '../../../connect-relay/shared/directory-tools.ts';
+import {
+  configuredResources,
+  currentRemotePublicUrls,
+  matchConfiguredResource,
+  remoteMcpResource,
+  REMOTE_DIRECTORY_MCP_RESOURCE_PATH,
+  type RemotePublicUrls,
+  type RemotePublicUrlsSource,
+} from '../../core/remote-public-url.ts';
 import { isClientIdMetadataUrl, pinnedClient } from './pinned-clients.ts';
 import { readBoundedRequestText } from '../remote-request-body.ts';
 import { renderConsentErrorPage, renderConsentPage, renderDemoSignInPage, renderLoopbackConsentPage } from './consent-page.ts';
@@ -66,6 +80,7 @@ import { isAcceptableRedirectUri, isLoopbackRedirectUri, redirectHost, redirectU
 export const REMOTE_OAUTH_PATHS = {
   protectedResource: '/.well-known/oauth-protected-resource',
   protectedResourceMcp: '/.well-known/oauth-protected-resource/mcp',
+  protectedResourceDirectoryMcp: `/.well-known/oauth-protected-resource${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`,
   authorizationServer: '/.well-known/oauth-authorization-server',
   authorize: '/connect/authorize',
   demoAuthorize: '/connect/demo/authorize',
@@ -170,9 +185,9 @@ export function withRemoteOAuthRoutes(
   return (request) => (isRemoteOAuthRequest(request) ? oauth(request) : rest(request));
 }
 
-export function protectedResourceMetadata(urls: RemotePublicUrls): Record<string, unknown> {
+export function protectedResourceMetadata(urls: RemotePublicUrls, surface: McpSurface = 'default'): Record<string, unknown> {
   return {
-    resource: urls.resource,
+    resource: remoteMcpResource(urls, surface).resource,
     authorization_servers: [urls.issuer],
     bearer_methods_supported: ['header'],
     resource_name: 'Olympus',
@@ -291,7 +306,8 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       return fail('invalid_request', 'code_challenge_method must be S256.');
     }
     const requestedResource = single.get('resource');
-    if (requestedResource !== null && !isConfiguredResource(requestedResource, u)) {
+    const resource = requestedResource === null ? u.resource : matchConfiguredResource(requestedResource, u);
+    if (resource === undefined) {
       return fail('invalid_target', 'The requested resource is not this Olympus.');
     }
     sweep();
@@ -302,7 +318,8 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       client,
       redirectUri,
       codeChallenge,
-      resource: u.resource,
+      // The grant's audience: the endpoint asked for (`/mcp` when none was named).
+      resource,
       state,
       csrf,
       attempts: 0,
@@ -479,8 +496,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (!form) return oauthError(400, 'invalid_request', 'The token request must be a form with each parameter once.');
     const grantType = form.get('grant_type');
     const clientId = form.get('client_id');
-    const resource = form.get('resource');
-    if (resource !== null && !isConfiguredResource(resource, u)) {
+    const requestedResource = form.get('resource');
+    const resource = requestedResource === null ? undefined : matchConfiguredResource(requestedResource, u);
+    if (requestedResource !== null && resource === undefined) {
       return oauthError(400, 'invalid_target', 'The requested resource is not this Olympus.');
     }
     if (!clientId) return oauthError(400, 'invalid_request', 'client_id is required.');
@@ -514,6 +532,10 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
         codes.delete(hash);
         return oauthError(400, 'invalid_grant', 'The code verifier does not match the challenge.');
       }
+      // A code is for the resource it was authorized for; naming another one fails (RFC 8707).
+      if (resource !== undefined && resource !== issued.resource) {
+        return oauthError(400, 'invalid_target', 'The code was issued for another resource.');
+      }
       const granted = store.oauth.createGrant({
         clientId,
         displayName: issued.displayName,
@@ -526,7 +548,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (grantType === 'refresh_token') {
       const refreshToken = form.get('refresh_token');
       if (!refreshToken) return oauthError(400, 'invalid_request', 'refresh_token is required.');
-      const result = store.oauth.refresh({ refreshToken, clientId, resource: u.resource });
+      // The grant keeps its own audience: any resource this install serves,
+      // or exactly the one named.
+      const result = store.oauth.refresh({ refreshToken, clientId, resource: resource ?? configuredResources(u) });
       if (!result.ok) return oauthError(400, 'invalid_grant', 'The refresh token is invalid, expired, or revoked.');
       return tokenResponse(result.tokens);
     }
@@ -607,6 +631,10 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
           if (method === 'OPTIONS') return metadataPreflight();
           if (method !== 'GET') return methodNotAllowed('GET, OPTIONS');
           return metadataResponse(protectedResourceMetadata(urls));
+        case REMOTE_OAUTH_PATHS.protectedResourceDirectoryMcp:
+          if (method === 'OPTIONS') return metadataPreflight();
+          if (method !== 'GET') return methodNotAllowed('GET, OPTIONS');
+          return metadataResponse(protectedResourceMetadata(urls, 'directory'));
         case REMOTE_OAUTH_PATHS.authorizationServer:
           if (method === 'OPTIONS') return metadataPreflight();
           if (method !== 'GET') return methodNotAllowed('GET, OPTIONS');

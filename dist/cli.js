@@ -8384,15 +8384,46 @@ var init_source_corpus_registry = __esm(() => {
   PUBLIC_CORPUS_DECLARATIONS = new Map(DEFAULT_SOURCE_CORPORA.map((corpus) => [corpus.corpusId, corpus]));
 });
 
+// connect-relay/shared/directory-tools.ts
+function isDirectoryTool(name) {
+  return typeof name === "string" && DIRECTORY_TOOLS.has(name);
+}
+var DIRECTORY_MCP_PATH = "/openai/mcp", DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
+var init_directory_tools = __esm(() => {
+  DIRECTORY_TOOL_NAMES = Object.freeze([
+    "olympus_dashboard",
+    "olympus_search",
+    "source_index_status",
+    "source_answer",
+    "source_answer_result",
+    "ask_anonymously",
+    "open_private_question",
+    "olympus_connect_source",
+    "olympus_scope_list",
+    "olympus_scope_set",
+    "olympus_disconnect_source",
+    "olympus_model_set",
+    "olympus_model_retry",
+    "olympus_privacy_get",
+    "olympus_privacy_set",
+    "olympus_sync_source"
+  ]);
+  DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
+});
+
 // src/core/remote-public-url.ts
 var exports_remote_public_url = {};
 __export(exports_remote_public_url, {
   resolveRemotePublicUrls: () => resolveRemotePublicUrls,
+  remoteMcpResource: () => remoteMcpResource,
   parseRemotePublicBaseUrl: () => parseRemotePublicBaseUrl,
+  matchConfiguredResource: () => matchConfiguredResource,
   isConfiguredResource: () => isConfiguredResource,
   currentRemotePublicUrls: () => currentRemotePublicUrls,
+  configuredResources: () => configuredResources,
   REMOTE_PUBLIC_BASE_URL_ENV: () => REMOTE_PUBLIC_BASE_URL_ENV,
-  REMOTE_MCP_RESOURCE_PATH: () => REMOTE_MCP_RESOURCE_PATH
+  REMOTE_MCP_RESOURCE_PATH: () => REMOTE_MCP_RESOURCE_PATH,
+  REMOTE_DIRECTORY_MCP_RESOURCE_PATH: () => REMOTE_DIRECTORY_MCP_RESOURCE_PATH
 });
 function currentRemotePublicUrls(source) {
   return typeof source === "function" ? source() : source;
@@ -8437,20 +8468,37 @@ function parseRemotePublicBaseUrl(value, installId) {
 function resolveRemotePublicUrls(env = process.env) {
   return parseRemotePublicBaseUrl(env[REMOTE_PUBLIC_BASE_URL_ENV]);
 }
-function isConfiguredResource(value, urls) {
+function remoteMcpResource(urls, surface) {
+  if (surface === "default")
+    return { resource: urls.resource, protectedResourceMetadataUrl: urls.protectedResourceMetadataUrl };
+  return {
+    resource: `${urls.origin}${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`,
+    protectedResourceMetadataUrl: `${urls.origin}/.well-known/oauth-protected-resource${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`
+  };
+}
+function configuredResources(urls) {
+  return [urls.resource, remoteMcpResource(urls, "directory").resource];
+}
+function matchConfiguredResource(value, urls) {
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
-    return false;
+    return;
   }
   if (parsed.username || parsed.password || parsed.search || parsed.hash || value.includes("#"))
-    return false;
+    return;
   const path = parsed.pathname.length > 1 ? parsed.pathname.replace(/\/$/, "") : parsed.pathname;
-  return `${parsed.origin}${path}` === urls.resource;
+  const normalized = `${parsed.origin}${path}`;
+  return configuredResources(urls).find((resource) => resource === normalized);
 }
-var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
+function isConfiguredResource(value, urls) {
+  return matchConfiguredResource(value, urls) !== undefined;
+}
+var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", REMOTE_DIRECTORY_MCP_RESOURCE_PATH, LOOPBACK_HOSTNAMES;
 var init_remote_public_url = __esm(() => {
+  init_directory_tools();
+  REMOTE_DIRECTORY_MCP_RESOURCE_PATH = DIRECTORY_MCP_PATH;
   LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
@@ -11696,7 +11744,8 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
           return { ok: false, reason: "expired" };
         if (row.client_id !== input.clientId)
           return { ok: false, reason: "client_mismatch" };
-        if (row.resource !== input.resource)
+        const audiences = typeof input.resource === "string" ? [input.resource] : input.resource;
+        if (!audiences.includes(row.resource))
           return { ok: false, reason: "wrong_audience" };
         db.query("UPDATE remote_oauth_tokens SET used_at = ? WHERE token_hash = ?").run(at.toISOString(), row.token_hash);
         db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ? AND kind = 'access'").run(row.connection_id);
@@ -88101,8 +88150,9 @@ function forwardResponseHeaders(headers) {
 }
 var RELAY_HEADER = "x-olympus-relay", FORWARDED_PATHS, BROWSER_GET_PATHS, POST_PATH_PATTERNS, DEMO_AUTHORIZE_PATH = "/connect/demo/authorize", FORWARDED_METHODS, HOP_BY_HOP, UNTRUSTED;
 var init_forward = __esm(() => {
+  init_directory_tools();
   init_private_answer();
-  FORWARDED_PATHS = ["/mcp", "/connect/token", "/connect/revoke"];
+  FORWARDED_PATHS = ["/mcp", DIRECTORY_MCP_PATH, "/connect/token", "/connect/revoke"];
   BROWSER_GET_PATHS = [
     /^\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/,
     /^\/oauth\/callback\/(gmail|google-drive|dropbox)$/
@@ -123596,6 +123646,26 @@ var init_mcp_surface = __esm(() => {
   CHATGPT_RESOURCES = [DASHBOARD_RESOURCE, PRIVATE_ANSWER_RESOURCE, PRIVATE_QUESTION_RESOURCE];
 });
 
+// src/workers/chatgpt/directory-surface.ts
+function createChatGptDirectoryMcpServer(makeOperationContext, options, makeDetachedContext, allowed = isDirectoryTool) {
+  const server = createChatGptMcpServer(makeOperationContext, options, makeDetachedContext);
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: listChatGptTools(makeOperationContext(), options).filter((tool) => allowed(tool.name))
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    if (!allowed(request.params.name))
+      return errorToolResult(new ChatGptSurfaceError("unknown_tool"));
+    return callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal, makeDetachedContext);
+  });
+  return server;
+}
+var init_directory_surface = __esm(() => {
+  init_types2();
+  init_directory_tools();
+  init_mcp_surface();
+  init_response_builder();
+});
+
 // src/workers/remote-request-body.ts
 async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BODY_BYTES, options = {}) {
   const declared = request.headers.get("Content-Length");
@@ -123670,6 +123740,7 @@ __export(exports_remote_mcp, {
   withRemoteMcpRoute: () => withRemoteMcpRoute,
   unauthorized: () => unauthorized,
   remoteOperationCaller: () => remoteOperationCaller,
+  remoteMcpSurface: () => remoteMcpSurface,
   lazyRemoteConnectionStore: () => lazyRemoteConnectionStore,
   jsonResponse: () => jsonResponse,
   isRemoteMcpRequest: () => isRemoteMcpRequest,
@@ -123677,12 +123748,20 @@ __export(exports_remote_mcp, {
   createInProcessOperationContext: () => createInProcessOperationContext,
   bearerToken: () => bearerToken,
   authenticateRemoteRequest: () => authenticateRemoteRequest,
-  REMOTE_MCP_PATH: () => REMOTE_MCP_PATH
+  REMOTE_MCP_PATH: () => REMOTE_MCP_PATH,
+  REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH
 });
 import { existsSync as existsSync53 } from "node:fs";
 function isRemoteMcpRequest(request) {
+  return remoteMcpSurface(request) !== undefined;
+}
+function remoteMcpSurface(request) {
   const { pathname } = new URL(request.url);
-  return pathname === REMOTE_MCP_PATH;
+  if (pathname === REMOTE_MCP_PATH)
+    return "default";
+  if (pathname === REMOTE_DIRECTORY_MCP_PATH)
+    return "directory";
+  return;
 }
 function withRemoteMcpRoute(remoteMcp, rest) {
   return (request) => isRemoteMcpRequest(request) ? remoteMcp(request) : rest(request);
@@ -123690,13 +123769,14 @@ function withRemoteMcpRoute(remoteMcp, rest) {
 function createRemoteMcpHandler(options) {
   const isRelayed = options.isRelayed ?? isRelayedRequest;
   return async (request) => {
-    const verification = authenticateRemoteRequest(request, options);
+    const surface = remoteMcpSurface(request) ?? "default";
+    const verification = authenticateRemoteRequest(request, options, surface);
     if (!verification.ok)
       return verification.response;
-    const response = await serveAuthenticated(request, verification);
+    const response = await serveAuthenticated(request, verification, surface);
     return isRelayed(request) ? markAuthenticated(response) : response;
   };
-  async function serveAuthenticated(request, verification) {
+  async function serveAuthenticated(request, verification, surface) {
     if (request.method !== "POST") {
       return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "POST" });
     }
@@ -123711,7 +123791,10 @@ function createRemoteMcpHandler(options) {
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
     const chatgpt = options.chatgpt?.servesRequest(request, verification.connection) ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true } : undefined;
-    const server = chatgpt ? createChatGptMcpServer(() => ctx, chatgpt, () => options.makeOperationContext(caller, new AbortController().signal)) : createOlympusMcpServer("remote", () => ctx);
+    if (surface === "directory" && !chatgpt)
+      return jsonResponse(404, { error: "not_found" });
+    const detached = () => options.makeOperationContext(caller, new AbortController().signal);
+    const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -123731,14 +123814,15 @@ function markAuthenticated(response) {
   headers.set(AUTHENTICATED_RESPONSE_HEADER, "1");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
-function authenticateRemoteRequest(request, options) {
+function authenticateRemoteRequest(request, options, surface = "default") {
   const urls = currentRemotePublicUrls(options.publicUrls);
-  const refuse3 = (error2) => ({ ok: false, response: unauthorized(error2, urls) });
+  const endpoint2 = urls ? remoteMcpResource(urls, surface) : undefined;
+  const refuse3 = (error2) => ({ ok: false, response: unauthorized(error2, urls, endpoint2?.protectedResourceMetadataUrl) });
   const token = bearerToken(request.headers.get("Authorization"));
   if (token === undefined)
     return refuse3();
   const oauthToken = urls !== undefined && isWellFormedOAuthAccessToken(token);
-  if (!oauthToken && !isWellFormedRemoteConnectionToken(token))
+  if (!oauthToken && (surface === "directory" || !isWellFormedRemoteConnectionToken(token)))
     return refuse3("invalid_token");
   let store;
   try {
@@ -123749,7 +123833,7 @@ function authenticateRemoteRequest(request, options) {
   if (!store)
     return refuse3("invalid_token");
   if (oauthToken) {
-    const verification2 = store.oauth.verifyAccessToken(token, urls.resource);
+    const verification2 = store.oauth.verifyAccessToken(token, endpoint2.resource);
     return verification2.ok ? { ok: true, connection: verification2.connection } : refuse3("invalid_token");
   }
   const verification = store.verifyToken(token);
@@ -123824,10 +123908,10 @@ function bearerToken(header) {
   const match = /^Bearer ([^\s]+)$/i.exec(header.trim());
   return match?.[1];
 }
-function unauthorized(error2, urls) {
+function unauthorized(error2, urls, protectedResourceMetadataUrl = urls?.protectedResourceMetadataUrl) {
   const parts = ['realm="olympus"'];
   if (urls)
-    parts.push(`resource_metadata="${urls.protectedResourceMetadataUrl}"`);
+    parts.push(`resource_metadata="${protectedResourceMetadataUrl}"`);
   if (error2) {
     parts.push(`error="${error2}"`, 'error_description="The connection token is not valid or has been revoked."');
   }
@@ -123840,7 +123924,7 @@ function jsonResponse(status, body, headers = {}) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
 }
-var REMOTE_MCP_PATH = "/mcp", IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1";
+var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1";
 var init_remote_mcp = __esm(() => {
   init_webStandardStreamableHttp();
   init_delphi();
@@ -123854,8 +123938,11 @@ var init_remote_mcp = __esm(() => {
   init_source_answer_jobs();
   init_server4();
   init_mcp_surface();
+  init_directory_surface();
+  init_directory_tools();
   init_remote_request_body();
   init_tokens();
+  REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
 });
 
 // src/workers/remote-oauth/demo-consent.ts
@@ -123996,9 +124083,9 @@ function isRemoteOAuthRequest(request) {
 function withRemoteOAuthRoutes(oauth, rest) {
   return (request) => isRemoteOAuthRequest(request) ? oauth(request) : rest(request);
 }
-function protectedResourceMetadata(urls) {
+function protectedResourceMetadata(urls, surface = "default") {
   return {
-    resource: urls.resource,
+    resource: remoteMcpResource(urls, surface).resource,
     authorization_servers: [urls.issuer],
     bearer_methods_supported: ["header"],
     resource_name: "Olympus"
@@ -124102,7 +124189,8 @@ function createRemoteOAuthHandler(options) {
       return fail("invalid_request", "code_challenge_method must be S256.");
     }
     const requestedResource = single.get("resource");
-    if (requestedResource !== null && !isConfiguredResource(requestedResource, u)) {
+    const resource = requestedResource === null ? u.resource : matchConfiguredResource(requestedResource, u);
+    if (resource === undefined) {
       return fail("invalid_target", "The requested resource is not this Olympus.");
     }
     sweep();
@@ -124113,7 +124201,7 @@ function createRemoteOAuthHandler(options) {
       client,
       redirectUri,
       codeChallenge,
-      resource: u.resource,
+      resource,
       state,
       csrf,
       attempts: 0,
@@ -124276,8 +124364,9 @@ function createRemoteOAuthHandler(options) {
       return oauthError(400, "invalid_request", "The token request must be a form with each parameter once.");
     const grantType = form.get("grant_type");
     const clientId = form.get("client_id");
-    const resource = form.get("resource");
-    if (resource !== null && !isConfiguredResource(resource, u)) {
+    const requestedResource = form.get("resource");
+    const resource = requestedResource === null ? undefined : matchConfiguredResource(requestedResource, u);
+    if (requestedResource !== null && resource === undefined) {
       return oauthError(400, "invalid_target", "The requested resource is not this Olympus.");
     }
     if (!clientId)
@@ -124311,6 +124400,9 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
+      if (resource !== undefined && resource !== issued.resource) {
+        return oauthError(400, "invalid_target", "The code was issued for another resource.");
+      }
       const granted = store.oauth.createGrant({
         clientId,
         displayName: issued.displayName,
@@ -124324,7 +124416,7 @@ function createRemoteOAuthHandler(options) {
       const refreshToken = form.get("refresh_token");
       if (!refreshToken)
         return oauthError(400, "invalid_request", "refresh_token is required.");
-      const result = store.oauth.refresh({ refreshToken, clientId, resource: u.resource });
+      const result = store.oauth.refresh({ refreshToken, clientId, resource: resource ?? configuredResources(u) });
       if (!result.ok)
         return oauthError(400, "invalid_grant", "The refresh token is invalid, expired, or revoked.");
       return tokenResponse(result.tokens);
@@ -124405,6 +124497,12 @@ function createRemoteOAuthHandler(options) {
           if (method !== "GET")
             return methodNotAllowed("GET, OPTIONS");
           return metadataResponse(protectedResourceMetadata(urls));
+        case REMOTE_OAUTH_PATHS.protectedResourceDirectoryMcp:
+          if (method === "OPTIONS")
+            return metadataPreflight();
+          if (method !== "GET")
+            return methodNotAllowed("GET, OPTIONS");
+          return metadataResponse(protectedResourceMetadata(urls, "directory"));
         case REMOTE_OAUTH_PATHS.authorizationServer:
           if (method === "OPTIONS")
             return metadataPreflight();
@@ -124635,6 +124733,7 @@ var init_handler = __esm(() => {
   REMOTE_OAUTH_PATHS = {
     protectedResource: "/.well-known/oauth-protected-resource",
     protectedResourceMcp: "/.well-known/oauth-protected-resource/mcp",
+    protectedResourceDirectoryMcp: `/.well-known/oauth-protected-resource${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`,
     authorizationServer: "/.well-known/oauth-authorization-server",
     authorize: "/connect/authorize",
     demoAuthorize: "/connect/demo/authorize",
