@@ -60496,7 +60496,8 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
   if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > effective.maxQuestionBytes) {
     return refuse2(["question_too_many_bytes"]);
   }
-  const unnamed = options?.level === "unnamed";
+  const thin = options?.net === "thin";
+  const unnamed = thin || options?.level === "unnamed";
   const reasons = new Set;
   let tokenCount = 0;
   for (const question of subQuestions) {
@@ -60509,8 +60510,9 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
     const nfkc = question.normalize("NFKC");
     for (const reason of scriptReasons(nfkc))
       reasons.add(reason);
-    for (const reason of unnamed ? questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES) : questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION))
-      reasons.add(reason);
+    if (!thin)
+      for (const reason of unnamed ? questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES) : questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION))
+        reasons.add(reason);
     if (hasEncodedBlob(nfkc))
       reasons.add("encoded_blob");
     if (secretLabelsInText(question).length > 0 || secretLabelsInText(nfkc).length > 0)
@@ -60519,7 +60521,7 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
       reasons.add("identifier_shape");
     if (hasTechnicalFingerprint(nfkc))
       reasons.add("technical_fingerprint");
-    if (hasUnknownWord(nfkc, vocabulary)) {
+    if (!thin && hasUnknownWord(nfkc, vocabulary)) {
       reasons.add("unknown_word");
       if (requestedPackNotLoaded(options ?? {}))
         reasons.add("vocabulary_unavailable");
@@ -60543,15 +60545,26 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
   if (copySource !== undefined) {
     if (!askedTextsValid(copySource))
       return refuse2(["writer_context_malformed"]);
-    if (copiesAskedQuestion(model, copySource))
+    if (!thin && copiesAskedQuestion(model, copySource))
       reasons.add("owner_question_copy");
   }
   const asked = unnamed ? askedWords(options?.askedQuestionTexts) : undefined;
-  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked))
+  const writtenAsNames = thin ? namesWrittenIn(subQuestions) : undefined;
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, writtenAsNames))
     reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent))
     reasons.add(reason);
   return reasons.size > 0 ? refuse2([...reasons]) : { decision: "pass", reasons: [] };
+}
+function namesWrittenIn(subQuestions) {
+  const names = new Set;
+  for (const question of subQuestions) {
+    forEachToken(foldText(question.normalize("NFKC")), (token) => {
+      if (token.capitalized && !FUNCTION_WORDS.has(token.norm) && !NAME_STOPWORDS.has(token.norm))
+        names.add(token.norm);
+    });
+  }
+  return names;
 }
 function refuse2(reasons) {
   return Object.freeze({ decision: "refuse", reasons: Object.freeze([...new Set(reasons)]) });
@@ -61286,13 +61299,17 @@ function runMatcher(question, minLength, minContent, onHit) {
     }
   };
 }
-function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
+function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, writtenAsNames) {
+  const thin = writtenAsNames !== undefined;
+  const plainWord = (token) => thin && ordinaryWord !== undefined && ordinaryWord(token) && !writtenAsNames.has(token);
   const reasons = new Set;
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
   const contentTokens = model.tokens.filter(isContent);
   const copiedWords = unnamed ? new Set : undefined;
   let copyFromQuestion = false;
   const copyHit = (words) => {
+    if (thin)
+      return;
     if (!copiedWords || copyFromQuestion) {
       reasons.add("shared_token_run");
       return;
@@ -61568,6 +61585,8 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
     reasons.add(source === "decoded" ? "encoded_identifier" : "snapshot_name");
   };
   for (const pair of pairCandidates.values()) {
+    if (plainWord(pair.left) && plainWord(pair.right))
+      continue;
     if (!pair.midSentence) {
       const namelike = (part) => statOf(part).capitalized >= statOf(part).lower;
       if (!namelike(pair.left) && !namelike(pair.right))
@@ -61582,12 +61601,14 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
       continue;
     for (const part of [pair.left, pair.right]) {
       const partSource = model.forms.get(part);
-      if (partSource && part.length >= 3 && neverLower(part) && !askedToken(part))
+      if (partSource && part.length >= 3 && neverLower(part) && !askedToken(part) && !plainWord(part))
         nameHit(partSource);
     }
   }
   for (const [token, single] of singleCandidates) {
     if (!single.strongLabel && !copiedWords?.has(token) && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0)
+      continue;
+    if (plainWord(token))
       continue;
     if (askedToken(token))
       continue;
@@ -61601,7 +61622,7 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
       nameHit(single.source);
   }
   for (const [token, source] of componentCandidates)
-    if (statOf(token).lowerAnywhere === 0 && !askedToken(token))
+    if (statOf(token).lowerAnywhere === 0 && !askedToken(token) && !plainWord(token))
       identifierHit(source);
   return reasons;
 }
@@ -71905,7 +71926,8 @@ async function runConsultWriterCheck(options) {
         languages: [...options.languages ?? ["en"]],
         level: options.level,
         askedQuestionTexts: [entry.userQuestion],
-        askedQuestionFullTexts: [entry.userQuestion]
+        askedQuestionFullTexts: [entry.userQuestion],
+        net: options.net ?? "full"
       });
       gate = verdict.decision;
       gateReasons = [...verdict.reasons];
@@ -71942,6 +71964,7 @@ async function checkOwnConsultWriter(input) {
   return runConsultWriterCheck({
     level: input.level,
     withEvidence: true,
+    net: "thin",
     ...input.languages ? { languages: input.languages } : {},
     ...input.onCase ? { onCase: input.onCase } : {},
     ...input.signal ? { signal: input.signal } : {},
@@ -123312,11 +123335,12 @@ function createConsultOrchestrator(options) {
       record4(jobId, "superseded", startedAt, "answer_busy");
       return;
     }
+    const own = ownWriter();
     const bounded = boundConsultWriterInput({
       question: held.question,
       answer: held.answer,
       gaps: held.gaps,
-      ...ownWriter() ? { evidence: consultWriterEvidence(held.pack) } : {}
+      ...own ? { evidence: consultWriterEvidence(held.pack) } : {}
     });
     const sessionAbort = new AbortController;
     const openDeadlineMs = Math.max(1000, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
@@ -123363,7 +123387,8 @@ function createConsultOrchestrator(options) {
       ...consultGateOptionsFromSettings(settingsAtGate.settings),
       level: scheduled.policy.level,
       askedQuestionTexts: [bounded.question],
-      askedQuestionFullTexts: [current.question]
+      askedQuestionFullTexts: [current.question],
+      net: own ? "thin" : "full"
     });
     if (verdict.decision !== "pass") {
       await closeSession();
