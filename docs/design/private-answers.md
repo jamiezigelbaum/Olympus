@@ -146,7 +146,7 @@ Decisions:
    Both use the same rewritten rules (consult-writer-instructions.md): Strict
    keeps Vitalik's rules (the skill file in ethereum/zkapi PR #16), Standard
    is the more revealing option. Strict was measured with and without the
-   evidence and keeps it (16 of 16 passed with, 15 of 16 without).
+   evidence and keeps it (it passed more often with it on Delphi).
 4. **What escalation is for.** A question complex enough that a stronger
    model's reasoning or outside knowledge helps, on top of what the evidence
    shows. zkAPI never sees the documents, so it cannot fix retrieval or find
@@ -177,11 +177,14 @@ Decisions:
    amounts, account, phone and ID numbers, addresses, mail addresses, handles,
    links and secrets, with the existing detectors
    (`ConsultGateOptions.net = 'thin'`). Dropped for it: the vocabulary list,
-   the question-structure limits and every copy rule; a dictionary word the
-   snapshot capitalizes or labels ("Patient:", "Defined benefit scheme") is
-   the topic, unless the request itself writes it capitalized. Every labelled
-   leak of the unnamed eval set stays refused. The built-in 4B writer keeps
-   the full gate unchanged.
+   the question-structure limits and every copy rule. Names are judged from
+   the snapshot alone, as at the Standard level, however the request writes
+   them (a request that lowercases a snapshot name is refused; review of
+   PR #209). Every labelled leak of the unnamed eval set stays refused. The
+   writer is bound to the job when it is created: that writer runs, gets the
+   evidence and selects the net, and a consult.json that names another writer
+   (or none, or cannot be read) by the send refuses it. The built-in 4B
+   writer keeps the full gate unchanged.
 8. **Wording.** "Paid and sent anonymously, with identifiers removed." Never
    "unlinkable": the provider reads the question, and an unusual situation can
    still hint at who asked.

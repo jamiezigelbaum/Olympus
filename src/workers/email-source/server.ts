@@ -4515,7 +4515,6 @@ export async function main(): Promise<void> {
   {
     const { createConsultOrchestrator, resolveZkapiConsultTransport } = await import('../chatgpt/consult-orchestrator.ts');
     const { CONSULT_WRITER_LIMITS, createConsultWriterServer, defaultConsultMemoryProbe, runConsultWriter, runOwnConsultWriter } = await import('../../core/consult-writer.ts');
-    const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS } = await import('../../core/consult-settings.ts');
     const { openZkapiConsultSession } = await import('../../core/consult-transport-zkapi.ts');
     type WriterServer = import('../../core/consult-writer.ts').ConsultWriterServer;
     // The writer's own llama-server on the answer model's verified files,
@@ -4547,19 +4546,17 @@ export async function main(): Promise<void> {
         { env: process.env, ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}) },
       );
     };
-    // The owner's own writer model (consult.json `writer`), read at every
-    // use; absent, the built-in model writes. Its key is resolved per call
-    // from the same environment as the route's and never logged.
-    const ownWriterChoice = () => {
-      const read = readConsultSettings();
-      return read.state === 'valid' ? read.settings.writer : undefined;
-    };
+    // The owner's own writer model (consult.json `writer`) arrives bound to
+    // the job (control.writer; null: the built-in model writes), never reread
+    // here, so the writer that runs is the one whose gate net applies. Its key
+    // is resolved per call from the same environment as the route's and
+    // never logged.
     consultOrchestrator = createConsultOrchestrator({
       jobs: privateAnswers,
       eligible: privateEvidenceEligible,
       settings: () => readConsultSettings(),
       writer: (input, control) => {
-        const choice = ownWriterChoice();
+        const choice = control.writer;
         if (choice) {
           let apiKey: string | undefined;
           try {
@@ -4584,11 +4581,7 @@ export async function main(): Promise<void> {
           level: control.level,
         });
       },
-      ownWriter: () => ownWriterChoice() !== undefined,
-      writerDeadlineMs: () => {
-        const choice = ownWriterChoice();
-        return choice ? choice.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS : CONSULT_WRITER_LIMITS.deadlineMs;
-      },
+      writerDeadlineMs: CONSULT_WRITER_LIMITS.deadlineMs,
       openSession: async (control) => {
         const route = transport();
         if (!route) {

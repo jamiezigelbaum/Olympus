@@ -41,13 +41,6 @@ describe('the thin net', () => {
     expect(judge(medication, unusual, 'general', 'thin').decision).toBe('pass');
   });
 
-  test('a dictionary word the snapshot capitalizes or labels is the topic, not a name, unless the request writes it as one', () => {
-    const pension = byId('divorce-pension');
-    const question = ['In a divorce, how do courts usually split a defined benefit pension partly built before the marriage?'];
-    expect(judge(pension, question, 'unnamed').decision).toBe('refuse');
-    expect(judge(pension, question, 'unnamed', 'thin')).toEqual({ decision: 'pass', reasons: [] });
-  });
-
   test('every labelled leak of the unnamed set stays refused: names, amounts, places, identifiers, dates, titles', () => {
     let leaks = 0;
     for (const entry of UNNAMED_CASES) {
@@ -63,7 +56,7 @@ describe('the thin net', () => {
     expect(leaks).toBeGreaterThan(60);
   });
 
-  test('a snapshot name that is also a dictionary word stays refused wherever the request writes it, sentence start included', () => {
+  test('a snapshot name that is also a dictionary word stays refused however the request writes it: any position, any case', () => {
     const entry: Case = {
       id: 'builder',
       userQuestion: 'Is my builder allowed to charge extra?',
@@ -73,10 +66,31 @@ describe('the thin net', () => {
       gaps: ['Whether a builder may raise a quoted price.'],
       canaries: ['Grace'],
     };
-    for (const question of ['Grace raised a quoted price after starting the work. Is that allowed?', 'Can a builder called Grace raise a quoted price after starting the work?']) {
-      expect(judge(entry, [question], 'unnamed', 'thin').reasons).toContain('snapshot_name');
+    // Independent review of PR #209: lowercasing the name must not lift the protection.
+    for (const question of [
+      'Grace raised a quoted price after starting the work. Is that allowed?',
+      'Can a builder called Grace raise a quoted price after starting the work?',
+      'Can a builder called grace raise a quoted price after starting the work?',
+      'grace raised a quoted price after starting the work. Is that allowed?',
+    ]) {
+      for (const level of ['general', 'unnamed'] as const) expect(judge(entry, [question], level, 'thin').reasons).toContain('snapshot_name');
     }
     expect(judge(entry, ['Can a builder raise a quoted price after starting the work?'], 'unnamed', 'thin').decision).toBe('pass');
+  });
+
+  test('labelled names and name pairs stay refused in lower case too', () => {
+    const entry: Case = {
+      id: 'reporter',
+      userQuestion: 'Can my neighbour report me for noise?',
+      titles: ['Complaint'],
+      documents: ['Reporter: Hope. The complaint was filed by Rose Marsh about music after midnight.'],
+      answer: 'A neighbour filed a noise complaint about late music.',
+      gaps: ['Whether one complaint can lead to a noise abatement notice.'],
+      canaries: ['Hope', 'Rose Marsh'],
+    };
+    for (const question of ['Can hope report late music to the council?', 'Can rose marsh report late music to the council?']) {
+      expect(judge(entry, [question], 'unnamed', 'thin').decision).toBe('refuse');
+    }
   });
 
   test('hard identifiers on sight stay refused: mail addresses, links, digit runs longer than eight', () => {

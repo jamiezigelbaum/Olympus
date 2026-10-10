@@ -318,7 +318,7 @@ describe('per-job binding', () => {
     const location = { env: { HOME: home } };
     placeSettings(home, VALID);
     const policy = bindConsultJobPolicy(readConsultSettings(location));
-    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false, level: 'unnamed' });
+    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false, level: 'unnamed', writer: null });
     expect(Object.isFrozen(policy) && Object.isFrozen(policy.languages) && Object.isFrozen(policy.domains)).toBe(true);
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: true });
 
@@ -329,6 +329,10 @@ describe('per-job binding', () => {
 
     // A different revision is stale even when it also turned outside help off.
     placeSettings(home, { ...VALID, revision: 5, enabled: false });
+    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
+
+    // A writer named by hand at the bound revision is stale too: the writer selects the gate net.
+    placeSettings(home, { ...VALID, writer: { baseUrl: 'http://192.168.1.20:8090/v1', model: 'home/model' } });
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
 
     // Off at the bound revision (not something a compare-and-swap writer produces) is still off.

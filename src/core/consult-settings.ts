@@ -372,6 +372,20 @@ export interface ConsultJobPolicy {
   readonly strict: boolean;
   /** What the writer may send for this job; a change since binding refuses at final authorization. */
   readonly level: ConsultLevel;
+  /**
+   * The owner's own writer as bound at job creation (consult.json `writer`),
+   * or null for the built-in writer. The consult runs this writer, gives it
+   * evidence and applies its gate net from this one value; a different writer
+   * in the file at final authorization refuses (independent review of
+   * PR #209: the writer and the gate net must never disagree).
+   */
+  readonly writer: ConsultWriterChoice | null;
+}
+
+/** A writer's identity for comparison: everything that selects where and how the question is written. */
+export function consultWriterIdentity(choice: ConsultWriterChoice | null | undefined): string {
+  if (!choice) return 'built-in';
+  return JSON.stringify([choice.baseUrl, choice.model, choice.secretRef ?? null, choice.timeoutMs ?? null]);
 }
 
 export function bindConsultJobPolicy(read: ConsultSettingsRead): ConsultJobPolicy {
@@ -383,6 +397,7 @@ export function bindConsultJobPolicy(read: ConsultSettingsRead): ConsultJobPolic
     domains: Object.freeze({ ...settings.domains }),
     strict: settings.strict,
     level: settings.level,
+    writer: settings.writer ? Object.freeze({ ...settings.writer }) : null,
   });
 }
 
@@ -400,7 +415,8 @@ export type ConsultJobPolicyRecheck =
  * since the job was created, even one that turned outside help off and on
  * again, refuses. A level change always moves the revision through the
  * writer; the level is compared as well so a file edited by hand without a
- * new revision cannot widen what a bound job sends.
+ * new revision cannot widen what a bound job sends, and so is the writer
+ * (consultWriterIdentity), which selects the gate net.
  */
 export function recheckConsultJobPolicy(policy: ConsultJobPolicy, current: ConsultSettingsRead): ConsultJobPolicyRecheck {
   if (!policy.outsideHelp) return { ok: false, reason: 'bound_off' };
@@ -408,6 +424,8 @@ export function recheckConsultJobPolicy(policy: ConsultJobPolicy, current: Consu
   if (current.state === 'invalid') return { ok: false, reason: 'settings_invalid' };
   if (current.settings.revision !== policy.settingsRevision) return { ok: false, reason: 'settings_stale' };
   if (current.settings.level !== policy.level) return { ok: false, reason: 'settings_stale' };
+  // The writer too: a bound job never sends under another writer's gate net.
+  if (consultWriterIdentity(current.settings.writer) !== consultWriterIdentity(policy.writer ?? null)) return { ok: false, reason: 'settings_stale' };
   if (!current.settings.enabled) return { ok: false, reason: 'settings_off' };
   return { ok: true };
 }

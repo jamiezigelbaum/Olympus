@@ -10,7 +10,7 @@
 import { describe, expect, test } from 'bun:test';
 import { privateEvidencePack } from '../src/core/analyst-built-in.ts';
 import { consultWriterContextFromPack, evaluateConsultRequest } from '../src/core/consult-gate.ts';
-import { DEFAULT_CONSULT_SETTINGS, bindConsultJobPolicy, consultGateOptionsFromSettings, type ConsultJobPolicy, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
+import { DEFAULT_CONSULT_SETTINGS, bindConsultJobPolicy, consultGateOptionsFromSettings, recheckConsultJobPolicy, type ConsultJobPolicy, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultReply, ZkapiConsultSession, ZkapiOpenControl, ZkapiOpenSessionResult, ZkapiSendControl } from '../src/core/consult-transport-zkapi.ts';
 import type { ConsultWriterInput, ConsultWriterOutcome } from '../src/core/consult-writer.ts';
 import {
@@ -38,6 +38,9 @@ const OWNER_COPY_QUESTION = 'When does my lease end in practice?';
 const OUTSIDE_TEXT = 'Deposit disputes are usually settled through a scheme or a small claims process.';
 
 const SETTINGS_ON: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true } };
+// The owner's own writer as consult.json names it (harness `ownWriter: true`).
+const OWN_WRITER = Object.freeze({ baseUrl: 'http://192.168.1.20:8090/v1', model: 'home/model', timeoutMs: 180_000 });
+const withOwnWriter = (read: ConsultSettingsRead): ConsultSettingsRead => (read.state === 'valid' ? { ...read, settings: { ...read.settings, writer: OWN_WRITER } } : read);
 const ON: ConsultJobPolicy = bindConsultJobPolicy(SETTINGS_ON);
 const OFF: ConsultJobPolicy = bindConsultJobPolicy({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
 
@@ -76,7 +79,7 @@ interface Harness {
   eligible: { refuse: boolean; hold?: (() => Promise<void>) | undefined };
   route: { available: boolean };
   activity: { busy: boolean };
-  writer: { calls: ConsultWriterInput[]; deadlines: number[]; levels: string[]; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
+  writer: { calls: ConsultWriterInput[]; deadlines: number[]; levels: string[]; choices: Array<unknown>; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
   transport: { opens: ZkapiOpenControl[]; result: 'ok' | 'busy'; sessions: FakeSession[]; beforeAuthorize?: () => Promise<void>; onReply?: () => void; reply: 'reply' | 'failed' };
   logs: string[];
   calls: { n: number; asked: boolean[] };
@@ -93,7 +96,11 @@ function harness(options: {
   writerDeadlineMs?: () => number;
 } = {}): Harness {
   const clock = { now: 1_000_000 };
-  const settings = { read: options.settings ?? SETTINGS_ON };
+  // `ownWriter: true` names the own writer in the file and in the bound policy.
+  const settings = { read: options.ownWriter ? withOwnWriter(options.settings ?? SETTINGS_ON) : options.settings ?? SETTINGS_ON };
+  const policy = options.policy
+    ? (options.ownWriter ? { ...options.policy, writer: OWN_WRITER } : options.policy)
+    : (options.ownWriter ? bindConsultJobPolicy(settings.read) : ON);
   const eligible: Harness['eligible'] = { refuse: false };
   const route = { available: true };
   const activity = { busy: false };
@@ -103,6 +110,7 @@ function harness(options: {
     calls: [],
     deadlines: [],
     levels: [],
+    choices: [],
     kills: [],
     outcome: options.writerOutcome ?? { kind: 'questions', questions: [CLEAN_QUESTION], promptTokens: 900, ms: 10 },
     releases: [],
@@ -126,7 +134,7 @@ function harness(options: {
     log: () => {},
     audit: () => {},
     claimHoldMs: 0,
-    consultPolicy: () => options.policy ?? ON,
+    consultPolicy: () => policy,
     ...(options.followUpWindowMs !== undefined ? { followUpWindowMs: options.followUpWindowMs } : {}),
     onFirstDelivered: (jobId) => orchestrator.onFirstDelivered(jobId),
     onAnswerActivity: () => orchestrator.onFreshAnswer(),
@@ -143,12 +151,12 @@ function harness(options: {
     now: () => clock.now,
     log: (line) => logs.push(line),
     completionTimeoutMs: () => options.completionTimeoutMs ?? 6 * 60_000,
-    ...(options.ownWriter !== undefined ? { ownWriter: () => options.ownWriter === true } : {}),
     ...(options.writerDeadlineMs ? { writerDeadlineMs: options.writerDeadlineMs } : {}),
     writer: async (input, control) => {
       writer.calls.push(input);
       writer.deadlines.push(control.deadlineMs);
       writer.levels.push(control.level);
+      writer.choices.push(control.writer);
       writer.kills.push(control.kill);
       if (writer.hold) await writer.hold();
       if (control.kill.aborted) return { kind: 'killed', reason: 'fresh_answer' };
@@ -890,7 +898,7 @@ describe('the zkAPI route from the sovereignty profiles', () => {
 
 describe('the owner\'s own writer (owner decision 2026-10-10)', () => {
   test('it reads bounded evidence excerpts from the snapshot pack, with its own deadline; the built-in writer never sees evidence', async () => {
-    const own = harness({ ownWriter: true, writerDeadlineMs: () => 180_000 });
+    const own = harness({ ownWriter: true });
     await consult(own);
     expect(own.writer.calls.length).toBe(1);
     const input = own.writer.calls[0]!;
@@ -898,6 +906,7 @@ describe('the owner\'s own writer (owner decision 2026-10-10)', () => {
     expect(input.evidence?.length).toBeGreaterThan(0);
     expect(input.evidence!.join(' ')).toContain('The lease for the flat ends in May');
     expect(own.writer.deadlines).toEqual([180_000]);
+    expect(own.writer.choices).toEqual([OWN_WRITER]);
     // The gate still compares against the whole pack and the send happens as before.
     expect(own.transport.sessions[0]!.sends.map((send) => send.question)).toEqual([CLEAN_QUESTION]);
 
@@ -905,6 +914,7 @@ describe('the owner\'s own writer (owner decision 2026-10-10)', () => {
     await consult(builtIn);
     expect(builtIn.writer.calls).toEqual([{ question: QUESTION, answer: ANSWER, gaps: GAPS }]);
     expect(builtIn.writer.deadlines).toEqual([60_000]);
+    expect(builtIn.writer.choices).toEqual([null]);
   });
 
   test('"these items do not answer" still never escalates, with either writer (owner change 2026-10-10)', async () => {
@@ -927,6 +937,44 @@ describe('the owner\'s own writer (owner decision 2026-10-10)', () => {
     await consult(builtIn);
     expect(builtIn.transport.sessions.flatMap((session) => session.sends)).toEqual([]);
     expect(builtIn.logs.some((line) => line.startsWith('[consult] outcome=gate_refused'))).toBe(true);
+  });
+
+  test('the writer is bound once: a file that names another writer (or none, or cannot be read) by the gate refuses, nothing sent (review of PR #209)', async () => {
+    for (const [label, change] of [
+      ['own writer removed', (read: ConsultSettingsRead): ConsultSettingsRead => {
+        const { writer: _removed, ...rest } = read.settings;
+        return { state: 'valid', settings: rest };
+      }],
+      ['own writer changed', (read: ConsultSettingsRead): ConsultSettingsRead => ({ state: 'valid', settings: { ...read.settings, writer: { ...OWN_WRITER, model: 'other/model' } } })],
+      ['file unreadable', (): ConsultSettingsRead => ({ state: 'invalid', reason: 'unreadable', settings: DEFAULT_CONSULT_SETTINGS })],
+    ] as const) {
+      const h = harness({ ownWriter: true, writerOutcome: { kind: 'questions', questions: [COPIED_QUESTION], promptTokens: 0, ms: 1 } });
+      // Bound with the own writer; the file changes while the writer runs.
+      h.writer.hold = async () => {
+        h.settings.read = change(h.settings.read);
+      };
+      await consult(h);
+      expect({ label, choices: h.writer.choices }).toEqual({ label, choices: [OWN_WRITER] });
+      expect({ label, sends: h.transport.sessions.flatMap((session) => session.sends) }).toEqual({ label, sends: [] });
+      expect({ label, refused: h.logs.some((line) => line.includes('outcome=authorization_refused')) }).toEqual({ label, refused: true });
+    }
+    // The reverse: bound to the built-in writer, a writer added later is not used and the job refuses.
+    const builtIn = harness({ writerOutcome: { kind: 'questions', questions: [CLEAN_QUESTION], promptTokens: 0, ms: 1 } });
+    builtIn.writer.hold = async () => {
+      builtIn.settings.read = withOwnWriter(builtIn.settings.read);
+    };
+    await consult(builtIn);
+    expect(builtIn.writer.choices).toEqual([null]);
+    expect(builtIn.transport.sessions.flatMap((session) => session.sends)).toEqual([]);
+  });
+
+  test('final authorization compares the writer identity', () => {
+    const bound = bindConsultJobPolicy(withOwnWriter(SETTINGS_ON));
+    expect(bound.writer).toEqual(OWN_WRITER);
+    expect(recheckConsultJobPolicy(bound, withOwnWriter(SETTINGS_ON))).toEqual({ ok: true });
+    expect(recheckConsultJobPolicy(bound, SETTINGS_ON)).toEqual({ ok: false, reason: 'settings_stale' });
+    expect(recheckConsultJobPolicy(ON, withOwnWriter(SETTINGS_ON))).toEqual({ ok: false, reason: 'settings_stale' });
+    expect(recheckConsultJobPolicy(ON, SETTINGS_ON)).toEqual({ ok: true });
   });
 
   test('the zkAPI model for ChatGPT questions replaces the route\'s model only when set', () => {

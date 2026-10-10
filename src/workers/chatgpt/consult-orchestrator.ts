@@ -59,9 +59,11 @@ import {
   CONSULT_GATE_MAX_RECENT_CONSULTS,
 } from '../../core/consult-gate.ts';
 import {
+  CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS,
   consultGateOptionsFromSettings,
   recheckConsultJobPolicy,
   type ConsultJobPolicy,
+  type ConsultWriterChoice,
   type ConsultLevel,
   type ConsultSettingsRead,
 } from '../../core/consult-settings.ts';
@@ -115,7 +117,13 @@ export interface ConsultOrchestratorOptions {
    * the memory probe); `kill` aborts on a fresh answer; `level` is the job's
    * bound level, which selects the writer's rules.
    */
-  readonly writer: (input: ConsultWriterInput, control: { kill: AbortSignal; deadlineMs: number; level: ConsultLevel }) => Promise<ConsultWriterOutcome>;
+  /**
+   * Writes the questions. `writer` is the job's bound writer
+   * (ConsultJobPolicy.writer): the owner's own model, or null for the
+   * built-in one. The callback runs exactly that writer and never rereads the
+   * settings, so the writer, its evidence and the gate net cannot disagree.
+   */
+  readonly writer: (input: ConsultWriterInput, control: { kill: AbortSignal; deadlineMs: number; level: ConsultLevel; writer: ConsultWriterChoice | null }) => Promise<ConsultWriterOutcome>;
   /** Opens the transport session (openZkapiConsultSession bound to the configured route); a failure means no consult. */
   readonly openSession: (control: ZkapiOpenControl) => Promise<ZkapiOpenSessionResult>;
   /** Whether a route exists now (profile and inference key present); checked before any writer work. Default: assumed available. */
@@ -131,15 +139,13 @@ export interface ConsultOrchestratorOptions {
   readonly now?: () => number;
   /** Content-free: codes, counts and milliseconds. */
   readonly log?: (line: string) => void;
-  /** The writer's deadline; a function is read at each consult (the owner's writer has its own). */
-  readonly writerDeadlineMs?: number | (() => number);
   /**
-   * Whether the owner's own writer model is chosen now (consult.json
-   * `writer`). It is then given evidence excerpts and its questions pass the
-   * gate's thin net (consult-gate.ts ConsultGateOptions.net). Default: the
-   * built-in writer, full gate. The trigger is the same for both writers.
+   * The built-in writer's deadline; a function is read at each consult. The
+   * owner's own writer (bound in the job's policy) uses its own timeout, is
+   * given evidence excerpts, and its questions pass the gate's thin net
+   * (consult-gate.ts ConsultGateOptions.net). The trigger is the same for both.
    */
-  readonly ownWriter?: () => boolean;
+  readonly writerDeadlineMs?: number | (() => number);
 }
 
 export interface ConsultOrchestrator {
@@ -173,7 +179,7 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       return CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS;
     }
   };
-  const writerDeadlineMs = (): number => {
+  const builtInDeadlineMs = (): number => {
     try {
       const value = typeof options.writerDeadlineMs === 'function' ? options.writerDeadlineMs() : options.writerDeadlineMs;
       return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : CONSULT_WRITER_DEADLINE_MS;
@@ -181,12 +187,11 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       return CONSULT_WRITER_DEADLINE_MS;
     }
   };
-  const ownWriter = (): boolean => {
-    try {
-      return options.ownWriter?.() === true;
-    } catch {
-      return false;
-    }
+  // The job's bound writer (null: built-in). A policy bound before the field existed is the built-in writer.
+  const boundWriter = (policy: ConsultJobPolicy): ConsultWriterChoice | null => policy.writer ?? null;
+  const writerDeadlineMs = (policy: ConsultJobPolicy): number => {
+    const own = boundWriter(policy);
+    return own ? own.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS : builtInDeadlineMs();
   };
   const recent: string[] = [];
   const inFlight = new Map<string, Promise<void>>();
@@ -237,7 +242,7 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     if (snapshot.verdict.sufficient !== false && snapshot.gaps.length === 0) return undefined;
     const candidate: Trigger = { rev: seam.rev, policy: seam.policy, firstDeliveredAt: seam.firstDeliveredAt, followUntil: seam.followUntil };
     // Never start work that cannot dispatch with delivery room left.
-    if (!windowOpen(candidate, at, writerDeadlineMs())) return undefined;
+    if (!windowOpen(candidate, at, writerDeadlineMs(candidate.policy))) return undefined;
     return candidate;
   };
 
@@ -303,8 +308,11 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     // One bounded input (§A.3): what the writer sees is exactly what the gate
     // compares against. The owner's own writer also reads evidence excerpts
     // from the same pack the gate compares the questions with.
-    // Read once: the writer that runs is the one whose gate net applies.
-    const own = ownWriter();
+    // One writer, bound when the job was created: it runs, it gets the
+    // evidence, and its gate net applies. Final authorization below refuses
+    // if the file now names another writer.
+    const writerChoice = boundWriter(scheduled.policy);
+    const own = writerChoice !== null;
     const bounded = boundConsultWriterInput({
       question: held.question,
       answer: held.answer,
@@ -324,7 +332,7 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     };
     let written: ConsultWriterOutcome;
     try {
-      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs(), level: scheduled.policy.level });
+      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs(scheduled.policy), level: scheduled.policy.level, writer: writerChoice });
     } catch {
       written = { kind: 'failed', reason: 'request_failed' };
     }
