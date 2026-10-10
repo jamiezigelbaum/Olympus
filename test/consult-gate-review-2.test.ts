@@ -184,20 +184,32 @@ describe('review 2: malformed packs', () => {
 });
 
 describe('review 2: bounded work', () => {
+  // The bound is on the gate's own CPU time (user + system), not wall-clock.
+  // Wall-clock on the parallel CI job is shared with every other test file:
+  // the quarter-million-word case measured ~1.9 s wall-clock twice on
+  // 2026-10-10 (PRs #227, #229) whose changes did not touch the gate, and
+  // passed on rerun. Measured on an idle 4-CPU Linux box: 0.5-0.7 s CPU,
+  // 0.5 s wall (CPU exceeds wall because Bun's GC threads count). A real
+  // regression, such as a quadratic rescan of the identifier, costs seconds
+  // of CPU and still fails this bound.
+  const cpuMs = (): number => {
+    const usage = process.cpuUsage();
+    return (usage.user + usage.system) / 1e3;
+  };
   const question = `Is ${'z '.repeat(76)}it?`;
   test('a half-megabyte single-letter identifier against a long question', () => {
     const context = ctx([{}], { connectedAccountIdentifiers: ['z '.repeat(524_000)] });
-    const started = performance.now();
+    const started = cpuMs();
     evaluateConsultQuestion(question, context);
-    expect(performance.now() - started).toBeLessThan(1_500);
+    expect(cpuMs() - started).toBeLessThan(1_500);
   });
   test('a quarter-million-word capitalized identifier: time and memory', () => {
     const context = ctx([{}], { connectedAccountIdentifiers: ['Abc '.repeat(262_000)] });
     Bun.gc(true);
     const before = process.memoryUsage();
-    const started = performance.now();
+    const started = cpuMs();
     evaluateConsultQuestion('Is cat a word?', context);
-    expect(performance.now() - started).toBeLessThan(1_500);
+    expect(cpuMs() - started).toBeLessThan(1_500);
     Bun.gc(true);
     const after = process.memoryUsage();
     // Nothing is retained. Peak RSS is allocator churn from tokenizing a
