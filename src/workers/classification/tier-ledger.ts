@@ -1372,28 +1372,100 @@ export class TierLedger {
       // keeps the row pending), never at its tiers' resting placement. Text
       // once read is never forgotten.
       raise = placementIsRaise(current, plan.copies);
-      this.db.query(`
-        UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
-          decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
-          content_read = MAX(content_read, ?), metadata_pending = ?, content_pending = ?,
-          metadata_forced = ?, metadata_flagged = ?, move_attempts = 0
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(
-        decision.metadataTier,
-        decision.contentTier,
-        decision.decidedBy,
-        reasonsJson,
-        decision.engineVersion,
-        decision.mapRevision,
-        decidedAt,
-        ...decisionFlags(decision),
-        ...idParams(identity),
-      );
-      this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, 'moving', decidedAt);
-      if (raise && options.queueWithoutHiding !== true) this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
+      this.queueMoveRow(identity, existing, decision, { hide: raise && options.queueWithoutHiding !== true, decidedAt });
       outcome = 'queued_move';
     })();
     return { outcome, record: this.getCurrent(identity)!, previousCopies, raise };
+  }
+
+  /**
+   * An owner per-item override that RAISES a routed item, applied by a
+   * process that does not hold the item's tiered store set (`olympus tier
+   * set`). When any layer is served today from a store less private than
+   * `trustDomain` (the override tier's store), every current copy is hidden
+   * in this one write and the move to the decision's tiers is queued, exactly
+   * as `recordRoutedPlacement` queues a raise; the set plans and runs the move
+   * (tier-move.ts). Returns false and writes nothing when no current copy is
+   * below `trustDomain`, or the item is not routed or is already mid-move:
+   * the set's own pass applies the override then (tier-override-settle.ts).
+   */
+  queueOwnerRaise(identity: TierLedgerIdentity, decision: TierDecision, trustDomain: SourceTrustDomain): boolean {
+    if (decision.decidedBy !== 'override') throw new Error('Only an owner override is queued this way.');
+    if (!(trustDomain in TRUST_DOMAIN_RANK)) throw new Error(`Unknown trust domain "${trustDomain}".`);
+    let queued = false;
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || !existing.routed || existing.state === 'moving') return;
+      const below = this.copies(identity)
+        .some((copy) => copy.state === 'current' && trustDomainRank(copy.trustDomain) < trustDomainRank(trustDomain));
+      if (!below) return;
+      this.queueMoveRow(identity, existing, decision, { hide: true, decidedAt: this.now().toISOString() });
+      queued = true;
+    })();
+    return queued;
+  }
+
+  /**
+   * Routed items that carry a per-item owner override, with it, in key order.
+   * Overrides are set by hand, one item at a time, so the list is small; the
+   * override pass (tier-override-settle.ts) reads it whole.
+   */
+  listRoutedOverrides(): Array<{ record: TierLedgerRecord; override: ItemTierOverride }> {
+    const rows = this.db.query(`
+      SELECT i.*, o.override_json AS override_json FROM tier_items i
+      JOIN tier_overrides o
+        ON o.provider = i.provider AND o.account_scope = i.account_scope
+        AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+      WHERE i.routed = 1
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+    `).all() as Array<TierItemRow & { override_json: string }>;
+    const result: Array<{ record: TierLedgerRecord; override: ItemTierOverride }> = [];
+    for (const row of rows) {
+      let parsed: ItemTierOverride;
+      try {
+        parsed = JSON.parse(row.override_json) as ItemTierOverride;
+      } catch {
+        continue;
+      }
+      if (parsed.kind === 'tier' && !TIER_KEYS.includes(parsed.tier)) continue;
+      if (parsed.kind !== 'tier' && parsed.kind !== 'not_secret') continue;
+      result.push({ record: recordFromRow(row), override: parsed });
+    }
+    return result;
+  }
+
+  /**
+   * The queued-move write: the item goes `moving` with the decision's tiers
+   * as its target and the decision's flags; with `hide`, every current copy
+   * is superseded first (a raise hides before anything moves). The copy
+   * itself is the move primitive's job. Runs inside the caller's transaction.
+   */
+  private queueMoveRow(
+    identity: TierLedgerIdentity,
+    existing: TierLedgerRecord,
+    decision: TierDecision,
+    options: { hide: boolean; decidedAt: string },
+  ): void {
+    const reasonsJson = JSON.stringify(decision.reasons);
+    this.db.query(`
+      UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
+        decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
+        content_read = MAX(content_read, ?), metadata_pending = ?, content_pending = ?,
+        metadata_forced = ?, metadata_flagged = ?, move_attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(
+      decision.metadataTier,
+      decision.contentTier,
+      decision.decidedBy,
+      reasonsJson,
+      decision.engineVersion,
+      decision.mapRevision,
+      options.decidedAt,
+      ...decisionFlags(decision),
+      ...idParams(identity),
+    );
+    this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, 'moving', options.decidedAt);
+    if (options.hide) this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
   }
 
   /**

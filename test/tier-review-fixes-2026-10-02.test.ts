@@ -19,6 +19,8 @@
 //    fresh-install-tiers.test.ts) and a revocation sticks.
 // 10. olympus_search does not preempt the sniffer.
 // T-1. A private lane that exists but is not ready holds read items.
+// 12. A per-item owner override applies to an item already stored, in both
+//     directions, without the file changing (reviewer demo, 2026-10-11).
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -43,6 +45,7 @@ import {
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
 import { classifyItemTiers, TIER_CLASSIFIER_VERSION, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger, type TierPlacementPlan } from '../src/workers/classification/tier-ledger.ts';
 import {
@@ -60,6 +63,7 @@ import { moveTieredItem, TierMoveRefusedError } from '../src/workers/connector-s
 import { defaultStoreTrustTier } from '../src/workers/connector-store/tier-placement.ts';
 import { settleNamesOnlyItems } from '../src/workers/connector-store/tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
+import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
@@ -585,3 +589,93 @@ describe('10. olympus_search is not an answer on the private pool', () => {
   });
 });
 
+
+describe('12. a per-item owner override applies to an item already stored (no file change)', () => {
+  const bank = identity('id:bank');
+  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), env.OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH!];
+  const currentCopies = (install: Install, id: ReturnType<typeof identity>) =>
+    install.lane.ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
+  /** How many evidence items the search returns for one title (a duplicate across stores would be two). */
+  const evidenceFor = (result: string, title: string) =>
+    (JSON.parse(result) as { structuredContent: { evidence: Array<{ title: string }> } }).structuredContent.evidence
+      .filter((entry) => entry.title === title).length;
+
+  test('down: a Private item set Personal moves to the Personal store at the next tick, once, and stays there through an unchanged sync', async () => {
+    const model = registeredBuiltIn(PRIVATE_VERDICT);
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+    const service = snifferFor(install, model.builtIn);
+    for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(currentCopies(install, bank)).toEqual([SECURE_CORPUS]);
+    expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
+
+    const set = await runTierCommand(['set', 'id:bank', 'personal'], { storePaths: storePaths() });
+    expect(set).toMatchObject({ results: [{ override: 'Personal', outcome: 'set_applies_next_pass' }] });
+    // A lowering exposes nothing before the move: still Private until it lands.
+    expect(currentCopies(install, bank)).toEqual([SECURE_CORPUS]);
+
+    await service.runOnce();
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({
+      state: 'current', metadataTier: 'private', contentTier: 'private', decidedBy: 'override',
+    });
+    // One store serves it: the Personal one. The Private copy is kept, never searched.
+    expect(currentCopies(install, bank)).toEqual([INTERNAL_CORPUS]);
+    expect(evidenceFor(await olympusSearch(install, 'loan terms'), 'bank letter.pdf')).toBe(1);
+
+    // An unchanged sync and later ticks keep the owner's decision.
+    await install.sync.pull({ approved_scope_key: 'dropbox.personal:/' });
+    await service.runOnce();
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'override' });
+    expect(currentCopies(install, bank)).toEqual([INTERNAL_CORPUS]);
+    expect(evidenceFor(await olympusSearch(install, 'loan terms'), 'bank letter.pdf')).toBe(1);
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ checked: 1, updated: 0, raised: 0, lowered: 0, heldMoving: 0 });
+  });
+
+  test('up: a Personal item set Private is hidden by the command itself, then moves, and stays Private through an unchanged sync', async () => {
+    const { install, service } = await gardenSettledPersonal();
+    expect(currentCopies(install, garden)).toEqual([INTERNAL_CORPUS]);
+    expect(await olympusSearch(install, 'orchard')).toContain('pruning plan');
+
+    const set = await runTierCommand(['set', 'id:garden', 'private'], { storePaths: storePaths() });
+    expect(set).toMatchObject({ results: [{ override: 'Private', outcome: 'hidden_now_move_queued' }] });
+    // Hidden at once, before any tick or sync runs.
+    expect(currentCopies(install, garden)).toEqual([]);
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'moving', targetMetadataTier: 'secure', targetContentTier: 'secure' });
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+
+    await service.runOnce();
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+    expect(currentCopies(install, garden)).toEqual([SECURE_CORPUS]);
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+
+    await install.sync.pull({ approved_scope_key: 'dropbox.personal:/' });
+    await service.runOnce();
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
+    expect(currentCopies(install, garden)).toEqual([SECURE_CORPUS]);
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+  });
+
+  test('the set\'s own pass raises an override it finds (hidden first), once, with no private model at all', async () => {
+    const install = await freshInstall();
+    expect(currentCopies(install, garden)).toEqual([INTERNAL_CORPUS]);
+    install.lane.ledger.setOverride(garden, { kind: 'tier', tier: 'secure' });
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ checked: 1, raised: 1 });
+    expect(currentCopies(install, garden)).toEqual([]);
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+    // The queued move carries the override: nothing more to do.
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ raised: 0, lowered: 0, heldMoving: 0 });
+  });
+
+  test('Secrets: the command hides every copy at once; the set\'s pass records the location and settles the copies', async () => {
+    const install = await freshInstall();
+    const set = await runTierCommand(['set', 'id:garden', 'secrets'], { storePaths: storePaths() });
+    expect(set).toMatchObject({ results: [{ override: 'Secrets', outcome: 'hidden_now' }] });
+    expect(currentCopies(install, garden)).toEqual([]);
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ secrets: 1 });
+    expect(install.secrets.get(garden)).toMatchObject({ providerItemId: 'id:garden', findingKinds: ['owner_marked_secret'] });
+    expect(install.lane.ledger.copies(garden)).toEqual([]);
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ secrets: 0 });
+  });
+});

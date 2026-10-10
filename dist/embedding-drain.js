@@ -10201,19 +10201,66 @@ class TierLedger {
         return;
       }
       raise = placementIsRaise(current, plan.copies);
-      this.db.query(`
-        UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
-          decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
-          content_read = MAX(content_read, ?), metadata_pending = ?, content_pending = ?,
-          metadata_forced = ?, metadata_flagged = ?, move_attempts = 0
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, decidedAt, ...decisionFlags(decision), ...idParams(identity));
-      this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, "moving", decidedAt);
-      if (raise && options.queueWithoutHiding !== true)
-        this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
+      this.queueMoveRow(identity, existing, decision, { hide: raise && options.queueWithoutHiding !== true, decidedAt });
       outcome = "queued_move";
     })();
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
+  }
+  queueOwnerRaise(identity, decision, trustDomain) {
+    if (decision.decidedBy !== "override")
+      throw new Error("Only an owner override is queued this way.");
+    if (!(trustDomain in TRUST_DOMAIN_RANK))
+      throw new Error(`Unknown trust domain "${trustDomain}".`);
+    let queued = false;
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || !existing.routed || existing.state === "moving")
+        return;
+      const below = this.copies(identity).some((copy) => copy.state === "current" && trustDomainRank(copy.trustDomain) < trustDomainRank(trustDomain));
+      if (!below)
+        return;
+      this.queueMoveRow(identity, existing, decision, { hide: true, decidedAt: this.now().toISOString() });
+      queued = true;
+    })();
+    return queued;
+  }
+  listRoutedOverrides() {
+    const rows = this.db.query(`
+      SELECT i.*, o.override_json AS override_json FROM tier_items i
+      JOIN tier_overrides o
+        ON o.provider = i.provider AND o.account_scope = i.account_scope
+        AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+      WHERE i.routed = 1
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+    `).all();
+    const result = [];
+    for (const row of rows) {
+      let parsed;
+      try {
+        parsed = JSON.parse(row.override_json);
+      } catch {
+        continue;
+      }
+      if (parsed.kind === "tier" && !TIER_KEYS.includes(parsed.tier))
+        continue;
+      if (parsed.kind !== "tier" && parsed.kind !== "not_secret")
+        continue;
+      result.push({ record: recordFromRow(row), override: parsed });
+    }
+    return result;
+  }
+  queueMoveRow(identity, existing, decision, options) {
+    const reasonsJson = JSON.stringify(decision.reasons);
+    this.db.query(`
+      UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
+        decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
+        content_read = MAX(content_read, ?), metadata_pending = ?, content_pending = ?,
+        metadata_forced = ?, metadata_flagged = ?, move_attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, options.decidedAt, ...decisionFlags(decision), ...idParams(identity));
+    this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, "moving", options.decidedAt);
+    if (options.hide)
+      this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
   }
   stageLandingCopy(identity, copy, options) {
     assertCopyPlan(copy);
@@ -21840,6 +21887,100 @@ var init_tier_rules_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-override-settle.ts
+function applyOwnerOverrides(options) {
+  const report = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0 };
+  const { set } = options;
+  const ledger = set.ledger;
+  let retirePublic = false;
+  try {
+    retirePublic = set.classification()?.retirePublic === true;
+  } catch {}
+  for (const { record, override } of ledger.listRoutedOverrides()) {
+    if (override.kind !== "tier")
+      continue;
+    report.checked += 1;
+    try {
+      applyOne(set, record, override.tier, retirePublic, report);
+    } catch {}
+  }
+  return report;
+}
+function applyOne(set, record, tier, retirePublic, report) {
+  const ledger = set.ledger;
+  const identity = identityOf4(record);
+  const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
+  const secrets = decision.contentTier === "secrets";
+  if (record.state === "moving" && !secrets) {
+    if (record.targetMetadataTier !== decision.metadataTier || record.targetContentTier !== decision.contentTier) {
+      report.heldMoving += 1;
+    }
+    return;
+  }
+  const atTiers = record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier;
+  if (atTiers && record.state !== "moving") {
+    if (!secrets && record.decidedBy === "override")
+      return;
+    if (secrets && !secretsCopiesLeft(set, identity))
+      return;
+  }
+  if (secrets) {
+    const exported = storedCopy(set, identity);
+    if (exported) {
+      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }))
+        report.secrets += 1;
+      return;
+    }
+    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision)).outcome === "secrets")
+      report.secrets += 1;
+    return;
+  }
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  switch (recorded.outcome) {
+    case "queued_move":
+      if (recorded.raise)
+        report.raised += 1;
+      else
+        report.lowered += 1;
+      return;
+    case "held_moving":
+      report.heldMoving += 1;
+      return;
+    case "updated":
+    case "inserted":
+      report.updated += 1;
+      return;
+    default:
+      return;
+  }
+}
+function secretsCopiesLeft(set, identity) {
+  const copies = set.ledger.copies(identity);
+  return secretsDisposition() === "tombstone_now" ? copies.length > 0 : copies.some((copy) => copy.state === "current");
+}
+function storedCopy(set, identity) {
+  const copies = set.ledger.copies(identity).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"));
+  for (const copy of copies) {
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (exported)
+      return exported;
+  }
+  return;
+}
+function identityOf4(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+var init_tier_override_settle = __esm(() => {
+  init_tier_classifier();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tier-image-content-sweep.ts
 function sweepImageContentToPrivate(options) {
   const report = { scanned: 0, raised: 0, stripped: 0, complete: true };
@@ -21859,7 +22000,7 @@ function sweepImageContentToPrivate(options) {
   }
   if (rows.length >= limit) {
     report.complete = false;
-    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf4(rows.at(-1)) }));
+    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf5(rows.at(-1)) }));
     return report;
   }
   for (const domain of ["public_safe", "internal"]) {
@@ -21876,7 +22017,7 @@ function raiseIfImage(set, record) {
     return false;
   if (record.contentTier === "secure")
     return false;
-  const identity = identityOf4(record);
+  const identity = identityOf5(record);
   if (set.ledger.getOverride(identity))
     return false;
   const current = set.ledger.copies(identity).filter((copy) => copy.state === "current");
@@ -21920,7 +22061,7 @@ function readState2(raw) {
     return { done: false };
   }
 }
-function identityOf4(record) {
+function identityOf5(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -22003,6 +22144,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_row_rehome();
   init_tier_rules_sweep();
+  init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
 });
@@ -34945,6 +35087,7 @@ import { existsSync as existsSync13 } from "node:fs";
 init_tier_rejudge();
 init_tier_names_only_settle();
 init_tier_rules_sweep();
+init_tier_override_settle();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
@@ -35272,6 +35415,8 @@ class TierSnifferService {
       this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}.`);
     }
     const autoMoves = this.options.autoMoves && !signal.aborted && !this.answering() && this.options.autoMoves.localEmbeddingsOnly() ? await this.runAutoMoves(this.options.autoMoves, signal) : undefined;
+    if (autoMoves && autoMoves.moved > 0)
+      this.applyOwnerOverrides();
     return { state: "ran", report, ...rejudged.seen > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
   }
   answering() {
@@ -35282,6 +35427,7 @@ class TierSnifferService {
     }
   }
   settleStoredItems() {
+    this.applyOwnerOverrides();
     for (const ledgerPath of this.ledgerPaths()) {
       const set = tierSetForLedger(ledgerPath);
       if (!set)
@@ -35308,6 +35454,19 @@ class TierSnifferService {
         const settled = settleNamesOnlyItems({ set });
         if (settled.settled > 0) {
           this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
+        }
+      } catch {}
+    }
+  }
+  applyOwnerOverrides() {
+    for (const ledgerPath of this.ledgerPaths()) {
+      const set = tierSetForLedger(ledgerPath);
+      if (!set)
+        continue;
+      try {
+        const report = applyOwnerOverrides({ set });
+        if (report.raised > 0 || report.lowered > 0 || report.secrets > 0 || report.updated > 0) {
+          this.options.log?.(`Olympus tier overrides: ${report.raised + report.lowered + report.secrets + report.updated} stored item(s) set by the owner applied ` + `(${report.raised} raised, hidden first; ${report.lowered} move(s) down queued` + `${report.secrets ? `; ${report.secrets} made Secrets` : ""}).`);
         }
       } catch {}
     }
