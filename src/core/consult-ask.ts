@@ -16,7 +16,7 @@
 // the composition root's writer; a level in the call without `remember` is a
 // one-off override ("ask zkAPI strictly").
 
-import { evaluateConsultRequest, type ConsultWriterContext } from './consult-gate.ts';
+import { evaluateConsultRequest, type ConsultGateReason, type ConsultWriterContext } from './consult-gate.ts';
 import {
   CONSULT_LIGHT_CLEANUP_INSTRUCTION,
   DEFAULT_CONSULT_SETTINGS,
@@ -151,6 +151,8 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   writerFailed: 'Your model could not prepare the question, so nothing was sent.',
   secret: 'Not sent: the question looks like it contains a password, key or token.',
   gateRefused: 'Not sent: at Strict the rewritten question still carried something identifying, so Olympus held it back. Try Standard, or ask more generally.',
+  /** The same refusal naming what was carried (consultGateRefusedMessage): `{what}` is a CONSULT_GATE_CARRIED kind. */
+  gateRefusedCarrying: 'Not sent: at Strict the rewritten question still carried {what} from your question, so Olympus held it back. Try Standard, or ask more generally.',
   noRoute: 'Set up the zkAPI route first.',
   stale: 'The anonymous answers settings changed while the question was being prepared, so nothing was sent. Ask again.',
   needsChoice: 'Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.',
@@ -163,6 +165,41 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   cancelled: 'The request was cancelled before the question was sent; nothing was charged.',
   tooManyBytes: 'Not sent: the question is over 8 KiB once encoded. Shorten it.',
 });
+
+/**
+ * What a Strict draft carried from the typed question, by gate reason, in the
+ * user's words (the kind, never the value: the message also reaches the
+ * calling agent through ask_anonymously). Reasons outside this map are
+ * "something identifying".
+ */
+const CONSULT_GATE_CARRIED: Readonly<Partial<Record<ConsultGateReason, string>>> = {
+  snapshot_figure: 'an exact figure',
+  snapshot_date: 'a date',
+  snapshot_name: 'a name',
+  snapshot_hostname: 'a web address',
+  snapshot_identifier: 'an identifier',
+  encoded_identifier: 'an identifier',
+  identifier_shape: 'an identifier',
+  owner_question_copy: 'wording copied',
+  shared_token_run: 'wording copied',
+};
+
+/** The reasons a second draft may cure: copied values and wording, never secrets, identifiers, encoding or bounds. */
+const CONSULT_GATE_RETRY_REASONS: ReadonlySet<ConsultGateReason> = new Set<ConsultGateReason>(['snapshot_figure', 'snapshot_date', 'snapshot_name', 'snapshot_hostname', 'owner_question_copy', 'shared_token_run']);
+
+/** The writer's feedback for one more Strict draft, or undefined when any reason is not one a redraft cures. */
+export function consultGateRetryFeedback(reasons: readonly ConsultGateReason[]): string | undefined {
+  if (reasons.length === 0 || !reasons.every((reason) => CONSULT_GATE_RETRY_REASONS.has(reason))) return undefined;
+  const kinds = [...new Set(reasons.map((reason) => CONSULT_GATE_CARRIED[reason]!))];
+  return `it kept ${kinds.join(' and ')} from the question.`;
+}
+
+/** The Strict gate refusal, naming the kind of thing the draft carried when every reason names one. */
+export function consultGateRefusedMessage(reasons: readonly ConsultGateReason[]): string {
+  const kinds = [...new Set(reasons.map((reason) => CONSULT_GATE_CARRIED[reason]).filter((kind): kind is string => kind !== undefined))];
+  if (kinds.length === 0 || reasons.some((reason) => CONSULT_GATE_CARRIED[reason] === undefined)) return CONSULT_ASK_MESSAGES.gateRefused;
+  return CONSULT_ASK_MESSAGES.gateRefusedCarrying.replace('{what}', kinds.join(' and '));
+}
 
 const MAX_MODEL_ID_CHARS = 128;
 
@@ -296,7 +333,6 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     questions = written.questions;
     rewritten = true;
   }
-  const sent = questions.join('\n');
   // The gate. Standard's only outbound rule is secrets (owner decision
   // 2026-10-10): the typed question is the gate's context, so a labelled
   // secret in it ("password: hunter2") stays refused however the request
@@ -304,14 +340,37 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   // own writer, the full gate under the built-in one, with the typed question
   // as the asked question so copying it is refused.
   const context: ConsultWriterContext = { entries: [{ kind: 'text', text: typed, path: 'writerVisible[]', group: -2 }], overflow: false };
-  const verdict = evaluateConsultRequest([...questions], context, {}, {}, strict
+  const gate = (draft: readonly string[]) => evaluateConsultRequest([...draft], context, {}, {}, strict
     ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: 'general', askedQuestionTexts: [typed], net: writer ? 'thin' : 'full' }
     : { net: 'secrets' });
+  let verdict = gate(questions);
+  // Strict, built-in writer: a draft that carried a figure, name, date or
+  // wording from the typed question gets one more draft, with the finding as
+  // feedback (live test 2026-10-10: "40%" survived the rewrite and the gate
+  // refused it as snapshot_figure). Secrets and identifier shapes never retry.
+  const feedback = verdict.decision !== 'pass' && strict && rewritten && !writer ? consultGateRetryFeedback(verdict.reasons) : undefined;
+  if (feedback !== undefined) {
+    let again: ConsultWriterOutcome;
+    try {
+      again = await deps.prepare({ question: typed, answer: '', gaps: [], direct: true, feedback }, writer, 'general', input.signal);
+    } catch {
+      again = { kind: 'failed', reason: 'request_failed' };
+    }
+    if (input.signal?.aborted) return { ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled };
+    if (again.kind === 'questions') {
+      const second = gate(again.questions);
+      if (second.decision === 'pass') {
+        questions = again.questions;
+        verdict = second;
+      }
+    }
+  }
+  const sent = questions.join('\n');
   if (verdict.decision !== 'pass') {
     // Within the character bound but over the transport's 8 KiB (multibyte text): a length refusal, not a secret.
     if ([...verdict.reasons].includes('question_too_many_bytes')) return { ok: false, code: 'question_too_long', message: CONSULT_ASK_MESSAGES.tooManyBytes, sent };
     const secret = [...verdict.reasons].some((reason) => /secret/i.test(reason));
-    return { ok: false, code: secret || !strict ? 'secret_detected' : 'gate_refused', message: secret || !strict ? CONSULT_ASK_MESSAGES.secret : CONSULT_ASK_MESSAGES.gateRefused, sent };
+    return { ok: false, code: secret || !strict ? 'secret_detected' : 'gate_refused', message: secret || !strict ? CONSULT_ASK_MESSAGES.secret : consultGateRefusedMessage(verdict.reasons), sent };
   }
   const bound = askBinding(read);
   let stale = false;
