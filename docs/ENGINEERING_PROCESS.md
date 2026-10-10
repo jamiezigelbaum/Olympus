@@ -46,7 +46,7 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    User-installed hooks remain user-owned and must not be rewritten by repo
    automation.
 5. **Let CI decide merge readiness.** GitHub requires every substantive lane
-   directly: `static checks`, `fast tests`, `exchange tests`, all three
+   directly: `static checks`, `fast tests`, `exchange tests`, all four
    `deploy tests` shards, and `Go bridge tests`. A local result is useful
    evidence, never a substitute for those exact-head checks.
    The `exchange tests` lane runs `test:exchange` for the publisher Google

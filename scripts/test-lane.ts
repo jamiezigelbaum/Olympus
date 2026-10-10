@@ -2,7 +2,7 @@
  * Run one deterministic lane of the test suite, optionally as a CI shard.
  *
  *   bun scripts/test-lane.ts fast
- *   bun scripts/test-lane.ts deploy --shard=2/3
+ *   bun scripts/test-lane.ts deploy --shard=2/4
  *   bun scripts/test-lane.ts go
  *
  * Lane membership is derived from each file's source on every run (see
