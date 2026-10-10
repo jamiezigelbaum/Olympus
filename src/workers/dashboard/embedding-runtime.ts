@@ -282,7 +282,7 @@ export function writeEmbeddingOperatorOverride(path: string, on: boolean): void 
     rmSync(path, { force: true });
     return;
   }
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${EMBEDDING_PRIORITY_TOKEN}\n`, 'utf8');
 }
 

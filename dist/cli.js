@@ -1129,7 +1129,7 @@ class EncryptedFileSecretStore {
         tag: cipher.getAuthTag().toString("base64"),
         ciphertext: ciphertext.toString("base64")
       };
-      mkdirSync3(dirname4(this.encryptedFilePath), { recursive: true });
+      mkdirSync3(dirname4(this.encryptedFilePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.encryptedFilePath, JSON.stringify(encrypted, null, 2));
     } finally {
       key.fill(0);
@@ -1154,7 +1154,7 @@ class EncryptedFileSecretStore {
     return this.localRandomKey();
   }
   localRandomKey() {
-    mkdirSync3(dirname4(this.keyFilePath), { recursive: true });
+    mkdirSync3(dirname4(this.keyFilePath), { recursive: true, mode: 448 });
     if (!existsSync3(this.keyFilePath)) {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes(32).toString("base64"));
     }
@@ -2416,7 +2416,7 @@ function ensureManagedWorkerEnvironment(options = {}) {
   return { path: envPath, wrote: reconcileWorkerEnv(envPath, { ...options, homeDir }) };
 }
 function reconcileWorkerEnv(envPath, options) {
-  mkdirSync4(dirname5(envPath), { recursive: true });
+  mkdirSync4(dirname5(envPath), { recursive: true, mode: 448 });
   if (!existsSync4(envPath)) {
     writePrivateFileAtomicSync(envPath, defaultWorkerEnv(options));
     return true;
@@ -3188,7 +3188,7 @@ class JsonCredentialOAuth2StateStore {
       }
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname6(this.path), { recursive: true });
+        await mkdir2(dirname6(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -3200,7 +3200,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname6(this.path), { recursive: true });
+        await mkdir2(dirname6(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -4914,7 +4914,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync5(dirname7(path), { recursive: true });
+  mkdirSync5(dirname7(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -9899,11 +9899,13 @@ import { isAbsolute as isAbsolutePath, join as join16, resolve as resolve5 } fro
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
-function loadConfig(env = process.env) {
+function loadConfig(env = process.env, options = {}) {
   const engineConfig = env.OLYMPUS_CONFIG ? undefined : installedEngineConfig(env);
   if (engineConfig) {
     const config2 = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
     applyEnvironmentOverrides(config2, env);
+    if (options.nativeRemoteHandoff === true)
+      applyNativeRemoteHandoff(config2, env);
     validateConfig(config2);
     return config2;
   }
@@ -9914,6 +9916,8 @@ function loadConfig(env = process.env) {
     mergeConfig(config, raw);
   }
   applyEnvironmentOverrides(config, env);
+  if (options.nativeRemoteHandoff === true)
+    applyNativeRemoteHandoff(config, env);
   validateConfig(config);
   return config;
 }
@@ -10046,6 +10050,41 @@ function applyEnvironmentOverrides(config, env) {
     };
   }
 }
+function applyNativeRemoteHandoff(config, env) {
+  const handoff = env[NATIVE_REMOTE_CONFIG_ENV]?.trim();
+  if (!handoff) {
+    delete config.remote;
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(handoff);
+  } catch {
+    throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} is not valid JSON.`);
+  }
+  const remote = asRecord4(parsed);
+  if (!remote)
+    throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
+  config.remote = parseRemoteConfig(remote);
+}
+function parseRemoteConfig(remote) {
+  const parsed = { enabled: remote.enabled === true };
+  for (const key of ["relayHost", "publicBaseUrl"]) {
+    const value = remote[key];
+    if (typeof value === "string" && value.trim())
+      parsed[key] = value.trim();
+  }
+  const demo = asRecord4(remote.demoConsent);
+  if (demo) {
+    parsed.demoConsent = { enabled: demo.enabled === true };
+    for (const key of ["username", "passwordHash"]) {
+      const value = demo[key];
+      if (typeof value === "string" && value.trim())
+        parsed.demoConsent[key] = value.trim();
+    }
+  }
+  return parsed;
+}
 function configFromPluginConfig(pluginConfig, options = {}) {
   const requireResolvedWorkerSecrets = options.requireResolvedWorkerSecrets !== false;
   const config = defaultConfig();
@@ -10057,23 +10096,8 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   const email = asRecord4(root?.email);
   const sourceIndex = asRecord4(root?.sourceIndex);
   const remote = asRecord4(root?.remote);
-  if (remote) {
-    config.remote = { enabled: remote.enabled === true };
-    for (const key of ["relayHost", "publicBaseUrl"]) {
-      const value = remote[key];
-      if (typeof value === "string" && value.trim())
-        config.remote[key] = value.trim();
-    }
-    const demo = asRecord4(remote.demoConsent);
-    if (demo) {
-      config.remote.demoConsent = { enabled: demo.enabled === true };
-      for (const key of ["username", "passwordHash"]) {
-        const value = demo[key];
-        if (typeof value === "string" && value.trim())
-          config.remote.demoConsent[key] = value.trim();
-      }
-    }
-  }
+  if (remote)
+    config.remote = parseRemoteConfig(remote);
   if (sovereignty) {
     config.sovereignty = {};
     if (typeof sovereignty.configPath === "string" && sovereignty.configPath.trim()) {
@@ -10827,7 +10851,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
 function asRecord4(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
-var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, NATIVE_REMOTE_CONFIG_ENV = "OLYMPUS_NATIVE_REMOTE_CONFIG_JSON", ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -20827,7 +20851,7 @@ var init_local_index = __esm(() => {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync12(dirname16(this.dbPath), { recursive: true });
+        mkdirSync12(dirname16(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database3(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       try {
@@ -51338,7 +51362,7 @@ async function defaultClearQuarantine(dir) {
     execFile("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve9());
   });
 }
-function ensureOwnedDirectory(path, uid, label) {
+function ensureOwnedDirectory(path, uid, label, options = {}) {
   try {
     mkdirSync23(path, { mode: 448 });
   } catch (error) {
@@ -51355,6 +51379,17 @@ function ensureOwnedDirectory(path, uid, label) {
     throw new ManagedToolsError("folder_unsafe", `${label} is not a plain folder.`);
   if (uid !== undefined && stats.uid !== uid)
     throw new ManagedToolsError("folder_unsafe", `${label} belongs to another user.`);
+  if ((stats.mode & 18) !== 0 && options.repairWriteBits === true) {
+    try {
+      chmodSync13(path, stats.mode & 493);
+      stats = lstatSync14(path);
+    } catch {
+      throw new ManagedToolsError("folder_unsafe", `${label} can be changed by other users, and Olympus could not fix that.`);
+    }
+    if (stats.isSymbolicLink() || !stats.isDirectory() || uid !== undefined && stats.uid !== uid) {
+      throw new ManagedToolsError("folder_unsafe", `${label} is not a plain folder.`);
+    }
+  }
   if ((stats.mode & 18) !== 0)
     throw new ManagedToolsError("folder_unsafe", `${label} can be changed by other users.`);
 }
@@ -51373,7 +51408,7 @@ async function installManagedTools(options = {}) {
   const root = join47(base, "tools");
   try {
     mkdirSync23(dirname32(base), { recursive: true, mode: 448 });
-    ensureOwnedDirectory(base, uid, "The Olympus folder");
+    ensureOwnedDirectory(base, uid, "The Olympus folder", { repairWriteBits: true });
     ensureOwnedDirectory(root, uid, "The Olympus tools folder");
   } catch (error) {
     const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError("folder_unsafe", "Olympus could not prepare its tools folder.");
@@ -57282,7 +57317,7 @@ function embeddingModelEstimate(modelId, prices) {
 }
 function estimatedEmbeddingCostUsd(tokens, modelId, prices) {
   const { estimate } = embeddingModelEstimate(modelId, prices);
-  return Math.round(tokens / 1e6 * estimate.usdPerMillionTokens * 100) / 100;
+  return Math.ceil(tokens / 1e6 * estimate.usdPerMillionTokens * 100) / 100;
 }
 var DEFAULT_EMBEDDING_MODEL_ESTIMATES, FALLBACK_EMBEDDING_MODEL_ESTIMATE;
 var init_embedding_cost_estimates = __esm(() => {
@@ -57980,7 +58015,7 @@ class SqliteSourceDashboardHistory {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync27(dirname37(dbPath), { recursive: true });
+      mkdirSync27(dirname37(dbPath), { recursive: true, mode: 448 });
     this.db = new Database10(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
@@ -60197,7 +60232,7 @@ class SqliteSourceIngestionLedgerStore {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync28(dirname38(dbPath), { recursive: true });
+      mkdirSync28(dirname38(dbPath), { recursive: true, mode: 448 });
     this.db = new Database11(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     this.db.exec(`
@@ -65574,7 +65609,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync29(dirname40(path), { recursive: true });
+  mkdirSync29(dirname40(path), { recursive: true, mode: 448 });
   writeFileSync11(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -70933,7 +70968,7 @@ function writeEmbeddingOperatorOverride(path, on) {
     rmSync14(path, { force: true });
     return;
   }
-  mkdirSync35(dirname48(path), { recursive: true });
+  mkdirSync35(dirname48(path), { recursive: true, mode: 448 });
   writeFileSync14(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
@@ -71382,7 +71417,8 @@ function createNativeWorkerService(options) {
         "plugins.entries.olympus.config.worker",
         "plugins.entries.olympus.config.email.baseUrl",
         "plugins.entries.olympus.config.sourceIndex",
-        "plugins.entries.olympus.config.sovereignty"
+        "plugins.entries.olympus.config.sovereignty",
+        "plugins.entries.olympus.config.remote.demoConsent"
       ]
     },
     initialConfig: options.initialPluginConfig,
@@ -71531,6 +71567,10 @@ function applyNativeWorkerConfigEnv(config, env) {
   env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES = String(config.worker.scheduler.maxTransientRetries);
   env[NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram] = String(config.worker.telegramCapture.enabled);
   env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp] = String(config.worker.whatsappCapture.enabled);
+  if (config.remote)
+    env[NATIVE_REMOTE_CONFIG_ENV] = JSON.stringify(config.remote);
+  else
+    delete env[NATIVE_REMOTE_CONFIG_ENV];
 }
 function resolveBunRuntimePath2(configured, env) {
   if (configured)
@@ -108745,7 +108785,7 @@ function writeSourceIngestionExclusionsFile(options) {
     copyFileSync(path, backupPath);
     chmodSync24(backupPath, 384);
   } else {
-    mkdirSync42(dirname58(path), { recursive: true });
+    mkdirSync42(dirname58(path), { recursive: true, mode: 448 });
   }
   writePrivateFileAtomicSync(path, text2);
   return {
@@ -129357,7 +129397,7 @@ async function main() {
   if (dashboardSessionSecret.source !== "file") {
     console.log(`[dashboard] control-session secret ${dashboardSessionSecret.source} at ${dashboardSessionSecret.path}${dashboardSessionSecret.source === "memory" ? " (could not be written; sessions end with this worker)" : ""}`);
   }
-  const olympusConfig = loadConfig();
+  const olympusConfig = loadConfig(process.env, { nativeRemoteHandoff: workerLaunch.nativeServiceSupervised === true });
   const sourceCorpusRegistry2 = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,
@@ -133499,7 +133539,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
     return false;
   }
   const parsed = JSON.parse(readFileSync26(source, "utf8"));
-  mkdirSync20(dirname29(destination), { recursive: true });
+  mkdirSync20(dirname29(destination), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(destination, JSON.stringify(sanitizeForExport(parsed), null, 2));
   files.push(destination);
   return true;
@@ -133516,7 +133556,7 @@ function exportDurabilityBoundary(destination) {
   }
 }
 function makeDurableDirectory(path, boundary) {
-  mkdirSync20(path, { recursive: true });
+  mkdirSync20(path, { recursive: true, mode: 448 });
   let current = resolve8(path);
   for (;; ) {
     syncDirectorySync2(current);
@@ -134748,9 +134788,6 @@ function settleWorkerServiceState(options, expected) {
     waitForActivationSettle(pollMs);
     service = inspectWorkerService(serviceActionOptions(options));
   }
-  if (!expected.includes(service.state) && expected.includes("active") && workerAnswersReadiness(options)) {
-    return { ...service, state: "active" };
-  }
   return service;
 }
 function validateSettleWindow(value, label, max) {
@@ -134758,14 +134795,6 @@ function validateSettleWindow(value, label, max) {
     throw new OperationError("invalid_params", `${label} must be between 0 and ${max} milliseconds.`);
   }
   return value;
-}
-function workerAnswersReadiness(options) {
-  try {
-    const url = `http://127.0.0.1:${workerReadinessPort(options)}/v1/health`;
-    return options.readinessProbe ? options.readinessProbe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
-  } catch {
-    return false;
-  }
 }
 function lifecycleActionFailure(action, state, options) {
   const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });

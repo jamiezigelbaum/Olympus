@@ -684,7 +684,7 @@ export function ensureManagedWorkerEnvironment(
 }
 
 function reconcileWorkerEnv(envPath: string, options: WorkerServiceInstallOptions): boolean {
-  mkdirSync(dirname(envPath), { recursive: true });
+  mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
   if (!existsSync(envPath)) {
     writePrivateFileAtomicSync(envPath, defaultWorkerEnv(options));
     return true;

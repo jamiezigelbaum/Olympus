@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -7,13 +7,76 @@ import {
   configWithEnvironmentOverrides,
   defaultConfig,
   loadConfig,
+  NATIVE_REMOTE_CONFIG_ENV,
   parseBoolean,
   parseLane,
   parseModelProfile,
 } from '../src/core/config.ts';
 import { workerAuthTokenFromConfig } from '../src/core/worker-auth.ts';
+import { resolveDemoConsent } from '../src/workers/remote-oauth/demo-consent.ts';
 
 describe('config', () => {
+  test('a Gateway-supervised worker reads the plugin remote section, demo sign-in included', () => {
+    // The worker child builds its config from its environment; before the
+    // handoff its remote section was always empty on OpenClaw hosts, so
+    // /connect/demo/authorize answered 404 on the hosted demo (2026-10-10).
+    const remote = {
+      enabled: true,
+      relayHost: ' relay.example.test ',
+      demoConsent: { enabled: true, username: 'reviewer', passwordHash: '$argon2id$v=19$m=65536,t=2,p=1$fixture', extra: 'dropped' },
+    };
+    const env = {
+      OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
+      [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify(remote),
+    };
+    const config = loadConfig(env, { nativeRemoteHandoff: true });
+    expect(config.remote).toEqual({
+      enabled: true,
+      relayHost: 'relay.example.test',
+      demoConsent: { enabled: true, username: 'reviewer', passwordHash: '$argon2id$v=19$m=65536,t=2,p=1$fixture' },
+    });
+    expect(resolveDemoConsent(config.remote, () => true)?.username).toBe('reviewer');
+  });
+
+  test('only a validated native launch reads the remote handoff, and refuses it malformed', () => {
+    const base = { OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json' };
+    // A worker.env or foreground worker carrying both variables is not a
+    // supervised launch: it cannot switch on remote access or demo sign-in.
+    const ambient = {
+      ...base,
+      OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '00000000-0000-4000-8000-000000000000',
+      [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify({ demoConsent: { enabled: true } }),
+    };
+    expect(loadConfig(ambient).remote).toBeUndefined();
+    expect(configWithEnvironmentOverrides(defaultConfig(), ambient).remote).toBeUndefined();
+    expect(() => loadConfig({ ...base, [NATIVE_REMOTE_CONFIG_ENV]: '{nope' }, { nativeRemoteHandoff: true }))
+      .toThrow('is not valid JSON');
+    expect(() => loadConfig({ ...base, [NATIVE_REMOTE_CONFIG_ENV]: '[]' }, { nativeRemoteHandoff: true }))
+      .toThrow('must hold a JSON object');
+  });
+
+  test('in a native launch the plugin remote section replaces engine.json, and its absence clears it', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-config-remote-handoff-'));
+    try {
+      mkdirSync(join(home, '.olympus'));
+      writeFileSync(join(home, '.olympus', 'engine.json'), JSON.stringify({
+        remote: { enabled: true, demoConsent: { enabled: true, username: 'stale', passwordHash: '$argon2id$stale' } },
+      }));
+      const env = { HOME: home, OLYMPUS_ENGINE_HOST: '1' };
+      // The standalone engine's own worker still reads engine.json.
+      expect(loadConfig(env).remote?.demoConsent?.username).toBe('stale');
+      // A Gateway with no remote section: nothing from engine.json survives.
+      expect(loadConfig(env, { nativeRemoteHandoff: true }).remote).toBeUndefined();
+      const disabled = loadConfig(
+        { ...env, [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify({ enabled: false, demoConsent: { enabled: false } }) },
+        { nativeRemoteHandoff: true },
+      );
+      expect(resolveDemoConsent(disabled.remote, () => true)).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test('opaque explicit worker refs never inherit ambient credentials in inspection mode', () => {
     const config = configFromPluginConfig({ worker: { authToken: { source: 'file', provider: 'fixture', id: '/worker' }, service: { enabled: true } } }, { requireResolvedWorkerSecrets: false });
     expect(config.worker.authTokenSecretRefUnresolved).toBe(true);
