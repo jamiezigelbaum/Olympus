@@ -2664,7 +2664,7 @@ export interface PrivateEvidenceResult {
 
 export type PrivateEvidenceCandidate = EvidenceCandidate & {
   corpusId: string;
-  /** A nearest neighbour the search did not return (privateNeighbours), not a match. */
+  // A nearest neighbour the search did not return (privateNeighbours), not a match.
   neighbour?: true;
 };
 
