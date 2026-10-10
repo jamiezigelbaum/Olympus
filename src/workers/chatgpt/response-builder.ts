@@ -488,24 +488,34 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     const level = record.level === 'strict' ? 'strict' : 'standard';
     const rewritten = record.rewritten === true;
     const sent = clean(record.sent, MAX_ANSWER);
-    // Anonymous only when the network address was hidden (Tor). With Tor
-    // off the route gives payment privacy only, and the model is told so.
+    // Anonymous only when the network address was hidden (Tor, verified).
+    // Visible (Tor off, or a bypass observed) gives payment privacy only;
+    // not verified (Tor ran but the route could not be confirmed, e.g. no
+    // confinement on Linux) is told as what it is: the route says why.
     const hidden = record.networkIdentity === 'hidden';
-    const how = hidden ? 'anonymously' : 'through zkAPI with the network address visible (payment privacy only; Tor is off on this route)';
+    const visible = record.networkIdentity === 'visible';
+    const route = clean(record.route, 200);
+    const how = hidden
+      ? 'anonymously'
+      : visible
+        ? 'through zkAPI with the network address visible (payment privacy only; Tor is off on this route or was bypassed)'
+        : `through zkAPI with the network route not verified (payment privacy; the route reads: ${route ?? 'not verified'})`;
     const note = rewritten
       ? `Asked ${how} at ${level === 'strict' ? 'Strict' : 'Standard'}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.`
       : `Asked ${how} at Standard, as written.`;
     // A requested save that failed: told with the answer, so the user is not
     // surprised by the Strict/Standard question next time.
     const saveNote = clean(record.note, 1_000);
+    const model = clean(record.model, 200);
     return {
-      content: [{ type: 'text', text: [reply, '', note, ...(saveNote ? [`Tell the user: ${saveNote}`] : [])].join('\n') }],
+      content: [{ type: 'text', text: [reply, '', note, ...(model ? [`Answered by ${model}.`] : []), ...(saveNote ? [`Tell the user: ${saveNote}`] : [])].join('\n') }],
       structuredContent: {
         status: 'answered',
         answer: reply,
         anonymous: hidden,
-        ...(typeof record.route === 'string' ? { route: clean(record.route, 200) } : {}),
-        ...(record.networkIdentity === 'visible' ? { network_address: 'visible' } : {}),
+        ...(model ? { model } : {}),
+        ...(route !== undefined ? { route } : {}),
+        ...(visible ? { network_address: 'visible' } : hidden ? {} : { network_address: 'not_verified' }),
         level,
         rewritten,
         ...(sent !== undefined ? { sent } : {}),

@@ -517,8 +517,12 @@ first call with no `level` returns `needs_choice`: the agent asks the user once
 for Strict (their own model rewrites the question into general questions before
 it leaves) or Standard (their words, prepared as written, lightly cleaned up or
 by their saved instruction), then calls again with `level` and `remember: true`.
-Only the question goes out, never documents. Setup (the zkAPI route, the writer
-model, the spend limit) lives on the dashboard's Anonymous answers card; see
+Only the question goes out, never documents, and never to the provider that
+hosts the agent asking: a question from ChatGPT goes to Claude Sonnet by
+default, one from Claude Code or Claude Desktop to an OpenAI model, and a
+one-off `model` from the agent's own provider is refused. Setup (the zkAPI
+route, the writer model, the spend limit) lives on the dashboard's Anonymous
+answers card; see
 [`docs/design/private-answers.md`](docs/design/private-answers.md).
 
 MCP clients cap how long one tool call may run, and an answer can take several

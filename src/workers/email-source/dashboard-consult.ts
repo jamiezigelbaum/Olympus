@@ -368,6 +368,8 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   const writerCarried = (base: ConsultSettings) => ({
     ...(base.writer ? { writer: base.writer } : {}),
     ...(base.chatgptFrontierModel ? { chatgptFrontierModel: base.chatgptFrontierModel } : {}),
+    // The model for Anthropic-hosted agents has no card field yet (file only); carried through.
+    ...(base.claudeFrontierModel ? { claudeFrontierModel: base.claudeFrontierModel } : {}),
     // A level chosen in conversation (ask_anonymously) stays chosen through every card save.
     ...(base.levelChosen ? { levelChosen: true as const } : {}),
   });
@@ -631,6 +633,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         level: base.level,
         ...(writer ? { writer } : {}),
         ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}),
+        ...(base.claudeFrontierModel ? { claudeFrontierModel: base.claudeFrontierModel } : {}),
         ...standardCarried(base),
         ...(base.levelChosen ? { levelChosen: true as const } : {}),
         expectedRevision: revision,

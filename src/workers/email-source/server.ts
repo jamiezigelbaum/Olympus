@@ -4209,8 +4209,8 @@ export async function main(): Promise<void> {
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
     // Bound late: the consult block below sets askAnonymouslyNow.
-    consultAsk: (input, signal) => (askAnonymouslyNow
-      ? askAnonymouslyNow({ ...input, origin: 'agent', signal })
+    consultAsk: ({ caller, ...input }, signal) => (askAnonymouslyNow
+      ? askAnonymouslyNow({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), origin: 'agent', signal })
       : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
@@ -4547,8 +4547,9 @@ export async function main(): Promise<void> {
     // that the send cannot use.
     // A consult from a ChatGPT private answer uses the ChatGPT model
     // (consult.json `chatgptFrontierModel`, default Claude Sonnet: never the
-    // provider that holds the conversation); the dashboard's own question
-    // uses the route's model.
+    // provider that holds the conversation); an agent's question arrives
+    // with its model already chosen by its hosting provider (consult-ask.ts);
+    // the dashboard's own question uses the route's model.
     const { consultChatgptFrontierModel, consultChatgptModelUnavailableMessage } = await import('../../core/consult-settings.ts');
     const chatgptModel = (): string => consultChatgptFrontierModel(readConsultSettings().settings);
     const transport = (origin: 'chatgpt' | 'dashboard' = 'chatgpt', model?: string) => resolveZkapiConsultTransport(
@@ -4617,8 +4618,9 @@ export async function main(): Promise<void> {
           // only caller allowed to write consult.json (consult-settings-writer).
           remember: (choice) => dashboardConsult.rememberLevel(choice),
         });
-        // The card's "model missing from the listing" note, as the orchestrator keeps it.
-        if (input.origin === 'agent' && !input.model) {
+        // The card's "model missing from the listing" note, as the orchestrator
+        // keeps it: only for the ChatGPT setting the card shows.
+        if (input.origin === 'agent' && !input.model && input.callerProvider !== 'anthropic') {
           if (!result.ok && result.code === 'model_unavailable') chatgptModelProblem = { at: new Date().toISOString(), message: consultChatgptModelUnavailableMessage(chatgptModel()) };
           else if (result.ok) chatgptModelProblem = undefined;
         }

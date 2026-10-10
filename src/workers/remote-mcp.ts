@@ -26,7 +26,8 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import type { OlympusConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../core/email.ts';
-import { markInProcessRemoteRequest, type OperationCaller } from '../core/operation-caller.ts';
+import { callerProviderFromLabel, markInProcessRemoteRequest, type OperationCaller } from '../core/operation-caller.ts';
+import { isChatGptGrant } from './remote-oauth/pinned-clients.ts';
 import type { OperationContext } from '../core/operations.ts';
 import {
   isWellFormedRemoteConnectionToken,
@@ -217,8 +218,13 @@ export function lazyRemoteConnectionStore(
   };
 }
 
-export function remoteOperationCaller(connection: Pick<RemoteConnectionRecord, 'id' | 'displayName'>): OperationCaller {
-  return { surface: 'remote', connectionId: connection.id, displayName: connection.displayName };
+/**
+ * The remote caller: a ChatGPT grant (pinned client id) is OpenAI-hosted;
+ * any other connection is placed by the name it was approved under.
+ */
+export function remoteOperationCaller(connection: RemoteMcpConnection): OperationCaller {
+  const provider = isChatGptGrant(connection) ? 'openai' : callerProviderFromLabel(connection.displayName);
+  return { surface: 'remote', connectionId: connection.id, displayName: connection.displayName, ...(provider ? { provider } : {}) };
 }
 
 /**

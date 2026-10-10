@@ -39,6 +39,20 @@ describe('ask_anonymously: operation → worker route → core', () => {
     ]);
   });
 
+  test('the calling agent rides to the core with its hosting provider; a connection claim from outside the remote endpoint is refused', async () => {
+    const seen: ConsultAskWireRequest[] = [];
+    const { ctx, worker } = lane(async (input) => { seen.push(input); return { ok: true, sent: input.question, reply: 'r', route: 'zkAPI via Tor', level: 'standard', rewritten: false, remembered: false, model: 'openai/gpt-5.5' }; });
+    expect(await ask.handler({ ...ctx, caller: { surface: 'mcp', displayName: 'claude-code', provider: 'anthropic' } }, { question: 'Q?' })).toMatchObject({ ok: true, model: 'openai/gpt-5.5' });
+    expect(seen).toEqual([{ question: 'Q?', caller: { surface: 'mcp', display_name: 'claude-code', provider: 'anthropic' } }]);
+    const forged = await worker.fetch(new Request('http://worker.test/v1/consult/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q?', caller: { surface: 'remote', connection_id: 'conn_1', provider: 'openai' } }),
+    }));
+    expect(forged.status).toBe(400);
+    expect(seen).toHaveLength(1);
+  });
+
   test('bad shapes are refused before the worker: unknown params, a wrong level or cleanup, a non-boolean remember', async () => {
     const { ctx } = lane(async () => { throw new Error('must not be called'); });
     await expect(ask.handler(ctx, { question: 'x', level: 'loose' })).rejects.toMatchObject({ code: 'invalid_params' });
@@ -153,10 +167,21 @@ describe('ask_anonymously: the ChatGPT result', () => {
     expect(exposed.structuredContent).toMatchObject({ status: 'answered', anonymous: false, network_address: 'visible' });
     expect(exposed.content[0]!.text).not.toContain('anonymously');
     expect(exposed.content[0]!.text).toContain('network address visible');
+    // Tor ran but the route could not be verified (no confinement on Linux): neither anonymous nor "Tor off"; the route says why.
+    const unverified = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y', route: 'payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; no confinement', networkIdentity: 'not_verified', level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
+    expect(unverified.structuredContent).toMatchObject({ status: 'answered', anonymous: false, network_address: 'not_verified' });
+    expect(unverified.content[0]!.text).not.toContain('anonymously');
+    expect(unverified.content[0]!.text).not.toContain('Tor is off');
+    expect(unverified.content[0]!.text).toContain('network route not verified');
+    expect(unverified.content[0]!.text).toContain('actual route is not verified');
     // A requested save that failed is told with the answer.
     const unsaved = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y', route: 'r', level: 'standard', rewritten: false, remembered: false, note: 'Not saved; choose again next time.' });
     expect(unsaved.structuredContent).toMatchObject({ status: 'answered', note: 'Not saved; choose again next time.' });
     expect(unsaved.content[0]!.text).toContain('Tell the user: Not saved; choose again next time.');
+    // The answering model is named, so the agent can say which provider read the question.
+    const named = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y', route: 'r', networkIdentity: 'hidden', level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false, model: 'anthropic/claude-sonnet-5.5' });
+    expect(named.structuredContent).toMatchObject({ status: 'answered', model: 'anthropic/claude-sonnet-5.5' });
+    expect(named.content[0]!.text).toContain('Answered by anthropic/claude-sonnet-5.5.');
   });
 
   test('needs_choice and refusals are results in the user\'s words, never errors; working hands off to source_answer_result', () => {

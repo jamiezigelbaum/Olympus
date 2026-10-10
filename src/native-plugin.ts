@@ -139,8 +139,15 @@ function askAnonymouslyContentText(payload: unknown): string | undefined {
     const level = result.level === 'strict' ? 'Strict' : 'Standard';
     const how = result.rewritten ? 'the question was rewritten by your model before it left' : 'sent as written';
     const hidden = result.networkIdentity === 'hidden';
-    const heading = hidden ? 'Anonymous answer (zkAPI, ' : 'Answer through zkAPI with the network address visible (Tor is off on this route: payment privacy only; ';
-    const lines = [heading + level + '; ' + how + '):', result.reply];
+    const visible = result.networkIdentity === 'visible';
+    const route = typeof result.route === 'string' ? result.route : 'not verified';
+    const heading = hidden
+      ? 'Anonymous answer (zkAPI, '
+      : visible
+        ? 'Answer through zkAPI with the network address visible (Tor is off on this route or was bypassed: payment privacy only; '
+        : 'Answer through zkAPI with the network route not verified (payment privacy; the route reads: ' + route + '; ';
+    const model = typeof result.model === 'string' ? '; answered by ' + result.model : '';
+    const lines = [heading + level + '; ' + how + model + '):', result.reply];
     if (result.rewritten && typeof result.sent === 'string') lines.push('', 'Sent:', result.sent);
     if (typeof result.note === 'string') lines.push('', 'Note: ' + result.note);
     return lines.join('\n');

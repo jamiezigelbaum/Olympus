@@ -7,7 +7,7 @@ import {
 import { loadConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { createEmailTransport, EmailClient } from '../core/email.ts';
-import { sanitizeCallerDisplayName, type OperationCaller } from '../core/operation-caller.ts';
+import { callerProviderFromLabel, sanitizeCallerDisplayName, type OperationCaller } from '../core/operation-caller.ts';
 import { shouldExposeOperation, type OperationSurface } from '../core/operation-exposure.ts';
 import { findOperationByName, operations, OperationError } from '../core/operations.ts';
 import { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv, sourceAnswerJobOwner } from '../core/source-answer-jobs.ts';
@@ -110,10 +110,15 @@ export async function serve(): Promise<void> {
   await server.connect(new StdioServerTransport());
 }
 
-/** The stdio MCP caller identity; the client's self-reported name is a label only. */
+/**
+ * The stdio MCP caller identity; the client's self-reported name is a label
+ * only, and the hosting provider it suggests ("claude-code" → Anthropic)
+ * only chooses an anonymous-answer model setting.
+ */
 export function mcpOperationCaller(clientName?: string): OperationCaller {
   const displayName = sanitizeCallerDisplayName(clientName);
-  return { surface: 'mcp', ...(displayName ? { displayName } : {}) };
+  const provider = callerProviderFromLabel(displayName);
+  return { surface: 'mcp', ...(displayName ? { displayName } : {}), ...(provider ? { provider } : {}) };
 }
 
 function makeContext(clientName?: string, sourceAnswerJobs?: SourceAnswerJobRegistry): OperationContext {
