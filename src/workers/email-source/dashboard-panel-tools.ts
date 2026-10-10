@@ -20,16 +20,26 @@
  *   overnight guard's own files, and which paired apps Unpair can end, read
  *   off the same view the dashboard result was built from. ChatGPT never sees
  *   any of it.
+ * - the computer lists every unreadable file (`_meta['olympus/computer']`
+ *   `unreadable`, up to COMPUTER_UNREADABLE_FILES_LIMIT per source) with a
+ *   one-time token each, and opens one through `olympus_open_unreadable_file
+ *   {token}`: the synced copy here, or the file's own web page for the panel
+ *   to open. The token is the only argument; a path is never taken.
  */
 import {
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
+  COMPUTER_UNREADABLE_FILES_LIMIT,
   DASHBOARD_TOOL_NAME,
   INDEX_FASTER_TOOL_NAME,
+  OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
+  unreadableNames,
   type ComputerDashboardMeta,
   type ComputerUnpairEntry,
+  type ComputerUnreadableEntry,
 } from '../chatgpt/dashboard-contract.ts';
+import type { UnreadableFiles } from '../file-extraction/unreadable-files.ts';
 import { callChatGptTool, type ChatGptSurfaceOptions } from '../chatgpt/mcp-surface.ts';
 import type { ChatGptToolResult } from '../chatgpt/response-builder.ts';
 import { SetupBackendError, type ChatGptSetupBackend } from '../chatgpt/setup-tools.ts';
@@ -63,6 +73,8 @@ export interface DashboardPanelToolsOptions {
   makeContext: (signal: AbortSignal) => OperationContext;
   /** The embedding-priority override, or undefined when the guard's state is unknown here. */
   indexFasterState: () => Promise<boolean | undefined>;
+  /** Which files can't be read, and opening one; absent without the extraction factory. */
+  unreadableFiles?: () => UnreadableFiles | undefined;
 }
 
 function refused(text: string, code: string): ChatGptToolResult {
@@ -141,6 +153,53 @@ async function unpairSource(options: DashboardPanelToolsOptions, args: Record<st
   return { content: [{ type: 'text', text }], structuredContent: { status: 'saved', source_id: args.source_id } };
 }
 
+/** Opening one unreadable file by its one-time token; the token is the only argument. */
+async function openUnreadableFile(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  if (typeof args.token !== 'string' || keys.some((key) => key !== 'token')) return refused('token must be a file token from the dashboard.', 'invalid_params');
+  const files = options.unreadableFiles?.();
+  if (!files) return refused('Olympus cannot open this file here.', 'unavailable');
+  const opened = await files.open(args.token);
+  switch (opened.status) {
+    case 'opened':
+      return { content: [{ type: 'text', text: 'Opened the file on this computer.' }], structuredContent: { status: 'opened' } };
+    case 'open_link':
+      return { content: [{ type: 'text', text: 'Opening the file\'s page.' }], structuredContent: { status: 'open_link', url: opened.url } };
+    case 'invalid':
+      return refused('token must be a file token from the dashboard.', 'invalid_params');
+    case 'rate_limited':
+      return refused('Too many files opened at once. Try again in a moment.', 'rate_limited');
+    case 'failed':
+      return refused('The file could not be opened.', 'internal');
+    default:
+      return refused('This file is no longer in the list. Refresh the dashboard.', 'gone');
+  }
+}
+
+/** Every unreadable file per source the view counts, with open tokens, for the computer's See why. */
+export function computerUnreadableEntries(view: SourceDashboardViewModel | undefined, files: UnreadableFiles | undefined): ComputerUnreadableEntry[] {
+  if (!view || !files) return [];
+  return view.sources.flatMap((card) => {
+    const count = Math.max(0, Math.trunc(card.coverage.unreadable_items ?? 0));
+    const corpusIds = card.unreadable_files?.corpus_ids ?? [];
+    if (count === 0 || corpusIds.length === 0) return [];
+    let listed: ReturnType<UnreadableFiles['computerList']>;
+    try {
+      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT);
+    } catch {
+      return [];
+    }
+    const entries = listed.files.flatMap((file) => {
+      const [name] = unreadableNames([file.name]);
+      return name ? [{ name, ...(file.token ? { token: file.token } : {}) }] : [];
+    });
+    // Past the limit the list says how many more; the row's count is the word,
+    // so a count read a moment apart from the list never shows fewer.
+    const more = Math.max(0, listed.more, count - entries.length);
+    return [{ sourceId: card.source_id, files: entries, more }];
+  });
+}
+
 /** Which paired apps this computer can unpair, off the view the dashboard result came from. */
 export function computerUnpairEntries(view: SourceDashboardViewModel | undefined): ComputerUnpairEntry[] {
   if (!view) return [];
@@ -159,6 +218,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (!allowed.has(name)) return refused('This tool is not available here.', 'unknown_tool');
       if (name === INDEX_FASTER_TOOL_NAME) return await indexFaster(options, args);
       if (name === UNPAIR_SOURCE_TOOL_NAME) return await unpairSource(options, args);
+      if (name === OPEN_UNREADABLE_FILE_TOOL_NAME) return await openUnreadableFile(options, args);
       const signal = context.signal ?? new AbortController().signal;
       const base = options.surface();
       // Keep the view the dashboard result is built from, for Unpair's entries.
@@ -172,10 +232,12 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (name !== DASHBOARD_TOOL_NAME || result.isError) return result;
       const on = await options.indexFasterState().catch(() => undefined);
       const unpair = computerUnpairEntries(view);
-      if (on === undefined && unpair.length === 0) return result;
+      const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.());
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0) return result;
       const meta: ComputerDashboardMeta = {
         ...(on !== undefined ? { indexFaster: { on } } : {}),
         ...(unpair.length > 0 ? { unpair } : {}),
+        ...(unreadable.length > 0 ? { unreadable } : {}),
       };
       const existing = result._meta && typeof result._meta === 'object' ? result._meta as Record<string, unknown> : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta } };

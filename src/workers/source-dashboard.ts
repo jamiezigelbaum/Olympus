@@ -852,6 +852,17 @@ export interface DashboardSourceCard {
       approval_entry_id?: string;
     };
   };
+  /**
+   * Which files `coverage.unreadable_items` counts (owner ruling, 2026-10-10:
+   * never say something is wrong without a way to find out exactly what):
+   * the newest few names, newest failure first, and the corpora that hold
+   * them, for the computer's full list. Secrets items are never counted or
+   * named. Absent when nothing is unreadable or no list is wired.
+   */
+  unreadable_files?: {
+    names: string[];
+    corpus_ids: string[];
+  };
   queue_health: {
     label: string;
     waiting: number;
@@ -1212,6 +1223,12 @@ export interface SourceDashboardBuildOptions {
    * Stamped on the card only while dashboardLiveManualSync says it is news.
    */
   manualSyncs?: Readonly<Record<string, DashboardManualSync>>;
+  /**
+   * The names of the newest unreadable files across these corpora, newest
+   * failure first, at most `limit` (the extraction queue's own list, the one
+   * its unreadable count comes from).
+   */
+  unreadableFileNames?: (corpusIds: readonly string[], limit: number) => readonly string[];
   credentialHealth?: CredentialHealthReport;
   oauthClientIds?: Partial<Record<DashboardOAuthSource | 'google', string>>;
   oauthClientSecretAvailability?: Partial<Record<DashboardOAuthSource | 'google', boolean>>;
@@ -2059,10 +2076,12 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // corpora, and the migration only when its plan touches one of them.
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
     const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
+    const unreadableFiles = unreadableFilesFor(built, corpora, options.unreadableFileNames);
     const card: DashboardSourceCard = {
       ...built,
       ...(tierClassification ? { tier_classification: tierClassification } : {}),
       ...(manualSync ? { last_manual_sync: { ...manualSync } } : {}),
+      ...(unreadableFiles ? { unreadable_files: unreadableFiles } : {}),
     };
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
@@ -2206,6 +2225,28 @@ function answerLaneFromDefinition(
       handles: handles.map((handle) => handle.handle).sort((a, b) => a.localeCompare(b)),
     },
   };
+}
+
+/** How many names the card carries: the most any surface shows without the computer's own list. */
+const CARD_UNREADABLE_NAMES = 5;
+
+function unreadableFilesFor(
+  card: DashboardSourceCard,
+  corpora: readonly SourceIndexStatusCorpus[],
+  names: SourceDashboardBuildOptions['unreadableFileNames'],
+): DashboardSourceCard['unreadable_files'] {
+  if (!names || !((card.coverage.unreadable_items ?? 0) > 0)) return undefined;
+  const corpusIds = corpora
+    .filter((corpus) => (numericCounts(corpus)[UNREADABLE_ITEMS_COUNT_KEY] ?? 0) > 0)
+    .map((corpus) => corpus.corpus_id);
+  if (corpusIds.length === 0) return undefined;
+  let listed: readonly string[];
+  try {
+    listed = names(corpusIds, CARD_UNREADABLE_NAMES);
+  } catch {
+    listed = [];
+  }
+  return { names: listed.slice(0, CARD_UNREADABLE_NAMES), corpus_ids: corpusIds };
 }
 
 function sourceCardFromDefinition(

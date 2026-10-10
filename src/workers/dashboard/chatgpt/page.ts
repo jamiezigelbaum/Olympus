@@ -23,6 +23,7 @@ import {
   DASHBOARD_TOOL_NAME,
   INDEX_FASTER_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
+  OPEN_UNREADABLE_FILE_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
   SYNC_SOURCE_TOOL_NAME,
 } from '../../chatgpt/dashboard-contract.ts';
@@ -192,6 +193,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .why summary{color:var(--muted);font-size:0.875rem;padding:0.125rem 0}
 .why .plain{margin:0.25rem 0;font-size:0.875rem}
 .why-note{font-size:0.8125rem;color:var(--muted)}
+.why .files li{overflow-wrap:anywhere}
+.why .files .btn.link.file{min-height:0;padding:0.125rem 0;color:var(--text);text-align:left;text-decoration:underline;text-underline-offset:2px}
+.landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
+@keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
 .strong{font-weight:600}
 .error{color:var(--danger);font-weight:600}
@@ -298,8 +303,11 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
+
+/** How long the place an open link landed on stays outlined (as on Keys, control-ui LANDED_HIGHLIGHT_MS). */
+const CHATGPT_DASHBOARD_LANDED_MS = 4000;
 
 /** The page, with every string the client prints inlined as data. */
 export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = {}): string {
@@ -337,6 +345,8 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
       computerMetaKey: COMPUTER_META_KEY,
       indexFasterTool: INDEX_FASTER_TOOL_NAME,
       unpairTool: UNPAIR_SOURCE_TOOL_NAME,
+      unreadableOpenTool: OPEN_UNREADABLE_FILE_TOOL_NAME,
+      landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY,
     },
   };

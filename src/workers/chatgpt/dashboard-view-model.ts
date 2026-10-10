@@ -4,7 +4,10 @@
  * Input is the engine's own dashboard view (`SourceDashboardViewModel`, the
  * same object `/dashboard.json` serves). Output is `DashboardViewModelV1`.
  *
- * Privacy boundary: nothing here copies a string off the input. Source labels
+ * Privacy boundary: nothing here copies a string off the input, with one
+ * owner-ruled exception (2026-10-10): the names of a source's newest
+ * unreadable files, which may reach ChatGPT (only content is Private;
+ * Secrets items are never counted or named). Source labels
  * come from the static source definitions, sentences come from vocabulary.ts
  * applied to a SCRUBBED card (every free-text field replaced by a value from a
  * closed set), and every other value is an enum, a number or an ISO time. The
@@ -15,7 +18,13 @@
  */
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { formatSpaceToFree, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
-import { OPEN_CONNECT_SOURCES, openPageUrl, type OpenConnectSource, type OpenFixSection } from '../../core/open-targets.ts';
+import {
+  OPEN_CONNECT_SOURCES,
+  openPageUrl,
+  openUnreadableSourceFor,
+  type OpenConnectSource,
+  type OpenFixSection,
+} from '../../core/open-targets.ts';
 import {
   dashboardCredentialProblem as credentialProblem,
   dashboardHonestStatus,
@@ -47,6 +56,7 @@ import {
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
   DASHBOARD_MANY_UNREADABLE_LABEL,
+  dashboardUnreadableMoreLabel,
 } from '../dashboard/vocabulary.ts';
 import {
   CONNECT_SOURCE_TOOL_NAME,
@@ -71,6 +81,8 @@ import {
   type SourceProgress,
   type SourceStalledReason,
   type TranscriptionModelView,
+  UNREADABLE_NAMES_IN_RESULT,
+  unreadableNames,
 } from './dashboard-contract.ts';
 
 /** Static, product-owned labels for answer models. Never the card's own text. */
@@ -397,8 +409,8 @@ function sourceEntry(
     ...(connecting ? { connecting: { expiresAt: connecting.expiresAt } } : {}),
     ...(progress ? { progress } : {}),
     ...(menu.length > 0 ? { menu } : {}),
-    // Counts only, the same facts the row's words come from; never a file name.
-    ...(unreadable > 0 ? { unreadable: unreadableView(card, unreadable) } : {}),
+    // The same count the row's words come from, with the newest files' names.
+    ...(unreadable > 0 ? { unreadable: unreadableView(definition, card, unreadable) } : {}),
     ...(manual
       ? {
           lastManualSync: {
@@ -413,16 +425,31 @@ function sourceEntry(
 
 /**
  * Why files can't be read, as data: a count per closed reason code. The engine
- * records one permanent failure, so one reason carries the whole count. No
- * file name or path is read here, so none can reach the view model.
+ * records one permanent failure, so one reason carries the whole count. Then
+ * the newest files' names (never a path), and, when the count is more than
+ * they show, "and N more": the computer's full list, through the same open
+ * page every computer-only control uses (openHref).
  */
-function unreadableView(card: DashboardSourceCard, count: number): DashboardUnreadable {
+function unreadableView(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard, count: number): DashboardUnreadable {
+  const names = unreadableNames(card.unreadable_files?.names).slice(0, Math.min(count, UNREADABLE_NAMES_IN_RESULT));
+  const rest = count - names.length;
+  const target = openUnreadableSourceFor(definition.source_id);
   return {
     count,
     reasons: [{ code: 'damaged_or_unsupported', count }],
     ...(card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL ? { many: true as const } : {}),
+    ...(names.length > 0 ? { names } : {}),
+    ...(rest > 0
+      ? {
+          more: helpLinkFix(
+            dashboardUnreadableMoreLabel(rest),
+            openPageUrl(target ? { kind: 'unreadable', source: target } : { kind: 'dashboard' }),
+          ),
+        }
+      : {}),
   };
 }
+
 
 function attentionItem(
   definition: DashboardSupportedSourceDefinition,
@@ -1040,6 +1067,11 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
         }
       : {}),
     ...(isoOrUndefined(card.last_sync_at) ? { last_sync_at: isoOrUndefined(card.last_sync_at)! } : {}),
+    // The one string copied off the input (owner ruling, 2026-10-10): the
+    // newest unreadable files' names, cut to display text. Never a path.
+    ...(card.unreadable_files
+      ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } }
+      : {}),
     ...(card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at)
       && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome)
       ? {

@@ -25,6 +25,8 @@ import type {
   ExtractionCorpusReadiness,
   ExtractionLaneKey,
   ExtractionTerminalRetryPath,
+  ExtractionUnreadableItem,
+  ExtractionUnreadableVerdict,
   LocalFileExtractionJobStore,
 } from './job-store.ts';
 import type { ExtractionItemRef } from './types.ts';
@@ -40,6 +42,16 @@ import type { ExtractionItemRef } from './types.ts';
  * absent one. Their needs-review chips stay absent until the evidence they read
  * is published through the same shared path.
  */
+export interface ExtractionReadinessLedger extends SourceIndexReadinessLedger {
+  /**
+   * The items this corpus's last snapshot counted as unreadable, newest
+   * failure first: the list its count is the length of (taken now when no
+   * snapshot was). The dashboard names files from this, never from a second
+   * query, so the count and the names cannot drift apart.
+   */
+  unreadableItems(corpusId: string): readonly ExtractionUnreadableItem[];
+}
+
 export function createExtractionReadinessLedger(
   jobs: Pick<LocalFileExtractionJobStore, 'corpusReadiness'>
     & Partial<Pick<LocalFileExtractionJobStore, 'scopedReadiness'>>,
@@ -51,9 +63,19 @@ export function createExtractionReadinessLedger(
     // Terminal failures the runner will still retry: their items are not
     // counted as unreadable until that last try has run.
     terminalRetryPaths?: readonly ExtractionTerminalRetryPath[];
+    // Asked about every item extraction gave up on (ExtractionUnreadableVerdict):
+    // a Secrets item counts with the policy exit, one no store serves is left out.
+    classifyUnreadable?: (item: ExtractionUnreadableItem) => ExtractionUnreadableVerdict;
   } = {},
-): SourceIndexReadinessLedger {
-  return {
+): ExtractionReadinessLedger {
+  const lastUnreadable = new Map<string, readonly ExtractionUnreadableItem[]>();
+  const listing = (corpusId: string) => ({
+    ...(options.classifyUnreadable ? { classifyUnreadable: options.classifyUnreadable } : {}),
+    onUnreadable: (items: readonly ExtractionUnreadableItem[]) => {
+      lastUnreadable.set(corpusId, items);
+    },
+  });
+  const ledger: ExtractionReadinessLedger = {
     snapshotForCorpus(corpusId: string) {
       const lanes = options.lanesForCorpus?.(corpusId);
       if (lanes !== undefined) {
@@ -62,6 +84,7 @@ export function createExtractionReadinessLedger(
           return readinessSnapshot(jobs.scopedReadiness(lanes, {
             ...(options.currentItem ? { currentItem: options.currentItem } : {}),
             ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
+            ...listing(corpusId),
           }));
         } catch {
           return undefined;
@@ -71,6 +94,7 @@ export function createExtractionReadinessLedger(
       try {
         readiness = jobs.corpusReadiness(corpusId, new Date(), {
           ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
+          ...listing(corpusId),
         });
       } catch {
         // A status poll must not fail because the queue is momentarily
@@ -80,7 +104,12 @@ export function createExtractionReadinessLedger(
       }
       return readinessSnapshot(readiness);
     },
+    unreadableItems(corpusId: string) {
+      if (!lastUnreadable.has(corpusId)) ledger.snapshotForCorpus(corpusId);
+      return lastUnreadable.get(corpusId) ?? [];
+    },
   };
+  return ledger;
 }
 
 function readinessSnapshot(

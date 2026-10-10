@@ -82,7 +82,7 @@ import {
 import { createConnectorStoreExtractionSink } from '../file-extraction/store-sink.ts';
 import { createTieredStoreExtractionSink } from '../file-extraction/tiered-store-sink.ts';
 import { tieredExtractionView, type TieredExtractionView } from '../connector-store/tiered-extraction.ts';
-import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import { TIER_DOMAIN_ORDER, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import type {
   ExtractionItemRef,
   ExtractorRegistryConfig,
@@ -189,7 +189,18 @@ export interface FileExtractionRuntime {
   corpusIds: readonly string[];
   /** Terminal failures the runner still retries; the readiness counts read them. */
   terminalRetryPaths: readonly ExtractionTerminalRetryPath[];
+  /**
+   * An item's row as a read may see it (tier-copy visibility applied): its
+   * locator and conversation, never its text. Undefined when no store of its
+   * corpus serves it any more. For naming and opening an unreadable file.
+   */
+  locateItem(ref: Pick<ExtractionItemRef, 'corpusId' | 'localItemId'>): ExtractionItemLocation | undefined;
   close(): void;
+}
+
+export interface ExtractionItemLocation {
+  locatorUri?: string;
+  providerConversationId?: string;
 }
 
 /**
@@ -234,6 +245,8 @@ export function createFileExtractionRuntime(
   );
 
   const corpora: ExtractionRunnerCorpus[] = [];
+  // Where each served corpus's items live: its store, or every store of its tier set.
+  const itemStores = new Map<string, () => LocalConnectorStore[]>();
   for (const config of roster) {
     const store = storesByCorpusId.get(config.corpusId);
     if (!store) {
@@ -250,6 +263,12 @@ export function createFileExtractionRuntime(
       throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);
     }
     const view = tierSet ? tieredExtractionView(tierSet, { home: store.trustDomain }) : undefined;
+    itemStores.set(config.corpusId, tierSet
+      ? () => TIER_DOMAIN_ORDER.flatMap((domain) => {
+          const leg = tierSet.store(domain);
+          return leg ? [leg] : [];
+        })
+      : () => [store]);
     // A store that is not Private holds no picture content of an item its set
     // never routed (or of any item, untiered); what an earlier build stored
     // there is removed (the names stay).
@@ -382,6 +401,17 @@ export function createFileExtractionRuntime(
     jobs,
     corpusIds: corpora.map((corpus) => corpus.corpusId),
     terminalRetryPaths: terminalRetryPaths(registry, reclassificationRules),
+    locateItem(ref) {
+      for (const holder of itemStores.get(ref.corpusId)?.() ?? []) {
+        const found = holder.localContent(ref.localItemId, 0, undefined, { withoutContent: true });
+        if (!found) continue;
+        return {
+          ...(found.locatorUri ? { locatorUri: found.locatorUri } : {}),
+          ...(found.providerConversationId ? { providerConversationId: found.providerConversationId } : {}),
+        };
+      }
+      return undefined;
+    },
     close() {
       jobs.close();
     },

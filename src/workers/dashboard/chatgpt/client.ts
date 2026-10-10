@@ -68,6 +68,10 @@ export interface ChatGptDashboardClientConfig {
     indexFasterTool: string;
     /** Unpair for a paired chat app, offered in its ⋯ menu on the computer only. */
     unpairTool: string;
+    /** Opens one unreadable file (`{token}` from the computer meta), on the computer only. */
+    unreadableOpenTool: string;
+    /** How long the place an open link landed on stays outlined (`.landed`). */
+    landedMs: number;
     copy: typeof DASHBOARD_COMPUTER_PANEL_COPY;
   };
 }
@@ -126,6 +130,10 @@ export function chatgptDashboardClient(
     hostLinks: Record<string, string>;
     /** The computer-only facts from the last dashboard result (`_meta[computerMetaKey]`). */
     computerMeta: Any;
+    /** Computer only: the source an open link asked to land on, until the panel has landed there. */
+    landing: string;
+    /** The source row outlined after landing, until `until` (ms). */
+    landed: { id: string; until: number } | null;
   } = {
     data: null,
     relayDown: false,
@@ -144,6 +152,8 @@ export function chatgptDashboardClient(
     hostReadOnly: false,
     hostLinks: {},
     computerMeta: null,
+    landing: '',
+    landed: null,
   };
   const H = config.host;
 
@@ -216,6 +226,11 @@ export function chatgptDashboardClient(
       if (typeof href === 'string' && /^https?:\/\//.test(href)) links[key] = href;
     }
     state.hostLinks = value.kind === 'computer' ? links : {};
+    // Said once, in the first answer: See why on one source (core/open-targets.ts unreadable/<source>).
+    const landing = value.landing;
+    if (value.kind === 'computer' && landing && typeof landing.sourceId === 'string' && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
+      state.landing = landing.sourceId;
+    }
   }
 
   /** The panel runs on the computer itself (the local /dashboard). */
@@ -312,8 +327,8 @@ export function chatgptDashboardClient(
   function inlineError(result: Any, name?: string): string {
     if (!result || !result.isError) return '';
     const code = result.structuredContent && typeof result.structuredContent.error === 'string' ? result.structuredContent.error : '';
-    // Unpair's refusals are the computer's own sentences (busy, a record to repair): always beside the control.
-    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && name === H.unpairTool)) return '';
+    // Unpair's refusals, and opening a file, are the computer's own sentences: always beside the control.
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool))) return '';
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
     return text ? String(text.text) : '';
@@ -341,6 +356,14 @@ export function chatgptDashboardClient(
         }
         state.actionError = { key, text: failed };
         render(key);
+        return;
+      }
+      if (name === H.unreadableOpenTool) {
+        // The engine opened the file's copy on this computer, or answers the
+        // file's own web page for this page to open. Nothing else changed.
+        const url = result && result.structuredContent ? result.structuredContent.url : '';
+        if (typeof url === 'string' && url) openLink(url);
+        redraw();
         return;
       }
       if (name === H.unpairTool) {
@@ -793,6 +816,8 @@ export function chatgptDashboardClient(
     }
     const why = seeWhy(source, id);
     if (why) add(main, why);
+    // Landed on a source with nothing to see why about now: the row itself is outlined.
+    else if (state.landed && state.landed.id === id) row.className += ' landed';
     add(row, main);
     const controls = el('div', 'source-actions');
     const context = { id, label: String(source.label || id) };
@@ -833,10 +858,13 @@ export function chatgptDashboardClient(
   }
 
   /**
-   * "See why", under a row with files that can't be read: a count per reason
-   * and one note. The data holds counts and closed reason codes only, so there
-   * is no file name here to show. An older engine's bare number has no reasons
-   * and shows nothing beyond the row's own line.
+   * "See why", under a row with files that can't be read: a count per reason,
+   * then which files (owner ruling, 2026-10-10: never say something is wrong
+   * without a way to find out exactly what), and one note. In ChatGPT the
+   * newest few names and "and N more", which opens the computer's full list;
+   * on the computer every file from its own list, each opening the file. An
+   * older engine's bare number has no reasons and shows nothing beyond the
+   * row's own line.
    */
   function seeWhy(source: Any, id: string): HTMLElement | null {
     const unreadable = source.unreadable;
@@ -850,8 +878,77 @@ export function chatgptDashboardClient(
       });
     if (!lines.length) return null;
     const box = details('why:' + id, document.createTextNode(P.seeWhy), 'why');
-    add(box, add(el('ul', 'plain'), ...lines), el('p', 'why-note', unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    if (state.landed && state.landed.id === id) box.className += ' landed';
+    add(box, add(el('ul', 'plain'), ...lines), unreadableFiles(unreadable, id), el('p', 'why-note', unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
     return box;
+  }
+
+  /** The unreadable files under See why: the computer's own list when it has one, else the result's names. */
+  function unreadableFiles(unreadable: Any, id: string): HTMLElement | null {
+    const list = el('ul', 'plain files');
+    const own = computerUnreadable(id);
+    if (own) {
+      own.files.forEach((file: Any, index: number) => {
+        const item = el('li');
+        if (typeof file.token === 'string' && file.token) {
+          const key = 'why-file:' + id + ':' + index;
+          const control = fixControl({ label: file.name, tool: H.unreadableOpenTool, args: { token: file.token } }, key, 'plain', false);
+          const opener = control.querySelector('button');
+          if (opener && opener.textContent === file.name) {
+            opener.className = 'btn link file';
+            opener.setAttribute('aria-label', fill(P.unreadableOpen, { name: file.name }));
+          }
+          add(item, control);
+        } else add(item, document.createTextNode(file.name));
+        add(list, item);
+      });
+      if (own.more > 0) add(list, el('li', 'muted', fill(P.unreadableMore, { count: count(own.more) })));
+      return list.childNodes.length ? list : null;
+    }
+    const names = Array.isArray(unreadable.names) ? unreadable.names.filter((name: Any) => typeof name === 'string' && name) : [];
+    names.forEach((name: string) => add(list, el('li', '', name)));
+    if (unreadable.more && typeof unreadable.more === 'object') {
+      add(list, add(el('li'), fixControl(unreadable.more, 'why-more:' + id, 'plain', false)));
+    }
+    return list.childNodes.length ? list : null;
+  }
+
+  /** Computer only: this source's unreadable files from the computer meta (names, open tokens), or null. */
+  function computerUnreadable(id: string): { files: Array<{ name: string; token?: string }>; more: number } | null {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.unreadable)) return null;
+    const entry = meta.unreadable.filter((item: Any) => item && item.sourceId === id)[0];
+    if (!entry || !Array.isArray(entry.files)) return null;
+    const files = entry.files
+      .filter((file: Any) => file && typeof file.name === 'string' && file.name)
+      .map((file: Any) => (typeof file.token === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(file.token)
+        ? { name: file.name, token: file.token }
+        : { name: file.name }));
+    const more = typeof entry.more === 'number' && isFinite(entry.more) && entry.more > 0 ? Math.floor(entry.more) : 0;
+    return files.length || more ? { files, more } : null;
+  }
+
+  /**
+   * Where an open link asked to land (computer only, once the data is in):
+   * that source's See why opens, gets a brief outline (`.landed`) and the
+   * focus. A source with nothing unreadable now is outlined as a row.
+   */
+  function applyLanding(): void {
+    const id = state.landing;
+    if (!id || !state.data || state.relayDown || editorOpen() || compact()) return;
+    state.landing = '';
+    const sources = Array.isArray(state.data.sources) ? state.data.sources : [];
+    if (!sources.some((source: Any) => source && source.id === id)) return;
+    state.open['why:' + id] = true;
+    state.landed = { id, until: Date.now() + H.landedMs };
+    render('summary:why:' + id);
+    const node = root.querySelector('.landed') as HTMLElement | null;
+    if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'center' });
+    setTimeout(() => {
+      state.landed = null;
+      const shown = root.querySelector('.landed');
+      if (shown) shown.classList.remove('landed');
+    }, H.landedMs);
   }
 
   /** Sync now was pressed and its sync has not finished: pressed here, or `checking` on the engine. */
@@ -1359,6 +1456,7 @@ export function chatgptDashboardClient(
       }
     }
     reportHeight();
+    if (state.landing && !picking && !privacyOpen) applyLanding();
   }
 
   function reportHeight(): void {

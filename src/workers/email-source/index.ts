@@ -405,6 +405,11 @@ export interface EmailSourceWorkerOptions {
   // reasons, analyst backend/fallback, release decision — never query/content).
   sourceAnswerLatencyLog?: SourceAnswerLatencyLog;
   sourceIndexStatus?: SourceIndexStatusHandler;
+  /**
+   * The names of the newest unreadable files across corpora (the extraction
+   * readiness ledger's own list), stamped on the dashboard's source cards.
+   */
+  unreadableFileNames?: (corpusIds: readonly string[], limit: number) => readonly string[];
   readwiseConnectorStoreSync?: ReadwiseConnectorStoreSyncHandler;
   /**
    * Resolves the current Readwise handler after registry changes. When present
@@ -1337,6 +1342,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
               ),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
+              ...(options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {}),
               ...(credentialHealth ? { credentialHealth } : {}),
               oauthClientIds: dashboardClientIdSets.all,
               oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),

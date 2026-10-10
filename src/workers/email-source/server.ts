@@ -24,6 +24,8 @@ import {
   parseFileExtractionCorporaEnv,
 } from './file-extraction-runtime.ts';
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
+import { createUnreadableFiles } from '../file-extraction/unreadable-files.ts';
+import type { ExtractionUnreadableItem, ExtractionUnreadableVerdict } from '../file-extraction/job-store.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
 import { OpenAICompatibleVlmClient } from '../file-extraction/extractors/openai-compatible-client.ts';
 import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
@@ -3436,6 +3438,97 @@ export async function main(): Promise<void> {
           }),
       }
     : undefined;
+  // An item extraction gave up on is named on the dashboard only when it is
+  // really unreadable: a Secrets item (by its tier ledger row, or located as a
+  // secret) counts with the policy exit and is never named or counted as
+  // unreadable, on any host; an item no store serves any more is left out of
+  // both the count and the list. Source-neutral: every lane's ledger and
+  // secret index, by corpus.
+  const unreadableVerdict = (item: ExtractionUnreadableItem): ExtractionUnreadableVerdict => {
+    const located = fileExtractionRuntime?.locateItem(item.ref);
+    const identity = {
+      provider: item.ref.provider,
+      accountScope: item.ref.accountScope,
+      providerItemId: item.ref.providerItemId,
+      ...(located?.providerConversationId ? { providerConversationId: located.providerConversationId } : {}),
+    };
+    for (const lane of tierLanes) {
+      if (!lane.corpusIds.has(item.ref.corpusId)) continue;
+      const record = lane.ledger.getCurrent(identity);
+      if (record && (record.metadataTier === 'secrets' || record.contentTier === 'secrets')) return 'blocked_policy';
+      if (lane.secrets?.get(identity)) return 'blocked_policy';
+    }
+    return located ? 'unreadable' : 'hidden';
+  };
+  const extractionReadinessLedger = fileExtractionRuntime
+    ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+        terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
+        classifyUnreadable: unreadableVerdict,
+        currentItem(ref) {
+          if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
+            return false;
+          }
+          const readScope = connectorStoreReadScope(dropboxConnectorStore);
+          return readScope.allowed
+            && readScope.contentAllowed
+            && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
+        },
+        lanesForCorpus(corpusId) {
+          if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) return undefined;
+          const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
+          if (!ref || !fileSourceScopeAuthority) return [];
+          const approval = fileSourceScopeAuthority.assertCurrent(ref);
+          const scopes = dropboxPolicyFullExtractionScopeKeys(
+            fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval),
+          );
+          const handle = selectedSourceCredentialHandle({
+            env: process.env,
+            pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
+            provider: 'dropbox',
+            capability: 'dropbox.files.sync',
+            handles: readActiveConnectedHandles(process.env),
+          });
+          const accountScope = handle?.accountRole?.trim() || dropboxFilesAccount || 'personal';
+          return scopes.map((approvedScopeKey) => ({
+            corpusId,
+            provider: 'dropbox',
+            accountScope,
+            approvedScopeKey,
+          }));
+        },
+      })
+    : undefined;
+  // Which files can't be read, and opening one on this computer (the panel's
+  // See why): the ledger's own list, so the names are the files its count
+  // counted. A file opens where its provider says: a Dropbox file's synced
+  // copy here, else its web page.
+  const { createDropboxOpenTargets: unreadableDropboxTargets, localDropboxRoots: unreadableDropboxRoots, localOpenArguments: unreadableOpenArguments } = await import('../dropbox-files/open-target.ts');
+  const unreadableOpenTargets: Record<string, (locator: string) => { url?: string; localPath?: string } | undefined> = {
+    dropbox: unreadableDropboxTargets(),
+  };
+  const unreadableFiles = extractionReadinessLedger && fileExtractionRuntime
+    ? createUnreadableFiles({
+        items: (corpusId) => extractionReadinessLedger.unreadableItems(corpusId),
+        verdict: unreadableVerdict,
+        locate: (ref) => fileExtractionRuntime.locateItem(ref),
+        // The provider's own resolver, else the item's locator when it is a web page (a Drive link).
+        openTarget: (provider, locator) => (Object.hasOwn(unreadableOpenTargets, provider)
+          ? unreadableOpenTargets[provider]!(locator)
+          : /^https:\/\//.test(locator) ? { url: locator } : undefined),
+        ...(process.platform === 'darwin'
+          ? {
+              openFile: (path: string) => new Promise<void>((resolve, reject) => {
+                const args = unreadableOpenArguments(path, unreadableDropboxRoots());
+                if (!args) {
+                  reject(new Error('open refused'));
+                  return;
+                }
+                execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+              }),
+            }
+          : {}),
+      })
+    : undefined;
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
       // Read per request: a per-tier store its tier set creates while the
@@ -3469,45 +3562,7 @@ export async function main(): Promise<void> {
       // extraction queue rather than from any source's own index. Absent when
       // the factory is switched off, which leaves the coverage math on the
       // store's own per-item count alone.
-      ...(fileExtractionRuntime
-        ? {
-            readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
-              terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
-              currentItem(ref) {
-                if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
-                  return false;
-                }
-                const readScope = connectorStoreReadScope(dropboxConnectorStore);
-                return readScope.allowed
-                  && readScope.contentAllowed
-                  && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
-              },
-              lanesForCorpus(corpusId) {
-                if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) return undefined;
-                const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
-                if (!ref || !fileSourceScopeAuthority) return [];
-                const approval = fileSourceScopeAuthority.assertCurrent(ref);
-                const scopes = dropboxPolicyFullExtractionScopeKeys(
-                  fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval),
-                );
-                const handle = selectedSourceCredentialHandle({
-                  env: process.env,
-                  pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
-                  provider: 'dropbox',
-                  capability: 'dropbox.files.sync',
-                  handles: readActiveConnectedHandles(process.env),
-                });
-                const accountScope = handle?.accountRole?.trim() || dropboxFilesAccount || 'personal';
-                return scopes.map((approvedScopeKey) => ({
-                  corpusId,
-                  provider: 'dropbox',
-                  accountScope,
-                  approvedScopeKey,
-                }));
-              },
-            }),
-          }
-        : {}),
+      ...(extractionReadinessLedger ? { readinessLedger: extractionReadinessLedger } : {}),
     })
     : undefined;
   const sourceDashboardHistory = sourceIndexReadEnabled
@@ -4214,6 +4269,7 @@ export async function main(): Promise<void> {
       : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
+    ...(unreadableFiles ? { unreadableFileNames: (corpusIds: readonly string[], limit: number) => unreadableFiles.names(corpusIds, limit) } : {}),
     currentReadwiseSync,
     currentXBookmarksRuntime,
     dropboxIngestionPolicy,
@@ -4882,6 +4938,7 @@ export async function main(): Promise<void> {
       const runtime = await readEmbeddingRuntime({ env: process.env });
       return runtime.state === 'unknown' ? undefined : runtime.overrideOn;
     },
+    unreadableFiles: () => unreadableFiles,
   });
 
   const server = Bun.serve({

@@ -30,10 +30,25 @@ export const OPEN_FIX_SECTIONS = ['connect', 'reconnect', 'answers', 'search', '
 
 export type OpenFixSection = typeof OPEN_FIX_SECTIONS[number];
 
+/**
+ * The sources whose files can be unreadable (the extraction factory reads
+ * them), by the short id a link names: `unreadable/<id>` opens the computer's
+ * dashboard with See why expanded on that source, where every unreadable
+ * file is listed and opens (owner ruling, 2026-10-10).
+ */
+export const OPEN_UNREADABLE_SOURCES = {
+  dropbox: { sourceId: 'dropbox.files', label: 'Dropbox' },
+  drive: { sourceId: 'google_drive.docs', label: 'Google Drive' },
+  whatsapp: { sourceId: 'whatsapp.personal.messages', label: 'WhatsApp' },
+} as const;
+
+export type OpenUnreadableSource = keyof typeof OPEN_UNREADABLE_SOURCES;
+
 export type OpenTarget =
   | { kind: 'dashboard' }
   | { kind: 'connect'; source: OpenConnectSource }
-  | { kind: 'fix'; section: OpenFixSection };
+  | { kind: 'fix'; section: OpenFixSection }
+  | { kind: 'unreadable'; source: OpenUnreadableSource };
 
 /** The longest link the handler reads at all; anything longer is ignored. */
 export const OPEN_URL_MAX_LENGTH = 128;
@@ -44,6 +59,7 @@ export function allOpenTargets(): OpenTarget[] {
     { kind: 'dashboard' },
     ...(Object.keys(OPEN_CONNECT_SOURCES) as OpenConnectSource[]).map((source) => ({ kind: 'connect' as const, source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: 'fix' as const, section })),
+    ...(Object.keys(OPEN_UNREADABLE_SOURCES) as OpenUnreadableSource[]).map((source) => ({ kind: 'unreadable' as const, source })),
   ];
 }
 
@@ -51,6 +67,7 @@ export function allOpenTargets(): OpenTarget[] {
 export function openTargetPath(target: OpenTarget): string {
   if (target.kind === 'connect') return `connect/${target.source}`;
   if (target.kind === 'fix') return `fix/${target.section}`;
+  if (target.kind === 'unreadable') return `unreadable/${target.source}`;
   return 'dashboard';
 }
 
@@ -98,6 +115,7 @@ export function parseOlympusOpenUrl(raw: unknown): (OpenTarget & { fallback?: tr
 export function openTargetToken(target: OpenTarget): string | undefined {
   if (target.kind === 'connect') return `connect.${target.source}`;
   if (target.kind === 'fix') return `fix.${target.section}`;
+  if (target.kind === 'unreadable') return `unreadable.${target.source}`;
   return undefined;
 }
 
@@ -122,6 +140,38 @@ export function isKeysOpenTarget(target: OpenTarget): boolean {
 export function keysOpenTargetTokenPattern(): string {
   const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token): token is string => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace('.', '\\.')).join('|')})$`;
+}
+
+/**
+ * The targets that land in the dashboard panel itself (See why on one
+ * source), not on Keys: the opening page sends them to
+ * `/dashboard#olympus-open=<token>`, and the computer's host page tells the
+ * panel where to land.
+ */
+export function isPanelOpenTarget(target: OpenTarget): boolean {
+  return target.kind === 'unreadable';
+}
+
+/** The panel targets' tokens, as one anchored pattern source (see openTargetTokenPattern). */
+export function panelOpenTargetTokenPattern(): string {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token): token is string => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace('.', '\\.')).join('|')})$`;
+}
+
+/** The dashboard source id a panel target lands on, by its token: `unreadable.dropbox` → `dropbox.files`. */
+export function panelOpenTargetSources(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const target of allOpenTargets()) {
+    if (target.kind !== 'unreadable') continue;
+    out[openTargetToken(target)!] = OPEN_UNREADABLE_SOURCES[target.source].sourceId;
+  }
+  return out;
+}
+
+/** The short id of the unreadable target for a dashboard source id, if it has one. */
+export function openUnreadableSourceFor(sourceId: string): OpenUnreadableSource | undefined {
+  return (Object.keys(OPEN_UNREADABLE_SOURCES) as OpenUnreadableSource[])
+    .find((source) => OPEN_UNREADABLE_SOURCES[source].sourceId === sourceId);
 }
 
 export const DASHBOARD_OPEN_FRAGMENT_KEY = 'olympus-open';

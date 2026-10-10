@@ -37,6 +37,11 @@ export interface DashboardHostBridgeConfig {
   openTargets: Record<string, string>;
   /** https://olympusplugin.ai/open/ */
   openBase: string;
+  /**
+   * Where an open link asked the panel to land (See why on one source),
+   * said in the first `ui/initialize` answer only.
+   */
+  landing?: { sourceId: string };
 }
 
 export interface DashboardHostBridgeIo {
@@ -64,18 +69,25 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
   const view = io.frame.ownerDocument.defaultView || window;
   const media = typeof view.matchMedia === 'function' ? view.matchMedia('(prefers-color-scheme: dark)') : null;
   let readOnly = config.readOnly;
+  // Said once: a later context change (the theme, a lock) must not land again.
+  let landing = config.landing;
 
   function theme(): 'light' | 'dark' {
     return media && media.matches ? 'dark' : 'light';
   }
 
-  function hostContext(): Any {
+  function hostContext(initial?: boolean): Any {
     const context: Any = {
       theme: theme(),
       displayMode: 'fullscreen',
       availableDisplayModes: ['fullscreen'],
     };
-    context[config.contextKey] = { kind: config.kind, readOnly, links: config.links };
+    const own: Any = { kind: config.kind, readOnly, links: config.links };
+    if (initial && landing) {
+      own.landing = { sourceId: landing.sourceId };
+      landing = undefined;
+    }
+    context[config.contextKey] = own;
     return context;
   }
 
@@ -155,7 +167,7 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
           protocolVersion: params && typeof params.protocolVersion === 'string' ? params.protocolVersion : '2026-01-26',
           hostInfo: { name: 'olympus', version: '1' },
           hostCapabilities: { openLinks: {}, serverTools: {} },
-          hostContext: hostContext(),
+          hostContext: hostContext(true),
         });
         return;
       case 'tools/call':

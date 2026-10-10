@@ -31,7 +31,17 @@ import {
   DASHBOARD_HOST_GATE_COPY,
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
 } from './vocabulary.ts';
-import { DASHBOARD_OPEN_FRAGMENT_KEY, OPEN_PAGE_BASE_URL, allOpenTargets, isKeysOpenTarget, olympusOpenUrl, openTargetPath, openTargetToken } from '../../core/open-targets.ts';
+import {
+  DASHBOARD_OPEN_FRAGMENT_KEY,
+  OPEN_PAGE_BASE_URL,
+  allOpenTargets,
+  isKeysOpenTarget,
+  isPanelOpenTarget,
+  olympusOpenUrl,
+  openTargetPath,
+  openTargetToken,
+  panelOpenTargetSources,
+} from '../../core/open-targets.ts';
 
 export const DASHBOARD_HTML_PATH = '/dashboard';
 /** POST: one panel tool call under the control session (http.ts isDashboardControlRoute). */
@@ -63,7 +73,8 @@ export function dashboardHomeHref(token?: string): string {
 /**
  * What an olympusplugin.ai/open/<path>/ link means on the computer: Connect
  * for X, Readwise, Telegram or WhatsApp opens that source's setup sheet on
- * Keys; a models fix opens Models there; the dashboard is the dashboard. The
+ * Keys; a models fix opens Models there; See why on a source (unreadable/<id>)
+ * opens this dashboard landed on it; the dashboard is the dashboard. The
  * ChatGPT-connection fixes (connect, reconnect) keep their help page.
  */
 export function computerOpenTargets(origin: string, token?: string): Record<string, string> {
@@ -73,6 +84,8 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
     if (target.kind === 'dashboard') out[path] = `${origin}${dashboardHomeHref(token)}`;
     else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref('keys', token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
+    } else if (isPanelOpenTarget(target)) {
+      out[path] = `${origin}${dashboardHomeHref(token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     }
   }
   return out;
@@ -168,6 +181,10 @@ function hostProgram(input: {
   readUrl: string;
   /** /dashboard, carrying a dash_ reader's token: the locked page with its data. */
   lockedUrl: string;
+  /** `#olympus-open=`: where an open link asked the panel to land. */
+  openFragment: string;
+  /** The panel targets' tokens and the source each lands on (core/open-targets.ts). */
+  landings: Record<string, string>;
   hasReadToken: boolean;
   toolsCallPath: string;
   words: typeof DASHBOARD_HOST_GATE_COPY;
@@ -221,7 +238,19 @@ function hostProgram(input: {
       return response.ok ? response.json().then((result) => remember(name, result)) : failed();
     });
   }
-  handle = bridge(input.bridge, {
+  // An open link's place in the panel (See why on one source): read against
+  // the closed list, then cleared, so a reload does not land again.
+  let landing: { sourceId: string } | undefined;
+  if (window.location.hash.indexOf(input.openFragment) === 0) {
+    const wanted = window.location.hash.slice(input.openFragment.length);
+    try {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    } catch {
+      // An unchangeable history keeps the fragment; it is only a place to look.
+    }
+    if (Object.prototype.hasOwnProperty.call(input.landings, wanted)) landing = { sourceId: input.landings[wanted]! };
+  }
+  handle = bridge(landing ? { ...input.bridge, landing } : input.bridge, {
     frame,
     callTool,
     openUrl(url: string) {
@@ -309,6 +338,8 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     csrfToken: input.csrfToken ?? '',
     readUrl,
     lockedUrl: dashboardHomeHref(token),
+    openFragment: `#${DASHBOARD_OPEN_FRAGMENT_KEY}=`,
+    landings: panelOpenTargetSources(),
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     words: DASHBOARD_HOST_GATE_COPY,

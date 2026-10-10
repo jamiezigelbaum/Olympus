@@ -425,7 +425,8 @@ export interface ExtractionCorpusReadiness {
    * `failed_terminal` job, and nothing queued, leased or retryable left to
    * try. Owner ruling, 2026-10-08: one damaged file is a fact the page states,
    * not a pause — these leave `failedActionableJobs` and count here instead.
-   * Disjoint from the two policy exits above.
+   * Disjoint from the two policy exits above. With `classifyUnreadable`,
+   * only the items it calls `unreadable` (ExtractionUnreadableVerdict).
    */
   unreadableItems: number;
   retryableDueJobs: number;
@@ -455,6 +456,71 @@ export interface ExtractionScopedReadinessOptions {
   terminalRetryPaths?: readonly ExtractionTerminalRetryPath[];
   /** Current store identity/scope fence for rows read from this separate queue. */
   currentItem?: (ref: ExtractionItemRef) => boolean;
+  /**
+   * Asked about every item extraction gave up on before it is counted, so the
+   * unreadable count and the list of unreadable files come from one decision
+   * (ExtractionUnreadableVerdict). Absent: every such item is unreadable.
+   */
+  classifyUnreadable?: (item: ExtractionUnreadableItem) => ExtractionUnreadableVerdict;
+  /** Handed the items counted as unreadable, newest failure first. */
+  onUnreadable?: (items: readonly ExtractionUnreadableItem[]) => void;
+}
+
+/** One item extraction gave up on for good, as the readiness counts saw it. */
+export interface ExtractionUnreadableItem {
+  /** From the item's newest `failed_terminal` job (its `name` is the bare file name captured at enqueue). */
+  ref: ExtractionItemRef;
+  /** When that job failed for good (its `updated_at`). */
+  failedAt: string;
+}
+
+/**
+ * What the caller says about an item extraction gave up on:
+ * - `unreadable`: counted in `unreadableItems` and listed;
+ * - `blocked_policy`: counted with the policy exit, never named (a Secrets
+ *   item: Secrets never belong in Olympus, so they never show as unreadable);
+ * - `hidden`: neither, because no store serves the item any more (removed,
+ *   or a copy nothing may show), so the count never exceeds what can be listed.
+ */
+export type ExtractionUnreadableVerdict = 'unreadable' | 'blocked_policy' | 'hidden';
+
+/**
+ * The one decision both readiness roll-ups make about the items extraction
+ * gave up on: the caller's verdict, newest failure first. A verdict that
+ * throws counts the item with the policy exit (it may be a Secrets item).
+ */
+function settleUnreadable(
+  candidates: readonly ExtractionUnreadableItem[],
+  classify: ExtractionScopedReadinessOptions['classifyUnreadable'],
+): { items: ExtractionUnreadableItem[]; blocked: number } {
+  const items: ExtractionUnreadableItem[] = [];
+  let blocked = 0;
+  for (const candidate of candidates) {
+    let verdict: ExtractionUnreadableVerdict = 'unreadable';
+    if (classify) {
+      try {
+        verdict = classify(candidate);
+      } catch {
+        verdict = 'blocked_policy';
+      }
+    }
+    if (verdict === 'blocked_policy') blocked += 1;
+    else if (verdict === 'unreadable') items.push(candidate);
+  }
+  items.sort((a, b) => (a.failedAt === b.failedAt
+    ? a.ref.localItemId.localeCompare(b.ref.localItemId)
+    : (a.failedAt < b.failedAt ? 1 : -1)));
+  return { items, blocked };
+}
+
+/** An item's unreadable entry: its newest `failed_terminal` job. */
+function unreadableCandidate(itemRows: readonly ExtractionJobSqlRow[]): ExtractionUnreadableItem | undefined {
+  let newest: ExtractionJobSqlRow | undefined;
+  for (const row of itemRows) {
+    if (row.status !== 'failed_terminal') continue;
+    if (!newest || row.updated_at > newest.updated_at) newest = row;
+  }
+  return newest ? { ref: refFromRow(newest), failedAt: newest.updated_at } : undefined;
 }
 
 interface ExtractionJobSqlRow {
@@ -1476,7 +1542,7 @@ export class LocalFileExtractionJobStore {
     }
     let blockedByPolicyItems = 0;
     let metadataOnlyExpectedItems = 0;
-    let unreadableItems = 0;
+    const unreadableCandidates: ExtractionUnreadableItem[] = [];
     const settledFailedItems = new Set<string>();
     for (const [itemId, itemRows] of byItem) {
       if (itemRows.some((row) => row.status === 'indexed')) continue;
@@ -1495,9 +1561,14 @@ export class LocalFileExtractionJobStore {
       ))) {
         metadataOnlyExpectedItems += 1;
       } else if (settledFailed) {
-        unreadableItems += 1;
+        const candidate = unreadableCandidate(itemRows);
+        if (candidate) unreadableCandidates.push(candidate);
       }
     }
+    const unreadable = settleUnreadable(unreadableCandidates, options.classifyUnreadable);
+    blockedByPolicyItems += unreadable.blocked;
+    const unreadableItems = unreadable.items.length;
+    options.onUnreadable?.(unreadable.items);
     const now = (options.now ?? new Date()).toISOString();
     const count = (status: ExtractionJobStatus): number => rows
       .filter((row) => row.status === status).length;
@@ -1557,7 +1628,7 @@ export class LocalFileExtractionJobStore {
   corpusReadiness(
     corpusId: string,
     now: Date = new Date(),
-    options: Pick<ExtractionScopedReadinessOptions, 'terminalRetryPaths'> = {},
+    options: Pick<ExtractionScopedReadinessOptions, 'terminalRetryPaths' | 'classifyUnreadable' | 'onUnreadable'> = {},
   ): ExtractionCorpusReadiness {
     const corpus = requireKeyPart(corpusId, 'corpusId');
     const itemRetry = terminalRetryPathSql('x', options.terminalRetryPaths ?? []);
@@ -1579,16 +1650,47 @@ export class LocalFileExtractionJobStore {
       SELECT
         SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 1 THEN 1 ELSE 0 END) AS blocked_items,
         SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 1
-            THEN 1 ELSE 0 END) AS metadata_only_items,
-        SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 0
-            AND terminal_failed_jobs = 1 AND in_flight_jobs = 0
-            THEN 1 ELSE 0 END) AS unreadable_items
+            THEN 1 ELSE 0 END) AS metadata_only_items
       FROM item_state
     `).get(...itemRetry.params, corpus) as {
       blocked_items: number | null;
       metadata_only_items: number | null;
-      unreadable_items: number | null;
     } | null;
+    // The unreadable items themselves, each by its newest terminal failure:
+    // the same per-item roll-up, so the count is the length of this list.
+    const failedRows = this.db.query(`
+      WITH item_state AS (
+        SELECT
+          local_item_id,
+          MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
+          MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
+          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported', 'skipped_too_large')
+              THEN 1 ELSE 0 END) AS metadata_only_jobs,
+          MAX(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS terminal_failed_jobs,
+          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
+              THEN 1 ELSE 0 END) AS in_flight_jobs,
+          MAX(CASE WHEN status = 'failed_terminal' THEN updated_at END) AS failed_at
+        FROM extraction_jobs x
+        WHERE corpus_id = ?
+        GROUP BY local_item_id
+      )
+      SELECT j.*
+      FROM item_state s
+      JOIN extraction_jobs j
+        ON j.corpus_id = ? AND j.local_item_id = s.local_item_id
+        AND j.status = 'failed_terminal' AND j.updated_at = s.failed_at
+      WHERE s.indexed_jobs = 0 AND s.blocked_jobs = 0 AND s.metadata_only_jobs = 0
+        AND s.terminal_failed_jobs = 1 AND s.in_flight_jobs = 0
+    `).all(...itemRetry.params, corpus, corpus) as ExtractionJobSqlRow[];
+    const seen = new Set<string>();
+    const candidates: ExtractionUnreadableItem[] = [];
+    for (const row of failedRows) {
+      if (seen.has(row.local_item_id)) continue;
+      seen.add(row.local_item_id);
+      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at });
+    }
+    const unreadable = settleUnreadable(candidates, options.classifyUnreadable);
+    options.onUnreadable?.(unreadable.items);
     const jobs = this.db.query(`
       SELECT
         SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_jobs,
@@ -1634,14 +1736,14 @@ export class LocalFileExtractionJobStore {
     const count = (value: number | null | undefined): number => Math.max(0, Math.trunc(value ?? 0));
     const jobCount = (key: string): number => count(typeof jobs?.[key] === 'number' ? jobs[key] : undefined);
     return {
-      blockedByPolicyItems: count(items?.blocked_items),
+      blockedByPolicyItems: count(items?.blocked_items) + unreadable.blocked,
       metadataOnlyExpectedItems: count(items?.metadata_only_items),
       queuedJobs: jobCount('queued_jobs'),
       leasedJobs: jobCount('leased_jobs'),
       failedRetryableJobs: jobCount('failed_retryable_jobs'),
       failedTerminalJobs: jobCount('failed_terminal_jobs'),
       failedActionableJobs: jobCount('failed_actionable_jobs'),
-      unreadableItems: count(items?.unreadable_items),
+      unreadableItems: unreadable.items.length,
       retryableDueJobs: jobCount('retryable_due_jobs'),
       ...(typeof jobs?.oldest_actionable_at === 'string' ? { oldestActionableAt: jobs.oldest_actionable_at } : {}),
       ...(typeof jobs?.newest_terminal_progress_at === 'string'
