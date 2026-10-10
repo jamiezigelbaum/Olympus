@@ -83,6 +83,8 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
     prefix (`oly2c.<installId>.…`, `oly2r.<installId>.…`).
   - Static, install-independent documents are served by the relay itself:
     `/.well-known/oauth-protected-resource[/mcp]`,
+    `/.well-known/oauth-protected-resource/openai/mcp` (the directory's
+    endpoint; see "Directory distribution"),
     `/.well-known/oauth-authorization-server`, `/healthz`.
   - `GET /oauth/authorize` is the bridge page (below).
   - Anything else without a routable credential → 401 with the
@@ -297,6 +299,22 @@ Three things the directory requires that the design above did not cover:
    `_meta.ui.domain`, support/privacy/terms pages on olympusplugin.ai, a demo
    video, 5 positive and 3 negative test cases, and the ZIP upload at
    platform.openai.com/plugins under OCU Inc.
+
+**The directory's own endpoint (added 2026-10-10).** A published plugin's
+MCP URL can never change, and OpenAI rescans it daily (a tool change reaches
+directory users without another review). The directory therefore uses
+`https://mcp.olympusplugin.ai/openai/mcp`, never `/mcp`, which stays exactly
+as it was for developer-mode connectors and is where new tools ship first.
+Both serve the same implementation; `/openai/mcp` lists and calls only the
+tools in `DIRECTORY_TOOL_NAMES` (`connect-relay/shared/directory-tools.ts`), so
+a new tool is on `/mcp` only until a deliberate change adds it there. It is
+its own OAuth protected resource (`/.well-known/oauth-protected-resource/openai/mcp`,
+same authorization server): an authorization names it with RFC 8707
+`resource`, and its tokens open only it, as `/mcp` tokens open only `/mcp`
+(the engine stores each token's resource and checks it per call). The
+private panels are unaffected: their job ids name the install, not the
+endpoint. Installs forward `/openai/mcp` from the release that added it; an
+older install answers it 404.
 
 ## Dashboard view-model contract (v1)
 

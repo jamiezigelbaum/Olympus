@@ -1,8 +1,8 @@
 /**
  * What the install lets through from the relay to its loopback worker.
  *
- * Only the remote surface ChatGPT uses is forwarded (`/mcp`, and the token
- * and revocation endpoints). The worker's other loopback routes (dashboard,
+ * Only the remote surface ChatGPT uses is forwarded (`/mcp`, the plugin
+ * directory's `/openai/mcp`, and the token and revocation endpoints). The worker's other loopback routes (dashboard,
  * local control APIs, the consent page) assume a local caller and must never
  * become reachable from the internet; the client answers everything else with
  * a local 404 without touching the worker. A compromised relay is assumed:
@@ -14,12 +14,13 @@
  * header, so consent can only ever come from a direct loopback visit.
  */
 
+import { DIRECTORY_MCP_PATH } from '../shared/directory-tools.ts';
 import { PRIVATE_ANSWER_PATH_PATTERN } from '../shared/private-answer.ts';
 
 /** Must equal RELAYED_REQUEST_HEADER in src/core/remote-access.ts (a test holds them equal). */
 export const RELAY_HEADER = 'x-olympus-relay';
 
-export const FORWARDED_PATHS = ['/mcp', '/connect/token', '/connect/revoke'] as const;
+export const FORWARDED_PATHS = ['/mcp', DIRECTORY_MCP_PATH, '/connect/token', '/connect/revoke'] as const;
 /**
  * Browser routes ChatGPT setup needs, GET only: a one-time hand-off link
  * (`/go/oly2g.<installId>.<secret>`, served by workers/chatgpt/handoff.ts) and

@@ -10,8 +10,12 @@
  * no value configured, OAuth is off and the bearer connections from
  * `olympus connections add` keep working.
  */
+import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
+
 export const REMOTE_PUBLIC_BASE_URL_ENV = 'OLYMPUS_PUBLIC_BASE_URL';
 export const REMOTE_MCP_RESOURCE_PATH = '/mcp';
+/** The ChatGPT plugin directory's endpoint, its own protected resource (connect-relay/shared/directory-tools.ts). */
+export const REMOTE_DIRECTORY_MCP_RESOURCE_PATH = DIRECTORY_MCP_PATH;
 
 export interface RemotePublicUrls {
   /** `https://host[:port]`, no trailing slash. Also the OAuth issuer. */
@@ -97,18 +101,42 @@ export function resolveRemotePublicUrls(
 }
 
 /**
- * RFC 8707 resource comparison. Scheme and host compare case-insensitively
- * (URL parsing lowercases them and drops a default port); a single trailing
- * slash is ignored; anything else must match the configured resource exactly.
+ * The protected resource of one MCP endpoint: `/mcp` (`urls.resource`) or
+ * the plugin directory's `/openai/mcp`, derived from the same configured
+ * origin. Each is its own audience: a token issued for one opens only it.
  */
-export function isConfiguredResource(value: string, urls: RemotePublicUrls): boolean {
+export function remoteMcpResource(urls: RemotePublicUrls, surface: McpSurface): { resource: string; protectedResourceMetadataUrl: string } {
+  if (surface === 'default') return { resource: urls.resource, protectedResourceMetadataUrl: urls.protectedResourceMetadataUrl };
+  return {
+    resource: `${urls.origin}${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`,
+    protectedResourceMetadataUrl: `${urls.origin}/.well-known/oauth-protected-resource${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`,
+  };
+}
+
+/** Every protected resource this install serves, `/mcp` first. */
+export function configuredResources(urls: RemotePublicUrls): string[] {
+  return [urls.resource, remoteMcpResource(urls, 'directory').resource];
+}
+
+/**
+ * RFC 8707 resource comparison: the configured resource a requested value
+ * names, or undefined. Scheme and host compare case-insensitively (URL
+ * parsing lowercases them and drops a default port); a single trailing slash
+ * is ignored; anything else must match a configured resource exactly.
+ */
+export function matchConfiguredResource(value: string, urls: RemotePublicUrls): string | undefined {
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    return false;
+    return undefined;
   }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash || value.includes('#')) return false;
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || value.includes('#')) return undefined;
   const path = parsed.pathname.length > 1 ? parsed.pathname.replace(/\/$/, '') : parsed.pathname;
-  return `${parsed.origin}${path}` === urls.resource;
+  const normalized = `${parsed.origin}${path}`;
+  return configuredResources(urls).find((resource) => resource === normalized);
+}
+
+export function isConfiguredResource(value: string, urls: RemotePublicUrls): boolean {
+  return matchConfiguredResource(value, urls) !== undefined;
 }
