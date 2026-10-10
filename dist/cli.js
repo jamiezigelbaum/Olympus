@@ -124284,6 +124284,8 @@ async function askAnonymously(input, deps) {
   const context = { entries: [{ kind: "text", text: typed, path: "writerVisible[]", group: -2 }], overflow: false };
   const verdict = evaluateConsultRequest([...questions], context, {}, {}, strict ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: "general", askedQuestionTexts: [typed], net: writer ? "thin" : "full" } : { net: "secrets" });
   if (verdict.decision !== "pass") {
+    if ([...verdict.reasons].includes("question_too_many_bytes"))
+      return { ok: false, code: "question_too_long", message: CONSULT_ASK_MESSAGES.tooManyBytes, sent };
     const secret = [...verdict.reasons].some((reason) => /secret/i.test(reason));
     return { ok: false, code: secret || !strict ? "secret_detected" : "gate_refused", message: secret || !strict ? CONSULT_ASK_MESSAGES.secret : CONSULT_ASK_MESSAGES.gateRefused, sent };
   }
@@ -124353,7 +124355,8 @@ var init_consult_ask = __esm(() => {
     cleanupCustomMissing: 'No custom instruction is saved on the Olympus dashboard, so "custom" cannot be used; choose as_written or light_cleanup.',
     rememberUnavailable: "The choice could not be saved here; it was used for this question only.",
     modelInvalid: "model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.",
-    cancelled: "The request was cancelled before the question was sent; nothing was charged."
+    cancelled: "The request was cancelled before the question was sent; nothing was charged.",
+    tooManyBytes: "Not sent: the question is over 8 KiB once encoded. Shorten it."
   });
 });
 

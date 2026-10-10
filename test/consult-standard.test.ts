@@ -299,4 +299,11 @@ describe('Ask anonymously', () => {
     expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: late.signal }, sendValue)).toEqual({ ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled });
     expect(atSend.calls.send).toEqual([]);
   });
+
+  test('a question within the character bound but over the transport\'s 8 KiB is refused as too long, not as a secret (Codex review of PR #215)', async () => {
+    const d = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+    const cjk = '預'.repeat(3_000);
+    expect(await askAnonymously({ question: cjk, origin: 'agent' }, d.value)).toMatchObject({ ok: false, code: 'question_too_long', message: CONSULT_ASK_MESSAGES.tooManyBytes });
+    expect(d.calls.send).toEqual([]);
+  });
 });

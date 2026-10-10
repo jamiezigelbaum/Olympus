@@ -7,7 +7,7 @@ tools:
   - source_answer_result
   - source_index_status
   - ask_anonymously
-mutating: false
+mutating: true
 ---
 
 # Ask Sources from Hermes
@@ -35,6 +35,9 @@ then call again with `level` and `remember: true`. Give the reply; when
 `rewritten` is true, say so and offer to show `sent`. A `working` result is
 collected with `source_answer_result`, like an answer.
 
-This Hermes adaptation intentionally has no search, locator, sync, watch,
-export, or mutation tool. If the four declared tools are unavailable, say that
-the Olympus MCP lane is unavailable and stop.
+This Hermes adaptation intentionally has no search, locator, sync, watch or
+export tool. The one side-effecting tool is `ask_anonymously`: it spends from
+the user's zkAPI balance, sends their question to a provider, and with
+`remember: true` saves their choice; never call it unasked. If the four
+declared tools are unavailable, say that the Olympus MCP lane is unavailable
+and stop.

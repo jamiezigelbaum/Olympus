@@ -139,6 +139,7 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   rememberUnavailable: 'The choice could not be saved here; it was used for this question only.',
   modelInvalid: 'model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.',
   cancelled: 'The request was cancelled before the question was sent; nothing was charged.',
+  tooManyBytes: 'Not sent: the question is over 8 KiB once encoded. Shorten it.',
 });
 
 const MAX_MODEL_ID_CHARS = 128;
@@ -279,6 +280,8 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: 'general', askedQuestionTexts: [typed], net: writer ? 'thin' : 'full' }
     : { net: 'secrets' });
   if (verdict.decision !== 'pass') {
+    // Within the character bound but over the transport's 8 KiB (multibyte text): a length refusal, not a secret.
+    if ([...verdict.reasons].includes('question_too_many_bytes')) return { ok: false, code: 'question_too_long', message: CONSULT_ASK_MESSAGES.tooManyBytes, sent };
     const secret = [...verdict.reasons].some((reason) => /secret/i.test(reason));
     return { ok: false, code: secret || !strict ? 'secret_detected' : 'gate_refused', message: secret || !strict ? CONSULT_ASK_MESSAGES.secret : CONSULT_ASK_MESSAGES.gateRefused, sent };
   }
