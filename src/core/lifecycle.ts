@@ -980,13 +980,8 @@ function settleWorkerServiceState(
     waitForActivationSettle(pollMs);
     service = inspectWorkerService(serviceActionOptions(options));
   }
-  // The service manager's label is not the only witness. A worker already
-  // answering its own loopback health route IS started, whatever the manager
-  // has caught up to, so it gets the last word before a refusal — once, at the
-  // end, rather than inside the poll, because the probe costs a subprocess.
-  if (!expected.includes(service.state) && expected.includes('active') && workerAnswersReadiness(options)) {
-    return { ...service, state: 'active' };
-  }
+  // A health responder does not prove this managed unit is running.
+  // Require the manager's active state; HTTP readiness is corroboration only.
   return service;
 }
 
