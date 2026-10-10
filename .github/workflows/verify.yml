@@ -93,13 +93,13 @@ jobs:
       - run: bun run test:exchange
 
   deploy:
-    name: deploy tests ${{ matrix.shard }}/3
+    name: deploy tests ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     env:
       OLYMPUS_REQUIRE_TOOLCHAINS: '1'
       OLYMPUS_REQUIRE_HOST_LOADER: '1'
@@ -124,7 +124,7 @@ jobs:
         run: npm install --prefix "$RUNNER_TEMP/openclaw-host" --no-save --no-audit --no-fund --ignore-scripts openclaw@2026.7.1
       - run: bun install --frozen-lockfile
       - run: bun run build
-      - run: bun scripts/test-lane.ts deploy --shard=${{ matrix.shard }}/3
+      - run: bun scripts/test-lane.ts deploy --shard=${{ matrix.shard }}/4
         env:
           OLYMPUS_OPENCLAW_INSTALL_DIR: ${{ runner.temp }}/openclaw-host/node_modules/openclaw
       - name: Retain trusted main timing data

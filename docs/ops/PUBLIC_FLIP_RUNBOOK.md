@@ -307,9 +307,11 @@ matching the job names in `.github/workflows/verify.yml`:
 |---|---|
 | `static checks` | `verify.yml` job `static` |
 | `fast tests` | `verify.yml` job `fast` |
-| `deploy tests 1/3` | `verify.yml` job `deploy`, shard 1 |
-| `deploy tests 2/3` | `verify.yml` job `deploy`, shard 2 |
-| `deploy tests 3/3` | `verify.yml` job `deploy`, shard 3 |
+| `exchange tests` | `verify.yml` job `exchange` |
+| `deploy tests 1/4` | `verify.yml` job `deploy`, shard 1 |
+| `deploy tests 2/4` | `verify.yml` job `deploy`, shard 2 |
+| `deploy tests 3/4` | `verify.yml` job `deploy`, shard 3 |
+| `deploy tests 4/4` | `verify.yml` job `deploy`, shard 4 |
 | `Go bridge tests` | `verify.yml` job `go` |
 
 `hermetic-go.yml` is a weekly schedule and is deliberately **not** required.
@@ -323,9 +325,11 @@ gh api -X PUT "repos/$GH_OWNER/$REPO/branches/main/protection" \
     "contexts": [
       "static checks",
       "fast tests",
-      "deploy tests 1/3",
-      "deploy tests 2/3",
-      "deploy tests 3/3",
+      "exchange tests",
+      "deploy tests 1/4",
+      "deploy tests 2/4",
+      "deploy tests 3/4",
+      "deploy tests 4/4",
       "Go bridge tests"
     ]
   },
