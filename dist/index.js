@@ -16706,7 +16706,6 @@ var DAY_MS = 24 * 60 * 60 * 1000;
 var PROBE_MAX_BYTES = 64 * 1024;
 var MAX_QUESTION_BYTES = 8 * 1024;
 var ZKAPI_SUPPORTED_DAEMON_VERSIONS = ["0.1.5", "0.1.6"];
-var ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000;
 var CHILD_ENV_KEYS = [
   "HOME",
   "PATH",
@@ -17195,7 +17194,7 @@ async function zkapiConsultReadiness(options) {
   const limit = ownerLimits(settings);
   if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
     blockers.push("daily_cap_reached");
-  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
+  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
     blockers.push("spend_cap_reached");
   }
   return {
@@ -19230,7 +19229,7 @@ function describeZkapiReadiness(readiness) {
   const deposit = money.depositAboveSuggestedCeiling ? "; deposit is above the suggested ceiling" : "";
   const requestLimit = readiness.requestsToday.cap !== undefined ? `limit ${readiness.requestsToday.cap}` : "no limit set";
   const spendLimit = readiness.spendToday.capUsd !== undefined ? `limit $${readiness.spendToday.capUsd.toFixed(2)}` : "no limit set";
-  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts up to $6.00)`;
+  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts its model's hold, up to $6.00)`;
   const fence = readiness.fences.length > 0 ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ""})` : ""}${entry.thisWallet ? ", this wallet" : ", another wallet"}`).join("; ")}; run a recovery-only session before another consult` : "no unresolved session";
   const stranded = readiness.stranded ? readiness.stranded.supervisorRunning ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})` : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(", ") || "no group recorded"}` : "";
   const last = readiness.lastSession ? `last ${readiness.lastSession.recovery ? "recovery session" : "consult"} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}${stageTimings(readiness.lastSession.stageMs)}` : "no consult run yet";

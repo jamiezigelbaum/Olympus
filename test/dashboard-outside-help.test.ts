@@ -229,11 +229,11 @@ describe('the Outside help page: states and copy', () => {
     expect(text).toContain(W.costLine);
     expect(W.costLine).toBe('A question usually costs a few cents. Up to $6 is held while it runs, and the rest comes back.');
     // The required disclosures stay on the page. "Everything to know first" keeps the fuller detail:
-    // automatic timing, $6 counted against limits, no default limit, no top-up, the estimated expiry,
+    // automatic timing, the hold counted against limits, no default limit, no top-up, the estimated expiry,
     // the fee buffer, the API key, key reuse, the operator and proof setup, the route not verified.
     const more = html.slice(html.indexOf('data-outside-disclosure-more'));
     const fuller = visibleText(more.slice(0, more.indexOf('</details>')));
-    for (const needle of ['within about five minutes', 'counts each question as $6', 'no daily limit unless you set one', 'There is no top-up', 'estimates the 30-day date',
+    for (const needle of ['within about five minutes', 'counts each question at the amount held for its model', 'no daily limit unless you set one', 'There is no top-up', 'estimates the 30-day date',
       'fee buffer', 'require an API key', 'key reuse is on', 'pause deposits and withdrawals', 'proof setup', 'cannot yet confirm the network route is anonymous']) expect(fuller).toContain(needle);
     // And the setup steps name the exact commands.
     for (const needle of ['--key-reuse-window-seconds 0', '--require-api-key', 'balance estimated to expire']) expect(text).toContain(needle);
@@ -249,7 +249,7 @@ describe('the Outside help page: states and copy', () => {
     expect(text).toContain('No daily limit · paid in on 1 Oct');
     // Technical facts, inside Details only.
     expect(text).toContain('zkapi-clientd 0.1.6 found');
-    expect(text).toContain('2 requests today ($12 counted at $6 each)');
+    expect(text).toContain('2 requests today ($12 counted against your limits)');
     expect(text).toContain('balance estimated to expire 2026-10-31 (24 days left)');
     const details = html.slice(html.indexOf('data-outside-section="details"'));
     expect(details).toContain('Route: payment privacy; route not verified.');

@@ -2210,9 +2210,9 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   routeUnknown: 'Olympus could not check zkAPI right now.',
   routeMissingShort: 'Not ready: zkAPI is not set up yet.',
   /**
-   * Today's usage. Only the $6 hold per question is recorded, never the
-   * settled price, so the day's figure is said as what counts against limits,
-   * never as money spent.
+   * Today's usage. Only each question's hold (the amount zkAPI holds for its
+   * model, $1 to $6) is recorded, never the settled price, so the day's figure
+   * is said as what counts against limits, never as money spent.
    */
   usageNone: 'No questions today',
   usageOne: '1 question today',
@@ -2233,14 +2233,14 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   disclosureMore: 'Everything to know first',
   /**
    * The fuller detail, in calm words (owner, 2026-10-08). It keeps what the
-   * shorter statements leave out: the timing window, the $6 counted against
+   * shorter statements leave out: the timing window, the hold counted against
    * limits, no default limit, deposit fees and no top-up, the estimated
    * expiry date, the fee buffer, the API key and key reuse, the operator
    * and the proof setup, and that the route is not verified on macOS.
    */
   disclosure: [
     'Olympus sends a question only within about five minutes of a private answer appearing in ChatGPT, and only if the panel was recently active. Closing the panel does not guarantee nothing is sent in that window.',
-    'A question usually costs a few cents. While it runs, up to $6 of your zkAPI balance is held, and the rest comes back when it settles. Olympus counts each question as $6 when checking the daily limits you set.',
+    'A question usually costs a few cents. While it runs, up to $6 of your zkAPI balance is held, and the rest comes back when it settles. Olympus counts each question at the amount held for its model (between $1 and $6) when checking the daily limits you set.',
     'There is no daily limit unless you set one under Balance and limits. Your balance is the most that can be spent.',
     'Adding money and taking it out are each an Ethereum transaction with its own network fee (about $7 each when Olympus last checked). There is no top-up: each deposit starts a new balance with its own fee and its own 30-day clock.',
     'Olympus estimates the 30-day date from the funding date you enter; the exact date is set on-chain when the deposit is confirmed.',
@@ -2264,8 +2264,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     torMissing: 'Tor not installed',
     key: 'API key configured',
     keyMissing: 'API key not configured',
-    today: '{n} requests today (${usd} counted at $6 each)',
-    todayOne: '1 request today (${usd} counted at $6 each)',
+    today: '{n} requests today (${usd} counted against your limits)',
+    todayOne: '1 request today (${usd} counted against your limits)',
     expiry: 'balance estimated to expire {date} ({days} days left)',
     expired: 'balance past its estimated expiry',
     expiryUnknown: 'balance expiry unknown until you enter the funding date',
@@ -2319,7 +2319,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   limitsToday: 'Questions today: {n}, counted as up to ${usd} against your limits.',
   fundingDate: 'Funding date: the day your deposit was confirmed (YYYY-MM-DD)',
   capRequests: 'Daily question limit (optional)',
-  capUsd: 'Daily spending limit in dollars, counted at $6 per question (optional)',
+  capUsd: 'Daily spending limit in dollars, counting each question at the amount held for its model (optional)',
   noLimitIntro: 'There is no daily limit unless you set one. Your balance is the most that can be spent.',
   removeLimits: 'No daily limit',
   removeLimitsHint: 'Clears both limits.',

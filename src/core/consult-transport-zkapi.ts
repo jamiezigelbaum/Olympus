@@ -90,9 +90,13 @@ const KILL_GRACE_MS = 3_000;
 /**
  * Reviewed daemon versions. 0.1.5 shipped SOCKS5/Tor client mode; 0.1.6 is the
  * newest release reviewed. Their highest per-request allowance is $6
- * (`internal/zkapi/model_budget.go`), and the daemon recomputes a request's
- * allowance from live policy after queueing, so every request reserves $6.
- * A newer version is refused until its allowance table is reviewed.
+ * (`internal/zkapi/model_budget.go`; $1 to $6 by the model's price tier). A
+ * request is counted against the owner's daily spend limit at the allowance
+ * the live model list states for its model, since that is what the daemon
+ * holds; $6 is the ceiling, used only when no listing is at hand. The daemon
+ * recomputes the allowance from live policy after queueing, so a policy
+ * change between the listing and the send can move the actual hold, bounded
+ * by $6. A newer version is refused until its allowance table is reviewed.
  */
 export const ZKAPI_SUPPORTED_DAEMON_VERSIONS = ['0.1.5', '0.1.6'] as const;
 export const ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6_000_000;
@@ -431,7 +435,7 @@ const MESSAGES: Record<ZkapiConsultErrorCode, string> = {
   policy_unavailable: 'The daemon could not load the model policy in time.',
   model_unavailable: 'The selected model is not in the daemon\'s live model list.',
   daily_cap_reached: 'The daily zkAPI request limit you set is reached.',
-  spend_cap_reached: 'Another request would exceed the daily worst-case zkAPI spend limit you set.',
+  spend_cap_reached: 'Another request would exceed the daily zkAPI spend limit you set (each question counts the amount zkAPI holds for its model).',
   state_unavailable: 'The persistent zkAPI session ledger could not be read or written.',
   timeout: 'The zkAPI consult timed out; it may still have been charged.',
   aborted: 'The zkAPI consult was cancelled; it may still have been charged.',
@@ -857,8 +861,9 @@ function ownerLimits(settings: ZkapiConsultSettings): { requestCap?: number; spe
 }
 
 /**
- * Record one request at the worst-case allowance under a cross-process lease
- * before the send, and set the unresolved-session fence in the same write.
+ * Record one request at its model's listed allowance (the daemon's hold for
+ * it; $6, the ceiling, when unknown) under a cross-process lease before the
+ * send, and set the unresolved-session fence in the same write.
  * Never handed back: a send whose outcome is unknown, or that failed after the
  * daemon accepted it, may still have been charged.
  */
@@ -867,6 +872,7 @@ export function reserveZkapiRequest(
   limits: { requestCap?: number; spendCapMicroUsd?: number },
   now: Date,
   fence: { scope: string } & Omit<ZkapiFence, 'at'> = { scope: 'default', configDir: 'unknown' },
+  allowanceMicroUsd: number = ZKAPI_MAX_ALLOWANCE_MICRO_USD,
 ): { reserved: true } | { reserved: false; reason: 'daily_cap_reached' | 'spend_cap_reached' } {
   let refusal: 'daily_cap_reached' | 'spend_cap_reached' | undefined;
   updateState(path, now, (state) => {
@@ -874,14 +880,14 @@ export function reserveZkapiRequest(
       refusal = 'daily_cap_reached';
       return undefined;
     }
-    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limits.spendCapMicroUsd) {
+    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits.spendCapMicroUsd) {
       refusal = 'spend_cap_reached';
       return undefined;
     }
     return {
       ...state,
       count: state.count + 1,
-      reservedMicroUsd: state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD,
+      reservedMicroUsd: state.reservedMicroUsd + allowanceMicroUsd,
       fences: (() => {
         const { scope, ...facts } = fence;
         return { ...state.fences, [scope]: { ...facts, at: now.toISOString() } };
@@ -1694,7 +1700,9 @@ export async function zkapiConsultReadiness(
   if (stranded && !stranded.supervisorRunning) blockers.push('stranded_processes');
   const limit = ownerLimits(settings);
   if (limit.requestCap !== undefined && usage.count >= limit.requestCap) blockers.push('daily_cap_reached');
-  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
+  // The next request's allowance is known only from the live listing inside
+  // a session, so before one the limit blocks only once it is used up.
+  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
     blockers.push('spend_cap_reached');
   }
   return {
@@ -2152,7 +2160,7 @@ async function runSession(
     const usage = zkapiUsageToday(statePath, now());
     const limit = ownerLimits(settings);
     if (limit.requestCap !== undefined && usage.count >= limit.requestCap) return refuse('daily_cap_reached');
-    if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
+    if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
       return refuse('spend_cap_reached');
     }
   } catch {
@@ -2328,6 +2336,8 @@ async function runSession(
     if (guardProblem) return (result = fail(guardProblem));
     if (!listing.listed) return (result = fail(sessionSignal.aborted ? interrupted() : 'policy_unavailable'));
     if (listing.allowance === undefined) return (result = fail('model_unavailable'));
+    // What the daemon holds for this model; never more than the reviewed ceiling.
+    const allowanceMicroUsd = Math.min(listing.allowance, ZKAPI_MAX_ALLOWANCE_MICRO_USD);
     receipt.listedAllowanceUsd = listing.allowance / 1_000_000;
 
     // --- Ready: the route is warm and nothing is reserved. Wait for the
@@ -2402,12 +2412,12 @@ async function runSession(
         configDir: zkapiWalletDirectory(env),
         daemonExecutable,
         daemonPort,
-      });
+      }, allowanceMicroUsd);
     } catch {
       return (result = fail('state_unavailable'));
     }
     if (!reservation.reserved) return (result = fail(reservation.reason));
-    receipt.reservedUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD / 1_000_000;
+    receipt.reservedUsd = allowanceMicroUsd / 1_000_000;
     receipt.fence = 'held';
     const requestsBefore = new Set(facts.requests.keys());
     sent.dispatched = true;
@@ -2428,7 +2438,7 @@ async function runSession(
       sent.dispatched = false;
       detachCaller = undefined;
       try {
-        releaseZkapiReservation(statePath, scope, fences[scope], now());
+        releaseZkapiReservation(statePath, scope, fences[scope], now(), allowanceMicroUsd);
         delete receipt.reservedUsd;
         receipt.fence = fenced || fencedElsewhere ? 'held' : 'clear';
       } catch {
@@ -2601,7 +2611,7 @@ async function runSession(
  * absent for a consult, the earlier record for a recovery session. Never
  * applied once `fetchImpl` has been called, however it failed.
  */
-function releaseZkapiReservation(path: string, scope: string, earlierFence: ZkapiFence | undefined, now: Date): void {
+function releaseZkapiReservation(path: string, scope: string, earlierFence: ZkapiFence | undefined, now: Date, allowanceMicroUsd: number): void {
   updateState(path, now, (state) => {
     const { [scope]: _ours, ...others } = state.fences ?? {};
     const fences = earlierFence ? { ...others, [scope]: earlierFence } : others;
@@ -2609,7 +2619,7 @@ function releaseZkapiReservation(path: string, scope: string, earlierFence: Zkap
     return {
       ...rest,
       count: Math.max(0, state.count - 1),
-      reservedMicroUsd: Math.max(0, state.reservedMicroUsd - ZKAPI_MAX_ALLOWANCE_MICRO_USD),
+      reservedMicroUsd: Math.max(0, state.reservedMicroUsd - allowanceMicroUsd),
       ...(Object.keys(fences).length > 0 ? { fences } : {}),
     };
   });
