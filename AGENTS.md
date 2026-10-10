@@ -128,7 +128,7 @@ Enforcement is mechanical, so this survives any thread or tool:
   shrinks. Do not add an entry to make a change pass — delete the leftover, or
   put it on the public surface.
 - GitHub Actions runs every test in parallel on every push; branch protection
-  requires the substantive static, fast, deploy-shard, and Go contexts directly, without a billed aggregate runner job.
+  requires the substantive static, fast, exchange, deploy-shard, and Go contexts directly, without a billed aggregate runner job.
 - Olympus owns no local Git hook. Protected `main` rejects direct pushes and
   GitHub's required full-CI lane checks own merge safety, so clones and
   worktrees do not inherit repository policy through mutable Git configuration.
