@@ -6,6 +6,7 @@
  *   connect-relay/server/generated/chatgpt-tools.json      tools/list + resources/list
  *   connect-relay/server/generated/chatgpt-dashboard.json  resources/read of ui://olympus/dashboard
  *   connect-relay/server/generated/chatgpt-private-answer.json  resources/read of ui://olympus/private-answer
+ *   connect-relay/server/generated/chatgpt-private-question.json  resources/read of ui://olympus/private-question
  *
  * The relay builds and deploys separately from the engine and imports only
  * these files. `bun run build` writes them; `--check` (and
@@ -16,6 +17,7 @@ import { join } from 'node:path';
 import { DASHBOARD_RESOURCE } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { CHATGPT_RESOURCES, CHATGPT_TOOLS, readChatGptResource } from '../src/workers/chatgpt/mcp-surface.ts';
 import { PRIVATE_ANSWER_RESOURCE } from '../src/workers/chatgpt/private-answer-resource.ts';
+import { PRIVATE_QUESTION_RESOURCE } from '../src/workers/chatgpt/private-question-resource.ts';
 
 const ROOT = join(import.meta.dir, '..');
 export const GENERATED_DIR = 'connect-relay/server/generated';
@@ -26,6 +28,7 @@ export function chatgptRelayAssets(): Record<string, string> {
     [`${GENERATED_DIR}/chatgpt-tools.json`]: render({ tools: CHATGPT_TOOLS, resources: CHATGPT_RESOURCES.map((resource) => ({ ...resource })) }),
     [`${GENERATED_DIR}/chatgpt-dashboard.json`]: render(readChatGptResource(DASHBOARD_RESOURCE.uri)),
     [`${GENERATED_DIR}/chatgpt-private-answer.json`]: render(readChatGptResource(PRIVATE_ANSWER_RESOURCE.uri)),
+    [`${GENERATED_DIR}/chatgpt-private-question.json`]: render(readChatGptResource(PRIVATE_QUESTION_RESOURCE.uri)),
   };
 }
 

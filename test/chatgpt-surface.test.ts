@@ -20,6 +20,9 @@ import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, type DashboardViewModelV1 
 import { DASHBOARD_RESOURCE_VERSIONED_URI, MCP_APP_MIME_TYPE, dashboardResourceHtml, matchesResourceUri, versionedResourceUri } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { PRIVATE_ANSWER_RESOURCE_URI } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
+import { PRIVATE_QUESTION_META_KEY, PRIVATE_QUESTION_RESOURCE_URI } from '../src/workers/chatgpt/private-question-contract.ts';
+import { PrivateQuestionJobs } from '../src/workers/chatgpt/private-question-jobs.ts';
+import { PRIVATE_QUESTION_RESOURCE_VERSIONED_URI, privateQuestionResourceHtml } from '../src/workers/chatgpt/private-question-resource.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { copyDashboardViewModel, PRIVATE_MATCH_PANEL_SETUP_NOTE } from '../src/workers/chatgpt/response-builder.ts';
@@ -751,6 +754,11 @@ beforeEach(() => {
     chatgpt: {
       servesRequest: () => servesChatGpt,
       readOnlyFor: () => readOnlySurface,
+      privateQuestions: new PrivateQuestionJobs({
+        installId: () => (questionInstall ? 'a'.repeat(32) : undefined),
+        ask: async () => ({ ok: false, code: 'unused', message: 'unused' }),
+        choice: () => ({ level: 'standard', cleanup: 'light_cleanup', customInstruction: false }),
+      }),
       async privateMatchProbe() { return privateProbe; },
       async dashboardView() {
         if (dashboardMode === 'throw') throw new Error(S('DASHBOARD_ERROR'));
@@ -767,6 +775,8 @@ afterEach(() => {
   store.close();
   rmSync(dir, { recursive: true, force: true });
 });
+
+let questionInstall = true;
 
 async function connectClient(): Promise<Client> {
   const { token } = store.create('ChatGPT');
@@ -798,6 +808,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'source_answer',
         'source_answer_result',
         'ask_anonymously',
+        'open_private_question',
         'olympus_connect_source',
         'olympus_scope_list',
         'olympus_scope_set',
@@ -858,6 +869,36 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     expect(list.message.result.tools).toEqual(JSON.parse(JSON.stringify(CHATGPT_TOOLS)));
   });
 
+  test('open_private_question opens a job for the panel: the job id and engine key are widget-only, the model is told nothing else', async () => {
+    const client = await connectClient();
+    try {
+      const result = await client.callTool({ name: 'open_private_question', arguments: {} }) as Record<string, any>;
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toEqual({ status: 'opened' });
+      expect(result.content[0].text).toContain('type their question in the panel');
+      expect(result._meta.ui).toEqual({ resourceUri: PRIVATE_QUESTION_RESOURCE_VERSIONED_URI });
+      expect(result._meta['openai/outputTemplate']).toBe(PRIVATE_QUESTION_RESOURCE_VERSIONED_URI);
+      const meta = result._meta[PRIVATE_QUESTION_META_KEY];
+      // The dashboard default (consult.json absent): Standard, lightly cleaned up.
+      expect(meta).toMatchObject({ v: 1, level: 'standard', cleanup: 'light_cleanup', customInstruction: false, maxChars: 4000 });
+      expect(meta.jobId).toMatch(/^oly2p\.a{32}\.[A-Za-z0-9_-]{43}$/);
+      expect(meta.askKey).toMatch(/^[A-Za-z0-9_-]{87}$/);
+      // Neither the job id nor the key is in what the model reads.
+      expect(JSON.stringify([result.content, result.structuredContent])).not.toContain(meta.jobId.split('.')[2]);
+      expect(JSON.stringify([result.content, result.structuredContent])).not.toContain(meta.askKey);
+      // Arguments are refused; not linked to the relay means no panel, told in words.
+      expect((await client.callTool({ name: 'open_private_question', arguments: { question: 'q' } }) as Record<string, any>).isError).toBe(true);
+      questionInstall = false;
+      const unavailable = await client.callTool({ name: 'open_private_question', arguments: {} }) as Record<string, any>;
+      expect(unavailable.isError).toBeFalsy();
+      expect(unavailable.structuredContent).toEqual({ status: 'unavailable', reason: 'not_connected' });
+      expect(unavailable._meta?.[PRIVATE_QUESTION_META_KEY]).toBeUndefined();
+    } finally {
+      questionInstall = true;
+      await client.close();
+    }
+  });
+
   test('serves the dashboard resource with the MCP Apps MIME type', async () => {
     const client = await connectClient();
     try {
@@ -865,6 +906,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
       expect(resources).toEqual([
         { uri: DASHBOARD_RESOURCE_VERSIONED_URI, name: 'Olympus dashboard', mimeType: MCP_APP_MIME_TYPE },
         { uri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, name: 'Olympus private answer', mimeType: MCP_APP_MIME_TYPE },
+        { uri: PRIVATE_QUESTION_RESOURCE_VERSIONED_URI, name: 'Olympus private question', mimeType: MCP_APP_MIME_TYPE },
       ]);
       const read = await client.readResource({ uri: DASHBOARD_RESOURCE_VERSIONED_URI });
       const content = read.contents[0] as { uri: string; mimeType: string; text: string; _meta: Record<string, unknown> };
@@ -909,6 +951,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
       for (const [base, current, html] of [
         [DASHBOARD_RESOURCE_URI, DASHBOARD_RESOURCE_VERSIONED_URI, dashboardResourceHtml()],
         [PRIVATE_ANSWER_RESOURCE_URI, PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceHtml()],
+        [PRIVATE_QUESTION_RESOURCE_URI, PRIVATE_QUESTION_RESOURCE_VERSIONED_URI, privateQuestionResourceHtml()],
       ] as const) {
         for (const uri of [base, `${base}?v=000000000000`]) {
           const read = await client.readResource({ uri });

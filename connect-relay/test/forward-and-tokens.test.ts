@@ -59,12 +59,18 @@ describe('the forwarded surface', () => {
     expect(forwardPath(`/private/${jobId}`, undefined, 'POST')).toBe(`/private/${jobId}`);
     // A source-open request by the same panel: exactly `<job path>/open`.
     expect(forwardPath(`/private/${jobId}/open`, undefined, 'POST')).toBe(`/private/${jobId}/open`);
+    // A sealed private question by the panel: exactly `<job path>/ask`.
+    expect(forwardPath(`/private/${jobId}/ask`, undefined, 'POST')).toBe(`/private/${jobId}/ask`);
     for (const [path, method] of [
       [`/private/${jobId}/open`, 'GET'],
       [`/private/${jobId}/open?path=/etc/passwd`, 'POST'],
       [`/private/${jobId}/open/`, 'POST'],
       [`/private/${jobId}/open/x`, 'POST'],
       [`/private/${jobId}/opens`, 'POST'],
+      [`/private/${jobId}/ask`, 'GET'],
+      [`/private/${jobId}/ask/`, 'POST'],
+      [`/private/${jobId}/ask?x=1`, 'POST'],
+      [`/private/${jobId}/asks`, 'POST'],
       [`/private/${jobId}/../open`, 'POST'],
       [`/private/${jobId}`, 'GET'],
       [`/private/${jobId}`, 'DELETE'],

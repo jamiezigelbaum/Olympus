@@ -1947,6 +1947,58 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
 } as const;
 
 /**
+ * The private question panel (src/workers/dashboard/chatgpt/private-question.ts):
+ * a question typed in ChatGPT's panel that ChatGPT never sees, asked
+ * anonymously through zkAPI from the user's own computer. `{model}` is
+ * filled in by the panel. Nothing here names a source item.
+ */
+export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
+  pageTitle: 'Olympus private question',
+  title: 'Private question',
+  /** The muted line under the title while composing and once answered. */
+  notSeen: 'ChatGPT does not see this question or its answer. It goes out anonymously through zkAPI from your computer.',
+  /** The muted line when the ask was refused before anything left the computer. */
+  notSent: 'Nothing was sent.',
+  /** The send was attempted and failed afterwards: it may have reached the provider and been charged. */
+  mayHaveLeft: 'The question left your computer but no answer came back. It may have been charged; check before asking again.',
+  questionLabel: 'Your question',
+  strict: 'Strict',
+  strictHint: 'Your own model rewrites it into general questions first, so nothing identifying can leave.',
+  standard: 'Standard',
+  standardHint: 'Your words, prepared the way you chose on the dashboard.',
+  prepLabel: 'Prepared',
+  asWritten: 'as written',
+  lightCleanup: 'lightly cleaned up',
+  custom: 'by your saved instruction',
+  send: 'Ask anonymously',
+  cost: 'Paid from your zkAPI balance.',
+  sending: 'Sealing your question for your computer…',
+  waiting: 'Asking from your computer… this can take a few minutes.',
+  empty: 'Type a question first.',
+  tooLong: 'The question is too long.',
+  slow: 'Your computer is taking longer than usual to get the answer.',
+  failed: 'Olympus couldn\'t ask this from your computer.',
+  claimed: 'This question was already opened in another window.',
+  expired: 'This panel has expired. Ask ChatGPT to open a new private question.',
+  rateLimited: 'Too many requests — try again in a moment.',
+  macOffline: 'Your computer is offline, so the question can\'t be asked.',
+  unreachable: 'Olympus couldn\'t reach your computer. Try again in a moment.',
+  generic: 'Olympus couldn\'t ask this here.',
+  answeredBy: 'Answered by {model}',
+  howStrict: 'rewritten by your own model before it left',
+  howAsWritten: 'sent as written',
+  howLightCleanup: 'lightly cleaned up before it left',
+  howCustom: 'prepared by your saved instruction before it left',
+  networkVisible: 'Tor was off or bypassed, so the network address was visible: payment was private, the question was not anonymous.',
+  networkUnverified: 'The network route could not be verified on this computer.',
+  showSent: 'Show what was sent',
+  hideSent: 'Hide what was sent',
+  askAnother: 'Ask another',
+  /** After Ask another: a new sealed question needs a new panel from ChatGPT. */
+  askAgain: 'To ask another private question, ask ChatGPT to open a new one.',
+} as const;
+
+/**
  * The local folder picker's words (native Control UI page and the standalone
  * /dashboard/dispositions page). The same layout and wording as the approved
  * ChatGPT picker (DASHBOARD_CHATGPT_PICKER_COPY), minus what only applies

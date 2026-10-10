@@ -31,7 +31,7 @@ import {
   type ConsultStandardMode,
   type ConsultWriterChoice,
 } from './consult-settings.ts';
-import type { ZkapiConsultResult } from './consult-transport-zkapi.ts';
+import type { ZkapiConsultOutcome, ZkapiConsultResult } from './consult-transport-zkapi.ts';
 import type { ConsultWriterInput, ConsultWriterOutcome } from './consult-writer.ts';
 
 /** The typed question's bound, in characters (the transport also caps it at 8 KiB). */
@@ -128,7 +128,20 @@ export type ConsultAskResult =
     readonly note?: string;
   }
   | { readonly ok: false; readonly code: 'needs_choice'; readonly message: string; readonly options: ConsultAskChoiceOptions }
-  | { readonly ok: false; readonly code: string; readonly message: string; readonly sent?: string };
+  | {
+    readonly ok: false;
+    readonly code: string;
+    readonly message: string;
+    /** The prepared question, when one was prepared (a gate refusal, or a send that failed). */
+    readonly sent?: string;
+    /**
+     * After a send was attempted: whether the question left. `not_sent` (refused
+     * before it left), `sent_failed` (the daemon answered with an error;
+     * spending may have happened) or `unknown` (it may have reached the
+     * provider). Absent when nothing was ever sent to the transport.
+     */
+    readonly outcome?: ZkapiConsultOutcome;
+  };
 
 export const CONSULT_ASK_MESSAGES = Object.freeze({
   empty: 'Type a question first.',
@@ -327,7 +340,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   if (!result) return { ok: false, code: 'route_not_configured', message: CONSULT_ASK_MESSAGES.noRoute };
   if (stale) return { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale };
   if (input.signal?.aborted && !result.ok && result.error.outcome === 'not_sent') return { ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled };
-  if (!result.ok) return { ok: false, code: result.error.code, message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message, sent };
+  if (!result.ok) return { ok: false, code: result.error.code, message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message, sent, outcome: result.error.outcome };
   return {
     ok: true,
     sent,

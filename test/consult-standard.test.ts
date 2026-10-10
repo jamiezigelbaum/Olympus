@@ -152,7 +152,7 @@ describe('Ask anonymously', () => {
       ...deps(settings({ standardMode: 'as_written' })).value,
       send: async () => ({ ok: false, error: { code: 'model_unavailable', message: 'not listed', outcome: 'not_sent', networkIdentity: 'not_verified' } }),
     };
-    expect(await askAnonymously(q('What is a deposit?'), missing)).toEqual({ ok: false, code: 'model_unavailable', message: 'not listed', sent: 'What is a deposit?' });
+    expect(await askAnonymously(q('What is a deposit?'), missing)).toEqual({ ok: false, code: 'model_unavailable', message: 'not listed', sent: 'What is a deposit?', outcome: 'not_sent' });
   });
 
   test('a labelled secret in the typed question stays refused, with or without its label (review of PR #209)', async () => {

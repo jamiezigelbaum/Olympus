@@ -240,6 +240,33 @@
       ]
     },
     {
+      "name": "open_private_question",
+      "title": "Open a private question",
+      "description": "Open a panel where the user types a question that you never see. It is asked anonymously through zkAPI from their own computer, paid from their zkAPI balance, and answered inside the panel. Use it when the user wants to ask a private or anonymous question without telling ChatGPT what it is (for example \"use Olympus zkAPI to ask a private question\"). When they have already typed the question in this conversation, use ask_anonymously instead. Takes no arguments. Returns {status: \"opened\"}: tell the user to type their question in the panel, and never ask what it is or what it answered. {status: \"unavailable\"}: tell the user why in those words.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://olympus/private-question?v=df2f56d88014"
+        },
+        "openai/outputTemplate": "ui://olympus/private-question?v=df2f56d88014"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": true
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ]
+    },
+    {
       "name": "olympus_connect_source",
       "title": "Connect a source to Olympus",
       "description": "Start connecting Gmail, Google Drive or Dropbox to Olympus on the user's Mac. Returns {openUrl}: a one-time sign-in link (10 minutes) the user opens to sign in with the provider and allow Olympus. Afterwards the user chooses which folders or mail Olympus may read in the Olympus panel.",
@@ -875,6 +902,11 @@
     {
       "uri": "ui://olympus/private-answer?v=00441e0e316a",
       "name": "Olympus private answer",
+      "mimeType": "text/html;profile=mcp-app"
+    },
+    {
+      "uri": "ui://olympus/private-question?v=df2f56d88014",
+      "name": "Olympus private question",
       "mimeType": "text/html;profile=mcp-app"
     }
   ]

@@ -21,6 +21,7 @@ import { startRelay, type RelayHandle } from '../server/relay.ts';
 import generatedDashboard from '../server/generated/chatgpt-dashboard.json';
 import generatedSurface from '../server/generated/chatgpt-tools.json';
 import generatedPrivateAnswer from '../server/generated/chatgpt-private-answer.json';
+import generatedPrivateQuestion from '../server/generated/chatgpt-private-question.json';
 
 setDefaultTimeout(15_000);
 
@@ -308,6 +309,7 @@ describe('routing', () => {
         'source_answer',
         'source_answer_result',
         'ask_anonymously',
+        'open_private_question',
         'olympus_connect_source',
         'olympus_scope_list',
         'olympus_scope_set',
@@ -329,9 +331,13 @@ describe('routing', () => {
     expect(resources.result.resources).toEqual([
       { uri: expect.stringMatching(/^ui:\/\/olympus\/dashboard\?v=[0-9a-f]{12}$/), name: 'Olympus dashboard', mimeType: 'text/html;profile=mcp-app' },
       { uri: expect.stringMatching(/^ui:\/\/olympus\/private-answer\?v=[0-9a-f]{12}$/), name: 'Olympus private answer', mimeType: 'text/html;profile=mcp-app' },
+      { uri: expect.stringMatching(/^ui:\/\/olympus\/private-question\?v=[0-9a-f]{12}$/), name: 'Olympus private question', mimeType: 'text/html;profile=mcp-app' },
     ]);
     const panel = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/private-answer' }))).json();
     expect(panel.result.contents).toEqual(generatedPrivateAnswer.contents);
+    const question = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/private-question' }))).json();
+    expect(question.result.contents).toEqual(generatedPrivateQuestion.contents);
+    expect(question.result.contents[0].text).toContain('/ask');
     const resource = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/dashboard' }))).json();
     // The dashboard lane's real bundle, not a placeholder.
     expect(resource.result.contents).toEqual(generatedDashboard.contents);
@@ -592,6 +598,13 @@ describe('private answer collection', () => {
     expect(unknown.headers.get('access-control-allow-origin')).toBe(PANEL);
     expect((await collect(relay, jobId, { body: 'x'.repeat(600) })).status).toBe(413);
     expect(workerA.requests).toHaveLength(1);
+    // A sealed private question (`/ask`) is forwarded with its larger cap: 16 KiB, not the key-sized one.
+    const ask = (body: string) => fetch(`${relay.url}/private/${jobId}/ask`, { method: 'POST', headers: { 'content-type': 'application/json', origin: PANEL }, body });
+    expect((await ask('x'.repeat(600))).status).not.toBe(413);
+    expect(workerA.requests).toHaveLength(2);
+    expect(workerA.requests[1]!.path.endsWith(`/private/${jobId}/ask`)).toBe(true);
+    expect((await ask('x'.repeat(16_385))).status).toBe(413);
+    expect(workerA.requests).toHaveLength(2);
     expect(workerB.requests).toHaveLength(0);
 
     const logs = logLines.join('\n');

@@ -79,7 +79,7 @@
 import { randomBytes } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import {
-  PRIVATE_ANSWER_MAX_REQUEST_BYTES,
+  privateAnswerMaxRequestBytes,
   isPanelOrigin,
   privateAnswerInstallId,
   privateAnswerRoute,
@@ -100,6 +100,7 @@ import {
   checkPrivateEvidence,
 } from './private-answer-contract.ts';
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer, type SealedPrivateAnswer } from './private-answer-crypto.ts';
+import type { PrivateQuestionJobs } from './private-question-jobs.ts';
 import {
   PRIVATE_ANSWER_PAYLOAD_LIMITS,
   preparePrivateAnswer,
@@ -1275,6 +1276,8 @@ function preparedAnswer(result: { answer: unknown; citations?: unknown; unanswer
 
 export interface PrivateAnswerHandlerOptions {
   jobs: PrivateAnswerJobs;
+  /** Private question jobs (private-question-jobs.ts): `/ask`, and the collection of their outcomes. */
+  questions?: PrivateQuestionJobs;
   /** Only relayed requests are served: the panel reaches the engine through the relay. */
   isRelayed: (request: Request) => boolean;
   /** Panel origins beyond ChatGPT's widget sandbox (the dedicated `_meta.ui.domain`). */
@@ -1302,7 +1305,7 @@ export function createPrivateAnswerHandler(options: PrivateAnswerHandlerOptions)
     if (!isPanelOrigin(request.headers.get('origin'), options.extraOrigins?.() ?? [])) {
       return reply({ status: 403, body: { status: 'forbidden' } });
     }
-    const text = await boundedText(request, PRIVATE_ANSWER_MAX_REQUEST_BYTES);
+    const text = await boundedText(request, privateAnswerMaxRequestBytes(route.action));
     if (text === undefined) return reply({ status: 413, body: { status: 'invalid' } });
     let body: unknown;
     try {
@@ -1312,6 +1315,11 @@ export function createPrivateAnswerHandler(options: PrivateAnswerHandlerOptions)
     }
     const record = typeof body === 'object' && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
     if (!record || record.v !== 1) return reply({ status: 400, body: { status: 'invalid' } });
+    if (route.action === 'ask') return reply(options.questions ? await options.questions.ask(jobId, record) : { status: 410, body: { status: 'gone' } });
+    if (options.questions?.has(jobId)) {
+      // A private question job: its outcome, never a private answer's.
+      return reply(route.action === 'open' ? { status: 410, body: { status: 'gone' } } : await options.questions.collect(jobId, record.publicKey));
+    }
     if (route.action === 'open') return reply(await options.jobs.open(jobId, record.open));
     // A `cap` field from an older cached panel is ignored: every claim gets the sealed answer.
     return reply(await options.jobs.claim(jobId, record.publicKey));

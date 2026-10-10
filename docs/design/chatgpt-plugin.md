@@ -1126,6 +1126,62 @@ context, and never transits OpenAI's servers.
 - The panel builds a fetch URL only from a job id of the exact routable
   `oly2p.` shape.
 
+## Private question panel (added 2026-10-10)
+
+Owner decision 2026-10-10 (design ~/Code/Claude/olympus-zkapi-rethink/DESIGN-2026-10-10.md,
+"A private question ChatGPT never sees"): the user says "use Olympus zkAPI to
+ask a private question" and types the question into a panel instead of the
+chat, so neither the question nor the answer passes through ChatGPT.
+
+### What the user sees
+
+ChatGPT calls `open_private_question` (no arguments). The result tells the
+model only that a panel opened and that it will not see the question; the
+panel (`ui://olympus/private-question`, src/workers/dashboard/chatgpt/
+private-question.ts) renders a question field, the Strict/Standard choice
+(defaulting to the dashboard's saved level and preparation) and "Ask
+anonymously". While the ask runs it says so; the answer, the model that
+answered, how the question was prepared and, when it was rewritten, what was
+sent (behind a toggle) render as text only. "Ask another" needs a new panel
+from ChatGPT: one sealed question per job.
+
+### Protocol
+
+Contract: src/workers/chatgpt/private-question-contract.ts. The tool result's
+widget-only `_meta["olympus/privateQuestion"]` carries the job id
+(`oly2p.<installId>.<secret>`, the private answer job's shape, so the relay
+routes it by install exactly as it routes a private answer), the engine's
+P-256 public key for the job (`askKey`), the default choice and the length
+cap. The panel makes its own ECDH P-256 pair for the job (private key
+non-extractable, kept in this origin's IndexedDB), derives the AES-GCM key
+with HKDF(info = job id) from the engine key, seals
+`{"v":1,"question","level","cleanup"?}` (AAD = job id) and POSTs
+`{"v":1,"publicKey","cap","iv","ciphertext"}` to
+`<relay>/private/<jobId>/ask`. The relay forwards ciphertext it holds no key
+for; its body cap for `/ask` is 16 KiB (connect-relay/shared/private-answer.ts
+`privateAnswerMaxRequestBytes`), the key-sized cap stays on the other two
+actions. The engine (src/workers/chatgpt/private-question-jobs.ts, behind the
+private answer handler) opens the question with its job private key, binds
+the job to that panel key, and runs the same ask lane as `ask_anonymously`
+(core/consult-ask.ts: writer, gate, zkAPI, the provider rule with the caller
+placed as OpenAI-hosted). The outcome, answer or refusal, is padded and
+sealed to the panel key like a private answer; the panel collects it with
+`POST /private/<jobId>` (202 pending → 200 ready) and a re-mount with the
+kept key collects instead of asking again. Jobs live 30 minutes; expiry
+aborts a running ask.
+
+What the host learns: that a panel opened, how long it polled, and the
+panel's rendered height (every MCP Apps widget reports its size, so the
+length class of the outcome is observable; an accepted residual under the
+owner's 2026-10-07 ruling that sealed content is the bar, not invisibility,
+like the private answer panel's). Never the question, the answer, the level
+or the model: nothing goes back through tools/call, widget state or a
+follow-up message (test/chatgpt-private-question-ui.test.ts asserts it). A
+send that fails after the question left is told as such (it may have been
+charged), never as "nothing was sent": the transport's outcome travels
+inside the sealed result. Proof of both directions of the crypto:
+test/chatgpt-private-question.test.ts.
+
 ## Live smoke (added 2026-10-02)
 
 `scripts/chatgpt-live-smoke.ts` checks what ChatGPT sees, end to end, on a
