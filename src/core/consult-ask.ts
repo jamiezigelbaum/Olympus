@@ -274,7 +274,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     let written: ConsultWriterOutcome;
     try {
       written = await deps.prepare(
-        { question: typed, answer: '', gaps: [], ...(instruction !== undefined ? { instruction } : {}) },
+        { question: typed, answer: '', gaps: [], ...(instruction !== undefined ? { instruction } : { direct: true as const }) },
         writer,
         strict ? 'general' : 'unnamed',
         input.signal,

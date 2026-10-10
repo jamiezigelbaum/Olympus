@@ -47,7 +47,12 @@ Two levels:
 - **Strict** (`general`). "Your model rewrites it into general questions
   first (Vitalik Buterin's approach)." The writer's general questions under
   Vitalik's rules, with the full gate for the built-in writer and the thin
-  net for the owner's own (below).
+  net for the owner's own (below). For a direct ask (`ask_anonymously`) the
+  writer gets the direct form of those rules (`CONSULT_WRITER_SYSTEM_DIRECT`):
+  the question is to be sent, so it always rewrites, and "nothing" is only
+  for a question with no general form. The escalation lane keeps the
+  "decide first" form (found live 2026-10-10: the escalation prompt with an
+  empty first answer declined a deposit question).
 
 ### Standard is open: the user's choice (owner decision, 2026-10-10)
 
