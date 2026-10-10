@@ -191,11 +191,13 @@ export const DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62;
 // gemini-embedding-2 (see DEFAULT_SEMANTIC_RELEVANCE_BAR). A model without an
 // entry gets no vector content preference, so ranking fails soft to lexical
 // content first and RRF rank; an adapter's explicit semanticRelevanceBar still
-// applies. TODO: calibrate Venice text-embedding-qwen3-8b and the local qwen3
-// (2560-dim) embedder on real corpora (off-domain peak vs true-positive floor,
-// as was done for Gemini on 2026-07-25) and add them here.
+// applies. Venice (4096-dim), 2026-10-10: eval fixtures and frozen blind
+// questions peak at 0.428079 off-domain; expected true positives start at
+// 0.482940. See eval/calibration/venice-relevance-result.json.
+// TODO: calibrate the local qwen3 (2560-dim) embedder independently.
 const CALIBRATED_CONTENT_PREFERENCE_BARS: ReadonlyMap<string, number> = new Map([
   ['gemini-embedding-2', DEFAULT_SEMANTIC_RELEVANCE_BAR],
+  ['text-embedding-qwen3-8b', 0.43],
 ]);
 // Relevance bars that also gate the vector lane when the adapter sets none:
 // a vector row below its model's bar is no evidence at all (not merely no

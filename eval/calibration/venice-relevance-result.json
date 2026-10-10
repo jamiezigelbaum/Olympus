@@ -1,0 +1,177 @@
+{
+  "recordedAt": "2026-10-10T22:59:04.767Z",
+  "model": "text-embedding-qwen3-8b",
+  "dimension": 4096,
+  "queryInstruction": "Instruct: Given a web search query, retrieve relevant passages that answer the query",
+  "fixtureDigest": "b21ae9daf912e4e742eeb266e57b134eb45314fd3382afb4836ebf0701ee6e69",
+  "documents": 11,
+  "positiveQuestions": 6,
+  "negativeQuestions": 25,
+  "offDomainPeak": 0.42807838135881765,
+  "truePositiveFloor": 0.4829398465116097,
+  "bar": 0.43,
+  "separates": true,
+  "rows": [
+    {
+      "question": "What purchase price and reservation deposit are in the offer for 14 Larch Court?",
+      "answerable": true,
+      "bestCosine": 0.7408192641957486,
+      "truePositiveCosine": 0.7365860576780919
+    },
+    {
+      "question": "By when must the purchase contract for 14 Larch Court be signed under the offer?",
+      "answerable": true,
+      "bestCosine": 0.7658560696036163,
+      "truePositiveCosine": 0.7658560696036163
+    },
+    {
+      "question": "what did the letting agent say about returning my deposit after I moved out of the flat",
+      "answerable": true,
+      "bestCosine": 0.5419450584827977,
+      "truePositiveCosine": 0.5419450584827977
+    },
+    {
+      "question": "why did the billing export fail last week and what should we change",
+      "answerable": true,
+      "bestCosine": 0.6685913217521671,
+      "truePositiveCosine": 0.6685913217521671
+    },
+    {
+      "question": "quelles sont les règles pour la succession de la maison de mon père",
+      "answerable": true,
+      "bestCosine": 0.5332482293898319,
+      "truePositiveCosine": 0.5332482293898319
+    },
+    {
+      "question": "what happened with the fee",
+      "answerable": true,
+      "bestCosine": 0.4829398465116097,
+      "truePositiveCosine": 0.4829398465116097
+    },
+    {
+      "question": "How do landlords usually calculate a fair rent increase?",
+      "answerable": false,
+      "bestCosine": 0.42807838135881765
+    },
+    {
+      "question": "What should a written apology letter to a customer include?",
+      "answerable": false,
+      "bestCosine": 0.2584289763186271
+    },
+    {
+      "question": "Which factors determine the lifespan of a roof?",
+      "answerable": false,
+      "bestCosine": 0.218660400844767
+    },
+    {
+      "question": "How does a court decide who keeps a shared pet after a separation?",
+      "answerable": false,
+      "bestCosine": 0.25697846581681366
+    },
+    {
+      "question": "What are typical warning signs of a phishing message?",
+      "answerable": false,
+      "bestCosine": 0.21327037031156487
+    },
+    {
+      "question": "How often should a smoke detector battery be replaced?",
+      "answerable": false,
+      "bestCosine": 0.21200987935524224
+    },
+    {
+      "question": "What is the purpose of a power of attorney?",
+      "answerable": false,
+      "bestCosine": 0.2392248520818705
+    },
+    {
+      "question": "How do employers usually handle overtime for salaried staff?",
+      "answerable": false,
+      "bestCosine": 0.19114114994863035
+    },
+    {
+      "question": "Which records help prove the age of a household appliance?",
+      "answerable": false,
+      "bestCosine": 0.3042890533657119
+    },
+    {
+      "question": "What makes a password manager safer than reusing passwords?",
+      "answerable": false,
+      "bestCosine": 0.25999066487214706
+    },
+    {
+      "question": "How do pharmacists check for interactions between two medicines?",
+      "answerable": false,
+      "bestCosine": 0.20402712792065034
+    },
+    {
+      "question": "What questions should a patient ask before elective surgery?",
+      "answerable": false,
+      "bestCosine": 0.1819020944363201
+    },
+    {
+      "question": "How do mortgage lenders assess affordability?",
+      "answerable": false,
+      "bestCosine": 0.2939558322057821
+    },
+    {
+      "question": "What is the difference between a will and a trust?",
+      "answerable": false,
+      "bestCosine": 0.21607503973323972
+    },
+    {
+      "question": "How do insurers usually value a stolen bicycle?",
+      "answerable": false,
+      "bestCosine": 0.23985737409906688
+    },
+    {
+      "question": "Why do backups fail to restore even when the job reports success?",
+      "answerable": false,
+      "bestCosine": 0.427242830193938
+    },
+    {
+      "question": "What is a reasonable notice period when ending a cleaning service?",
+      "answerable": false,
+      "bestCosine": 0.3818815070565961
+    },
+    {
+      "question": "How should a small charity record donations for tax purposes?",
+      "answerable": false,
+      "bestCosine": 0.27603073132808154
+    },
+    {
+      "question": "What usually causes a cold draught near a closed window?",
+      "answerable": false,
+      "bestCosine": 0.23559321997846083
+    },
+    {
+      "question": "How do airlines decide compensation for lost luggage?",
+      "answerable": false,
+      "bestCosine": 0.21097332070178731
+    },
+    {
+      "question": "What evidence supports a claim that a repair was done poorly?",
+      "answerable": false,
+      "bestCosine": 0.325822574157314
+    },
+    {
+      "question": "How do schools usually handle a request for a deferred exam?",
+      "answerable": false,
+      "bestCosine": 0.24726497493624455
+    },
+    {
+      "question": "Which habits reduce the risk of repetitive strain injury at a desk?",
+      "answerable": false,
+      "bestCosine": 0.17417089033295816
+    },
+    {
+      "question": "What does a standard home inspection report usually cover?",
+      "answerable": false,
+      "bestCosine": 0.33938457477417455
+    },
+    {
+      "question": "How do lenders treat irregular freelance income when assessing a loan?",
+      "answerable": false,
+      "bestCosine": 0.27822471309429603
+    }
+  ]
+}

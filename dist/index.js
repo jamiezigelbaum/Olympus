@@ -9761,7 +9761,8 @@ var init_local_index = __esm(() => {
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
-    ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
+    ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
+    ["text-embedding-qwen3-8b", 0.43]
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
     [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
