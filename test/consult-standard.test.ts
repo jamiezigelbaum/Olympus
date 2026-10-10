@@ -4,7 +4,7 @@
 // secrets. "Ask anonymously" on the dashboard follows the same mode.
 
 import { describe, expect, test } from 'bun:test';
-import { askAnonymously, CONSULT_ASK_MAX_CHARS, CONSULT_ASK_MESSAGES, type ConsultAskDependencies } from '../src/core/consult-ask.ts';
+import { askAnonymously, CONSULT_ASK_MAX_CHARS, CONSULT_ASK_MESSAGES, type ConsultAskDependencies, type ConsultAskInput, type ConsultAskSendOptions } from '../src/core/consult-ask.ts';
 import { CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES, consultWriterContextFromPack, evaluateConsultRequest } from '../src/core/consult-gate.ts';
 import { CONSULT_LIGHT_CLEANUP_INSTRUCTION, DEFAULT_CONSULT_SETTINGS, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
@@ -62,47 +62,54 @@ describe('Ask anonymously', () => {
   const settings = (extra: Partial<typeof DEFAULT_CONSULT_SETTINGS> = {}): ConsultSettingsRead => ({ state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 2, ...extra } });
   const reply = (text: string): ZkapiConsultResult => ({ ok: true, text, routeLabel: 'zkAPI via Tor', networkIdentity: 'hidden', receipt: {} as never, elapsedMs: 5 });
 
+  /** The dashboard's call: Standard, chosen by the card. */
+  const q = (question: unknown): ConsultAskInput => ({ question, level: 'standard', origin: 'dashboard' });
+
   function deps(read: ConsultSettingsRead, prepared: Awaited<ReturnType<ConsultAskDependencies['prepare']>> = { kind: 'questions', questions: ['How long do landlords usually take to return a deposit?'], promptTokens: 1, ms: 1 }) {
-    const calls = { prepare: [] as ConsultWriterInput[], send: [] as string[] };
+    const calls = { prepare: [] as ConsultWriterInput[], levels: [] as string[], send: [] as string[], sendOptions: [] as ConsultAskSendOptions[], remembered: [] as Array<{ level: string; cleanup?: string }> };
     const value: ConsultAskDependencies = {
       settings: () => read,
-      prepare: async (input) => { calls.prepare.push(input); return prepared; },
+      prepare: async (input, _writer, level) => { calls.prepare.push(input); calls.levels.push(level); return prepared; },
       // Like the transport: final authorization runs just before dispatch; false sends nothing.
-      send: async (question, authorize) => {
+      send: async (question, authorize, options) => {
         if (!authorize()) return { ok: false, error: { code: 'authorization_refused', message: 'refused', outcome: 'not_sent', networkIdentity: 'not_verified' } };
         calls.send.push(question);
+        calls.sendOptions.push(options);
         return reply('Usually within two weeks.');
       },
+      remember: async (choice) => { calls.remembered.push(choice); return { ok: true }; },
     };
     return { value, calls };
   }
 
   test('light cleanup (the default) prepares the typed question with the preset and returns exactly what was sent', async () => {
     const d = deps(settings());
-    const result = await askAnonymously('  When will Jo return my deposit?  ', d.value);
+    const result = await askAnonymously(q('  When will Jo return my deposit?  '), d.value);
     expect(d.calls.prepare).toEqual([{ question: 'When will Jo return my deposit?', answer: '', gaps: [], instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION }]);
     expect(d.calls.send).toEqual(['How long do landlords usually take to return a deposit?']);
-    expect(result).toEqual({ ok: true, sent: 'How long do landlords usually take to return a deposit?', reply: 'Usually within two weeks.', route: 'zkAPI via Tor' });
+    expect(result).toEqual({ ok: true, sent: 'How long do landlords usually take to return a deposit?', reply: 'Usually within two weeks.', route: 'zkAPI via Tor', networkIdentity: 'hidden', level: 'standard', cleanup: 'light_cleanup', rewritten: true, remembered: false });
+    expect(d.calls.levels).toEqual(['unnamed']);
+    expect(d.calls.sendOptions).toEqual([{ origin: 'dashboard' }]);
   });
 
   test('as written sends the typed question unchanged with no model; custom sends the user\'s instruction', async () => {
     const plain = deps(settings({ standardMode: 'as_written' }));
-    expect(await askAnonymously('When will Jo return my deposit?', plain.value)).toMatchObject({ ok: true, sent: 'When will Jo return my deposit?' });
+    expect(await askAnonymously(q('When will Jo return my deposit?'), plain.value)).toMatchObject({ ok: true, sent: 'When will Jo return my deposit?' });
     expect(plain.calls.prepare).toEqual([]);
     const custom = deps(settings({ standardMode: 'custom', standardInstruction: 'Ask it in Dutch.' }));
-    await askAnonymously('When will Jo return my deposit?', custom.value);
+    await askAnonymously(q('When will Jo return my deposit?'), custom.value);
     expect(custom.calls.prepare[0]!.instruction).toBe('Ask it in Dutch.');
   });
 
   test('nothing is sent when the question is empty or too long, the settings are unreadable, the model declines or fails, or a secret is in it', async () => {
     const none = deps(settings());
-    expect(await askAnonymously('  ', none.value)).toMatchObject({ ok: false, code: 'question_empty' });
-    expect(await askAnonymously('x'.repeat(CONSULT_ASK_MAX_CHARS + 1), none.value)).toMatchObject({ ok: false, code: 'question_too_long' });
-    expect(await askAnonymously('x', deps({ state: 'invalid', reason: 'malformed_json' } as unknown as ConsultSettingsRead).value)).toMatchObject({ ok: false, code: 'settings_invalid' });
-    expect(await askAnonymously('x', deps(settings(), { kind: 'declined', promptTokens: 1, ms: 1 }).value)).toEqual({ ok: false, code: 'writer_declined', message: CONSULT_ASK_MESSAGES.declined });
-    expect(await askAnonymously('x', deps(settings(), { kind: 'failed', reason: 'form' }).value)).toMatchObject({ ok: false, code: 'writer_failed' });
+    expect(await askAnonymously(q('  '), none.value)).toMatchObject({ ok: false, code: 'question_empty' });
+    expect(await askAnonymously(q('x'.repeat(CONSULT_ASK_MAX_CHARS + 1)), none.value)).toMatchObject({ ok: false, code: 'question_too_long' });
+    expect(await askAnonymously(q('x'), deps({ state: 'invalid', reason: 'malformed_json' } as unknown as ConsultSettingsRead).value)).toMatchObject({ ok: false, code: 'settings_invalid' });
+    expect(await askAnonymously(q('x'), deps(settings(), { kind: 'declined', promptTokens: 1, ms: 1 }).value)).toEqual({ ok: false, code: 'writer_declined', message: CONSULT_ASK_MESSAGES.declined });
+    expect(await askAnonymously(q('x'), deps(settings(), { kind: 'failed', reason: 'form' }).value)).toMatchObject({ ok: false, code: 'writer_failed' });
     const keyed = deps(settings({ standardMode: 'as_written' }));
-    const refused = await askAnonymously(`Why is ${FAKE_KEY} rejected?`, keyed.value);
+    const refused = await askAnonymously(q(`Why is ${FAKE_KEY} rejected?`), keyed.value);
     expect(refused).toMatchObject({ ok: false, code: 'secret_detected', message: CONSULT_ASK_MESSAGES.secret });
     expect(keyed.calls.send).toEqual([]);
     expect(none.calls.send).toEqual([]);
@@ -110,20 +117,20 @@ describe('Ask anonymously', () => {
 
   test('the transport\'s refusals come back as they are: no route, or a model the listing lacks', async () => {
     const noRoute: ConsultAskDependencies = { ...deps(settings({ standardMode: 'as_written' })).value, send: async () => undefined };
-    expect(await askAnonymously('What is a deposit?', noRoute)).toEqual({ ok: false, code: 'route_not_configured', message: CONSULT_ASK_MESSAGES.noRoute });
+    expect(await askAnonymously(q('What is a deposit?'), noRoute)).toEqual({ ok: false, code: 'route_not_configured', message: CONSULT_ASK_MESSAGES.noRoute });
     const missing: ConsultAskDependencies = {
       ...deps(settings({ standardMode: 'as_written' })).value,
       send: async () => ({ ok: false, error: { code: 'model_unavailable', message: 'not listed', outcome: 'not_sent', networkIdentity: 'not_verified' } }),
     };
-    expect(await askAnonymously('What is a deposit?', missing)).toEqual({ ok: false, code: 'model_unavailable', message: 'not listed', sent: 'What is a deposit?' });
+    expect(await askAnonymously(q('What is a deposit?'), missing)).toEqual({ ok: false, code: 'model_unavailable', message: 'not listed', sent: 'What is a deposit?' });
   });
 
   test('a labelled secret in the typed question stays refused, with or without its label (review of PR #209)', async () => {
     const plain = deps(settings({ standardMode: 'as_written' }));
-    expect(await askAnonymously('Is password: hunter2 safe?', plain.value)).toMatchObject({ ok: false, code: 'secret_detected' });
+    expect(await askAnonymously(q('Is password: hunter2 safe?'), plain.value)).toMatchObject({ ok: false, code: 'secret_detected' });
     // The writer dropped the label but kept the value.
     const dropped = deps(settings(), { kind: 'questions', questions: ['Is hunter2 a safe choice?'], promptTokens: 1, ms: 1 });
-    expect(await askAnonymously('Is password: hunter2 safe?', dropped.value)).toMatchObject({ ok: false, code: 'secret_detected' });
+    expect(await askAnonymously(q('Is password: hunter2 safe?'), dropped.value)).toMatchObject({ ok: false, code: 'secret_detected' });
     expect([...plain.calls.send, ...dropped.calls.send]).toEqual([]);
   });
 
@@ -145,11 +152,158 @@ describe('Ask anonymously', () => {
           return { kind: 'questions', questions: [input.question], promptTokens: 1, ms: 1 };
         },
       };
-      expect({ change, result: await askAnonymously('What is a deposit?', value) }).toEqual({ change, result: { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale } });
+      expect({ change, result: await askAnonymously(q('What is a deposit?'), value) }).toEqual({ change, result: { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale } });
       expect(d.calls.send).toEqual([]);
     }
     // Unchanged: it sends.
     const same = deps(settings({ standardMode: 'custom', standardInstruction: 'One.' }));
-    expect(await askAnonymously('What is a deposit?', same.value)).toMatchObject({ ok: true });
+    expect(await askAnonymously(q('What is a deposit?'), same.value)).toMatchObject({ ok: true });
+  });
+
+  // The agent's path (owner decision 2026-10-10): ask once, remember, Strict rewrites.
+
+  test('an agent\'s first question with no level is not sent: needs_choice offers the card\'s setting; a remembered level is used without asking', async () => {
+    const fresh = deps(settings({ standardMode: 'as_written' }));
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, fresh.value)).toEqual({
+      ok: false,
+      code: 'needs_choice',
+      message: CONSULT_ASK_MESSAGES.needsChoice,
+      options: { suggestedLevel: 'standard', suggestedCleanup: 'as_written', customInstruction: false },
+    });
+    expect(fresh.calls.send).toEqual([]);
+    const strictCard = deps(settings({ level: 'general', standardMode: 'custom', standardInstruction: 'In Dutch.' }));
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, strictCard.value)).toMatchObject({ options: { suggestedLevel: 'strict', suggestedCleanup: 'custom', customInstruction: true } });
+    const chosen = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, chosen.value)).toMatchObject({ ok: true, level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
+    expect(chosen.calls.sendOptions).toEqual([{ origin: 'agent' }]);
+  });
+
+  test('remember stores the choice through the writer before the send and reports it; without a writer the question still goes, once', async () => {
+    let current = settings({ standardMode: 'light_cleanup' });
+    const d = deps(current);
+    const value: ConsultAskDependencies = {
+      ...d.value,
+      settings: () => current,
+      remember: async (choice) => { d.calls.remembered.push(choice); current = settings({ standardMode: 'as_written', levelChosen: true }); return { ok: true }; },
+    };
+    const result = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', cleanup: 'as_written', remember: true }, value);
+    expect(d.calls.remembered).toEqual([{ level: 'unnamed', cleanup: 'as_written' }]);
+    expect(result).toMatchObject({ ok: true, sent: 'What is a deposit?', remembered: true });
+    const { remember: _unused, ...noWriter } = deps(settings({ standardMode: 'as_written' })).value;
+    const unsaved = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', remember: true }, noWriter);
+    expect(unsaved).toMatchObject({ ok: true, remembered: false });
+  });
+
+  test('Strict: the writer rewrites with no instruction at the without-names level, the gate checks the rewrite, and the result says it was rewritten', async () => {
+    const d = deps(settings({ standardMode: 'as_written' }), { kind: 'questions', questions: ['How long do landlords usually take to return a deposit?'], promptTokens: 1, ms: 1 });
+    const result = await askAnonymously({ question: 'When will Jo at Heron Lettings return my deposit?', origin: 'agent', level: 'strict' }, d.value);
+    expect(d.calls.prepare).toEqual([{ question: 'When will Jo at Heron Lettings return my deposit?', answer: '', gaps: [] }]);
+    expect(d.calls.levels).toEqual(['general']);
+    expect(result).toMatchObject({ ok: true, level: 'strict', rewritten: true, sent: 'How long do landlords usually take to return a deposit?' });
+    expect('cleanup' in result).toBe(false);
+    // The rewrite still names the person: held back as gate_refused, nothing sent.
+    const leaky = deps(settings({ standardMode: 'as_written' }), { kind: 'questions', questions: ['When will Jo at Heron Lettings return the deposit?'], promptTokens: 1, ms: 1 });
+    expect(await askAnonymously({ question: 'When will Jo at Heron Lettings return my deposit?', origin: 'agent', level: 'strict' }, leaky.value)).toMatchObject({ ok: false, code: 'gate_refused', message: CONSULT_ASK_MESSAGES.gateRefused });
+    expect(leaky.calls.send).toEqual([]);
+  });
+
+  test('a one-off model and a cleanup override apply to this question only; custom needs a saved instruction; bad values are refused unsent', async () => {
+    const d = deps(settings({ standardMode: 'light_cleanup', levelChosen: true }));
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', cleanup: 'as_written', model: 'anthropic/claude-sonnet-5.5' }, d.value)).toMatchObject({ ok: true, cleanup: 'as_written', rewritten: false });
+    expect(d.calls.prepare).toEqual([]);
+    expect(d.calls.sendOptions).toEqual([{ origin: 'agent', model: 'anthropic/claude-sonnet-5.5' }]);
+    expect(d.calls.remembered).toEqual([]);
+    expect(await askAnonymously({ question: 'x', origin: 'agent', level: 'standard', cleanup: 'custom' }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.cleanupCustomMissing });
+    expect(await askAnonymously({ question: 'x', origin: 'agent', level: 'loose' as never }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.levelInvalid });
+    expect(await askAnonymously({ question: 'x', origin: 'agent', level: 'standard', model: 'not a model' }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.modelInvalid });
+    expect(d.calls.send).toHaveLength(1);
+  });
+
+  test('a write that lands between remember and the send (another conversation, the card) is refused as stale, never sent under the newer revision (Codex review of PR #215)', async () => {
+    const races: Array<{ after: Partial<typeof DEFAULT_CONSULT_SETTINGS>; note: string }> = [
+      { after: { standardMode: 'light_cleanup', levelChosen: true, revision: 4 }, note: 'another conversation remembered light cleanup' },
+      { after: { level: 'general', standardMode: 'as_written', levelChosen: true, revision: 4 }, note: 'the card switched to Strict' },
+      { after: { standardMode: 'as_written', revision: 4 }, note: 'the card cleared the choice' },
+    ];
+    for (const race of races) {
+      let current = settings({ standardMode: 'custom', standardInstruction: 'In Dutch.' });
+      const d = deps(current);
+      const value: ConsultAskDependencies = {
+        ...d.value,
+        settings: () => current,
+        remember: async () => { current = settings({ standardMode: 'custom', standardInstruction: 'In Dutch.', ...race.after }); return { ok: true }; },
+      };
+      const result = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', cleanup: 'as_written', remember: true }, value);
+      expect({ note: race.note, result }).toEqual({ note: race.note, result: { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale } });
+      expect(d.calls.send).toEqual([]);
+    }
+    // The remembered write itself, unchanged after: the question goes, prepared by the re-read file.
+    let current = settings({ standardMode: 'custom', standardInstruction: 'In Dutch.' });
+    const d = deps(current);
+    const value: ConsultAskDependencies = {
+      ...d.value,
+      settings: () => current,
+      remember: async () => { current = settings({ standardMode: 'light_cleanup', levelChosen: true, revision: 4 }); return { ok: true }; },
+    };
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', cleanup: 'light_cleanup', remember: true }, value)).toMatchObject({ ok: true, cleanup: 'light_cleanup', remembered: true });
+    expect(d.calls.prepare[0]!.instruction).toBe(CONSULT_LIGHT_CLEANUP_INSTRUCTION);
+  });
+
+  test('a save that fails while the answer succeeds is reported with the answer (Codex review of PR #215)', async () => {
+    const d = deps(settings({ standardMode: 'as_written' }));
+    const value: ConsultAskDependencies = { ...d.value, remember: async () => ({ ok: false, message: 'The settings changed under you; not saved.' }) };
+    const result = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', remember: true }, value);
+    expect(result).toMatchObject({ ok: true, remembered: false, note: 'The settings changed under you; not saved.' });
+    // The save that lands: no note.
+    let current = settings({ standardMode: 'as_written' });
+    const saved = deps(current);
+    const kept = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', remember: true }, {
+      ...saved.value,
+      settings: () => current,
+      remember: async () => { current = settings({ standardMode: 'as_written', levelChosen: true, revision: 3 }); return { ok: true }; },
+    });
+    expect(kept).toMatchObject({ ok: true, remembered: true });
+    expect('note' in kept).toBe(false);
+  });
+
+  test('the caller\'s cancellation stops the ask before dispatch with nothing sent: before the writer, after it, and at authorization (Codex review of PR #215)', async () => {
+    const gone = AbortSignal.abort();
+    const before = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: gone }, before.value)).toEqual({ ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled });
+    expect(before.calls.prepare).toEqual([]);
+    expect(before.calls.send).toEqual([]);
+    // Cancelled while the writer runs: the writer sees the signal, nothing is sent.
+    const controller = new AbortController();
+    const during = deps(settings({ standardMode: 'light_cleanup', levelChosen: true }));
+    const seen: Array<AbortSignal | undefined> = [];
+    const value: ConsultAskDependencies = {
+      ...during.value,
+      prepare: async (_input, _writer, _level, signal) => { seen.push(signal); controller.abort(); return { kind: 'questions', questions: ['How long do deposits take?'], promptTokens: 1, ms: 1 }; },
+    };
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: controller.signal }, value)).toMatchObject({ ok: false, code: 'cancelled' });
+    expect(seen).toEqual([controller.signal]);
+    expect(during.calls.send).toEqual([]);
+    // Cancelled between the gate and dispatch: authorization refuses, nothing reserved; the signal reaches the transport.
+    const late = new AbortController();
+    const atSend = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+    const sendValue: ConsultAskDependencies = {
+      ...atSend.value,
+      send: async (question, authorize, options) => {
+        late.abort();
+        expect(options.signal).toBe(late.signal);
+        if (!authorize()) return { ok: false, error: { code: 'authorization_refused', message: 'refused', outcome: 'not_sent', networkIdentity: 'not_verified' } };
+        atSend.calls.send.push(question);
+        return reply('never');
+      },
+    };
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: late.signal }, sendValue)).toEqual({ ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled });
+    expect(atSend.calls.send).toEqual([]);
+  });
+
+  test('a question within the character bound but over the transport\'s 8 KiB is refused as too long, not as a secret (Codex review of PR #215)', async () => {
+    const d = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+    const cjk = '預'.repeat(3_000);
+    expect(await askAnonymously({ question: cjk, origin: 'agent' }, d.value)).toMatchObject({ ok: false, code: 'question_too_long', message: CONSULT_ASK_MESSAGES.tooManyBytes });
+    expect(d.calls.send).toEqual([]);
   });
 });

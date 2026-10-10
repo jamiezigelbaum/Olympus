@@ -797,6 +797,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'source_index_status',
         'source_answer',
         'source_answer_result',
+        'ask_anonymously',
         'olympus_connect_source',
         'olympus_scope_list',
         'olympus_scope_set',
@@ -1019,7 +1020,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     const client = await connectClient();
     try {
       const { tools } = await client.listTools();
-      expect(tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_answer_result', 'source_index_status']);
+      expect(tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'source_answer', 'source_answer_result', 'source_index_status']);
       expect(tools.some((tool) => tool.name === DASHBOARD_TOOL_NAME)).toBe(false);
     } finally {
       await client.close();

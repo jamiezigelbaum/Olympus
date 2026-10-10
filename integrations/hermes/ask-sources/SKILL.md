@@ -1,12 +1,13 @@
 ---
 name: ask-sources
 version: 0.4.0
-description: Ask Olympus for cited answers and check source readiness through the exact three-tool Hermes MCP surface.
+description: Ask Olympus for cited answers, check source readiness, and ask a frontier model anonymously through the exact four-tool Hermes MCP surface.
 tools:
   - source_answer
   - source_answer_result
   - source_index_status
-mutating: false
+  - ask_anonymously
+mutating: true
 ---
 
 # Ask Sources from Hermes
@@ -25,6 +26,18 @@ not ask the same question again.
 Use `source_index_status` only for aggregate readiness and coverage checks. It
 does not browse or return source content.
 
-This Hermes adaptation intentionally has no search, locator, sync, watch,
-export, or mutation tool. If the three declared tools are unavailable, say that
-the Olympus MCP lane is unavailable and stop.
+Use `ask_anonymously` only when the user asks to ask something anonymously,
+privately or "through Olympus zkAPI". Only the question goes out, paid from
+their zkAPI balance. The first time it returns `needs_choice`: ask the user
+once whether they want Strict (their own model rewrites the question into
+general questions first) or Standard (their words, prepared as they chose),
+then call again with `level` and `remember: true`. Give the reply; when
+`rewritten` is true, say so and offer to show `sent`. A `working` result is
+collected with `source_answer_result`, like an answer.
+
+This Hermes adaptation intentionally has no search, locator, sync, watch or
+export tool. The one side-effecting tool is `ask_anonymously`: it spends from
+the user's zkAPI balance, sends their question to a provider, and with
+`remember: true` saves their choice; never call it unasked. If the four
+declared tools are unavailable, say that the Olympus MCP lane is unavailable
+and stop.

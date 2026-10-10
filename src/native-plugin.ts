@@ -123,7 +123,31 @@ function contentTextForOperation(operation: Operation, payload: unknown): string
     const summary = sourceAnswerContentText(payload);
     if (summary) return summary;
   }
+  if (operation.name === 'ask_anonymously') {
+    const summary = askAnonymouslyContentText(payload);
+    if (summary) return summary;
+  }
   return JSON.stringify(payload, null, 2);
+}
+
+/** An anonymous answer as the agent reads it: the reply, how it was asked, or the refusal in the user's words. */
+function askAnonymouslyContentText(payload: unknown): string | undefined {
+  const result = asRecord(payload);
+  if (!result || typeof result.ok !== 'boolean') return undefined;
+  if (result.ok) {
+    if (typeof result.reply !== 'string') return undefined;
+    const level = result.level === 'strict' ? 'Strict' : 'Standard';
+    const how = result.rewritten ? 'the question was rewritten by your model before it left' : 'sent as written';
+    const hidden = result.networkIdentity === 'hidden';
+    const heading = hidden ? 'Anonymous answer (zkAPI, ' : 'Answer through zkAPI with the network address visible (Tor is off on this route: payment privacy only; ';
+    const lines = [heading + level + '; ' + how + '):', result.reply];
+    if (result.rewritten && typeof result.sent === 'string') lines.push('', 'Sent:', result.sent);
+    if (typeof result.note === 'string') lines.push('', 'Note: ' + result.note);
+    return lines.join('\n');
+  }
+  if (typeof result.message !== 'string') return undefined;
+  if (result.code === 'needs_choice') return 'Choice needed before asking anonymously: ' + result.message;
+  return 'Not answered: ' + result.message;
 }
 
 function sourceAnswerContentText(payload: unknown): string | undefined {
@@ -203,7 +227,9 @@ function nativeToolFromOperation(operation: Operation, ctx: OperationContext): N
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted?.();
       try {
-        const result = await operation.handler(ctx, asParams(params));
+        // The host's cancellation reaches the operation (ask_anonymously
+        // stops before dispatch under it; nothing paid after a cancel).
+        const result = await operation.handler(signal ? { ...ctx, signal } : ctx, asParams(params));
         return operationResult(operation, result);
       } catch (error) {
         if (error instanceof OperationError) return errorResult(error);

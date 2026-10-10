@@ -42,7 +42,9 @@ account they may ever create is an optional Venice account.
 - **ChatGPT tools.** `olympus_search` is the primary answer tool (Olympus
   retrieves, ChatGPT reasons under the one generic Analyst instruction);
   `source_answer` and `source_answer_result` are listed only when an answer
-  model is set up on the Mac; `source_index_status`; setup tools for
+  model is set up on the Mac; `source_index_status`; `ask_anonymously` (one
+  typed question to a frontier model through zkAPI, Strict or Standard, asked
+  once and remembered); setup tools for
   connecting sources, folders and mail, disconnecting, model choice and
   privacy. Mixed auth: the dashboard works before the engine exists.
 - **Dashboard inside ChatGPT** (`ui://olympus/dashboard`, in the sidebar):

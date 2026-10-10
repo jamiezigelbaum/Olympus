@@ -64,7 +64,7 @@ import {
   type ConsultWriterChoice,
 } from '../../core/consult-settings.ts';
 import type { ConsultWriterCheckReport, ConsultWriterCheckResult } from '../../core/consult-writer-check.ts';
-import { CONSULT_ASK_MAX_CHARS, type ConsultAskResult } from '../../core/consult-ask.ts';
+import { CONSULT_ASK_MAX_CHARS, type ConsultAskInput, type ConsultAskResult } from '../../core/consult-ask.ts';
 import { writeConsultSettings, type ConsultSettingsWriteRefusal } from '../../core/consult-settings-writer.ts';
 import {
   abandonZkapiFence,
@@ -119,6 +119,21 @@ export interface DashboardConsultBackend {
   saveStandard(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
   /** "Ask anonymously": starts one typed question in the background; the card polls for the result. */
   ask(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
+  /**
+   * Stores the level (and Standard's cleanup) a user chose in conversation
+   * (ask_anonymously `remember`), marking it chosen, through the same
+   * compare-and-swap write as the card; everything else carries.
+   */
+}
+
+/**
+ * The adapter the composition root holds: the dashboard's backend plus the
+ * one write the agent's Ask needs (not a dashboard action, so not on the
+ * worker-facing interface).
+ */
+export interface DashboardConsultAdapter extends DashboardConsultBackend {
+  /** Stores the agent's Strict/Standard choice as the default (`levelChosen`), through the only allowed writer. */
+  rememberLevel(choice: { level: ConsultLevel; cleanup?: ConsultStandardMode }): Promise<{ ok: true } | { ok: false; message: string }>;
 }
 
 /**
@@ -157,7 +172,7 @@ export interface DashboardConsultAdapterOptions {
   /** The writer capability check (absent: the card offers no test). */
   writerCheck?: DashboardWriterCheckRunner;
   /** "Ask anonymously" (core/consult-ask.ts), bound by the composition root; absent: the card offers no box. */
-  ask?: (question: string) => Promise<ConsultAskResult>;
+  ask?: (input: ConsultAskInput) => Promise<ConsultAskResult>;
   /** The ChatGPT model missing from the live zkAPI listing, when it last was. */
   chatgptModelProblem?: () => { at: string; message: string } | undefined;
 }
@@ -250,7 +265,7 @@ export function dashboardInstallView(state: ManagedToolsJobState): DashboardOuts
   }
 }
 
-export function createDashboardConsultAdapter(options: DashboardConsultAdapterOptions): DashboardConsultBackend {
+export function createDashboardConsultAdapter(options: DashboardConsultAdapterOptions): DashboardConsultAdapter {
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date());
   const statePath = options.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
@@ -353,6 +368,8 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   const writerCarried = (base: ConsultSettings) => ({
     ...(base.writer ? { writer: base.writer } : {}),
     ...(base.chatgptFrontierModel ? { chatgptFrontierModel: base.chatgptFrontierModel } : {}),
+    // A level chosen in conversation (ask_anonymously) stays chosen through every card save.
+    ...(base.levelChosen ? { levelChosen: true as const } : {}),
   });
   const carried = (base: ConsultSettings) => ({ ...writerCarried(base), ...standardCarried(base) });
 
@@ -528,15 +545,44 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       void (async () => {
         let result: ConsultAskResult;
         try {
-          result = await runner(question);
+          // The card's own box: the level the card shows, the route's model.
+          const read = readConsultSettings(location);
+          const level = (read.state === 'valid' ? read.settings : DEFAULT_CONSULT_SETTINGS).level === 'general' ? 'strict' : 'standard';
+          result = await runner({ question, level, origin: 'dashboard' });
         } catch {
           result = { ok: false, code: 'internal_error', message: MESSAGES.askUnavailable };
         }
         askState = result.ok
           ? { state: 'done', at: now().toISOString(), question, sent: result.sent, reply: result.reply, route: result.route }
-          : { state: 'failed', at: now().toISOString(), question, message: result.message, ...(result.sent !== undefined ? { sent: result.sent } : {}) };
+          : { state: 'failed', at: now().toISOString(), question, message: result.message, ...('sent' in result && result.sent !== undefined ? { sent: result.sent } : {}) };
       })();
       return { ok: true, status_message: MESSAGES.askStarted };
+    },
+
+    async rememberLevel(choice) {
+      const current = readConsultSettings(location);
+      if (current.state === 'invalid') return { ok: false, message: 'The anonymous answers settings file could not be read.' };
+      const base = current.state === 'valid' ? current.settings : DEFAULT_CONSULT_SETTINGS;
+      // A cleanup other than custom replaces the Standard pair; custom (or none) keeps the file's.
+      const standard = choice.cleanup !== undefined && choice.cleanup !== 'custom'
+        ? { standardMode: choice.cleanup }
+        : standardCarried(base);
+      const result = writeConsultSettings({
+        ...writerCarried(base),
+        enabled: base.enabled,
+        languages: [...base.languages],
+        domains: { ...base.domains },
+        strict: base.strict,
+        level: choice.level,
+        ...standard,
+        levelChosen: true,
+        expectedRevision: base.revision,
+      }, location);
+      if (!result.ok) {
+        const refusal = writeRefusal(result.reason, result.current?.state === 'valid' ? result.current.settings.revision : 0);
+        return { ok: false, message: refusal.ok ? 'The choice could not be saved.' : refusal.message };
+      }
+      return { ok: true };
     },
 
     async saveWriter(update) {
@@ -586,6 +632,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         ...(writer ? { writer } : {}),
         ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}),
         ...standardCarried(base),
+        ...(base.levelChosen ? { levelChosen: true as const } : {}),
         expectedRevision: revision,
       }, location);
       if (!result.ok) return writeRefusal(result.reason, result.current?.state === 'valid' ? result.current.settings.revision : 0);

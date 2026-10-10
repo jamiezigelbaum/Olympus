@@ -394,6 +394,12 @@ export interface EmailSourceConnector {
 export interface EmailSourceWorkerOptions {
   connector?: EmailSourceConnector;
   sourceAnswer?: SourceIndexAnswerHandler;
+  /**
+   * "Ask anonymously" (core/consult-ask.ts), bound by the composition root:
+   * one typed question prepared at the chosen level and sent through zkAPI.
+   * Absent: `/consult/ask` answers 501.
+   */
+  consultAsk?: (input: ConsultAskWireRequest, signal: AbortSignal) => Promise<unknown>;
   // Optional content-free latency ledger. When present, one JSON line per
   // answered source_answer request is appended (phase timings, corpus ids, skip
   // reasons, analyst backend/fallback, release decision — never query/content).
@@ -731,6 +737,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const connector = options.connector ?? new GogcliEmailConnectorStub();
   const agentConnections = options.agentConnections;
   const sourceAnswer = options.sourceAnswer;
+  const consultAsk = options.consultAsk;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
   const currentReadwiseSync = options.currentReadwiseSync
@@ -908,6 +915,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           );
           assertNoRawEmailFields(health);
           return json(health);
+        }
+
+        if (request.method === 'POST' && url.pathname === `${basePath}/consult/ask`) {
+          if (!consultAsk) {
+            throw new EmailSourceWorkerError(501, 'consult_ask_not_supported', 'Private source worker does not support anonymous questions.');
+          }
+          // The outcome is a result, never an HTTP error: a refusal (no level
+          // chosen, a secret, no route, a cap) is reported to the agent in
+          // the body. The core validates every field again.
+          // The request's signal (a remote caller gone, a job's deadline)
+          // cancels the writer and the session before dispatch.
+          return json(await consultAsk(await parseConsultAskRequest(request), request.signal));
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/answer`) {
@@ -3673,6 +3692,39 @@ function isSqliteBusyError(error: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** The `/consult/ask` body: the question and the conversation's choices, shapes only. */
+export interface ConsultAskWireRequest {
+  question: string;
+  level?: 'strict' | 'standard';
+  cleanup?: 'as_written' | 'light_cleanup' | 'custom';
+  remember?: boolean;
+  model?: string;
+}
+
+async function parseConsultAskRequest(request: Request): Promise<ConsultAskWireRequest> {
+  const record = await parseObjectBody(request);
+  if (typeof record.question !== 'string' || record.question.trim().length === 0) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'question must be a non-empty string.');
+  }
+  const level = asOptionalString(record.level);
+  if (level !== undefined && level !== 'strict' && level !== 'standard') {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'level must be "strict" or "standard".');
+  }
+  const cleanup = asOptionalString(record.cleanup);
+  if (cleanup !== undefined && cleanup !== 'as_written' && cleanup !== 'light_cleanup' && cleanup !== 'custom') {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'cleanup must be "as_written", "light_cleanup" or "custom".');
+  }
+  const remember = asOptionalBoolean(record.remember);
+  const model = asOptionalString(record.model);
+  return {
+    question: record.question,
+    ...(level !== undefined ? { level } : {}),
+    ...(cleanup !== undefined ? { cleanup } : {}),
+    ...(remember !== undefined ? { remember } : {}),
+    ...(model !== undefined ? { model } : {}),
+  };
 }
 
 async function parseSourceIndexAnswerRequest(request: Request): Promise<SourceIndexAnswerRequest> {

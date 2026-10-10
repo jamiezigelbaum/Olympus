@@ -13,12 +13,12 @@ export function listMcpTools(config: OlympusConfig, surface: Extract<OperationSu
     description: operationDescription(operation, { config }),
     inputSchema: operationToolSchema(operation, { config }),
     // Explicit hints (ChatGPT review asks for all three). Olympus tools read
-    // or act on the owner's own index and models, never the open web; none
-    // deletes anything.
+    // or act on the owner's own index and models; none deletes anything.
+    // Only ask_anonymously reaches a provider outside (openWorld).
     annotations: {
       readOnlyHint: !operation.mutating,
       destructiveHint: false,
-      openWorldHint: false,
+      openWorldHint: operation.openWorld === true,
     },
   }));
 }

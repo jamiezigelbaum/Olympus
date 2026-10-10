@@ -4208,6 +4208,10 @@ export async function main(): Promise<void> {
     },
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
+    // Bound late: the consult block below sets askAnonymouslyNow.
+    consultAsk: (input, signal) => (askAnonymouslyNow
+      ? askAnonymouslyNow({ ...input, origin: 'agent', signal })
+      : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
     currentReadwiseSync,
@@ -4482,8 +4486,8 @@ export async function main(): Promise<void> {
   // (every job then binds outside help off); no product path writes that
   // file until C5.
   let consultOrchestrator: import('../chatgpt/consult-orchestrator.ts').ConsultOrchestrator | undefined;
-  // The dashboard's "Ask anonymously" box, wired inside the consult block below.
-  let askAnonymouslyNow: ((question: unknown) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
+  // "Ask anonymously" (the agent tool and the dashboard's box), wired inside the consult block below.
+  let askAnonymouslyNow: ((input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
   // The last time the ChatGPT model was missing from the live zkAPI listing (for the card); cleared by a reply.
   let chatgptModelProblem: { at: string; message: string } | undefined;
   const privateAnswers = new PrivateAnswerJobs({
@@ -4547,10 +4551,10 @@ export async function main(): Promise<void> {
     // uses the route's model.
     const { consultChatgptFrontierModel, consultChatgptModelUnavailableMessage } = await import('../../core/consult-settings.ts');
     const chatgptModel = (): string => consultChatgptFrontierModel(readConsultSettings().settings);
-    const transport = (origin: 'chatgpt' | 'dashboard' = 'chatgpt') => resolveZkapiConsultTransport(
+    const transport = (origin: 'chatgpt' | 'dashboard' = 'chatgpt', model?: string) => resolveZkapiConsultTransport(
       sovereigntyEngine.config.modelProfiles,
       (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
-      { env: process.env, ...(origin === 'chatgpt' ? { chatgptFrontierModel: chatgptModel() } : {}) },
+      { env: process.env, ...(origin === 'chatgpt' ? { chatgptFrontierModel: model ?? chatgptModel() } : {}) },
     );
     // The owner's own writer model (consult.json `writer`) arrives bound to
     // the job (control.writer; null: the built-in model writes), never reread
@@ -4587,26 +4591,39 @@ export async function main(): Promise<void> {
     {
       const { askAnonymously } = await import('../../core/consult-ask.ts');
       const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS } = await import('../../core/consult-settings.ts');
-      askAnonymouslyNow = (question) => askAnonymously(question, {
-        settings: () => readConsultSettings(),
-        prepare: (input, writer) => runChosenWriter(input, {
-          kill: new AbortController().signal,
-          deadlineMs: writer ? writer.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS : CONSULT_WRITER_LIMITS.deadlineMs,
-          level: 'unnamed',
-          writer,
-        }),
-        // Open, send with final authorization, then wait for settlement:
-        // the one-shot path's steps, with the Ask's settings check at the
-        // transport's authorization boundary (review of PR #209).
-        send: async (text, authorize) => {
-          const route = transport('dashboard');
-          if (!route) return undefined;
-          const opened = await openZkapiConsultSession(route);
-          if (!opened.ok) return { ok: false, error: opened.error };
-          await opened.session.send(text, { authorize: () => authorize() });
-          return opened.session.finished;
-        },
-      });
+      askAnonymouslyNow = async (input) => {
+        const result = await askAnonymously(input, {
+          settings: () => readConsultSettings(),
+          prepare: (writerInput, writer, level, signal) => runChosenWriter(writerInput, {
+            kill: signal ?? new AbortController().signal,
+            deadlineMs: writer ? writer.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS : CONSULT_WRITER_LIMITS.deadlineMs,
+            level,
+            writer,
+          }),
+          // Open, send with final authorization, then wait for settlement:
+          // the one-shot path's steps, with the Ask's settings check at the
+          // transport's authorization boundary (review of PR #209). An
+          // agent's question uses the model set for ChatGPT questions (or
+          // the one-off model it named); the dashboard's box uses the route's.
+          send: async (text, authorize, { origin, model, signal }) => {
+            const route = transport(origin === 'agent' ? 'chatgpt' : 'dashboard', model);
+            if (!route) return undefined;
+            const opened = await openZkapiConsultSession(route, signal ? { signal } : {});
+            if (!opened.ok) return { ok: false, error: opened.error };
+            await opened.session.send(text, { authorize: () => authorize(), ...(signal ? { signal } : {}) });
+            return opened.session.finished;
+          },
+          // The agent's "remember" goes through the dashboard adapter: the
+          // only caller allowed to write consult.json (consult-settings-writer).
+          remember: (choice) => dashboardConsult.rememberLevel(choice),
+        });
+        // The card's "model missing from the listing" note, as the orchestrator keeps it.
+        if (input.origin === 'agent' && !input.model) {
+          if (!result.ok && result.code === 'model_unavailable') chatgptModelProblem = { at: new Date().toISOString(), message: consultChatgptModelUnavailableMessage(chatgptModel()) };
+          else if (result.ok) chatgptModelProblem = undefined;
+        }
+        return result;
+      };
     }
     consultOrchestrator = createConsultOrchestrator({
       jobs: privateAnswers,

@@ -25,6 +25,7 @@ describe('relay ChatGPT assets', () => {
         'source_index_status',
         'source_answer',
         'source_answer_result',
+        'ask_anonymously',
         'olympus_connect_source',
         'olympus_scope_list',
         'olympus_scope_set',

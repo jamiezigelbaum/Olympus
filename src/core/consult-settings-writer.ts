@@ -60,6 +60,8 @@ export interface ConsultSettingsUpdate {
   /** How Standard prepares a question; passed through like the writer. */
   readonly standardMode?: ConsultStandardMode;
   readonly standardInstruction?: string;
+  /** Whether a level was chosen in conversation; passed through like the writer. */
+  readonly levelChosen?: true;
 }
 
 export interface ConsultSettingsWriteInput extends ConsultSettingsUpdate {
@@ -141,6 +143,7 @@ export function writeConsultSettings(input: ConsultSettingsWriteInput, location:
     ...(input.chatgptFrontierModel ? { chatgptFrontierModel: input.chatgptFrontierModel } : {}),
     ...(input.standardMode ? { standardMode: input.standardMode } : {}),
     ...(input.standardInstruction !== undefined ? { standardInstruction: input.standardInstruction } : {}),
+    ...(input.levelChosen ? { levelChosen: true } : {}),
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) return { ok: false, reason: 'invalid_input' };
   const custody = ensureSettingsDirectory(dirname(path));
