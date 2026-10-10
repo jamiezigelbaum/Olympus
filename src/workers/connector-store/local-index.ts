@@ -10605,6 +10605,58 @@ export function createConnectorStoreCorpusAdapter(
       backend: embeddingProvider.backend,
     };
   };
+  // The vector lane alone, without its relevance bar: the nearest items to
+  // the query in meaning, whatever their cosine, as candidates and never as
+  // matches. Same scope and filters as the search. A short question in one
+  // language can sit just under the bar against the item that answers it in
+  // another (2026-10-10: "Letter of Intent notary" peaked at 0.725 under
+  // EmbeddingGemma 2's 0.73, so no vector row entered and the Spanish letter
+  // was never found), so a consumer that ranks on its own reads them too.
+  adapter.semanticNeighbours = async (request) => {
+    assertConnectorStoreCorpusRequest(store, request);
+    const startedAt = Date.now();
+    const none = { matchedItems: 0, contentMatchedItems: 0, saturated: false };
+    if (
+      !embeddingProvider
+      || (options.retrievalMode ?? 'hybrid') !== 'hybrid'
+      || (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
+      || !store.hasEmbeddings(embeddingProvider.modelId)
+    ) {
+      return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
+    }
+    const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
+    const lane = await store.vectorSearchLane(
+      request.query,
+      embeddingProvider,
+      maxResults,
+      options.accountScope,
+      filters,
+      request.deadlineAtMs,
+    );
+    return {
+      hits: lane.rows.map((row) => connectorStoreHitFromRow(
+        store,
+        row,
+        row.bestCosine,
+        options.resultProjector,
+        filters?.locatorPathScope,
+      )),
+      latencyMs: Date.now() - startedAt,
+      laneAudits: [{
+        laneName: `${store.corpusId}:connector_store_vector_neighbours`,
+        laneType: 'semantic',
+        candidateCount: lane.rows.length,
+        returnedCount: lane.rows.length,
+        ...(lane.skippedReason !== undefined ? { skippedReason: lane.skippedReason } : {}),
+        modelId: embeddingProvider.modelId,
+        backend: VECTOR_BACKEND,
+        localOnly: true,
+        rawExposed: false,
+      }],
+      matchCount: none,
+      rawExposed: false,
+    };
+  };
   return adapter;
 }
 
