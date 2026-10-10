@@ -36,6 +36,10 @@ export function shouldExposeOperation(
   if (operation.requiresOpenClawSessionRoute && context.surface !== 'native') {
     return false;
   }
+  // Likewise the owner check: only the native factory can vouch for it.
+  if (operation.requiresOwnerAgentSession && context.surface !== 'native') {
+    return false;
+  }
   if (operation.nativeExposure === 'sourceIndexEnabledOnly') {
     return isSourceIndexReadSurfaceEnabled(context.config);
   }

@@ -540,12 +540,112 @@ export function chatgptDashboardClient(
   }
 
   /** The fix's open page, beside its control (not on the inline card). */
-  function howLink(fix: Any, key: string): HTMLElement | null {
+  function howLink(fix: Any, key: string, source?: { id: string; label: string }): HTMLElement | null {
     const href = helpHref(fix && fix.href);
     if (!href || compact()) return null;
+    if (remoteMode()) {
+      // Remote mode: the same words open the tunnel instructions in place.
+      const toggle = button(howWords(key), key + ':how', () => toggleRemote(key), 'plain');
+      toggle.className = 'btn link';
+      toggle.setAttribute('aria-expanded', state.open['remote:' + key] ? 'true' : 'false');
+      const wrap = add(el('span', 'fix'), toggle);
+      return add(wrap, remoteBox(key, href, source));
+    }
     const link = button(howWords(key), key + ':how', () => openLink(href), 'plain');
     link.className = 'btn link';
     return link;
+  }
+
+  // ---- remote mode (the engine runs on a server) ----------------------------
+  /**
+   * The engine declared it runs on a server (`remote` in the view model), and
+   * this panel is not on that server's own dashboard: a "do this on your
+   * computer" control then shows how to open Olympus on the owner's computer
+   * instead of an olympus:// page, which cannot reach the server.
+   */
+  function remoteMode(): boolean {
+    if (onComputer()) return false;
+    const remote = state.data ? state.data.remote : null;
+    return !!remote && typeof remote.port === 'number' && remote.port >= 1 && remote.port <= 65535 && Math.floor(remote.port) === remote.port;
+  }
+  function toggleRemote(key: string): void {
+    state.open['remote:' + key] = !state.open['remote:' + key];
+    render(key);
+  }
+  /** `connect/x`, `fix/models` from an olympusplugin.ai /open/ page; '' for anything else. */
+  function openPath(href: string): string {
+    const match = /^https:\/\/(?:www\.)?olympusplugin\.ai\/open\/((?:connect|fix|unreadable)\/[a-z]+)\/$/.exec(href);
+    return match ? match[1]! : '';
+  }
+  /**
+   * The two by-hand lines, exactly as core/remote-open.ts remoteOpenInstructions
+   * writes them (test/remote-open.test.ts holds the two equal): the tunnel on
+   * the engine's own port number, and a fresh one-time link from the server.
+   */
+  function remoteLines(href: string): { onComputer: string; onServer: string; port: number } {
+    const remote = state.data.remote;
+    const port = remote.port as number;
+    const target = typeof remote.sshTarget === 'string' && /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,190}$/.test(remote.sshTarget)
+      ? remote.sshTarget
+      : 'you@your-server';
+    const path = openPath(href);
+    return {
+      onComputer: 'ssh -N -L ' + port + ':127.0.0.1:' + port + ' ' + target,
+      onServer: 'olympus dashboard --no-open' + (path ? ' --target ' + path : ''),
+      port,
+    };
+  }
+  /**
+   * Copy: select the line and ask the browser to copy the selection. ChatGPT's
+   * sandbox may refuse (it blocks the clipboard API, which this page never
+   * touches); then the line stays selected and the button says to press the
+   * copy keys.
+   */
+  function copyControl(code: HTMLElement, key: string): HTMLElement {
+    const R = P.remote;
+    const node = button(R.copy, key, () => {
+      let copied = false;
+      try {
+        const selection = window.getSelection();
+        if (selection) {
+          const range = doc.createRange();
+          range.selectNodeContents(code);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          copied = typeof doc.execCommand === 'function' && doc.execCommand('copy') === true;
+        }
+      } catch {
+        copied = false;
+      }
+      node.textContent = copied ? R.copied : R.copySelected;
+    }, 'plain');
+    return node;
+  }
+  function copyLine(text: string, key: string): HTMLElement {
+    const code = el('code', '', text);
+    return add(el('div', 'remote-line'), code, copyControl(code, key));
+  }
+  /** The remote-mode box under a control, while it is open. */
+  function remoteBox(key: string, href: string, source?: { id: string; label: string }): HTMLElement | null {
+    if (!state.open['remote:' + key]) return null;
+    const R = P.remote;
+    const lines = remoteLines(href);
+    const box = add(el('div', 'remote-box'), el('p', 'strong', R.title));
+    box.setAttribute('role', 'region');
+    box.setAttribute('aria-label', R.title);
+    if (state.data.remote.agent === true) {
+      const phrase = source && openPath(href).indexOf('connect/') === 0 ? fill(R.askPhraseFor, { source: source.label }) : R.askPhrase;
+      add(box, el('p', '', R.askLine), copyLine(phrase, key + ':remote:ask'), el('p', 'muted', R.byHandAfterAsk));
+    }
+    add(
+      box,
+      el('p', '', R.onComputer),
+      copyLine(lines.onComputer, key + ':remote:tunnel'),
+      el('p', '', R.onServer),
+      copyLine(lines.onServer, key + ':remote:link'),
+      el('p', 'muted', fill(R.portNote, { port: lines.port })),
+    );
+    return box;
   }
   function globalReason(): string {
     // The computer's controls are locked: every control waits for them.
@@ -576,7 +676,7 @@ export function chatgptDashboardClient(
     if (blocked || fix.disabledReason) {
       add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
       // A repair only the computer can make still says how, unless the whole page is waiting.
-      if (!blocked) add(wrap, howLink(fix, key));
+      if (!blocked) add(wrap, howLink(fix, key, source));
       return wrap;
     }
     if (state.busy === key) {
@@ -587,6 +687,12 @@ export function chatgptDashboardClient(
     const failure = state.actionError && state.actionError.key === key ? state.actionError.text : '';
     let action: (() => void) | null = null;
     const opens = fix.openHref === true ? helpHref(fix.href) : '';
+    if (opens && remoteMode()) {
+      // Remote mode: the control opens the tunnel instructions in place.
+      const toggle = button(fix.label, key, () => toggleRemote(key), style);
+      toggle.setAttribute('aria-expanded', state.open['remote:' + key] ? 'true' : 'false');
+      return add(wrap, toggle, remoteBox(key, opens, source));
+    }
     if (opens) {
       // The control is the link: Connect or Reconnect for a source set up on the computer.
       return add(wrap, button(fix.label, key, () => openLink(opens), style));
@@ -612,7 +718,14 @@ export function chatgptDashboardClient(
       };
     } else if (typeof fix.tool === 'string' && fix.tool) action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
-      // No tool, only a help page: the control is the link to it.
+      // No tool, only a help page: the control is the link to it. In remote
+      // mode it shows the tunnel instructions in place: the open page's
+      // olympus:// would wake Olympus on this computer, not the server's.
+      if (remoteMode()) {
+        const toggle = button(howWords(key), key, () => toggleRemote(key), style);
+        toggle.setAttribute('aria-expanded', state.open['remote:' + key] ? 'true' : 'false');
+        return add(wrap, toggle, remoteBox(key, helpHref(fix.href), source));
+      }
       return add(wrap, button(howWords(key), key, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {
@@ -637,7 +750,7 @@ export function chatgptDashboardClient(
         render(key + ':no');
       }, 'plain'), errorNote(failure));
     }
-    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key) : null, errorNote(failure));
+    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key, source) : null, errorNote(failure));
   }
 
   function errorNote(text: string): HTMLElement | null {

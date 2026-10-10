@@ -1,17 +1,22 @@
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import type { WorkerLaunch } from './core/model-key-reload.ts';
 import { randomBytes } from 'node:crypto';
-import { accessSync, closeSync, constants as fsConstants, openSync, readFileSync, statSync, writeSync } from 'node:fs';
+import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
 import { olympusPackageRoot } from './core/package-root.ts';
 import { pairMessagingSource, type MessagingCaptureScopeApproval } from './core/messaging-pairing.ts';
 import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from './core/messaging-capture.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
-import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from './core/dashboard-launch.ts';
-import { DASHBOARD_LAUNCH_OPEN_KEY, openTargetPath, openTargetToken, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
+import { mintDashboardOpeningUrl, olympusCommandHint as olympusCommandHintFor, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
+
+/** How the CLI names itself in hints: plain `olympus` on PATH, else this install's own bin/olympus (src/ and dist/ both sit one level under the root). */
+export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
+  return olympusCommandHintFor({ ...input, pluginBin: input.pluginBin ?? resolve(import.meta.dir, '..', 'bin', 'olympus') });
+}
+import { allOpenTargets, openTargetFromPath, openTargetPath, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
 import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenHandlerResult } from './core/open-handler.ts';
 import {
   deleteAllConfirmationPrompts,
@@ -27,6 +32,8 @@ import { findOperationByCliName, operations, operationDescription, operationTool
 import type { Operation, OperationContext } from './core/operations.ts';
 import { VERSION } from './version.ts';
 import type { WorkerServicePlatform, WorkerServiceState } from './core/worker-service.ts';
+import { writeManagedWorkerEnvSecret } from './core/worker-service.ts';
+import { isValidSshTarget, parseServerModeSetting, resolveServerMode } from './core/remote-open.ts';
 import {
   runWorkerLifecycle,
   type LifecycleRecoverySignal,
@@ -74,6 +81,7 @@ import {
   applyWorkerSetupEnv,
   dashboardQueryTokenFromWorkerAuthToken,
   environmentWithWorkerSetupEnv,
+  readWorkerSetupEnv,
   withWorkerAuthHeader,
   normalizeWorkerAuthToken,
   workerAuthTokenFromConfig,
@@ -417,6 +425,9 @@ async function main(): Promise<void> {
       // Async because the opening link is MINTED against this install's own
       // configured worker, with a ticket that only that worker can redeem.
       const noOpen = args.includes('--no-open');
+      // `--target connect/x`: where the printed link lands, from the closed
+      // list (core/open-targets.ts). The remote-mode instructions name it so
+      // a link opened through an SSH tunnel lands on the right screen.
       const target = dashboardTargetArg(args);
       const result = args.includes('--read-only')
         ? runDashboardReadOnlyCommand({ noOpen })
@@ -440,6 +451,22 @@ async function main(): Promise<void> {
       const result = await runOpenCommand(args.slice(1));
       console.log(JSON.stringify(result, null, 2));
       if (!result.opened) process.exitCode = 1;
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
+  if (args[0] === 'server-mode') {
+    // Remote mode's declaration (core/remote-open.ts): whether this engine
+    // runs on a server, and how the owner's computer reaches it over SSH.
+    try {
+      console.log(JSON.stringify(runServerModeCommand(args.slice(1)), null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -841,6 +868,7 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
     || group === 'tier'
     || group === 'zkapi'
     || group === 'open-handler'
+    || group === 'server-mode'
   ) {
     return command ? `${group} ${command}` : undefined;
   }
@@ -1273,6 +1301,7 @@ function printHelp(): void {
   console.log('  olympus dashboard token');
   console.log('  olympus open olympus://open/<target>');
   console.log('  olympus open-handler install|uninstall|status');
+  console.log('  olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
@@ -1328,6 +1357,10 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'open-handler install': 'olympus open-handler install',
   'open-handler uninstall': 'olympus open-handler uninstall',
   'open-handler status': 'olympus open-handler status',
+  'server-mode status': 'olympus server-mode status',
+  'server-mode on': 'olympus server-mode on [--ssh-target <user@host>] [--agent-route on|off]',
+  'server-mode off': 'olympus server-mode off',
+  'server-mode auto': 'olympus server-mode auto [--ssh-target <user@host>] [--agent-route on|off]',
   'source extract-pdfs': 'olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
@@ -2811,8 +2844,6 @@ export function runDashboardTokenCommand(env: Record<string, string | undefined>
   return token;
 }
 
-type DashboardFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-
 export interface DashboardCommandDependencies {
   /** The bearer-mint round trip. Injected by tests; production uses fetch. */
   fetchImpl?: DashboardFetch;
@@ -2823,8 +2854,6 @@ export interface DashboardCommandDependencies {
   /** Where the opened dashboard lands (an `olympus://` link's target); the plain dashboard when absent. */
   target?: OpenTarget;
 }
-
-const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * The bounded standalone opening handoff (owner request, 2026-09-13).
@@ -2851,7 +2880,7 @@ export async function runDashboardCommand(
   const config = loadConfig();
   const base = workerRootBaseUrl(config.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config);
-  const openUrl = await mintDashboardOpeningUrl(base, token, dependencies);
+  const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
   let opened = false;
   if (!dependencies.noOpen) {
     try {
@@ -2871,23 +2900,6 @@ export async function runDashboardCommand(
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
         + ` For the read-only view link instead, run ${olympusCommandHint()} dashboard --read-only.`,
   };
-}
-
-/**
- * `olympus dashboard --target <place>`: the same closed list an olympus://
- * link reads (core/open-targets.ts), by its path: `unreadable/dropbox` opens
- * the dashboard with Dropbox's See why open. A place not on the list is
- * refused here rather than opening somewhere else.
- */
-export function dashboardTargetArg(args: readonly string[]): OpenTarget | undefined {
-  const at = args.indexOf('--target');
-  if (at < 0) return undefined;
-  const value = args[at + 1];
-  const target = typeof value === 'string' && /^[a-z/]{1,64}$/.test(value) ? parseOlympusOpenUrl(`olympus://open/${value}`) : undefined;
-  if (!target || ('fallback' in target && target.fallback)) {
-    throw new OperationError('invalid_params', `Unknown dashboard place: ${String(value ?? '')}.`, 'Usage: olympus dashboard --target unreadable/dropbox');
-  }
-  return target;
 }
 
 /**
@@ -2960,137 +2972,83 @@ function runDashboardReadOnlyCommand(
   };
 }
 
-/** The worker ROOT: the configured base without its /v1 API suffix. */
-function workerRootBaseUrl(baseUrl: string): string {
-  let url: URL;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    throw new OperationError(
-      'config_error',
-      'The configured worker URL is not a valid URL.',
-      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
-    );
+/**
+ * `olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]`.
+ *
+ * `on`: this engine runs on a server, so the ChatGPT panel shows how to open
+ * Olympus on the owner's computer (a tunnel plus a one-time link) instead of
+ * an olympus:// link that cannot work there. `auto` (the default) decides
+ * from the host: no desktop session on Linux means a server. The setting and
+ * the SSH name live in worker.env; the worker reads them on every dashboard
+ * read, so no restart is needed.
+ */
+export function runServerModeCommand(
+  args: readonly string[],
+  options: { env?: Record<string, string | undefined>; homeDir?: string; envPath?: string; platform?: WorkerServicePlatform } = {},
+): Record<string, unknown> {
+  const env = options.env ?? process.env;
+  const rest = [...args];
+  let sshTarget: string | undefined;
+  const at = rest.indexOf('--ssh-target');
+  if (at >= 0) {
+    sshTarget = rest[at + 1];
+    rest.splice(at, 2);
+    if (!isValidSshTarget(sshTarget)) {
+      throw new OperationError('invalid_params', '--ssh-target takes user@host (or an ssh_config name) as your computer reaches this server.', 'For example: olympus server-mode on --ssh-target you@your-server');
+    }
   }
-  if (url.username || url.password) {
-    throw new OperationError('config_error', 'The configured worker URL must not carry embedded credentials.');
+  let agentRoute: string | undefined;
+  const routeAt = rest.indexOf('--agent-route');
+  if (routeAt >= 0) {
+    agentRoute = rest[routeAt + 1];
+    rest.splice(routeAt, 2);
+    if (agentRoute !== 'on' && agentRoute !== 'off') {
+      throw new OperationError('invalid_params', '--agent-route takes on or off.', 'Use off when your assistant cannot run commands on your computer (for example Hermes).');
+    }
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new OperationError(
-      'config_error',
-      'The configured worker URL must use HTTP or HTTPS.',
-      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
-    );
+  const action = rest[0] ?? '';
+  if (rest.length !== 1 || (action !== 'status' && parseServerModeSetting(action) !== action)) {
+    throw new OperationError('invalid_params', 'Usage: olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]');
   }
-  const path = url.pathname.replace(/\/+$/, '') || '/';
-  if (path !== '/' && path !== '/v1') {
-    throw new OperationError(
-      'config_error',
-      'The configured worker URL path must be /v1 or the origin root.',
-      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
-    );
-  }
-  return url.origin;
+  const writeOptions = {
+    ...(options.platform ? { platform: options.platform } : {}),
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.envPath ? { envPath: options.envPath } : {}),
+  };
+  if (action !== 'status') writeManagedWorkerEnvSecret({ key: 'OLYMPUS_SERVER_MODE', value: action, ...writeOptions });
+  if (sshTarget) writeManagedWorkerEnvSecret({ key: 'OLYMPUS_SERVER_SSH_TARGET', value: sshTarget.trim(), ...writeOptions });
+  if (agentRoute) writeManagedWorkerEnvSecret({ key: 'OLYMPUS_SERVER_AGENT_ROUTE', value: agentRoute, ...writeOptions });
+  const fileEnv = readWorkerSetupEnv({ env, ...(options.homeDir ? { homeDir: options.homeDir } : {}), ...(options.envPath ? { workerEnvPath: options.envPath } : {}) });
+  const mode = resolveServerMode({ env, fileEnv });
+  return {
+    setting: mode.setting,
+    remote: mode.remote,
+    basis: mode.basis,
+    ssh_target: mode.sshTarget ?? null,
+    agent_route: mode.agentRoute,
+  };
 }
 
-/**
- * Mint the opening ticket from this install's own worker.
- *
- * `redirect: 'error'` is the load-bearing part: the bearer travels with this
- * request, so a worker (or anything answering as one) that tries to redirect
- * it is refused outright rather than followed to a host the reader never
- * configured. A refusal, an invalid body, or an unreachable worker is an
- * error naming that worker — never a silent downgrade to the old link.
- */
-async function mintDashboardOpeningUrl(
-  base: string,
-  token: string | undefined,
-  dependencies: DashboardCommandDependencies,
-): Promise<string> {
-  if (!token) {
+/** `--target <path>` for `olympus dashboard`: one of the closed list, or a refusal naming them. */
+export function dashboardTargetArg(args: readonly string[]): OpenTarget | undefined {
+  const index = args.indexOf('--target');
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  const target = value === undefined ? undefined : openTargetFromPath(value);
+  if (!target) {
     throw new OperationError(
-      'config_error',
-      'No worker auth token is configured, so there is nothing to unlock.',
-      `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+      'invalid_params',
+      '--target takes one of the places Olympus can open.',
+      `Use one of: ${allOpenTargets().map(openTargetPath).join(', ')}.`,
     );
   }
-  const fetchImpl = dependencies.fetchImpl ?? fetch;
-  let response: Response;
-  try {
-    response = await fetchImpl(`${base}/dashboard/control/launch`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, Origin: base },
-      redirect: 'error',
-      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS),
-    });
-  } catch {
-    throw new OperationError(
-      'email_unreachable',
-      'The configured Olympus worker did not answer the opening request.',
-      `Start the worker (${olympusCommandHint()} worker status) and run this again.`,
-    );
-  }
-  if (!response.ok) {
-    throw new OperationError(
-      'email_unreachable',
-      `The configured Olympus worker refused the opening request with HTTP ${response.status}.`,
-      `Check ${olympusCommandHint()} worker status, then run this again.`,
-    );
-  }
-  let ticket: unknown;
-  try {
-    ticket = (await response.json() as { ticket?: unknown }).ticket;
-  } catch {
-    ticket = undefined;
-  }
-  if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) {
-    throw new OperationError(
-      'email_unreachable',
-      'The configured Olympus worker answered the opening request without a ticket.',
-      'This worker predates the standalone opening handoff; upgrade it, then run this again.',
-    );
-  }
-  const openToken = dependencies.target ? openTargetToken(dependencies.target) : undefined;
-  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`
-    + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : '');
+  return target;
 }
 
 /** Open in the desktop browser. Bun.spawnSync rather than a shell, always. */
 function openInDesktopBrowser(url: string): boolean {
   const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
   return Bun.spawnSync([opener, url], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
-}
-
-/**
- * How a user-facing sentence names the Olympus CLI.
- *
- * `olympus` is not on PATH after a clean install — the install guide runs it as
- * `"$OLYMPUS_BIN"` for exactly that reason — so a bare command sends the reader
- * to "command not found" (clean-install rehearsal, 2026-09-05). Same phrasing
- * the dashboard's worker-token gate uses.
- */
-const OLYMPUS_PLUGIN_BIN_HINT = '<rootDir>/bin/olympus';
-
-/**
- * The command to print: plain `olympus` when that is on PATH (the reader can
- * type it), else this install's own bin/olympus, else the placeholder.
- * Read per call, never at import (bundled dist stays lean).
- */
-export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
-  const env = input.env ?? process.env;
-  const isExecutable = (path: string): boolean => {
-    try {
-      accessSync(path, fsConstants.X_OK);
-      return statSync(path).isFile();
-    } catch {
-      return false;
-    }
-  };
-  const dirs = (env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':').filter(Boolean);
-  if (dirs.some((dir) => isExecutable(join(dir, 'olympus')))) return 'olympus';
-  const own = input.pluginBin ?? resolve(import.meta.dir, '..', 'bin', 'olympus');
-  if (isExecutable(own) && !/\s/.test(own)) return own;
-  return OLYMPUS_PLUGIN_BIN_HINT;
 }
 
 if (import.meta.main) {

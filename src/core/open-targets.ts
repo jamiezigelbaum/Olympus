@@ -71,6 +71,12 @@ export function openTargetPath(target: OpenTarget): string {
   return 'dashboard';
 }
 
+/** The target a path names exactly (`connect/x`), or undefined: never a fallback. */
+export function openTargetFromPath(path: unknown): OpenTarget | undefined {
+  if (typeof path !== 'string') return undefined;
+  return allOpenTargets().find((target) => openTargetPath(target) === path);
+}
+
 /** `olympus://open/<path>`. */
 export function olympusOpenUrl(target: OpenTarget): string {
   return `${OLYMPUS_URL_SCHEME}://open/${openTargetPath(target)}`;

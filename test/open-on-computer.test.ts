@@ -117,7 +117,7 @@ describe('olympus:// targets', () => {
     expect(dashboardTargetArg(['dashboard', '--target', 'unreadable/dropbox'])).toEqual({ kind: 'unreadable', source: 'dropbox' });
     expect(dashboardTargetArg(['dashboard', '--no-open', '--target', 'fix/models'])).toEqual({ kind: 'fix', section: 'models' });
     for (const bad of [['--target'], ['--target', 'unreadable/gmail'], ['--target', '../keys'], ['--target', 'https://evil.example/']]) {
-      expect(() => dashboardTargetArg(['dashboard', ...bad])).toThrow('Unknown dashboard place');
+      expect(() => dashboardTargetArg(['dashboard', ...bad])).toThrow('--target takes one of the places Olympus can open.');
     }
   });
 

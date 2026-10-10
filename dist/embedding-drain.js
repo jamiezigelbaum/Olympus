@@ -986,7 +986,8 @@ var init_public_surface = __esm(() => {
     "source_watches",
     "source_watch_cancel",
     "olympus_doctor",
-    "ask_anonymously"
+    "ask_anonymously",
+    "olympus_open_remote"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
     "argus_ping",
@@ -22889,6 +22890,63 @@ var init_connect = __esm(() => {
   ]);
 });
 
+// src/core/open-targets.ts
+function allOpenTargets() {
+  return [
+    { kind: "dashboard" },
+    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
+  ];
+}
+function openTargetToken(target) {
+  if (target.kind === "connect")
+    return `connect.${target.source}`;
+  if (target.kind === "fix")
+    return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
+  return;
+}
+function openTargetTokenPattern() {
+  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isKeysOpenTarget(target) {
+  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function keysOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var init_open_targets = __esm(() => {
+  OPEN_CONNECT_SOURCES = {
+    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
+    readwise: { sourceId: "readwise.library", label: "Readwise" },
+    telegram: { sourceId: "telegram.messages", label: "Telegram" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
+  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+  OPEN_UNREADABLE_SOURCES = {
+    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
+});
+
+// src/core/remote-open.ts
+var init_remote_open = __esm(() => {
+  init_open_targets();
+});
+
 // src/core/invocation-provenance.ts
 function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -24922,6 +24980,19 @@ var init_vocabulary = __esm(() => {
     linkExpired: "link expired",
     howOnComputer: "Do this on your computer",
     howOnComputerFix: "Fix this on your computer",
+    remote: {
+      title: "Olympus runs on a server, so this opens on your computer through a secure tunnel.",
+      askLine: "Ask your assistant:",
+      askPhrase: "Open Olympus on my computer",
+      askPhraseFor: "Open Olympus on my computer to connect {source}",
+      byHandAfterAsk: "Or do it yourself:",
+      onComputer: "On your computer, run:",
+      onServer: "Then on the server, run this and open the link it prints in your computer's browser:",
+      portNote: "Keep {port} on both sides of the tunnel: the link only works on that port.",
+      copy: "Copy",
+      copied: "Copied",
+      copySelected: "Selected: press Ctrl+C or ⌘C to copy"
+    },
     sourcePaused: "Paused",
     syncChecking: "Checking…",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
@@ -25931,13 +26002,84 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function howWords(key) {
     return key === "blocker" || key.indexOf("need:") === 0 ? P.howOnComputerFix : P.howOnComputer;
   }
-  function howLink(fix, key) {
+  function howLink(fix, key, source) {
     const href = helpHref(fix && fix.href);
     if (!href || compact())
       return null;
+    if (remoteMode()) {
+      const toggle = button(howWords(key), key + ":how", () => toggleRemote(key), "plain");
+      toggle.className = "btn link";
+      toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
+      const wrap = add(el("span", "fix"), toggle);
+      return add(wrap, remoteBox(key, href, source));
+    }
     const link = button(howWords(key), key + ":how", () => openLink(href), "plain");
     link.className = "btn link";
     return link;
+  }
+  function remoteMode() {
+    if (onComputer())
+      return false;
+    const remote = state.data ? state.data.remote : null;
+    return !!remote && typeof remote.port === "number" && remote.port >= 1 && remote.port <= 65535 && Math.floor(remote.port) === remote.port;
+  }
+  function toggleRemote(key) {
+    state.open["remote:" + key] = !state.open["remote:" + key];
+    render(key);
+  }
+  function openPath(href) {
+    const match = /^https:\/\/(?:www\.)?olympusplugin\.ai\/open\/((?:connect|fix|unreadable)\/[a-z]+)\/$/.exec(href);
+    return match ? match[1] : "";
+  }
+  function remoteLines(href) {
+    const remote = state.data.remote;
+    const port = remote.port;
+    const target = typeof remote.sshTarget === "string" && /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,190}$/.test(remote.sshTarget) ? remote.sshTarget : "you@your-server";
+    const path = openPath(href);
+    return {
+      onComputer: "ssh -N -L " + port + ":127.0.0.1:" + port + " " + target,
+      onServer: "olympus dashboard --no-open" + (path ? " --target " + path : ""),
+      port
+    };
+  }
+  function copyControl(code, key) {
+    const R2 = P.remote;
+    const node = button(R2.copy, key, () => {
+      let copied = false;
+      try {
+        const selection = window.getSelection();
+        if (selection) {
+          const range = doc.createRange();
+          range.selectNodeContents(code);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          copied = typeof doc.execCommand === "function" && doc.execCommand("copy") === true;
+        }
+      } catch {
+        copied = false;
+      }
+      node.textContent = copied ? R2.copied : R2.copySelected;
+    }, "plain");
+    return node;
+  }
+  function copyLine(text, key) {
+    const code = el("code", "", text);
+    return add(el("div", "remote-line"), code, copyControl(code, key));
+  }
+  function remoteBox(key, href, source) {
+    if (!state.open["remote:" + key])
+      return null;
+    const R2 = P.remote;
+    const lines = remoteLines(href);
+    const box = add(el("div", "remote-box"), el("p", "strong", R2.title));
+    box.setAttribute("role", "region");
+    box.setAttribute("aria-label", R2.title);
+    if (state.data.remote.agent === true) {
+      const phrase = source && openPath(href).indexOf("connect/") === 0 ? fill2(R2.askPhraseFor, { source: source.label }) : R2.askPhrase;
+      add(box, el("p", "", R2.askLine), copyLine(phrase, key + ":remote:ask"), el("p", "muted", R2.byHandAfterAsk));
+    }
+    add(box, el("p", "", R2.onComputer), copyLine(lines.onComputer, key + ":remote:tunnel"), el("p", "", R2.onServer), copyLine(lines.onServer, key + ":remote:link"), el("p", "muted", fill2(R2.portNote, { port: lines.port })));
+    return box;
   }
   function globalReason() {
     if (state.hostReadOnly)
@@ -25963,7 +26105,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (blocked || fix.disabledReason) {
       add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
       if (!blocked)
-        add(wrap, howLink(fix, key));
+        add(wrap, howLink(fix, key, source));
       return wrap;
     }
     if (state.busy === key) {
@@ -25974,6 +26116,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const failure = state.actionError && state.actionError.key === key ? state.actionError.text : "";
     let action = null;
     const opens = fix.openHref === true ? helpHref(fix.href) : "";
+    if (opens && remoteMode()) {
+      const toggle = button(fix.label, key, () => toggleRemote(key), style);
+      toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
+      return add(wrap, toggle, remoteBox(key, opens, source));
+    }
     if (opens) {
       return add(wrap, button(fix.label, key, () => openLink(opens), style));
     }
@@ -25995,6 +26142,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     } else if (typeof fix.tool === "string" && fix.tool)
       action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
+      if (remoteMode()) {
+        const toggle = button(howWords(key), key, () => toggleRemote(key), style);
+        toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
+        return add(wrap, toggle, remoteBox(key, helpHref(fix.href), source));
+      }
       return add(wrap, button(howWords(key), key, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {
@@ -26015,7 +26167,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         render(key + ":no");
       }, "plain"), errorNote(failure));
     }
-    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key) : null, errorNote(failure));
+    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key, source) : null, errorNote(failure));
   }
   function errorNote(text) {
     if (!text)
@@ -29585,6 +29737,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
 @keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
+.remote-box{flex-basis:100%;margin-top:0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.375rem;font-size:0.875rem}
+.remote-box p{margin:0}
+.remote-line{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
+.remote-line code{flex:1 1 16rem;min-width:0;padding:0.25rem 0.5rem;border:1px solid var(--line);border-radius:0.375rem;background:var(--bg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;overflow-wrap:anywhere;user-select:all}
 .strong{font-weight:600}
 .error{color:var(--danger);font-weight:600}
 .picker-top{margin:0 0 0.75rem}
@@ -29694,58 +29850,6 @@ textarea.text{resize:vertical;min-height:4.5rem}
 `;
 });
 
-// src/core/open-targets.ts
-function allOpenTargets() {
-  return [
-    { kind: "dashboard" },
-    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
-    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
-  ];
-}
-function openTargetToken(target) {
-  if (target.kind === "connect")
-    return `connect.${target.source}`;
-  if (target.kind === "fix")
-    return `fix.${target.section}`;
-  if (target.kind === "unreadable")
-    return `unreadable.${target.source}`;
-  return;
-}
-function openTargetTokenPattern() {
-  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function isKeysOpenTarget(target) {
-  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
-}
-function keysOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function isPanelOpenTarget(target) {
-  return target.kind === "unreadable";
-}
-function panelOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
-var init_open_targets = __esm(() => {
-  OPEN_CONNECT_SOURCES = {
-    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
-    readwise: { sourceId: "readwise.library", label: "Readwise" },
-    telegram: { sourceId: "telegram.messages", label: "Telegram" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
-  };
-  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
-  OPEN_UNREADABLE_SOURCES = {
-    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
-    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
-  };
-});
-
 // src/workers/chatgpt/dashboard-resource.ts
 import { createHash as createHash13 } from "node:crypto";
 function versionedResourceUri(base, html) {
@@ -29779,11 +29883,23 @@ class DashboardLaunchTickets {
       throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
     }
   }
-  mint(origin) {
-    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
-    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
+  mint(origin, options = {}) {
+    const nowMs = this.now();
+    this.prune(nowMs);
+    if (options.remote === true) {
+      for (const [ticket2, record] of this.tickets) {
+        if (record.remote)
+          this.tickets.delete(ticket2);
+      }
+    }
+    const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
+    const expiresAtMs = nowMs + ttlSeconds * 1000;
     const ticket = randomBytes2(32).toString("base64url");
-    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
+    this.tickets.set(ticket, {
+      expiresAtMs,
+      originTag: dashboardLaunchOriginTag(origin),
+      ...options.remote === true ? { remote: true } : {}
+    });
     while (this.tickets.size > this.maxTickets) {
       const oldest = this.tickets.keys().next();
       if (oldest.done)
@@ -29822,7 +29938,7 @@ function dashboardLaunchOriginTag(origin) {
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
 }
-var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_LAUNCH_PAGE_HTML;
+var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_PAGE_HTML;
 var init_dashboard_launch = __esm(() => {
   init_open_targets();
   DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
@@ -30431,6 +30547,7 @@ var LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
 // src/workers/email-source/server.ts
 init_connect();
 init_worker_auth();
+init_remote_open();
 
 // src/core/dashboard-session-secret.ts
 init_atomic_file();

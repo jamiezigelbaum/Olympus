@@ -108,6 +108,7 @@ describe('operations', () => {
       'source_watch_cancel',
       'olympus_doctor',
       'ask_anonymously',
+      'olympus_open_remote',
     ]);
     expect(operations.find((operation) => operation.name === 'olympus_doctor')?.mutating).toBe(false);
     expect(operations.find((operation) => operation.name === 'olympus_doctor')?.nativeExposure).toBe('always');

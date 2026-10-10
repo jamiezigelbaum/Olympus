@@ -171,6 +171,8 @@ export interface ChatGptDashboardOptions {
   privateModel?: BuiltInPrivateModelView;
   /** The built-in transcription model, when it is this machine's transcriber (models.transcription). */
   transcription?: BuiltInTranscriptionDashboardState;
+  /** Remote mode, when the engine declares it runs on a server (DashboardViewModelV1.remote). */
+  remote?: DashboardViewModelV1['remote'];
 }
 
 export interface BuiltInPrivateModelView {
@@ -315,6 +317,7 @@ export function buildChatGptDashboardViewModel(
           },
         }
       : {}),
+    ...(options.remote ? { remote: options.remote } : {}),
     generatedAt: isoOrNow(view.generated_at, now),
   };
 }

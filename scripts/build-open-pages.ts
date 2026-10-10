@@ -9,7 +9,8 @@
  * Each page tries its olympus:// link once with a meta refresh, offers the
  * same link as a button (a click is the gesture some browsers want), and
  * always shows the two steps by hand for a phone or a computer without the
- * link handler. No script, no tracking, nothing from another site: the
+ * link handler, plus the two lines for Olympus on a server (an SSH tunnel and
+ * a one-time link). No script, no tracking, nothing from another site: the
  * site's own Content-Security-Policy (site/deploy/Caddyfile.site) allows no
  * script at all, and a meta refresh is navigation, which it does not govern.
  */
@@ -23,6 +24,7 @@ import {
   openTargetPath,
   type OpenTarget,
 } from '../src/core/open-targets.ts';
+import { DEFAULT_ENGINE_PORT, remoteOpenInstructions } from '../src/core/remote-open.ts';
 
 const SITE_OPEN_DIR = join(import.meta.dir, '..', 'site', 'open');
 
@@ -51,6 +53,23 @@ function helpAnchor(target: OpenTarget): string {
   if (target.kind === 'connect') return 'connect';
   if (target.kind === 'fix') return target.section;
   return 'open-olympus';
+}
+
+/**
+ * Remote mode by hand (core/remote-open.ts): a static page cannot know the
+ * engine's port or the server's name, so it shows the default port and says
+ * what to change. The panel shows the real port when the engine declares it
+ * runs on a server.
+ */
+function remoteSection(target: OpenTarget): string {
+  const lines = remoteOpenInstructions({ port: DEFAULT_ENGINE_PORT, target });
+  return `<h2 id="on-a-server">If Olympus runs on a server</h2>
+      <p>Open it on your computer through a secure tunnel. On your computer, run:</p>
+      <pre><code>${lines.onComputer}</code></pre>
+      <p>Then on the server, run this and open the link it prints in your computer's browser:</p>
+      <pre><code>${lines.onServer}</code></pre>
+      <p>${DEFAULT_ENGINE_PORT} is the usual port. If the printed link shows another number, use that number on both sides of the tunnel: the link only works on that port. Replace <code>you@your-server</code> with how you sign in to the server.</p>
+      <p>If your assistant runs on the server and your computer is paired with it (OpenClaw), you can ask it instead: <strong>Open Olympus on my computer</strong>.</p>`;
 }
 
 export function renderOpenPage(target: OpenTarget): string {
@@ -92,6 +111,8 @@ export function renderOpenPage(target: OpenTarget): string {
       <ol class="flow">
         ${steps.join('\n        ')}
       </ol>
+
+      ${remoteSection(target)}
       <p class="meta">More help: <a href="/help/on-your-computer/#${helpAnchor(target)}">Fix it on your computer</a>.</p>
     </div>
   </main>

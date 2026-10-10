@@ -12,6 +12,7 @@ import {
 } from './source-corpus-registry.ts';
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
+import { OPEN_REMOTE_DESCRIPTION, OPEN_REMOTE_PARAMS, OPEN_REMOTE_TOOL_NAME, openRemote } from './remote-open-tool.ts';
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
 import type { OperationCaller } from './operation-caller.ts';
 import type { SourceAnswerJobScope, SourceAnswerPending } from './source-answer-jobs.ts';
@@ -53,6 +54,11 @@ export interface OperationContext {
    * dispatch sends nothing and reserves nothing.
    */
   signal?: AbortSignal;
+  /**
+   * The caller is the owner's own agent session: set only by the OpenClaw
+   * tool factory from the host's `senderIsOwner`, never from tool params.
+   */
+  ownerAgentSession?: boolean;
   /** Test seam for olympus_doctor's host check; production probes this machine. */
   doctorHostProbe?: () => DoctorHostFacts;
 }
@@ -79,6 +85,13 @@ export interface Operation {
    * refuse, since neither surface has anywhere to get the route from.
    */
   requiresOpenClawSessionRoute?: true;
+  /**
+   * The operation acts for the owner only (it mints a one-time bearer link):
+   * the native tool factory sets `ownerAgentSession` from OpenClaw's own
+   * `senderIsOwner`, so it is exposed on the native surface only and refuses
+   * everywhere the factory did not vouch for the caller.
+   */
+  requiresOwnerAgentSession?: true;
   cliHints: {
     name: string;
     positional?: string[];
@@ -621,6 +634,19 @@ export const operations: Operation[] = [
       const jobs = ctx.sourceAnswerJobs;
       return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
     },
+  },
+  {
+    // Remote mode's agent route (core/remote-open-tool.ts): the owner's own
+    // OpenClaw session only, a closed target list, the ticket minted last.
+    name: OPEN_REMOTE_TOOL_NAME,
+    description: OPEN_REMOTE_DESCRIPTION,
+    params: OPEN_REMOTE_PARAMS,
+    // Not read-only: it mints a one-time bearer link to the dashboard.
+    mutating: true,
+    nativeExposure: 'always',
+    requiresOwnerAgentSession: true,
+    cliHints: { name: 'open remote' },
+    handler: async (ctx, params) => openRemote(ctx, params),
   },
 ];
 

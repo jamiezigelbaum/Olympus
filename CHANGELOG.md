@@ -2,6 +2,16 @@
 
 ## 1.0.0-rc.3 - unreleased
 
+- **Olympus on a server opens on your computer.** When the engine runs on a
+  server (`olympus server-mode on --ssh-target you@your-server`, or found
+  automatically on a Linux host with no screen), Connect and "Fix this on
+  your computer" in ChatGPT show "Ask your assistant: Open Olympus on my
+  computer" (OpenClaw) and the two lines to copy instead: an SSH tunnel on
+  the engine's own port, and `olympus dashboard --no-open --target ...` for
+  a one-time link. The /open/ pages carry the same lines. OpenClaw's
+  assistant does it for you with the new `olympus_open_remote` tool through
+  your paired computer, after you approve the tunnel. Setup:
+  docs/openclaw-node-setup.md.
 - **"Do this on your computer" opens Olympus there, with no Terminal step.**
   Connect for X bookmarks, Readwise, Telegram and WhatsApp, and every "Fix
   this on your computer" link in ChatGPT, open an olympusplugin.ai/open/ page

@@ -251,6 +251,28 @@ describe('the panel renders See why', () => {
     expect(sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([MORE_HREF]);
   });
 
+  // On a server, the computer's full list is the remote route: the tunnel
+  // and `olympus dashboard --no-open --target unreadable/dropbox`, never the
+  // /open/ page (its olympus:// link would open the laptop's own Olympus).
+  test('engine on a server: "and N more" shows the remote lines for unreadable/dropbox, never the /open/ page', () => {
+    const sent: any[] = [];
+    const win = mount({ ...fresh({ unreadable: {
+      count: 7,
+      reasons: [{ code: 'damaged_or_unsupported', count: 7 }],
+      names: ['Q3 board deck.key', 'scan-0042.tiff'],
+      more: { label: 'and 5 more', tool: DASHBOARD_TOOL_NAME, args: {}, href: MORE_HREF, openHref: true },
+    } }), remote: { port: 8123, sshTarget: 'jamie@sparta', agent: false } }, sent);
+    const more = Array.from(win.document.querySelectorAll('details.why ul.files button')).find((node) => node.textContent === 'and 5 more') as unknown as HTMLButtonElement;
+    more.click();
+    expect(sent.some((message) => message.method === 'ui/open-link')).toBe(false);
+    const box = win.document.querySelector('.remote-box')!;
+    expect(box).not.toBeNull();
+    expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual([
+      'ssh -N -L 8123:127.0.0.1:8123 jamie@sparta',
+      'olympus dashboard --no-open --target unreadable/dropbox',
+    ]);
+  });
+
   test('no file path reaches the panel, whatever the data carries', () => {
     const hostile = { count: 2, files: [SECRET_NAME, SECRET_PATH], reasons: [
       { code: 'damaged_or_unsupported', count: 2, name: SECRET_NAME, path: SECRET_PATH },

@@ -266,7 +266,25 @@ export interface DashboardViewModelV1 {
    * `olympus_privacy_get`. Counts only; never a description or a rule.
    */
   privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
+  /**
+   * Contract v1 addition (2026-10-10, remote mode): present only when the
+   * engine declares it runs on a server (core/remote-open.ts; owner decision:
+   * the engine declares it, the panel does not infer it). A "do this on your
+   * computer" control then shows how to open Olympus on the owner's computer
+   * (a tunnel on `port`, the engine's own port number, and a one-time link)
+   * instead of the olympus:// page, which cannot reach a server.
+   * `sshTarget` is the owner's own `user@host` for the server, when they set
+   * one. `agent`: Olympus runs inside OpenClaw, so the owner's assistant can
+   * open it for them ("Ask your assistant"); otherwise only the by-hand lines.
+   */
+  remote?: DashboardRemoteMode;
   generatedAt: string;
+}
+
+export interface DashboardRemoteMode {
+  port: number;
+  sshTarget?: string;
+  agent: boolean;
 }
 
 /**
