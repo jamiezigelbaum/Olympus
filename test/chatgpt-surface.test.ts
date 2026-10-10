@@ -757,7 +757,7 @@ beforeEach(() => {
       privateQuestions: new PrivateQuestionJobs({
         installId: () => (questionInstall ? 'a'.repeat(32) : undefined),
         ask: async () => ({ ok: false, code: 'unused', message: 'unused' }),
-        settings: () => ({ state: 'missing' } as never),
+        choice: () => ({ level: 'standard', cleanup: 'light_cleanup', customInstruction: false }),
       }),
       async privateMatchProbe() { return privateProbe; },
       async dashboardView() {

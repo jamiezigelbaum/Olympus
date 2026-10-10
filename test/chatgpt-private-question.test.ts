@@ -56,7 +56,7 @@ function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs
       if (auto) return Promise.resolve(auto);
       return new Promise<ConsultAskResult>((res, rej) => { resolve = res; reject = rej; });
     },
-    settings: () => ({ state: 'valid', settings: { v: 1, revision: 1, enabled: true, languages: ['en'], domains: {}, strict: false, level: 'general', standardMode: 'as_written', levelChosen: true } } as never),
+    choice: () => ({ level: 'strict', cleanup: 'as_written', customInstruction: false }),
     now: () => clock.now,
     ...extra,
   });
@@ -208,7 +208,7 @@ describe('the jobs: begin → ask → collect', () => {
     await settle();
     expect((await h.jobs.collect(meta.jobId, panel.publicKey)).status).toBe(410);
 
-    const none = new PrivateQuestionJobs({ installId: () => undefined, ask: () => Promise.resolve(ANSWERED), settings: () => ({ state: 'missing' } as never) });
+    const none = new PrivateQuestionJobs({ installId: () => undefined, ask: () => Promise.resolve(ANSWERED), choice: () => ({ level: 'strict', cleanup: 'as_written', customInstruction: false }) });
     expect(await none.begin()).toBeUndefined();
 
     const bounded = harness({ maxJobs: 2 });
@@ -230,12 +230,15 @@ describe('the jobs: begin → ask → collect', () => {
     expect((await h.jobs.collect(meta.jobId, panel.publicKey)).status).toBe(202);
   });
 
-  test('the panel\'s default choice follows the dashboard settings', async () => {
-    const custom = harness({
-      settings: () => ({ state: 'valid', settings: { v: 1, revision: 1, enabled: true, languages: ['en'], domains: {}, strict: false, level: 'unnamed', standardMode: 'custom', standardInstruction: 'Keep it short.', levelChosen: true } } as never),
-    });
+  test('the panel\'s default choice follows the composition root\'s, checked, with a fallback', async () => {
+    const custom = harness({ choice: () => ({ level: 'standard', cleanup: 'custom', customInstruction: true }) });
     expect(await custom.jobs.begin()).toMatchObject({ level: 'standard', cleanup: 'custom', customInstruction: true });
-    const broken = harness({ settings: () => { throw new Error('unreadable'); } });
+    // custom without a saved instruction is not offered; junk falls back field by field.
+    const noInstruction = harness({ choice: () => ({ level: 'standard', cleanup: 'custom', customInstruction: false }) });
+    expect(await noInstruction.jobs.begin()).toMatchObject({ level: 'standard', cleanup: 'custom', customInstruction: false });
+    const junk = harness({ choice: () => ({ level: 'open', cleanup: 'other', customInstruction: 'yes' } as never) });
+    expect(await junk.jobs.begin()).toMatchObject({ level: 'standard', cleanup: 'as_written', customInstruction: false });
+    const broken = harness({ choice: () => { throw new Error('unreadable'); } });
     // Unreadable settings: the defaults (Standard, lightly cleaned up), never a throw.
     expect(await broken.jobs.begin()).toMatchObject({ level: 'standard', cleanup: 'light_cleanup', customInstruction: false });
   });

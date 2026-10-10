@@ -15,9 +15,6 @@
  */
 import { randomBytes } from 'node:crypto';
 import type { ConsultAskResult } from '../../core/consult-ask.ts';
-import type { ConsultSettingsRead } from '../../core/consult-settings.ts';
-import { consultAskLevelFromSettings } from '../../core/consult-ask.ts';
-import { DEFAULT_CONSULT_SETTINGS, consultStandardBinding } from '../../core/consult-settings.ts';
 import { privateAnswerInstallId } from '../../../connect-relay/shared/private-answer.ts';
 import {
   generateEngineKeyPair,
@@ -38,6 +35,8 @@ import {
   type PrivateQuestionResultV1,
 } from './private-question-contract.ts';
 
+export type PrivateQuestionChoice = Pick<PrivateQuestionMetaV1, 'level' | 'cleanup' | 'customInstruction'>;
+
 export interface PrivateQuestionAskInput {
   readonly question: string;
   readonly level: PrivateQuestionLevel;
@@ -50,8 +49,12 @@ export interface PrivateQuestionJobsOptions {
   readonly installId: () => string | undefined;
   /** The ask lane (consult-ask.ts askAnonymously, placed as an OpenAI-hosted caller). */
   readonly ask: (input: PrivateQuestionAskInput) => Promise<ConsultAskResult>;
-  /** consult.json, for the panel's default choice. */
-  readonly settings: () => ConsultSettingsRead;
+  /**
+   * The panel's default choice (the dashboard's saved level and Standard
+   * preparation), read by the composition root: this module stays off the
+   * settings file (test/consult-settings.test.ts holds who may read it).
+   */
+  readonly choice: () => PrivateQuestionChoice;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly maxJobs?: number;
@@ -223,20 +226,16 @@ export class PrivateQuestionJobs {
     return true;
   }
 
-  private choice(): Pick<PrivateQuestionMetaV1, 'level' | 'cleanup' | 'customInstruction'> {
-    let read: ConsultSettingsRead | undefined;
+  /** The composition root's choice; an unreadable one falls back to Standard, lightly cleaned up (the dashboard default). */
+  private choice(): PrivateQuestionChoice {
     try {
-      read = this.options.settings();
+      const choice = this.options.choice();
+      const level: PrivateQuestionLevel = choice.level === 'strict' ? 'strict' : 'standard';
+      const cleanup: PrivateQuestionCleanup = (CLEANUPS as readonly string[]).includes(choice.cleanup) ? choice.cleanup : 'as_written';
+      return { level, cleanup, customInstruction: cleanup === 'custom' && choice.customInstruction === true };
     } catch {
-      read = undefined;
+      return { level: 'standard', cleanup: 'light_cleanup', customInstruction: false };
     }
-    const settings = read?.state === 'valid' ? read.settings : DEFAULT_CONSULT_SETTINGS;
-    const standard = consultStandardBinding(settings);
-    return {
-      level: consultAskLevelFromSettings(settings.level),
-      cleanup: standard.mode,
-      customInstruction: standard.mode === 'custom',
-    };
   }
 }
 

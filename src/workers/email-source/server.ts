@@ -4438,8 +4438,9 @@ export async function main(): Promise<void> {
   // built-in private model. Without it on this machine every private match
   // reports `no_model` with counts only.
   const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
-  const { readConsultSettings } = await import('../../core/consult-settings.ts');
+  const { readConsultSettings, DEFAULT_CONSULT_SETTINGS, consultStandardBinding } = await import('../../core/consult-settings.ts');
   const { PrivateQuestionJobs } = await import('../chatgpt/private-question-jobs.ts');
+  const { consultAskLevelFromSettings } = await import('../../core/consult-ask.ts');
   const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
   const { createDropboxOpenTargets, localDropboxRoots, localOpenArguments } = await import('../dropbox-files/open-target.ts');
@@ -4521,7 +4522,13 @@ export async function main(): Promise<void> {
         signal: input.signal,
       })
       : Promise.resolve({ ok: false as const, code: 'transport_unavailable', message: 'Anonymous answers are not set up on this computer.' })),
-    settings: () => readConsultSettings(),
+    // The panel's default choice: the dashboard's saved level and Standard preparation (consult.json, read at every open).
+    choice: () => {
+      const read = readConsultSettings();
+      const settings = read.state === 'valid' ? read.settings : DEFAULT_CONSULT_SETTINGS;
+      const standard = consultStandardBinding(settings);
+      return { level: consultAskLevelFromSettings(settings.level), cleanup: standard.mode, customInstruction: standard.mode === 'custom' };
+    },
   });
   const privateAnswerSweep = setInterval(() => {
     privateAnswers.sweep();
