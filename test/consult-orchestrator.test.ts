@@ -76,7 +76,7 @@ interface Harness {
   eligible: { refuse: boolean; hold?: (() => Promise<void>) | undefined };
   route: { available: boolean };
   activity: { busy: boolean };
-  writer: { calls: ConsultWriterInput[]; levels: string[]; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
+  writer: { calls: ConsultWriterInput[]; deadlines: number[]; levels: string[]; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
   transport: { opens: ZkapiOpenControl[]; result: 'ok' | 'busy'; sessions: FakeSession[]; beforeAuthorize?: () => Promise<void>; onReply?: () => void; reply: 'reply' | 'failed' };
   logs: string[];
   calls: { n: number; asked: boolean[] };
@@ -89,6 +89,8 @@ function harness(options: {
   followUpWindowMs?: number;
   completionTimeoutMs?: number;
   settings?: ConsultSettingsRead;
+  ownWriter?: boolean;
+  writerDeadlineMs?: () => number;
 } = {}): Harness {
   const clock = { now: 1_000_000 };
   const settings = { read: options.settings ?? SETTINGS_ON };
@@ -99,6 +101,7 @@ function harness(options: {
   const calls = { n: 0, asked: [] as boolean[] };
   const writer: Harness['writer'] = {
     calls: [],
+    deadlines: [],
     levels: [],
     kills: [],
     outcome: options.writerOutcome ?? { kind: 'questions', questions: [CLEAN_QUESTION], promptTokens: 900, ms: 10 },
@@ -140,8 +143,11 @@ function harness(options: {
     now: () => clock.now,
     log: (line) => logs.push(line),
     completionTimeoutMs: () => options.completionTimeoutMs ?? 6 * 60_000,
+    ...(options.ownWriter !== undefined ? { ownWriter: () => options.ownWriter === true } : {}),
+    ...(options.writerDeadlineMs ? { writerDeadlineMs: options.writerDeadlineMs } : {}),
     writer: async (input, control) => {
       writer.calls.push(input);
+      writer.deadlines.push(control.deadlineMs);
       writer.levels.push(control.level);
       writer.kills.push(control.kill);
       if (writer.hold) await writer.hold();
@@ -879,5 +885,49 @@ describe('the zkAPI route from the sovereignty profiles', () => {
     expect(resolveZkapiConsultTransport({ a: { provider: 'openai' } }, () => undefined)).toBeUndefined();
     expect(resolveZkapiConsultTransport({ z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', zkapi }, y: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8788/v1', zkapi } }, () => undefined)).toBeUndefined();
     expect(resolveZkapiConsultTransport({ z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', zkapi } }, () => { throw new Error('no store'); })).toMatchObject({ baseUrl: 'http://127.0.0.1:8787/v1' });
+  });
+});
+
+describe('the owner\'s own writer (owner decision 2026-10-10)', () => {
+  test('it reads bounded evidence excerpts from the snapshot pack, with its own deadline; the built-in writer never sees evidence', async () => {
+    const own = harness({ ownWriter: true, writerDeadlineMs: () => 180_000 });
+    await consult(own);
+    expect(own.writer.calls.length).toBe(1);
+    const input = own.writer.calls[0]!;
+    expect(input.question).toBe(QUESTION);
+    expect(input.evidence?.length).toBeGreaterThan(0);
+    expect(input.evidence!.join(' ')).toContain('The lease for the flat ends in May');
+    expect(own.writer.deadlines).toEqual([180_000]);
+    // The gate still compares against the whole pack and the send happens as before.
+    expect(own.transport.sessions[0]!.sends.map((send) => send.question)).toEqual([CLEAN_QUESTION]);
+
+    const builtIn = harness({ ownWriter: false });
+    await consult(builtIn);
+    expect(builtIn.writer.calls).toEqual([{ question: QUESTION, answer: ANSWER, gaps: GAPS }]);
+    expect(builtIn.writer.deadlines).toEqual([60_000]);
+  });
+
+  test('"these items do not answer" still never escalates, with either writer (owner change 2026-10-10)', async () => {
+    for (const ownWriter of [true, false]) {
+      const h = harness({ ownWriter, verdict: { sufficient: false, noAnswer: true } });
+      await consult(h);
+      expect(h.writer.calls).toEqual([]);
+      expect(h.transport.opens).toEqual([]);
+    }
+  });
+
+  test('a copied phrase from the evidence the own writer read is still refused by the gate at Strict', async () => {
+    const general: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true, level: 'general' } };
+    const h = harness({ ownWriter: true, policy: bindConsultJobPolicy(general), settings: general, writerOutcome: { kind: 'questions', questions: [COPIED_QUESTION], promptTokens: 0, ms: 1 } });
+    await consult(h);
+    expect(h.writer.calls[0]!.evidence?.length).toBeGreaterThan(0);
+    expect(h.transport.sessions.flatMap((session) => session.sends)).toEqual([]);
+    expect(h.logs.some((line) => line.startsWith('[consult] outcome=gate_refused'))).toBe(true);
+  });
+
+  test('the zkAPI model for ChatGPT questions replaces the route\'s model only when set', () => {
+    const profiles = { z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', model: 'openai/gpt-5-mini', zkapi: {} as never } };
+    expect(resolveZkapiConsultTransport(profiles, () => undefined)?.model).toBe('openai/gpt-5-mini');
+    expect(resolveZkapiConsultTransport(profiles, () => undefined, { chatgptFrontierModel: 'other/model' })?.model).toBe('other/model');
   });
 });

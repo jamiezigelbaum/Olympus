@@ -1,4 +1,4 @@
-# Consult writer instructions (approved text, not yet wired)
+# Consult writer instructions
 
 > **Source.** The privacy rules, their structure and most of their wording come
 > from `tor-remote-research.md` by Vitalik Buterin, in `ethereum/zkapi` pull
@@ -15,6 +15,41 @@
 > **Licence note.** The `ethereum/zkapi` repository has no root `LICENSE`
 > file; `zkapi-clientd/` is MIT and the Rust workspace is MIT OR Apache-2.0.
 > No licence is stated for this root-level file.
+
+## The loaded rules, rewritten (2026-10-10)
+
+Owner decision, 2026-10-10 (`docs/design/private-answers.md`, "Writer: your
+own local model"). On that day the built-in writer copied its prompt's single
+landlord example and asked the outside model what "the document signed by the
+landlord" says. The loaded rules (`CONSULT_WRITER_SYSTEM` for Strict,
+`CONSULT_WRITER_SYSTEM_UNNAMED` for Standard, in
+`src/core/consult-writer.ts`) are now written as a short skill, the same
+opening for both levels:
+
+1. **Decide first.** The outside model cannot find anything the user's
+   material is missing; it can only reason more deeply and know more about the
+   world. Propose nothing when the material and first answer already settle
+   the question, or when the gap is a fact only the user's own records hold
+   (what a paper says, whether something was signed, a date, a name, a
+   figure). Ask when the question needs deeper reasoning or outside knowledge
+   on top of what the material shows.
+2. **Never ask about the user's documents.** Not what they say, not whether
+   they mention something, not for an upload: the outside model never sees
+   them. Never write "the document" or "this letter" as if the reader had it;
+   describe the kind of thing.
+3. **Read, then write in your own words.** The owner's own writer reads
+   bounded evidence excerpts; the built-in writer reads the first answer and
+   gaps only.
+4. **The level's rules** (Strict: general questions only; Standard: the
+   situation without identifiers), then the form the gate requires.
+5. **No single anchoring example.** Four short, varied shapes per level
+   (a medicine, a contract, a disk or a car purchase, and one case where the
+   right answer is to propose nothing), each marked "shapes, not templates".
+
+The Strict rules changed deliberately: the test that pinned their hash
+(`test/consult-writer.test.ts`) now pins the new text. The sections below
+remain the full reasoning the loaded rules are condensed from; where the
+quoted loaded text below differs from the source file, the source file wins.
 
 Status: approved writer instructions for the frontier consult lane
 (`docs/design/frontier-consult-lane.md` on the design proposal branch, sections Z.2 and A.4).
@@ -330,15 +365,17 @@ Owner decision, 2026-10-07. Outside help has two levels, chosen on the Mac
 card under "What may zkAPI send?" and stored as `level` in
 `~/.olympus/consult.json`:
 
-- **Strict** (`general`): everything above, unchanged. The
-  loaded rules are `CONSULT_WRITER_SYSTEM`, byte for byte as before (a test
-  pins its hash).
+- **Strict** (`general`): everything above. The loaded rules are
+  `CONSULT_WRITER_SYSTEM` (rewritten 2026-10-10, see the top of this page; a
+  test pins its hash).
 - **Standard (recommended)** (`unnamed`, the default everywhere; a settings
   file without the key reads as `unnamed`, owner decision 2026-10-08): the
   rules in this section replace "Never relay private content", the verdict
   rule and the stranger test above. The loaded form is
-  `CONSULT_WRITER_SYSTEM_UNNAMED` in `src/core/consult-writer.ts`, quoted
-  here in full:
+  `CONSULT_WRITER_SYSTEM_UNNAMED` in `src/core/consult-writer.ts`. Its text
+  before the 2026-10-10 rewrite, kept for the record (the rules are the same;
+  the opening and the examples changed, and the single landlord example is
+  gone):
 
 > You are the local analyst. You have just answered a user's question from
 > their private documents. That answer is final.

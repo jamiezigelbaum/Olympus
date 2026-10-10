@@ -14,8 +14,10 @@
  *     E1: every item the answer read still eligible; the fresh-answer
  *       generation captured before E1 still current         no → failed, snapshot dropped
  *     ┌ open the transport session (warm: lease, Tor, daemon, policy)   ┐ in parallel
- *     └ writer on its own server (memory rule, token bound, deadline)   ┘
- *       over ONE bounded input (question, answer, gaps), also the gate's
+ *     └ writer: built-in on its own server (memory rule, token bound,   ┘
+ *       deadline), or the owner's own model server (deadline)
+ *       over ONE bounded input (question, answer, gaps; plus evidence
+ *       excerpts for the owner's own writer), also the gate's
  *       writerVisibleTexts (question) and writerAnswerTexts (answer, gaps)
  *     gate over the snapshot pack + that bounded input      refuse → failed, silently
  *     session ready? busy or any failure → failed (never queued)
@@ -37,7 +39,10 @@
  * only, never as content, and never leave this machine.
  *
  * What may be shown to the writer: the question, the answer and the gaps
- * from the snapshot. Nothing else is ever passed to it.
+ * from the snapshot, and, for the owner's own writer only (consult.json
+ * `writer`, owner decision 2026-10-10), bounded excerpts of the snapshot's
+ * evidence pack (consultWriterEvidence). Nothing else is ever passed to it.
+ * The gate compares the questions against the whole pack either way.
  *
  * Money boundary: nothing is reserved before the transport's `authorize`
  * says yes; `authorize` runs synchronously before the reservation inside
@@ -66,7 +71,7 @@ import type {
   ZkapiOpenControl,
   ZkapiOpenSessionResult,
 } from '../../core/consult-transport-zkapi.ts';
-import { boundConsultWriterInput, type ConsultWriterInput, type ConsultWriterOutcome } from '../../core/consult-writer.ts';
+import { boundConsultWriterInput, consultWriterEvidence, type ConsultWriterInput, type ConsultWriterOutcome } from '../../core/consult-writer.ts';
 import { checkPrivateEvidence, type PrivateEvidenceGuard } from './private-answer-contract.ts';
 import type { PrivateAnswerJobs } from './private-answer-jobs.ts';
 
@@ -126,7 +131,14 @@ export interface ConsultOrchestratorOptions {
   readonly now?: () => number;
   /** Content-free: codes, counts and milliseconds. */
   readonly log?: (line: string) => void;
-  readonly writerDeadlineMs?: number;
+  /** The writer's deadline; a function is read at each consult (the owner's writer has its own). */
+  readonly writerDeadlineMs?: number | (() => number);
+  /**
+   * Whether the owner's own writer model is chosen now (consult.json
+   * `writer`). It is then given evidence excerpts. Default: the built-in
+   * writer. The trigger is the same for both writers.
+   */
+  readonly ownWriter?: () => boolean;
 }
 
 export interface ConsultOrchestrator {
@@ -160,7 +172,21 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       return CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS;
     }
   };
-  const writerDeadlineMs = options.writerDeadlineMs ?? CONSULT_WRITER_DEADLINE_MS;
+  const writerDeadlineMs = (): number => {
+    try {
+      const value = typeof options.writerDeadlineMs === 'function' ? options.writerDeadlineMs() : options.writerDeadlineMs;
+      return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : CONSULT_WRITER_DEADLINE_MS;
+    } catch {
+      return CONSULT_WRITER_DEADLINE_MS;
+    }
+  };
+  const ownWriter = (): boolean => {
+    try {
+      return options.ownWriter?.() === true;
+    } catch {
+      return false;
+    }
+  };
   const recent: string[] = [];
   const inFlight = new Map<string, Promise<void>>();
   /** Aborted by onFreshAnswer; replaced for the next writer. */
@@ -203,12 +229,14 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     const snapshot = options.jobs.consultSnapshot(jobId);
     if (!snapshot) return undefined;
     // Consult only when the first answer is marked insufficient or has gaps,
-    // and never for "these items do not answer" (owner ruling).
+    // and never for "these items do not answer" (owner ruling; kept for the
+    // owner's own writer too, 2026-10-10: zkAPI never sees the documents, so
+    // it cannot fix retrieval or find what the Mac missed).
     if (snapshot.verdict.noAnswer) return undefined;
     if (snapshot.verdict.sufficient !== false && snapshot.gaps.length === 0) return undefined;
     const candidate: Trigger = { rev: seam.rev, policy: seam.policy, firstDeliveredAt: seam.firstDeliveredAt, followUntil: seam.followUntil };
     // Never start work that cannot dispatch with delivery room left.
-    if (!windowOpen(candidate, at, writerDeadlineMs)) return undefined;
+    if (!windowOpen(candidate, at, writerDeadlineMs())) return undefined;
     return candidate;
   };
 
@@ -271,8 +299,15 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       record(jobId, 'superseded', startedAt, 'answer_busy');
       return;
     }
-    // One bounded input (§A.3): what the writer sees is exactly what the gate compares against.
-    const bounded = boundConsultWriterInput({ question: held.question, answer: held.answer, gaps: held.gaps });
+    // One bounded input (§A.3): what the writer sees is exactly what the gate
+    // compares against. The owner's own writer also reads evidence excerpts
+    // from the same pack the gate compares the questions with.
+    const bounded = boundConsultWriterInput({
+      question: held.question,
+      answer: held.answer,
+      gaps: held.gaps,
+      ...(ownWriter() ? { evidence: consultWriterEvidence(held.pack) } : {}),
+    });
     // The writer and the transport warm-up overlap (§A.8, speed measure 2).
     // The session's own open deadline is the dispatch window's remainder.
     const sessionAbort = new AbortController();
@@ -286,7 +321,7 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     };
     let written: ConsultWriterOutcome;
     try {
-      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs, level: scheduled.policy.level });
+      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs(), level: scheduled.policy.level });
     } catch {
       written = { kind: 'failed', reason: 'request_failed' };
     }
@@ -476,7 +511,15 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
 export function resolveZkapiConsultTransport(
   profiles: Readonly<Record<string, { provider: string; baseUrl?: string; secretRef?: string; model?: string; zkapi?: ZkapiConsultSettings }>>,
   resolveSecret: (secretRef: string | undefined) => string | undefined,
-  extra: Pick<ZkapiConsultTransportOptions, 'env' | 'statePath'> = {},
+  extra: Pick<ZkapiConsultTransportOptions, 'env' | 'statePath'> & {
+    /**
+     * The model for a question that came through ChatGPT (consult.json
+     * `chatgptFrontierModel`): there a model from another provider than
+     * OpenAI is better, since OpenAI also holds the ChatGPT conversation
+     * (owner decision 2026-10-10). Unset: the route's own model.
+     */
+    readonly chatgptFrontierModel?: string;
+  } = {},
 ): ZkapiConsultTransportOptions | undefined {
   const routes = Object.values(profiles).filter((profile) => profile.provider === 'zkapi' && profile.zkapi && profile.baseUrl);
   if (routes.length !== 1) return undefined;
@@ -489,7 +532,7 @@ export function resolveZkapiConsultTransport(
   }
   return {
     baseUrl: route.baseUrl!,
-    model: route.model ?? '',
+    model: extra.chatgptFrontierModel ?? route.model ?? '',
     ...(apiKey ? { apiKey } : {}),
     settings: route.zkapi!,
     ...(extra.env ? { env: extra.env } : {}),

@@ -141,6 +141,82 @@ const PUBLIC_CLI_HELP_GROUPS = new Set([
   'open-handler',
 ]);
 
+const ZKAPI_TEST_WRITER_USAGE = 'olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]';
+
+/**
+ * `olympus zkapi test-writer`: the writer capability check
+ * (core/consult-writer-check.ts) against the owner's own model, the one saved
+ * in ~/.olympus/consult.json or one named on the command line to try before
+ * saving it. Runs only when invoked; sends nothing to zkAPI; writes no setting.
+ */
+async function runZkapiTestWriter(rest: string[]): Promise<void> {
+  const flags: Record<string, string> = {};
+  let json = false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index]!;
+    if (arg === '--json') {
+      json = true;
+      continue;
+    }
+    const name = arg.startsWith('--') ? arg.slice(2) : undefined;
+    const value = rest[index + 1];
+    if (!name || !['level', 'base-url', 'model', 'secret-ref'].includes(name) || value === undefined || value.startsWith('--')) {
+      throw new OperationError('invalid_params', `Usage: ${ZKAPI_TEST_WRITER_USAGE}`);
+    }
+    flags[name] = value;
+    index += 1;
+  }
+  const { readConsultSettings, parseConsultWriterChoice, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS } = await import('./core/consult-settings.ts');
+  const { checkOwnConsultWriter } = await import('./core/consult-writer-check.ts');
+  const { resolveSecretRefValueSync } = await import('./core/secret-store.ts');
+  const { environmentWithWorkerSetupEnv } = await import('./core/worker-auth.ts');
+  const read = readConsultSettings();
+  const saved = read.state === 'valid' ? read.settings : undefined;
+  const named = flags['base-url'] !== undefined || flags.model !== undefined;
+  const choice = named
+    ? parseConsultWriterChoice({
+      ...(flags['base-url'] !== undefined ? { baseUrl: flags['base-url'] } : {}),
+      ...(flags.model !== undefined ? { model: flags.model } : {}),
+      ...(flags['secret-ref'] !== undefined ? { secretRef: flags['secret-ref'] } : {}),
+    })
+    : saved?.writer;
+  if (!choice) {
+    throw new OperationError('invalid_params', named
+      ? 'Give --base-url (an http:// or https:// OpenAI-compatible address, usually ending in /v1) and --model; --secret-ref is env:NAME or store:name.'
+      : 'No model of your own is chosen. Choose one on the Anonymous answers card, or name one with --base-url and --model.');
+  }
+  const level = flags.level ?? saved?.level ?? 'unnamed';
+  if (level !== 'unnamed' && level !== 'general') throw new OperationError('invalid_params', '--level must be unnamed or general.');
+  let apiKey: string | undefined;
+  if (choice.secretRef) {
+    apiKey = resolveSecretRefValueSync(choice.secretRef, { env: environmentWithWorkerSetupEnv() })?.trim() || undefined;
+    if (!apiKey) throw new OperationError('config_error', `The key reference ${choice.secretRef} is not set on this computer.`);
+  }
+  console.error(`Testing ${choice.model} at ${choice.baseUrl} (${level === 'unnamed' ? 'Standard' : 'Strict'}) on invented cases. Nothing is sent to zkAPI.`);
+  const report = await checkOwnConsultWriter({
+    endpoint: { baseUrl: choice.baseUrl, model: choice.model, ...(apiKey ? { apiKey } : {}) },
+    level,
+    ...(saved ? { languages: saved.languages } : {}),
+    deadlineMs: choice.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS,
+    onCase: (result, index, total) => {
+      if (json) return;
+      const verdict = result.outcome === 'questions'
+        ? result.gate === 'pass' ? 'would be sent' : `refused by the privacy check (${result.gateReasons.join(', ')})`
+        : result.outcome === 'declined' ? 'no question' : `no usable reply (${result.reason ?? result.outcome})`;
+      console.log(`[${index + 1}/${total}] ${result.id}: ${verdict}${result.canaryLeak ? ' LEAK' : ''}${result.asksAboutDocuments ? ' ASKS-ABOUT-DOCUMENT' : ''}`);
+      for (const question of result.questions) console.log(`    ${question}`);
+    },
+  });
+  if (json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log(`${report.cases} cases: ${report.written} written, ${report.declined} with no question, ${report.failed} failed. The privacy check would send ${report.gatePassed} and refuse ${report.gateRefused}.`);
+    console.log(report.canaryLeaks.length === 0 ? 'No invented name, place or figure got past the privacy check.' : `Leaks past the privacy check: ${report.canaryLeaks.join(', ')}. Do not rely on this model yet.`);
+    if (report.documentQuestions.length > 0) console.log(`Asked about a document the frontier model cannot see: ${report.documentQuestions.join(', ')}.`);
+  }
+  if (report.canaryLeaks.length > 0) process.exitCode = 1;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (!isV04PublicCliInvocation(args)) {
@@ -237,6 +313,11 @@ async function main(): Promise<void> {
     });
     console.log(JSON.stringify(result, null, 2));
     if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (args[0] === 'zkapi' && args[1] === 'test-writer') {
+    await runZkapiTestWriter(args.slice(2));
     return;
   }
 
@@ -1207,6 +1288,7 @@ function printHelp(): void {
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
   for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
   console.log('  olympus zkapi install-tools');
+  console.log(`  ${ZKAPI_TEST_WRITER_USAGE}`);
   console.log('  olympus serve');
   console.log('  olympus --tools-json');
 }
@@ -1250,6 +1332,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
   ...TIER_CLI_USAGE,
   'zkapi install-tools': 'olympus zkapi install-tools',
+  'zkapi test-writer': ZKAPI_TEST_WRITER_USAGE,
   serve: 'olympus serve',
 };
 
@@ -1345,6 +1428,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Usage: olympus zkapi <command>',
     'Commands:',
     '  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers',
+    '  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)',
   ],
   'open-handler': [
     'Usage: olympus open-handler <command>',

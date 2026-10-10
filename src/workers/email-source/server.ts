@@ -4277,6 +4277,8 @@ export async function main(): Promise<void> {
               recover: (update) => dashboardConsult.recover(update),
               abandon: (update) => dashboardConsult.abandon(update),
               installTools: (update) => dashboardConsult.installTools(update),
+              saveWriter: (update) => dashboardConsult.saveWriter(update),
+              testWriter: (update) => dashboardConsult.testWriter(update),
             },
             stopMessagingCapture,
             corpusRegistry: sourceCorpusRegistry,
@@ -4512,7 +4514,8 @@ export async function main(): Promise<void> {
   privateAnswerSweep.unref?.();
   {
     const { createConsultOrchestrator, resolveZkapiConsultTransport } = await import('../chatgpt/consult-orchestrator.ts');
-    const { createConsultWriterServer, defaultConsultMemoryProbe, runConsultWriter } = await import('../../core/consult-writer.ts');
+    const { CONSULT_WRITER_LIMITS, createConsultWriterServer, defaultConsultMemoryProbe, runConsultWriter, runOwnConsultWriter } = await import('../../core/consult-writer.ts');
+    const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS } = await import('../../core/consult-settings.ts');
     const { openZkapiConsultSession } = await import('../../core/consult-transport-zkapi.ts');
     type WriterServer = import('../../core/consult-writer.ts').ConsultWriterServer;
     // The writer's own llama-server on the answer model's verified files,
@@ -4533,22 +4536,59 @@ export async function main(): Promise<void> {
     // read per call from the same environment the outside-help card checks
     // (worker.env under a non-empty process value), so the card never says a key is present
     // that the send cannot use.
-    const transport = () => resolveZkapiConsultTransport(
-      sovereigntyEngine.config.modelProfiles,
-      (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
-      { env: process.env },
-    );
+    // Every consult here comes from a ChatGPT private answer, so the
+    // ChatGPT model choice applies (consult.json `chatgptFrontierModel`).
+    const transport = () => {
+      const read = readConsultSettings();
+      const chatgptFrontierModel = read.state === 'valid' ? read.settings.chatgptFrontierModel : undefined;
+      return resolveZkapiConsultTransport(
+        sovereigntyEngine.config.modelProfiles,
+        (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
+        { env: process.env, ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}) },
+      );
+    };
+    // The owner's own writer model (consult.json `writer`), read at every
+    // use; absent, the built-in model writes. Its key is resolved per call
+    // from the same environment as the route's and never logged.
+    const ownWriterChoice = () => {
+      const read = readConsultSettings();
+      return read.state === 'valid' ? read.settings.writer : undefined;
+    };
     consultOrchestrator = createConsultOrchestrator({
       jobs: privateAnswers,
       eligible: privateEvidenceEligible,
       settings: () => readConsultSettings(),
-      writer: (input, control) => runConsultWriter(input, {
-        server: writerServerFor(),
-        memory,
-        kill: control.kill,
-        deadlineMs: control.deadlineMs,
-        level: control.level,
-      }),
+      writer: (input, control) => {
+        const choice = ownWriterChoice();
+        if (choice) {
+          let apiKey: string | undefined;
+          try {
+            apiKey = choice.secretRef ? resolveSecretRefValueSync(choice.secretRef, { env: environmentWithWorkerSetupEnv() }) : undefined;
+          } catch {
+            apiKey = undefined;
+          }
+          // A key reference that does not resolve: no consult (never a keyless request to a server that wants one).
+          if (choice.secretRef && !apiKey) return Promise.resolve({ kind: 'failed' as const, reason: 'start_failed' as const });
+          return runOwnConsultWriter(input, {
+            endpoint: { baseUrl: choice.baseUrl, model: choice.model, ...(apiKey ? { apiKey } : {}) },
+            kill: control.kill,
+            deadlineMs: control.deadlineMs,
+            level: control.level,
+          });
+        }
+        return runConsultWriter(input, {
+          server: writerServerFor(),
+          memory,
+          kill: control.kill,
+          deadlineMs: control.deadlineMs,
+          level: control.level,
+        });
+      },
+      ownWriter: () => ownWriterChoice() !== undefined,
+      writerDeadlineMs: () => {
+        const choice = ownWriterChoice();
+        return choice ? choice.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS : CONSULT_WRITER_LIMITS.deadlineMs;
+      },
       openSession: async (control) => {
         const route = transport();
         if (!route) {
@@ -4671,6 +4711,25 @@ export async function main(): Promise<void> {
     },
     requestReload: () => requestModelReload(),
     env: process.env,
+    // The writer capability check, on the owner's click only: the writer
+    // chosen now, its key resolved here, the level and languages saved now.
+    // It sends nothing to zkAPI (core/consult-writer-check.ts).
+    writerCheck: async ({ onCase }) => {
+      const { readConsultSettings, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS } = await import('../../core/consult-settings.ts');
+      const { checkOwnConsultWriter } = await import('../../core/consult-writer-check.ts');
+      const read = readConsultSettings();
+      const choice = read.state === 'valid' ? read.settings.writer : undefined;
+      if (read.state !== 'valid' || !choice) throw new Error('Choose your model and save it first.');
+      const apiKey = consultRouteKey(choice.secretRef);
+      if (choice.secretRef && !apiKey) throw new Error(`The key reference ${choice.secretRef} is not set on this computer.`);
+      return checkOwnConsultWriter({
+        endpoint: { baseUrl: choice.baseUrl, model: choice.model, ...(apiKey ? { apiKey } : {}) },
+        level: read.settings.level,
+        languages: read.settings.languages,
+        deadlineMs: choice.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS,
+        onCase,
+      });
+    },
   });
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === '1';
   // source_answer needs an Analyst the Mac can actually run; without one,

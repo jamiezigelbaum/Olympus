@@ -405,6 +405,9 @@ describe('the settings module stays off the hosted surfaces', () => {
     // it is also the writer's one caller (test/consult-settings-writer.test.ts
     // holds that the adapter is reachable only from the composition root).
     'src/workers/email-source/dashboard-consult.ts',
+    // `olympus zkapi test-writer` reads the saved writer, level and
+    // languages to run the writer check; it only reads.
+    'src/cli.ts',
   ];
 
   function sourceFiles(dir: string): string[] {
@@ -434,5 +437,32 @@ describe('the settings module stays off the hosted surfaces', () => {
   test('no registered operation (every MCP, native, CLI and remote tool) is a consult settings operation', () => {
     const names = operations.map((operation) => operation.name);
     expect(names.filter((name) => /consult/i.test(name))).toEqual([]);
+  });
+});
+
+describe('the owner\'s writer and the ChatGPT model (2026-10-10)', () => {
+  const base = { v: 1, revision: 3, enabled: true, languages: ['en'], domains: { units: true, countries: true, medicines: true, medicineBrands: false }, strict: false, level: 'unnamed' };
+  test('optional; any HTTP(S) host (loopback, LAN, tailnet); a key reference and a bounded deadline', () => {
+    expect(parseConsultSettings(base)?.writer).toBeUndefined();
+    for (const baseUrl of ['http://127.0.0.1:11434/v1', 'http://192.168.1.20:8080/v1', 'https://delphi.tail1234.ts.net/v1']) {
+      expect(parseConsultSettings({ ...base, writer: { baseUrl, model: 'qwen3-32b' } })?.writer).toEqual({ baseUrl, model: 'qwen3-32b' });
+    }
+    expect(parseConsultSettings({ ...base, writer: { baseUrl: 'http://h:1/v1/', model: 'm', secretRef: 'env:KEY', timeoutMs: 120_000 } })?.writer).toEqual({ baseUrl: 'http://h:1/v1', model: 'm', secretRef: 'env:KEY', timeoutMs: 120_000 });
+    expect(parseConsultSettings({ ...base, chatgptFrontierModel: 'anthropic/some-model' })?.chatgptFrontierModel).toBe('anthropic/some-model');
+  });
+
+  test('anything else makes the whole file invalid (outside help off)', () => {
+    for (const writer of [
+      { baseUrl: 'ftp://h/v1', model: 'm' },
+      { baseUrl: 'http://user:pw@h/v1', model: 'm' },
+      { baseUrl: 'http://h/v1?x=1', model: 'm' },
+      { baseUrl: 'http://h/v1', model: '' },
+      { baseUrl: 'http://h/v1', model: 'a b' },
+      { baseUrl: 'http://h/v1', model: 'm', secretRef: 'plain-key' },
+      { baseUrl: 'http://h/v1', model: 'm', timeoutMs: 1_000 },
+      { baseUrl: 'http://h/v1', model: 'm', apiKey: 'x' },
+      { model: 'm' },
+    ]) expect({ writer, parsed: parseConsultSettings({ ...base, writer }) }).toEqual({ writer, parsed: undefined });
+    expect(parseConsultSettings({ ...base, chatgptFrontierModel: '' })).toBeUndefined();
   });
 });

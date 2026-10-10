@@ -107,6 +107,72 @@ Status: approved, not built. It needs a writer prompt for the new level, a
 re-identification eval beside the existing leak eval, and the setting on the
 card.
 
+## Writer: your own local model
+
+Status: built (2026-10-10). Owner decision, 2026-10-10, modelled on Vitalik
+Buterin's published setup: a local model reads the private data, decides when
+a remote model is needed and writes the request itself with less identifying
+detail; zkAPI separates payment; Tor hides the network ("you need all
+three").
+
+Why: on 2026-10-10 the built-in 4B writer saw only "the evidence does not
+contain the LOI", copied its prompt's single landlord example, and asked the
+outside model whether "the document signed by the landlord" mentions a
+notary: a question about a document the outside model can never see.
+
+Decisions:
+
+1. **An option, not a gate.** Anonymous answers work with any model. People
+   who run a substantial model at home (Ollama, LM Studio, a llama.cpp server,
+   or a home server such as Delphi) can choose it as the writer. Nothing
+   checks or locks which model is used; the card only says it works best
+   with a substantial one.
+2. **Where it is set.** `writer` in `~/.olympus/consult.json`: an
+   OpenAI-compatible base URL, a model name, and an optional key reference
+   (`env:NAME` or `store:name`, resolved like the sovereignty profiles' keys,
+   never stored or logged), plus an optional deadline (default 180 s). Not the
+   sovereignty policy, because its local profiles are loopback-only and a home
+   server on the LAN or tailnet must be allowed; and this file is read at every
+   use, so a change needs no restart. Any HTTP(S) address is accepted. Set on
+   the card ("Who writes the question"); without it, the built-in model writes,
+   exactly as before. Two existing protections still apply: the zkAPI
+   daemon's port is refused, and a model with Ollama's cloud tag is refused,
+   because both would send private evidence off the machine.
+3. **Vitalik's way.** The chosen model reads bounded excerpts of the evidence
+   the answer used (at most 12 excerpts, 1,500 characters each, 12,000 in
+   all), the question, the first answer and its gaps. It decides whether a
+   frontier model would help and writes the request in its own words. The
+   built-in writer keeps its inputs (question, answer, gaps) and token bound.
+   Both use the same rewritten rules (consult-writer-instructions.md), and the
+   outbound gate stays the backstop at the chosen level.
+4. **What escalation is for.** A question complex enough that a stronger
+   model's reasoning or outside knowledge helps, on top of what the evidence
+   shows. zkAPI never sees the documents, so it cannot fix retrieval or find
+   what the Mac missed; the writer proposes nothing when the gap is a missing
+   fact from the user's own records. The trigger is unchanged for both
+   writers: a first answer of "these items do not answer" never escalates
+   (owner change, 2026-10-10, superseding an earlier proposal to let it).
+5. **ChatGPT questions prefer another provider.** OpenAI also holds the
+   ChatGPT conversation and could link it to the anonymous question.
+   `chatgptFrontierModel` in consult.json names the zkAPI model for questions
+   that came through ChatGPT (today, all of them); empty uses the route's own
+   model. No new default is set: the anchor picks one after checking the live
+   zkAPI catalog. The card notes when ChatGPT questions go to an OpenAI model.
+6. **Capability test, on request only.** `olympus zkapi test-writer` and the
+   card's "Test your model" run six invented cases (from the leak and
+   re-identification evals, plus the LOI case with and without the letter)
+   through the chosen writer and the gate. Nothing goes to zkAPI. It shows the
+   questions written, what the gate would send or refuse, any invented name or
+   figure that got past, and any question about a document. It never runs on
+   its own.
+7. **Wording.** "Paid and sent anonymously, with identifiers removed." Never
+   "unlinkable": the provider reads the question, and an unusual situation can
+   still hint at who asked.
+
+Residual: the owner's writer receives private evidence over the network when
+it runs on another computer; the card says to use a server they control and
+https or a private network.
+
 ## The user journey
 
 1. **Setup.** The owner opens Private answers and picks one of the three.

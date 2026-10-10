@@ -23,8 +23,10 @@ import {
   consultWriterMemoryDecision,
   createConsultWriterServer,
   defaultConsultMemoryProbe,
+  consultWriterEvidence,
   parseConsultWriterReply,
   runConsultWriter,
+  runOwnConsultWriter,
   type ConsultMemorySample,
   type ConsultWriterServer,
 } from '../src/core/consult-writer.ts';
@@ -32,8 +34,13 @@ import { createHash } from 'node:crypto';
 import { llamaServerArguments } from '../src/workers/source-index/built-in-reasoning/server.ts';
 
 const GB = 1024 * 1024 * 1024;
-/** sha256 of CONSULT_WRITER_SYSTEM as it was before the unnamed level (origin/main 514db9db). */
-const GENERAL_SYSTEM_SHA256 = '96ed8cbfa207c7087302edbe065c19592046e0e089326333721bf5db29be4879';
+/**
+ * sha256 of CONSULT_WRITER_SYSTEM, the Strict rules. Updated deliberately on
+ * 2026-10-10 (owner decision: the skill-style rewrite without a single
+ * anchoring example; docs/design/consult-writer-instructions.md). Before it:
+ * 96ed8cbfa207c7087302edbe065c19592046e0e089326333721bf5db29be4879.
+ */
+const GENERAL_SYSTEM_SHA256 = 'f7ca6f93e68659c513d8648e6d825e179e169795a11cdbafec5bf1f7fbc08ed8';
 const NORMAL: ConsultMemorySample = { totalBytes: 24 * GB, freePercent: 40, pressure: 'normal' };
 
 const LISBON = {
@@ -64,7 +71,7 @@ describe('writer prompt', () => {
 
   test('the rules carry the implied-place rule and the form the gate requires; the schema allows one to three questions or null', () => {
     expect(CONSULT_WRITER_SYSTEM).toMatch(/only implies/);
-    expect(CONSULT_WRITER_SYSTEM).toMatch(/destination suggested by an itinerary/);
+    expect(CONSULT_WRITER_SYSTEM).toMatch(/a country suggested by a city/);
     expect(CONSULT_WRITER_SYSTEM).toMatch(/never a city or region/);
     expect(CONSULT_WRITER_SYSTEM).toMatch(/at most 25 words/);
     expect(CONSULT_WRITER_SYSTEM).toMatch(/600 bytes and 80 words/);
@@ -76,8 +83,7 @@ describe('writer prompt', () => {
     ]);
   });
 
-  test('levels: "general" is the original rules, byte for byte; "unnamed" has its own; the default is general', () => {
-    // The general level's rules are unchanged by the unnamed level (owner decision 2026-10-07).
+  test('levels: "general" is pinned by hash; "unnamed" has its own; the default is general', () => {
     expect(createHash('sha256').update(CONSULT_WRITER_SYSTEM).digest('hex')).toBe(GENERAL_SYSTEM_SHA256);
     expect(consultWriterSystem('general')).toBe(CONSULT_WRITER_SYSTEM);
     expect(consultWriterSystem('unnamed')).toBe(CONSULT_WRITER_SYSTEM_UNNAMED);
@@ -86,21 +92,60 @@ describe('writer prompt', () => {
     const unnamed = buildConsultWriterPrompt(LISBON, 'unnamed');
     expect(unnamed[0]!.content).toBe(CONSULT_WRITER_SYSTEM_UNNAMED);
     expect(unnamed[1]!.content).toBe(buildConsultWriterPrompt(LISBON)[1]!.content);
-    // Within the same prompt bound as the general rules.
-    expect(CONSULT_WRITER_SYSTEM_UNNAMED.length).toBeLessThanOrEqual(CONSULT_WRITER_SYSTEM.length);
+    // Both stay short enough for the built-in writer's 2,048-token bound beside typical inputs.
+    expect(CONSULT_WRITER_SYSTEM.length).toBeLessThan(3_800);
+    expect(CONSULT_WRITER_SYSTEM_UNNAMED.length).toBeLessThan(3_800);
+  });
+
+  test('both levels decide first, never ask about the user\'s documents, and carry several varied shapes instead of one anchoring example (2026-10-10)', () => {
+    for (const rules of [CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED]) {
+      expect(rules).toMatch(/Decide first/);
+      expect(rules).toMatch(/cannot find anything the user's material is missing/);
+      expect(rules).toMatch(/deeper reasoning or outside knowledge on top of what the material shows/);
+      expect(rules).toMatch(/Never ask what the user's documents say, whether they mention or contain something, or for a document to be shared or uploaded/);
+      expect(rules).toMatch(/Shapes, not templates/);
+      expect((rules.match(/^- Missing:/gm) ?? []).length).toBeGreaterThanOrEqual(4);
+      expect(rules).toMatch(/Propose nothing: only the user's own records hold it/);
+      // The single landlord example the live failure copied is gone.
+      expect(rules).not.toMatch(/landlord/i);
+      expect(rules).not.toMatch(/notary/i);
+    }
+  });
+
+  test('evidence: only when given, bounded, and placed before the answer', () => {
+    const pack = {
+      question: 'q',
+      candidates: [
+        { provenance: { sourceItem: {} as never, citation: { title: 'Letter' } }, trustTier: 'S4', trustDomain: 'secure_local', chunks: ['First chunk.', 'x'.repeat(5_000)] },
+        ...Array.from({ length: 20 }, (_, index) => ({ provenance: { sourceItem: {} as never }, trustTier: 'S4', trustDomain: 'secure_local', chunks: [`chunk ${index}`] })),
+      ],
+      coverage: { searchedCorpora: [], skippedCorpora: [], extractionGaps: [] },
+      builtAt: 'now',
+    } as never;
+    const excerpts = consultWriterEvidence(pack);
+    expect(excerpts[0]).toBe('Letter: First chunk.');
+    expect(excerpts.length).toBe(CONSULT_WRITER_LIMITS.evidenceExcerpts);
+    const bounded = boundConsultWriterInput({ ...LISBON, evidence: excerpts });
+    expect(bounded.evidence!.length).toBeLessThanOrEqual(CONSULT_WRITER_LIMITS.evidenceExcerpts);
+    expect(bounded.evidence![1]!.length).toBe(CONSULT_WRITER_LIMITS.evidenceExcerptChars);
+    expect(bounded.evidence!.join('').length).toBeLessThanOrEqual(CONSULT_WRITER_LIMITS.evidenceChars);
+    const user = buildConsultWriterPrompt({ ...LISBON, evidence: ['Letter: First chunk.'] }, 'unnamed')[1]!.content;
+    expect(user).toContain('[1] Letter: First chunk.');
+    expect(user.indexOf('[1] Letter')).toBeLessThan(user.indexOf('Answer:'));
+    expect(buildConsultWriterPrompt(LISBON, 'unnamed')[1]!.content).not.toContain('Material the answer read');
   });
 
   test('the unnamed rules: the situation and a verdict may be sent; what is always removed; what is kept; the combination rule; the same form and reply', () => {
     const rules = CONSULT_WRITER_SYSTEM_UNNAMED;
     expect(rules).toMatch(/ask for a verdict on it/);
+    expect(rules).not.toMatch(/gave 45 days' notice/);
     for (const removed of [/names of people, companies, products, projects/, /employers/, /places smaller than a country/, /country only when the answer depends on it/,
-      /exact dates and years/, /exact money amounts: use bands or relative terms/, /about two months' rent/, /account, reference, phone and ID numbers/,
+      /exact dates and years/, /exact money amounts \(use bands or relative terms/, /about two months' pay/, /account, reference, phone and ID numbers/,
       /file and document titles/, /anything quoted word for word/]) expect(rules).toMatch(removed);
-    expect(rules).toMatch(/gave 45 days' notice where the lease requires 60 days/);
     expect(rules).toMatch(/health, legal, financial and relationship facts/);
     expect(rules).toMatch(/Leave out every detail the answer does not need/);
     expect(rules).toMatch(/Never keep a job, a rare condition and a region together unless the answer needs all three/);
-    expect(rules).toMatch(/at most 25 words: at most one short sentence of situation, then a short question of at most twelve content words/);
+    expect(rules).toMatch(/at most 25 words: at most one short sentence of situation, then a question of at most twelve content words/);
     expect(rules).toMatch(/\{"questions": null\}/);
     // The owner's example fits the form and the parser as written.
     const example = 'A tenant gave 45 days notice where the lease requires 60 days. Can the landlord keep a deposit of about two months rent?';
@@ -344,3 +389,61 @@ async function waitFor(condition: () => boolean, ms = 5_000): Promise<void> {
     await Bun.sleep(2);
   }
 }
+
+describe('the owner\'s own writer (consult.json writer)', () => {
+  const ENDPOINT = { baseUrl: 'http://192.168.1.20:8080/v1', model: 'qwen3-32b', apiKey: 'sk-test-not-real' };
+  function fakeFetch(replies: Array<{ status: number; body: unknown }>, seen: Array<{ url: string; init: RequestInit }>): typeof fetch {
+    return (async (url: string, init: RequestInit) => {
+      seen.push({ url: String(url), init });
+      const reply = replies.shift() ?? { status: 500, body: {} };
+      return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+  }
+  const reply = (content: string) => ({ status: 200, body: { choices: [{ message: { content } }] } });
+
+  test('one chat completion to the chosen address (LAN allowed) with the key, the rules, the evidence and the schema; questions parsed as usual', async () => {
+    const seen: Array<{ url: string; init: RequestInit }> = [];
+    const outcome = await runOwnConsultWriter({ ...LISBON, evidence: ['Itinerary: three days by the river.'] }, {
+      endpoint: ENDPOINT,
+      kill: new AbortController().signal,
+      deadlineMs: 5_000,
+      level: 'unnamed',
+      fetchImpl: fakeFetch([reply('<think>{"draft": true}</think>{"questions": ["What passport validity do most countries require from short stay visitors?"]}')], seen),
+    });
+    expect(outcome).toMatchObject({ kind: 'questions', questions: ['What passport validity do most countries require from short stay visitors?'] });
+    expect(seen.length).toBe(1);
+    expect(seen[0]!.url).toBe('http://192.168.1.20:8080/v1/chat/completions');
+    expect((seen[0]!.init.headers as Record<string, string>).authorization).toBe('Bearer sk-test-not-real');
+    expect(seen[0]!.init.redirect).toBe('error');
+    const body = JSON.parse(String(seen[0]!.init.body));
+    expect(body.model).toBe('qwen3-32b');
+    expect(body.messages[0].content).toBe(CONSULT_WRITER_SYSTEM_UNNAMED);
+    expect(body.messages[1].content).toContain('[1] Itinerary: three days by the river.');
+    expect(body.response_format.json_schema.schema).toEqual(CONSULT_WRITER_RESPONSE_SCHEMA);
+  });
+
+  test('a server that rejects the schema format is asked once more without it; errors and declines are reported; a cloud-tagged model is never asked', async () => {
+    const seen: Array<{ url: string; init: RequestInit }> = [];
+    const retried = await runOwnConsultWriter(LISBON, { endpoint: ENDPOINT, kill: new AbortController().signal, deadlineMs: 5_000, fetchImpl: fakeFetch([{ status: 400, body: {} }, reply('{"questions": null}')], seen) });
+    expect(retried).toMatchObject({ kind: 'declined' });
+    expect(seen.length).toBe(2);
+    expect(JSON.parse(String(seen[1]!.init.body)).response_format).toBeUndefined();
+    expect(await runOwnConsultWriter(LISBON, { endpoint: ENDPOINT, kill: new AbortController().signal, deadlineMs: 5_000, fetchImpl: fakeFetch([{ status: 500, body: {} }], []) })).toEqual({ kind: 'failed', reason: 'request_failed' });
+    expect(await runOwnConsultWriter(LISBON, { endpoint: ENDPOINT, kill: new AbortController().signal, deadlineMs: 5_000, fetchImpl: fakeFetch([reply('no json')], []) })).toEqual({ kind: 'failed', reason: 'not_json' });
+    const never: Array<{ url: string; init: RequestInit }> = [];
+    expect(await runOwnConsultWriter(LISBON, { endpoint: { ...ENDPOINT, model: 'gpt-oss:120b-cloud' }, kill: new AbortController().signal, deadlineMs: 5_000, fetchImpl: fakeFetch([], never) })).toEqual({ kind: 'skipped', reason: 'cloud_model' });
+    expect(never).toEqual([]);
+  });
+
+  test('a fresh answer aborts the request at once; a slow server is cut at the deadline', async () => {
+    const hanging = ((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      if (init.signal?.aborted) reject(new Error('aborted'));
+      init.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    })) as unknown as typeof fetch;
+    const fresh = new AbortController();
+    const running = runOwnConsultWriter(LISBON, { endpoint: ENDPOINT, kill: fresh.signal, deadlineMs: 5_000, fetchImpl: hanging });
+    fresh.abort();
+    expect(await running).toEqual({ kind: 'killed', reason: 'fresh_answer' });
+    expect(await runOwnConsultWriter(LISBON, { endpoint: ENDPOINT, kill: new AbortController().signal, deadlineMs: 20, fetchImpl: hanging })).toEqual({ kind: 'killed', reason: 'deadline' });
+  });
+});

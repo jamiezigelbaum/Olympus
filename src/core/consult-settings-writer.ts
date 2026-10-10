@@ -37,6 +37,7 @@ import {
   type ConsultSettingsInvalidReason,
   type ConsultSettingsLocation,
   type ConsultSettingsRead,
+  type ConsultWriterChoice,
 } from './consult-settings.ts';
 
 /** What the owner chooses; `v` and `revision` are the writer's. */
@@ -47,6 +48,14 @@ export interface ConsultSettingsUpdate {
   readonly strict: boolean;
   /** What the consult writer may send; always written, so the file never relies on the reader's default. */
   readonly level: ConsultLevel;
+  /**
+   * The owner's own writer model and the zkAPI model for ChatGPT questions.
+   * Written exactly as given: a caller that does not change them passes the
+   * file's current values through, so a save of the switch or the level
+   * never drops them.
+   */
+  readonly writer?: ConsultWriterChoice;
+  readonly chatgptFrontierModel?: string;
 }
 
 export interface ConsultSettingsWriteInput extends ConsultSettingsUpdate {
@@ -124,6 +133,8 @@ export function writeConsultSettings(input: ConsultSettingsWriteInput, location:
     domains: { ...input.domains },
     strict: input.strict,
     level: input.level,
+    ...(input.writer ? { writer: { ...input.writer } } : {}),
+    ...(input.chatgptFrontierModel ? { chatgptFrontierModel: input.chatgptFrontierModel } : {}),
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) return { ok: false, reason: 'invalid_input' };
   const custody = ensureSettingsDirectory(dirname(path));

@@ -5,7 +5,9 @@
 //
 //   {"v": 1, "revision": N, "enabled": bool, "languages": [...],
 //    "domains": {"units", "countries", "places", "technical", "medicines", "medicineBrands"},
-//    "strict": bool, "level": "unnamed" | "general"}
+//    "strict": bool, "level": "unnamed" | "general",
+//    "writer": {"baseUrl", "model", "secretRef"?, "timeoutMs"?},   (optional)
+//    "chatgptFrontierModel": "provider/model"}                    (optional)
 //
 // - Read at every use, never cached, so a change needs no worker restart.
 // - The parser is strict: invalid UTF-8, a duplicated key, an unknown key, a
@@ -24,6 +26,21 @@
 //   which say what this level sends (zkapi-consult-settings.ts, enforced at
 //   send time by the transport). The writer always writes the key.
 //
+// - `writer` (optional, owner decision 2026-10-10; design
+//   docs/design/private-answers.md, "Writer: your own local model") names the
+//   owner's own OpenAI-compatible model server (Ollama, LM Studio, a
+//   llama.cpp server, a home server on the LAN or tailnet) that writes the
+//   outside question in place of the built-in model. It reads the private
+//   evidence, so it is the owner's choice of where that goes: any HTTP(S)
+//   address is accepted, with no allowlist. Absent: the built-in model.
+//   It lives here, not in the sovereignty policy, because sovereignty local
+//   profiles are loopback-only (a home server on the LAN would be refused),
+//   and this file is read at every use, so a change needs no restart.
+// - `chatgptFrontierModel` (optional) is the zkAPI model for questions that
+//   came through ChatGPT, where a model from another provider than OpenAI
+//   is better (OpenAI also holds the ChatGPT conversation). Absent: the
+//   zkAPI route's own `model`. No default is chosen here.
+//
 // This module only reads. The compare-and-swap writer lands with its first
 // caller, the Mac dashboard enable path (stage C5), in its own module; the
 // public `olympus consult` command is C8 and strict mode's approval step is
@@ -32,6 +49,7 @@
 
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
+import { normalizeSecretRef } from './secret-store.ts';
 import {
   CONSULT_LANGUAGE_PACKS,
   DEFAULT_CONSULT_DOMAIN_PACKS,
@@ -64,6 +82,23 @@ export const CONSULT_LEVEL_FOR_NEW_SETUP: ConsultLevel = CONSULT_LEVEL_WHEN_UNSE
  */
 export const CONSULT_LEVEL_FOR_REPAIR: ConsultLevel = 'general';
 
+/** The owner's own model server for the consult writer (`writer` in consult.json). */
+export interface ConsultWriterChoice {
+  /** OpenAI-compatible base URL, usually ending in `/v1`. Any HTTP(S) host the owner chose. */
+  readonly baseUrl: string;
+  readonly model: string;
+  /** `env:NAME` or `store:name`; resolved like the sovereignty profiles' keys, never stored here. */
+  readonly secretRef?: string;
+  /** The writer's deadline in milliseconds (default CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS). */
+  readonly timeoutMs?: number;
+}
+
+/** Bounds of the owner's writer deadline. */
+export const CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS = Object.freeze({ min: 10_000, max: 240_000 });
+export const CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180_000;
+const MAX_MODEL_ID_CHARS = 200;
+const MAX_BASE_URL_CHARS = 500;
+
 export interface ConsultSettings {
   readonly v: typeof CONSULT_SETTINGS_VERSION;
   /** Compare-and-swap counter; 0 means no file has been written. */
@@ -78,6 +113,10 @@ export interface ConsultSettings {
   readonly strict: boolean;
   /** What the consult writer may send. */
   readonly level: ConsultLevel;
+  /** The owner's own writer model; absent means the built-in model writes. */
+  readonly writer?: ConsultWriterChoice;
+  /** The zkAPI model for questions that came through ChatGPT; absent means the route's model. */
+  readonly chatgptFrontierModel?: string;
 }
 
 export type ConsultSettingsInvalidReason =
@@ -111,7 +150,9 @@ export const DEFAULT_CONSULT_SETTINGS: ConsultSettings = Object.freeze({
 });
 
 const REQUIRED_TOP_LEVEL_KEYS = ['v', 'revision', 'enabled', 'languages', 'domains', 'strict'] as const;
-const OPTIONAL_TOP_LEVEL_KEYS = ['level'] as const;
+const OPTIONAL_TOP_LEVEL_KEYS = ['level', 'writer', 'chatgptFrontierModel'] as const;
+const WRITER_REQUIRED_KEYS = ['baseUrl', 'model'] as const;
+const WRITER_OPTIONAL_KEYS = ['secretRef', 'timeoutMs'] as const;
 const DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS) as Array<keyof ConsultDomainPacks>;
 const OPTIONAL_DOMAIN_KEYS: readonly string[] = ['places', 'technical'];
 const LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS) as ConsultLanguage[];
@@ -174,6 +215,16 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
   if (!isPlainObject(domains)) return undefined;
   if (!Object.keys(domains).every((key) => (DOMAIN_KEYS as string[]).includes(key))) return undefined;
   if (!DOMAIN_KEYS.every((key) => key in domains ? typeof domains[key] === 'boolean' : OPTIONAL_DOMAIN_KEYS.includes(key))) return undefined;
+  let writer: ConsultWriterChoice | undefined;
+  if (Object.hasOwn(value, 'writer')) {
+    writer = parseConsultWriterChoice(value.writer);
+    if (!writer) return undefined;
+  }
+  let chatgptFrontierModel: string | undefined;
+  if (Object.hasOwn(value, 'chatgptFrontierModel')) {
+    chatgptFrontierModel = parseModelId(value.chatgptFrontierModel);
+    if (!chatgptFrontierModel) return undefined;
+  }
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
@@ -182,6 +233,46 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
     domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] as boolean : true])) as unknown as ConsultDomainPacks),
     strict,
     level: level as ConsultLevel,
+    ...(writer ? { writer } : {}),
+    ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}),
+  });
+}
+
+function parseModelId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed !== value || trimmed.length > MAX_MODEL_ID_CHARS || /[\u0000-\u001F\u007F\s]/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+/**
+ * The `writer` block: an HTTP(S) base URL without credentials, query or
+ * fragment, a model id, an optional key reference and an optional deadline.
+ * Any host is accepted (loopback, LAN, tailnet): where the owner's own
+ * model runs is the owner's choice (owner decision 2026-10-10).
+ */
+export function parseConsultWriterChoice(value: unknown): ConsultWriterChoice | undefined {
+  if (!isPlainObject(value) || !hasKeys(value, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS)) return undefined;
+  const { baseUrl, secretRef, timeoutMs } = value;
+  if (typeof baseUrl !== 'string' || baseUrl.length > MAX_BASE_URL_CHARS || baseUrl.trim() !== baseUrl) return undefined;
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+  if (url.username || url.password || url.search || url.hash) return undefined;
+  const model = parseModelId(value.model);
+  if (!model) return undefined;
+  if (secretRef !== undefined && (typeof secretRef !== 'string' || !normalizeSecretRef(secretRef))) return undefined;
+  if (timeoutMs !== undefined && (typeof timeoutMs !== 'number' || !Number.isSafeInteger(timeoutMs)
+    || timeoutMs < CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS.min || timeoutMs > CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS.max)) return undefined;
+  return Object.freeze({
+    baseUrl: baseUrl.replace(/\/+$/, ''),
+    model,
+    ...(typeof secretRef === 'string' ? { secretRef: secretRef.trim() } : {}),
+    ...(typeof timeoutMs === 'number' ? { timeoutMs } : {}),
   });
 }
 

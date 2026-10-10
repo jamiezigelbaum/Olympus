@@ -569,6 +569,8 @@ function fakeBackend(calls: string[]): DashboardConsultBackend {
     recover: async () => { calls.push('recover'); return { ok: true, status_message: 'recovered' }; },
     abandon: async () => { calls.push('abandon'); return { ok: false, httpStatus: 409, code: 'no_unresolved_session', message: 'none' }; },
     installTools: async () => { calls.push('install'); return { ok: true, status_message: 'installing' }; },
+    saveWriter: async () => { calls.push('writer'); return { ok: true, status_message: 'saved', revision: 2 }; },
+    testWriter: async () => { calls.push('writer-test'); return { ok: true, status_message: 'testing' }; },
   };
 }
 
@@ -733,6 +735,7 @@ function adapter(input: {
   recover?: ZkapiConsultResult;
   reload?: boolean;
   source?: string;
+  writerCheck?: Parameters<typeof createDashboardConsultAdapter>[0]['writerCheck'];
 }) {
   const path = join(input.home, '.olympus', 'sovereignty.json');
   mkdirSync(join(input.home, '.olympus'), { recursive: true, mode: 0o700 });
@@ -752,6 +755,7 @@ function adapter(input: {
     now: () => new Date('2026-10-07T12:00:00.000Z'),
     readiness: async (options) => { probes.push(options); return readiness(input.readiness); },
     recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
+    ...(input.writerCheck ? { writerCheck: input.writerCheck } : {}),
   });
   return { backend, reloads, probes, recoveries, path, env };
 }
@@ -1143,5 +1147,77 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     expect(state.fences).toBeUndefined();
     expect(state.abandonedFences?.[scope]?.abandonedAt).toBe('2026-10-07T12:00:00.000Z');
     expect(summaryOf(await backend.status())).toEqual({ state: 'off' });
+  });
+});
+
+describe('who writes the question (owner decision 2026-10-10)', () => {
+  const REPORT = {
+    level: 'unnamed' as const, cases: 1, written: 1, declined: 0, failed: 0, gatePassed: 1, gateRefused: 0, canaryLeaks: [], documentQuestions: [],
+    results: [{ id: 'loi-notary-present', outcome: 'questions' as const, questions: ['Does a non binding letter of intent for a shop lease in Spain need a notary?'], gate: 'pass' as const, gateReasons: [], canaryLeak: false, asksAboutDocuments: false }],
+  };
+
+  test('saving a model of the owner\'s own (a LAN address is accepted) and the ChatGPT model; the switch and the level keep them; clearing goes back to the built-in model', async () => {
+    const home = tempHome();
+    const { backend, env } = adapter({ home });
+    const saved = await backend.saveWriter({ revision: 0, writer: { base_url: 'http://192.168.1.20:8080/v1', model: 'qwen3-32b', secret_ref: 'env:HOME_MODEL_KEY' }, chatgpt_frontier_model: 'anthropic/some-model' });
+    expect(saved).toMatchObject({ ok: true, revision: 1 });
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { writer: { baseUrl: 'http://192.168.1.20:8080/v1', model: 'qwen3-32b', secretRef: 'env:HOME_MODEL_KEY' }, chatgptFrontierModel: 'anthropic/some-model' } });
+    // Turning on and choosing a level carry the choices through.
+    expect(await backend.setEnabled({ enabled: true, revision: 1, languages: ['en'] })).toMatchObject({ ok: true, revision: 2 });
+    expect(await backend.setEnabled({ enabled: true, revision: 2, level: 'general' })).toMatchObject({ ok: true, revision: 3 });
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: true, level: 'general', writer: { model: 'qwen3-32b' }, chatgptFrontierModel: 'anthropic/some-model' } });
+    const status = await backend.status();
+    expect(status.writer).toMatchObject({ choice: { model: 'qwen3-32b', secretRef: 'env:HOME_MODEL_KEY', keyPresent: false }, chatgptFrontierModel: 'anthropic/some-model', routeModel: 'openai/gpt-5-mini' });
+    expect(await backend.saveWriter({ revision: 3, writer: null })).toMatchObject({ ok: true, revision: 4 });
+    const cleared = readConsultSettings({ env });
+    expect(cleared.state === 'valid' && cleared.settings.writer).toBeUndefined();
+    expect(cleared.state === 'valid' && cleared.settings.chatgptFrontierModel).toBe('anthropic/some-model');
+    // Not a URL, a stale revision: refused, nothing written.
+    expect(await backend.saveWriter({ revision: 4, writer: { base_url: 'ftp://x', model: 'm' } })).toMatchObject({ ok: false, code: 'writer_invalid' });
+    expect(await backend.saveWriter({ revision: 1, writer: { base_url: 'http://127.0.0.1:11434/v1', model: 'm' } })).toMatchObject({ ok: false, code: 'conflict' });
+  });
+
+  test('the test runs only on the click, needs a chosen model, reports progress and its result, and is never started by status', async () => {
+    const home = tempHome();
+    let runs = 0;
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const { backend } = adapter({ home, writerCheck: async ({ onCase }) => { runs += 1; onCase(REPORT.results[0]!, 0, 1); await gate; return REPORT; } });
+    await backend.status();
+    expect(runs).toBe(0);
+    expect(await backend.testWriter({ confirm: true })).toMatchObject({ ok: false, code: 'writer_not_chosen' });
+    await backend.saveWriter({ revision: 0, writer: { base_url: 'http://127.0.0.1:11434/v1', model: 'llama3.3:70b' } });
+    expect(await backend.testWriter({})).toMatchObject({ ok: false, code: 'confirmation_required' });
+    expect(await backend.testWriter({ confirm: true })).toMatchObject({ ok: true });
+    expect(await backend.testWriter({ confirm: true })).toMatchObject({ ok: false, code: 'writer_test_running' });
+    expect((await backend.status()).writer?.check).toEqual({ state: 'running', done: 1, total: 1 });
+    finish();
+    await Bun.sleep(5);
+    const done = (await backend.status()).writer?.check;
+    expect(done).toMatchObject({ state: 'done', report: REPORT });
+    expect(runs).toBe(1);
+  });
+
+  test('the card: the choice, no gate on the model, the OpenAI note, the test button and its result', () => {
+    const html = page({
+      ...status(),
+      writer: { routeModel: 'openai/gpt-5-mini', testAvailable: true, check: { state: 'done', at: '2026-10-10T12:00:00.000Z', report: REPORT } },
+    });
+    const text = visibleText(html);
+    expect(text).toContain('For people running a strong local model at home: ask frontier models anonymously when your model needs help.');
+    expect(text).toContain('paid and sent anonymously, with identifiers removed');
+    expect(text).not.toMatch(/unlinkable/i);
+    expect(text).toContain('Who writes the question');
+    expect(text).toContain('works best with a substantial model');
+    expect(text).toContain('Now: the model built into Olympus.');
+    expect(text).toContain('Questions from ChatGPT now go to openai/gpt-5-mini, an OpenAI model.');
+    expect(text).toContain('Does a non binding letter of intent for a shop lease in Spain need a notary?');
+    expect(text).toContain('No invented name, place or figure got past the privacy check.');
+    expect(html).toContain('data-outside-form="writer"');
+    expect(html).toContain('data-outside-form="writer-test"');
+    expect(html).toContain('/dashboard/consult/writer/test');
+    // Not an OpenAI model: no note.
+    const other = page({ ...status(), writer: { routeModel: 'openai/gpt-5-mini', chatgptFrontierModel: 'anthropic/some-model', testAvailable: true, check: { state: 'idle' } } });
+    expect(other).not.toContain('data-outside-writer-openai');
   });
 });
