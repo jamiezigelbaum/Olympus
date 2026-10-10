@@ -128,6 +128,10 @@ export const CONSULT_GATE_CONTENT_RUN_TOKENS = 4;
 // Whole request, UTF-8 bytes. A few short sentences fit; a document does not.
 export const CONSULT_GATE_MAX_QUESTION_BYTES = 600;
 export const CONSULT_GATE_MAX_QUESTION_TOKENS = 80;
+// Standard (the "secrets" net, owner decision 2026-10-10): the question goes
+// out as the user chose, so its only size bound is the transport's own
+// (consult-transport-zkapi.ts, 8 KiB). Recent sends are held to the same bound.
+export const CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES = 8 * 1024;
 
 /**
  * Sub-questions per request. The reference practice allows several safe
@@ -754,25 +758,30 @@ function evaluateCheckedRequest(
   if (!writerContextShapeValid(context)) return refuse(['writer_context_malformed']);
   if (!writerContextWithinLimits(context, effective)) return refuse(['writer_context_too_large']);
   if (context.malformed) return refuse(['writer_context_malformed']);
-  const vocabulary = consultVocabulary(options ?? {});
-  if (!vocabulary) return refuse(['vocabulary_unavailable']);
   if (!Array.isArray(subQuestions)) return refuse(['not_plain_text']);
   if (
     !Array.isArray(recent)
     || recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS
-    || recent.some((text) => typeof text !== 'string' || utf8Bytes(text) > CONSULT_GATE_MAX_QUESTION_BYTES)
+    || recent.some((text) => typeof text !== 'string' || utf8Bytes(text) > CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES)
   ) {
     return refuse(['recent_consults_too_large']);
   }
   if (subQuestions.length === 0) return refuse(['question_empty']);
   if (subQuestions.length > CONSULT_GATE_MAX_SUB_QUESTIONS) return refuse(['too_many_sub_questions']);
   if (subQuestions.some((question) => typeof question !== 'string')) return refuse(['not_plain_text']);
-  if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > effective.maxQuestionBytes) {
+  const maxQuestionBytes = options?.net === 'secrets' ? CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES : effective.maxQuestionBytes;
+  if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > maxQuestionBytes) {
     return refuse(['question_too_many_bytes']);
   }
 
+  if (options?.net === 'secrets') return secretsOnly(subQuestions, context);
+  const vocabulary = consultVocabulary(options ?? {});
+  if (!vocabulary) return refuse(['vocabulary_unavailable']);
+
   // 2. The request on its own. Any refusal here returns before snapshot work.
-  const unnamed = options?.level === 'unnamed';
+  const thin = options?.net === 'thin';
+  // The thin net judges the snapshot with the unnamed level's exemptions at both levels.
+  const unnamed = thin || options?.level === 'unnamed';
   const reasons = new Set<ConsultGateReason>();
   let tokenCount = 0;
   for (const question of subQuestions) {
@@ -783,14 +792,14 @@ function evaluateCheckedRequest(
     for (const reason of characterReasons(question)) reasons.add(reason);
     const nfkc = question.normalize('NFKC');
     for (const reason of scriptReasons(nfkc)) reasons.add(reason);
-    for (const reason of unnamed
+    if (!thin) for (const reason of unnamed
       ? questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES)
       : questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION)) reasons.add(reason);
     if (hasEncodedBlob(nfkc)) reasons.add('encoded_blob');
     if (secretLabelsInText(question).length > 0 || secretLabelsInText(nfkc).length > 0) reasons.add('secret_detected');
     if (hasIdentifierShape(nfkc)) reasons.add('identifier_shape');
     if (hasTechnicalFingerprint(nfkc)) reasons.add('technical_fingerprint');
-    if (hasUnknownWord(nfkc, vocabulary)) {
+    if (!thin && hasUnknownWord(nfkc, vocabulary)) {
       reasons.add('unknown_word');
       // A language the owner asked for whose pack is not installed (German,
       // Italian) makes every word of that language unknown; say so rather than
@@ -820,12 +829,29 @@ function evaluateCheckedRequest(
   const copySource: unknown = options?.askedQuestionFullTexts ?? options?.askedQuestionTexts;
   if (copySource !== undefined) {
     if (!askedTextsValid(copySource)) return refuse(['writer_context_malformed']);
-    if (copiesAskedQuestion(model, copySource)) reasons.add('owner_question_copy');
+    if (!thin && copiesAskedQuestion(model, copySource)) reasons.add('owner_question_copy');
   }
   const asked = unnamed ? askedWords(options?.askedQuestionTexts) : undefined;
-  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked)) reasons.add(reason);
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, thin)) reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent)) reasons.add(reason);
   return reasons.size > 0 ? refuse([...reasons]) : { decision: 'pass', reasons: [] };
+}
+
+// The secrets net of ConsultGateNet: secret patterns in the request, or a labelled snapshot secret repeated in it.
+function secretsOnly(subQuestions: readonly string[], context: ConsultWriterContext): ConsultGateVerdict {
+  for (const question of subQuestions) {
+    if (question.trim().length === 0) return refuse(['question_empty']);
+    if (secretLabelsInText(question).length > 0 || secretLabelsInText(question.normalize('NFKC')).length > 0) return refuse(['secret_detected']);
+  }
+  const requestCompact = compact(caseFold(foldText(subQuestions.join(' '))));
+  for (const entry of context.entries) {
+    if (entry.kind === 'metadata') continue;
+    for (const value of labelledSecretValues(caseFold(foldText(entry.text)))) {
+      const form = compact(value);
+      if (form.length >= 3 && requestCompact.includes(form)) return refuse(['secret_detected']);
+    }
+  }
+  return { decision: 'pass', reasons: [] };
 }
 
 function refuse(reasons: readonly ConsultGateReason[]): ConsultGateVerdict {
@@ -1197,7 +1223,35 @@ export interface ConsultGateOptions {
    * a short list of strings refuses the request (`writer_context_malformed`).
    */
   readonly askedQuestionFullTexts?: readonly string[];
+  /**
+   * How much of the gate runs (owner decision 2026-10-10, "Writer: your own
+   * local model" in docs/design/private-answers.md). "full", the default, is
+   * every rule: the built-in writer always gets it. "thin" is the net under a
+   * strong writer the owner runs himself, at both levels, after Vitalik
+   * Buterin's approach (the local model rewriting under a skill file is the
+   * content filter): it refuses only hard identifiers. Kept: character,
+   * script and encoding rules, secrets, identifier shapes (mail addresses,
+   * handles, links, long digit runs), technical fingerprints, the request's
+   * byte and token bounds, and the snapshot's names, identifiers, addresses,
+   * dates, hosts and figures, judged with the unnamed level's exemptions (a
+   * dictionary word the snapshot also writes in lower case is not a name; a
+   * short duration that defines the problem is not a figure). Dropped: the
+   * vocabulary rule (`unknown_word`), the question-structure rules (content
+   * words, sentences, question mark) and every copy rule (`shared_token_run`,
+   * `owner_question_copy`, copied wording).
+   */
+  readonly net?: ConsultGateNet;
 }
+
+/**
+ * "secrets": the Standard level's only content rule (owner decision
+ * 2026-10-10: Standard is open and its content privacy is the user's choice).
+ * It refuses passwords, API keys, private keys and tokens, found by the
+ * shared secret patterns (opsec.ts) in the request and by a secret-labelled
+ * value of the snapshot ("password: ...") that the request repeats. Nothing
+ * else about the content is judged; the request's size bounds still apply.
+ */
+export type ConsultGateNet = 'full' | 'thin' | 'secrets';
 
 export const DEFAULT_CONSULT_LANGUAGES: readonly ConsultLanguage[] = Object.freeze(['en']);
 
@@ -2131,6 +2185,13 @@ function compareWithSnapshot(
   unnamed: boolean,
   ordinaryWord?: (token: string) => boolean,
   asked?: AskedWords,
+  // Thin net (ConsultGateOptions.net): present only then; the request's words written as names.
+  // Thin net (ConsultGateOptions.net): copies are not refused. The name,
+  // identifier, figure and date rules run exactly as at the unnamed level,
+  // whatever case the request writes a word in: protection comes from the
+  // snapshot alone (independent review of PR #209: a request that lowercased
+  // a snapshot name, "a builder called grace", must still be refused).
+  thin = false,
 ): Set<ConsultGateReason> {
   const reasons = new Set<ConsultGateReason>();
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
@@ -2143,6 +2204,12 @@ function compareWithSnapshot(
   const copiedWords = unnamed ? new Set<string>() : undefined;
   let copyFromQuestion = false;
   const copyHit = (words: Iterable<string>): void => {
+    // Thin net: a copy is not refused, but its words are judged by the name
+    // rule without the ordinary-word exemption, as at the unnamed level.
+    if (thin) {
+      for (const word of words) copiedWords?.add(word);
+      return;
+    }
     if (!copiedWords || copyFromQuestion) {
       reasons.add('shared_token_run');
       return;

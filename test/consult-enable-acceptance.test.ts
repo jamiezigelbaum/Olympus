@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { privateEvidencePack } from '../src/core/analyst-built-in.ts';
-import { bindConsultJobPolicy, readConsultSettings } from '../src/core/consult-settings.ts';
+import { CONSULT_LIGHT_CLEANUP_INSTRUCTION, bindConsultJobPolicy, readConsultSettings } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultReadiness, ZkapiConsultReply, ZkapiConsultSession, ZkapiOpenControl, ZkapiOpenSessionResult, ZkapiSendControl } from '../src/core/consult-transport-zkapi.ts';
 import type { ConsultWriterInput, ConsultWriterOutcome } from '../src/core/consult-writer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
@@ -300,7 +300,8 @@ describe('C5 acceptance: the Outside help card turns consults on, and off', () =
     const first = await envelope(jobId, panel, delivered);
     expect(first.outside).toEqual({ state: 'idle' });
     expect(first.unanswered).toEqual(GAPS);
-    expect(on.writerCalls).toEqual([{ question: QUESTION, answer: ANSWER, gaps: GAPS }]);
+    // Standard's default (owner decision 2026-10-10): the question as ChatGPT sent it, lightly cleaned.
+    expect(on.writerCalls).toEqual([{ question: QUESTION, answer: '', gaps: [], instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION }]);
     expect(on.opens).toHaveLength(1);
     expect(on.sends).toEqual([{ question: CLEAN_QUESTION, authorized: true }]);
     const next = await envelope(jobId, panel, await on.jobs.claim(jobId, panel.publicKey, 2));

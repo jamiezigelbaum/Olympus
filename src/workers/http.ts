@@ -553,6 +553,12 @@ export const DASHBOARD_CONSULT_CONTROL_PATHS: readonly string[] = [
   // The one-click install of Tor and zkapi-clientd (core/managed-tools.ts):
   // it downloads programs Olympus later runs, so it is held to the same grade.
   '/dashboard/consult/tools/install',
+  // The owner's own writer model (it decides where private evidence goes)
+  // and the writer check (it runs that model): both held to the same grade.
+  '/dashboard/consult/writer',
+  '/dashboard/consult/writer/test',
+  '/dashboard/consult/standard',
+  '/dashboard/consult/ask',
 ];
 
 export function isDashboardConsultControlRoute(request: Request): boolean {

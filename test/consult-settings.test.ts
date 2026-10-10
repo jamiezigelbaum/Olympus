@@ -21,6 +21,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import {
+  CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT,
+  CONSULT_LIGHT_CLEANUP_INSTRUCTION,
+  CONSULT_STANDARD_INSTRUCTION_MAX_CHARS,
+  consultChatgptFrontierModel,
+  consultChatgptModelUnavailableMessage,
+  consultStandardBinding,
   CONSULT_SETTINGS_MAX_BYTES,
   DEFAULT_CONSULT_SETTINGS,
   __consultSettingsTestHooks,
@@ -85,6 +91,30 @@ function placeSettings(home: string, settings: Record<string, unknown>): void {
 }
 
 describe('parseConsultSettings', () => {
+  test('Standard\'s mode (owner decision 2026-10-10): an old file reads as light cleanup; custom needs its own bounded instruction, and only custom has one', () => {
+    const old = parseConsultSettings(VALID)!;
+    expect(consultStandardBinding(old)).toEqual({ mode: 'light_cleanup', instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION });
+    expect(consultStandardBinding(parseConsultSettings({ ...VALID, standardMode: 'as_written' })!)).toEqual({ mode: 'as_written' });
+    const custom = parseConsultSettings({ ...VALID, standardMode: 'custom', standardInstruction: 'Write it in Dutch.' })!;
+    expect(consultStandardBinding(custom)).toEqual({ mode: 'custom', instruction: 'Write it in Dutch.' });
+    for (const bad of [
+      { standardMode: 'custom' },
+      { standardMode: 'custom', standardInstruction: '   ' },
+      { standardMode: 'custom', standardInstruction: 'x'.repeat(CONSULT_STANDARD_INSTRUCTION_MAX_CHARS + 1) },
+      { standardMode: 'custom', standardInstruction: 'a\u0000b' },
+      { standardMode: 'light_cleanup', standardInstruction: 'extra' },
+      { standardMode: 'loud' },
+    ]) expect({ bad, parsed: parseConsultSettings({ ...VALID, ...bad }) }).toEqual({ bad, parsed: undefined });
+  });
+
+  test('the ChatGPT model defaults to Claude Sonnet (owner decision 2026-10-10), the file may override it, and its unavailability reads plainly', () => {
+    expect(CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT).toBe('anthropic/claude-sonnet-5.5');
+    expect(consultChatgptFrontierModel(parseConsultSettings(VALID)!)).toBe('anthropic/claude-sonnet-5.5');
+    expect(consultChatgptFrontierModel(parseConsultSettings({ ...VALID, chatgptFrontierModel: 'google/some-model' })!)).toBe('google/some-model');
+    expect(consultChatgptModelUnavailableMessage(CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT)).toBe('Claude Sonnet isn\'t available through zkAPI right now; choose another model.');
+    expect(consultChatgptModelUnavailableMessage('google/some-model')).not.toContain('Claude');
+  });
+
   test('a file written before the places and technical keys stays valid, with both on; unknown keys still reject', () => {
     const { places: _places, technical: _technical, ...oldDomains } = VALID.domains;
     const old = parseConsultSettings({ ...VALID, domains: oldDomains });
@@ -313,12 +343,21 @@ describe('settings location honours the injected HOME', () => {
 });
 
 describe('per-job binding', () => {
+  test('Standard\'s mode and instruction are bound: a change refuses as stale, even at the same revision', () => {
+    const read = (extra: Record<string, unknown>) => ({ state: 'valid' as const, settings: parseConsultSettings({ ...VALID, ...extra })! });
+    const policy = bindConsultJobPolicy(read({ standardMode: 'custom', standardInstruction: 'One.' }));
+    expect(policy.standard).toEqual({ mode: 'custom', instruction: 'One.' });
+    expect(recheckConsultJobPolicy(policy, read({ standardMode: 'custom', standardInstruction: 'One.' }))).toEqual({ ok: true });
+    expect(recheckConsultJobPolicy(policy, read({ standardMode: 'custom', standardInstruction: 'Two.' }))).toEqual({ ok: false, reason: 'settings_stale' });
+    expect(recheckConsultJobPolicy(policy, read({ standardMode: 'as_written' }))).toEqual({ ok: false, reason: 'settings_stale' });
+  });
+
   test('a job keeps the policy it bound and authorizes only at that revision', () => {
     const home = tempHome();
     const location = { env: { HOME: home } };
     placeSettings(home, VALID);
     const policy = bindConsultJobPolicy(readConsultSettings(location));
-    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false, level: 'unnamed' });
+    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false, level: 'unnamed', writer: null, standard: { mode: 'light_cleanup', instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION } });
     expect(Object.isFrozen(policy) && Object.isFrozen(policy.languages) && Object.isFrozen(policy.domains)).toBe(true);
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: true });
 
@@ -329,6 +368,10 @@ describe('per-job binding', () => {
 
     // A different revision is stale even when it also turned outside help off.
     placeSettings(home, { ...VALID, revision: 5, enabled: false });
+    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
+
+    // A writer named by hand at the bound revision is stale too: the writer selects the gate net.
+    placeSettings(home, { ...VALID, writer: { baseUrl: 'http://192.168.1.20:8090/v1', model: 'home/model' } });
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
 
     // Off at the bound revision (not something a compare-and-swap writer produces) is still off.
@@ -392,6 +435,9 @@ describe('the settings module stays off the hosted surfaces', () => {
   const SETTINGS_MODULE = 'src/core/consult-settings.ts';
   const SETTINGS_IMPORTERS: readonly string[] = [
     'src/core/doctor.ts',
+    // Ask anonymously (owner decision 2026-10-10) reads Standard's mode for
+    // the typed question; it only reads.
+    'src/core/consult-ask.ts',
     // The C4b orchestrator re-reads the settings at the gate and inside
     // final authorization (recheckConsultJobPolicy); it only reads.
     'src/workers/chatgpt/consult-orchestrator.ts',
@@ -405,6 +451,9 @@ describe('the settings module stays off the hosted surfaces', () => {
     // it is also the writer's one caller (test/consult-settings-writer.test.ts
     // holds that the adapter is reachable only from the composition root).
     'src/workers/email-source/dashboard-consult.ts',
+    // `olympus zkapi test-writer` reads the saved writer, level and
+    // languages to run the writer check; it only reads.
+    'src/cli.ts',
   ];
 
   function sourceFiles(dir: string): string[] {
@@ -434,5 +483,32 @@ describe('the settings module stays off the hosted surfaces', () => {
   test('no registered operation (every MCP, native, CLI and remote tool) is a consult settings operation', () => {
     const names = operations.map((operation) => operation.name);
     expect(names.filter((name) => /consult/i.test(name))).toEqual([]);
+  });
+});
+
+describe('the owner\'s writer and the ChatGPT model (2026-10-10)', () => {
+  const base = { v: 1, revision: 3, enabled: true, languages: ['en'], domains: { units: true, countries: true, medicines: true, medicineBrands: false }, strict: false, level: 'unnamed' };
+  test('optional; any HTTP(S) host (loopback, LAN, tailnet); a key reference and a bounded deadline', () => {
+    expect(parseConsultSettings(base)?.writer).toBeUndefined();
+    for (const baseUrl of ['http://127.0.0.1:11434/v1', 'http://192.168.1.20:8080/v1', 'https://delphi.tail1234.ts.net/v1']) {
+      expect(parseConsultSettings({ ...base, writer: { baseUrl, model: 'qwen3-32b' } })?.writer).toEqual({ baseUrl, model: 'qwen3-32b' });
+    }
+    expect(parseConsultSettings({ ...base, writer: { baseUrl: 'http://h:1/v1/', model: 'm', secretRef: 'env:KEY', timeoutMs: 120_000 } })?.writer).toEqual({ baseUrl: 'http://h:1/v1', model: 'm', secretRef: 'env:KEY', timeoutMs: 120_000 });
+    expect(parseConsultSettings({ ...base, chatgptFrontierModel: 'anthropic/some-model' })?.chatgptFrontierModel).toBe('anthropic/some-model');
+  });
+
+  test('anything else makes the whole file invalid (outside help off)', () => {
+    for (const writer of [
+      { baseUrl: 'ftp://h/v1', model: 'm' },
+      { baseUrl: 'http://user:pw@h/v1', model: 'm' },
+      { baseUrl: 'http://h/v1?x=1', model: 'm' },
+      { baseUrl: 'http://h/v1', model: '' },
+      { baseUrl: 'http://h/v1', model: 'a b' },
+      { baseUrl: 'http://h/v1', model: 'm', secretRef: 'plain-key' },
+      { baseUrl: 'http://h/v1', model: 'm', timeoutMs: 1_000 },
+      { baseUrl: 'http://h/v1', model: 'm', apiKey: 'x' },
+      { model: 'm' },
+    ]) expect({ writer, parsed: parseConsultSettings({ ...base, writer }) }).toEqual({ writer, parsed: undefined });
+    expect(parseConsultSettings({ ...base, chatgptFrontierModel: '' })).toBeUndefined();
   });
 });

@@ -5,7 +5,9 @@
 //
 //   {"v": 1, "revision": N, "enabled": bool, "languages": [...],
 //    "domains": {"units", "countries", "places", "technical", "medicines", "medicineBrands"},
-//    "strict": bool, "level": "unnamed" | "general"}
+//    "strict": bool, "level": "unnamed" | "general",
+//    "writer": {"baseUrl", "model", "secretRef"?, "timeoutMs"?},   (optional)
+//    "chatgptFrontierModel": "provider/model"}                    (optional)
 //
 // - Read at every use, never cached, so a change needs no worker restart.
 // - The parser is strict: invalid UTF-8, a duplicated key, an unknown key, a
@@ -24,6 +26,21 @@
 //   which say what this level sends (zkapi-consult-settings.ts, enforced at
 //   send time by the transport). The writer always writes the key.
 //
+// - `writer` (optional, owner decision 2026-10-10; design
+//   docs/design/private-answers.md, "Writer: your own local model") names the
+//   owner's own OpenAI-compatible model server (Ollama, LM Studio, a
+//   llama.cpp server, a home server on the LAN or tailnet) that writes the
+//   outside question in place of the built-in model. It reads the private
+//   evidence, so it is the owner's choice of where that goes: any HTTP(S)
+//   address is accepted, with no allowlist. Absent: the built-in model.
+//   It lives here, not in the sovereignty policy, because sovereignty local
+//   profiles are loopback-only (a home server on the LAN would be refused),
+//   and this file is read at every use, so a change needs no restart.
+// - `chatgptFrontierModel` (optional) is the zkAPI model for questions that
+//   came through ChatGPT, where a model from another provider than OpenAI
+//   is better (OpenAI also holds the ChatGPT conversation). Absent: the
+//   zkAPI route's own `model`. No default is chosen here.
+//
 // This module only reads. The compare-and-swap writer lands with its first
 // caller, the Mac dashboard enable path (stage C5), in its own module; the
 // public `olympus consult` command is C8 and strict mode's approval step is
@@ -32,6 +49,7 @@
 
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
+import { normalizeSecretRef } from './secret-store.ts';
 import {
   CONSULT_LANGUAGE_PACKS,
   DEFAULT_CONSULT_DOMAIN_PACKS,
@@ -64,6 +82,57 @@ export const CONSULT_LEVEL_FOR_NEW_SETUP: ConsultLevel = CONSULT_LEVEL_WHEN_UNSE
  */
 export const CONSULT_LEVEL_FOR_REPAIR: ConsultLevel = 'general';
 
+/** The owner's own model server for the consult writer (`writer` in consult.json). */
+export interface ConsultWriterChoice {
+  /** OpenAI-compatible base URL, usually ending in `/v1`. Any HTTP(S) host the owner chose. */
+  readonly baseUrl: string;
+  readonly model: string;
+  /** `env:NAME` or `store:name`; resolved like the sovereignty profiles' keys, never stored here. */
+  readonly secretRef?: string;
+  /** The writer's deadline in milliseconds (default CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS). */
+  readonly timeoutMs?: number;
+}
+
+/**
+ * How a question is prepared before it leaves at the Standard level (owner
+ * decision 2026-10-10: Standard is open and the user's choice; no built-in
+ * content rules). `as_written`: no model, the question goes out unchanged.
+ * `light_cleanup` (default): the writer follows CONSULT_LIGHT_CLEANUP_INSTRUCTION.
+ * `custom`: the writer follows the user's own instruction, verbatim.
+ */
+export type ConsultStandardMode = 'as_written' | 'light_cleanup' | 'custom';
+export const CONSULT_STANDARD_MODES: readonly ConsultStandardMode[] = Object.freeze(['as_written', 'light_cleanup', 'custom']);
+export const CONSULT_STANDARD_MODE_WHEN_UNSET: ConsultStandardMode = 'light_cleanup';
+export const CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4_000;
+
+/**
+ * The light-cleanup preset, shown in full on the card. Editing it saves the
+ * edited text as a custom instruction.
+ */
+export const CONSULT_LIGHT_CLEANUP_INSTRUCTION = [
+  'Prepare the user\'s question to be sent to an outside model that knows nothing about them.',
+  'Remove names of people and organisations, contact details (addresses, phone numbers, email addresses, handles) and account, reference and ID numbers. Refer to people and organisations by their role instead ("the landlord", "the employer").',
+  'Keep everything else as the user wrote it. You may add details from the material that the outside model needs to answer, with the same removals.',
+].join(' ');
+
+/** The Standard mode a settings file selects (absent: light cleanup). */
+export function consultStandardMode(settings: ConsultSettings): ConsultStandardMode {
+  return settings.standardMode ?? CONSULT_STANDARD_MODE_WHEN_UNSET;
+}
+
+/** The writer instruction for a Standard mode, or undefined for `as_written` (no model). */
+export function consultStandardInstruction(settings: ConsultSettings): string | undefined {
+  const mode = consultStandardMode(settings);
+  if (mode === 'as_written') return undefined;
+  return mode === 'custom' ? settings.standardInstruction : CONSULT_LIGHT_CLEANUP_INSTRUCTION;
+}
+
+/** Bounds of the owner's writer deadline. */
+export const CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS = Object.freeze({ min: 10_000, max: 240_000 });
+export const CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180_000;
+const MAX_MODEL_ID_CHARS = 200;
+const MAX_BASE_URL_CHARS = 500;
+
 export interface ConsultSettings {
   readonly v: typeof CONSULT_SETTINGS_VERSION;
   /** Compare-and-swap counter; 0 means no file has been written. */
@@ -78,6 +147,38 @@ export interface ConsultSettings {
   readonly strict: boolean;
   /** What the consult writer may send. */
   readonly level: ConsultLevel;
+  /** The owner's own writer model; absent means the built-in model writes. */
+  readonly writer?: ConsultWriterChoice;
+  /** The zkAPI model for questions that came through ChatGPT; absent means CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT. */
+  readonly chatgptFrontierModel?: string;
+  /** How the Standard level prepares a question (absent: light cleanup). */
+  readonly standardMode?: ConsultStandardMode;
+  /** The user's own instruction; present exactly when `standardMode` is `custom`. */
+  readonly standardInstruction?: string;
+}
+
+/**
+ * The zkAPI model for questions that came through ChatGPT when the file names
+ * none (owner decision 2026-10-10): Anthropic Claude Sonnet, so the provider
+ * that holds the ChatGPT conversation is not the one that reads the question.
+ * Never replaced by an OpenAI model when the live listing lacks it.
+ */
+export const CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = 'anthropic/claude-sonnet-5.5';
+
+/** The zkAPI model for a question that came through ChatGPT: the file's choice, else Claude Sonnet. */
+export function consultChatgptFrontierModel(settings: ConsultSettings): string {
+  return settings.chatgptFrontierModel ?? CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT;
+}
+
+/**
+ * What the card says when the live zkAPI model listing lacks the ChatGPT
+ * model (the transport's `model_unavailable`). Never a fallback to another
+ * model: the user chooses.
+ */
+export function consultChatgptModelUnavailableMessage(model: string): string {
+  return model === CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT
+    ? 'Claude Sonnet isn\'t available through zkAPI right now; choose another model.'
+    : 'The model chosen for ChatGPT questions isn\'t available through zkAPI right now; choose another model.';
 }
 
 export type ConsultSettingsInvalidReason =
@@ -111,7 +212,9 @@ export const DEFAULT_CONSULT_SETTINGS: ConsultSettings = Object.freeze({
 });
 
 const REQUIRED_TOP_LEVEL_KEYS = ['v', 'revision', 'enabled', 'languages', 'domains', 'strict'] as const;
-const OPTIONAL_TOP_LEVEL_KEYS = ['level'] as const;
+const OPTIONAL_TOP_LEVEL_KEYS = ['level', 'writer', 'chatgptFrontierModel', 'standardMode', 'standardInstruction'] as const;
+const WRITER_REQUIRED_KEYS = ['baseUrl', 'model'] as const;
+const WRITER_OPTIONAL_KEYS = ['secretRef', 'timeoutMs'] as const;
 const DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS) as Array<keyof ConsultDomainPacks>;
 const OPTIONAL_DOMAIN_KEYS: readonly string[] = ['places', 'technical'];
 const LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS) as ConsultLanguage[];
@@ -174,6 +277,29 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
   if (!isPlainObject(domains)) return undefined;
   if (!Object.keys(domains).every((key) => (DOMAIN_KEYS as string[]).includes(key))) return undefined;
   if (!DOMAIN_KEYS.every((key) => key in domains ? typeof domains[key] === 'boolean' : OPTIONAL_DOMAIN_KEYS.includes(key))) return undefined;
+  let writer: ConsultWriterChoice | undefined;
+  if (Object.hasOwn(value, 'writer')) {
+    writer = parseConsultWriterChoice(value.writer);
+    if (!writer) return undefined;
+  }
+  let chatgptFrontierModel: string | undefined;
+  if (Object.hasOwn(value, 'chatgptFrontierModel')) {
+    chatgptFrontierModel = parseModelId(value.chatgptFrontierModel);
+    if (!chatgptFrontierModel) return undefined;
+  }
+  let standardMode: ConsultStandardMode | undefined;
+  if (Object.hasOwn(value, 'standardMode')) {
+    if (typeof value.standardMode !== 'string' || !(CONSULT_STANDARD_MODES as readonly string[]).includes(value.standardMode)) return undefined;
+    standardMode = value.standardMode as ConsultStandardMode;
+  }
+  let standardInstruction: string | undefined;
+  if (Object.hasOwn(value, 'standardInstruction')) {
+    const text = value.standardInstruction;
+    if (typeof text !== 'string' || text.trim().length === 0 || text.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS || /\u0000/.test(text)) return undefined;
+    standardInstruction = text;
+  }
+  // A custom instruction exists exactly when the mode is custom.
+  if ((standardMode === 'custom') !== (standardInstruction !== undefined)) return undefined;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
@@ -182,6 +308,48 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
     domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] as boolean : true])) as unknown as ConsultDomainPacks),
     strict,
     level: level as ConsultLevel,
+    ...(writer ? { writer } : {}),
+    ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}),
+    ...(standardMode ? { standardMode } : {}),
+    ...(standardInstruction !== undefined ? { standardInstruction } : {}),
+  });
+}
+
+function parseModelId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed !== value || trimmed.length > MAX_MODEL_ID_CHARS || /[\u0000-\u001F\u007F\s]/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+/**
+ * The `writer` block: an HTTP(S) base URL without credentials, query or
+ * fragment, a model id, an optional key reference and an optional deadline.
+ * Any host is accepted (loopback, LAN, tailnet): where the owner's own
+ * model runs is the owner's choice (owner decision 2026-10-10).
+ */
+export function parseConsultWriterChoice(value: unknown): ConsultWriterChoice | undefined {
+  if (!isPlainObject(value) || !hasKeys(value, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS)) return undefined;
+  const { baseUrl, secretRef, timeoutMs } = value;
+  if (typeof baseUrl !== 'string' || baseUrl.length > MAX_BASE_URL_CHARS || baseUrl.trim() !== baseUrl) return undefined;
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+  if (url.username || url.password || url.search || url.hash) return undefined;
+  const model = parseModelId(value.model);
+  if (!model) return undefined;
+  if (secretRef !== undefined && (typeof secretRef !== 'string' || !normalizeSecretRef(secretRef))) return undefined;
+  if (timeoutMs !== undefined && (typeof timeoutMs !== 'number' || !Number.isSafeInteger(timeoutMs)
+    || timeoutMs < CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS.min || timeoutMs > CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS.max)) return undefined;
+  return Object.freeze({
+    baseUrl: baseUrl.replace(/\/+$/, ''),
+    model,
+    ...(typeof secretRef === 'string' ? { secretRef: secretRef.trim() } : {}),
+    ...(typeof timeoutMs === 'number' ? { timeoutMs } : {}),
   });
 }
 
@@ -281,6 +449,32 @@ export interface ConsultJobPolicy {
   readonly strict: boolean;
   /** What the writer may send for this job; a change since binding refuses at final authorization. */
   readonly level: ConsultLevel;
+  /**
+   * The owner's own writer as bound at job creation (consult.json `writer`),
+   * or null for the built-in writer. The consult runs this writer, gives it
+   * evidence and applies its gate net from this one value; a different writer
+   * in the file at final authorization refuses (independent review of
+   * PR #209: the writer and the gate net must never disagree).
+   */
+  readonly writer: ConsultWriterChoice | null;
+  /**
+   * How the Standard level prepares the question, bound like the writer: the
+   * mode and, unless `as_written`, the exact instruction the writer follows.
+   */
+  readonly standard: { readonly mode: ConsultStandardMode; readonly instruction?: string };
+}
+
+/** The Standard preparation a settings file selects, as a job binds it. */
+export function consultStandardBinding(settings: ConsultSettings): ConsultJobPolicy['standard'] {
+  const mode = consultStandardMode(settings);
+  const instruction = consultStandardInstruction(settings);
+  return Object.freeze({ mode, ...(instruction !== undefined ? { instruction } : {}) });
+}
+
+/** A writer's identity for comparison: everything that selects where and how the question is written. */
+export function consultWriterIdentity(choice: ConsultWriterChoice | null | undefined): string {
+  if (!choice) return 'built-in';
+  return JSON.stringify([choice.baseUrl, choice.model, choice.secretRef ?? null, choice.timeoutMs ?? null]);
 }
 
 export function bindConsultJobPolicy(read: ConsultSettingsRead): ConsultJobPolicy {
@@ -292,6 +486,8 @@ export function bindConsultJobPolicy(read: ConsultSettingsRead): ConsultJobPolic
     domains: Object.freeze({ ...settings.domains }),
     strict: settings.strict,
     level: settings.level,
+    writer: settings.writer ? Object.freeze({ ...settings.writer }) : null,
+    standard: consultStandardBinding(settings),
   });
 }
 
@@ -309,7 +505,8 @@ export type ConsultJobPolicyRecheck =
  * since the job was created, even one that turned outside help off and on
  * again, refuses. A level change always moves the revision through the
  * writer; the level is compared as well so a file edited by hand without a
- * new revision cannot widen what a bound job sends.
+ * new revision cannot widen what a bound job sends, and so is the writer
+ * (consultWriterIdentity), which selects the gate net.
  */
 export function recheckConsultJobPolicy(policy: ConsultJobPolicy, current: ConsultSettingsRead): ConsultJobPolicyRecheck {
   if (!policy.outsideHelp) return { ok: false, reason: 'bound_off' };
@@ -317,6 +514,10 @@ export function recheckConsultJobPolicy(policy: ConsultJobPolicy, current: Consu
   if (current.state === 'invalid') return { ok: false, reason: 'settings_invalid' };
   if (current.settings.revision !== policy.settingsRevision) return { ok: false, reason: 'settings_stale' };
   if (current.settings.level !== policy.level) return { ok: false, reason: 'settings_stale' };
+  // The writer too: a bound job never sends under another writer's gate net.
+  if (consultWriterIdentity(current.settings.writer) !== consultWriterIdentity(policy.writer ?? null)) return { ok: false, reason: 'settings_stale' };
+  // And how Standard prepares the question: a bound mode never sends under another.
+  if (JSON.stringify(consultStandardBinding(current.settings)) !== JSON.stringify(policy.standard ?? consultStandardBinding(DEFAULT_CONSULT_SETTINGS))) return { ok: false, reason: 'settings_stale' };
   if (!current.settings.enabled) return { ok: false, reason: 'settings_off' };
   return { ok: true };
 }

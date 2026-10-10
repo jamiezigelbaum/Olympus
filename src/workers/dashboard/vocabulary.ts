@@ -2112,18 +2112,75 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** The honesty label: the network route is not verified on macOS, said plainly. */
   experimental: 'Experimental: on macOS, Olympus can\'t yet confirm the connection is anonymous (network route not verified).',
   /** What outside help is, before anything technical (owner, 2026-10-07). */
-  intro: 'When the answer from your computer is missing something, Olympus can ask a top AI model a short question through zkAPI. Payment is anonymous, and with Tor on the provider can\'t see where the question came from. Olympus blocks names and other identifying words before sending, but the provider reads the question.',
+  intro: 'For people running a strong local model at home: ask frontier models anonymously when your model needs help. When the answer from your computer is missing something, Olympus can send a top AI model a short question through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.',
   /** What zkAPI may send (owner titles 2026-10-08; internal ids 'unnamed' and 'general'). */
   levelTitle: 'What may zkAPI send?',
+  /** Who writes the outside question (owner decision 2026-10-10): the built-in model, or the owner's own. No gate on the model. */
+  writer: {
+    title: 'Who writes the question',
+    builtInShort: 'the model built into Olympus',
+    intro: 'By default the small model built into Olympus writes the outside question from the first answer. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it reads the private material the answer used, decides whether a frontier model would help, and writes the question. At Strict, Olympus\'s privacy check still runs before anything is sent; at Standard, only passwords, keys and tokens are stopped. This works best with a substantial model.',
+    currentBuiltIn: 'Now: the model built into Olympus.',
+    currentOwn: 'Now: your model {model} at {address}.',
+    baseUrl: 'Your model server\'s address (OpenAI-compatible, usually ending in /v1)',
+    model: 'Model name',
+    secretRef: 'Key reference, if your server needs one (optional: env:NAME or store:name)',
+    where: 'Your private material goes to this address, so use a server you control. A server on another computer is reached over your network; prefer https or a private network such as a tailnet.',
+    keyMissing: 'The key reference {secretRef} is not set on this computer, so your model cannot be used until it is.',
+    frontierModel: 'zkAPI model for questions from ChatGPT (optional)',
+    frontierHint: 'A model from a provider other than OpenAI is better here: OpenAI also holds your ChatGPT conversation and could link the two. Empty uses Claude Sonnet.',
+    openAiNote: 'Questions from ChatGPT now go to {model}, an OpenAI model. OpenAI also holds your ChatGPT conversation; a model from another provider is better here.',
+    save: 'Save',
+    useBuiltIn: 'Use the built-in model',
+    testTitle: 'Test your model',
+    testIntro: 'Runs six invented cases through your model and Olympus\'s privacy check, and shows the questions it wrote. Nothing is sent to zkAPI and nothing costs money. It runs only when you click, and can take several minutes on a home server.',
+    testNeedsChoice: 'Choose and save your model first.',
+    test: 'Test your model',
+    testAgain: 'Test again',
+    testStarting: 'Starting the test…',
+    testProgress: 'Testing: {done} of {total} cases done…',
+    testSummary: '{cases} cases: {written} written, {declined} with no question, {failed} failed. The privacy check would send {passed} and refuse {refused}.',
+    testNoLeaks: 'No invented name, place or figure got past the privacy check.',
+    testLeaks: '{n} cases let an invented name, place or figure past the privacy check. Do not rely on this model yet.',
+    testDocumentQuestions: '{n} cases asked about a document the frontier model cannot see.',
+    testPassed: 'would be sent',
+    testRefused: 'refused by the privacy check ({reasons})',
+    testDeclined: 'no question (the model decided outside help would not help)',
+    testFailed: 'no usable reply ({reason})',
+    testLeakMark: 'leak',
+    testDocumentMark: 'asks about a document',
+  },
   levels: {
     unnamed: {
       title: 'Standard (recommended)',
-      body: 'Sends your actual question with names, places, exact dates, amounts and account numbers removed. Gets real answers.',
+      body: 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can\'t tell who sent it.',
     },
     general: {
       title: 'Strict',
-      body: 'Sends only general questions; nothing about your situation leaves. Safest, but rarely helpful.',
+      body: 'Your model rewrites it into general questions first (Vitalik Buterin\'s approach).',
     },
+  },
+  /** How Standard prepares a question (owner decision 2026-10-10: open, the user's choice). */
+  standard: {
+    title: 'How should your model prepare a question before it leaves?',
+    modes: {
+      as_written: { title: 'Exactly as written', body: 'No model step: the question goes out unchanged.' },
+      light_cleanup: { title: 'Lightly cleaned (default)', body: 'Your model follows this instruction. Edit it to make it your own.' },
+      custom: { title: 'By your own instruction', body: 'Your model follows exactly what you write here.' },
+    },
+    instructionLabel: 'Instruction for your model',
+    save: 'Save',
+  },
+  /** "Ask anonymously" (owner decision 2026-10-10): a typed question, prepared as Standard is set, sent through zkAPI; never ChatGPT. */
+  ask: {
+    title: 'Ask anonymously',
+    intro: 'Type a question. It is prepared the way you chose above, sent through zkAPI, and the answer shows here. It never goes to ChatGPT. Each question costs a little from your zkAPI balance.',
+    label: 'Your question',
+    send: 'Ask',
+    running: 'Asking anonymously… Starting a private route takes a minute or two.',
+    sentTitle: 'What was sent',
+    replyTitle: 'Answer',
+    notSent: 'Nothing was sent.',
   },
   levelSave: 'Save',
   /** Standard chosen while the statements are not accepted: they show inline with one action. */
@@ -2171,7 +2228,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** Two short lines at first view; the fuller detail sits behind disclosureMore. */
   disclosureShort: [
     'It asks on its own: when an answer from your computer is missing something, Olympus may send one short question. You can turn it off at any time.',
-    'The provider reads the question, with names and identifying details removed; zkAPI hides who paid.',
+    'The provider reads the question, prepared the way you choose; zkAPI hides who paid.',
   ],
   disclosureMore: 'Everything to know first',
   /**
