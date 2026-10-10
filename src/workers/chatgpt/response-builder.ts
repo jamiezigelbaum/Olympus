@@ -612,7 +612,8 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     structuredContent: {
       status: 'refused',
       code: refusal.code,
-      ...(record.outcome === 'sent_failed' || record.outcome === 'unknown' ? { outcome: record.outcome, note: 'The question had already left the user\'s computer when this failed, so it may have used some of their zkAPI balance; say so, and do not ask it again without asking the user.' } : {}),
+      // A 402 from zkAPI refuses before any spend, so it never carries the may-have-used note.
+      ...((record.outcome === 'sent_failed' || record.outcome === 'unknown') && refusal.code !== 'balance_run_out' ? { outcome: record.outcome, note: 'The question had already left the user\'s computer when this failed, so it may have used some of their zkAPI balance; say so, and do not ask it again without asking the user.' } : {}),
       message: refusal.message,
     },
   };

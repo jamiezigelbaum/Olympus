@@ -109,6 +109,9 @@ describe('refusals as ChatGPT and the panel tell them', () => {
     expect(result.content[0]!.text).toBe('Not answered: Your zkAPI balance has run out. Olympus on your computer has the details.');
     expect(JSON.stringify(result)).not.toMatch(/https?:|add |daemonCode|funding/i);
     expect(resultOf(raw)).toMatchObject({ state: 'refused', code: 'balance_run_out', message: CHATGPT_ZKAPI_BALANCE_RUN_OUT });
+    // zkAPI refuses an empty balance before any spend: no may-have-used note beside it.
+    expect(result.structuredContent).not.toHaveProperty('note');
+    expect(resultOf(raw)).not.toHaveProperty('outcome');
     // Any other daemon error keeps its own words.
     expect(askAnonymouslyToolResult({ ...raw, daemonCode: 'upstream_error' }).structuredContent).toMatchObject({ code: 'daemon_error', message: ZKAPI_CONSULT_ERROR_MESSAGES.daemon_error });
   });

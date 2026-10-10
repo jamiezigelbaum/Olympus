@@ -313,7 +313,7 @@ export function resultOf(outcome: ConsultAskResult): PrivateQuestionResultV1 {
     state: 'refused',
     code: refusal.code,
     message: refusal.message,
-    ...('outcome' in outcome && outcome.outcome !== undefined ? { outcome: outcome.outcome } : {}),
+    ...('outcome' in outcome && outcome.outcome !== undefined && refusal.code !== 'balance_run_out' ? { outcome: outcome.outcome } : {}),
     ...('sent' in outcome && outcome.sent !== undefined ? { sent: outcome.sent } : {}),
   };
 }

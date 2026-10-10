@@ -121715,7 +121715,7 @@ function askAnonymouslyToolResult(raw) {
     structuredContent: {
       status: "refused",
       code: refusal2.code,
-      ...record3.outcome === "sent_failed" || record3.outcome === "unknown" ? { outcome: record3.outcome, note: "The question had already left the user's computer when this failed, so it may have used some of their zkAPI balance; say so, and do not ask it again without asking the user." } : {},
+      ...(record3.outcome === "sent_failed" || record3.outcome === "unknown") && refusal2.code !== "balance_run_out" ? { outcome: record3.outcome, note: "The question had already left the user's computer when this failed, so it may have used some of their zkAPI balance; say so, and do not ask it again without asking the user." } : {},
       message: refusal2.message
     }
   };
@@ -126167,7 +126167,7 @@ function resultOf(outcome) {
     state: "refused",
     code: refusal2.code,
     message: refusal2.message,
-    ..."outcome" in outcome && outcome.outcome !== undefined ? { outcome: outcome.outcome } : {},
+    ..."outcome" in outcome && outcome.outcome !== undefined && refusal2.code !== "balance_run_out" ? { outcome: outcome.outcome } : {},
     ..."sent" in outcome && outcome.sent !== undefined ? { sent: outcome.sent } : {}
   };
 }
