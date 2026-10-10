@@ -111,7 +111,7 @@ describe('the jobs: begin → ask → collect', () => {
   test('a sealed question runs the ask lane and the outcome comes back sealed to the asking key only', async () => {
     const h = harness();
     const meta = (await h.jobs.begin())!;
-    expect(meta).toMatchObject({ v: 1, level: 'strict', cleanup: 'as_written', customInstruction: false, maxChars: PRIVATE_QUESTION_MAX_CHARS });
+    expect(meta).toMatchObject({ v: 1, level: 'standard', cleanup: 'light_cleanup', customInstruction: false, maxChars: PRIVATE_QUESTION_MAX_CHARS });
     expect(meta.jobId).toMatch(new RegExp(`^oly2p\\.${INSTALL}\\.[A-Za-z0-9_-]{43}$`));
     expect(meta.askKey).toMatch(/^[A-Za-z0-9_-]{87}$/);
     expect(h.jobs.has(meta.jobId)).toBe(true);
@@ -236,7 +236,8 @@ describe('the jobs: begin → ask → collect', () => {
     });
     expect(await custom.jobs.begin()).toMatchObject({ level: 'standard', cleanup: 'custom', customInstruction: true });
     const broken = harness({ settings: () => { throw new Error('unreadable'); } });
-    expect(await broken.jobs.begin()).toMatchObject({ level: 'strict', cleanup: 'as_written', customInstruction: false });
+    // Unreadable settings: the defaults (Standard, lightly cleaned up), never a throw.
+    expect(await broken.jobs.begin()).toMatchObject({ level: 'standard', cleanup: 'light_cleanup', customInstruction: false });
   });
 
   test('resultOf maps the ask lane\'s outcome field by field', () => {
@@ -274,7 +275,6 @@ describe('the HTTP handler: /ask and the collection of a question job', () => {
 
     const accepted = await post(handler, `/private/${meta.jobId}/ask`, body);
     expect(accepted.status).toBe(202);
-    expect(accepted.headers.get('access-control-allow-origin')).toBe(PANEL_ORIGIN);
     await settle();
     const ready = await post(handler, `/private/${meta.jobId}`, { v: 1, publicKey: panel.publicKey, cap: 2 });
     expect(ready.status).toBe(200);

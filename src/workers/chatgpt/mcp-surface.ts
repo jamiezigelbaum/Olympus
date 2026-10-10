@@ -49,6 +49,7 @@ import {
   dashboardToolResult,
   errorToolResult,
   openPrivateQuestionToolResult,
+  privateQuestionToolMeta,
   searchToolResult,
   sourceStatusToolResult,
   type ChatGptToolResult,
@@ -322,6 +323,7 @@ export const OPEN_PRIVATE_QUESTION_TOOL: ChatGptToolDefinition = {
     'to type their question in the panel, and never ask what it is or what it answered. {status: "unavailable"}: tell the user why in those words.',
   ].join(' '),
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  _meta: privateQuestionToolMeta(),
   // The panel sends a paid question from the user's computer: neither read-only nor closed-world.
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   securitySchemes: OAUTH2_REQUIRED,

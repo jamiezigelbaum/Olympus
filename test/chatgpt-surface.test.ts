@@ -879,7 +879,8 @@ describe('ChatGPT MCP surface over the remote handler', () => {
       expect(result._meta.ui).toEqual({ resourceUri: PRIVATE_QUESTION_RESOURCE_VERSIONED_URI });
       expect(result._meta['openai/outputTemplate']).toBe(PRIVATE_QUESTION_RESOURCE_VERSIONED_URI);
       const meta = result._meta[PRIVATE_QUESTION_META_KEY];
-      expect(meta).toMatchObject({ v: 1, level: 'strict', cleanup: 'as_written', customInstruction: false, maxChars: 4000 });
+      // The dashboard default (consult.json absent): Standard, lightly cleaned up.
+      expect(meta).toMatchObject({ v: 1, level: 'standard', cleanup: 'light_cleanup', customInstruction: false, maxChars: 4000 });
       expect(meta.jobId).toMatch(/^oly2p\.a{32}\.[A-Za-z0-9_-]{43}$/);
       expect(meta.askKey).toMatch(/^[A-Za-z0-9_-]{87}$/);
       // Neither the job id nor the key is in what the model reads.
@@ -1062,7 +1063,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     const client = await connectClient();
     try {
       const { tools } = await client.listTools();
-      expect(tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'open_private_question', 'source_answer', 'source_answer_result', 'source_index_status']);
+      expect(tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'source_answer', 'source_answer_result', 'source_index_status']);
       expect(tools.some((tool) => tool.name === DASHBOARD_TOOL_NAME)).toBe(false);
     } finally {
       await client.close();

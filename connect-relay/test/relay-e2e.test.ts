@@ -309,6 +309,7 @@ describe('routing', () => {
         'source_answer',
         'source_answer_result',
         'ask_anonymously',
+        'open_private_question',
         'olympus_connect_source',
         'olympus_scope_list',
         'olympus_scope_set',

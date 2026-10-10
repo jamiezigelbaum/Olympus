@@ -557,7 +557,8 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
         if (value === cleanup) option.selected = true;
         select.appendChild(option);
       }
-      if (!choices.some(([value]) => value === cleanup)) { cleanup = 'as_written'; select.value = cleanup; }
+      if (!choices.some(([value]) => value === cleanup)) cleanup = 'as_written';
+      select.value = cleanup;
       select.addEventListener('change', () => { cleanup = select.value; });
       prep.appendChild(select);
       form.appendChild(prep);
