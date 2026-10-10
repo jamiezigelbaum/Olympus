@@ -109,3 +109,38 @@ export async function generatePanelKeyPair(): Promise<{ privateKey: CryptoKey; p
   const pair = await subtle().generateKey({ name: 'ECDH', namedCurve: PRIVATE_ANSWER_CURVE }, false, ['deriveBits']) as CryptoKeyPair;
   return { privateKey: pair.privateKey, publicKey: toBase64Url(new Uint8Array(await subtle().exportKey('raw', pair.publicKey))) };
 }
+
+/**
+ * The engine's key pair for one private question job: the panel seals the
+ * question to its public key (private-question-contract.ts). Same curve and
+ * derivation as the answer's seal, with the panel's claim key on the other
+ * side; the derived AES key differs from the answer's (a fresh engine key
+ * seals each answer), so nothing is encrypted twice under one key.
+ */
+export async function generateEngineKeyPair(): Promise<{ privateKey: CryptoKey; publicKey: string }> {
+  return generatePanelKeyPair();
+}
+
+/** A sealed question: the panel's AES-GCM output under its claim key and the engine's job key. */
+export interface SealedPrivateQuestion {
+  iv: string;
+  ciphertext: string;
+}
+
+/** The panel side (and tests): seals a question to the engine's job key with the panel's own private key. */
+export async function sealPrivateQuestion(jobId: string, panelPrivateKey: CryptoKey, engineKey: CryptoKey, plaintext: string): Promise<SealedPrivateQuestion> {
+  const key = await aesKey(panelPrivateKey, engineKey, jobId, 'encrypt');
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const ciphertext = await subtle().encrypt({ name: 'AES-GCM', iv, additionalData: utf8(jobId) }, key, utf8(plaintext));
+  return { iv: toBase64Url(iv), ciphertext: toBase64Url(new Uint8Array(ciphertext)) };
+}
+
+/** The engine side: opens a sealed question with the job's private key and the panel's public key. Throws when malformed. */
+export async function openPrivateQuestion(jobId: string, enginePrivateKey: CryptoKey, panelKey: CryptoKey, sealed: { iv: unknown; ciphertext: unknown }): Promise<string> {
+  const iv = fromBase64Url(sealed.iv, IV_BYTES);
+  const ciphertext = fromBase64Url(sealed.ciphertext);
+  if (!iv || !ciphertext || ciphertext.byteLength > 32_768) throw new Error('malformed sealed question');
+  const key = await aesKey(enginePrivateKey, panelKey, jobId, 'decrypt');
+  const plaintext = await subtle().decrypt({ name: 'AES-GCM', iv, additionalData: utf8(jobId) }, key, ciphertext);
+  return new TextDecoder().decode(plaintext);
+}

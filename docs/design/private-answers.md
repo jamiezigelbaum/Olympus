@@ -284,6 +284,17 @@ https or a private network.
 Ongoing: weekly use, the balance, the estimated 30-day expiry date on the
 card (a reminder before it is not built yet), and one-click off.
 
+## A private question ChatGPT never sees (added 2026-10-10)
+
+The `ask_anonymously` tool keeps the question out of the provider's hands but
+not out of ChatGPT's: the user typed it into the conversation. For a question
+the user does not want ChatGPT to see either, `open_private_question` opens a
+panel in the ChatGPT reply where the question is typed, sealed to the user's
+own computer, asked through the same lane (writer, gate, zkAPI, the provider
+rule) and answered in the panel. ChatGPT learns that a panel opened and
+nothing else. Protocol and proof: docs/design/chatgpt-plugin.md "Private
+question panel".
+
 ## Known gaps
 
 - **Funding.** Olympus never runs `zkapi-clientd config` (a standing security
