@@ -252,7 +252,8 @@ describe('asking', () => {
     expect(host.asks).toHaveLength(1);
     const ask = host.asks[0]!;
     expect(ask.url).toBe(`${RELAY}/private/${JOB}/ask`);
-    expect(ask.body).toMatchObject({ v: 1, cap: 2 });
+    expect(ask.body).toMatchObject({ v: 1 });
+    expect(Object.keys(ask.body).sort()).toEqual(['ciphertext', 'iv', 'publicKey', 'v']);
     expect(ask.body.publicKey).toMatch(/^[A-Za-z0-9_-]{87}$/);
     // The relay saw ciphertext only; the engine side opened the question.
     expect(JSON.stringify(ask.body)).not.toContain('Orchard');

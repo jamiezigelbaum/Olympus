@@ -4517,7 +4517,6 @@ export async function main(): Promise<void> {
         question: input.question,
         level: input.level,
         ...(input.cleanup !== undefined ? { cleanup: input.cleanup } : {}),
-        origin: 'agent',
         callerProvider: 'openai',
         signal: input.signal,
       })

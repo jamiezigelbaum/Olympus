@@ -37,7 +37,6 @@ export interface ChatGptPrivateQuestionConfig {
   heightResendMs: number;
   initFallbackMs: number;
   keyStore: { database: string; store: string; maxAgeMs: number; timeoutMs: number };
-  capability: number;
 }
 
 export interface ChatGptPrivateQuestionPageOptions {
@@ -397,7 +396,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       const response = await bounded<Response>((window as Any).fetch(config.relayOrigin + '/private/' + jobId + '/ask', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ v: 1, publicKey: keys.publicKey, cap: config.capability, iv: sealed.iv, ciphertext: sealed.ciphertext }),
+        body: JSON.stringify({ v: 1, publicKey: keys.publicKey, iv: sealed.iv, ciphertext: sealed.ciphertext }),
         ...(controller ? { signal: controller.signal } : {}),
       }), config.requestTimeoutMs, controller);
       if (mine !== run) return;
@@ -438,7 +437,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
           response = await bounded<Response>((window as Any).fetch(config.relayOrigin + '/private/' + jobId, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ v: 1, publicKey: keys.publicKey, cap: config.capability }),
+            body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
             ...(controller ? { signal: controller.signal } : {}),
           }), Math.min(config.requestTimeoutMs, left), controller);
           try { body = await bounded(response.json(), Math.min(config.requestTimeoutMs, deadline - Date.now()), controller); } catch { body = null; }
@@ -779,7 +778,6 @@ export function chatgptPrivateQuestionPageHtml(options: ChatGptPrivateQuestionPa
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
     keyStore: { ...CHATGPT_PRIVATE_QUESTION_KEY_STORE, ...options.keyStore },
-    capability: 2,
   };
   return [
     '<!doctype html>',

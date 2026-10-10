@@ -74,7 +74,7 @@ async function panelAsk(meta: PrivateQuestionMetaV1, plaintext: unknown) {
   const panel = await generatePanelKeyPair();
   const engineKey = (await importPanelPublicKey(meta.askKey))!.key;
   const sealed = await sealPrivateQuestion(meta.jobId, panel.privateKey, engineKey, JSON.stringify(plaintext));
-  return { panel, body: { v: 1, publicKey: panel.publicKey, cap: 2, ...sealed } };
+  return { panel, body: { v: 1, publicKey: panel.publicKey, ...sealed } };
 }
 
 async function settle(): Promise<void> {
