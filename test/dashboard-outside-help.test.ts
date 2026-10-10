@@ -234,7 +234,7 @@ describe('the Outside help page: states and copy', () => {
     // the fee buffer, the API key, key reuse, the operator and proof setup, the route not verified.
     const more = html.slice(html.indexOf('data-outside-disclosure-more'));
     const fuller = visibleText(more.slice(0, more.indexOf('</details>')));
-    for (const needle of ['within about five minutes', 'counts each question at the amount held for its model', 'no daily limit unless you set one', 'There is no top-up', 'estimates the 30-day date',
+    for (const needle of ['only when you ask your agent to use Olympus zkAPI', 'counts each question at the amount held for its model', 'no daily limit unless you set one', 'There is no top-up', 'estimates the 30-day date',
       'fee buffer', 'require an API key', 'key reuse is on', 'pause deposits and withdrawals', 'proof setup', 'cannot yet confirm the network route is anonymous']) expect(fuller).toContain(needle);
     // And the setup steps name the exact commands.
     for (const needle of ['--key-reuse-window-seconds 0', '--require-api-key', 'balance estimated to expire']) expect(text).toContain(needle);

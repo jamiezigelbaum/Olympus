@@ -24936,7 +24936,7 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      outsideHelp: { title: "Outside help", line: "Anonymous answers (zkAPI)" },
+      outsideHelp: { title: "Anonymous answers", line: "Ask top AI models without saying who you are" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
     locked: "Open dashboard controls first",
