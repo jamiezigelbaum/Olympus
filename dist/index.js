@@ -13566,7 +13566,8 @@ function operationCallerToWire(caller) {
   return {
     surface: caller.surface,
     ...caller.connectionId ? { connection_id: caller.connectionId } : {},
-    ...displayName ? { display_name: displayName } : {}
+    ...displayName ? { display_name: displayName } : {},
+    ...caller.provider ? { provider: caller.provider } : {}
   };
 }
 var inProcessRemoteRequests = new WeakSet;
@@ -13656,7 +13657,8 @@ class EmailClient {
         ...options.level ? { level: options.level } : {},
         ...options.cleanup ? { cleanup: options.cleanup } : {},
         ...options.remember !== undefined ? { remember: options.remember } : {},
-        ...options.model ? { model: options.model } : {}
+        ...options.model ? { model: options.model } : {},
+        ...options.caller ? { caller: operationCallerToWire(options.caller) } : {}
       })
     }, {
       timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS,
@@ -18624,7 +18626,7 @@ var DEFAULT_CONSULT_SETTINGS = Object.freeze({
   level: CONSULT_LEVEL_FOR_NEW_SETUP
 });
 var REQUIRED_TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
-var OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel", "standardMode", "standardInstruction", "levelChosen"];
+var OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel", "claudeFrontierModel", "standardMode", "standardInstruction", "levelChosen"];
 var WRITER_REQUIRED_KEYS = ["baseUrl", "model"];
 var WRITER_OPTIONAL_KEYS = ["secretRef", "timeoutMs"];
 var DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
@@ -18674,6 +18676,12 @@ function parseConsultSettings(value) {
     if (!chatgptFrontierModel)
       return;
   }
+  let claudeFrontierModel;
+  if (Object.hasOwn(value, "claudeFrontierModel")) {
+    claudeFrontierModel = parseModelId(value.claudeFrontierModel);
+    if (!claudeFrontierModel)
+      return;
+  }
   let standardMode;
   if (Object.hasOwn(value, "standardMode")) {
     if (typeof value.standardMode !== "string" || !CONSULT_STANDARD_MODES.includes(value.standardMode))
@@ -18701,6 +18709,7 @@ function parseConsultSettings(value) {
     level,
     ...writer ? { writer } : {},
     ...chatgptFrontierModel ? { chatgptFrontierModel } : {},
+    ...claudeFrontierModel ? { claudeFrontierModel } : {},
     ...standardMode ? { standardMode } : {},
     ...standardInstruction !== undefined ? { standardInstruction } : {},
     ...value.levelChosen === true ? { levelChosen: true } : {}
@@ -20366,7 +20375,7 @@ var ASK_ANONYMOUSLY_PARAMS = {
   },
   cleanup: { type: "string", description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
   remember: { type: "boolean", description: "Save this level (and cleanup) as the default for later questions, so the user is not asked again." },
-  model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one. Omit to use the configured model." },
+  model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; a model from the provider hosting this conversation is refused. Omit to use the model configured for this provider." },
   timeoutMs: { type: "number", description: "How long to wait for the answer, in milliseconds (default 1200000; a zkAPI route can take minutes; inside OpenClaw the wait is capped at 600000)." }
 };
 var operations = [
@@ -20762,7 +20771,7 @@ var operations = [
     description: [
       "Ask a frontier model one question anonymously through zkAPI, paid per question from the user's own zkAPI balance; nothing identifies them and the provider cannot tie it to an account.",
       "Use it only when the user asks to ask anonymously, privately or through Olympus zkAPI, or to use a named model without being tracked. Only the question goes out: no documents, no history.",
-      'Returns {ok: true, reply, sent, level, rewritten}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent".',
+      'Returns {ok: true, reply, sent, level, rewritten, model}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent". The model is one from another provider than the one hosting this conversation.',
       'Returns {ok: false, code: "needs_choice", message, options} the first time: ask the user once (Strict or Standard), then call again with level, and remember=true to keep it.',
       "Any other {ok: false, message} is a refusal to tell the user in those words (a secret in the question, no route set up, the daily spend limit).",
       'A zkAPI answer can take minutes: pass timeoutMs 600000 where you can. If the result is {"status": "working", "job_id": ...}, the answer is still coming: call source_answer_result with that job_id (again while it says working) rather than asking again.'
@@ -20789,6 +20798,7 @@ var operations = [
         ...model !== undefined ? { model } : {},
         ...timeoutMs !== undefined ? { timeoutMs } : {},
         ...insideGateway ? {} : { maxTimeoutMs: CONSULT_ASK_CLIENT_TIMEOUT_MS },
+        ...ctx.caller ? { caller: ctx.caller } : {},
         ...signal ? { signal } : {}
       });
       const jobs = ctx.sourceAnswerJobs;
@@ -21773,7 +21783,8 @@ function askAnonymouslyContentText(payload) {
     const how = result.rewritten ? "the question was rewritten by your model before it left" : "sent as written";
     const hidden = result.networkIdentity === "hidden";
     const heading = hidden ? "Anonymous answer (zkAPI, " : "Answer through zkAPI with the network address visible (Tor is off on this route: payment privacy only; ";
-    const lines = [heading + level + "; " + how + "):", result.reply];
+    const model = typeof result.model === "string" ? "; answered by " + result.model : "";
+    const lines = [heading + level + "; " + how + model + "):", result.reply];
     if (result.rewritten && typeof result.sent === "string")
       lines.push("", "Sent:", result.sent);
     if (typeof result.note === "string")

@@ -7,7 +7,8 @@
 //    "domains": {"units", "countries", "places", "technical", "medicines", "medicineBrands"},
 //    "strict": bool, "level": "unnamed" | "general",
 //    "writer": {"baseUrl", "model", "secretRef"?, "timeoutMs"?},   (optional)
-//    "chatgptFrontierModel": "provider/model"}                    (optional)
+//    "chatgptFrontierModel": "provider/model",                     (optional)
+//    "claudeFrontierModel": "provider/model"}                      (optional)
 //
 // - Read at every use, never cached, so a change needs no worker restart.
 // - The parser is strict: invalid UTF-8, a duplicated key, an unknown key, a
@@ -37,9 +38,15 @@
 //   profiles are loopback-only (a home server on the LAN would be refused),
 //   and this file is read at every use, so a change needs no restart.
 // - `chatgptFrontierModel` (optional) is the zkAPI model for questions that
-//   came through ChatGPT, where a model from another provider than OpenAI
-//   is better (OpenAI also holds the ChatGPT conversation). Absent: the
-//   zkAPI route's own `model`. No default is chosen here.
+//   came through ChatGPT or another OpenAI-hosted agent, where a model from
+//   another provider than OpenAI is better (OpenAI also holds the
+//   conversation). Absent: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT (Claude
+//   Sonnet). `claudeFrontierModel` (optional) is the same for questions from
+//   an Anthropic-hosted agent (Claude Code, Claude Desktop); absent:
+//   CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT (an OpenAI model). An agent whose
+//   provider is unknown (OpenClaw, the CLI) uses the ChatGPT setting
+//   (owner decision 2026-10-10: never the provider that holds the
+//   conversation; see consultFrontierModelFor).
 //
 // This module only reads. The compare-and-swap writer lands with its first
 // caller, the Mac dashboard enable path (stage C5), in its own module; the
@@ -149,8 +156,10 @@ export interface ConsultSettings {
   readonly level: ConsultLevel;
   /** The owner's own writer model; absent means the built-in model writes. */
   readonly writer?: ConsultWriterChoice;
-  /** The zkAPI model for questions that came through ChatGPT; absent means CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT. */
+  /** The zkAPI model for questions from ChatGPT or another OpenAI-hosted agent; absent means CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT. */
   readonly chatgptFrontierModel?: string;
+  /** The zkAPI model for questions from an Anthropic-hosted agent (Claude); absent means CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT. */
+  readonly claudeFrontierModel?: string;
   /** How the Standard level prepares a question (absent: light cleanup). */
   readonly standardMode?: ConsultStandardMode;
   /** The user's own instruction; present exactly when `standardMode` is `custom`. */
@@ -175,6 +184,49 @@ export const CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = 'anthropic/claude-sonnet-5
 /** The zkAPI model for a question that came through ChatGPT: the file's choice, else Claude Sonnet. */
 export function consultChatgptFrontierModel(settings: ConsultSettings): string {
   return settings.chatgptFrontierModel ?? CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT;
+}
+
+/**
+ * The zkAPI model for a question from an Anthropic-hosted agent when the
+ * file names none (owner decision 2026-10-10): an OpenAI model, so the
+ * provider that holds the Claude conversation is not the one that reads the
+ * question. Like the ChatGPT default, never replaced when the live listing
+ * lacks it: the user chooses another (`model`, or the file).
+ */
+export const CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT = 'openai/gpt-5.5';
+
+/** The zkAPI model for a question from an Anthropic-hosted agent: the file's choice, else CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT. */
+export function consultClaudeFrontierModel(settings: ConsultSettings): string {
+  return settings.claudeFrontierModel ?? CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT;
+}
+
+/**
+ * The provider hosting the agent that asks: OpenAI (ChatGPT, through the
+ * relay's pinned client ids) or Anthropic (a Claude client, by its MCP
+ * client name). Unknown callers (OpenClaw, the CLI) have none.
+ */
+export type ConsultCallerProvider = 'openai' | 'anthropic';
+export const CONSULT_CALLER_PROVIDERS: readonly ConsultCallerProvider[] = ['openai', 'anthropic'];
+
+/**
+ * The zkAPI model for an agent's question by who hosts the agent: an
+ * Anthropic-hosted agent gets the Claude setting (an OpenAI model by
+ * default), everything else the ChatGPT setting (Claude Sonnet by default).
+ * The unknown case takes the ChatGPT setting because ChatGPT is the surface
+ * most questions come through.
+ */
+export function consultFrontierModelFor(settings: ConsultSettings, provider: ConsultCallerProvider | undefined): string {
+  return provider === 'anthropic' ? consultClaudeFrontierModel(settings) : consultChatgptFrontierModel(settings);
+}
+
+/**
+ * The provider a zkAPI model id names (`openai/gpt-5.5` → `openai`), for
+ * the cross-provider rule on a one-off `model`; undefined when the id names
+ * neither of the hosting providers.
+ */
+export function consultModelProvider(model: string): ConsultCallerProvider | undefined {
+  const prefix = model.slice(0, model.indexOf('/')).toLowerCase();
+  return (CONSULT_CALLER_PROVIDERS as readonly string[]).includes(prefix) ? prefix as ConsultCallerProvider : undefined;
 }
 
 /**
@@ -219,7 +271,7 @@ export const DEFAULT_CONSULT_SETTINGS: ConsultSettings = Object.freeze({
 });
 
 const REQUIRED_TOP_LEVEL_KEYS = ['v', 'revision', 'enabled', 'languages', 'domains', 'strict'] as const;
-const OPTIONAL_TOP_LEVEL_KEYS = ['level', 'writer', 'chatgptFrontierModel', 'standardMode', 'standardInstruction', 'levelChosen'] as const;
+const OPTIONAL_TOP_LEVEL_KEYS = ['level', 'writer', 'chatgptFrontierModel', 'claudeFrontierModel', 'standardMode', 'standardInstruction', 'levelChosen'] as const;
 const WRITER_REQUIRED_KEYS = ['baseUrl', 'model'] as const;
 const WRITER_OPTIONAL_KEYS = ['secretRef', 'timeoutMs'] as const;
 const DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS) as Array<keyof ConsultDomainPacks>;
@@ -294,6 +346,11 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
     chatgptFrontierModel = parseModelId(value.chatgptFrontierModel);
     if (!chatgptFrontierModel) return undefined;
   }
+  let claudeFrontierModel: string | undefined;
+  if (Object.hasOwn(value, 'claudeFrontierModel')) {
+    claudeFrontierModel = parseModelId(value.claudeFrontierModel);
+    if (!claudeFrontierModel) return undefined;
+  }
   let standardMode: ConsultStandardMode | undefined;
   if (Object.hasOwn(value, 'standardMode')) {
     if (typeof value.standardMode !== 'string' || !(CONSULT_STANDARD_MODES as readonly string[]).includes(value.standardMode)) return undefined;
@@ -318,6 +375,7 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
     level: level as ConsultLevel,
     ...(writer ? { writer } : {}),
     ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}),
+    ...(claudeFrontierModel ? { claudeFrontierModel } : {}),
     ...(standardMode ? { standardMode } : {}),
     ...(standardInstruction !== undefined ? { standardInstruction } : {}),
     ...(value.levelChosen === true ? { levelChosen: true as const } : {}),

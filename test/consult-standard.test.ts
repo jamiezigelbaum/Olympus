@@ -6,7 +6,7 @@
 import { describe, expect, test } from 'bun:test';
 import { askAnonymously, CONSULT_ASK_MAX_CHARS, CONSULT_ASK_MESSAGES, type ConsultAskDependencies, type ConsultAskInput, type ConsultAskSendOptions } from '../src/core/consult-ask.ts';
 import { CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES, consultWriterContextFromPack, evaluateConsultRequest } from '../src/core/consult-gate.ts';
-import { CONSULT_LIGHT_CLEANUP_INSTRUCTION, DEFAULT_CONSULT_SETTINGS, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
+import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, CONSULT_LIGHT_CLEANUP_INSTRUCTION, DEFAULT_CONSULT_SETTINGS, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
 import { CONSULT_STANDARD_REPLY_FORMAT, buildConsultWriterPrompt, parseConsultWriterReply, type ConsultWriterInput } from '../src/core/consult-writer.ts';
 import { privateEvidencePack } from '../src/core/analyst-built-in.ts';
@@ -175,7 +175,31 @@ describe('Ask anonymously', () => {
     expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, strictCard.value)).toMatchObject({ options: { suggestedLevel: 'strict', suggestedCleanup: 'custom', customInstruction: true } });
     const chosen = deps(settings({ standardMode: 'as_written', levelChosen: true }));
     expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, chosen.value)).toMatchObject({ ok: true, level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
-    expect(chosen.calls.sendOptions).toEqual([{ origin: 'agent' }]);
+    expect(chosen.calls.sendOptions).toEqual([{ origin: 'agent', model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT }]);
+  });
+
+  test('the model follows who hosts the agent (owner decision 2026-10-10): never the provider that holds the conversation, for a one-off model too', async () => {
+    const chosen = () => deps(settings({ standardMode: 'as_written', levelChosen: true, claudeFrontierModel: 'openai/some-model' }));
+    const fromClaude = chosen();
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'anthropic' }, fromClaude.value)).toMatchObject({ ok: true, model: 'openai/some-model' });
+    expect(fromClaude.calls.sendOptions).toEqual([{ origin: 'agent', model: 'openai/some-model' }]);
+    const fromChatGpt = chosen();
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'openai' }, fromChatGpt.value)).toMatchObject({ ok: true, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
+    const unknown = chosen();
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, unknown.value)).toMatchObject({ ok: true, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
+    // A one-off model from the caller's own provider is refused before any work; from another, or from an unknown caller, it is used.
+    const refused = chosen();
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'anthropic', model: 'anthropic/claude-opus-5.5' }, refused.value))
+      .toEqual({ ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.modelSameProvider });
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'openai', model: 'OpenAI/gpt-5.5' }, refused.value)).toMatchObject({ code: 'model_same_provider' });
+    expect(refused.calls.send).toEqual([]);
+    const allowed = chosen();
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'anthropic', model: 'google/some-model' }, allowed.value)).toMatchObject({ ok: true, model: 'google/some-model' });
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', model: 'openai/gpt-5.5' }, allowed.value)).toMatchObject({ ok: true, model: 'openai/gpt-5.5' });
+    // The dashboard's box keeps the route's own model and names none.
+    const dashboard = deps(settings({ standardMode: 'as_written' }));
+    expect(await askAnonymously(q('What is a deposit?'), dashboard.value)).not.toHaveProperty('model');
+    expect(dashboard.calls.sendOptions).toEqual([{ origin: 'dashboard' }]);
   });
 
   test('remember stores the choice through the writer before the send and reports it; without a writer the question still goes, once', async () => {

@@ -12,9 +12,13 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import plugin from '../src/native-plugin.ts';
 import { mcpOperationCaller } from '../src/mcp/server.ts';
 import {
+  callerProviderFromLabel,
+  operationCallerToWire,
   parseOperationCallerWire,
   sanitizeCallerDisplayName,
 } from '../src/core/operation-caller.ts';
+import { remoteOperationCaller } from '../src/workers/remote-mcp.ts';
+import { CHATGPT_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { evaluateReleaseGate, isCallingAgentDestination } from '../src/core/opsec.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import type {
@@ -110,6 +114,27 @@ describe('caller wire validation', () => {
     expect(parseOperationCallerWire({ surface: 'remote', connection_id: 'has space' }).ok).toBe(false);
     expect(parseOperationCallerWire({ surface: 'remote', connection_id: 'x'.repeat(129) }).ok).toBe(false);
     expect(parseOperationCallerWire({ surface: 'mcp', display_name: '   ' }).ok).toBe(false);
+    // The hosting provider rides the wire as one of two values, or not at all.
+    expect(parseOperationCallerWire({ surface: 'mcp', provider: 'anthropic' })).toEqual({ ok: true, caller: { surface: 'mcp', provider: 'anthropic' } });
+    expect(parseOperationCallerWire({ surface: 'mcp', provider: 'google' }).ok).toBe(false);
+    expect(parseOperationCallerWire({ surface: 'mcp', provider: 1 }).ok).toBe(false);
+    expect(operationCallerToWire({ surface: 'remote', connectionId: 'c1', displayName: 'ChatGPT', provider: 'openai' }))
+      .toEqual({ surface: 'remote', connection_id: 'c1', display_name: 'ChatGPT', provider: 'openai' });
+    expect(operationCallerToWire({ surface: 'cli' })).toEqual({ surface: 'cli' });
+  });
+
+  test('who hosts the agent: a ChatGPT grant by its pinned client id, a Claude client by its name, anything else unknown', () => {
+    expect(callerProviderFromLabel('claude-code')).toBe('anthropic');
+    expect(callerProviderFromLabel('Claude Desktop')).toBe('anthropic');
+    expect(callerProviderFromLabel('ChatGPT')).toBe('openai');
+    expect(callerProviderFromLabel('codex-cli')).toBe('openai');
+    expect(callerProviderFromLabel('Grok')).toBeUndefined();
+    expect(callerProviderFromLabel(undefined)).toBeUndefined();
+    expect(mcpOperationCaller('claude-code')).toEqual({ surface: 'mcp', displayName: 'claude-code', provider: 'anthropic' });
+    expect(mcpOperationCaller('Grok')).toEqual({ surface: 'mcp', displayName: 'Grok' });
+    expect(remoteOperationCaller({ id: 'c1', displayName: 'My phone', clientId: CHATGPT_CLIENT_ID })).toEqual({ surface: 'remote', connectionId: 'c1', displayName: 'My phone', provider: 'openai' });
+    expect(remoteOperationCaller({ id: 'c2', displayName: 'Claude Desktop', clientId: 'https://example.com/client.json' })).toEqual({ surface: 'remote', connectionId: 'c2', displayName: 'Claude Desktop', provider: 'anthropic' });
+    expect(remoteOperationCaller({ id: 'c3', displayName: 'Grok', clientId: null })).toEqual({ surface: 'remote', connectionId: 'c3', displayName: 'Grok' });
   });
 
   test('display names lose control and bidi characters and are bounded', () => {

@@ -498,12 +498,14 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     // A requested save that failed: told with the answer, so the user is not
     // surprised by the Strict/Standard question next time.
     const saveNote = clean(record.note, 1_000);
+    const model = clean(record.model, 200);
     return {
-      content: [{ type: 'text', text: [reply, '', note, ...(saveNote ? [`Tell the user: ${saveNote}`] : [])].join('\n') }],
+      content: [{ type: 'text', text: [reply, '', note, ...(model ? [`Answered by ${model}.`] : []), ...(saveNote ? [`Tell the user: ${saveNote}`] : [])].join('\n') }],
       structuredContent: {
         status: 'answered',
         answer: reply,
         anonymous: hidden,
+        ...(model ? { model } : {}),
         ...(typeof record.route === 'string' ? { route: clean(record.route, 200) } : {}),
         ...(record.networkIdentity === 'visible' ? { network_address: 'visible' } : {}),
         level,

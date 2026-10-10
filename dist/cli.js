@@ -11246,12 +11246,22 @@ function sanitizeCallerDisplayName(value) {
     return;
   return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
 }
+function callerProviderFromLabel(label) {
+  if (!label)
+    return;
+  if (/claude|anthropic/i.test(label))
+    return "anthropic";
+  if (/chatgpt|openai|codex/i.test(label))
+    return "openai";
+  return;
+}
 function operationCallerToWire(caller) {
   const displayName = sanitizeCallerDisplayName(caller.displayName);
   return {
     surface: caller.surface,
     ...caller.connectionId ? { connection_id: caller.connectionId } : {},
-    ...displayName ? { display_name: displayName } : {}
+    ...displayName ? { display_name: displayName } : {},
+    ...caller.provider ? { provider: caller.provider } : {}
   };
 }
 function parseOperationCallerWire(value) {
@@ -11261,7 +11271,7 @@ function parseOperationCallerWire(value) {
     return { ok: false, message: "caller must be an object when provided." };
   }
   const record = value;
-  const unknownFields = Object.keys(record).filter((key) => !["surface", "connection_id", "display_name"].includes(key));
+  const unknownFields = Object.keys(record).filter((key) => !["surface", "connection_id", "display_name", "provider"].includes(key));
   if (unknownFields.length > 0) {
     return { ok: false, message: `caller contains undeclared fields: ${unknownFields.sort().join(", ")}.` };
   }
@@ -11282,12 +11292,20 @@ function parseOperationCallerWire(value) {
       return { ok: false, message: "caller.display_name must be a non-empty string when provided." };
     }
   }
+  let provider;
+  if (record.provider !== undefined) {
+    if (typeof record.provider !== "string" || !OPERATION_CALLER_PROVIDERS.includes(record.provider)) {
+      return { ok: false, message: `caller.provider must be one of: ${OPERATION_CALLER_PROVIDERS.join(", ")}.` };
+    }
+    provider = record.provider;
+  }
   return {
     ok: true,
     caller: {
       surface: record.surface,
       ...connectionId ? { connection_id: connectionId } : {},
-      ...displayName ? { display_name: displayName } : {}
+      ...displayName ? { display_name: displayName } : {},
+      ...provider ? { provider } : {}
     }
   };
 }
@@ -11301,9 +11319,10 @@ function isInProcessRemoteRequest(request) {
 function callerClaimsRemoteConnection(caller) {
   return caller.surface === "remote" || caller.connection_id !== undefined;
 }
-var OPERATION_CALLER_SURFACES, OPERATION_CALLER_DISPLAY_NAME_MAX = 80, OPERATION_CALLER_CONNECTION_ID_MAX = 128, CONNECTION_ID_PATTERN, UNSAFE_LABEL_CHARS, inProcessRemoteRequests;
+var OPERATION_CALLER_SURFACES, OPERATION_CALLER_PROVIDERS, OPERATION_CALLER_DISPLAY_NAME_MAX = 80, OPERATION_CALLER_CONNECTION_ID_MAX = 128, CONNECTION_ID_PATTERN, UNSAFE_LABEL_CHARS, inProcessRemoteRequests;
 var init_operation_caller = __esm(() => {
   OPERATION_CALLER_SURFACES = ["native", "mcp", "cli", "remote"];
+  OPERATION_CALLER_PROVIDERS = ["openai", "anthropic"];
   CONNECTION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
   UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
   inProcessRemoteRequests = new WeakSet;
@@ -49652,7 +49671,8 @@ class EmailClient {
         ...options.level ? { level: options.level } : {},
         ...options.cleanup ? { cleanup: options.cleanup } : {},
         ...options.remember !== undefined ? { remember: options.remember } : {},
-        ...options.model ? { model: options.model } : {}
+        ...options.model ? { model: options.model } : {},
+        ...options.caller ? { caller: operationCallerToWire(options.caller) } : {}
       })
     }, {
       timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS,
@@ -63529,7 +63549,10 @@ __export(exports_consult_settings, {
   consultStandardBinding: () => consultStandardBinding,
   consultSettingsPath: () => consultSettingsPath,
   consultOutsideHelpEnabled: () => consultOutsideHelpEnabled,
+  consultModelProvider: () => consultModelProvider,
   consultGateOptionsFromSettings: () => consultGateOptionsFromSettings,
+  consultFrontierModelFor: () => consultFrontierModelFor,
+  consultClaudeFrontierModel: () => consultClaudeFrontierModel,
   consultChatgptModelUnavailableMessage: () => consultChatgptModelUnavailableMessage,
   consultChatgptFrontierModel: () => consultChatgptFrontierModel,
   bindConsultJobPolicy: () => bindConsultJobPolicy,
@@ -63547,7 +63570,9 @@ __export(exports_consult_settings, {
   CONSULT_LEVEL_FOR_REPAIR: () => CONSULT_LEVEL_FOR_REPAIR,
   CONSULT_LEVEL_FOR_NEW_SETUP: () => CONSULT_LEVEL_FOR_NEW_SETUP,
   CONSULT_LEVELS: () => CONSULT_LEVELS,
-  CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT: () => CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT
+  CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT: () => CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT,
+  CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT: () => CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT,
+  CONSULT_CALLER_PROVIDERS: () => CONSULT_CALLER_PROVIDERS
 });
 import { closeSync as closeSync11, constants as constants5, fstatSync as fstatSync3, openSync as openSync11, readSync as readSync3 } from "node:fs";
 import { join as join53 } from "node:path";
@@ -63562,6 +63587,16 @@ function consultStandardInstruction(settings) {
 }
 function consultChatgptFrontierModel(settings) {
   return settings.chatgptFrontierModel ?? CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT;
+}
+function consultClaudeFrontierModel(settings) {
+  return settings.claudeFrontierModel ?? CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT;
+}
+function consultFrontierModelFor(settings, provider) {
+  return provider === "anthropic" ? consultClaudeFrontierModel(settings) : consultChatgptFrontierModel(settings);
+}
+function consultModelProvider(model) {
+  const prefix = model.slice(0, model.indexOf("/")).toLowerCase();
+  return CONSULT_CALLER_PROVIDERS.includes(prefix) ? prefix : undefined;
 }
 function consultChatgptModelUnavailableMessage(model) {
   return model === CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT ? "Claude Sonnet isn't available through zkAPI right now; choose another model." : "The model chosen for ChatGPT questions isn't available through zkAPI right now; choose another model.";
@@ -63609,6 +63644,12 @@ function parseConsultSettings(value) {
     if (!chatgptFrontierModel)
       return;
   }
+  let claudeFrontierModel;
+  if (Object.hasOwn(value, "claudeFrontierModel")) {
+    claudeFrontierModel = parseModelId(value.claudeFrontierModel);
+    if (!claudeFrontierModel)
+      return;
+  }
   let standardMode;
   if (Object.hasOwn(value, "standardMode")) {
     if (typeof value.standardMode !== "string" || !CONSULT_STANDARD_MODES.includes(value.standardMode))
@@ -63636,6 +63677,7 @@ function parseConsultSettings(value) {
     level,
     ...writer ? { writer } : {},
     ...chatgptFrontierModel ? { chatgptFrontierModel } : {},
+    ...claudeFrontierModel ? { claudeFrontierModel } : {},
     ...standardMode ? { standardMode } : {},
     ...standardInstruction !== undefined ? { standardInstruction } : {},
     ...value.levelChosen === true ? { levelChosen: true } : {}
@@ -63838,7 +63880,7 @@ function hasKeys(value, required3, optional) {
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
-var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_STANDARD_MODES, CONSULT_STANDARD_MODE_WHEN_UNSET = "light_cleanup", CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000, CONSULT_LIGHT_CLEANUP_INSTRUCTION, CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = "anthropic/claude-sonnet-5.5", DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
+var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_STANDARD_MODES, CONSULT_STANDARD_MODE_WHEN_UNSET = "light_cleanup", CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000, CONSULT_LIGHT_CLEANUP_INSTRUCTION, CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = "anthropic/claude-sonnet-5.5", CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT = "openai/gpt-5.5", CONSULT_CALLER_PROVIDERS, DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
 var init_consult_settings = __esm(() => {
   init_secret_store();
   init_consult_gate();
@@ -63852,6 +63894,7 @@ var init_consult_settings = __esm(() => {
     "Keep everything else as the user wrote it. You may add details from the material that the outside model needs to answer, with the same removals."
   ].join(" ");
   CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS = Object.freeze({ min: 1e4, max: 240000 });
+  CONSULT_CALLER_PROVIDERS = ["openai", "anthropic"];
   DEFAULT_CONSULT_SETTINGS = Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision: 0,
@@ -63862,7 +63905,7 @@ var init_consult_settings = __esm(() => {
     level: CONSULT_LEVEL_FOR_NEW_SETUP
   });
   REQUIRED_TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
-  OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel", "standardMode", "standardInstruction", "levelChosen"];
+  OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel", "claudeFrontierModel", "standardMode", "standardInstruction", "levelChosen"];
   WRITER_REQUIRED_KEYS = ["baseUrl", "model"];
   WRITER_OPTIONAL_KEYS = ["secretRef", "timeoutMs"];
   DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
@@ -65730,7 +65773,7 @@ var init_operations = __esm(() => {
     },
     cleanup: { type: "string", description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
     remember: { type: "boolean", description: "Save this level (and cleanup) as the default for later questions, so the user is not asked again." },
-    model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one. Omit to use the configured model." },
+    model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; a model from the provider hosting this conversation is refused. Omit to use the model configured for this provider." },
     timeoutMs: { type: "number", description: "How long to wait for the answer, in milliseconds (default 1200000; a zkAPI route can take minutes; inside OpenClaw the wait is capped at 600000)." }
   };
   operations = [
@@ -66126,7 +66169,7 @@ var init_operations = __esm(() => {
       description: [
         "Ask a frontier model one question anonymously through zkAPI, paid per question from the user's own zkAPI balance; nothing identifies them and the provider cannot tie it to an account.",
         "Use it only when the user asks to ask anonymously, privately or through Olympus zkAPI, or to use a named model without being tracked. Only the question goes out: no documents, no history.",
-        'Returns {ok: true, reply, sent, level, rewritten}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent".',
+        'Returns {ok: true, reply, sent, level, rewritten, model}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent". The model is one from another provider than the one hosting this conversation.',
         'Returns {ok: false, code: "needs_choice", message, options} the first time: ask the user once (Strict or Standard), then call again with level, and remember=true to keep it.',
         "Any other {ok: false, message} is a refusal to tell the user in those words (a secret in the question, no route set up, the daily spend limit).",
         'A zkAPI answer can take minutes: pass timeoutMs 600000 where you can. If the result is {"status": "working", "job_id": ...}, the answer is still coming: call source_answer_result with that job_id (again while it says working) rather than asking again.'
@@ -66153,6 +66196,7 @@ var init_operations = __esm(() => {
           ...model !== undefined ? { model } : {},
           ...timeoutMs !== undefined ? { timeoutMs } : {},
           ...insideGateway ? {} : { maxTimeoutMs: CONSULT_ASK_CLIENT_TIMEOUT_MS },
+          ...ctx.caller ? { caller: ctx.caller } : {},
           ...signal ? { signal } : {}
         });
         const jobs = ctx.sourceAnswerJobs;
@@ -87124,7 +87168,8 @@ async function serve() {
 }
 function mcpOperationCaller(clientName) {
   const displayName = sanitizeCallerDisplayName(clientName);
-  return { surface: "mcp", ...displayName ? { displayName } : {} };
+  const provider = callerProviderFromLabel(displayName);
+  return { surface: "mcp", ...displayName ? { displayName } : {}, ...provider ? { provider } : {} };
 }
 function makeContext(clientName, sourceAnswerJobs) {
   const config2 = loadConfig();
@@ -109503,13 +109548,26 @@ async function parseConsultAskRequest(request) {
   }
   const remember = asOptionalBoolean(record3.remember);
   const model = asOptionalString(record3.model);
+  const caller = parseRequestCaller(record3, request);
   return {
     question: record3.question,
     ...level !== undefined ? { level } : {},
     ...cleanup !== undefined ? { cleanup } : {},
     ...remember !== undefined ? { remember } : {},
-    ...model !== undefined ? { model } : {}
+    ...model !== undefined ? { model } : {},
+    ...caller ? { caller } : {}
   };
+}
+function parseRequestCaller(record3, request) {
+  const callerParse = parseOperationCallerWire(record3.caller);
+  if (!callerParse.ok) {
+    throw new EmailSourceWorkerError(400, "invalid_request", callerParse.message);
+  }
+  const caller = callerParse.caller;
+  if (caller && callerClaimsRemoteConnection(caller) && !isInProcessRemoteRequest(request)) {
+    throw new EmailSourceWorkerError(400, "invalid_request", 'caller.surface "remote" and caller.connection_id are set only by the remote MCP endpoint.');
+  }
+  return caller;
 }
 async function parseSourceIndexAnswerRequest(request) {
   const record3 = await parseObjectBody(request);
@@ -109562,14 +109620,7 @@ async function parseSourceIndexAnswerRequest(request) {
   if (timeoutMs !== undefined && timeoutMs <= 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "timeout_ms must be a positive number when provided.");
   }
-  const callerParse = parseOperationCallerWire(record3.caller);
-  if (!callerParse.ok) {
-    throw new EmailSourceWorkerError(400, "invalid_request", callerParse.message);
-  }
-  const caller = callerParse.caller;
-  if (caller && callerClaimsRemoteConnection(caller) && !isInProcessRemoteRequest(request)) {
-    throw new EmailSourceWorkerError(400, "invalid_request", 'caller.surface "remote" and caller.connection_id are set only by the remote MCP endpoint.');
-  }
+  const caller = parseRequestCaller(record3, request);
   return {
     question: record3.question,
     ...query !== undefined ? { query } : {},
@@ -116365,6 +116416,46 @@ var init_webStandardStreamableHttp = __esm(() => {
   init_types2();
 });
 
+// src/workers/remote-oauth/pinned-clients.ts
+var exports_pinned_clients = {};
+__export(exports_pinned_clients, {
+  pinnedClient: () => pinnedClient,
+  isClientIdMetadataUrl: () => isClientIdMetadataUrl,
+  isChatGptGrant: () => isChatGptGrant,
+  CHATGPT_REDIRECT_URI: () => CHATGPT_REDIRECT_URI,
+  CHATGPT_CODEX_CLIENT_ID: () => CHATGPT_CODEX_CLIENT_ID,
+  CHATGPT_CLIENT_ID: () => CHATGPT_CLIENT_ID
+});
+function isClientIdMetadataUrl(clientId) {
+  return clientId.startsWith("https://");
+}
+function isChatGptGrant(connection) {
+  return typeof connection.clientId === "string" && pinnedClient(connection.clientId) !== undefined;
+}
+function pinnedClient(clientId) {
+  if (clientId === CHATGPT_CODEX_CLIENT_ID) {
+    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com" };
+  }
+  if (clientId === CHATGPT_CLIENT_ID) {
+    return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com" };
+  }
+  const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
+  if (callback) {
+    return {
+      clientId,
+      clientName: "ChatGPT",
+      redirectUris: [`https://chatgpt.com/connector/oauth/${callback}`],
+      verifiedHost: "chatgpt.com"
+    };
+  }
+  return;
+}
+var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID;
+var init_pinned_clients = __esm(() => {
+  CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
+  CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
+});
+
 // src/workers/dashboard/shared-status.ts
 function dashboardHonestStatus(status, progress) {
   if (!progress || progress.stage === "done")
@@ -118594,13 +118685,15 @@ function askAnonymouslyToolResult(raw) {
     const how = hidden ? "anonymously" : "through zkAPI with the network address visible (payment privacy only; Tor is off on this route)";
     const note = rewritten ? `Asked ${how} at ${level === "strict" ? "Strict" : "Standard"}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.` : `Asked ${how} at Standard, as written.`;
     const saveNote = clean(record3.note, 1000);
+    const model = clean(record3.model, 200);
     return {
-      content: [{ type: "text", text: [reply, "", note, ...saveNote ? [`Tell the user: ${saveNote}`] : []].join(`
+      content: [{ type: "text", text: [reply, "", note, ...model ? [`Answered by ${model}.`] : [], ...saveNote ? [`Tell the user: ${saveNote}`] : []].join(`
 `) }],
       structuredContent: {
         status: "answered",
         answer: reply,
         anonymous: hidden,
+        ...model ? { model } : {},
         ...typeof record3.route === "string" ? { route: clean(record3.route, 200) } : {},
         ...record3.networkIdentity === "visible" ? { network_address: "visible" } : {},
         level,
@@ -120444,7 +120537,7 @@ var init_mcp_surface = __esm(() => {
       'The first time it returns {status: "needs_choice"}: ask the user once whether they want Strict (their own model rewrites',
       "the question into general questions before it leaves, so nothing identifying can be sent) or Standard (their words,",
       "prepared as written, lightly cleaned up, or by the instruction they saved); then call again with level, and remember: true to keep it.",
-      'Returns {status: "answered", answer, level, rewritten, sent}: give the answer; when rewritten is true, say the question',
+      'Returns {status: "answered", answer, level, rewritten, sent, model}: give the answer; when rewritten is true, say the question',
       'was rewritten first and offer to show what was sent. {status: "refused", message}: tell the user the message in those words.',
       'If it returns {status: "working", job_id}, the answer is still coming: call source_answer_result with that job_id',
       "(again while it says working) instead of asking again. Ask one question at a time."
@@ -120456,7 +120549,7 @@ var init_mcp_surface = __esm(() => {
         level: { type: "string", enum: ["strict", "standard"], description: "Strict or Standard. Omit to use the level the user chose before." },
         cleanup: { type: "string", enum: ["as_written", "light_cleanup", "custom"], description: "Standard only: how the words are prepared. Omit to use the saved one." },
         remember: { type: "boolean", description: "Save this level (and cleanup) as the default so the user is not asked again." },
-        model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one." }
+        model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; an OpenAI model is refused here, since OpenAI holds this conversation." }
       },
       required: ["question"],
       additionalProperties: false
@@ -120650,7 +120743,8 @@ function lazyRemoteConnectionStore(resolvePath4, open7) {
   };
 }
 function remoteOperationCaller(connection) {
-  return { surface: "remote", connectionId: connection.id, displayName: connection.displayName };
+  const provider = isChatGptGrant(connection) ? "openai" : callerProviderFromLabel(connection.displayName);
+  return { surface: "remote", connectionId: connection.id, displayName: connection.displayName, ...provider ? { provider } : {} };
 }
 function createInProcessOperationContext(input) {
   const config2 = {
@@ -120727,6 +120821,7 @@ var init_remote_mcp = __esm(() => {
   init_delphi();
   init_email();
   init_operation_caller();
+  init_pinned_clients();
   init_remote_connections();
   init_remote_access();
   init_remote_oauth_store();
@@ -120736,46 +120831,6 @@ var init_remote_mcp = __esm(() => {
   init_mcp_surface();
   init_remote_request_body();
   init_tokens();
-});
-
-// src/workers/remote-oauth/pinned-clients.ts
-var exports_pinned_clients = {};
-__export(exports_pinned_clients, {
-  pinnedClient: () => pinnedClient,
-  isClientIdMetadataUrl: () => isClientIdMetadataUrl,
-  isChatGptGrant: () => isChatGptGrant,
-  CHATGPT_REDIRECT_URI: () => CHATGPT_REDIRECT_URI,
-  CHATGPT_CODEX_CLIENT_ID: () => CHATGPT_CODEX_CLIENT_ID,
-  CHATGPT_CLIENT_ID: () => CHATGPT_CLIENT_ID
-});
-function isClientIdMetadataUrl(clientId) {
-  return clientId.startsWith("https://");
-}
-function isChatGptGrant(connection) {
-  return typeof connection.clientId === "string" && pinnedClient(connection.clientId) !== undefined;
-}
-function pinnedClient(clientId) {
-  if (clientId === CHATGPT_CODEX_CLIENT_ID) {
-    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com" };
-  }
-  if (clientId === CHATGPT_CLIENT_ID) {
-    return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com" };
-  }
-  const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
-  if (callback) {
-    return {
-      clientId,
-      clientName: "ChatGPT",
-      redirectUris: [`https://chatgpt.com/connector/oauth/${callback}`],
-      verifiedHost: "chatgpt.com"
-    };
-  }
-  return;
-}
-var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID;
-var init_pinned_clients = __esm(() => {
-  CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
-  CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
 });
 
 // src/workers/remote-oauth/demo-consent.ts
@@ -124231,6 +124286,9 @@ async function askAnonymously(input, deps) {
     return { ok: false, code: "invalid_params", message: CONSULT_ASK_MESSAGES.cleanupInvalid };
   if (input.model !== undefined && !validModelId(input.model))
     return { ok: false, code: "invalid_params", message: CONSULT_ASK_MESSAGES.modelInvalid };
+  if (input.model !== undefined && input.callerProvider !== undefined && consultModelProvider(input.model) === input.callerProvider) {
+    return { ok: false, code: "model_same_provider", message: CONSULT_ASK_MESSAGES.modelSameProvider };
+  }
   let read;
   try {
     read = deps.settings();
@@ -124348,9 +124406,10 @@ async function askAnonymously(input, deps) {
     stale = askBinding(current) !== bound;
     return !stale;
   };
+  const model = input.origin === "agent" ? input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider) : input.model;
   let result;
   try {
-    result = await deps.send(sent, authorize, { origin: input.origin, ...input.model !== undefined ? { model: input.model } : {}, ...input.signal ? { signal: input.signal } : {} });
+    result = await deps.send(sent, authorize, { origin: input.origin, ...model !== undefined ? { model } : {}, ...input.signal ? { signal: input.signal } : {} });
   } catch {
     result = { ok: false, error: { code: "internal_error", message: "The zkAPI session failed inside Olympus.", outcome: "unknown", networkIdentity: "not_verified" } };
   }
@@ -124372,6 +124431,7 @@ async function askAnonymously(input, deps) {
     ...strict ? {} : { cleanup },
     rewritten,
     remembered,
+    ...model !== undefined ? { model } : {},
     ...rememberNote ? { note: rememberNote } : {}
   };
 }
@@ -124400,6 +124460,7 @@ var init_consult_ask = __esm(() => {
     cleanupCustomMissing: 'No custom instruction is saved on the Olympus dashboard, so "custom" cannot be used; choose as_written or light_cleanup.',
     rememberUnavailable: "The choice could not be saved here; it was used for this question only.",
     modelInvalid: "model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.",
+    modelSameProvider: "Not sent: that model is from the provider that hosts this conversation, so the question could be tied to the user. Name a model from another provider, or leave model out.",
     cancelled: "The request was cancelled before the question was sent; nothing was charged.",
     tooManyBytes: "Not sent: the question is over 8 KiB once encoded. Shorten it."
   });
@@ -124986,6 +125047,7 @@ function writeConsultSettings(input, location = {}) {
     level: input.level,
     ...input.writer ? { writer: { ...input.writer } } : {},
     ...input.chatgptFrontierModel ? { chatgptFrontierModel: input.chatgptFrontierModel } : {},
+    ...input.claudeFrontierModel ? { claudeFrontierModel: input.claudeFrontierModel } : {},
     ...input.standardMode ? { standardMode: input.standardMode } : {},
     ...input.standardInstruction !== undefined ? { standardInstruction: input.standardInstruction } : {},
     ...input.levelChosen ? { levelChosen: true } : {}
@@ -125194,6 +125256,7 @@ function createDashboardConsultAdapter(options) {
   const writerCarried = (base) => ({
     ...base.writer ? { writer: base.writer } : {},
     ...base.chatgptFrontierModel ? { chatgptFrontierModel: base.chatgptFrontierModel } : {},
+    ...base.claudeFrontierModel ? { claudeFrontierModel: base.claudeFrontierModel } : {},
     ...base.levelChosen ? { levelChosen: true } : {}
   });
   const carried = (base) => ({ ...writerCarried(base), ...standardCarried(base) });
@@ -125440,6 +125503,7 @@ function createDashboardConsultAdapter(options) {
         level: base.level,
         ...writer ? { writer } : {},
         ...chatgptFrontierModel ? { chatgptFrontierModel } : {},
+        ...base.claudeFrontierModel ? { claudeFrontierModel: base.claudeFrontierModel } : {},
         ...standardCarried(base),
         ...base.levelChosen ? { levelChosen: true } : {},
         expectedRevision: revision
@@ -128391,7 +128455,7 @@ async function main() {
     },
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
-    consultAsk: (input, signal) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, origin: "agent", signal }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
+    consultAsk: ({ caller, ...input }, signal) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, origin: "agent", signal }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
     ...sourceIndexStatus ? { sourceIndexStatus } : {},
     currentReadwiseSync,
@@ -128680,7 +128744,7 @@ async function main() {
           },
           remember: (choice) => dashboardConsult.rememberLevel(choice)
         });
-        if (input.origin === "agent" && !input.model) {
+        if (input.origin === "agent" && !input.model && input.callerProvider !== "anthropic") {
           if (!result.ok && result.code === "model_unavailable")
             chatgptModelProblem = { at: new Date().toISOString(), message: consultChatgptModelUnavailableMessage2(chatgptModel()) };
           else if (result.ok)

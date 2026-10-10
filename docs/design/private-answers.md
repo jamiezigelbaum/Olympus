@@ -195,16 +195,28 @@ Decisions:
    fact from the user's own records. The trigger is unchanged for both
    writers: a first answer of "these items do not answer" never escalates
    (owner change, 2026-10-10, superseding an earlier proposal to let it).
-5. **ChatGPT questions prefer another provider.** OpenAI also holds the
-   ChatGPT conversation and could link it to the anonymous question.
-   `chatgptFrontierModel` in consult.json names the zkAPI model for questions
-   that came through ChatGPT (today, all of them). Default (owner decision,
-   2026-10-10): `anthropic/claude-sonnet-5.5`; the user may override it.
-   There is no fallback to an OpenAI model: if the live zkAPI listing lacks
+5. **The answering model is never the provider that holds the conversation.**
+   OpenAI also holds a ChatGPT conversation and could link it to the
+   anonymous question; Anthropic holds a Claude one. So the model follows who
+   hosts the asking agent (owner decision 2026-10-10, extended the same day
+   to every agent surface):
+   - `chatgptFrontierModel` in consult.json names the zkAPI model for
+     questions from ChatGPT (recognised by the relay's pinned client ids) or
+     another OpenAI-hosted agent. Default: `anthropic/claude-sonnet-5.5`.
+   - `claudeFrontierModel` names it for questions from an Anthropic-hosted
+     agent (Claude Code, Claude Desktop: recognised by the MCP client name or
+     the connection's name). Default: `openai/gpt-5.5`. File only for now;
+     the card field comes with the card rework.
+   - An agent whose provider is unknown (OpenClaw, the CLI) takes the ChatGPT
+     setting, since ChatGPT is the surface most questions come through.
+   - A one-off `model` from the caller's own provider is refused
+     (`model_same_provider`); the answering model is named in every result
+     (`model`), so the agent can say who read the question.
+   There is no fallback to another model: if the live zkAPI listing lacks
    the model, the consult is not sent and the card says "Claude Sonnet isn't
    available through zkAPI right now; choose another model" (the transport's
    `model_unavailable` check). The card notes when ChatGPT questions go to
-   an OpenAI model.
+   an OpenAI model. The dashboard's own question box uses the route's model.
 6. **Capability test, on request only.** `olympus zkapi test-writer` and the
    card's "Test your model" run six invented cases (from the leak and
    re-identification evals, plus the LOI case with and without the letter)

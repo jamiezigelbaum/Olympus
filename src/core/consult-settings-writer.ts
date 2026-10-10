@@ -57,6 +57,7 @@ export interface ConsultSettingsUpdate {
    */
   readonly writer?: ConsultWriterChoice;
   readonly chatgptFrontierModel?: string;
+  readonly claudeFrontierModel?: string;
   /** How Standard prepares a question; passed through like the writer. */
   readonly standardMode?: ConsultStandardMode;
   readonly standardInstruction?: string;
@@ -141,6 +142,7 @@ export function writeConsultSettings(input: ConsultSettingsWriteInput, location:
     level: input.level,
     ...(input.writer ? { writer: { ...input.writer } } : {}),
     ...(input.chatgptFrontierModel ? { chatgptFrontierModel: input.chatgptFrontierModel } : {}),
+    ...(input.claudeFrontierModel ? { claudeFrontierModel: input.claudeFrontierModel } : {}),
     ...(input.standardMode ? { standardMode: input.standardMode } : {}),
     ...(input.standardInstruction !== undefined ? { standardInstruction: input.standardInstruction } : {}),
     ...(input.levelChosen ? { levelChosen: true } : {}),

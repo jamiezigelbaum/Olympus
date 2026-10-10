@@ -20,8 +20,11 @@ import {
   CONSULT_LIGHT_CLEANUP_INSTRUCTION,
   DEFAULT_CONSULT_SETTINGS,
   consultGateOptionsFromSettings,
+  consultFrontierModelFor,
+  consultModelProvider,
   consultStandardBinding,
   consultWriterIdentity,
+  type ConsultCallerProvider,
   type ConsultLevel,
   type ConsultSettingsRead,
   type ConsultStandardMode,
@@ -54,11 +57,17 @@ export interface ConsultAskInput {
   readonly cleanup?: ConsultStandardMode;
   /** Store `level` (and `cleanup`) as the default for later questions. */
   readonly remember?: boolean;
-  /** A one-off zkAPI model id; absent means the configured one. */
+  /** A one-off zkAPI model id; absent means the configured one. Refused when it names the caller's own provider. */
   readonly model?: string;
   /**
+   * Who hosts the asking agent, when the surface can tell (OperationCaller
+   * .provider): it chooses the model setting (consultFrontierModelFor) and
+   * refuses a one-off `model` from the same provider.
+   */
+  readonly callerProvider?: ConsultCallerProvider;
+  /**
    * Where the question came from. A question from an agent uses the model
-   * set for ChatGPT questions (never the provider that holds the
+   * set for its hosting provider (never the provider that holds the
    * conversation); the dashboard's own box uses the route's model.
    */
   readonly origin: 'agent' | 'dashboard';
@@ -118,6 +127,8 @@ export type ConsultAskResult =
     /** True when the writer rewrote the question (Strict, or Standard light cleanup / custom). */
     readonly rewritten: boolean;
     readonly remembered: boolean;
+    /** The zkAPI model that answered an agent's question (the dashboard's box uses the route's own model, not named here). */
+    readonly model?: string;
     /** A requested save that failed (the question still went): the user should hear it, or they are asked again next time. */
     readonly note?: string;
   }
@@ -140,6 +151,7 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   cleanupCustomMissing: 'No custom instruction is saved on the Olympus dashboard, so "custom" cannot be used; choose as_written or light_cleanup.',
   rememberUnavailable: 'The choice could not be saved here; it was used for this question only.',
   modelInvalid: 'model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.',
+  modelSameProvider: 'Not sent: that model is from the provider that hosts this conversation, so the question could be tied to the user. Name a model from another provider, or leave model out.',
   cancelled: 'The request was cancelled before the question was sent; nothing was charged.',
   tooManyBytes: 'Not sent: the question is over 8 KiB once encoded. Shorten it.',
 });
@@ -169,6 +181,12 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   if (input.level !== undefined && !CONSULT_ASK_LEVELS.includes(input.level)) return { ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.levelInvalid };
   if (input.cleanup !== undefined && !CONSULT_ASK_CLEANUPS.includes(input.cleanup)) return { ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.cleanupInvalid };
   if (input.model !== undefined && !validModelId(input.model)) return { ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.modelInvalid };
+  // The cross-provider rule applies to a one-off model too (owner decision
+  // 2026-10-10): the provider that holds the conversation never reads the
+  // anonymous question.
+  if (input.model !== undefined && input.callerProvider !== undefined && consultModelProvider(input.model) === input.callerProvider) {
+    return { ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.modelSameProvider };
+  }
   let read: ConsultSettingsRead;
   try {
     read = deps.settings();
@@ -302,9 +320,12 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     stale = askBinding(current) !== bound;
     return !stale;
   };
+  // An agent's question goes to the model set for its hosting provider
+  // unless it named one; the dashboard's box uses the route's own model.
+  const model = input.origin === 'agent' ? input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider) : input.model;
   let result: ZkapiConsultResult | undefined;
   try {
-    result = await deps.send(sent, authorize, { origin: input.origin, ...(input.model !== undefined ? { model: input.model } : {}), ...(input.signal ? { signal: input.signal } : {}) });
+    result = await deps.send(sent, authorize, { origin: input.origin, ...(model !== undefined ? { model } : {}), ...(input.signal ? { signal: input.signal } : {}) });
   } catch {
     result = { ok: false, error: { code: 'internal_error', message: 'The zkAPI session failed inside Olympus.', outcome: 'unknown', networkIdentity: 'not_verified' } };
   }
@@ -322,6 +343,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     ...(strict ? {} : { cleanup }),
     rewritten,
     remembered,
+    ...(model !== undefined ? { model } : {}),
     ...(rememberNote ? { note: rememberNote } : {}),
   };
 }

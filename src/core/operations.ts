@@ -166,7 +166,7 @@ const ASK_ANONYMOUSLY_PARAMS = {
   },
   cleanup: { type: 'string', description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
   remember: { type: 'boolean', description: 'Save this level (and cleanup) as the default for later questions, so the user is not asked again.' },
-  model: { type: 'string', description: 'A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one. Omit to use the configured model.' },
+  model: { type: 'string', description: 'A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; a model from the provider hosting this conversation is refused. Omit to use the model configured for this provider.' },
   timeoutMs: { type: 'number', description: 'How long to wait for the answer, in milliseconds (default 1200000; a zkAPI route can take minutes; inside OpenClaw the wait is capped at 600000).' },
 } satisfies Record<string, ParamDef>;
 
@@ -583,7 +583,7 @@ export const operations: Operation[] = [
     description: [
       'Ask a frontier model one question anonymously through zkAPI, paid per question from the user\'s own zkAPI balance; nothing identifies them and the provider cannot tie it to an account.',
       'Use it only when the user asks to ask anonymously, privately or through Olympus zkAPI, or to use a named model without being tracked. Only the question goes out: no documents, no history.',
-      'Returns {ok: true, reply, sent, level, rewritten}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent".',
+      'Returns {ok: true, reply, sent, level, rewritten, model}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent". The model is one from another provider than the one hosting this conversation.',
       'Returns {ok: false, code: "needs_choice", message, options} the first time: ask the user once (Strict or Standard), then call again with level, and remember=true to keep it.',
       'Any other {ok: false, message} is a refusal to tell the user in those words (a secret in the question, no route set up, the daily spend limit).',
       'A zkAPI answer can take minutes: pass timeoutMs 600000 where you can. If the result is {"status": "working", "job_id": ...}, the answer is still coming: call source_answer_result with that job_id (again while it says working) rather than asking again.',
@@ -615,6 +615,7 @@ export const operations: Operation[] = [
         ...(model !== undefined ? { model } : {}),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
         ...(insideGateway ? {} : { maxTimeoutMs: CONSULT_ASK_CLIENT_TIMEOUT_MS }),
+        ...(ctx.caller ? { caller: ctx.caller } : {}),
         ...(signal ? { signal } : {}),
       });
       const jobs = ctx.sourceAnswerJobs;

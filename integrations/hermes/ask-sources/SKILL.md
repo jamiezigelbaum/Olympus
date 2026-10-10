@@ -32,7 +32,9 @@ their zkAPI balance. The first time it returns `needs_choice`: ask the user
 once whether they want Strict (their own model rewrites the question into
 general questions first) or Standard (their words, prepared as they chose),
 then call again with `level` and `remember: true`. Give the reply; when
-`rewritten` is true, say so and offer to show `sent`. A `working` result is
+`rewritten` is true, say so and offer to show `sent`. The result names the
+`model` that answered: never one from the provider hosting the agent, and a
+one-off `model` from that provider is refused. A `working` result is
 collected with `source_answer_result`, like an answer.
 
 This Hermes adaptation intentionally has no search, locator, sync, watch or

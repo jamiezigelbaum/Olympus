@@ -55,6 +55,8 @@ export interface ConsultAskClientOptions {
   timeoutMs?: number;
   /** Raises the lane ceiling for this ask; only off the OpenClaw Gateway (see EmailTransportRequestOptions.maxTimeoutMs). */
   maxTimeoutMs?: number;
+  /** The calling agent: its hosting provider chooses the model setting (never the provider that holds the conversation). */
+  caller?: OperationCaller;
   signal?: AbortSignal;
 }
 
@@ -430,6 +432,7 @@ export class EmailClient {
         ...(options.cleanup ? { cleanup: options.cleanup } : {}),
         ...(options.remember !== undefined ? { remember: options.remember } : {}),
         ...(options.model ? { model: options.model } : {}),
+        ...(options.caller ? { caller: operationCallerToWire(options.caller) } : {}),
       }),
     }, {
       timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS,

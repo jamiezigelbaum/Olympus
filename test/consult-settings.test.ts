@@ -22,10 +22,14 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import {
   CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT,
+  CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT,
   CONSULT_LIGHT_CLEANUP_INSTRUCTION,
   CONSULT_STANDARD_INSTRUCTION_MAX_CHARS,
   consultChatgptFrontierModel,
   consultChatgptModelUnavailableMessage,
+  consultClaudeFrontierModel,
+  consultFrontierModelFor,
+  consultModelProvider,
   consultStandardBinding,
   CONSULT_SETTINGS_MAX_BYTES,
   DEFAULT_CONSULT_SETTINGS,
@@ -113,6 +117,22 @@ describe('parseConsultSettings', () => {
     expect(consultChatgptFrontierModel(parseConsultSettings({ ...VALID, chatgptFrontierModel: 'google/some-model' })!)).toBe('google/some-model');
     expect(consultChatgptModelUnavailableMessage(CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT)).toBe('Claude Sonnet isn\'t available through zkAPI right now; choose another model.');
     expect(consultChatgptModelUnavailableMessage('google/some-model')).not.toContain('Claude');
+  });
+
+  test('an Anthropic-hosted agent gets an OpenAI model by default (owner decision 2026-10-10), the file may override it; the unknown case takes the ChatGPT setting; a model id names its provider', () => {
+    expect(CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT).toMatch(/^openai\//);
+    const base = parseConsultSettings(VALID)!;
+    expect(consultClaudeFrontierModel(base)).toBe(CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT);
+    expect(consultFrontierModelFor(base, 'anthropic')).toBe(CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT);
+    expect(consultFrontierModelFor(base, 'openai')).toBe(CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT);
+    expect(consultFrontierModelFor(base, undefined)).toBe(CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT);
+    const chosen = parseConsultSettings({ ...VALID, claudeFrontierModel: 'google/some-model', chatgptFrontierModel: 'x-ai/other' })!;
+    expect(consultFrontierModelFor(chosen, 'anthropic')).toBe('google/some-model');
+    expect(consultFrontierModelFor(chosen, 'openai')).toBe('x-ai/other');
+    expect(consultModelProvider('openai/gpt-5.5')).toBe('openai');
+    expect(consultModelProvider('Anthropic/claude-sonnet-5.5')).toBe('anthropic');
+    expect(consultModelProvider('google/some-model')).toBeUndefined();
+    expect(consultModelProvider('no-slash')).toBeUndefined();
   });
 
   test('a file written before the places and technical keys stays valid, with both on; unknown keys still reject', () => {
@@ -495,6 +515,9 @@ describe('the owner\'s writer and the ChatGPT model (2026-10-10)', () => {
     }
     expect(parseConsultSettings({ ...base, writer: { baseUrl: 'http://h:1/v1/', model: 'm', secretRef: 'env:KEY', timeoutMs: 120_000 } })?.writer).toEqual({ baseUrl: 'http://h:1/v1', model: 'm', secretRef: 'env:KEY', timeoutMs: 120_000 });
     expect(parseConsultSettings({ ...base, chatgptFrontierModel: 'anthropic/some-model' })?.chatgptFrontierModel).toBe('anthropic/some-model');
+    expect(parseConsultSettings({ ...base, claudeFrontierModel: 'openai/some-model' })?.claudeFrontierModel).toBe('openai/some-model');
+    expect(parseConsultSettings({ ...base, claudeFrontierModel: '' })).toBeUndefined();
+    expect(parseConsultSettings({ ...base, claudeFrontierModel: 7 })).toBeUndefined();
   });
 
   test('anything else makes the whole file invalid (outside help off)', () => {

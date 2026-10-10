@@ -3701,6 +3701,8 @@ export interface ConsultAskWireRequest {
   cleanup?: 'as_written' | 'light_cleanup' | 'custom';
   remember?: boolean;
   model?: string;
+  /** The calling agent, validated like source_answer's; its provider chooses the model setting. */
+  caller?: OperationCallerWire;
 }
 
 async function parseConsultAskRequest(request: Request): Promise<ConsultAskWireRequest> {
@@ -3718,13 +3720,36 @@ async function parseConsultAskRequest(request: Request): Promise<ConsultAskWireR
   }
   const remember = asOptionalBoolean(record.remember);
   const model = asOptionalString(record.model);
+  const caller = parseRequestCaller(record, request);
   return {
     question: record.question,
     ...(level !== undefined ? { level } : {}),
     ...(cleanup !== undefined ? { cleanup } : {}),
     ...(remember !== undefined ? { remember } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(caller ? { caller } : {}),
   };
+}
+
+/**
+ * The optional `caller` of a worker request. Only the worker's own remote
+ * endpoint, after verifying a connection token, may attribute a request to a
+ * connection.
+ */
+function parseRequestCaller(record: Record<string, unknown>, request: Request): OperationCallerWire | undefined {
+  const callerParse = parseOperationCallerWire(record.caller);
+  if (!callerParse.ok) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', callerParse.message);
+  }
+  const caller = callerParse.caller;
+  if (caller && callerClaimsRemoteConnection(caller) && !isInProcessRemoteRequest(request)) {
+    throw new EmailSourceWorkerError(
+      400,
+      'invalid_request',
+      'caller.surface "remote" and caller.connection_id are set only by the remote MCP endpoint.',
+    );
+  }
+  return caller;
 }
 
 async function parseSourceIndexAnswerRequest(request: Request): Promise<SourceIndexAnswerRequest> {
@@ -3787,20 +3812,7 @@ async function parseSourceIndexAnswerRequest(request: Request): Promise<SourceIn
   if (timeoutMs !== undefined && timeoutMs <= 0) {
     throw new EmailSourceWorkerError(400, 'invalid_request', 'timeout_ms must be a positive number when provided.');
   }
-  const callerParse = parseOperationCallerWire(record.caller);
-  if (!callerParse.ok) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', callerParse.message);
-  }
-  const caller = callerParse.caller;
-  // Only the worker's own remote endpoint, after verifying a connection token,
-  // may attribute an answer to a connection.
-  if (caller && callerClaimsRemoteConnection(caller) && !isInProcessRemoteRequest(request)) {
-    throw new EmailSourceWorkerError(
-      400,
-      'invalid_request',
-      'caller.surface "remote" and caller.connection_id are set only by the remote MCP endpoint.',
-    );
-  }
+  const caller = parseRequestCaller(record, request);
   return {
     question: record.question,
     ...(query !== undefined ? { query } : {}),
