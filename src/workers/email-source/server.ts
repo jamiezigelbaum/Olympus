@@ -1810,7 +1810,9 @@ export async function main(): Promise<void> {
   if (dashboardSessionSecret.source !== 'file') {
     console.log(`[dashboard] control-session secret ${dashboardSessionSecret.source} at ${dashboardSessionSecret.path}${dashboardSessionSecret.source === 'memory' ? ' (could not be written; sessions end with this worker)' : ''}`);
   }
-  const olympusConfig = loadConfig();
+  // A Gateway- or engine-supervised child takes `remote` from the plugin config
+  // its supervisor handed over; a foreground worker never reads that handoff.
+  const olympusConfig = loadConfig(process.env, { nativeRemoteHandoff: workerLaunch.nativeServiceSupervised === true });
   const sourceCorpusRegistry = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,

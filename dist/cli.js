@@ -1129,7 +1129,7 @@ class EncryptedFileSecretStore {
         tag: cipher.getAuthTag().toString("base64"),
         ciphertext: ciphertext.toString("base64")
       };
-      mkdirSync3(dirname4(this.encryptedFilePath), { recursive: true });
+      mkdirSync3(dirname4(this.encryptedFilePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.encryptedFilePath, JSON.stringify(encrypted, null, 2));
     } finally {
       key.fill(0);
@@ -1154,7 +1154,7 @@ class EncryptedFileSecretStore {
     return this.localRandomKey();
   }
   localRandomKey() {
-    mkdirSync3(dirname4(this.keyFilePath), { recursive: true });
+    mkdirSync3(dirname4(this.keyFilePath), { recursive: true, mode: 448 });
     if (!existsSync3(this.keyFilePath)) {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes(32).toString("base64"));
     }
@@ -1288,6 +1288,15 @@ var init_secret_store = __esm(() => {
   init_atomic_file();
   init_file_lease();
 });
+
+// src/core/build-flavor.ts
+var PUBLIC_RUNTIME_BUILD = false;
+
+// src/core/google-handle-compatibility.ts
+function isRetiredGoogleHandle(handle, publicBuild = PUBLIC_RUNTIME_BUILD) {
+  return publicBuild && (handle.provider === "gmail" && handle.handle === "gmail.personal.delegated" || handle.provider === "google_drive" && handle.handle === "google_drive.personal.delegated") && handle.oauth2Refresh === undefined && (handle.tokenSecretRefs?.length ?? 0) === 0;
+}
+var init_google_handle_compatibility = () => {};
 
 // src/core/operation-error.ts
 function sourceAnswerJobNotFound() {
@@ -2407,7 +2416,7 @@ function ensureManagedWorkerEnvironment(options = {}) {
   return { path: envPath, wrote: reconcileWorkerEnv(envPath, { ...options, homeDir }) };
 }
 function reconcileWorkerEnv(envPath, options) {
-  mkdirSync4(dirname5(envPath), { recursive: true });
+  mkdirSync4(dirname5(envPath), { recursive: true, mode: 448 });
   if (!existsSync4(envPath)) {
     writePrivateFileAtomicSync(envPath, defaultWorkerEnv(options));
     return true;
@@ -3014,9 +3023,6 @@ var init_publisher_oauth_client = __esm(() => {
   ];
 });
 
-// src/core/build-flavor.ts
-var PUBLIC_RUNTIME_BUILD = false;
-
 // src/core/google-service-account.ts
 import { createSign } from "node:crypto";
 function parseGoogleServiceAccountKey(rawCredential, options = {}) {
@@ -3182,7 +3188,7 @@ class JsonCredentialOAuth2StateStore {
       }
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname6(this.path), { recursive: true });
+        await mkdir2(dirname6(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -3194,7 +3200,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname6(this.path), { recursive: true });
+        await mkdir2(dirname6(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -4908,7 +4914,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync5(dirname7(path), { recursive: true });
+  mkdirSync5(dirname7(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -5817,6 +5823,10 @@ async function completeOAuthSourceConnection(prepared, code) {
         ...xUserId ? { providerAccountId: xUserId } : {}
       }, prepared.registryPath);
     }
+    const replacedProviders = new Set(proposedHandles.map((handle) => handle.provider));
+    const retired = readConnectedHandleRegistry(prepared.registryPath).handles.filter((handle) => replacedProviders.has(handle.provider) && isRetiredGoogleHandle(handle));
+    if (retired.length > 0)
+      removeConnectedHandles(retired.map((handle) => handle.handle), prepared.registryPath);
     return {
       ok: true,
       source: prepared.options.source,
@@ -5842,7 +5852,7 @@ async function resolveOAuthClientSecret(prepared) {
 }
 function assertOneConnectedAccountForProposedProviders(registryPath, proposed) {
   const providers = new Set(proposed.map((handle) => handle.provider));
-  const handles = readConnectedHandleRegistry(registryPath).handles.filter((handle) => providers.has(handle.provider));
+  const handles = readConnectedHandleRegistry(registryPath).handles.filter((handle) => providers.has(handle.provider) && !isRetiredGoogleHandle(handle));
   assertOneConnectedAccountPerProvider({ version: 1, handles }, proposed);
 }
 function normalizeOAuthTimeoutMs(value, defaultValue, label) {
@@ -6583,6 +6593,7 @@ function retryableErrorDisposition(error, now) {
 }
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
+  init_google_handle_compatibility();
   init_model_transport();
   init_zkapi_consult_settings();
   init_secret_store();
@@ -9888,11 +9899,13 @@ import { isAbsolute as isAbsolutePath, join as join16, resolve as resolve5 } fro
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
-function loadConfig(env = process.env) {
+function loadConfig(env = process.env, options = {}) {
   const engineConfig = env.OLYMPUS_CONFIG ? undefined : installedEngineConfig(env);
   if (engineConfig) {
     const config2 = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
     applyEnvironmentOverrides(config2, env);
+    if (options.nativeRemoteHandoff === true)
+      applyNativeRemoteHandoff(config2, env);
     validateConfig(config2);
     return config2;
   }
@@ -9903,6 +9916,8 @@ function loadConfig(env = process.env) {
     mergeConfig(config, raw);
   }
   applyEnvironmentOverrides(config, env);
+  if (options.nativeRemoteHandoff === true)
+    applyNativeRemoteHandoff(config, env);
   validateConfig(config);
   return config;
 }
@@ -10035,6 +10050,41 @@ function applyEnvironmentOverrides(config, env) {
     };
   }
 }
+function applyNativeRemoteHandoff(config, env) {
+  const handoff = env[NATIVE_REMOTE_CONFIG_ENV]?.trim();
+  if (!handoff) {
+    delete config.remote;
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(handoff);
+  } catch {
+    throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} is not valid JSON.`);
+  }
+  const remote = asRecord4(parsed);
+  if (!remote)
+    throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
+  config.remote = parseRemoteConfig(remote);
+}
+function parseRemoteConfig(remote) {
+  const parsed = { enabled: remote.enabled === true };
+  for (const key of ["relayHost", "publicBaseUrl"]) {
+    const value = remote[key];
+    if (typeof value === "string" && value.trim())
+      parsed[key] = value.trim();
+  }
+  const demo = asRecord4(remote.demoConsent);
+  if (demo) {
+    parsed.demoConsent = { enabled: demo.enabled === true };
+    for (const key of ["username", "passwordHash"]) {
+      const value = demo[key];
+      if (typeof value === "string" && value.trim())
+        parsed.demoConsent[key] = value.trim();
+    }
+  }
+  return parsed;
+}
 function configFromPluginConfig(pluginConfig, options = {}) {
   const requireResolvedWorkerSecrets = options.requireResolvedWorkerSecrets !== false;
   const config = defaultConfig();
@@ -10046,23 +10096,8 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   const email = asRecord4(root?.email);
   const sourceIndex = asRecord4(root?.sourceIndex);
   const remote = asRecord4(root?.remote);
-  if (remote) {
-    config.remote = { enabled: remote.enabled === true };
-    for (const key of ["relayHost", "publicBaseUrl"]) {
-      const value = remote[key];
-      if (typeof value === "string" && value.trim())
-        config.remote[key] = value.trim();
-    }
-    const demo = asRecord4(remote.demoConsent);
-    if (demo) {
-      config.remote.demoConsent = { enabled: demo.enabled === true };
-      for (const key of ["username", "passwordHash"]) {
-        const value = demo[key];
-        if (typeof value === "string" && value.trim())
-          config.remote.demoConsent[key] = value.trim();
-      }
-    }
-  }
+  if (remote)
+    config.remote = parseRemoteConfig(remote);
   if (sovereignty) {
     config.sovereignty = {};
     if (typeof sovereignty.configPath === "string" && sovereignty.configPath.trim()) {
@@ -10816,7 +10851,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
 function asRecord4(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
-var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, NATIVE_REMOTE_CONFIG_ENV = "OLYMPUS_NATIVE_REMOTE_CONFIG_JSON", ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -20699,7 +20734,8 @@ var init_local_index = __esm(() => {
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
-    ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
+    ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
+    ["text-embedding-qwen3-8b", 0.43]
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
     [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
@@ -20816,7 +20852,7 @@ var init_local_index = __esm(() => {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync12(dirname16(this.dbPath), { recursive: true });
+        mkdirSync12(dirname16(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database3(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       try {
@@ -51327,7 +51363,7 @@ async function defaultClearQuarantine(dir) {
     execFile("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve9());
   });
 }
-function ensureOwnedDirectory(path, uid, label) {
+function ensureOwnedDirectory(path, uid, label, options = {}) {
   try {
     mkdirSync23(path, { mode: 448 });
   } catch (error) {
@@ -51344,6 +51380,17 @@ function ensureOwnedDirectory(path, uid, label) {
     throw new ManagedToolsError("folder_unsafe", `${label} is not a plain folder.`);
   if (uid !== undefined && stats.uid !== uid)
     throw new ManagedToolsError("folder_unsafe", `${label} belongs to another user.`);
+  if ((stats.mode & 18) !== 0 && options.repairWriteBits === true) {
+    try {
+      chmodSync13(path, stats.mode & 493);
+      stats = lstatSync14(path);
+    } catch {
+      throw new ManagedToolsError("folder_unsafe", `${label} can be changed by other users, and Olympus could not fix that.`);
+    }
+    if (stats.isSymbolicLink() || !stats.isDirectory() || uid !== undefined && stats.uid !== uid) {
+      throw new ManagedToolsError("folder_unsafe", `${label} is not a plain folder.`);
+    }
+  }
   if ((stats.mode & 18) !== 0)
     throw new ManagedToolsError("folder_unsafe", `${label} can be changed by other users.`);
 }
@@ -51362,7 +51409,7 @@ async function installManagedTools(options = {}) {
   const root = join47(base, "tools");
   try {
     mkdirSync23(dirname32(base), { recursive: true, mode: 448 });
-    ensureOwnedDirectory(base, uid, "The Olympus folder");
+    ensureOwnedDirectory(base, uid, "The Olympus folder", { repairWriteBits: true });
     ensureOwnedDirectory(root, uid, "The Olympus tools folder");
   } catch (error) {
     const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError("folder_unsafe", "Olympus could not prepare its tools folder.");
@@ -57369,7 +57416,7 @@ function embeddingModelEstimate(modelId, prices) {
 }
 function estimatedEmbeddingCostUsd(tokens, modelId, prices) {
   const { estimate } = embeddingModelEstimate(modelId, prices);
-  return Math.round(tokens / 1e6 * estimate.usdPerMillionTokens * 100) / 100;
+  return Math.ceil(tokens / 1e6 * estimate.usdPerMillionTokens * 100) / 100;
 }
 var DEFAULT_EMBEDDING_MODEL_ESTIMATES, FALLBACK_EMBEDDING_MODEL_ESTIMATE;
 var init_embedding_cost_estimates = __esm(() => {
@@ -58067,7 +58114,7 @@ class SqliteSourceDashboardHistory {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync27(dirname37(dbPath), { recursive: true });
+      mkdirSync27(dirname37(dbPath), { recursive: true, mode: 448 });
     this.db = new Database10(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
@@ -58468,8 +58515,15 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === "embedding_lane_disabled");
   const schedule = scheduleFromSchedulers(schedulers);
   const operatorPaused = schedule?.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason);
+  const googleReconnectRequired = (definition.provider === "gmail" || definition.provider === "google_drive") && (handlesForDefinition(definition, registry).some((handle) => isRetiredGoogleHandle(handle)) || !operatorPaused && schedule?.last_error_kind === "credential_missing");
   const providerRefusing = !operatorPaused && (schedule?.degraded_reason === "api_request_guard" || schedule !== undefined && schedule.consecutive_failures > 0 && schedule.last_error_kind === "api_request_guard");
-  const baseConnection = connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, corpora.some(corpusSyncRunning), oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing, now, registryUnreadable, unpaired);
+  const baseConnection = connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, corpora.some(corpusSyncRunning), oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing || googleReconnectRequired, now, registryUnreadable, unpaired);
+  if (googleReconnectRequired) {
+    baseConnection.state = "reauth_required";
+    baseConnection.label = "Reconnect Google to continue syncing";
+    if (baseConnection.action.kind === "oauth")
+      baseConnection.action.label = "Reconnect Google";
+  }
   const pairedSession = definition.connect_action.kind === "guided_session";
   const unpairable = pairedSession && unpaired === undefined && (baseConnection.handles.length > 0 || baseConnection.state !== "not_connected");
   const connectedFolderSource = fileSourceScopeStatus !== undefined && baseConnection.handles.length > 0 && baseConnection.state !== "reauth_required";
@@ -59874,7 +59928,7 @@ function providerLabel2(provider) {
     case "built-in":
       return "Built into Olympus";
     case "zkapi":
-      return "zkAPI (experimental, consults only)";
+      return "zkAPI (anonymous answers only)";
   }
 }
 function registryCorpusSourceIds(registry) {
@@ -59952,6 +60006,7 @@ function round12(value) {
 }
 var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
+  init_google_handle_compatibility();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -60276,7 +60331,7 @@ class SqliteSourceIngestionLedgerStore {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync28(dirname38(dbPath), { recursive: true });
+      mkdirSync28(dirname38(dbPath), { recursive: true, mode: 448 });
     this.db = new Database11(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     this.db.exec(`
@@ -65653,7 +65708,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync29(dirname40(path), { recursive: true });
+  mkdirSync29(dirname40(path), { recursive: true, mode: 448 });
   writeFileSync11(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -71012,7 +71067,7 @@ function writeEmbeddingOperatorOverride(path, on) {
     rmSync14(path, { force: true });
     return;
   }
-  mkdirSync35(dirname48(path), { recursive: true });
+  mkdirSync35(dirname48(path), { recursive: true, mode: 448 });
   writeFileSync14(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
@@ -71461,7 +71516,8 @@ function createNativeWorkerService(options) {
         "plugins.entries.olympus.config.worker",
         "plugins.entries.olympus.config.email.baseUrl",
         "plugins.entries.olympus.config.sourceIndex",
-        "plugins.entries.olympus.config.sovereignty"
+        "plugins.entries.olympus.config.sovereignty",
+        "plugins.entries.olympus.config.remote.demoConsent"
       ]
     },
     initialConfig: options.initialPluginConfig,
@@ -71610,6 +71666,10 @@ function applyNativeWorkerConfigEnv(config, env) {
   env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES = String(config.worker.scheduler.maxTransientRetries);
   env[NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram] = String(config.worker.telegramCapture.enabled);
   env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp] = String(config.worker.whatsappCapture.enabled);
+  if (config.remote)
+    env[NATIVE_REMOTE_CONFIG_ENV] = JSON.stringify(config.remote);
+  else
+    delete env[NATIVE_REMOTE_CONFIG_ENV];
 }
 function resolveBunRuntimePath2(configured, env) {
   if (configured)
@@ -108824,7 +108884,7 @@ function writeSourceIngestionExclusionsFile(options) {
     copyFileSync(path, backupPath);
     chmodSync24(backupPath, 384);
   } else {
-    mkdirSync42(dirname58(path), { recursive: true });
+    mkdirSync42(dirname58(path), { recursive: true, mode: 448 });
   }
   writePrivateFileAtomicSync(path, text2);
   return {
@@ -112201,7 +112261,7 @@ function dashboardProvidersForSource(source) {
 }
 function assertDashboardAccountCardinality(registry2, source) {
   const providers = new Set(dashboardProvidersForSource(source));
-  const handles = registry2.handles.filter((handle) => providers.has(handle.provider));
+  const handles = registry2.handles.filter((handle) => providers.has(handle.provider) && !isRetiredGoogleHandle(handle));
   try {
     assertOneConnectedAccountPerProvider({ version: 1, handles });
   } catch {
@@ -112965,6 +113025,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000;
 var init_email_source = __esm(() => {
+  init_google_handle_compatibility();
   init_consent_page();
   init_analyst();
   init_types();
@@ -118328,7 +118389,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition) : undefined;
+  const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === "Needs you" || status === "Failing";
   const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : undefined);
   const menu = [];
@@ -118390,7 +118451,7 @@ function attentionItem(definition, card, actionKind, degraded, connecting, progr
   }
   const reason = dashboardAttentionLine(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} });
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const fix = scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition) : sync ?? checkAgainFix();
+  const fix = scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function syncFix(definition, card, status, actionKind, degraded, progress) {
@@ -118418,9 +118479,9 @@ function connectingFor(definition, card, now) {
     fix: { label: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
   };
 }
-function reconnectFix(definition) {
+function reconnectFix(definition, card) {
   const source = oauthSource(definition);
-  return source ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, "reconnect"));
+  return source ? { label: (source === "gmail" || source === "google-drive") && card.connection.label === "Reconnect Google to continue syncing" ? "Reconnect Google" : DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, "reconnect"));
 }
 function helpLinkFix(label, href) {
   return { label, tool: DASHBOARD_TOOL_NAME, args: {}, href, openHref: true };
@@ -118865,6 +118926,7 @@ var init_dashboard_view_model = __esm(() => {
   DISCONNECT_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
   SYNC_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
   KNOWN_CONNECTION_LABELS = new Set([
+    "Reconnect Google to continue syncing",
     "not connected",
     "connection state unreadable",
     "awaiting browser consent",
@@ -129438,7 +129500,7 @@ async function main() {
   if (dashboardSessionSecret.source !== "file") {
     console.log(`[dashboard] control-session secret ${dashboardSessionSecret.source} at ${dashboardSessionSecret.path}${dashboardSessionSecret.source === "memory" ? " (could not be written; sessions end with this worker)" : ""}`);
   }
-  const olympusConfig = loadConfig();
+  const olympusConfig = loadConfig(process.env, { nativeRemoteHandoff: workerLaunch.nativeServiceSupervised === true });
   const sourceCorpusRegistry2 = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,
@@ -133580,7 +133642,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
     return false;
   }
   const parsed = JSON.parse(readFileSync26(source, "utf8"));
-  mkdirSync20(dirname29(destination), { recursive: true });
+  mkdirSync20(dirname29(destination), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(destination, JSON.stringify(sanitizeForExport(parsed), null, 2));
   files.push(destination);
   return true;
@@ -133597,7 +133659,7 @@ function exportDurabilityBoundary(destination) {
   }
 }
 function makeDurableDirectory(path, boundary) {
-  mkdirSync20(path, { recursive: true });
+  mkdirSync20(path, { recursive: true, mode: 448 });
   let current = resolve8(path);
   for (;; ) {
     syncDirectorySync2(current);
@@ -134829,9 +134891,6 @@ function settleWorkerServiceState(options, expected) {
     waitForActivationSettle(pollMs);
     service = inspectWorkerService(serviceActionOptions(options));
   }
-  if (!expected.includes(service.state) && expected.includes("active") && workerAnswersReadiness(options)) {
-    return { ...service, state: "active" };
-  }
   return service;
 }
 function validateSettleWindow(value, label, max) {
@@ -134839,14 +134898,6 @@ function validateSettleWindow(value, label, max) {
     throw new OperationError("invalid_params", `${label} must be between 0 and ${max} milliseconds.`);
   }
   return value;
-}
-function workerAnswersReadiness(options) {
-  try {
-    const url = `http://127.0.0.1:${workerReadinessPort(options)}/v1/health`;
-    return options.readinessProbe ? options.readinessProbe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
-  } catch {
-    return false;
-  }
 }
 function lifecycleActionFailure(action, state, options) {
   const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });

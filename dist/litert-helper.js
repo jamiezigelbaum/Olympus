@@ -244,7 +244,7 @@ function main() {
     process.exit(1);
   }
   lib.litert_lm_set_min_log_level(LOG_ERRORS_ONLY);
-  mkdirSync(settings.cacheDir, { recursive: true });
+  mkdirSync(settings.cacheDir, { recursive: true, mode: 448 });
   let device = "cpu";
   let engine = null;
   const wantsVision = settings.visionTokensPerImage !== undefined;

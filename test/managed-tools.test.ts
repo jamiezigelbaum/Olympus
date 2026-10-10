@@ -226,6 +226,26 @@ describe('the pins', () => {
 });
 
 describe('installing', () => {
+  test('repairs a group-writable Olympus folder that is ours, but never a group-writable tools folder', async () => {
+    // A service under umask 002 created ~/.local/share/olympus 0775 on the
+    // olympus-test box (2026-10-10), and install-tools refused it.
+    const f = setup();
+    const base = managedToolsBase(f.host)!;
+    mkdirSync(base, { recursive: true, mode: 0o700 });
+    chmodSync(base, 0o775);
+    const result = await installManagedTools(f.options);
+    expect(result.ok).toBe(true);
+    expect(statSync(base).mode & 0o777).toBe(0o755);
+
+    const g = setup();
+    mkdirSync(g.root, { recursive: true, mode: 0o700 });
+    chmodSync(g.root, 0o775);
+    const refused = await installManagedTools(g.options);
+    expect(refused.ok).toBe(false);
+    expect(refused.tools[0]).toMatchObject({ outcome: 'failed', code: 'folder_unsafe' });
+    expect(statSync(g.root).mode & 0o777).toBe(0o775);
+  });
+
   test('installs both into owner-only version folders, writes the manifest, clears quarantine on staging only, and discovery finds them', async () => {
     const f = setup();
     const result = await installManagedTools(f.options);

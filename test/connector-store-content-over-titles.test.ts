@@ -144,6 +144,24 @@ describe('connector-store ranking: content over titles', () => {
     });
   });
 
+  test('Venice content preference uses its calibrated bar and respects an adapter override', async () => {
+    for (const [score, expectedFirst] of [[0.429, 'title-spiral'], [0.431, 'pdf-a']] as const) {
+      await withStores(async ({ store, provider }) => {
+        provider.modelId = 'text-embedding-qwen3-8b';
+        provider.epochId = 'fixture:venice-calibrated-content';
+        provider.embed = async (inputs, options) => inputs.map(input => {
+          if (options.taskType === 'RETRIEVAL_QUERY') return [1, 0];
+          return input.text.includes('four quadrants') ? [score, Math.sqrt(1 - score * score)] : [0, 1];
+        });
+        await store.embedChunks({ provider });
+        const options = { retrievalMode: 'hybrid' as const, maxResults: 3, provider };
+        expect(hitIds(await search(store, 'spiral dynamics', options))[0]).toBe(expectedFirst);
+        expect(hitIds(await search(store, 'spiral dynamics', { ...options, semanticRelevanceBar: 0.9 }))[0])
+          .toBe('title-spiral');
+      });
+    }
+  });
+
   test('a title-only lookup still finds the file when no content matches', async () => {
     await withStores(async ({ store, provider }) => {
       const response = await search(store, 'brief history everything', { retrievalMode: 'keyword', maxResults: 5 });
