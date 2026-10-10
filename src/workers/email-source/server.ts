@@ -4439,6 +4439,7 @@ export async function main(): Promise<void> {
   // reports `no_model` with counts only.
   const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
   const { readConsultSettings } = await import('../../core/consult-settings.ts');
+  const { PrivateQuestionJobs } = await import('../chatgpt/private-question-jobs.ts');
   const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
   const { createDropboxOpenTargets, localDropboxRoots, localOpenArguments } = await import('../dropbox-files/open-target.ts');
@@ -4506,7 +4507,27 @@ export async function main(): Promise<void> {
         }
       : {}),
   });
-  const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30_000);
+  // The private question panel's jobs (chatgpt/private-question-jobs.ts):
+  // the sealed question runs the same ask lane as the ask_anonymously tool,
+  // with the caller placed as OpenAI-hosted, since ChatGPT opened the panel.
+  const privateQuestions = new PrivateQuestionJobs({
+    installId: () => remotePublicUrls()?.installId,
+    ask: (input) => (askAnonymouslyNow
+      ? askAnonymouslyNow({
+        question: input.question,
+        level: input.level,
+        ...(input.cleanup !== undefined ? { cleanup: input.cleanup } : {}),
+        origin: 'agent',
+        callerProvider: 'openai',
+        signal: input.signal,
+      })
+      : Promise.resolve({ ok: false as const, code: 'transport_unavailable', message: 'Anonymous answers are not set up on this computer.' })),
+    settings: () => readConsultSettings(),
+  });
+  const privateAnswerSweep = setInterval(() => {
+    privateAnswers.sweep();
+    privateQuestions.sweep();
+  }, 30_000);
   privateAnswerSweep.unref?.();
   {
     const { CONSULT_WRITER_LIMITS, createConsultWriterServer, defaultConsultMemoryProbe, runConsultWriter, runOwnConsultWriter } = await import('../../core/consult-writer.ts');
@@ -4824,6 +4845,7 @@ export async function main(): Promise<void> {
   // computer's /dashboard and the OpenClaw Control UI tab.
   const chatgptSurface = {
     privateAnswers,
+    privateQuestions,
     dashboardView: async (signal?: AbortSignal) => {
       const response = await worker.fetch(new Request(
         'http://olympus-worker.internal/dashboard.json',
@@ -4872,6 +4894,7 @@ export async function main(): Promise<void> {
     // (relay-mode OAuth approval: core/request-peer.ts).
     fetch: withRequestPeer(withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
+      questions: privateQuestions,
       isRelayed: isRelayedRequest,
       extraOrigins: () => [DASHBOARD_UI_DOMAIN],
     }), withRemoteOAuthRoutes(

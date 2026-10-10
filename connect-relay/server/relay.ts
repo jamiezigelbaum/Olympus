@@ -21,6 +21,9 @@
  *   panel collecting one sealed answer, routed by the install the job id
  *   names; only ChatGPT widget origins pass CORS. The relay forwards
  *   ciphertext it holds no key for (shared/private-answer.ts).
+ *   `POST /private/<job id>/ask` (same CORS, same routing, a 16 KiB body)
+ *   carries a private question sealed to the Mac's job key
+ *   (src/workers/chatgpt/private-question-contract.ts).
  *   `POST /private/<job id>/open` (same CORS, same routing) asks the Mac to
  *   open one of that answer's sources, by a token only the decrypted answer
  *   carries; the relay learns a token only when the panel uses it, so it
@@ -60,7 +63,8 @@ import { INSTALL_URL } from '../shared/dashboard-contract.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey, prefixKey } from '../shared/rate-limit.ts';
 import { HANDOFF_PATH_PREFIX, OAUTH_HANDBACK_PATHS, credentialInstallId, oauthHandbackInstallId } from '../shared/tokens.ts';
 import {
-  PRIVATE_ANSWER_MAX_REQUEST_BYTES,
+  privateAnswerMaxRequestBytes,
+  privateAnswerRoute,
   PRIVATE_ANSWER_PATH_PREFIX,
   isPanelOrigin,
   privateAnswerCorsHeaders,
@@ -697,16 +701,18 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const cors = allowed ? privateAnswerCorsHeaders(requestOrigin) : {};
     const reply = (status: number, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
       json(status, body, { ...cors, ...headers });
-    const jobId = url.search ? undefined : privateAnswerJobId(url.pathname);
+    const privateRoute = url.search ? undefined : privateAnswerRoute(url.pathname);
+    const jobId = privateRoute?.jobId;
     const installId = privateAnswerInstallId(jobId);
-    if (!jobId || !installId) return reply(404, { status: 'gone' });
+    if (!privateRoute || !jobId || !installId) return reply(404, { status: 'gone' });
     if (request.method === 'OPTIONS') {
       return allowed ? new Response(null, { status: 204, headers: { ...cors, 'Cache-Control': 'no-store' } }) : reply(403, { status: 'forbidden' });
     }
     if (request.method !== 'POST') return reply(405, { status: 'invalid' }, { Allow: 'POST, OPTIONS' });
     if (!allowed) return reply(403, { status: 'forbidden' });
     if (!privateFetches.take(ip)) return reply(429, { status: 'rate_limited' }, { 'Retry-After': '5' });
-    const read = await readBody(request, PRIVATE_ANSWER_MAX_REQUEST_BYTES, ip);
+    // A sealed question (`/ask`) is the one body larger than a key.
+    const read = await readBody(request, privateAnswerMaxRequestBytes(privateRoute.action), ip);
     if (!read.ok) return reply(read.response.status, { status: read.response.status === 413 ? 'invalid' : 'busy' }, { 'Retry-After': '5' });
     const response = await toInstall({
       installId,

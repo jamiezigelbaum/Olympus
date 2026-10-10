@@ -6,8 +6,9 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { staleChatgptRelayAssets } from '../scripts/build-chatgpt-relay-assets.ts';
-import { CHATGPT_RESOURCES, CHATGPT_TOOLS, DASHBOARD_RESOURCE_CONTENTS, PRIVATE_ANSWER_RESOURCE_CONTENTS } from '../connect-relay/server/relay-mcp.ts';
+import { CHATGPT_RESOURCES, CHATGPT_TOOLS, DASHBOARD_RESOURCE_CONTENTS, PRIVATE_ANSWER_RESOURCE_CONTENTS, PRIVATE_QUESTION_RESOURCE_CONTENTS } from '../connect-relay/server/relay-mcp.ts';
 import { PRIVATE_ANSWER_RESOURCE } from '../src/workers/chatgpt/private-answer-resource.ts';
+import { PRIVATE_QUESTION_RESOURCE } from '../src/workers/chatgpt/private-question-resource.ts';
 import { DASHBOARD_RESOURCE } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { CHATGPT_TOOLS as ENGINE_TOOLS, readChatGptResource } from '../src/workers/chatgpt/mcp-surface.ts';
 
@@ -26,6 +27,7 @@ describe('relay ChatGPT assets', () => {
         'source_answer',
         'source_answer_result',
         'ask_anonymously',
+        'open_private_question',
         'olympus_connect_source',
         'olympus_scope_list',
         'olympus_scope_set',
@@ -39,9 +41,10 @@ describe('relay ChatGPT assets', () => {
     ]);
   });
 
-  test('the relay serves the engine dashboard and private answer resources, bundle and metadata included', () => {
-    expect(CHATGPT_RESOURCES).toEqual([{ ...DASHBOARD_RESOURCE }, { ...PRIVATE_ANSWER_RESOURCE }]);
+  test('the relay serves the engine dashboard, private answer and private question resources, bundle and metadata included', () => {
+    expect(CHATGPT_RESOURCES).toEqual([{ ...DASHBOARD_RESOURCE }, { ...PRIVATE_ANSWER_RESOURCE }, { ...PRIVATE_QUESTION_RESOURCE }]);
     expect(DASHBOARD_RESOURCE_CONTENTS).toEqual(JSON.parse(JSON.stringify(readChatGptResource(DASHBOARD_RESOURCE.uri).contents)));
     expect(PRIVATE_ANSWER_RESOURCE_CONTENTS).toEqual(JSON.parse(JSON.stringify(readChatGptResource(PRIVATE_ANSWER_RESOURCE.uri).contents)));
+    expect(PRIVATE_QUESTION_RESOURCE_CONTENTS).toEqual(JSON.parse(JSON.stringify(readChatGptResource(PRIVATE_QUESTION_RESOURCE.uri).contents)));
   });
 });

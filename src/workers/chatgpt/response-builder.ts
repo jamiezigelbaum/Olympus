@@ -87,6 +87,8 @@ import {
 } from './private-answer-contract.ts';
 import { DASHBOARD_RESOURCE_VERSIONED_URI } from './dashboard-resource.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI } from './private-answer-resource.ts';
+import { PRIVATE_QUESTION_META_KEY, type PrivateQuestionMetaV1 } from './private-question-contract.ts';
+import { PRIVATE_QUESTION_RESOURCE_VERSIONED_URI } from './private-question-resource.ts';
 
 export interface ChatGptTextContent {
   type: 'text';
@@ -1212,6 +1214,39 @@ export function answerToolMeta(): Record<string, unknown> {
   return {
     ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI },
     'openai/outputTemplate': PRIVATE_ANSWER_RESOURCE_VERSIONED_URI,
+  };
+}
+
+/** The private question tool's `_meta`: its result renders the private question panel. */
+export function privateQuestionToolMeta(): Record<string, unknown> {
+  return {
+    ui: { resourceUri: PRIVATE_QUESTION_RESOURCE_VERSIONED_URI },
+    'openai/outputTemplate': PRIVATE_QUESTION_RESOURCE_VERSIONED_URI,
+  };
+}
+
+/** What the model is told when the panel opened: the question is typed there, and it will not see it. */
+export const PRIVATE_QUESTION_OPENED_TEXT = 'A private question panel is open below. The user types their question in it; it is sent anonymously through zkAPI from their own computer, and the answer is shown there. Neither the question nor the answer is shared with you, so do not ask what they typed; tell the user to type their question in the panel.';
+/** When no job could be opened: Olympus is not linked to the relay. */
+export const PRIVATE_QUESTION_UNAVAILABLE_TEXT = 'The private question panel cannot open: Olympus on the user\'s computer is not connected through the relay. Tell the user to open the Olympus dashboard and connect ChatGPT, then try again. They can also use ask_anonymously, where the question goes through this conversation.';
+
+/**
+ * open_private_question: the panel's job, widget-only. `structuredContent`
+ * tells the model only that a panel opened; the job id and the engine's key
+ * sit in `_meta[PRIVATE_QUESTION_META_KEY]` (hosts pass `_meta` to the widget
+ * and not to the model).
+ */
+export function openPrivateQuestionToolResult(meta: PrivateQuestionMetaV1 | undefined): ChatGptToolResult {
+  if (!meta) {
+    return {
+      content: [{ type: 'text', text: PRIVATE_QUESTION_UNAVAILABLE_TEXT }],
+      structuredContent: { status: 'unavailable', reason: 'not_connected' },
+    };
+  }
+  return {
+    content: [{ type: 'text', text: PRIVATE_QUESTION_OPENED_TEXT }],
+    structuredContent: { status: 'opened' },
+    _meta: { ...privateQuestionToolMeta(), [PRIVATE_QUESTION_META_KEY]: meta },
   };
 }
 

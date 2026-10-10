@@ -11,6 +11,11 @@
  *   POST https://<relay>/private/oly2p.<installId>.<secret>/open
  *   {"v":1,"open":"<token from the decrypted answer>"}   → 204
  *
+ *   POST https://<relay>/private/oly2p.<installId>.<secret>/ask
+ *   {"v":1,"publicKey":"<panel key>","iv":"…","ciphertext":"…"}   → 202
+ *   (a private question sealed to the engine's job key; the relay forwards
+ *   ciphertext it holds no key for; src/workers/chatgpt/private-question-contract.ts)
+ *
  * The panel (a ChatGPT widget) calls it with `fetch`, so the browser sends an
  * Origin and preflights the JSON POST. Only the ChatGPT widget sandbox
  * origins below pass.
@@ -24,11 +29,20 @@ export const PRIVATE_ANSWER_PATH_PREFIX = '/private/';
  * (open one of its sources on the Mac, by a token from inside the sealed
  * answer: `{"v":1,"open":"<token>"}`).
  */
-export const PRIVATE_ANSWER_PATH_PATTERN = /^\/private\/oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}(?:\/open)?$/;
+export const PRIVATE_ANSWER_PATH_PATTERN = /^\/private\/oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}(?:\/open|\/ask)?$/;
 /** The open request's path suffix. */
 export const PRIVATE_ANSWER_OPEN_SUFFIX = '/open';
+/** The ask request's path suffix (a private question sealed to the engine). */
+export const PRIVATE_ANSWER_ASK_SUFFIX = '/ask';
 /** `{"v":1,"publicKey":"<87 chars>"}` is about 110 bytes; anything far larger is not a panel. */
 export const PRIVATE_ANSWER_MAX_REQUEST_BYTES = 512;
+/** A sealed question: up to 8 KiB of text as base64url ciphertext with its key, iv and JSON around it. */
+export const PRIVATE_QUESTION_MAX_REQUEST_BYTES = 16_384;
+export type PrivateAnswerAction = 'collect' | 'open' | 'ask';
+/** The body cap for one private-answer action: only a sealed question is larger than a key. */
+export function privateAnswerMaxRequestBytes(action: PrivateAnswerAction): number {
+  return action === 'ask' ? PRIVATE_QUESTION_MAX_REQUEST_BYTES : PRIVATE_ANSWER_MAX_REQUEST_BYTES;
+}
 
 /**
  * ChatGPT serves MCP Apps widgets from its sandbox domain,
@@ -59,11 +73,11 @@ export function privateAnswerJobId(path: string): string | undefined {
 }
 
 /** A private-answer path's job id and action, or undefined for any other path. */
-export function privateAnswerRoute(path: string): { jobId: string; action: 'collect' | 'open' } | undefined {
+export function privateAnswerRoute(path: string): { jobId: string; action: PrivateAnswerAction } | undefined {
   if (!PRIVATE_ANSWER_PATH_PATTERN.test(path)) return undefined;
-  const open = path.endsWith(PRIVATE_ANSWER_OPEN_SUFFIX);
-  const end = open ? path.length - PRIVATE_ANSWER_OPEN_SUFFIX.length : path.length;
-  return { jobId: path.slice(PRIVATE_ANSWER_PATH_PREFIX.length, end), action: open ? 'open' : 'collect' };
+  const suffix = path.endsWith(PRIVATE_ANSWER_OPEN_SUFFIX) ? PRIVATE_ANSWER_OPEN_SUFFIX : path.endsWith(PRIVATE_ANSWER_ASK_SUFFIX) ? PRIVATE_ANSWER_ASK_SUFFIX : '';
+  const action: PrivateAnswerAction = suffix === PRIVATE_ANSWER_OPEN_SUFFIX ? 'open' : suffix === PRIVATE_ANSWER_ASK_SUFFIX ? 'ask' : 'collect';
+  return { jobId: path.slice(PRIVATE_ANSWER_PATH_PREFIX.length, path.length - suffix.length), action };
 }
 
 /** The install a private-answer job id names. */

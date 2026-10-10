@@ -36,6 +36,9 @@ import { callSetupTool, isSetupTool, SETUP_TOOLS, type ChatGptSetupBackend } fro
 import { PRIVATE_ANSWER_RESOURCE_URI, type PrivateAnswerDetail, type PrivateEvidenceItem, type PrivateMatchSummary } from './private-answer-contract.ts';
 import type { PrivateAnswerJobs, PrivateEvidenceRefresh } from './private-answer-jobs.ts';
 import { PRIVATE_ANSWER_RESOURCE, privateAnswerResourceHtml, privateAnswerResourceMeta } from './private-answer-resource.ts';
+import { PRIVATE_QUESTION_RESOURCE_URI } from './private-question-contract.ts';
+import type { PrivateQuestionJobs } from './private-question-jobs.ts';
+import { PRIVATE_QUESTION_RESOURCE, privateQuestionResourceHtml, privateQuestionResourceMeta } from './private-question-resource.ts';
 import {
   answerToolMeta,
   answerToolResult,
@@ -45,6 +48,7 @@ import {
   dashboardToolMeta,
   dashboardToolResult,
   errorToolResult,
+  openPrivateQuestionToolResult,
   searchToolResult,
   sourceStatusToolResult,
   type ChatGptToolResult,
@@ -71,6 +75,8 @@ export interface ChatGptSurfaceOptions {
   privateMatchProbeLog?: (line: string) => void;
   /** One-time private answer jobs for the private answer panel; without it a match reports `no_model`. */
   privateAnswers?: PrivateAnswerJobs;
+  /** Private question jobs for the private question panel; without them open_private_question answers "unavailable". */
+  privateQuestions?: PrivateQuestionJobs;
   /** The built-in embedding model's state, when the embeddings lane reports one. */
   embedding?: () => ChatGptDashboardOptions['embedding'];
   /** The owner's privacy settings, counts only, for the dashboard. */
@@ -300,6 +306,27 @@ export const ASK_ANONYMOUSLY_TOOL: ChatGptToolDefinition = {
   securitySchemes: OAUTH2_REQUIRED,
 };
 
+/**
+ * The private question panel (private-question-contract.ts): a question
+ * ChatGPT never sees. The tool takes nothing and opens one job; the panel
+ * does the rest with the relay and the user's computer.
+ */
+export const OPEN_PRIVATE_QUESTION_TOOL: ChatGptToolDefinition = {
+  name: 'open_private_question',
+  title: 'Open a private question',
+  description: [
+    'Open a panel where the user types a question that you never see. It is asked anonymously through zkAPI from their own computer,',
+    'paid from their zkAPI balance, and answered inside the panel. Use it when the user wants to ask a private or anonymous question',
+    'without telling ChatGPT what it is (for example "use Olympus zkAPI to ask a private question"). When they have already typed',
+    'the question in this conversation, use ask_anonymously instead. Takes no arguments. Returns {status: "opened"}: tell the user',
+    'to type their question in the panel, and never ask what it is or what it answered. {status: "unavailable"}: tell the user why in those words.',
+  ].join(' '),
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  // The panel sends a paid question from the user's computer: neither read-only nor closed-world.
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  securitySchemes: OAUTH2_REQUIRED,
+};
+
 const ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL] as const;
 
 /**
@@ -313,6 +340,7 @@ export const CHATGPT_TOOLS: readonly ChatGptToolDefinition[] = [
   SOURCE_STATUS_TOOL,
   ...ANSWER_TOOLS,
   ASK_ANONYMOUSLY_TOOL,
+  OPEN_PRIVATE_QUESTION_TOOL,
   ...SETUP_TOOLS,
 ];
 
@@ -322,7 +350,7 @@ export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSur
   // A handed-off anonymous answer is collected with source_answer_result
   // too, so the collector is listed with the ask even with no answer model.
   else if (askToolListed(ctx)) tools.push(SOURCE_ANSWER_RESULT_TOOL);
-  if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL);
+  if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL);
   tools.push(...SETUP_TOOLS);
   return options.readOnly ? tools.filter((tool) => tool.annotations.readOnlyHint) : tools;
 }
@@ -455,6 +483,12 @@ export async function callChatGptTool(
           params.remember = args.remember;
         }
         return askAnonymouslyToolResult(await runOperation(ASK_ANONYMOUSLY_TOOL.name, ctx, params));
+      }
+      case OPEN_PRIVATE_QUESTION_TOOL.name: {
+        if (!askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
+        if (Object.keys(args).length > 0) throw new ChatGptSurfaceError('invalid_params');
+        // The job is opened here; the question itself never passes through this surface.
+        return openPrivateQuestionToolResult(options.privateQuestions ? await options.privateQuestions.begin() : undefined);
       }
       default:
         if (isSetupTool(name)) return await callSetupTool(name, args, options.setup);
@@ -678,7 +712,7 @@ async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: Abort
 }
 
 /** Every MCP Apps resource this surface serves, in list order. */
-export const CHATGPT_RESOURCES = [DASHBOARD_RESOURCE, PRIVATE_ANSWER_RESOURCE] as const;
+export const CHATGPT_RESOURCES = [DASHBOARD_RESOURCE, PRIVATE_ANSWER_RESOURCE, PRIVATE_QUESTION_RESOURCE] as const;
 
 /**
  * resources/read. Accepts each resource's versioned URI, its bare base URI and
@@ -693,6 +727,16 @@ export function readChatGptResource(uri: string): { contents: Array<Record<strin
         mimeType: PRIVATE_ANSWER_RESOURCE.mimeType,
         text: privateAnswerResourceHtml(),
         _meta: privateAnswerResourceMeta(),
+      }],
+    };
+  }
+  if (matchesResourceUri(uri, PRIVATE_QUESTION_RESOURCE_URI)) {
+    return {
+      contents: [{
+        uri,
+        mimeType: PRIVATE_QUESTION_RESOURCE.mimeType,
+        text: privateQuestionResourceHtml(),
+        _meta: privateQuestionResourceMeta(),
       }],
     };
   }
