@@ -7,6 +7,7 @@ import { describe, expect, test } from 'bun:test';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
+import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { createEmailSourceWorker, type ConsultAskWireRequest } from '../src/workers/email-source/index.ts';
 import { askAnonymouslyToolResult, isAskAnonymouslyResult } from '../src/workers/chatgpt/response-builder.ts';
 
@@ -69,6 +70,31 @@ describe('ask_anonymously: operation → worker route → core', () => {
     expect(seen!.aborted).toBe(false);
     controller.abort();
     expect(seen!.aborted).toBe(true);
+  });
+
+  test('with a job registry (stdio MCP), the caller\'s cancellation ends the ask until hand-off and not after', async () => {
+    const seen: AbortSignal[] = [];
+    const { ctx } = lane(async (_input, signal) => {
+      seen.push(signal);
+      await new Promise<void>((resolve) => { if (signal.aborted) resolve(); else signal.addEventListener('abort', () => resolve(), { once: true }); });
+      return { ok: false, code: 'cancelled', message: 'cancelled' };
+    });
+    // Before hand-off: the caller's abort reaches the worker request.
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 60_000, resultWaitMs: 1_000, deadlineMs: 60_000, ttlMs: 60_000, maxRunningGlobal: 2, maxRunningPerOwner: 2, maxRetainedPerOwner: 4, maxResultBytes: 1_000_000 } });
+    const caller = new AbortController();
+    const early = ask.handler({ ...ctx, signal: caller.signal, sourceAnswerJobs: { registry, owner: 'o' } }, { question: 'x', level: 'standard' });
+    await Bun.sleep(5);
+    caller.abort();
+    expect(await early).toMatchObject({ ok: false, code: 'cancelled' });
+    expect(seen[0]!.aborted).toBe(true);
+    // After hand-off: the caller may go; the work keeps its own signal.
+    const quick = new SourceAnswerJobRegistry({ limits: { handoffMs: 5, resultWaitMs: 1_000, deadlineMs: 60_000, ttlMs: 60_000, maxRunningGlobal: 2, maxRunningPerOwner: 2, maxRetainedPerOwner: 4, maxResultBytes: 1_000_000 } });
+    const late = new AbortController();
+    const handed = await ask.handler({ ...ctx, signal: late.signal, sourceAnswerJobs: { registry: quick, owner: 'o' } }, { question: 'x', level: 'standard' });
+    expect(handed).toMatchObject({ status: 'working' });
+    late.abort();
+    await Bun.sleep(5);
+    expect(seen[1]!.aborted).toBe(false);
   });
 
   test('the caller\'s cancellation reaches the core through the client and the route', async () => {

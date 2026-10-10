@@ -96,10 +96,15 @@ export async function serve(): Promise<void> {
   // already per client: a slow source_answer hands off to it rather than
   // outliving the client's tool-call limit.
   const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env, 'stdio') });
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     // The stdio client names itself during initialize (e.g. "claude-code").
     // Self-reported, so it is an audit label only, never an authorization.
-    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name, sourceAnswerJobs));
+    // The request's signal is the client's cancellation: it ends a call
+    // before hand-off (an ask stops before dispatch, nothing paid).
+    return handleMcpCallTool(request, () => ({
+      ...makeContext(server.getClientVersion()?.name, sourceAnswerJobs),
+      ...(extra.signal ? { signal: extra.signal } : {}),
+    }));
   });
 
   await server.connect(new StdioServerTransport());

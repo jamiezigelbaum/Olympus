@@ -65313,6 +65313,35 @@ var init_selected_item_safety = __esm(() => {
 });
 
 // src/core/operations.ts
+function runUnderCaller(jobs, caller, work) {
+  if (!caller)
+    return jobs.registry.run(jobs, work);
+  let following = true;
+  const scope = { ...jobs, detachFromClient: () => {
+    following = false;
+    jobs.detachFromClient?.();
+  } };
+  return jobs.registry.run(scope, (signal) => {
+    const controller = new AbortController;
+    const onJob = () => controller.abort(signal.reason);
+    const onCaller = () => {
+      if (following)
+        controller.abort(caller.reason);
+    };
+    if (signal.aborted)
+      onJob();
+    else
+      signal.addEventListener("abort", onJob, { once: true });
+    if (caller.aborted)
+      onCaller();
+    else
+      caller.addEventListener("abort", onCaller, { once: true });
+    return work(controller.signal).finally(() => {
+      signal.removeEventListener("abort", onJob);
+      caller.removeEventListener("abort", onCaller);
+    });
+  });
+}
 function optionalAskLevel(value) {
   const level = optionalString9(value);
   if (level === undefined || level === "strict" || level === "standard")
@@ -65841,7 +65870,7 @@ var init_operations = __esm(() => {
           ...signal ? { signal } : {}
         });
         const jobs = ctx.sourceAnswerJobs;
-        return jobs ? jobs.registry.run(jobs, answer) : answer();
+        return jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal);
       }
     },
     {
@@ -66120,7 +66149,7 @@ var init_operations = __esm(() => {
           ...signal ? { signal } : {}
         });
         const jobs = ctx.sourceAnswerJobs;
-        return jobs ? jobs.registry.run(jobs, ask) : ask(ctx.signal);
+        return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
       }
     }
   ];
@@ -87078,8 +87107,11 @@ async function serve() {
     };
   });
   const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: sourceAnswerJobLimitsFromEnv(process.env, "stdio") });
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    return handleMcpCallTool(request, () => makeContext(server.getClientVersion()?.name, sourceAnswerJobs));
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    return handleMcpCallTool(request, () => ({
+      ...makeContext(server.getClientVersion()?.name, sourceAnswerJobs),
+      ...extra.signal ? { signal: extra.signal } : {}
+    }));
   });
   await server.connect(new StdioServerTransport);
 }

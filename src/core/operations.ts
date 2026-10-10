@@ -14,7 +14,7 @@ import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
 import type { OperationCaller } from './operation-caller.ts';
-import type { SourceAnswerJobScope } from './source-answer-jobs.ts';
+import type { SourceAnswerJobScope, SourceAnswerPending } from './source-answer-jobs.ts';
 
 type SourceIndexAnswerCorpusId = string;
 type SourceIndexStatusCorpusId = string;
@@ -314,7 +314,7 @@ export const operations: Operation[] = [
         ...(signal ? { signal } : {}),
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? jobs.registry.run(jobs, answer) : answer();
+      return jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal);
     },
   },
   {
@@ -614,10 +614,37 @@ export const operations: Operation[] = [
         ...(signal ? { signal } : {}),
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? jobs.registry.run(jobs, ask) : ask(ctx.signal);
+      return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
     },
   },
 ];
+
+/**
+ * Runs `work` under the job registry, and until the job hands off also under
+ * the caller's own cancellation (OpenClaw's tool signal, stdio MCP's request
+ * signal; the remote surface links its transport instead). After hand-off the
+ * caller may go away without ending the work, as the registry promises.
+ */
+function runUnderCaller<T>(
+  jobs: SourceAnswerJobScope,
+  caller: AbortSignal | undefined,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T | SourceAnswerPending> {
+  if (!caller) return jobs.registry.run(jobs, work);
+  let following = true;
+  const scope: SourceAnswerJobScope = { ...jobs, detachFromClient: () => { following = false; jobs.detachFromClient?.(); } };
+  return jobs.registry.run(scope, (signal) => {
+    const controller = new AbortController();
+    const onJob = () => controller.abort(signal.reason);
+    const onCaller = () => { if (following) controller.abort(caller.reason); };
+    if (signal.aborted) onJob(); else signal.addEventListener('abort', onJob, { once: true });
+    if (caller.aborted) onCaller(); else caller.addEventListener('abort', onCaller, { once: true });
+    return work(controller.signal).finally(() => {
+      signal.removeEventListener('abort', onJob);
+      caller.removeEventListener('abort', onCaller);
+    });
+  });
+}
 
 function optionalAskLevel(value: unknown): 'strict' | 'standard' | undefined {
   const level = optionalString(value);

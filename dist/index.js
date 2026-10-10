@@ -20507,7 +20507,7 @@ var operations = [
         ...signal ? { signal } : {}
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? jobs.registry.run(jobs, answer) : answer();
+      return jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal);
     }
   },
   {
@@ -20786,10 +20786,39 @@ var operations = [
         ...signal ? { signal } : {}
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? jobs.registry.run(jobs, ask) : ask(ctx.signal);
+      return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
     }
   }
 ];
+function runUnderCaller(jobs, caller, work) {
+  if (!caller)
+    return jobs.registry.run(jobs, work);
+  let following = true;
+  const scope = { ...jobs, detachFromClient: () => {
+    following = false;
+    jobs.detachFromClient?.();
+  } };
+  return jobs.registry.run(scope, (signal) => {
+    const controller = new AbortController;
+    const onJob = () => controller.abort(signal.reason);
+    const onCaller = () => {
+      if (following)
+        controller.abort(caller.reason);
+    };
+    if (signal.aborted)
+      onJob();
+    else
+      signal.addEventListener("abort", onJob, { once: true });
+    if (caller.aborted)
+      onCaller();
+    else
+      caller.addEventListener("abort", onCaller, { once: true });
+    return work(controller.signal).finally(() => {
+      signal.removeEventListener("abort", onJob);
+      caller.removeEventListener("abort", onCaller);
+    });
+  });
+}
 function optionalAskLevel(value) {
   const level = optionalString4(value);
   if (level === undefined || level === "strict" || level === "standard")
