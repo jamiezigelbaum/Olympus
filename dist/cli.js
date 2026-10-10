@@ -52950,7 +52950,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
     cleanupCallerSignals();
     return fail(code);
   };
-  const blocked = settingsBlockers(zkapiMoneyStatus(settings, now()))[0];
+  const blocked = settingsBlockers(zkapiMoneyStatus(settings, now())).find((code) => !(recovery && code === "acknowledgements_incomplete"));
   if (blocked)
     return refuse2(blocked);
   if (!options.apiKey)

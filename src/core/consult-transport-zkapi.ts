@@ -2259,7 +2259,15 @@ async function runSession(
     cleanupCallerSignals();
     return fail(code);
   };
-  const blocked = settingsBlockers(zkapiMoneyStatus(settings, now()))[0];
+  // The cost-and-risk statements govern questions: what the owner's model
+  // sends and what each one costs. A recovery session sends the fixed empty
+  // request, nothing of the owner's, to settle money already held, so the
+  // statements do not stand between the owner and that one fix. Owner
+  // decision 2026-10-10 (Recover had failed `acknowledgements_incomplete`
+  // right after the statements changed version; a problem's fix must not
+  // fail on a second, unstated condition). The funding and expiry blockers
+  // still apply: an expired note cannot settle.
+  const blocked = settingsBlockers(zkapiMoneyStatus(settings, now())).find((code) => !(recovery && code === 'acknowledgements_incomplete'));
   if (blocked) return refuse(blocked);
   if (!options.apiKey) return refuse('daemon_api_key_missing');
   const daemonExecutable = resolveZkapiExecutable('zkapi-clientd', settings.daemonExecutable, env);
