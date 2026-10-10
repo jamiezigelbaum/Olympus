@@ -9,7 +9,7 @@
  * core/dashboard-launch.ts), never the worker token.
  */
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from './dashboard-launch.ts';
 import { DASHBOARD_LAUNCH_OPEN_KEY, openTargetToken, type OpenTarget } from './open-targets.ts';
 import { OperationError } from './operation-error.ts';
@@ -21,6 +21,8 @@ export interface DashboardOpeningMintOptions {
   fetchImpl?: DashboardFetch;
   /** Where the opened dashboard lands; the plain dashboard when absent. */
   target?: OpenTarget;
+  /** How the error hints name the CLI (the CLI passes its own; see olympusCommandHint). */
+  commandHint?: string;
 }
 
 /**
@@ -35,10 +37,10 @@ export const OLYMPUS_PLUGIN_BIN_HINT = '<rootDir>/bin/olympus';
 
 /**
  * The command to print: plain `olympus` when that is on PATH (the reader can
- * type it), else this install's own bin/olympus, else the placeholder.
- * Read per call, never at import (bundled dist stays lean). This file runs as
- * src/core/*.ts and bundled as dist/*.js, so the install root is one or two
- * levels up.
+ * type it), else `pluginBin` (this install's own bin/olympus, which the CLI
+ * passes), else the placeholder. Read per call, never at import. No
+ * import.meta here: this module also loads inside the OpenClaw host through
+ * jiti, where import.meta is not available.
  */
 export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
   const env = input.env ?? process.env;
@@ -52,11 +54,8 @@ export function olympusCommandHint(input: { env?: Record<string, string | undefi
   };
   const dirs = (env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':').filter(Boolean);
   if (dirs.some((dir) => isExecutable(join(dir, 'olympus')))) return 'olympus';
-  const candidates = input.pluginBin !== undefined
-    ? [input.pluginBin]
-    : [resolve(import.meta.dir, '..', 'bin', 'olympus'), resolve(import.meta.dir, '..', '..', 'bin', 'olympus')];
-  const own = candidates.find(isExecutable);
-  if (own && !/\s/.test(own)) return own;
+  const own = input.pluginBin;
+  if (own && isExecutable(own) && !/\s/.test(own)) return own;
   return OLYMPUS_PLUGIN_BIN_HINT;
 }
 
@@ -109,11 +108,12 @@ export async function mintDashboardOpeningUrl(
   token: string | undefined,
   dependencies: DashboardOpeningMintOptions = {},
 ): Promise<string> {
+  const hint = dependencies.commandHint ?? olympusCommandHint();
   if (!token) {
     throw new OperationError(
       'config_error',
       'No worker auth token is configured, so there is nothing to unlock.',
-      `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+      `Run ${hint} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
     );
   }
   const fetchImpl = dependencies.fetchImpl ?? fetch;
@@ -129,14 +129,14 @@ export async function mintDashboardOpeningUrl(
     throw new OperationError(
       'email_unreachable',
       'The configured Olympus worker did not answer the opening request.',
-      `Start the worker (${olympusCommandHint()} worker status) and run this again.`,
+      `Start the worker (${hint} worker status) and run this again.`,
     );
   }
   if (!response.ok) {
     throw new OperationError(
       'email_unreachable',
       `The configured Olympus worker refused the opening request with HTTP ${response.status}.`,
-      `Check ${olympusCommandHint()} worker status, then run this again.`,
+      `Check ${hint} worker status, then run this again.`,
     );
   }
   let ticket: unknown;

@@ -17,8 +17,11 @@ describe('MCP server surface', () => {
     // has no way to mint, so advertising them here was advertising a refusal.
     // source_answer_result is MCP-only: native OpenClaw never hands a slow
     // answer off (see src/core/public-surface.ts).
+    // olympus_open_remote is the owner's own OpenClaw session only: it mints a
+    // bearer opening link, and only the native host vouches for the owner.
     expect(mcpNames.filter((name) => name !== 'source_answer_result'))
-      .toEqual(nativeNames.filter((name) => !name.startsWith('source_watch')));
+      .toEqual(nativeNames.filter((name) => !name.startsWith('source_watch') && name !== 'olympus_open_remote'));
+    expect(mcpNames).not.toContain('olympus_open_remote');
     expect(nativeNames).not.toContain('source_answer_result');
     expect(nativeNames).toContain('source_watches');
     expect(mcpNames).not.toContain('source_watches');

@@ -10,9 +10,12 @@ import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
-import { mintDashboardOpeningUrl, olympusCommandHint, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
+import { mintDashboardOpeningUrl, olympusCommandHint as olympusCommandHintFor, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
 
-export { olympusCommandHint };
+/** How the CLI names itself in hints: plain `olympus` on PATH, else this install's own bin/olympus (src/ and dist/ both sit one level under the root). */
+export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
+  return olympusCommandHintFor({ ...input, pluginBin: input.pluginBin ?? resolve(import.meta.dir, '..', 'bin', 'olympus') });
+}
 import { allOpenTargets, openTargetFromPath, openTargetPath, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
 import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenHandlerResult } from './core/open-handler.ts';
 import {
@@ -2877,7 +2880,7 @@ export async function runDashboardCommand(
   const config = loadConfig();
   const base = workerRootBaseUrl(config.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config);
-  const openUrl = await mintDashboardOpeningUrl(base, token, dependencies);
+  const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
   let opened = false;
   if (!dependencies.noOpen) {
     try {

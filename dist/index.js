@@ -20338,7 +20338,7 @@ init_public_surface();
 
 // src/core/dashboard-opening.ts
 import { accessSync as accessSync5, constants as fsConstants2, statSync as statSync14 } from "node:fs";
-import { join as join25, resolve as resolve3 } from "node:path";
+import { join as join25 } from "node:path";
 init_operation_error();
 var OLYMPUS_PLUGIN_BIN_HINT = "<rootDir>/bin/olympus";
 function olympusCommandHint(input = {}) {
@@ -20354,9 +20354,8 @@ function olympusCommandHint(input = {}) {
   const dirs = (env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").filter(Boolean);
   if (dirs.some((dir) => isExecutable(join25(dir, "olympus"))))
     return "olympus";
-  const candidates = input.pluginBin !== undefined ? [input.pluginBin] : [resolve3(import.meta.dir, "..", "bin", "olympus"), resolve3(import.meta.dir, "..", "..", "bin", "olympus")];
-  const own = candidates.find(isExecutable);
-  if (own && !/\s/.test(own))
+  const own = input.pluginBin;
+  if (own && isExecutable(own) && !/\s/.test(own))
     return own;
   return OLYMPUS_PLUGIN_BIN_HINT;
 }
@@ -20381,8 +20380,9 @@ function workerRootBaseUrl(baseUrl) {
   return url.origin;
 }
 async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
+  const hint = dependencies.commandHint ?? olympusCommandHint();
   if (!token) {
-    throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
+    throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${hint} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
   }
   const fetchImpl = dependencies.fetchImpl ?? fetch;
   let response;
@@ -20394,10 +20394,10 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
       signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
     });
   } catch {
-    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${olympusCommandHint()} worker status) and run this again.`);
+    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${hint} worker status) and run this again.`);
   }
   if (!response.ok) {
-    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${olympusCommandHint()} worker status, then run this again.`);
+    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${hint} worker status, then run this again.`);
   }
   let ticket;
   try {
