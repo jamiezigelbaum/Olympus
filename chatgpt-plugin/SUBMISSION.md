@@ -1,6 +1,8 @@
 # Olympus: ChatGPT directory submission kit
 
-Status: draft, 2026-10-01; tools, tiers and the private answer panel updated
+Status: package complete 2026-10-10 (directory endpoint `/openai/mcp`, review
+cases and release notes in `plugin.json`, own logo, final privacy policy and
+terms); earlier: draft 2026-10-01; tools, tiers and the private answer panel updated
 2026-10-02; installer, sources and sensitive-data items updated after the
 2026-10-02 product review; installer items updated 2026-10-03 for the
 one-line script. Publisher: **Open Coordination Unlimited, Inc.**
@@ -26,43 +28,19 @@ out of the uploaded ZIP (see the checklist).
 | Terms of service | https://olympusplugin.ai/terms | HTTPS |
 | Support email | support@olympusplugin.ai | |
 
-### Long description (proposed; ≤4000)
+### Long description
 
-> Olympus is a private knowledge engine that runs on your Mac. It indexes the
-> sources you choose, such as your files in Dropbox and Google Drive and your
-> Gmail, using accounts you already have, and answers your questions in
-> ChatGPT with citations to your own items.
->
-> Your index stays on your Mac. Olympus sorts every item, one by one, into
-> Personal, Private or Secret, and you can tell it in your own words what is
-> private for you. ChatGPT receives excerpts only from Personal items.
-> Questions that match Private items are answered on your Mac and shown only
-> to you, in a private Olympus panel; that answer is never sent to ChatGPT.
-> Secrets such as passwords are never read by any model.
->
-> ChatGPT reaches your Mac through one secure connection that you approve with
-> a click on the Mac itself: no Olympus account, no password and no API keys.
-> The Olympus dashboard in the ChatGPT sidebar shows what is connected, how far
-> indexing has got and anything that needs you.
->
-> Olympus never sends mail, edits files or changes anything in your accounts.
-> Requires a Mac that is awake and online when you ask.
+Lives in `plugin.json` (`interface.longDescription`), including the optional
+anonymous-questions paragraph. zkAPI copy rule (owner, 2026-10-10): in
+anything ChatGPT or its reviewers see, zkAPI is "your own zkAPI account, set
+up outside ChatGPT in Olympus on your Mac"; no prices, ETH, wallet, deposit or
+funding words, and one neutral side-effect line in the tool descriptions.
 
-The current `longDescription` in `plugin.json` names the same sources (no
-local files or notes source exists yet) but predates the tier, private panel
-and no-keys paragraphs; update it to this text if accepted.
+### Capabilities
 
-### Capabilities (proposed `capabilities`, ≤20 entries of ≤120 characters)
-
-- Answers questions from your own mail, files and notes, with numbered citations
-- Shows which sources are connected and how far indexing has got
-- Answers from Private items only in a private panel, never sent to ChatGPT
-- Never sends, edits or deletes anything in your accounts
-
-(`plugin.json` has `["Read"]` today. Some setup tools change Olympus's own
-settings on the Mac (folder choices, disconnect, model choice, privacy); none
-writes to the user's accounts. Check whether the platform expects a write
-capability for them before submitting.)
+`Answers from your own mail and files`, `Private answers panel`,
+`Sources dashboard`, `Anonymous questions` (short labels, as Devic Agency's
+accepted package uses).
 
 ### Default prompts (current, ≤3 of ≤128 characters)
 
@@ -85,7 +63,9 @@ does not see them.
 | `source_answer` | Answer a question with citations; may return a `job_id`. Listed only when an answer model is set up on the Mac | yes / no / no | oauth2 |
 | `source_answer_result` | Collect a pending answer by `job_id` (listed with `source_answer`) | yes / no / no | oauth2 |
 | `olympus_connect_source` | One-time sign-in link for Gmail, Google Drive or Dropbox | no / no / yes | oauth2 |
-| `olympus_privacy_get` / `olympus_privacy_set` | Read or save what is private for the user | yes / no / no; no / no / no | oauth2 |
+| `olympus_privacy_get` / `olympus_privacy_set` (set: panel) | Read or save what is private for the user | yes / no / no; no / yes / no | oauth2 |
+| `ask_anonymously` | Ask a frontier model a question the user already wrote, anonymously, through their own zkAPI account | no / no / yes | oauth2 |
+| `open_private_question` | Open the private question panel; the question is typed there and ChatGPT never sees it or the answer | no / no / yes | oauth2 |
 | `olympus_scope_list` / `olympus_scope_set` (panel) | Folder and mail choices | yes / no / no; no / no / no | oauth2 |
 | `olympus_disconnect_source` (panel) | Stop reading a source; indexed data stays on the Mac | no / yes / no | oauth2 |
 | `olympus_model_set` / `olympus_model_retry` (panel) | Switch between models already set up on the Mac (never takes a key); retry a failed built-in install | no / no / no | oauth2 |
@@ -123,86 +103,20 @@ or credentials). Credentials live in 1Password, never in this repository.
 > are never answered from. Nothing in the demo is real.
 >
 > Answers, and private answers in the panel, can take up to a minute.
+>
+> The demo also has anonymous questions set up with its own zkAPI account,
+> ready to use: ask "Use Olympus to ask a private question anonymously",
+> type a general question in the panel that opens, and choose Ask
+> anonymously. The answer appears in the panel only and can take up to three
+> minutes. Nothing is sold, bought or paid in ChatGPT.
 
 ## 3. Test cases
 
-Data: `demo-data/` (README has the file-to-tier map). Field names follow
-`extensions.com.openai.review.test_cases` (`description`, `prompt`,
-`tools_triggered`, `expected_behavior`).
-
-### Positive
-
-Answer tool: `olympus_search` is the primary answer tool; ChatGPT writes
-the reply from its evidence. `source_answer` (with `source_answer_result`
-while it says working) is listed only when the demo engine has an answer
-model set up; either satisfies "answer tool" below.
-
-**P1. Lease renewal (mail + document)**
-- Prompt: `What did Sam say about renewing my lease?`
-- Tools: answer tool
-- Expected: Sam offers a 12-month renewal from 1 December 2026; rent rises
-  from $2,150 to $2,215 a month (3%); answer needed by 15 October; he will
-  replace the dishwasher before the new term and lets Robin keep the bike in
-  hallway storage. Cites the two emails from Sam Okafor (and may cite the
-  lease summary).
-
-**P2. Appointment lookup**
-- Prompt: `When is my next dentist appointment?`
-- Tools: answer tool
-- Expected: Wednesday 21 October 2026 at 9:30 with Dr. Mendes at Brightside
-  Dental, 220 Harbour Road; arrive 10 minutes early. Cites the Brightside
-  Dental confirmation email.
-
-**P3. Decision across sources (default prompt)**
-- Prompt: `Ask Olympus what I decided about the budget last month.`
-- Tools: answer tool
-- Expected: On 2 September Robin and Priya capped the kitchen renovation at
-  $18,000 and accepted the Hollis & Daughters quote of $16,400; savings rise
-  from $600 to $750 a month from October; Lisbon budget $3,200; no new car
-  this year. Cites the budget note and Priya's email (may cite the quote and
-  the renovation plan).
-
-**P4. Dashboard in the sidebar**
-- Prompt: `Show my Olympus dashboard.`
-- Tools: `olympus_dashboard`
-- Expected: The Olympus dashboard renders, showing the demo's connected
-  sources as ready, indexing complete, and nothing needing attention. No
-  Private or Secret item or folder name appears anywhere on it.
-
-**P5. Source status in chat**
-- Prompt: `Which sources is Olympus indexing, and are they up to date?`
-- Tools: `source_index_status`
-- Expected: A short list of the demo's sources, each with a one-word status
-  (for example Fresh) and a short line. No item titles.
-
-### Negative
-
-**N1. Private items stay out of the chat**
-- Prompt: `What did my blood test results say?`
-- Tools: answer tool (the private answer panel renders with its result)
-- Expected: ChatGPT's reply is short and says Olympus is answering privately
-  on the Mac, in the panel; it contains no result values, no clinic or
-  doctor name and no content from the Private items, cites none of them as
-  evidence, and does not ask the user to upload or paste the files. The
-  Olympus panel appears under the reply on its own, titled "Private answer
-  from your Mac" and marked "Not sent to ChatGPT", and shows the answer from
-  the lab results and clinic note (or, while the demo's private model is not
-  ready, says so). A Private item's name may be visible to ChatGPT when the
-  name itself is Personal; its contents never are.
-
-**N2. No actions on the user's behalf**
-- Prompt: `Email Sam and tell him I accept the lease renewal.`
-- Tools: none from Olympus (it may use an answer tool only to look up the
-  lease).
-- Expected: ChatGPT does not claim to have sent anything through Olympus and
-  explains Olympus is read-only; it may offer to draft the reply for the user
-  to send.
-
-**N3. Unrelated general question**
-- Prompt: `What is the capital of Portugal?`
-- Tools: none from Olympus.
-- Expected: ChatGPT answers from general knowledge (Lisbon) without calling
-  Olympus, which is only for the user's own information.
+The 5 positive and 3 negative cases, the commerce statement and the release
+notes live in `plugin.json` (`extensions.com.openai.review` and
+`.publication`); `test/chatgpt-plugin-package.test.ts` pins their shape.
+Data: `demo-data/` (README has the file-to-tier map). Never add a negative
+case that could spend money (a zkAPI ask is a spend).
 
 Spare (if a reviewer asks about Secrets): `What's the admin password for my
 old router?` → Olympus finds nothing usable; Secret items are not indexed, so
@@ -238,10 +152,12 @@ Identity and listing
 - [ ] Submitter has org owner or Apps Management Write (`api.apps.write`).
 - [ ] Website, support, privacy and terms URLs are live over HTTPS
       (`site/`, deployed with `site/deploy/deploy.sh`).
-- [ ] Privacy policy and terms have passed legal review, including the
-      defaults listed in the HTML comment at the top of each page; then
-      remove the "Draft" banners. The policy must cover categories, purposes, recipients,
-      retention and controls.
+- [x] Privacy policy and terms final, effective 10 October 2026 (owner:
+      no external legal review). The policy has a "Privacy policy in brief"
+      section under the headings OpenAI's automated check expects (data
+      collected, uses, recipients, retention incl. account and billing,
+      controls and rights with a 30-day answer, contact) and covers
+      anonymous questions. Deploy the site before submitting.
 
 Package
 - [ ] `plugin.json` `version` is explicit semver and equals `package.json`
@@ -249,10 +165,10 @@ Package
       engine were deployed from.
 - [ ] ZIP contains only `plugin.json`, `mcp.json`, `skills/`, `assets/`. Not
       `SUBMISSION.md`, not `demo-data/`, no `.app.json`, no hooks.
-- [ ] Icons: square, ≥48 px, PNG/JPEG/WebP/SVG, ≤5 MiB (test enforced).
-      **Olympus needs its own logo** (owner, 2026-10-01: not the OCU mark).
-      `assets/icon.png` is a temporary placeholder; replace it, set `logo`,
-      `composerIcon` and `brandColor`.
+- [x] Icons: square, ≥48 px, PNG/JPEG/WebP/SVG, ≤5 MiB (test enforced).
+      `assets/icon.png` is the site's mountain mark (2026-10-10), replacing
+      the emoji-style placeholder; `brandColor` #2f5d50, `brandColorDark`
+      #7fbfa9.
 - [ ] Skills pass the automated scan. The setup skill shows the user exactly
       one reviewed command to run in Terminal themselves,
       `curl -fsSL https://olympusplugin.ai/install.sh | sh`, and never runs
@@ -276,8 +192,10 @@ Installer
       the plain message, and nothing is written.
 
 Server and UI
-- [ ] MCP endpoint `https://mcp.olympusplugin.ai/mcp` (Streamable HTTP) is
-      final: the origin cannot change after approval.
+- [ ] MCP endpoint `https://mcp.olympusplugin.ai/openai/mcp` (Streamable
+      HTTP, allowlisted tools, its own OAuth resource) is deployed; it cannot
+      change after approval. `/mcp` stays for developer-mode connectors and
+      gets new tools first.
 - [ ] Domain verification: the token from the platform is served as plain
       text at `https://mcp.olympusplugin.ai/.well-known/openai-apps-challenge`
       (relay config, not this repo).
@@ -297,6 +215,8 @@ Server and UI
       (design: "Private answer panel", Relay).
 
 Reviewer demo
+- [ ] Demo engine has anonymous questions on, with a funded zkAPI account
+      (owner funds it) so the zkAPI case never runs dry.
 - [ ] Demo engine holds only `demo-data/`, carries the demo marker, and has
       `remote.demoConsent` with an Argon2id hash; credentials stored in
       1Password and entered in the form only.

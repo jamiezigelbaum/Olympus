@@ -3,7 +3,17 @@
   "mcpServers": {
     "olympus": {
       "type": "streamable-http",
-      "url": "https://mcp.olympusplugin.ai/mcp"
+      "url": "https://mcp.olympusplugin.ai/openai/mcp",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "cimd"
+            }
+          }
+        }
+      }
     }
   }
 }
