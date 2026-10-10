@@ -17232,6 +17232,7 @@ init_opsec();
 init_types();
 var CONSULT_GATE_MAX_QUESTION_BYTES = 600;
 var CONSULT_GATE_MAX_QUESTION_TOKENS = 80;
+var CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES = 8 * 1024;
 var CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576;
 var CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000;
 var DEFAULT_CONSULT_GATE_LIMITS = Object.freeze({
@@ -18577,6 +18578,13 @@ var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
 var CONSULT_LEVEL_WHEN_UNSET = "unnamed";
 var CONSULT_LEVEL_FOR_NEW_SETUP = CONSULT_LEVEL_WHEN_UNSET;
+var CONSULT_STANDARD_MODES = Object.freeze(["as_written", "light_cleanup", "custom"]);
+var CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000;
+var CONSULT_LIGHT_CLEANUP_INSTRUCTION = [
+  "Prepare the user's question to be sent to an outside model that knows nothing about them.",
+  'Remove names of people and organisations, contact details (addresses, phone numbers, email addresses, handles) and account, reference and ID numbers. Refer to people and organisations by their role instead ("the landlord", "the employer").',
+  "Keep everything else as the user wrote it. You may add details from the material that the outside model needs to answer, with the same removals."
+].join(" ");
 var CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS = Object.freeze({ min: 1e4, max: 240000 });
 var MAX_MODEL_ID_CHARS = 200;
 var MAX_BASE_URL_CHARS = 500;
@@ -18590,7 +18598,7 @@ var DEFAULT_CONSULT_SETTINGS = Object.freeze({
   level: CONSULT_LEVEL_FOR_NEW_SETUP
 });
 var REQUIRED_TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
-var OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel"];
+var OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel", "standardMode", "standardInstruction"];
 var WRITER_REQUIRED_KEYS = ["baseUrl", "model"];
 var WRITER_OPTIONAL_KEYS = ["secretRef", "timeoutMs"];
 var DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
@@ -18640,6 +18648,21 @@ function parseConsultSettings(value) {
     if (!chatgptFrontierModel)
       return;
   }
+  let standardMode;
+  if (Object.hasOwn(value, "standardMode")) {
+    if (typeof value.standardMode !== "string" || !CONSULT_STANDARD_MODES.includes(value.standardMode))
+      return;
+    standardMode = value.standardMode;
+  }
+  let standardInstruction;
+  if (Object.hasOwn(value, "standardInstruction")) {
+    const text = value.standardInstruction;
+    if (typeof text !== "string" || text.trim().length === 0 || text.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS || /\u0000/.test(text))
+      return;
+    standardInstruction = text;
+  }
+  if (standardMode === "custom" !== (standardInstruction !== undefined))
+    return;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
@@ -18649,7 +18672,9 @@ function parseConsultSettings(value) {
     strict,
     level,
     ...writer ? { writer } : {},
-    ...chatgptFrontierModel ? { chatgptFrontierModel } : {}
+    ...chatgptFrontierModel ? { chatgptFrontierModel } : {},
+    ...standardMode ? { standardMode } : {},
+    ...standardInstruction !== undefined ? { standardInstruction } : {}
   });
 }
 function parseModelId(value) {

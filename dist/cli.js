@@ -7902,7 +7902,9 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/consult/abandon" },
     { method: "POST", path: "/dashboard/consult/tools/install" },
     { method: "POST", path: "/dashboard/consult/writer" },
-    { method: "POST", path: "/dashboard/consult/writer/test" }
+    { method: "POST", path: "/dashboard/consult/writer/test" },
+    { method: "POST", path: "/dashboard/consult/standard" },
+    { method: "POST", path: "/dashboard/consult/ask" }
   ];
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
@@ -53238,12 +53240,12 @@ var init_vocabulary = __esm(() => {
       needs_acceptance: "Anonymous answers (zkAPI): paused · accept the updated statements"
     },
     experimental: "Experimental: on macOS, Olympus can't yet confirm the connection is anonymous (network route not verified).",
-    intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. When the answer from your computer is missing something, Olympus can send a top AI model a short question through zkAPI, paid and sent anonymously, with identifiers removed. The provider reads the question, and an unusual situation could still hint at who you are.",
+    intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. When the answer from your computer is missing something, Olympus can send a top AI model a short question through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.",
     levelTitle: "What may zkAPI send?",
     writer: {
       title: "Who writes the question",
       builtInShort: "the model built into Olympus",
-      intro: "By default the small model built into Olympus writes the outside question from the first answer. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it reads the private material the answer used, decides whether a frontier model would help, and writes the question in its own words. Olympus's privacy check still runs before anything is sent. This works best with a substantial model.",
+      intro: "By default the small model built into Olympus writes the outside question from the first answer. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it reads the private material the answer used, decides whether a frontier model would help, and writes the question. At Strict, Olympus's privacy check still runs before anything is sent; at Standard, only passwords, keys and tokens are stopped. This works best with a substantial model.",
       currentBuiltIn: "Now: the model built into Olympus.",
       currentOwn: "Now: your model {model} at {address}.",
       baseUrl: "Your model server's address (OpenAI-compatible, usually ending in /v1)",
@@ -53252,7 +53254,7 @@ var init_vocabulary = __esm(() => {
       where: "Your private material goes to this address, so use a server you control. A server on another computer is reached over your network; prefer https or a private network such as a tailnet.",
       keyMissing: "The key reference {secretRef} is not set on this computer, so your model cannot be used until it is.",
       frontierModel: "zkAPI model for questions from ChatGPT (optional)",
-      frontierHint: "A model from a provider other than OpenAI is better here: OpenAI also holds your ChatGPT conversation and could link the two. Empty uses the zkAPI route's own model.",
+      frontierHint: "A model from a provider other than OpenAI is better here: OpenAI also holds your ChatGPT conversation and could link the two. Empty uses Claude Sonnet.",
       openAiNote: "Questions from ChatGPT now go to {model}, an OpenAI model. OpenAI also holds your ChatGPT conversation; a model from another provider is better here.",
       save: "Save",
       useBuiltIn: "Use the built-in model",
@@ -53277,12 +53279,32 @@ var init_vocabulary = __esm(() => {
     levels: {
       unnamed: {
         title: "Standard (recommended)",
-        body: "Sends your actual question with names, places, exact dates, amounts and account numbers removed. Gets real answers."
+        body: "Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can't tell who sent it."
       },
       general: {
         title: "Strict",
-        body: "Sends only general questions; nothing about your situation leaves. Safest, but rarely helpful."
+        body: "Your model rewrites it into general questions first (Vitalik Buterin's approach)."
       }
+    },
+    standard: {
+      title: "How should your model prepare a question before it leaves?",
+      modes: {
+        as_written: { title: "Exactly as written", body: "No model step: the question goes out unchanged." },
+        light_cleanup: { title: "Lightly cleaned (default)", body: "Your model follows this instruction. Edit it to make it your own." },
+        custom: { title: "By your own instruction", body: "Your model follows exactly what you write here." }
+      },
+      instructionLabel: "Instruction for your model",
+      save: "Save"
+    },
+    ask: {
+      title: "Ask anonymously",
+      intro: "Type a question. It is prepared the way you chose above, sent through zkAPI, and the answer shows here. It never goes to ChatGPT. Each question costs a little from your zkAPI balance.",
+      label: "Your question",
+      send: "Ask",
+      running: "Asking anonymously… Starting a private route takes a minute or two.",
+      sentTitle: "What was sent",
+      replyTitle: "Answer",
+      notSent: "Nothing was sent."
     },
     levelSave: "Save",
     levelAcceptSave: "Accept and save",
@@ -53317,7 +53339,7 @@ var init_vocabulary = __esm(() => {
     disclosureTitle: "Before you turn this on",
     disclosureShort: [
       "It asks on its own: when an answer from your computer is missing something, Olympus may send one short question. You can turn it off at any time.",
-      "The provider reads the question, with names and identifying details removed; zkAPI hides who paid."
+      "The provider reads the question, prepared the way you choose; zkAPI hides who paid."
     ],
     disclosureMore: "Everything to know first",
     disclosure: [
@@ -60479,12 +60501,9 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
     return refuse2(["writer_context_too_large"]);
   if (context.malformed)
     return refuse2(["writer_context_malformed"]);
-  const vocabulary = consultVocabulary(options ?? {});
-  if (!vocabulary)
-    return refuse2(["vocabulary_unavailable"]);
   if (!Array.isArray(subQuestions))
     return refuse2(["not_plain_text"]);
-  if (!Array.isArray(recent) || recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS || recent.some((text) => typeof text !== "string" || utf8Bytes(text) > CONSULT_GATE_MAX_QUESTION_BYTES)) {
+  if (!Array.isArray(recent) || recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS || recent.some((text) => typeof text !== "string" || utf8Bytes(text) > CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES)) {
     return refuse2(["recent_consults_too_large"]);
   }
   if (subQuestions.length === 0)
@@ -60493,9 +60512,15 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
     return refuse2(["too_many_sub_questions"]);
   if (subQuestions.some((question) => typeof question !== "string"))
     return refuse2(["not_plain_text"]);
-  if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > effective.maxQuestionBytes) {
+  const maxQuestionBytes = options?.net === "secrets" ? CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES : effective.maxQuestionBytes;
+  if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > maxQuestionBytes) {
     return refuse2(["question_too_many_bytes"]);
   }
+  if (options?.net === "secrets")
+    return secretsOnly(subQuestions, context);
+  const vocabulary = consultVocabulary(options ?? {});
+  if (!vocabulary)
+    return refuse2(["vocabulary_unavailable"]);
   const thin = options?.net === "thin";
   const unnamed = thin || options?.level === "unnamed";
   const reasons = new Set;
@@ -60549,22 +60574,30 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
       reasons.add("owner_question_copy");
   }
   const asked = unnamed ? askedWords(options?.askedQuestionTexts) : undefined;
-  const writtenAsNames = thin ? namesWrittenIn(subQuestions) : undefined;
-  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, writtenAsNames))
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, thin))
     reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent))
     reasons.add(reason);
   return reasons.size > 0 ? refuse2([...reasons]) : { decision: "pass", reasons: [] };
 }
-function namesWrittenIn(subQuestions) {
-  const names = new Set;
+function secretsOnly(subQuestions, context) {
   for (const question of subQuestions) {
-    forEachToken(foldText(question.normalize("NFKC")), (token) => {
-      if (token.capitalized && !FUNCTION_WORDS.has(token.norm) && !NAME_STOPWORDS.has(token.norm))
-        names.add(token.norm);
-    });
+    if (question.trim().length === 0)
+      return refuse2(["question_empty"]);
+    if (secretLabelsInText(question).length > 0 || secretLabelsInText(question.normalize("NFKC")).length > 0)
+      return refuse2(["secret_detected"]);
   }
-  return names;
+  const requestCompact = compact(caseFold(foldText(subQuestions.join(" "))));
+  for (const entry of context.entries) {
+    if (entry.kind === "metadata")
+      continue;
+    for (const value of labelledSecretValues(caseFold(foldText(entry.text)))) {
+      const form = compact(value);
+      if (form.length >= 3 && requestCompact.includes(form))
+        return refuse2(["secret_detected"]);
+    }
+  }
+  return { decision: "pass", reasons: [] };
 }
 function refuse2(reasons) {
   return Object.freeze({ decision: "refuse", reasons: Object.freeze([...new Set(reasons)]) });
@@ -61299,17 +61332,18 @@ function runMatcher(question, minLength, minContent, onHit) {
     }
   };
 }
-function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, writtenAsNames) {
-  const thin = writtenAsNames !== undefined;
-  const plainWord = (token) => thin && ordinaryWord !== undefined && ordinaryWord(token) && !writtenAsNames.has(token);
+function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, thin = false) {
   const reasons = new Set;
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
   const contentTokens = model.tokens.filter(isContent);
   const copiedWords = unnamed ? new Set : undefined;
   let copyFromQuestion = false;
   const copyHit = (words) => {
-    if (thin)
+    if (thin) {
+      for (const word of words)
+        copiedWords?.add(word);
       return;
+    }
     if (!copiedWords || copyFromQuestion) {
       reasons.add("shared_token_run");
       return;
@@ -61585,8 +61619,6 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, writt
     reasons.add(source === "decoded" ? "encoded_identifier" : "snapshot_name");
   };
   for (const pair of pairCandidates.values()) {
-    if (plainWord(pair.left) && plainWord(pair.right))
-      continue;
     if (!pair.midSentence) {
       const namelike = (part) => statOf(part).capitalized >= statOf(part).lower;
       if (!namelike(pair.left) && !namelike(pair.right))
@@ -61601,14 +61633,12 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, writt
       continue;
     for (const part of [pair.left, pair.right]) {
       const partSource = model.forms.get(part);
-      if (partSource && part.length >= 3 && neverLower(part) && !askedToken(part) && !plainWord(part))
+      if (partSource && part.length >= 3 && neverLower(part) && !askedToken(part))
         nameHit(partSource);
     }
   }
   for (const [token, single] of singleCandidates) {
     if (!single.strongLabel && !copiedWords?.has(token) && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0)
-      continue;
-    if (plainWord(token))
       continue;
     if (askedToken(token))
       continue;
@@ -61622,7 +61652,7 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, writt
       nameHit(single.source);
   }
   for (const [token, source] of componentCandidates)
-    if (statOf(token).lowerAnywhere === 0 && !askedToken(token) && !plainWord(token))
+    if (statOf(token).lowerAnywhere === 0 && !askedToken(token))
       identifierHit(source);
   return reasons;
 }
@@ -61918,10 +61948,11 @@ function figureKeys(normalized, needUnits) {
   }
   return keys;
 }
-var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18, CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2, CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5, CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS = 7, CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS = 4, CONSULT_GATE_ASKED_WORDS_MAX_TEXTS = 4, CONSULT_GATE_ASKED_WORDS_MAX_BYTES = 16384, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, WRITER_ANSWER_PATH = "writerAnswer[]", PROSE_PATHS, SEP, YEAR_LIKE, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS, RULE_UNIT_WORDS, FIGURE_PREFIX_SYMBOLS, STREET_SUFFIXES;
+var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18, CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2, CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5, CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS = 7, CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS = 4, CONSULT_GATE_ASKED_WORDS_MAX_TEXTS = 4, CONSULT_GATE_ASKED_WORDS_MAX_BYTES = 16384, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, WRITER_ANSWER_PATH = "writerAnswer[]", PROSE_PATHS, SEP, YEAR_LIKE, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS, RULE_UNIT_WORDS, FIGURE_PREFIX_SYMBOLS, STREET_SUFFIXES;
 var init_consult_gate = __esm(() => {
   init_opsec();
   init_types();
+  CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES = 8 * 1024;
   DEFAULT_CONSULT_GATE_LIMITS = Object.freeze({
     maxQuestionBytes: CONSULT_GATE_MAX_QUESTION_BYTES,
     maxQuestionTokens: CONSULT_GATE_MAX_QUESTION_TOKENS,
@@ -63336,23 +63367,49 @@ __export(exports_consult_settings, {
   parseConsultWriterChoice: () => parseConsultWriterChoice,
   parseConsultSettingsText: () => parseConsultSettingsText,
   parseConsultSettings: () => parseConsultSettings,
+  consultWriterIdentity: () => consultWriterIdentity,
+  consultStandardMode: () => consultStandardMode,
+  consultStandardInstruction: () => consultStandardInstruction,
+  consultStandardBinding: () => consultStandardBinding,
   consultSettingsPath: () => consultSettingsPath,
   consultOutsideHelpEnabled: () => consultOutsideHelpEnabled,
   consultGateOptionsFromSettings: () => consultGateOptionsFromSettings,
+  consultChatgptModelUnavailableMessage: () => consultChatgptModelUnavailableMessage,
+  consultChatgptFrontierModel: () => consultChatgptFrontierModel,
   bindConsultJobPolicy: () => bindConsultJobPolicy,
   __consultSettingsTestHooks: () => __consultSettingsTestHooks,
   DEFAULT_CONSULT_SETTINGS: () => DEFAULT_CONSULT_SETTINGS,
+  CONSULT_STANDARD_MODE_WHEN_UNSET: () => CONSULT_STANDARD_MODE_WHEN_UNSET,
+  CONSULT_STANDARD_MODES: () => CONSULT_STANDARD_MODES,
+  CONSULT_STANDARD_INSTRUCTION_MAX_CHARS: () => CONSULT_STANDARD_INSTRUCTION_MAX_CHARS,
   CONSULT_SETTINGS_VERSION: () => CONSULT_SETTINGS_VERSION,
   CONSULT_SETTINGS_MAX_BYTES: () => CONSULT_SETTINGS_MAX_BYTES,
   CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS: () => CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS,
   CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: () => CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS,
+  CONSULT_LIGHT_CLEANUP_INSTRUCTION: () => CONSULT_LIGHT_CLEANUP_INSTRUCTION,
   CONSULT_LEVEL_WHEN_UNSET: () => CONSULT_LEVEL_WHEN_UNSET,
   CONSULT_LEVEL_FOR_REPAIR: () => CONSULT_LEVEL_FOR_REPAIR,
   CONSULT_LEVEL_FOR_NEW_SETUP: () => CONSULT_LEVEL_FOR_NEW_SETUP,
-  CONSULT_LEVELS: () => CONSULT_LEVELS
+  CONSULT_LEVELS: () => CONSULT_LEVELS,
+  CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT: () => CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT
 });
 import { closeSync as closeSync11, constants as constants5, fstatSync as fstatSync3, openSync as openSync11, readSync as readSync3 } from "node:fs";
 import { join as join53 } from "node:path";
+function consultStandardMode(settings) {
+  return settings.standardMode ?? CONSULT_STANDARD_MODE_WHEN_UNSET;
+}
+function consultStandardInstruction(settings) {
+  const mode = consultStandardMode(settings);
+  if (mode === "as_written")
+    return;
+  return mode === "custom" ? settings.standardInstruction : CONSULT_LIGHT_CLEANUP_INSTRUCTION;
+}
+function consultChatgptFrontierModel(settings) {
+  return settings.chatgptFrontierModel ?? CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT;
+}
+function consultChatgptModelUnavailableMessage(model) {
+  return model === CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT ? "Claude Sonnet isn't available through zkAPI right now; choose another model." : "The model chosen for ChatGPT questions isn't available through zkAPI right now; choose another model.";
+}
 function consultSettingsPath(env = process.env) {
   const home2 = env.HOME?.trim();
   return home2 ? join53(home2, ".olympus", "consult.json") : undefined;
@@ -63396,6 +63453,21 @@ function parseConsultSettings(value) {
     if (!chatgptFrontierModel)
       return;
   }
+  let standardMode;
+  if (Object.hasOwn(value, "standardMode")) {
+    if (typeof value.standardMode !== "string" || !CONSULT_STANDARD_MODES.includes(value.standardMode))
+      return;
+    standardMode = value.standardMode;
+  }
+  let standardInstruction;
+  if (Object.hasOwn(value, "standardInstruction")) {
+    const text = value.standardInstruction;
+    if (typeof text !== "string" || text.trim().length === 0 || text.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS || /\u0000/.test(text))
+      return;
+    standardInstruction = text;
+  }
+  if (standardMode === "custom" !== (standardInstruction !== undefined))
+    return;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
@@ -63405,7 +63477,9 @@ function parseConsultSettings(value) {
     strict,
     level,
     ...writer ? { writer } : {},
-    ...chatgptFrontierModel ? { chatgptFrontierModel } : {}
+    ...chatgptFrontierModel ? { chatgptFrontierModel } : {},
+    ...standardMode ? { standardMode } : {},
+    ...standardInstruction !== undefined ? { standardInstruction } : {}
   });
 }
 function parseModelId(value) {
@@ -63517,6 +63591,16 @@ function consultOutsideHelpEnabled(read) {
 function consultGateOptionsFromSettings(settings) {
   return { languages: [...settings.languages], domains: { ...settings.domains }, level: settings.level };
 }
+function consultStandardBinding(settings) {
+  const mode = consultStandardMode(settings);
+  const instruction = consultStandardInstruction(settings);
+  return Object.freeze({ mode, ...instruction !== undefined ? { instruction } : {} });
+}
+function consultWriterIdentity(choice) {
+  if (!choice)
+    return "built-in";
+  return JSON.stringify([choice.baseUrl, choice.model, choice.secretRef ?? null, choice.timeoutMs ?? null]);
+}
 function bindConsultJobPolicy(read) {
   const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS;
   return Object.freeze({
@@ -63525,7 +63609,9 @@ function bindConsultJobPolicy(read) {
     languages: Object.freeze([...settings.languages]),
     domains: Object.freeze({ ...settings.domains }),
     strict: settings.strict,
-    level: settings.level
+    level: settings.level,
+    writer: settings.writer ? Object.freeze({ ...settings.writer }) : null,
+    standard: consultStandardBinding(settings)
   });
 }
 function recheckConsultJobPolicy(policy, current) {
@@ -63538,6 +63624,10 @@ function recheckConsultJobPolicy(policy, current) {
   if (current.settings.revision !== policy.settingsRevision)
     return { ok: false, reason: "settings_stale" };
   if (current.settings.level !== policy.level)
+    return { ok: false, reason: "settings_stale" };
+  if (consultWriterIdentity(current.settings.writer) !== consultWriterIdentity(policy.writer ?? null))
+    return { ok: false, reason: "settings_stale" };
+  if (JSON.stringify(consultStandardBinding(current.settings)) !== JSON.stringify(policy.standard ?? consultStandardBinding(DEFAULT_CONSULT_SETTINGS)))
     return { ok: false, reason: "settings_stale" };
   if (!current.settings.enabled)
     return { ok: false, reason: "settings_off" };
@@ -63589,13 +63679,19 @@ function hasKeys(value, required3, optional) {
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
-var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
+var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_STANDARD_MODES, CONSULT_STANDARD_MODE_WHEN_UNSET = "light_cleanup", CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000, CONSULT_LIGHT_CLEANUP_INSTRUCTION, CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = "anthropic/claude-sonnet-5.5", DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
 var init_consult_settings = __esm(() => {
   init_secret_store();
   init_consult_gate();
   CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
   CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
   CONSULT_LEVEL_FOR_NEW_SETUP = CONSULT_LEVEL_WHEN_UNSET;
+  CONSULT_STANDARD_MODES = Object.freeze(["as_written", "light_cleanup", "custom"]);
+  CONSULT_LIGHT_CLEANUP_INSTRUCTION = [
+    "Prepare the user's question to be sent to an outside model that knows nothing about them.",
+    'Remove names of people and organisations, contact details (addresses, phone numbers, email addresses, handles) and account, reference and ID numbers. Refer to people and organisations by their role instead ("the landlord", "the employer").',
+    "Keep everything else as the user wrote it. You may add details from the material that the outside model needs to answer, with the same removals."
+  ].join(" ");
   CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS = Object.freeze({ min: 1e4, max: 240000 });
   DEFAULT_CONSULT_SETTINGS = Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
@@ -63607,7 +63703,7 @@ var init_consult_settings = __esm(() => {
     level: CONSULT_LEVEL_FOR_NEW_SETUP
   });
   REQUIRED_TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
-  OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel"];
+  OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel", "standardMode", "standardInstruction"];
   WRITER_REQUIRED_KEYS = ["baseUrl", "model"];
   WRITER_OPTIONAL_KEYS = ["secretRef", "timeoutMs"];
   DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
@@ -71410,7 +71506,9 @@ __export(exports_consult_writer, {
   CONSULT_WRITER_SYSTEM_UNNAMED: () => CONSULT_WRITER_SYSTEM_UNNAMED,
   CONSULT_WRITER_SYSTEM: () => CONSULT_WRITER_SYSTEM,
   CONSULT_WRITER_RESPONSE_SCHEMA: () => CONSULT_WRITER_RESPONSE_SCHEMA,
-  CONSULT_WRITER_LIMITS: () => CONSULT_WRITER_LIMITS
+  CONSULT_WRITER_LIMITS: () => CONSULT_WRITER_LIMITS,
+  CONSULT_STANDARD_RESPONSE_SCHEMA: () => CONSULT_STANDARD_RESPONSE_SCHEMA,
+  CONSULT_STANDARD_REPLY_FORMAT: () => CONSULT_STANDARD_REPLY_FORMAT
 });
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { freemem, platform as osPlatform5, totalmem } from "node:os";
@@ -71434,7 +71532,8 @@ function boundConsultWriterInput(input) {
     question: clean(input.question, CONSULT_WRITER_LIMITS.questionChars),
     answer: clean(input.answer, CONSULT_WRITER_LIMITS.answerChars),
     gaps: Object.freeze((Array.isArray(input.gaps) ? input.gaps : []).map((gap) => clean(gap, CONSULT_WRITER_LIMITS.gapChars)).filter(Boolean).slice(0, CONSULT_WRITER_LIMITS.gaps)),
-    ...evidence.length > 0 ? { evidence: Object.freeze(evidence) } : {}
+    ...evidence.length > 0 ? { evidence: Object.freeze(evidence) } : {},
+    ...typeof input.instruction === "string" && input.instruction.trim() ? { instruction: input.instruction } : {}
   });
 }
 function consultWriterEvidence(pack) {
@@ -71453,6 +71552,22 @@ function consultWriterEvidence(pack) {
 }
 function buildConsultWriterPrompt(input, level = "general") {
   const bounded = boundConsultWriterInput(input);
+  if (bounded.instruction !== undefined) {
+    const standardUser = [
+      `Question: ${bounded.question}`,
+      ...bounded.evidence && bounded.evidence.length > 0 ? [`Material the answer read (private; the outside model never sees it):
+${bounded.evidence.map((excerpt, index) => `[${index + 1}] ${excerpt}`).join(`
+`)}`] : []
+    ].join(`
+
+`);
+    return Object.freeze([
+      Object.freeze({ role: "system", content: `${bounded.instruction}
+
+${CONSULT_STANDARD_REPLY_FORMAT}` }),
+      Object.freeze({ role: "user", content: standardUser })
+    ]);
+  }
   const user = [
     `Question: ${bounded.question}`,
     ...bounded.evidence && bounded.evidence.length > 0 ? [`Material the answer read (private: for your understanding only; the outside model never sees it, never quote it):
@@ -71471,7 +71586,7 @@ ${bounded.answer}`,
     Object.freeze({ role: "user", content: user })
   ]);
 }
-function parseConsultWriterReply(raw) {
+function parseConsultWriterReply(raw, options = {}) {
   const text = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/^[\s\S]*<\/think>/i, "");
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -71493,6 +71608,17 @@ function parseConsultWriterReply(raw) {
   if (!questions.every((question) => typeof question === "string"))
     return { kind: "invalid", reason: "shape" };
   const cleaned = [];
+  if (options.standard) {
+    for (const raw2 of questions) {
+      const question = raw2.trim();
+      if (!question || question.length > CONSULT_WRITER_LIMITS.standardQuestionChars)
+        return { kind: "invalid", reason: "form" };
+      if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(question))
+        return { kind: "invalid", reason: "form" };
+      cleaned.push(question);
+    }
+    return { kind: "questions", questions: Object.freeze(cleaned) };
+  }
   for (const raw2 of questions) {
     const question = raw2.trim();
     if (!question || question.length > CONSULT_WRITER_LIMITS.maxQuestionChars)
@@ -71577,6 +71703,7 @@ async function runConsultWriter(input, options) {
   if (!memory.ok)
     return { kind: "skipped", reason: memory.reason };
   const messages = buildConsultWriterPrompt(input, options.level ?? "general");
+  const standard = boundConsultWriterInput(input).instruction !== undefined;
   const deadline = AbortSignal.timeout(options.deadlineMs ?? CONSULT_WRITER_LIMITS.deadlineMs);
   const stop = AbortSignal.any([options.kill, deadline]);
   const killedReason = () => options.kill.aborted ? "fresh_answer" : "deadline";
@@ -71616,7 +71743,7 @@ async function runConsultWriter(input, options) {
     }
     let text;
     try {
-      text = await writerCompletion(fetchImpl, endpoint, messages, stop);
+      text = await writerCompletion(fetchImpl, endpoint, messages, stop, standard);
     } catch {
       if (stop.aborted)
         return { kind: "killed", reason: killedReason() };
@@ -71626,7 +71753,7 @@ async function runConsultWriter(input, options) {
     if (stop.aborted)
       return { kind: "killed", reason: killedReason() };
     keep = true;
-    const reply = parseConsultWriterReply(text);
+    const reply = parseConsultWriterReply(text, { standard });
     const ms = now() - startedAt;
     if (reply.kind === "invalid")
       return { kind: "failed", reason: reply.reason };
@@ -71673,12 +71800,12 @@ async function countWriterTokens(fetchImpl, endpoint, messages, signal) {
     return;
   }
 }
-async function writerCompletion(fetchImpl, endpoint, messages, signal) {
+async function writerCompletion(fetchImpl, endpoint, messages, signal, standard = false) {
   const response = await post(fetchImpl, endpoint, "/v1/chat/completions", {
     messages,
     temperature: 0,
-    max_tokens: CONSULT_WRITER_LIMITS.maxOutputTokens,
-    response_format: { type: "json_schema", json_schema: { name: "consult", schema: CONSULT_WRITER_RESPONSE_SCHEMA } }
+    max_tokens: standard ? CONSULT_WRITER_LIMITS.standardMaxOutputTokens : CONSULT_WRITER_LIMITS.maxOutputTokens,
+    response_format: { type: "json_schema", json_schema: { name: "consult", schema: standard ? CONSULT_STANDARD_RESPONSE_SCHEMA : CONSULT_WRITER_RESPONSE_SCHEMA } }
   }, signal);
   if (!response.ok)
     throw new Error(`writer HTTP ${response.status}`);
@@ -71695,6 +71822,7 @@ async function runOwnConsultWriter(input, options) {
   if (isCloudForwardingModelId(options.endpoint.model))
     return { kind: "skipped", reason: "cloud_model" };
   const messages = buildConsultWriterPrompt(input, options.level ?? "general");
+  const standard = boundConsultWriterInput(input).instruction !== undefined;
   const deadline = AbortSignal.timeout(options.deadlineMs);
   const stop = AbortSignal.any([options.kill, deadline]);
   const killedReason = () => options.kill.aborted ? "fresh_answer" : "deadline";
@@ -71713,7 +71841,7 @@ async function runOwnConsultWriter(input, options) {
       temperature: 0,
       max_tokens: CONSULT_WRITER_LIMITS.ownWriterMaxOutputTokens,
       stream: false,
-      ...structured ? { response_format: { type: "json_schema", json_schema: { name: "consult", schema: CONSULT_WRITER_RESPONSE_SCHEMA } } } : {}
+      ...structured ? { response_format: { type: "json_schema", json_schema: { name: "consult", schema: standard ? CONSULT_STANDARD_RESPONSE_SCHEMA : CONSULT_WRITER_RESPONSE_SCHEMA } } } : {}
     }),
     signal: stop
   });
@@ -71744,7 +71872,7 @@ async function runOwnConsultWriter(input, options) {
   }
   if (stop.aborted)
     return { kind: "killed", reason: killedReason() };
-  const reply = parseConsultWriterReply(text);
+  const reply = parseConsultWriterReply(text, { standard });
   const ms = now() - startedAt;
   if (reply.kind === "invalid")
     return { kind: "failed", reason: reply.reason };
@@ -71752,7 +71880,7 @@ async function runOwnConsultWriter(input, options) {
     return { kind: "declined", promptTokens: 0, ms };
   return { kind: "questions", questions: reply.questions, promptTokens: 0, ms };
 }
-var CONSULT_WRITER_LIMITS, CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_WRITER_RESPONSE_SCHEMA;
+var CONSULT_WRITER_LIMITS, CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.', CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_STANDARD_RESPONSE_SCHEMA, CONSULT_WRITER_RESPONSE_SCHEMA;
 var init_consult_writer = __esm(() => {
   init_model_transport();
   init_local_model_policy();
@@ -71772,6 +71900,8 @@ var init_consult_writer = __esm(() => {
     maxQuestionWords: 25,
     minQuestionWords: 3,
     maxQuestionChars: 200,
+    standardQuestionChars: 2000,
+    standardMaxOutputTokens: 640,
     deadlineMs: 60000,
     footprintBytes: 600 * 1024 * 1024,
     minFreePercentAfter: 20,
@@ -71833,6 +71963,19 @@ var init_consult_writer = __esm(() => {
     ...CONSULT_WRITER_COMMON_TAIL
   ].join(`
 `);
+  CONSULT_STANDARD_RESPONSE_SCHEMA = Object.freeze({
+    type: "object",
+    properties: {
+      questions: {
+        anyOf: [
+          { type: "null" },
+          { type: "array", minItems: 1, maxItems: CONSULT_WRITER_LIMITS.maxQuestions, items: { type: "string", maxLength: CONSULT_WRITER_LIMITS.standardQuestionChars } }
+        ]
+      }
+    },
+    required: ["questions"],
+    additionalProperties: false
+  });
   CONSULT_WRITER_RESPONSE_SCHEMA = Object.freeze({
     type: "object",
     properties: {
@@ -71880,7 +72023,16 @@ function consultWriterCheckPack(entry) {
     builtAt: "2026-10-10T09:00:00.000Z"
   };
 }
-function consultWriterCheckInput(entry, withEvidence) {
+function consultWriterCheckInput(entry, withEvidence, instruction) {
+  if (instruction !== undefined) {
+    return {
+      question: entry.userQuestion,
+      answer: "",
+      gaps: [],
+      instruction,
+      ...withEvidence ? { evidence: consultWriterEvidence(consultWriterCheckPack(entry)) } : {}
+    };
+  }
   return {
     question: entry.userQuestion,
     answer: entry.answer,
@@ -71913,7 +72065,7 @@ async function runConsultWriterCheck(options) {
       break;
     let outcome;
     try {
-      outcome = await options.writer(consultWriterCheckInput(entry, options.withEvidence), options.level);
+      outcome = await options.writer(consultWriterCheckInput(entry, options.withEvidence, options.instruction), options.level);
     } catch {
       outcome = { kind: "failed", reason: "request_failed" };
     }
@@ -71927,7 +72079,7 @@ async function runConsultWriterCheck(options) {
         level: options.level,
         askedQuestionTexts: [entry.userQuestion],
         askedQuestionFullTexts: [entry.userQuestion],
-        net: options.net ?? "full"
+        net: options.instruction !== undefined ? "secrets" : options.net ?? "full"
       });
       gate = verdict.decision;
       gateReasons = [...verdict.reasons];
@@ -71965,6 +72117,7 @@ async function checkOwnConsultWriter(input) {
     level: input.level,
     withEvidence: true,
     net: "thin",
+    ...input.instruction !== undefined ? { instruction: input.instruction } : {},
     ...input.languages ? { languages: input.languages } : {},
     ...input.onCase ? { onCase: input.onCase } : {},
     ...input.signal ? { signal: input.signal } : {},
@@ -99701,6 +99854,12 @@ function renderOutsideHelpCard(status, input) {
   }
   parts.push(renderStatusBlock(status, summary, canEdit));
   parts.push(renderLevel(status, canEdit));
+  if (status.standard)
+    parts.push(renderStandard(status.standard, status.settings.state === "invalid" ? false : canEdit));
+  if (status.writer?.modelProblem)
+    parts.push(`<p class="pnote ohwarn" data-outside-model-problem>${escapeHtml2(status.writer.modelProblem.message)}</p>`);
+  if (status.ask)
+    parts.push(renderAsk(status.ask, canEdit && route.state === "configured"));
   parts.push(renderProblems(status, canEdit));
   const shortList = `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
   const fullList = `<ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
@@ -99878,15 +100037,44 @@ function renderWriter(writer, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const C2 = DASHBOARD_OUTSIDE_HELP_COPY.writer;
   const choice = writer.choice;
-  const effectiveModel = writer.chatgptFrontierModel ?? writer.routeModel;
+  const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel ?? writer.routeModel;
   const parts = [`<p class="pnote">${escapeHtml2(C2.intro)}</p>`];
   parts.push(`<p class="pnote" data-outside-writer-current="${choice ? "own" : "built_in"}">${escapeHtml2(choice ? fill(C2.currentOwn, { model: choice.model, address: choice.baseUrl }) : C2.currentBuiltIn)}</p>`);
   if (choice?.secretRef && choice.keyPresent === false)
     parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml2(fill(C2.keyMissing, { secretRef: choice.secretRef }))}</p>`);
-  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml2(C2.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml2(choice?.baseUrl ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml2(C2.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml2(choice?.model ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml2(C2.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml2(choice?.secretRef ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml2(C2.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.routeModel ?? "")}" value="${escapeHtml2(writer.chatgptFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml2(fill(C2.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml2(C2.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled}>${escapeHtml2(C2.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
+  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml2(C2.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml2(choice?.baseUrl ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml2(C2.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml2(choice?.model ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml2(C2.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml2(choice?.secretRef ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml2(C2.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveChatgptModel ?? writer.routeModel ?? "")}" value="${escapeHtml2(writer.chatgptFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml2(fill(C2.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml2(C2.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled}>${escapeHtml2(C2.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
   parts.push(renderWriterCheck(writer, canEdit));
   const summary = choice ? choice.model : C2.builtInShort;
   return renderSection({ id: "writer", title: C2.title, summary, open: writer.check.state !== "idle", body: `<div data-outside-writer>${parts.join("")}</div>` });
+}
+function renderStandard(standard, canEdit) {
+  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.standard;
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const options = ["as_written", "light_cleanup", "custom"].map((mode) => {
+    const copy = C2.modes[mode];
+    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? " checked" : ""}${disabled}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
+  }).join("");
+  const text = standard.mode === "custom" && standard.instruction !== undefined ? standard.instruction : standard.preset;
+  return `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml2(standard.mode)}" data-outside-preset="${escapeHtml2(standard.preset)}">` + `<div class="sect">${escapeHtml2(C2.title)}</div>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml2(C2.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml2(text)}</textarea>` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(C2.save)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+function renderAsk(ask, canEdit) {
+  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.ask;
+  const state = ask.state;
+  const disabled = canEdit && state.state !== "running" ? "" : ' disabled aria-disabled="true"';
+  const parts = [`<div class="sect">${escapeHtml2(C2.title)}</div>`, `<p class="pnote">${escapeHtml2(C2.intro)}</p>`];
+  parts.push(`<form class="ohform" data-outside-form="ask">` + `<label class="plabel" for="outside-ask-question">${escapeHtml2(C2.label)}</label>` + `<textarea class="keyfield" id="outside-ask-question" name="question" rows="3" maxlength="${ask.maxChars}"${disabled}>${escapeHtml2(state.state === "idle" ? "" : state.question)}</textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(C2.send)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  if (state.state === "running")
+    parts.push(`<p class="pnote" role="status">${escapeHtml2(C2.running)}</p>`);
+  if (state.state === "done") {
+    parts.push(`<div class="sect">${escapeHtml2(C2.replyTitle)}</div><p class="pnote" data-outside-ask-reply>${escapeHtml2(state.reply)}</p>`);
+    parts.push(`<div class="sect">${escapeHtml2(C2.sentTitle)}</div><pre class="pnote" data-outside-ask-sent>${escapeHtml2(state.sent)}</pre>`);
+    parts.push(`<p class="pnote ohsmall">${escapeHtml2(state.route)}</p>`);
+  }
+  if (state.state === "failed") {
+    parts.push(`<p class="pnote ohwarn" role="status" data-outside-ask-failed>${escapeHtml2(state.message)}</p>`);
+    parts.push(state.sent !== undefined ? `<div class="sect">${escapeHtml2(C2.sentTitle)}</div><pre class="pnote" data-outside-ask-sent>${escapeHtml2(state.sent)}</pre>` : `<p class="pnote ohsmall">${escapeHtml2(C2.notSent)}</p>`);
+  }
+  return `<div class="ohpanel" data-outside-ask="${escapeHtml2(state.state)}">${parts.join("")}</div>`;
 }
 function renderWriterCheck(writer, canEdit) {
   const C2 = DASHBOARD_OUTSIDE_HELP_COPY.writer;
@@ -100064,6 +100252,17 @@ function outsideHelpClientScript(config2) {
         chatgpt_frontier_model: frontier === '' ? null : frontier,
       };
     }
+    if (kind === 'standard') {
+      var mode = form.querySelector('input[name="standard_mode"]:checked');
+      var chosen = mode ? mode.value : form.getAttribute('data-outside-standard');
+      var instruction = String(field('standard_instruction') || '');
+      // An edited preset is saved as the user's own instruction.
+      if (chosen === 'light_cleanup' && instruction.trim() !== String(form.getAttribute('data-outside-preset') || '').trim()) chosen = 'custom';
+      var standardBody = { revision: Number(root.getAttribute('data-revision') || '0'), standard_mode: chosen };
+      if (chosen === 'custom') standardBody.standard_instruction = instruction;
+      return standardBody;
+    }
+    if (kind === 'ask') return { question: String(field('question') || '') };
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
     return { confirm: true };
@@ -100079,9 +100278,9 @@ function outsideHelpClientScript(config2) {
     }
     setTimeout(poll, delay);
   }
-  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest };
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard, ask: config.paths.ask };
   // While the writer check runs (only after the owner's click), the page re-reads itself.
-  if (root.querySelector('[data-outside-writer-check="running"]') && config.writerPollMs) {
+  if ((root.querySelector('[data-outside-writer-check="running"]') || root.querySelector('[data-outside-ask="running"]')) && config.writerPollMs) {
     setTimeout(function () { window.location.reload(); }, config.writerPollMs);
   }
   // One post; a network failure (Olympus restarting, say) is its own answer, never a thrown error.
@@ -100170,6 +100369,8 @@ var init_outside_help = __esm(() => {
     abandon: "/dashboard/consult/abandon",
     installTools: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
     writer: "/dashboard/consult/writer",
+    standard: "/dashboard/consult/standard",
+    ask: "/dashboard/consult/ask",
     writerTest: "/dashboard/consult/writer/test"
   };
   LANGUAGE_NAMES = {
@@ -106447,7 +106648,9 @@ var init_http = __esm(() => {
     "/dashboard/consult/abandon",
     "/dashboard/consult/tools/install",
     "/dashboard/consult/writer",
-    "/dashboard/consult/writer/test"
+    "/dashboard/consult/writer/test",
+    "/dashboard/consult/standard",
+    "/dashboard/consult/ask"
   ];
   GRADE_CODES = { bearer: "b", local: "l" };
 });
@@ -107786,7 +107989,7 @@ function createEmailSourceWorker(options = {}) {
           }
           const record3 = await parseObjectBody(request);
           const backend = sourceDashboard.consult;
-          const outcome = url.pathname === "/dashboard/consult" ? await backend.setEnabled(record3) : url.pathname === "/dashboard/consult/route" ? await backend.saveRoute(record3) : url.pathname === "/dashboard/consult/route/add" ? await backend.addRoute(record3) : url.pathname === "/dashboard/consult/recover" ? await backend.recover(record3) : url.pathname === "/dashboard/consult/tools/install" ? await backend.installTools(record3) : url.pathname === "/dashboard/consult/writer" ? await backend.saveWriter(record3) : url.pathname === "/dashboard/consult/writer/test" ? await backend.testWriter(record3) : await backend.abandon(record3);
+          const outcome = url.pathname === "/dashboard/consult" ? await backend.setEnabled(record3) : url.pathname === "/dashboard/consult/route" ? await backend.saveRoute(record3) : url.pathname === "/dashboard/consult/route/add" ? await backend.addRoute(record3) : url.pathname === "/dashboard/consult/recover" ? await backend.recover(record3) : url.pathname === "/dashboard/consult/tools/install" ? await backend.installTools(record3) : url.pathname === "/dashboard/consult/writer" ? await backend.saveWriter(record3) : url.pathname === "/dashboard/consult/writer/test" ? await backend.testWriter(record3) : url.pathname === "/dashboard/consult/standard" ? await backend.saveStandard(record3) : url.pathname === "/dashboard/consult/ask" ? await backend.ask(record3) : await backend.abandon(record3);
           if (!outcome.ok) {
             return json({ ok: false, error: { code: outcome.code, message: outcome.message }, ...outcome.revision !== undefined ? { revision: outcome.revision } : {} }, outcome.httpStatus);
           }
@@ -123230,7 +123433,7 @@ function createConsultOrchestrator(options) {
       return CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS;
     }
   };
-  const writerDeadlineMs = () => {
+  const builtInDeadlineMs = () => {
     try {
       const value = typeof options.writerDeadlineMs === "function" ? options.writerDeadlineMs() : options.writerDeadlineMs;
       return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : CONSULT_WRITER_DEADLINE_MS;
@@ -123238,12 +123441,15 @@ function createConsultOrchestrator(options) {
       return CONSULT_WRITER_DEADLINE_MS;
     }
   };
-  const ownWriter = () => {
+  const boundWriter = (policy) => policy.writer ?? null;
+  const writerDeadlineMs = (policy) => {
+    const own = boundWriter(policy);
+    return own ? own.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS : builtInDeadlineMs();
+  };
+  const notifyTransport = (code) => {
     try {
-      return options.ownWriter?.() === true;
-    } catch {
-      return false;
-    }
+      options.onTransportFailure?.(code);
+    } catch {}
   };
   const recent = [];
   const inFlight = new Map;
@@ -123283,7 +123489,7 @@ function createConsultOrchestrator(options) {
     if (snapshot.verdict.sufficient !== false && snapshot.gaps.length === 0)
       return;
     const candidate = { rev: seam.rev, policy: seam.policy, firstDeliveredAt: seam.firstDeliveredAt, followUntil: seam.followUntil };
-    if (!windowOpen(candidate, at, writerDeadlineMs()))
+    if (!windowOpen(candidate, at, writerDeadlineMs(candidate.policy)))
       return;
     return candidate;
   };
@@ -123335,8 +123541,16 @@ function createConsultOrchestrator(options) {
       record4(jobId, "superseded", startedAt, "answer_busy");
       return;
     }
-    const own = ownWriter();
-    const bounded = boundConsultWriterInput({
+    const writerChoice = boundWriter(scheduled.policy);
+    const own = writerChoice !== null;
+    const standard = scheduled.policy.level === "unnamed" ? scheduled.policy.standard ?? consultStandardBinding(DEFAULT_CONSULT_SETTINGS) : undefined;
+    const bounded = boundConsultWriterInput(standard ? {
+      question: held.question,
+      answer: "",
+      gaps: [],
+      ...standard.instruction !== undefined ? { instruction: standard.instruction } : {},
+      ...own && standard.mode !== "as_written" ? { evidence: consultWriterEvidence(held.pack) } : {}
+    } : {
       question: held.question,
       answer: held.answer,
       gaps: held.gaps,
@@ -123358,7 +123572,7 @@ function createConsultOrchestrator(options) {
     };
     let written;
     try {
-      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs(), level: scheduled.policy.level });
+      written = standard?.mode === "as_written" ? { kind: "questions", questions: Object.freeze([held.question.trim()]), promptTokens: 0, ms: 0 } : await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs(scheduled.policy), level: scheduled.policy.level, writer: writerChoice });
     } catch {
       written = { kind: "failed", reason: "request_failed" };
     }
@@ -123388,7 +123602,7 @@ function createConsultOrchestrator(options) {
       level: scheduled.policy.level,
       askedQuestionTexts: [bounded.question],
       askedQuestionFullTexts: [current.question],
-      net: own ? "thin" : "full"
+      net: standard ? "secrets" : own ? "thin" : "full"
     });
     if (verdict.decision !== "pass") {
       await closeSession();
@@ -123402,6 +123616,8 @@ function createConsultOrchestrator(options) {
     if (!opened || !opened.ok) {
       fail(jobId);
       record4(jobId, "transport_unavailable", startedAt, opened?.ok === false ? opened.error.code : "open_threw");
+      if (opened?.ok === false)
+        notifyTransport(opened.error.code);
       return;
     }
     const session = opened.session;
@@ -123458,6 +123674,8 @@ function createConsultOrchestrator(options) {
     if (!reply2 || reply2.kind !== "reply") {
       fail(jobId);
       record4(jobId, "reply_failed", startedAt, reply2?.kind === "failed" ? reply2.error.code : "no_reply");
+      if (reply2?.kind === "failed")
+        notifyTransport(reply2.error.code);
       return;
     }
     if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) {
@@ -123473,6 +123691,9 @@ function createConsultOrchestrator(options) {
       return;
     }
     record4(jobId, "appended", startedAt, `reply_ms=${reply2.elapsedMs}`);
+    try {
+      options.onAppended?.();
+    } catch {}
   };
   return {
     onFirstDelivered(jobId) {
@@ -123540,6 +123761,76 @@ var init_consult_orchestrator = __esm(() => {
   CONSULT_DISPATCH_WINDOW_MS = 5 * 60000;
   CONSULT_DELIVERY_MARGIN_MS = 2 * 60000;
   CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS = 6 * 60000;
+});
+
+// src/core/consult-ask.ts
+var exports_consult_ask = {};
+__export(exports_consult_ask, {
+  askAnonymously: () => askAnonymously,
+  CONSULT_ASK_MESSAGES: () => CONSULT_ASK_MESSAGES,
+  CONSULT_ASK_MAX_CHARS: () => CONSULT_ASK_MAX_CHARS
+});
+async function askAnonymously(question, deps) {
+  const typed = typeof question === "string" ? question.trim() : "";
+  if (!typed)
+    return { ok: false, code: "question_empty", message: CONSULT_ASK_MESSAGES.empty };
+  if (typed.length > CONSULT_ASK_MAX_CHARS)
+    return { ok: false, code: "question_too_long", message: CONSULT_ASK_MESSAGES.tooLong };
+  let read;
+  try {
+    read = deps.settings();
+  } catch {
+    return { ok: false, code: "settings_invalid", message: CONSULT_ASK_MESSAGES.settingsInvalid };
+  }
+  if (read.state === "invalid")
+    return { ok: false, code: "settings_invalid", message: CONSULT_ASK_MESSAGES.settingsInvalid };
+  const standard = consultStandardBinding(read.settings);
+  let questions;
+  if (standard.mode === "as_written" || standard.instruction === undefined) {
+    questions = [typed];
+  } else {
+    let written;
+    try {
+      written = await deps.prepare({ question: typed, answer: "", gaps: [], instruction: standard.instruction }, read.state === "valid" ? read.settings.writer ?? null : null);
+    } catch {
+      written = { kind: "failed", reason: "request_failed" };
+    }
+    if (written.kind === "declined")
+      return { ok: false, code: "writer_declined", message: CONSULT_ASK_MESSAGES.declined };
+    if (written.kind !== "questions")
+      return { ok: false, code: "writer_failed", message: CONSULT_ASK_MESSAGES.writerFailed };
+    questions = written.questions;
+  }
+  const sent = questions.join(`
+`);
+  const verdict = evaluateConsultRequest([...questions], { entries: [], overflow: false }, {}, {}, { net: "secrets" });
+  if (verdict.decision !== "pass")
+    return { ok: false, code: "secret_detected", message: CONSULT_ASK_MESSAGES.secret, sent };
+  let result;
+  try {
+    result = await deps.send(sent);
+  } catch {
+    result = { ok: false, error: { code: "internal_error", message: "The zkAPI session failed inside Olympus.", outcome: "unknown", networkIdentity: "not_verified" } };
+  }
+  if (!result)
+    return { ok: false, code: "route_not_configured", message: CONSULT_ASK_MESSAGES.noRoute };
+  if (!result.ok)
+    return { ok: false, code: result.error.code, message: result.error.message, sent };
+  return { ok: true, sent, reply: result.text, route: result.routeLabel };
+}
+var CONSULT_ASK_MAX_CHARS = 4000, CONSULT_ASK_MESSAGES;
+var init_consult_ask = __esm(() => {
+  init_consult_gate();
+  init_consult_settings();
+  CONSULT_ASK_MESSAGES = Object.freeze({
+    empty: "Type a question first.",
+    tooLong: `Keep the question under ${CONSULT_ASK_MAX_CHARS.toLocaleString("en-US")} characters.`,
+    settingsInvalid: "The anonymous answers settings file could not be read, so nothing was sent.",
+    declined: "Your model chose not to send anything.",
+    writerFailed: "Your model could not prepare the question, so nothing was sent.",
+    secret: "Not sent: the question looks like it contains a password, key or token.",
+    noRoute: "Set up the zkAPI route first."
+  });
 });
 
 // src/workers/remote-openapi.ts
@@ -124122,7 +124413,9 @@ function writeConsultSettings(input, location = {}) {
     strict: input.strict,
     level: input.level,
     ...input.writer ? { writer: { ...input.writer } } : {},
-    ...input.chatgptFrontierModel ? { chatgptFrontierModel: input.chatgptFrontierModel } : {}
+    ...input.chatgptFrontierModel ? { chatgptFrontierModel: input.chatgptFrontierModel } : {},
+    ...input.standardMode ? { standardMode: input.standardMode } : {},
+    ...input.standardInstruction !== undefined ? { standardInstruction: input.standardInstruction } : {}
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
@@ -124269,6 +124562,7 @@ function createDashboardConsultAdapter(options) {
   let policy = options.sovereignty.config;
   let restartPending = false;
   let writerCheck = { state: "idle" };
+  let askState = { state: "idle" };
   const zkapiProfile = () => {
     const entries = Object.entries(policy.modelProfiles).filter(([, profile2]) => profile2.provider === "zkapi");
     if (entries.length !== 1)
@@ -124313,9 +124607,30 @@ function createDashboardConsultAdapter(options) {
         }
       } : {},
       ...settings?.chatgptFrontierModel ? { chatgptFrontierModel: settings.chatgptFrontierModel } : {},
+      effectiveChatgptModel: consultChatgptFrontierModel(settings ?? DEFAULT_CONSULT_SETTINGS),
       ...routeModel ? { routeModel } : {},
+      ...options.chatgptModelProblem?.() ? { modelProblem: options.chatgptModelProblem() } : {},
       testAvailable: options.writerCheck !== undefined,
       check: writerCheck
+    };
+  };
+  const standardCarried = (base) => ({
+    ...base.standardMode ? { standardMode: base.standardMode } : {},
+    ...base.standardInstruction !== undefined ? { standardInstruction: base.standardInstruction } : {}
+  });
+  const writerCarried = (base) => ({
+    ...base.writer ? { writer: base.writer } : {},
+    ...base.chatgptFrontierModel ? { chatgptFrontierModel: base.chatgptFrontierModel } : {}
+  });
+  const carried = (base) => ({ ...writerCarried(base), ...standardCarried(base) });
+  const standardView = () => {
+    const read = readConsultSettings(location);
+    const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS;
+    return {
+      mode: consultStandardMode(settings),
+      preset: CONSULT_LIGHT_CLEANUP_INSTRUCTION,
+      ...settings.standardInstruction !== undefined ? { instruction: settings.standardInstruction } : {},
+      maxChars: CONSULT_STANDARD_INSTRUCTION_MAX_CHARS
     };
   };
   const languages = () => {
@@ -124417,8 +124732,65 @@ function createDashboardConsultAdapter(options) {
         languages: languages(),
         restartPending,
         tools: { tools: toolsState(), install: dashboardInstallView(toolsJob.progress()) },
-        writer: writerView()
+        writer: writerView(),
+        standard: standardView(),
+        ...options.ask ? { ask: { state: askState, maxChars: CONSULT_ASK_MAX_CHARS } } : {}
       };
+    },
+    async saveStandard(update) {
+      const revision = update.revision;
+      if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
+        return invalid3(MESSAGES2.needsRevision, "needs_revision");
+      const mode = update.standard_mode;
+      if (typeof mode !== "string" || !CONSULT_STANDARD_MODES.includes(mode))
+        return invalid3(MESSAGES2.standardInvalid, "standard_invalid");
+      let instruction;
+      if (mode === "custom") {
+        const raw = update.standard_instruction;
+        if (typeof raw !== "string" || !raw.trim() || raw.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS)
+          return invalid3(MESSAGES2.standardInvalid, "standard_invalid");
+        instruction = raw.replace(/\r\n?/g, `
+`);
+      }
+      const current = readConsultSettings(location);
+      if (current.state === "invalid")
+        return writeRefusal("invalid_current", 0);
+      const base = current.state === "valid" ? current.settings : DEFAULT_CONSULT_SETTINGS;
+      const result = writeConsultSettings({
+        ...writerCarried(base),
+        enabled: base.enabled,
+        languages: [...base.languages],
+        domains: { ...base.domains },
+        strict: base.strict,
+        level: base.level,
+        standardMode: mode,
+        ...instruction !== undefined ? { standardInstruction: instruction } : {},
+        expectedRevision: revision
+      }, location);
+      if (!result.ok)
+        return writeRefusal(result.reason, result.current?.state === "valid" ? result.current.settings.revision : 0);
+      return { ok: true, status_message: MESSAGES2.standardSaved, revision: result.settings.revision };
+    },
+    async ask(update) {
+      if (!options.ask)
+        return { ok: false, httpStatus: 501, code: "ask_unavailable", message: MESSAGES2.askUnavailable };
+      if (askState.state === "running")
+        return { ok: false, httpStatus: 409, code: "ask_running", message: MESSAGES2.askRunning };
+      const question = typeof update.question === "string" ? update.question.trim() : "";
+      if (!question)
+        return invalid3(MESSAGES2.askEmpty, "question_empty");
+      const runner = options.ask;
+      askState = { state: "running", question };
+      (async () => {
+        let result;
+        try {
+          result = await runner(question);
+        } catch {
+          result = { ok: false, code: "internal_error", message: MESSAGES2.askUnavailable };
+        }
+        askState = result.ok ? { state: "done", at: now().toISOString(), question, sent: result.sent, reply: result.reply, route: result.route } : { state: "failed", at: now().toISOString(), question, message: result.message, ...result.sent !== undefined ? { sent: result.sent } : {} };
+      })();
+      return { ok: true, status_message: MESSAGES2.askStarted };
     },
     async saveWriter(update) {
       const revision = update.revision;
@@ -124469,6 +124841,7 @@ function createDashboardConsultAdapter(options) {
         level: base.level,
         ...writer ? { writer } : {},
         ...chatgptFrontierModel ? { chatgptFrontierModel } : {},
+        ...standardCarried(base),
         expectedRevision: revision
       }, location);
       if (!result.ok)
@@ -124546,8 +124919,7 @@ function createDashboardConsultAdapter(options) {
         domains: { ...base.domains },
         strict: base.strict,
         level,
-        ...base.writer ? { writer: base.writer } : {},
-        ...base.chatgptFrontierModel ? { chatgptFrontierModel: base.chatgptFrontierModel } : {},
+        ...carried(base),
         expectedRevision: revision,
         ...replaceInvalid ? { replaceInvalid: true } : {}
       }, location);
@@ -124712,6 +125084,7 @@ var DASHBOARD_ZKAPI_PROFILE_ID = "zkapi-consult", DASHBOARD_ZKAPI_API_KEY_ENV = 
 var init_dashboard_consult = __esm(() => {
   init_consult_gate();
   init_consult_settings();
+  init_consult_ask();
   init_consult_settings_writer();
   init_consult_transport_zkapi();
   init_sovereignty();
@@ -124765,6 +125138,12 @@ var init_dashboard_consult = __esm(() => {
     writerInvalid: "Enter the address of an OpenAI-compatible server (http:// or https://, usually ending in /v1) and a model name. A key reference is env:NAME or store:name.",
     frontierModelInvalid: "Enter a zkAPI model name such as provider/model, or leave it empty.",
     writerTestStarted: "Testing your model on invented cases. Nothing is sent to zkAPI. This can take several minutes.",
+    standardSaved: "Saved how your questions are prepared.",
+    standardInvalid: "Choose one of the three ways, and write an instruction for your own.",
+    askStarted: "Asking anonymously. Starting a private route takes a minute or two.",
+    askRunning: "A question is already on its way. Wait for its answer first.",
+    askUnavailable: "Asking anonymously is not available here.",
+    askEmpty: "Type a question first.",
     writerTestRunning: "A test is already running.",
     writerTestNoWriter: "Choose your model and save it first. The test runs on your own model.",
     writerTestUnavailable: "This Olympus cannot run the test."
@@ -127473,7 +127852,9 @@ async function main() {
           abandon: (update) => dashboardConsult.abandon(update),
           installTools: (update) => dashboardConsult.installTools(update),
           saveWriter: (update) => dashboardConsult.saveWriter(update),
-          testWriter: (update) => dashboardConsult.testWriter(update)
+          testWriter: (update) => dashboardConsult.testWriter(update),
+          saveStandard: (update) => dashboardConsult.saveStandard(update),
+          ask: (update) => dashboardConsult.ask(update)
         },
         stopMessagingCapture,
         corpusRegistry: sourceCorpusRegistry2,
@@ -127607,6 +127988,8 @@ async function main() {
     }
   });
   let consultOrchestrator;
+  let askAnonymouslyNow;
+  let chatgptModelProblem;
   const privateAnswers = new PrivateAnswerJobs2({
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
@@ -127631,7 +128014,6 @@ async function main() {
   {
     const { createConsultOrchestrator: createConsultOrchestrator2, resolveZkapiConsultTransport: resolveZkapiConsultTransport2 } = await Promise.resolve().then(() => (init_consult_orchestrator(), exports_consult_orchestrator));
     const { CONSULT_WRITER_LIMITS: CONSULT_WRITER_LIMITS2, createConsultWriterServer: createConsultWriterServer2, defaultConsultMemoryProbe: defaultConsultMemoryProbe2, runConsultWriter: runConsultWriter2, runOwnConsultWriter: runOwnConsultWriter2 } = await Promise.resolve().then(() => (init_consult_writer(), exports_consult_writer));
-    const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
     const { openZkapiConsultSession: openZkapiConsultSession2 } = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
     let writerServer;
     const writerServerFor = () => {
@@ -127644,50 +128026,66 @@ async function main() {
       return writerServer;
     };
     const memory = defaultConsultMemoryProbe2();
-    const transport = () => {
-      const read = readConsultSettings2();
-      const chatgptFrontierModel = read.state === "valid" ? read.settings.chatgptFrontierModel : undefined;
-      return resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }), { env: process.env, ...chatgptFrontierModel ? { chatgptFrontierModel } : {} });
-    };
-    const ownWriterChoice = () => {
-      const read = readConsultSettings2();
-      return read.state === "valid" ? read.settings.writer : undefined;
-    };
-    consultOrchestrator = createConsultOrchestrator2({
-      jobs: privateAnswers,
-      eligible: privateEvidenceEligible,
-      settings: () => readConsultSettings2(),
-      writer: (input, control) => {
-        const choice = ownWriterChoice();
-        if (choice) {
-          let apiKey;
-          try {
-            apiKey = choice.secretRef ? resolveSecretRefValueSync(choice.secretRef, { env: environmentWithWorkerSetupEnv() }) : undefined;
-          } catch {
-            apiKey = undefined;
-          }
-          if (choice.secretRef && !apiKey)
-            return Promise.resolve({ kind: "failed", reason: "start_failed" });
-          return runOwnConsultWriter2(input, {
-            endpoint: { baseUrl: choice.baseUrl, model: choice.model, ...apiKey ? { apiKey } : {} },
-            kill: control.kill,
-            deadlineMs: control.deadlineMs,
-            level: control.level
-          });
+    const { consultChatgptFrontierModel: consultChatgptFrontierModel2, consultChatgptModelUnavailableMessage: consultChatgptModelUnavailableMessage2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+    const chatgptModel = () => consultChatgptFrontierModel2(readConsultSettings2().settings);
+    const transport = (origin = "chatgpt") => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }), { env: process.env, ...origin === "chatgpt" ? { chatgptFrontierModel: chatgptModel() } : {} });
+    const runChosenWriter = (input, control) => {
+      const choice = control.writer;
+      if (choice) {
+        let apiKey;
+        try {
+          apiKey = choice.secretRef ? resolveSecretRefValueSync(choice.secretRef, { env: environmentWithWorkerSetupEnv() }) : undefined;
+        } catch {
+          apiKey = undefined;
         }
-        return runConsultWriter2(input, {
-          server: writerServerFor(),
-          memory,
+        if (choice.secretRef && !apiKey)
+          return Promise.resolve({ kind: "failed", reason: "start_failed" });
+        return runOwnConsultWriter2(input, {
+          endpoint: { baseUrl: choice.baseUrl, model: choice.model, ...apiKey ? { apiKey } : {} },
           kill: control.kill,
           deadlineMs: control.deadlineMs,
           level: control.level
         });
+      }
+      return runConsultWriter2(input, {
+        server: writerServerFor(),
+        memory,
+        kill: control.kill,
+        deadlineMs: control.deadlineMs,
+        level: control.level
+      });
+    };
+    {
+      const { askAnonymously: askAnonymously2 } = await Promise.resolve().then(() => (init_consult_ask(), exports_consult_ask));
+      const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+      const { sendZkapiConsult: sendZkapiConsult2 } = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
+      askAnonymouslyNow = (question) => askAnonymously2(question, {
+        settings: () => readConsultSettings2(),
+        prepare: (input, writer) => runChosenWriter(input, {
+          kill: new AbortController().signal,
+          deadlineMs: writer ? writer.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 : CONSULT_WRITER_LIMITS2.deadlineMs,
+          level: "unnamed",
+          writer
+        }),
+        send: async (text4) => {
+          const route = transport("dashboard");
+          return route ? sendZkapiConsult2(text4, route) : undefined;
+        }
+      });
+    }
+    consultOrchestrator = createConsultOrchestrator2({
+      jobs: privateAnswers,
+      eligible: privateEvidenceEligible,
+      settings: () => readConsultSettings2(),
+      writer: (input, control) => runChosenWriter(input, control),
+      onTransportFailure: (code) => {
+        if (code === "model_unavailable")
+          chatgptModelProblem = { at: new Date().toISOString(), message: consultChatgptModelUnavailableMessage2(chatgptModel()) };
       },
-      ownWriter: () => ownWriterChoice() !== undefined,
-      writerDeadlineMs: () => {
-        const choice = ownWriterChoice();
-        return choice ? choice.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 : CONSULT_WRITER_LIMITS2.deadlineMs;
+      onAppended: () => {
+        chatgptModelProblem = undefined;
       },
+      writerDeadlineMs: CONSULT_WRITER_LIMITS2.deadlineMs,
       openSession: async (control) => {
         const route = transport();
         if (!route) {
@@ -127790,6 +128188,8 @@ async function main() {
     },
     requestReload: () => requestModelReload(),
     env: process.env,
+    ask: (question) => askAnonymouslyNow ? askAnonymouslyNow(question) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
+    chatgptModelProblem: () => chatgptModelProblem,
     writerCheck: async ({ onCase }) => {
       const { readConsultSettings: readConsultSettings3, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
       const { checkOwnConsultWriter: checkOwnConsultWriter2 } = await Promise.resolve().then(() => (init_consult_writer_check(), exports_consult_writer_check));
@@ -127800,9 +128200,12 @@ async function main() {
       const apiKey = consultRouteKey(choice.secretRef);
       if (choice.secretRef && !apiKey)
         throw new Error(`The key reference ${choice.secretRef} is not set on this computer.`);
+      const { consultStandardInstruction: consultStandardInstruction2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+      const instruction = read.settings.level === "unnamed" ? consultStandardInstruction2(read.settings) ?? consultStandardInstruction2({ ...read.settings, standardMode: "light_cleanup" }) : undefined;
       return checkOwnConsultWriter2({
         endpoint: { baseUrl: choice.baseUrl, model: choice.model, ...apiKey ? { apiKey } : {} },
         level: read.settings.level,
+        ...instruction !== undefined ? { instruction } : {},
         languages: read.settings.languages,
         deadlineMs: choice.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2,
         onCase
