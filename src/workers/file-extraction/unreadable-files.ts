@@ -35,16 +35,25 @@ export interface UnreadableFileLocation {
  */
 export interface UnreadableVerdictLane {
   corpusIds: ReadonlySet<string>;
-  ledger: { getCurrent(identity: TierLedgerIdentity): { metadataTier: string; contentTier: string } | undefined };
+  ledger: {
+    getCurrent(identity: TierLedgerIdentity): { metadataTier: string; contentTier: string } | undefined;
+    /**
+     * The owner's persisted `olympus tier set` override. A Secrets one counts
+     * at once, before the next sync re-decides a routed item's record.
+     */
+    getOverride?(identity: TierLedgerIdentity): { kind: string; tier?: string } | undefined;
+  };
   secrets?: { get(identity: TierLedgerIdentity): unknown };
 }
 
 /**
  * Whether an item extraction gave up on is really unreadable (the readiness
  * counts' ExtractionUnreadableVerdict):
- * - a Secrets item, by its tier ledger row (names or content judged Secrets,
- *   an owner's `olympus tier` override included) or located as a secret by
- *   its lane's secret index, counts with the policy exit: Secrets never
+ * - a Secrets item, by its tier ledger row (names or content judged Secrets),
+ *   by the owner's persisted `olympus tier set … secrets` override (read
+ *   directly: for a routed item the record only follows at the next sync), or
+ *   located as a secret by its lane's secret index, counts with the policy
+ *   exit: Secrets never
  *   belong in Olympus, so they never show as unreadable, on any host;
  * - an item no store serves any more (removed, or a copy nothing may show)
  *   is left out of the count and the list alike;
@@ -67,6 +76,8 @@ export function createUnreadableVerdict(input: {
       if (!lane.corpusIds.has(item.ref.corpusId)) continue;
       const record = lane.ledger.getCurrent(identity);
       if (record && (record.metadataTier === 'secrets' || record.contentTier === 'secrets')) return 'blocked_policy';
+      const override = lane.ledger.getOverride?.(identity);
+      if (override?.kind === 'tier' && override.tier === 'secrets') return 'blocked_policy';
       if (lane.secrets?.get(identity) !== undefined) return 'blocked_policy';
     }
     return located ? 'unreadable' : 'hidden';
@@ -96,7 +107,7 @@ export interface UnreadableFilesOptions {
   openFile?(path: string): Promise<void>;
   now?: () => number;
   /**
-   * How long a token stays good after the list that carried it was last read.
+   * How long a token stays good from when it was issued (absolute: reading the list again never extends it).
    */
   tokenTtlMs?: number;
 }
@@ -117,19 +128,40 @@ export interface UnreadableFileEntry {
   token?: string;
 }
 
+/**
+ * One corpus's unreadable count checked again now: how many of the items its
+ * last snapshot counted are still unreadable, and how many have since become
+ * Secrets (they move to the policy exit).
+ */
+export interface UnreadableRecheck {
+  unreadable: number;
+  blocked: number;
+}
+
 export interface UnreadableFiles {
   /**
-   * The newest unreadable files' names across these corpora, newest failure first.
+   * The corpus's last counted list, each verdict asked again now: the count a
+   * dashboard publishes beside the names, so neither lags a Secrets change.
+   */
+  recheck(corpusId: string): UnreadableRecheck;
+  /**
+   * The newest unreadable files' names across these corpora, newest failure first (verdicts asked again now).
    */
   names(corpusIds: readonly string[], limit: number): string[];
   /**
-   * The computer's list: up to `limit` files with open tokens, and how many more there are.
+   * The computer's list from `offset`: up to `limit` files, and how many more
+   * there are after them. Only with an `opener` (an unlocked control session,
+   * or the worker bearer) does a file carry an open token, bound to that opener.
    */
-  computerList(corpusIds: readonly string[], limit: number): { files: UnreadableFileEntry[]; more: number };
+  computerList(
+    corpusIds: readonly string[],
+    limit: number,
+    options?: { offset?: number; opener?: string },
+  ): { files: UnreadableFileEntry[]; more: number };
   /**
-   * Opens the file a token from computerList names.
+   * Opens the file a token from computerList names, for the opener it was issued to. A token opens once.
    */
-  open(token: unknown): Promise<UnreadableOpenResult>;
+  open(token: unknown, opener?: string): Promise<UnreadableOpenResult>;
 }
 
 const TOKEN_LENGTH = 43;
@@ -153,8 +185,16 @@ const MAX_TOKENS = 2_000;
 const OPEN_RATE = { capacity: 10, refillPerSecond: 1 };
 const UNNAMED = 'Unnamed file';
 
+/**
+ * A verdict asked within this long is reused: one dashboard read asks for the
+ * count, the names and the computer's list of the same items.
+ */
+const VERDICT_REUSE_MS = 1_000;
+
 interface TokenEntry {
-  key: string;
+  /** The opener and the item: one live token per pair. */
+  slot: string;
+  opener: string;
   item: ExtractionUnreadableItem;
   expiresAt: number;
 }
@@ -163,23 +203,47 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
   const now = options.now ?? Date.now;
   const ttl = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
   const byToken = new Map<string, TokenEntry>();
-  const tokenByKey = new Map<string, string>();
+  const tokenBySlot = new Map<string, string>();
+  const verdicts = new Map<string, { verdict: ExtractionUnreadableVerdict; at: number }>();
   let bucket = OPEN_RATE.capacity;
   let refilledAt = now();
 
   const keyOf = (ref: ExtractionItemRef) => `${ref.corpusId}\u0000${ref.localItemId}`;
 
+  /** The verdict now (a throw counts as Secrets), reused for VERDICT_REUSE_MS. */
+  function verdictOf(item: ExtractionUnreadableItem, at: number): ExtractionUnreadableVerdict {
+    const key = keyOf(item.ref);
+    const known = verdicts.get(key);
+    if (known && at - known.at < VERDICT_REUSE_MS && at >= known.at) return known.verdict;
+    let verdict: ExtractionUnreadableVerdict;
+    try {
+      verdict = options.verdict(item);
+    } catch {
+      verdict = 'blocked_policy';
+    }
+    verdicts.set(key, { verdict, at });
+    if (verdicts.size > MAX_TOKENS) verdicts.delete(verdicts.keys().next().value as string);
+    return verdict;
+  }
+
+  function listed(corpusId: string): readonly ExtractionUnreadableItem[] {
+    try {
+      return options.items(corpusId);
+    } catch {
+      return [];
+    }
+  }
+
+  /** The counted items across these corpora still unreadable now, newest failure first. */
+  function current(corpusIds: readonly string[], at: number): ExtractionUnreadableItem[] {
+    return merged(corpusIds).filter((item) => verdictOf(item, at) === 'unreadable');
+  }
+
   function merged(corpusIds: readonly string[]): ExtractionUnreadableItem[] {
     const seen = new Set<string>();
     const out: ExtractionUnreadableItem[] = [];
     for (const corpusId of new Set(corpusIds)) {
-      let items: readonly ExtractionUnreadableItem[];
-      try {
-        items = options.items(corpusId);
-      } catch {
-        items = [];
-      }
-      for (const item of items) {
+      for (const item of listed(corpusId)) {
         const key = keyOf(item.ref);
         if (seen.has(key)) continue;
         seen.add(key);
@@ -223,31 +287,34 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     }
   }
 
+  function drop(token: string, entry: TokenEntry): void {
+    byToken.delete(token);
+    if (tokenBySlot.get(entry.slot) === token) tokenBySlot.delete(entry.slot);
+  }
+
   function sweep(at: number): void {
     for (const [token, entry] of byToken) {
-      if (entry.expiresAt > at) continue;
-      byToken.delete(token);
-      if (tokenByKey.get(entry.key) === token) tokenByKey.delete(entry.key);
+      if (entry.expiresAt <= at) drop(token, entry);
     }
   }
 
-  function mint(item: ExtractionUnreadableItem, at: number): string {
-    const key = keyOf(item.ref);
-    const existing = tokenByKey.get(key);
-    const entry = existing ? byToken.get(existing) : undefined;
-    if (existing && entry) {
-      // Read again: the same token, good for another window.
-      byToken.delete(existing);
-      byToken.set(existing, { key, item, expiresAt: at + ttl });
+  /**
+   * The opener's live token for this item, else a new one. Never renewed: a
+   * token's life runs from when it was issued, however often the list is read.
+   */
+  function mint(item: ExtractionUnreadableItem, opener: string, at: number): string {
+    const slot = `${opener}\u0000${keyOf(item.ref)}`;
+    const existing = tokenBySlot.get(slot);
+    if (existing && byToken.has(existing)) {
+      byToken.get(existing)!.item = item;
       return existing;
     }
     const token = randomBytes(32).toString('base64url');
-    byToken.set(token, { key, item, expiresAt: at + ttl });
-    tokenByKey.set(key, token);
+    byToken.set(token, { slot, opener, item, expiresAt: at + ttl });
+    tokenBySlot.set(slot, token);
     while (byToken.size > MAX_TOKENS) {
       const [oldest, old] = byToken.entries().next().value as [string, TokenEntry];
-      byToken.delete(oldest);
-      if (tokenByKey.get(old.key) === oldest) tokenByKey.delete(old.key);
+      drop(oldest, old);
     }
     return token;
   }
@@ -261,42 +328,51 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
   }
 
   return {
-    names(corpusIds, limit) {
-      return merged(corpusIds).slice(0, Math.max(0, limit)).map(displayName);
+    recheck(corpusId) {
+      const at = now();
+      let unreadable = 0;
+      let blocked = 0;
+      for (const item of listed(corpusId)) {
+        const verdict = verdictOf(item, at);
+        if (verdict === 'unreadable') unreadable += 1;
+        else if (verdict === 'blocked_policy') blocked += 1;
+      }
+      return { unreadable, blocked };
     },
 
-    computerList(corpusIds, limit) {
+    names(corpusIds, limit) {
+      return current(corpusIds, now()).slice(0, Math.max(0, limit)).map(displayName);
+    },
+
+    computerList(corpusIds, limit, list = {}) {
       const at = now();
       sweep(at);
-      const all = merged(corpusIds);
-      const shown = all.slice(0, Math.max(0, limit));
+      const all = current(corpusIds, at);
+      const offset = Math.max(0, Math.trunc(list.offset ?? 0));
+      const shown = all.slice(offset, offset + Math.max(0, limit));
+      const opener = list.opener;
       const files = shown.map((item): UnreadableFileEntry => {
         const name = displayName(item);
-        return target(item) ? { name, token: mint(item, at) } : { name };
+        return opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
       });
-      return { files, more: all.length - shown.length };
+      return { files, more: Math.max(0, all.length - offset - shown.length) };
     },
 
-    async open(token) {
+    async open(token, opener) {
       if (!isUnreadableOpenToken(token)) return { status: 'invalid' };
       const at = now();
       sweep(at);
       const entry = byToken.get(token);
-      if (!entry) return { status: 'gone' };
+      // Another opener's token is no token here (and stays theirs).
+      if (!entry || !opener || entry.opener !== opener) return { status: 'gone' };
       if (!takeOpen(at)) return { status: 'rate_limited' };
-      // Checked again now: a file that became Secrets, or that no store
-      // serves any more, never opens from an older list.
-      let verdict: ExtractionUnreadableVerdict;
-      try {
-        verdict = options.verdict(entry.item);
-      } catch {
-        verdict = 'blocked_policy';
-      }
-      if (verdict !== 'unreadable') {
-        byToken.delete(token);
-        if (tokenByKey.get(entry.key) === token) tokenByKey.delete(entry.key);
-        return { status: 'gone' };
-      }
+      // Spent now, before anything waits: a token opens once, and a second
+      // call racing this one finds nothing.
+      drop(token, entry);
+      // Checked again now (never a reused verdict): a file that became
+      // Secrets, or that no store serves any more, never opens from an older list.
+      verdicts.delete(keyOf(entry.item.ref));
+      if (verdictOf(entry.item, at) !== 'unreadable') return { status: 'gone' };
       const resolved = target(entry.item);
       if (!resolved) return { status: 'gone' };
       if (resolved.localPath && options.openFile) {

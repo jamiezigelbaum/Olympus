@@ -418,9 +418,11 @@ export interface ComputerDashboardMeta {
   unpair?: ComputerUnpairEntry[];
   /**
    * Every unreadable file per source, newest failure first, up to
-   * COMPUTER_UNREADABLE_FILES_LIMIT (`more` counts the rest). A file with a
-   * place to open carries a one-time `token` for OPEN_UNREADABLE_FILE_TOOL_NAME;
-   * the engine keeps where it opens (never a path in the browser).
+   * COMPUTER_UNREADABLE_FILES_LIMIT (`more` counts the rest, which
+   * UNREADABLE_FILES_PAGE_TOOL_NAME lists). For an unlocked session, a file
+   * with a place to open carries a one-time `token` for
+   * OPEN_UNREADABLE_FILE_TOOL_NAME, bound to that session; the engine keeps
+   * where it opens (never a path in the browser).
    */
   unreadable?: ComputerUnreadableEntry[];
 }
@@ -459,6 +461,14 @@ export const UNPAIR_SOURCE_TOOL_NAME = 'olympus_unpair_source';
 export const OPEN_UNREADABLE_FILE_TOOL_NAME = 'olympus_open_unreadable_file';
 
 /**
+ * Computer only, never listed to ChatGPT: the next page of one source's
+ * unreadable files (`{source_id, offset}`), past the first
+ * COMPUTER_UNREADABLE_FILES_LIMIT, with open tokens. Answers
+ * `{status: 'listed', files, more}`.
+ */
+export const UNREADABLE_FILES_PAGE_TOOL_NAME = 'olympus_unreadable_files';
+
+/**
  * Every tool the panel calls, and so the only tools an Olympus host runs for
  * it (POST /dashboard/tools/call, the Control UI's gateway method). Search and
  * the answer tools are the conversation's, not the panel's.
@@ -476,12 +486,13 @@ export const PANEL_TOOL_NAMES = [
   SYNC_SOURCE_TOOL_NAME,
 ] as const;
 
-/** The computer adds Index faster, Unpair and opening an unreadable file to the panel's tools. */
+/** The computer adds Index faster, Unpair, and listing and opening unreadable files to the panel's tools. */
 export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [
   ...PANEL_TOOL_NAMES,
   INDEX_FASTER_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
+  UNREADABLE_FILES_PAGE_TOOL_NAME,
 ];
 
 /** The `_meta` key carrying the picker's names to the widget only. */

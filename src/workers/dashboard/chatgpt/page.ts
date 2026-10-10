@@ -24,6 +24,7 @@ import {
   INDEX_FASTER_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
+  UNREADABLE_FILES_PAGE_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
   SYNC_SOURCE_TOOL_NAME,
 } from '../../chatgpt/dashboard-contract.ts';
@@ -350,6 +351,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
       indexFasterTool: INDEX_FASTER_TOOL_NAME,
       unpairTool: UNPAIR_SOURCE_TOOL_NAME,
       unreadableOpenTool: OPEN_UNREADABLE_FILE_TOOL_NAME,
+      unreadablePageTool: UNREADABLE_FILES_PAGE_TOOL_NAME,
       landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY,
     },

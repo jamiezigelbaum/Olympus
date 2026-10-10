@@ -4258,7 +4258,12 @@ export async function main(): Promise<void> {
       : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
-    ...(unreadableFiles ? { unreadableFileNames: (corpusIds: readonly string[], limit: number) => unreadableFiles.names(corpusIds, limit) } : {}),
+    ...(unreadableFiles
+      ? {
+          unreadableFileNames: (corpusIds: readonly string[], limit: number) => unreadableFiles.names(corpusIds, limit),
+          unreadableRecheck: (corpusId: string) => unreadableFiles.recheck(corpusId),
+        }
+      : {}),
     currentReadwiseSync,
     currentXBookmarksRuntime,
     dropboxIngestionPolicy,

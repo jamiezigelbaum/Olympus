@@ -53,10 +53,16 @@ pass-through and is not involved.
    `/dashboard#olympus-open=<token>`: the host page clears the fragment and
    hands the panel that source id once, in its first `ui/initialize` reply,
    and the panel opens that source's See why, focuses it and outlines it
-   briefly (`.landed`). There the computer lists every unreadable file (up
-   to 200), each opening through the computer-only tool
-   `olympus_open_unreadable_file`, which takes a one-time token and never a
-   path. Any other target (the dashboard, a ChatGPT connect or reconnect
+   briefly (`.landed`). There the computer lists every unreadable file (200
+   at a time; "and N more" reads the next page through the computer-only
+   `olympus_unreadable_files`), each opening through the computer-only tool
+   `olympus_open_unreadable_file`, which takes a token and never a path. A
+   token is minted only for an unlocked control session (or the worker
+   bearer) and opens only for it, is spent before the open starts, and lasts
+   30 minutes from issue; a locked `dash_` reader sees the names alone. The
+   count and names are checked again when the dashboard is read, so a file
+   judged Secrets since (an `olympus tier set … secrets` override included)
+   is never named or counted. Any other target (the dashboard, a ChatGPT connect or reconnect
    fix) lands on `/dashboard`. `olympus dashboard --target <path>` (for
    example `unreadable/dropbox`) opens the same places from Terminal.
 

@@ -55188,6 +55188,7 @@ class SqliteSourceDashboardHistory {
 }
 function buildSourceDashboardViewModel(options) {
   const now = options.now ?? new Date;
+  const statusCorpora = recheckedUnreadableCorpora(options.sourceIndexStatus.corpora, options.unreadableRecheck);
   const degradedCredentials = [
     ...options.sourceIndexStatus.degraded_credentials ?? [],
     ...credentialHealthDegradations(options.credentialHealth, now)
@@ -55200,7 +55201,7 @@ function buildSourceDashboardViewModel(options) {
   const unpairedSources = new Map((options.unpairedSources ?? []).map((state) => [state.source_id, state]));
   const claimedCorpusIds = new Set;
   const cards = DASHBOARD_SUPPORTED_SOURCES.map((definition) => {
-    const corpora = options.sourceIndexStatus.corpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
+    const corpora = statusCorpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
     const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false);
@@ -55223,7 +55224,7 @@ function buildSourceDashboardViewModel(options) {
     withSyncAnswer.setup = dashboardSourceSetupStatus(withSyncAnswer);
     return withSyncAnswer;
   });
-  const unassignedCorpora = unassignedCorporaFrom(options.sourceIndexStatus.corpora.filter((corpus) => !claimedCorpusIds.has(corpus.corpus_id)), schedulerByCorpus, now);
+  const unassignedCorpora = unassignedCorporaFrom(statusCorpora.filter((corpus) => !claimedCorpusIds.has(corpus.corpus_id)), schedulerByCorpus, now);
   const samples = cards.map((card) => ({
     source_id: card.source_id,
     corpus_id: card.corpus_id,
@@ -55309,6 +55310,37 @@ function answerLaneFromDefinition(definition, registry, credentialHealth, apiKey
       handles: handles.map((handle) => handle.handle).sort((a, b) => a.localeCompare(b))
     }
   };
+}
+function recheckedUnreadableCorpora(corpora, recheck) {
+  if (!recheck)
+    return [...corpora];
+  return corpora.map((corpus) => {
+    const counts = "counts" in corpus ? corpus.counts : undefined;
+    const counted = counts?.[UNREADABLE_ITEMS_COUNT_KEY];
+    if (!counts || typeof counted !== "number" || !(counted > 0))
+      return corpus;
+    let now;
+    try {
+      now = recheck(corpus.corpus_id);
+    } catch {
+      now = undefined;
+    }
+    if (!now)
+      return corpus;
+    const unreadable = Math.min(counted, Math.max(0, Math.trunc(now.unreadable)));
+    const moved = Math.min(counted - unreadable, Math.max(0, Math.trunc(now.blocked)));
+    if (unreadable === counted)
+      return corpus;
+    const blocked = counts[BLOCKED_BY_POLICY_COUNT_KEY];
+    return {
+      ...corpus,
+      counts: {
+        ...counts,
+        [UNREADABLE_ITEMS_COUNT_KEY]: unreadable,
+        ...moved > 0 ? { [BLOCKED_BY_POLICY_COUNT_KEY]: (typeof blocked === "number" ? blocked : 0) + moved } : {}
+      }
+    };
+  });
 }
 function unreadableFilesFor(card, corpora, names) {
   if (!names || !((card.coverage.unreadable_items ?? 0) > 0))
@@ -96842,6 +96874,9 @@ function createUnreadableVerdict(input) {
       const record3 = lane.ledger.getCurrent(identity);
       if (record3 && (record3.metadataTier === "secrets" || record3.contentTier === "secrets"))
         return "blocked_policy";
+      const override = lane.ledger.getOverride?.(identity);
+      if (override?.kind === "tier" && override.tier === "secrets")
+        return "blocked_policy";
       if (lane.secrets?.get(identity) !== undefined)
         return "blocked_policy";
     }
@@ -96855,21 +96890,42 @@ function createUnreadableFiles(options) {
   const now = options.now ?? Date.now;
   const ttl = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
   const byToken = new Map;
-  const tokenByKey = new Map;
+  const tokenBySlot = new Map;
+  const verdicts = new Map;
   let bucket = OPEN_RATE.capacity;
   let refilledAt = now();
   const keyOf = (ref) => `${ref.corpusId}\x00${ref.localItemId}`;
+  function verdictOf(item, at) {
+    const key = keyOf(item.ref);
+    const known = verdicts.get(key);
+    if (known && at - known.at < VERDICT_REUSE_MS && at >= known.at)
+      return known.verdict;
+    let verdict;
+    try {
+      verdict = options.verdict(item);
+    } catch {
+      verdict = "blocked_policy";
+    }
+    verdicts.set(key, { verdict, at });
+    if (verdicts.size > MAX_TOKENS)
+      verdicts.delete(verdicts.keys().next().value);
+    return verdict;
+  }
+  function listed(corpusId) {
+    try {
+      return options.items(corpusId);
+    } catch {
+      return [];
+    }
+  }
+  function current(corpusIds, at) {
+    return merged(corpusIds).filter((item) => verdictOf(item, at) === "unreadable");
+  }
   function merged(corpusIds) {
     const seen = new Set;
     const out = [];
     for (const corpusId of new Set(corpusIds)) {
-      let items;
-      try {
-        items = options.items(corpusId);
-      } catch {
-        items = [];
-      }
-      for (const item of items) {
+      for (const item of listed(corpusId)) {
         const key = keyOf(item.ref);
         if (seen.has(key))
           continue;
@@ -96913,32 +96969,30 @@ function createUnreadableFiles(options) {
       return;
     }
   }
+  function drop(token, entry) {
+    byToken.delete(token);
+    if (tokenBySlot.get(entry.slot) === token)
+      tokenBySlot.delete(entry.slot);
+  }
   function sweep(at) {
     for (const [token, entry] of byToken) {
-      if (entry.expiresAt > at)
-        continue;
-      byToken.delete(token);
-      if (tokenByKey.get(entry.key) === token)
-        tokenByKey.delete(entry.key);
+      if (entry.expiresAt <= at)
+        drop(token, entry);
     }
   }
-  function mint(item, at) {
-    const key = keyOf(item.ref);
-    const existing = tokenByKey.get(key);
-    const entry = existing ? byToken.get(existing) : undefined;
-    if (existing && entry) {
-      byToken.delete(existing);
-      byToken.set(existing, { key, item, expiresAt: at + ttl });
+  function mint(item, opener, at) {
+    const slot = `${opener}\x00${keyOf(item.ref)}`;
+    const existing = tokenBySlot.get(slot);
+    if (existing && byToken.has(existing)) {
+      byToken.get(existing).item = item;
       return existing;
     }
     const token = randomBytes15(32).toString("base64url");
-    byToken.set(token, { key, item, expiresAt: at + ttl });
-    tokenByKey.set(key, token);
+    byToken.set(token, { slot, opener, item, expiresAt: at + ttl });
+    tokenBySlot.set(slot, token);
     while (byToken.size > MAX_TOKENS) {
       const [oldest, old] = byToken.entries().next().value;
-      byToken.delete(oldest);
-      if (tokenByKey.get(old.key) === oldest)
-        tokenByKey.delete(old.key);
+      drop(oldest, old);
     }
     return token;
   }
@@ -96951,42 +97005,49 @@ function createUnreadableFiles(options) {
     return true;
   }
   return {
-    names(corpusIds, limit) {
-      return merged(corpusIds).slice(0, Math.max(0, limit)).map(displayName);
+    recheck(corpusId) {
+      const at = now();
+      let unreadable = 0;
+      let blocked = 0;
+      for (const item of listed(corpusId)) {
+        const verdict = verdictOf(item, at);
+        if (verdict === "unreadable")
+          unreadable += 1;
+        else if (verdict === "blocked_policy")
+          blocked += 1;
+      }
+      return { unreadable, blocked };
     },
-    computerList(corpusIds, limit) {
+    names(corpusIds, limit) {
+      return current(corpusIds, now()).slice(0, Math.max(0, limit)).map(displayName);
+    },
+    computerList(corpusIds, limit, list = {}) {
       const at = now();
       sweep(at);
-      const all = merged(corpusIds);
-      const shown = all.slice(0, Math.max(0, limit));
+      const all = current(corpusIds, at);
+      const offset = Math.max(0, Math.trunc(list.offset ?? 0));
+      const shown = all.slice(offset, offset + Math.max(0, limit));
+      const opener = list.opener;
       const files = shown.map((item) => {
         const name = displayName(item);
-        return target(item) ? { name, token: mint(item, at) } : { name };
+        return opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
       });
-      return { files, more: all.length - shown.length };
+      return { files, more: Math.max(0, all.length - offset - shown.length) };
     },
-    async open(token) {
+    async open(token, opener) {
       if (!isUnreadableOpenToken(token))
         return { status: "invalid" };
       const at = now();
       sweep(at);
       const entry = byToken.get(token);
-      if (!entry)
+      if (!entry || !opener || entry.opener !== opener)
         return { status: "gone" };
       if (!takeOpen(at))
         return { status: "rate_limited" };
-      let verdict;
-      try {
-        verdict = options.verdict(entry.item);
-      } catch {
-        verdict = "blocked_policy";
-      }
-      if (verdict !== "unreadable") {
-        byToken.delete(token);
-        if (tokenByKey.get(entry.key) === token)
-          tokenByKey.delete(entry.key);
+      drop(token, entry);
+      verdicts.delete(keyOf(entry.item.ref));
+      if (verdictOf(entry.item, at) !== "unreadable")
         return { status: "gone" };
-      }
       const resolved = target(entry.item);
       if (!resolved)
         return { status: "gone" };
@@ -97003,7 +97064,7 @@ function createUnreadableFiles(options) {
     }
   };
 }
-var TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS = 2000, OPEN_RATE, UNNAMED = "Unnamed file";
+var TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS = 2000, OPEN_RATE, UNNAMED = "Unnamed file", VERDICT_REUSE_MS = 1000;
 var init_unreadable_files = __esm(() => {
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
@@ -101385,7 +101446,7 @@ function unreadableNames(input) {
     return [chars.length > UNREADABLE_NAME_MAX_CHARS ? `${chars.slice(0, UNREADABLE_NAME_MAX_CHARS - 1).join("")}…` : line];
   });
 }
-var UNREADABLE_NAMES_IN_RESULT = 5, UNREADABLE_NAME_MAX_CHARS = 120, COMPUTER_UNREADABLE_FILES_LIMIT = 200, DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var UNREADABLE_NAMES_IN_RESULT = 5, UNREADABLE_NAME_MAX_CHARS = 120, COMPUTER_UNREADABLE_FILES_LIMIT = 200, DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -101403,7 +101464,8 @@ var init_dashboard_contract = __esm(() => {
     ...PANEL_TOOL_NAMES,
     INDEX_FASTER_TOOL_NAME,
     UNPAIR_SOURCE_TOOL_NAME,
-    OPEN_UNREADABLE_FILE_TOOL_NAME
+    OPEN_UNREADABLE_FILE_TOOL_NAME,
+    UNREADABLE_FILES_PAGE_TOOL_NAME
   ];
 });
 
@@ -101432,6 +101494,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     hostReadOnly: false,
     hostLinks: {},
     computerMeta: null,
+    unreadablePages: {},
     landing: "",
     landed: null
   };
@@ -101576,6 +101639,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       state.data = content;
       const meta2 = result._meta && typeof result._meta === "object" ? result._meta[H.computerMetaKey] : null;
       state.computerMeta = meta2 && typeof meta2 === "object" ? meta2 : null;
+      state.unreadablePages = {};
       state.relayDown = false;
       if (!state.busy)
         state.syncPressed = {};
@@ -101595,7 +101659,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config2.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool)))
+    if (config2.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool)))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
@@ -101630,6 +101694,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         const url = result && result.structuredContent ? result.structuredContent.url : "";
         if (typeof url === "string" && url)
           openLink(url);
+        refresh();
+        return;
+      }
+      if (name === H.unreadablePageTool) {
+        const page = result && result.structuredContent;
+        if (page && page.status === "listed" && typeof page.source_id === "string" && Array.isArray(page.files)) {
+          const prior = state.unreadablePages[page.source_id] || { files: [], more: 0 };
+          state.unreadablePages[page.source_id] = { files: prior.files.concat(unreadableEntries(page.files)), more: moreCount(page.more) };
+        }
         redraw();
         return;
       }
@@ -102220,8 +102293,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
           add(item, document.createTextNode(file.name));
         add(list, item);
       });
-      if (own.more > 0)
-        add(list, el("li", "muted", fill2(P.unreadableMore, { count: count(own.more) })));
+      if (own.more > 0) {
+        const more = { label: fill2(P.unreadableMore, { count: count(own.more) }), tool: H.unreadablePageTool, args: { source_id: id, offset: own.files.length } };
+        add(list, add(el("li"), fixControl(more, "why-page:" + id, "plain", false)));
+      }
       return list.childNodes.length ? list : null;
     }
     const names = Array.isArray(unreadable.names) ? unreadable.names.filter((name) => typeof name === "string" && name) : [];
@@ -102238,9 +102313,16 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const entry = meta2.unreadable.filter((item) => item && item.sourceId === id)[0];
     if (!entry || !Array.isArray(entry.files))
       return null;
-    const files = entry.files.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
-    const more = typeof entry.more === "number" && isFinite(entry.more) && entry.more > 0 ? Math.floor(entry.more) : 0;
+    const pages = state.unreadablePages[id];
+    const files = unreadableEntries(entry.files).concat(pages ? pages.files : []);
+    const more = pages ? pages.more : moreCount(entry.more);
     return files.length || more ? { files, more } : null;
+  }
+  function unreadableEntries(input) {
+    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
+  }
+  function moreCount(value) {
+    return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
   }
   function applyLanding() {
     const id = state.landing;
@@ -105379,6 +105461,7 @@ function chatgptDashboardPageHtml(options = {}) {
       indexFasterTool: INDEX_FASTER_TOOL_NAME,
       unpairTool: UNPAIR_SOURCE_TOOL_NAME,
       unreadableOpenTool: OPEN_UNREADABLE_FILE_TOOL_NAME,
+      unreadablePageTool: UNREADABLE_FILES_PAGE_TOOL_NAME,
       landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY
     }
@@ -107261,6 +107344,9 @@ function withWorkerBearerAuth(fetchHandler, options) {
             return dashboardConsultMacOnlyResponse();
           return withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
         }
+        if (isDashboardToolsCallRoute(request)) {
+          return withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
+        }
         return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
       }
       if (authorization.status === "origin_mismatch" || authorization.status === "csrf_mismatch") {
@@ -107466,6 +107552,9 @@ function dashboardConsultMacOnlyResponse() {
     status: 403,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
   });
+}
+function isDashboardToolsCallRoute(request) {
+  return request.method === "POST" && new URL(request.url).pathname === "/dashboard/tools/call";
 }
 function isDashboardControlRoute(request) {
   if (request.method !== "POST")
@@ -108911,6 +109000,7 @@ function createEmailSourceWorker(options = {}) {
               unpairedSources: dashboardUnpairedSourceStates(dashboardUnpairedSources, sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
               ...options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {},
+              ...options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {},
               ...credentialHealth ? { credentialHealth } : {},
               oauthClientIds: dashboardClientIdSets.all,
               oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
@@ -108965,7 +109055,10 @@ function createEmailSourceWorker(options = {}) {
           if (!sourceDashboard.panelTools.allows(name)) {
             throw new EmailSourceWorkerError(404, "unknown_tool", "That tool is not available to the dashboard.");
           }
-          return json(await sourceDashboard.panelTools.call(name, args, dashboardPanelCallContext(url, request)));
+          return json(await sourceDashboard.panelTools.call(name, args, {
+            ...dashboardPanelCallContext(url, request),
+            opener: dashboardPanelOpener(request)
+          }));
         }
         const oauthCallbackDone = /^\/oauth\/callback\/([^/]+)\/done$/.exec(url.pathname);
         if (request.method === "GET" && oauthCallbackDone) {
@@ -111919,6 +112012,10 @@ function dashboardGoogleOAuthSource(source) {
 }
 function dashboardOAuthClientSecretRequired(source) {
   return source === "x";
+}
+function dashboardPanelOpener(request) {
+  const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+  return csrf ? `session:${createHash57("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -127395,14 +127492,14 @@ async function unpairSource(options, args) {
   const text4 = typeof parsed.status_message === "string" ? parsed.status_message : "Unpaired.";
   return { content: [{ type: "text", text: text4 }], structuredContent: { status: "saved", source_id: args.source_id } };
 }
-async function openUnreadableFile(options, args) {
+async function openUnreadableFile(options, args, context) {
   const keys = Object.keys(args);
   if (typeof args.token !== "string" || keys.some((key) => key !== "token"))
     return refused("token must be a file token from the dashboard.", "invalid_params");
   const files = options.unreadableFiles?.();
-  if (!files)
+  if (!files || !context.opener)
     return refused("Olympus cannot open this file here.", "unavailable");
-  const opened = await files.open(args.token);
+  const opened = await files.open(args.token, context.opener);
   switch (opened.status) {
     case "opened":
       return { content: [{ type: "text", text: "Opened the file on this computer." }], structuredContent: { status: "opened" } };
@@ -127418,7 +127515,36 @@ async function openUnreadableFile(options, args) {
       return refused("This file is no longer in the list. Refresh the dashboard.", "gone");
   }
 }
-function computerUnreadableEntries(view, files) {
+async function unreadableFilesPage(options, args, context) {
+  const keys = Object.keys(args);
+  const offset = args.offset;
+  if (typeof args.source_id !== "string" || typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > 1e6 || keys.some((key) => key !== "source_id" && key !== "offset")) {
+    return refused("source_id and offset must come from the dashboard.", "invalid_params");
+  }
+  const files = options.unreadableFiles?.();
+  if (!files || !context.opener)
+    return refused("Olympus cannot list these files here.", "unavailable");
+  const sourceId = args.source_id;
+  const view = await options.surface().dashboardView(context.signal).catch(() => {
+    return;
+  });
+  const corpusIds = view?.sources.find((card) => card.source_id === sourceId)?.unreadable_files?.corpus_ids;
+  if (!corpusIds?.length)
+    return refused("This list changed. Refresh the dashboard.", "gone");
+  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { offset, opener: context.opener });
+  const page2 = entriesOf(listed.files);
+  return {
+    content: [{ type: "text", text: `${page2.length} more files.` }],
+    structuredContent: { status: "listed", source_id: args.source_id, offset, files: page2, more: listed.more }
+  };
+}
+function entriesOf(files) {
+  return files.flatMap((file) => {
+    const [name] = unreadableNames([file.name]);
+    return name ? [{ name, ...file.token ? { token: file.token } : {} }] : [];
+  });
+}
+function computerUnreadableEntries(view, files, opener) {
   if (!view || !files)
     return [];
   return view.sources.flatMap((card) => {
@@ -127428,14 +127554,11 @@ function computerUnreadableEntries(view, files) {
       return [];
     let listed;
     try {
-      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT);
+      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, opener ? { opener } : {});
     } catch {
       return [];
     }
-    const entries = listed.files.flatMap((file) => {
-      const [name] = unreadableNames([file.name]);
-      return name ? [{ name, ...file.token ? { token: file.token } : {} }] : [];
-    });
+    const entries = entriesOf(listed.files);
     const more = Math.max(0, listed.more, count2 - entries.length);
     return [{ sourceId: card.source_id, files: entries, more }];
   });
@@ -127462,7 +127585,9 @@ function createDashboardPanelTools(options) {
       if (name === UNPAIR_SOURCE_TOOL_NAME)
         return await unpairSource(options, args);
       if (name === OPEN_UNREADABLE_FILE_TOOL_NAME)
-        return await openUnreadableFile(options, args);
+        return await openUnreadableFile(options, args, context);
+      if (name === UNREADABLE_FILES_PAGE_TOOL_NAME)
+        return await unreadableFilesPage(options, args, context);
       const signal = context.signal ?? new AbortController().signal;
       const base = options.surface();
       let view;
@@ -127478,7 +127603,7 @@ function createDashboardPanelTools(options) {
         return;
       });
       const unpair = computerUnpairEntries(view);
-      const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.());
+      const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context.opener);
       if (on === undefined && unpair.length === 0 && unreadable.length === 0)
         return result;
       const meta2 = {
@@ -130038,7 +130163,10 @@ async function main() {
     consultAsk: ({ caller, ...input }, signal) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
     ...sourceIndexStatus ? { sourceIndexStatus } : {},
-    ...unreadableFiles ? { unreadableFileNames: (corpusIds, limit) => unreadableFiles.names(corpusIds, limit) } : {},
+    ...unreadableFiles ? {
+      unreadableFileNames: (corpusIds, limit) => unreadableFiles.names(corpusIds, limit),
+      unreadableRecheck: (corpusId) => unreadableFiles.recheck(corpusId)
+    } : {},
     currentReadwiseSync,
     currentXBookmarksRuntime,
     dropboxIngestionPolicy,

@@ -70,6 +70,8 @@ export interface ChatGptDashboardClientConfig {
     unpairTool: string;
     /** Opens one unreadable file (`{token}` from the computer meta), on the computer only. */
     unreadableOpenTool: string;
+    /** The next page of one source's unreadable files (`{source_id, offset}`), on the computer only. */
+    unreadablePageTool: string;
     /** How long the place an open link landed on stays outlined (`.landed`). */
     landedMs: number;
     copy: typeof DASHBOARD_COMPUTER_PANEL_COPY;
@@ -130,6 +132,8 @@ export function chatgptDashboardClient(
     hostLinks: Record<string, string>;
     /** The computer-only facts from the last dashboard result (`_meta[computerMetaKey]`). */
     computerMeta: Any;
+    /** Computer only: further pages of a source's unreadable files read since the last dashboard result. */
+    unreadablePages: Record<string, { files: Array<{ name: string; token?: string }>; more: number }>;
     /** Computer only: the source an open link asked to land on, until the panel has landed there. */
     landing: string;
     /** The source row outlined after landing, until `until` (ms). */
@@ -152,6 +156,7 @@ export function chatgptDashboardClient(
     hostReadOnly: false,
     hostLinks: {},
     computerMeta: null,
+    unreadablePages: {},
     landing: '',
     landed: null,
   };
@@ -306,6 +311,8 @@ export function chatgptDashboardClient(
       state.data = content;
       const meta = result._meta && typeof result._meta === 'object' ? result._meta[H.computerMetaKey] : null;
       state.computerMeta = meta && typeof meta === 'object' ? meta : null;
+      // A fresh list starts from its first page (its tokens are new too).
+      state.unreadablePages = {};
       state.relayDown = false;
       // The engine's own `lastManualSync` now says whether a press is still checking.
       if (!state.busy) state.syncPressed = {};
@@ -328,7 +335,7 @@ export function chatgptDashboardClient(
     if (!result || !result.isError) return '';
     const code = result.structuredContent && typeof result.structuredContent.error === 'string' ? result.structuredContent.error : '';
     // Unpair's refusals, and opening a file, are the computer's own sentences: always beside the control.
-    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool))) return '';
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool))) return '';
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
     return text ? String(text.text) : '';
@@ -360,9 +367,20 @@ export function chatgptDashboardClient(
       }
       if (name === H.unreadableOpenTool) {
         // The engine opened the file's copy on this computer, or answers the
-        // file's own web page for this page to open. Nothing else changed.
+        // file's own web page for this page to open. The token is spent:
+        // read the list again for fresh ones.
         const url = result && result.structuredContent ? result.structuredContent.url : '';
         if (typeof url === 'string' && url) openLink(url);
+        refresh();
+        return;
+      }
+      if (name === H.unreadablePageTool) {
+        // The next page of the list: appended under the files already shown.
+        const page = result && result.structuredContent;
+        if (page && page.status === 'listed' && typeof page.source_id === 'string' && Array.isArray(page.files)) {
+          const prior = state.unreadablePages[page.source_id] || { files: [], more: 0 };
+          state.unreadablePages[page.source_id] = { files: prior.files.concat(unreadableEntries(page.files)), more: moreCount(page.more) };
+        }
         redraw();
         return;
       }
@@ -1015,7 +1033,11 @@ export function chatgptDashboardClient(
         } else add(item, document.createTextNode(file.name));
         add(list, item);
       });
-      if (own.more > 0) add(list, el('li', 'muted', fill(P.unreadableMore, { count: count(own.more) })));
+      if (own.more > 0) {
+        // The next page, so every file is reachable however many there are.
+        const more = { label: fill(P.unreadableMore, { count: count(own.more) }), tool: H.unreadablePageTool, args: { source_id: id, offset: own.files.length } };
+        add(list, add(el('li'), fixControl(more, 'why-page:' + id, 'plain', false)));
+      }
       return list.childNodes.length ? list : null;
     }
     const names = Array.isArray(unreadable.names) ? unreadable.names.filter((name: Any) => typeof name === 'string' && name) : [];
@@ -1032,13 +1054,22 @@ export function chatgptDashboardClient(
     if (!onComputer() || !meta || !Array.isArray(meta.unreadable)) return null;
     const entry = meta.unreadable.filter((item: Any) => item && item.sourceId === id)[0];
     if (!entry || !Array.isArray(entry.files)) return null;
-    const files = entry.files
+    const pages = state.unreadablePages[id];
+    const files = unreadableEntries(entry.files).concat(pages ? pages.files : []);
+    const more = pages ? pages.more : moreCount(entry.more);
+    return files.length || more ? { files, more } : null;
+  }
+
+  function unreadableEntries(input: Any[]): Array<{ name: string; token?: string }> {
+    return input
       .filter((file: Any) => file && typeof file.name === 'string' && file.name)
       .map((file: Any) => (typeof file.token === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(file.token)
         ? { name: file.name, token: file.token }
         : { name: file.name }));
-    const more = typeof entry.more === 'number' && isFinite(entry.more) && entry.more > 0 ? Math.floor(entry.more) : 0;
-    return files.length || more ? { files, more } : null;
+  }
+
+  function moreCount(value: Any): number {
+    return typeof value === 'number' && isFinite(value) && value > 0 ? Math.floor(value) : 0;
   }
 
   /**

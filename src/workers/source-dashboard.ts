@@ -23,6 +23,7 @@ import type {
 import type { ConnectedHandleRegistry, ConnectedCredentialHandle } from './credential-broker/connected-handles.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './dashboard/scheduler-markers.ts';
 import {
+  BLOCKED_BY_POLICY_COUNT_KEY,
   ITEMS_WITH_TEXT_COUNT_KEY,
   UNREADABLE_ITEMS_COUNT_KEY,
   answerReadyEligibleFromCounts,
@@ -1229,6 +1230,13 @@ export interface SourceDashboardBuildOptions {
    * its unreadable count comes from).
    */
   unreadableFileNames?: (corpusIds: readonly string[], limit: number) => readonly string[];
+  /**
+   * One corpus's unreadable count checked again now (the status counts may be
+   * up to its cache window old): still unreadable, and since become Secrets.
+   * Applied before any card is built, so the count, its names and the
+   * coverage math agree, and a file that became Secrets is never counted.
+   */
+  unreadableRecheck?: (corpusId: string) => { unreadable: number; blocked: number } | undefined;
   credentialHealth?: CredentialHealthReport;
   oauthClientIds?: Partial<Record<DashboardOAuthSource | 'google', string>>;
   oauthClientSecretAvailability?: Partial<Record<DashboardOAuthSource | 'google', boolean>>;
@@ -2020,6 +2028,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
 
 export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptions): SourceDashboardViewModel {
   const now = options.now ?? new Date();
+  const statusCorpora = recheckedUnreadableCorpora(options.sourceIndexStatus.corpora, options.unreadableRecheck);
   const degradedCredentials = [
     ...(options.sourceIndexStatus.degraded_credentials ?? []),
     ...credentialHealthDegradations(options.credentialHealth, now),
@@ -2046,7 +2055,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
   );
   const claimedCorpusIds = new Set<string>();
   const cards = DASHBOARD_SUPPORTED_SOURCES.map((definition) => {
-    const corpora = options.sourceIndexStatus.corpora
+    const corpora = statusCorpora
       .filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora) claimedCorpusIds.add(corpus.corpus_id);
     const built = sourceCardFromDefinition(
@@ -2103,7 +2112,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
   // is surfaced and counted rather than dropped: a corpus vanishing from this
   // page is the failure mode this section exists to make impossible.
   const unassignedCorpora = unassignedCorporaFrom(
-    options.sourceIndexStatus.corpora.filter((corpus) => !claimedCorpusIds.has(corpus.corpus_id)),
+    statusCorpora.filter((corpus) => !claimedCorpusIds.has(corpus.corpus_id)),
     schedulerByCorpus,
     now,
   );
@@ -2225,6 +2234,42 @@ function answerLaneFromDefinition(
       handles: handles.map((handle) => handle.handle).sort((a, b) => a.localeCompare(b)),
     },
   };
+}
+
+/**
+ * The status corpora with each unreadable count checked again now: never
+ * more than the items still unreadable, and those since judged Secrets moved
+ * to the policy exit. A corpus the recheck cannot answer keeps its count.
+ */
+function recheckedUnreadableCorpora(
+  corpora: readonly SourceIndexStatusCorpus[],
+  recheck: SourceDashboardBuildOptions['unreadableRecheck'],
+): SourceIndexStatusCorpus[] {
+  if (!recheck) return [...corpora];
+  return corpora.map((corpus) => {
+    const counts = 'counts' in corpus ? corpus.counts : undefined;
+    const counted = counts?.[UNREADABLE_ITEMS_COUNT_KEY];
+    if (!counts || typeof counted !== 'number' || !(counted > 0)) return corpus;
+    let now: { unreadable: number; blocked: number } | undefined;
+    try {
+      now = recheck(corpus.corpus_id);
+    } catch {
+      now = undefined;
+    }
+    if (!now) return corpus;
+    const unreadable = Math.min(counted, Math.max(0, Math.trunc(now.unreadable)));
+    const moved = Math.min(counted - unreadable, Math.max(0, Math.trunc(now.blocked)));
+    if (unreadable === counted) return corpus;
+    const blocked = counts[BLOCKED_BY_POLICY_COUNT_KEY];
+    return {
+      ...corpus,
+      counts: {
+        ...counts,
+        [UNREADABLE_ITEMS_COUNT_KEY]: unreadable,
+        ...(moved > 0 ? { [BLOCKED_BY_POLICY_COUNT_KEY]: (typeof blocked === 'number' ? blocked : 0) + moved } : {}),
+      },
+    } as SourceIndexStatusCorpus;
+  });
 }
 
 /** How many names the card carries: the most any surface shows without the computer's own list. */

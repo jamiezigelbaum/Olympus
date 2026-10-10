@@ -45,6 +45,35 @@ describe('unreadable files are stated, not alarmed', () => {
     expect(dashboardSubLine(dropbox, { now: NOW })).toContain("2 files can't be read");
   });
 
+  // Codex review of #231 (P1a): the status counts may be up to their cache
+  // window old. Checked again at publish time, a file judged Secrets since
+  // is neither counted nor named, and moves to the policy exit at once.
+  test('the count is checked again at publish time: one became Secrets, one was read since', () => {
+    const asked: string[] = [];
+    const view = realView({ extraction_items_unreadable: 3, qa_blocked_policy: 1 }, {
+      unreadableRecheck: (corpusId) => {
+        asked.push(corpusId);
+        return { unreadable: 1, blocked: 1 };
+      },
+      unreadableFileNames: () => ['still.pdf'],
+    });
+    const dropbox = view.sources.find((source) => source.source_id === 'dropbox.files')!;
+    expect(asked).toEqual(['secure_local.dropbox.files']);
+    expect(dropbox.coverage.unreadable_items).toBe(1);
+    expect(dropbox.unreadable_files?.names).toEqual(['still.pdf']);
+    expect(dashboardSubLine(dropbox, { now: NOW })).toContain("1 file can't be read");
+    // Nothing left unreadable: no count, no names.
+    const none = realView({ extraction_items_unreadable: 2 }, { unreadableRecheck: () => ({ unreadable: 0, blocked: 2 }), unreadableFileNames: () => ['x.pdf'] })
+      .sources.find((source) => source.source_id === 'dropbox.files')!;
+    expect(none.coverage.unreadable_items).toBe(0);
+    expect(none.unreadable_files).toBeUndefined();
+    // A recheck can only lower the count; one it cannot answer leaves it.
+    expect(realView({ extraction_items_unreadable: 2 }, { unreadableRecheck: () => ({ unreadable: 9, blocked: 0 }) })
+      .sources.find((source) => source.source_id === 'dropbox.files')!.coverage.unreadable_items).toBe(2);
+    expect(realView({ extraction_items_unreadable: 2 }, { unreadableRecheck: () => { throw new Error('closed'); } })
+      .sources.find((source) => source.source_id === 'dropbox.files')!.coverage.unreadable_items).toBe(2);
+  });
+
   test('a corpus that publishes no unreadable count publishes no key', () => {
     const dropbox = realView({}).sources.find((source) => source.source_id === 'dropbox.files')!;
     expect('unreadable_items' in dropbox.coverage).toBe(false);
@@ -284,7 +313,12 @@ function schedulerStatus(tasks: SourceSchedulerTaskStatus[]): SourceSchedulerSta
 
 function realView(
   countOverrides: Record<string, number>,
-  options: { manualSyncs?: Record<string, DashboardManualSync>; now?: Date } = {},
+  options: {
+    manualSyncs?: Record<string, DashboardManualSync>;
+    now?: Date;
+    unreadableRecheck?: (corpusId: string) => { unreadable: number; blocked: number } | undefined;
+    unreadableFileNames?: (corpusIds: readonly string[], limit: number) => readonly string[];
+  } = {},
 ): SourceDashboardViewModel {
   return buildSourceDashboardViewModel({
     sourceIndexStatus: {
@@ -328,6 +362,8 @@ function realView(
     sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
     connectedHandleRegistry: dropboxHandleRegistry(),
     ...(options.manualSyncs ? { manualSyncs: options.manualSyncs } : {}),
+    ...(options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {}),
+    ...(options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {}),
     now: options.now ?? NOW,
   });
 }

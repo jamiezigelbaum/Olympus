@@ -25,6 +25,7 @@ import {
   OLYMPUS_HOST_CONTEXT_KEY,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
+  UNREADABLE_FILES_PAGE_TOOL_NAME,
   PANEL_TOOL_NAMES,
   PRIVACY_GET_TOOL_NAME,
   PRIVACY_SET_TOOL_NAME,
@@ -60,8 +61,8 @@ describe('the panel\'s tool lists', () => {
     expect(PANEL_TOOL_NAMES).toContain(PRIVACY_SET_TOOL_NAME);
   });
 
-  test('the computer adds exactly Index faster, Unpair and opening a file; ChatGPT\'s conversation tools are on neither list', () => {
-    expect([...COMPUTER_HOST_TOOL_NAMES]).toEqual([...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME, OPEN_UNREADABLE_FILE_TOOL_NAME]);
+  test('the computer adds exactly Index faster, Unpair, and opening and paging unreadable files; ChatGPT\'s conversation tools are on neither list', () => {
+    expect([...COMPUTER_HOST_TOOL_NAMES]).toEqual([...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME, OPEN_UNREADABLE_FILE_TOOL_NAME, UNREADABLE_FILES_PAGE_TOOL_NAME]);
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(UNPAIR_SOURCE_TOOL_NAME);
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(OPEN_UNREADABLE_FILE_TOOL_NAME);
     for (const name of ['olympus_search', 'olympus_answer', 'olympus_source_status']) {
@@ -630,7 +631,8 @@ describe('See why on the computer', () => {
     expect(Array.from(why.querySelectorAll('ul.files li')).map((node) => node.textContent)).toEqual(['Q3 deck.key', 'scan.tiff', 'and 1 more']);
     // The result's ChatGPT names and its "and N more" link give way to the computer's list.
     expect(why.textContent).not.toContain('ChatGPT name.pdf');
-    expect(why.querySelectorAll('ul.files button').length).toBe(1);
+    // Q3 deck opens; "and 1 more" pages the rest.
+    expect(Array.from(why.querySelectorAll('ul.files button')).map((node) => node.textContent)).toEqual(['Q3 deck.key', 'and 1 more']);
     const open = why.querySelector('ul.files button')! as unknown as HTMLButtonElement;
     expect(open.getAttribute('aria-label')).toBe('Open Q3 deck.key');
     open.click();
@@ -640,8 +642,28 @@ describe('See why on the computer', () => {
     page.respond('tools/call', { content: [{ type: 'text', text: 'Opening the file\'s page.' }], structuredContent: { status: 'open_link', url: 'https://www.dropbox.com/preview/Q3%20deck.key' } });
     await settle();
     expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual(['https://www.dropbox.com/preview/Q3%20deck.key']);
-    // Opening a file changes nothing, so the dashboard is not read again.
-    expect(page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name)).toEqual([DASHBOARD_TOOL_NAME, OPEN_UNREADABLE_FILE_TOOL_NAME]);
+    // The token is spent: the dashboard is read again for fresh ones.
+    expect(page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name)).toEqual([DASHBOARD_TOOL_NAME, OPEN_UNREADABLE_FILE_TOOL_NAME, DASHBOARD_TOOL_NAME]);
+  });
+
+  // Codex review of #231 (P2c): past the first page, every file is reachable.
+  test('"and N more" reads the next page and lists it under the first, each file opening', async () => {
+    const page = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
+    const more = () => Array.from(page.win.document.querySelectorAll('details.why ul.files button')).find((node) => /more$/.test(node.textContent ?? '')) as unknown as HTMLButtonElement | undefined;
+    more()!.click();
+    await settle();
+    const calls = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params);
+    expect(calls[calls.length - 1]).toEqual({ name: UNREADABLE_FILES_PAGE_TOOL_NAME, arguments: { source_id: 'dropbox.files', offset: 2 } });
+    const NEXT = 'N'.repeat(43);
+    page.respond('tools/call', { content: [{ type: 'text', text: '1 more files.' }], structuredContent: { status: 'listed', source_id: 'dropbox.files', offset: 2, files: [{ name: 'page two.pdf', token: NEXT }], more: 0 } });
+    await settle();
+    const why = page.win.document.querySelector('details.why')!;
+    expect(Array.from(why.querySelectorAll('ul.files li')).map((node) => node.textContent)).toEqual(['Q3 deck.key', 'scan.tiff', 'page two.pdf']);
+    expect(more()).toBeUndefined();
+    (Array.from(why.querySelectorAll('ul.files button')).find((node) => node.textContent === 'page two.pdf') as unknown as HTMLButtonElement).click();
+    await settle();
+    const last = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params).at(-1);
+    expect(last).toEqual({ name: OPEN_UNREADABLE_FILE_TOOL_NAME, arguments: { token: NEXT } });
   });
 
   test('a file that is gone says so beside it', async () => {

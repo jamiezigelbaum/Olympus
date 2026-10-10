@@ -31,9 +31,10 @@
   why, ChatGPT and the computer now list the newest unreadable files by name
   (up to 5, then "and N more", which opens the full list on the computer).
   On the computer each file opens: a Dropbox file's synced copy if there is
-  one, else its web page, a Drive file's web page. Files judged Secrets
-  never show as unreadable anywhere; they count with the files Olympus
-  leaves out by policy. `olympus dashboard --target unreadable/dropbox`
+  one, else its web page, a Drive file's web page; a long list pages 200
+  at a time. Files judged Secrets (an `olympus tier set … secrets` included)
+  never show as unreadable anywhere, from the moment they are judged; they
+  count with the files Olympus leaves out by policy. `olympus dashboard --target unreadable/dropbox`
   opens the same list from Terminal.
 - **A full disk says how much to free.** A model download that failed for
   space reads "Free up 3 GB, then Try again", and Models no longer repeats

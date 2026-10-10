@@ -410,6 +410,8 @@ export interface EmailSourceWorkerOptions {
    * readiness ledger's own list), stamped on the dashboard's source cards.
    */
   unreadableFileNames?: (corpusIds: readonly string[], limit: number) => readonly string[];
+  /** One corpus's unreadable count checked again now (SourceDashboardBuildOptions.unreadableRecheck). */
+  unreadableRecheck?: (corpusId: string) => { unreadable: number; blocked: number } | undefined;
   readwiseConnectorStoreSync?: ReadwiseConnectorStoreSyncHandler;
   /**
    * Resolves the current Readwise handler after registry changes. When present
@@ -1242,6 +1244,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             if (!sourceDashboard?.panelTools) {
               throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'The dashboard panel is not configured.');
             }
+            // A locked reader: names, never an open token (no opener).
             return json(await sourceDashboard.panelTools.call(DASHBOARD_TOOL_NAME, {}, dashboardPanelCallContext(url, request)));
           }
           if (page === 'connector') return html(renderDashboardLocalPage('connector', { url, options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) } }));
@@ -1343,6 +1346,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
               ...(options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {}),
+              ...(options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {}),
               ...(credentialHealth ? { credentialHealth } : {}),
               oauthClientIds: dashboardClientIdSets.all,
               oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
@@ -1424,7 +1428,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (!sourceDashboard.panelTools.allows(name)) {
             throw new EmailSourceWorkerError(404, 'unknown_tool', 'That tool is not available to the dashboard.');
           }
-          return json(await sourceDashboard.panelTools.call(name, args as Record<string, unknown>, dashboardPanelCallContext(url, request)));
+          return json(await sourceDashboard.panelTools.call(name, args as Record<string, unknown>, {
+            ...dashboardPanelCallContext(url, request),
+            opener: dashboardPanelOpener(request),
+          }));
         }
 
         // The query-free landing the successful callback redirects to (MINOR 2,
@@ -6276,6 +6283,17 @@ function dashboardOAuthClientSecretRequired(source: DashboardOAuthSource | 'goog
  * never point a callback at another origin.
  */
 /** Where a panel tool call came from: the browser's origin, and the gateway's when it came through one. */
+/**
+ * Who a panel tool call (POST /dashboard/tools/call) opens files as: the
+ * control session, by the CSRF token workers/http.ts injects only after the
+ * session cookie and its CSRF token checked out, else the worker bearer (the
+ * only other way that route is reached). Hashed: the token itself is not kept.
+ */
+function dashboardPanelOpener(request: Request): string {
+  const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+  return csrf ? `session:${createHash('sha256').update(csrf).digest('base64url')}` : 'bearer';
+}
+
 function dashboardPanelCallContext(url: URL, request: Request): DashboardPanelCallContext {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
   return {

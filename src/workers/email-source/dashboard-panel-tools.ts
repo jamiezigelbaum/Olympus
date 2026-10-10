@@ -24,7 +24,11 @@
  *   `unreadable`, up to COMPUTER_UNREADABLE_FILES_LIMIT per source) with a
  *   one-time token each, and opens one through `olympus_open_unreadable_file
  *   {token}`: the synced copy here, or the file's own web page for the panel
- *   to open. The token is the only argument; a path is never taken.
+ *   to open. The token is the only argument; a path is never taken. Tokens
+ *   are minted only for an unlocked control session (or the worker bearer),
+ *   bound to it, open once, and last 30 minutes from issue; a locked reader
+ *   gets the names alone. Past the first page, `olympus_unreadable_files
+ *   {source_id, offset}` lists the next, so every file is reachable.
  */
 import {
   COMPUTER_HOST_TOOL_NAMES,
@@ -34,6 +38,7 @@ import {
   INDEX_FASTER_TOOL_NAME,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
+  UNREADABLE_FILES_PAGE_TOOL_NAME,
   unreadableNames,
   type ComputerDashboardMeta,
   type ComputerUnpairEntry,
@@ -54,6 +59,11 @@ export interface DashboardPanelCallContext {
   /** Set when the request came through the gateway: the start route re-reads it. */
   gatewayOrigin?: string;
   signal?: AbortSignal;
+  /**
+   * Who may open unreadable files from this call: an unlocked control session
+   * or the worker bearer. Absent (a locked dash_ reader): names, no tokens.
+   */
+  opener?: string;
 }
 
 export interface DashboardPanelTools {
@@ -154,12 +164,12 @@ async function unpairSource(options: DashboardPanelToolsOptions, args: Record<st
 }
 
 /** Opening one unreadable file by its one-time token; the token is the only argument. */
-async function openUnreadableFile(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+async function openUnreadableFile(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
   const keys = Object.keys(args);
   if (typeof args.token !== 'string' || keys.some((key) => key !== 'token')) return refused('token must be a file token from the dashboard.', 'invalid_params');
   const files = options.unreadableFiles?.();
-  if (!files) return refused('Olympus cannot open this file here.', 'unavailable');
-  const opened = await files.open(args.token);
+  if (!files || !context.opener) return refused('Olympus cannot open this file here.', 'unavailable');
+  const opened = await files.open(args.token, context.opener);
   switch (opened.status) {
     case 'opened':
       return { content: [{ type: 'text', text: 'Opened the file on this computer.' }], structuredContent: { status: 'opened' } };
@@ -176,8 +186,57 @@ async function openUnreadableFile(options: DashboardPanelToolsOptions, args: Rec
   }
 }
 
-/** Every unreadable file per source the view counts, with open tokens, for the computer's See why. */
-export function computerUnreadableEntries(view: SourceDashboardViewModel | undefined, files: UnreadableFiles | undefined): ComputerUnreadableEntry[] {
+/**
+ * The next page of one source's unreadable files (`{source_id, offset}`), with
+ * open tokens for this opener: what the first page's "more" counts, so every
+ * file is reachable however many there are. The source's corpora are the ones
+ * the dashboard view names now.
+ */
+async function unreadableFilesPage(
+  options: DashboardPanelToolsOptions,
+  args: Record<string, unknown>,
+  context: DashboardPanelCallContext,
+): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  const offset = args.offset;
+  if (
+    typeof args.source_id !== 'string'
+    || typeof offset !== 'number' || !Number.isInteger(offset) || offset < 0 || offset > 1_000_000
+    || keys.some((key) => key !== 'source_id' && key !== 'offset')
+  ) {
+    return refused('source_id and offset must come from the dashboard.', 'invalid_params');
+  }
+  const files = options.unreadableFiles?.();
+  if (!files || !context.opener) return refused('Olympus cannot list these files here.', 'unavailable');
+  const sourceId = args.source_id;
+  const view = await options.surface().dashboardView(context.signal).catch(() => undefined);
+  const corpusIds = view?.sources.find((card) => card.source_id === sourceId)?.unreadable_files?.corpus_ids;
+  if (!corpusIds?.length) return refused('This list changed. Refresh the dashboard.', 'gone');
+  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { offset, opener: context.opener });
+  const page = entriesOf(listed.files);
+  return {
+    content: [{ type: 'text', text: `${page.length} more files.` }],
+    structuredContent: { status: 'listed', source_id: args.source_id, offset, files: page, more: listed.more },
+  };
+}
+
+function entriesOf(files: ReturnType<UnreadableFiles['computerList']>['files']): ComputerUnreadableEntry['files'] {
+  return files.flatMap((file) => {
+    const [name] = unreadableNames([file.name]);
+    return name ? [{ name, ...(file.token ? { token: file.token } : {}) }] : [];
+  });
+}
+
+/**
+ * Every unreadable file per source the view counts, first page, for the
+ * computer's See why: with open tokens bound to `opener` when there is one
+ * (an unlocked session, or the bearer), names alone for a locked reader.
+ */
+export function computerUnreadableEntries(
+  view: SourceDashboardViewModel | undefined,
+  files: UnreadableFiles | undefined,
+  opener?: string,
+): ComputerUnreadableEntry[] {
   if (!view || !files) return [];
   return view.sources.flatMap((card) => {
     const count = Math.max(0, Math.trunc(card.coverage.unreadable_items ?? 0));
@@ -185,14 +244,11 @@ export function computerUnreadableEntries(view: SourceDashboardViewModel | undef
     if (count === 0 || corpusIds.length === 0) return [];
     let listed: ReturnType<UnreadableFiles['computerList']>;
     try {
-      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT);
+      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, opener ? { opener } : {});
     } catch {
       return [];
     }
-    const entries = listed.files.flatMap((file) => {
-      const [name] = unreadableNames([file.name]);
-      return name ? [{ name, ...(file.token ? { token: file.token } : {}) }] : [];
-    });
+    const entries = entriesOf(listed.files);
     // Past the limit the list says how many more; the row's count is the word,
     // so a count read a moment apart from the list never shows fewer.
     const more = Math.max(0, listed.more, count - entries.length);
@@ -218,7 +274,8 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (!allowed.has(name)) return refused('This tool is not available here.', 'unknown_tool');
       if (name === INDEX_FASTER_TOOL_NAME) return await indexFaster(options, args);
       if (name === UNPAIR_SOURCE_TOOL_NAME) return await unpairSource(options, args);
-      if (name === OPEN_UNREADABLE_FILE_TOOL_NAME) return await openUnreadableFile(options, args);
+      if (name === OPEN_UNREADABLE_FILE_TOOL_NAME) return await openUnreadableFile(options, args, context);
+      if (name === UNREADABLE_FILES_PAGE_TOOL_NAME) return await unreadableFilesPage(options, args, context);
       const signal = context.signal ?? new AbortController().signal;
       const base = options.surface();
       // Keep the view the dashboard result is built from, for Unpair's entries.
@@ -232,7 +289,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (name !== DASHBOARD_TOOL_NAME || result.isError) return result;
       const on = await options.indexFasterState().catch(() => undefined);
       const unpair = computerUnpairEntries(view);
-      const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.());
+      const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context.opener);
       if (on === undefined && unpair.length === 0 && unreadable.length === 0) return result;
       const meta: ComputerDashboardMeta = {
         ...(on !== undefined ? { indexFaster: { on } } : {}),
