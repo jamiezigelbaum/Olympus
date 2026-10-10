@@ -1,0 +1,4 @@
+# Local public-provider evidence; preserve on disk without publishing infrastructure details.
+*.json
+*.sse
+*-reference.md

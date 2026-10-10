@@ -144,6 +144,15 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-10 — Venice E2EE P0 blocks implementation.** The approved launch
+  requires verified single-hop inference, fail-closed NRAS and Olympus-reviewed
+  pins. The live NEAR spike accepted identical encrypted input with a substituted
+  reply-key header and encrypted its answer to the substitute key. P1–P4 are
+  stopped pending an authenticated recipient binding; v2 passthrough is also
+  unproven. See the [P0 evidence and limits](../research/venice-e2ee-p0/REPORT.md).
+  No product routing or fallback changed. Each future phase remains a separate
+  independently reviewed PR, with the owner merging it.
+
 - **2026-10-08 — Ordinary photos are Personal; only sensitive photos are
   Private.** Owner decision, replacing the 2026-10-07 interim rule below.
   Sensitive: nudity or intimate images, identity documents, bank or credit
