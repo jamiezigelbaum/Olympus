@@ -1398,6 +1398,49 @@ The optional `integrations/hermes/ask-sources` adaptation may be copied to
 `hermes://mcp/install` link is published because current Hermes documentation
 does not define that handler, and no external catalog submission is authorized.
 
+### Olympus on a server: opening it on the owner's computer
+
+**Installs on a server only** (owner decision, 2026-10-10: OpenClaw users get
+this at onboarding, with one approval; Hermes users get the lines to copy). Some screens (keys, X sign-in, Telegram and
+WhatsApp pairing) must open in a browser on the owner's own computer. On a
+server, Olympus does that through an SSH tunnel and a one-time link; the
+owner's assistant can run both on the owner's computer through a paired node.
+Design: `docs/design/remote-access.md`; owner-facing page:
+`docs/openclaw-node-setup.md`.
+
+1. **Declare it.** Ask the owner how their computer signs in to this server
+   over SSH (`user@host` or an ssh_config name; the OpenClaw app's remote
+   settings show the one it uses), then run
+   `"$OLYMPUS_BIN" server-mode on --ssh-target <user@host>` and check
+   `"$OLYMPUS_BIN" server-mode status` reads `remote: true`. Skip this whole
+   section when Olympus runs on the owner's own computer.
+2. **Find the node.** `openclaw nodes status`: you need the owner's computer
+   as a connected node that offers `system.run`. If there is none (for
+   example only the macOS app is installed), tell the owner the dashboard
+   will show two lines to copy instead, and offer the optional
+   `openclaw node install` from `docs/openclaw-node-setup.md`. Do not install
+   it without their yes.
+3. **One approval.** Ask once, in these words or close: "May I let your
+   computer open Olympus links without asking, and have it ask you each time
+   before I start the secure tunnel?" On a yes, check
+   `openclaw approvals get --node <node>`, then:
+   - effective security `full`: add nothing (it already runs commands
+     without asking); say so.
+   - `allowlist` with ask `on-miss` or `always`: add only the opener,
+     `openclaw approvals allowlist add --agent <agent> --node <node> "/usr/bin/open"`
+     (`xdg-open`'s full path on Linux). Never allowlist `ssh`: each tunnel
+     asks the owner once; tell them to choose Allow once.
+   - ask `off` with `allowlist`: ssh would be refused. Tell the owner;
+     do not change the node's policy without their explicit yes.
+4. **Test it** with `olympus_open_remote {"target": "dashboard"}`: run the
+   returned `node_commands.<platform>.tunnel` with `exec host=node` (the owner
+   approves it), then `.open`. The dashboard opens unlocked in the owner's
+   browser. Never paste, repeat or store the returned link; it is a one-time
+   ticket.
+
+Hermes installs have no node: in step 1 add `--agent-route off`, and skip
+steps 2 to 4; the dashboard then shows the owner only the two lines to copy.
+
 ## Step 6 — Finish installation: dashboard handoff
 
 **Pre-source completion receipt — mandatory before inviting Connect.** This

@@ -1296,7 +1296,7 @@ function printHelp(): void {
   console.log('  olympus dashboard token');
   console.log('  olympus open olympus://open/<target>');
   console.log('  olympus open-handler install|uninstall|status');
-  console.log('  olympus server-mode status|on|off|auto [--ssh-target <user@host>]');
+  console.log('  olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
@@ -1353,9 +1353,9 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'open-handler uninstall': 'olympus open-handler uninstall',
   'open-handler status': 'olympus open-handler status',
   'server-mode status': 'olympus server-mode status',
-  'server-mode on': 'olympus server-mode on [--ssh-target <user@host>]',
+  'server-mode on': 'olympus server-mode on [--ssh-target <user@host>] [--agent-route on|off]',
   'server-mode off': 'olympus server-mode off',
-  'server-mode auto': 'olympus server-mode auto [--ssh-target <user@host>]',
+  'server-mode auto': 'olympus server-mode auto [--ssh-target <user@host>] [--agent-route on|off]',
   'source extract-pdfs': 'olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
@@ -2968,7 +2968,7 @@ function runDashboardReadOnlyCommand(
 }
 
 /**
- * `olympus server-mode status|on|off|auto [--ssh-target <user@host>]`.
+ * `olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]`.
  *
  * `on`: this engine runs on a server, so the ChatGPT panel shows how to open
  * Olympus on the owner's computer (a tunnel plus a one-time link) instead of
@@ -2992,9 +2992,18 @@ export function runServerModeCommand(
       throw new OperationError('invalid_params', '--ssh-target takes user@host (or an ssh_config name) as your computer reaches this server.', 'For example: olympus server-mode on --ssh-target you@your-server');
     }
   }
+  let agentRoute: string | undefined;
+  const routeAt = rest.indexOf('--agent-route');
+  if (routeAt >= 0) {
+    agentRoute = rest[routeAt + 1];
+    rest.splice(routeAt, 2);
+    if (agentRoute !== 'on' && agentRoute !== 'off') {
+      throw new OperationError('invalid_params', '--agent-route takes on or off.', 'Use off when your assistant cannot run commands on your computer (for example Hermes).');
+    }
+  }
   const action = rest[0] ?? '';
   if (rest.length !== 1 || (action !== 'status' && parseServerModeSetting(action) !== action)) {
-    throw new OperationError('invalid_params', 'Usage: olympus server-mode status|on|off|auto [--ssh-target <user@host>]');
+    throw new OperationError('invalid_params', 'Usage: olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]');
   }
   const writeOptions = {
     ...(options.platform ? { platform: options.platform } : {}),
@@ -3003,6 +3012,7 @@ export function runServerModeCommand(
   };
   if (action !== 'status') writeManagedWorkerEnvSecret({ key: 'OLYMPUS_SERVER_MODE', value: action, ...writeOptions });
   if (sshTarget) writeManagedWorkerEnvSecret({ key: 'OLYMPUS_SERVER_SSH_TARGET', value: sshTarget.trim(), ...writeOptions });
+  if (agentRoute) writeManagedWorkerEnvSecret({ key: 'OLYMPUS_SERVER_AGENT_ROUTE', value: agentRoute, ...writeOptions });
   const fileEnv = readWorkerSetupEnv({ env, ...(options.homeDir ? { homeDir: options.homeDir } : {}), ...(options.envPath ? { workerEnvPath: options.envPath } : {}) });
   const mode = resolveServerMode({ env, fileEnv });
   return {
@@ -3010,6 +3020,7 @@ export function runServerModeCommand(
     remote: mode.remote,
     basis: mode.basis,
     ssh_target: mode.sshTarget ?? null,
+    agent_route: mode.agentRoute,
   };
 }
 

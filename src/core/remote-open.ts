@@ -30,6 +30,13 @@ import { openTargetPath, type OpenTarget } from './open-targets.ts';
 export const SERVER_MODE_ENV = 'OLYMPUS_SERVER_MODE';
 /** How the owner's computer reaches this server over SSH (`user@host`), when known. */
 export const SERVER_SSH_TARGET_ENV = 'OLYMPUS_SERVER_SSH_TARGET';
+/**
+ * `off` when the owner's assistant cannot open Olympus on their computer even
+ * though OpenClaw runs the engine (a Hermes install: OpenClaw hosts the
+ * engine, Hermes is the assistant and has no node). The panel then offers
+ * only the by-hand lines.
+ */
+export const SERVER_AGENT_ROUTE_ENV = 'OLYMPUS_SERVER_AGENT_ROUTE';
 
 export type ServerModeSetting = 'on' | 'off' | 'auto';
 export const SERVER_MODE_SETTINGS: readonly ServerModeSetting[] = ['on', 'off', 'auto'];
@@ -42,6 +49,8 @@ export interface ServerMode {
   basis: 'declared' | 'no_desktop_session' | 'desktop_session' | 'desktop_platform';
   /** `user@host` the owner's computer uses to reach this server, when set and well-formed. */
   sshTarget?: string;
+  /** False only when the owner turned the assistant route off (SERVER_AGENT_ROUTE_ENV=off). */
+  agentRoute: boolean;
 }
 
 export function parseServerModeSetting(value: unknown): ServerModeSetting | undefined {
@@ -68,7 +77,8 @@ export function resolveServerMode(input: {
     ?? 'auto';
   const rawTarget = input.fileEnv?.[SERVER_SSH_TARGET_ENV] ?? input.env[SERVER_SSH_TARGET_ENV];
   const sshTarget = isValidSshTarget(rawTarget) ? rawTarget.trim() : undefined;
-  const withTarget = (mode: Omit<ServerMode, 'sshTarget'>): ServerMode => (sshTarget ? { ...mode, sshTarget } : mode);
+  const agentRoute = (input.fileEnv?.[SERVER_AGENT_ROUTE_ENV] ?? input.env[SERVER_AGENT_ROUTE_ENV])?.trim().toLowerCase() !== 'off';
+  const withTarget = (mode: Omit<ServerMode, 'sshTarget' | 'agentRoute'>): ServerMode => (sshTarget ? { ...mode, sshTarget, agentRoute } : { ...mode, agentRoute });
   if (setting === 'on') return withTarget({ remote: true, setting, basis: 'declared' });
   if (setting === 'off') return withTarget({ remote: false, setting, basis: 'declared' });
   const platform = input.platform ?? process.platform;

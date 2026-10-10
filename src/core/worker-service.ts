@@ -717,7 +717,7 @@ function reconcileWorkerEnv(envPath: string, options: WorkerServiceInstallOption
 // Not secrets, but owner settings the worker reads from the same file:
 // remote mode's declaration and SSH name (core/remote-open.ts), written by
 // `olympus server-mode`.
-export const MANAGED_WORKER_ENV_SECRET_KEYS = ['OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY', 'OLYMPUS_SERVER_MODE', 'OLYMPUS_SERVER_SSH_TARGET'] as const;
+export const MANAGED_WORKER_ENV_SECRET_KEYS = ['OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY', 'OLYMPUS_SERVER_MODE', 'OLYMPUS_SERVER_SSH_TARGET', 'OLYMPUS_SERVER_AGENT_ROUTE'] as const;
 export type ManagedWorkerEnvSecretKey = typeof MANAGED_WORKER_ENV_SECRET_KEYS[number];
 
 /**

@@ -56,7 +56,8 @@ describe('the engine declares remote mode', () => {
       fileEnv: { OLYMPUS_SERVER_MODE: 'on', OLYMPUS_SERVER_SSH_TARGET: 'jamie@sparta' },
       platform: 'darwin',
     });
-    expect(mode).toEqual({ remote: true, setting: 'on', basis: 'declared', sshTarget: 'jamie@sparta' });
+    expect(mode).toEqual({ remote: true, setting: 'on', basis: 'declared', sshTarget: 'jamie@sparta', agentRoute: true });
+    expect(resolveServerMode({ env: { OLYMPUS_SERVER_AGENT_ROUTE: 'off' }, platform: 'linux' }).agentRoute).toBe(false);
   });
 
   test('an SSH name can never be read as an option or carry shell characters', () => {
@@ -73,12 +74,16 @@ describe('the engine declares remote mode', () => {
       const envPath = join(dir, 'worker.env');
       writeFileSync(envPath, "OLYMPUS_WORKER_AUTH_TOKEN='x'\n", { mode: 0o600 });
       const options = { env: { HOME: dir }, homeDir: dir, envPath, platform: 'linux' as const };
-      expect(runServerModeCommand(['on', '--ssh-target', 'jamie@sparta'], options)).toEqual({ setting: 'on', remote: true, basis: 'declared', ssh_target: 'jamie@sparta' });
+      expect(runServerModeCommand(['on', '--ssh-target', 'jamie@sparta'], options)).toEqual({ setting: 'on', remote: true, basis: 'declared', ssh_target: 'jamie@sparta', agent_route: true });
       const written = readFileSync(envPath, 'utf8');
       expect(written).toContain("OLYMPUS_SERVER_MODE='on'");
       expect(written).toContain("OLYMPUS_SERVER_SSH_TARGET='jamie@sparta'");
       expect(runServerModeCommand(['off'], options)).toMatchObject({ setting: 'off', remote: false, ssh_target: 'jamie@sparta' });
       expect(runServerModeCommand(['status'], options)).toMatchObject({ setting: 'off' });
+      // A Hermes install: OpenClaw runs the engine, but the assistant cannot reach the computer.
+      expect(runServerModeCommand(['on', '--agent-route', 'off'], options)).toMatchObject({ remote: true, agent_route: false });
+      expect(readFileSync(envPath, 'utf8')).toContain("OLYMPUS_SERVER_AGENT_ROUTE='off'");
+      expect(() => runServerModeCommand(['on', '--agent-route', 'maybe'], options)).toThrow(/agent-route/);
       expect(() => runServerModeCommand(['on', '--ssh-target', '-oProxyCommand=x'], options)).toThrow(/ssh-target/);
       expect(() => runServerModeCommand(['maybe'], options)).toThrow(/Usage/);
       expect(() => runServerModeCommand([], options)).toThrow(/Usage/);

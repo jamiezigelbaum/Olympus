@@ -25,6 +25,7 @@ describe('operation exposure policy', () => {
       'source_watch_cancel',
       'olympus_doctor',
       'ask_anonymously',
+      'olympus_open_remote',
     ]);
   });
 
@@ -32,7 +33,9 @@ describe('operation exposure policy', () => {
     // Every other surface would publish a tool with nowhere to get the
     // authenticated owner and delivery route from, so the call could only
     // ever come back as a policy refusal.
-    const sessionRouteOnly = ['source_watch_create', 'source_watches', 'source_watch_cancel'];
+    // olympus_open_remote too: only the native factory can vouch that the
+    // caller is the owner's own session.
+    const sessionRouteOnly = ['source_watch_create', 'source_watches', 'source_watch_cancel', 'olympus_open_remote'];
     const native = surfaceNames('native');
     for (const name of sessionRouteOnly) expect(native).toContain(name);
     // source_answer_result is the other way round: only surfaces that hand a
@@ -43,7 +46,7 @@ describe('operation exposure policy', () => {
     for (const surface of ['mcp', 'cli'] as const) {
       const names = surfaceNames(surface).filter((operation) => operation !== 'source_answer_result');
       for (const name of sessionRouteOnly) expect(names).not.toContain(name);
-      // Nothing else moved: the two surfaces differ by exactly those three.
+      // Nothing else moved: the two surfaces differ by exactly those four.
       expect(names).toEqual(native.filter((operation) => !sessionRouteOnly.includes(operation)));
     }
   });
@@ -64,6 +67,7 @@ describe('operation exposure policy', () => {
       'argus_complete',
       'olympus_doctor',
       'ask_anonymously',
+      'olympus_open_remote',
     ]);
   });
 

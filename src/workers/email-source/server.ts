@@ -4893,13 +4893,13 @@ export async function main(): Promise<void> {
     // `olympus server-mode on` needs no restart. `agent`: the OpenClaw
     // Gateway supervises this worker (its native service, not the standalone
     // engine host), so the owner's assistant can open Olympus on their
-    // computer for them; anywhere else (Hermes, a hand-run worker) the panel
-    // shows the by-hand lines only.
+    // computer for them; anywhere else (a hand-run worker, or a Hermes
+    // install that turned the route off) the panel shows the by-hand lines only.
     remote: () => {
       const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv() });
       const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw';
       return mode.remote
-        ? { port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw }
+        ? { port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw && mode.agentRoute }
         : undefined;
     },
     privacy: () => {
