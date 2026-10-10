@@ -37,6 +37,12 @@ install -m 0644 "$SRC/Caddyfile" /etc/caddy/Caddyfile.new
 caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new
 mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
 
+# The privacy policy promises relay event logs are kept 14 days: journald
+# holds them (the service logs to stdout), so cap its retention host-wide.
+install -d -m 0755 /etc/systemd/journald.conf.d
+printf '[Journal]\nMaxRetentionSec=14day\n' > /etc/systemd/journald.conf.d/olympus-retention.conf
+systemctl restart systemd-journald
+
 systemctl daemon-reload
 systemctl enable olympus-relay.service >/dev/null
 systemctl restart olympus-relay.service

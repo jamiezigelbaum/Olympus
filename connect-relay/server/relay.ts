@@ -100,6 +100,13 @@ import { publicKeyOf, type MemoryInstallRegistry, type RegistryCounts } from './
 import { createResponsePolicies, type RouteKind } from './response-policy.ts';
 import { InstallSession } from './session.ts';
 
+/** An OpenAI-hosted origin's host name, or a fixed class: callers can put anything in Origin. */
+export function panelOriginClass(origin: string | null | undefined): string {
+  if (!origin) return 'none';
+  const match = /^https:\/\/([a-z0-9.-]+\.(?:oaiusercontent\.com|chatgpt\.com|openai\.com))$/i.exec(origin);
+  return match ? match[1]!.toLowerCase().slice(0, 120) : 'other';
+}
+
 export interface RelayConfig {
   /** The relay's one public name, e.g. `mcp.olympusplugin.ai`. Issuer and resource derive from it. */
   readonly publicHost: string;
@@ -708,9 +715,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const privateAnswer = async (request: Request, url: URL, ip: string): Promise<Response> => {
     const requestOrigin = request.headers.get('origin');
     const allowed = isPanelOrigin(requestOrigin, panelOrigins);
-    // The widget host's origin is not private; logging refusals shows which
-    // ChatGPT surfaces (web, desktop) serve the panel from where.
-    if (!allowed) log('panel_origin_refused', { origin: (requestOrigin ?? 'none').slice(0, 120) });
+    // Refusals log only which kind of origin was refused: an OpenAI widget
+    // host by name (not private), anything else as 'other', never verbatim.
+    if (!allowed) log('panel_origin_refused', { origin: panelOriginClass(requestOrigin) });
     const cors = allowed ? privateAnswerCorsHeaders(requestOrigin) : {};
     const reply = (status: number, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
       json(status, body, { ...cors, ...headers });

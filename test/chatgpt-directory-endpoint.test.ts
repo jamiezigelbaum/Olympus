@@ -394,6 +394,20 @@ describe('/openai/mcp is its own protected resource', () => {
     expect(await wrong.json()).toMatchObject({ error: 'invalid_grant' });
   });
 
+  test('a refresh retry inside the grace window cannot name the other resource, either way', async () => {
+    for (const [own, other] of [[DIRECTORY_RESOURCE, MCP_RESOURCE], [MCP_RESOURCE, DIRECTORY_RESOURCE]] as const) {
+      const granted = await grant(own);
+      const first = await tokenRequest({ grant_type: 'refresh_token', refresh_token: granted.refresh_token, client_id: CHATGPT_CLIENT_ID, resource: own });
+      expect(first.status).toBe(200);
+      const replay = await tokenRequest({ grant_type: 'refresh_token', refresh_token: granted.refresh_token, client_id: CHATGPT_CLIENT_ID, resource: other });
+      expect(replay.status).toBe(400);
+      expect(await replay.json()).toMatchObject({ error: 'invalid_grant' });
+      // The honest retry still gets the same pair.
+      const retry = await tokenRequest({ grant_type: 'refresh_token', refresh_token: granted.refresh_token, client_id: CHATGPT_CLIENT_ID, resource: own });
+      expect(retry.status).toBe(200);
+    }
+  });
+
   test('a code is exchanged only for the resource it was authorized for; an unknown resource is refused', async () => {
     const { verifier, challenge } = pkce();
     const callback = await ownerCode(challenge, DIRECTORY_RESOURCE);

@@ -211,3 +211,13 @@ describe('routing /openai/mcp to the install', () => {
     expect(worker.paths).toEqual([]);
   });
 });
+
+describe('panel origin refusal log', () => {
+  test('names an OpenAI widget host, never echoes anything else', async () => {
+    const { panelOriginClass } = await import('../server/relay.ts');
+    expect(panelOriginClass('https://abc.web-sandbox.oaiusercontent.com')).toBe('abc.web-sandbox.oaiusercontent.com');
+    expect(panelOriginClass('https://203.0.113.9')).toBe('other');
+    expect(panelOriginClass('https://evil.example?x=chatgpt.com')).toBe('other');
+    expect(panelOriginClass(null)).toBe('none');
+  });
+});

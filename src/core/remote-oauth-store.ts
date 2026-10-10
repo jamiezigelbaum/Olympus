@@ -349,7 +349,10 @@ export function createRemoteOAuthStore(
         const row = readToken(input.refreshToken, 'refresh');
         if (!row) return { ok: false, reason: 'unknown' };
         if (row.revoked_at !== null) return { ok: false, reason: 'revoked' };
+        const audiences: readonly string[] = typeof input.resource === 'string' ? [input.resource] : input.resource;
         if (row.used_at !== null) {
+          // A retry inside the grace window names the same resource too.
+          if (!audiences.includes(row.resource)) return { ok: false, reason: 'wrong_audience' };
           const key = Buffer.from(row.token_hash).toString('hex');
           const grace = refreshGrace.get(key);
           if (grace && grace.expiresAt > at.getTime() && grace.clientId === input.clientId) {
@@ -373,7 +376,6 @@ export function createRemoteOAuthStore(
         }
         if (Date.parse(row.expires_at) <= at.getTime()) return { ok: false, reason: 'expired' };
         if (row.client_id !== input.clientId) return { ok: false, reason: 'client_mismatch' };
-        const audiences: readonly string[] = typeof input.resource === 'string' ? [input.resource] : input.resource;
         if (!audiences.includes(row.resource)) return { ok: false, reason: 'wrong_audience' };
         db.query('UPDATE remote_oauth_tokens SET used_at = ? WHERE token_hash = ?').run(at.toISOString(), row.token_hash);
         // The previous access token retires with its refresh token.

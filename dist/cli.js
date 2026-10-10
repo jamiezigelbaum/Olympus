@@ -11723,7 +11723,10 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
           return { ok: false, reason: "unknown" };
         if (row.revoked_at !== null)
           return { ok: false, reason: "revoked" };
+        const audiences = typeof input.resource === "string" ? [input.resource] : input.resource;
         if (row.used_at !== null) {
+          if (!audiences.includes(row.resource))
+            return { ok: false, reason: "wrong_audience" };
           const key = Buffer.from(row.token_hash).toString("hex");
           const grace = refreshGrace.get(key);
           if (grace && grace.expiresAt > at.getTime() && grace.clientId === input.clientId) {
@@ -11744,7 +11747,6 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
           return { ok: false, reason: "expired" };
         if (row.client_id !== input.clientId)
           return { ok: false, reason: "client_mismatch" };
-        const audiences = typeof input.resource === "string" ? [input.resource] : input.resource;
         if (!audiences.includes(row.resource))
           return { ok: false, reason: "wrong_audience" };
         db.query("UPDATE remote_oauth_tokens SET used_at = ? WHERE token_hash = ?").run(at.toISOString(), row.token_hash);
