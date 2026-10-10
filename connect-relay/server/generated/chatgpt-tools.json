@@ -46,7 +46,7 @@
         "properties": {
           "question": {
             "type": "string",
-            "description": "The user's question, in their own words, with any names, dates or places they gave."
+            "description": "The user's message word for word, including any part you will answer another way (for example from the web). Do not shorten it, split it or turn it into keywords. Change it only to make a follow-up stand on its own: replace \"it\", \"that\" or \"the same\" with what they refer to."
           },
           "limit": {
             "type": "integer",
@@ -116,7 +116,7 @@
         "properties": {
           "question": {
             "type": "string",
-            "description": "The user's question, in their own words, with any names, dates or places they gave."
+            "description": "The user's message word for word, including any part you will answer another way (for example from the web). Do not shorten it, split it or turn it into keywords. Change it only to make a follow-up stand on its own: replace \"it\", \"that\" or \"the same\" with what they refer to."
           },
           "detail": {
             "type": "string",

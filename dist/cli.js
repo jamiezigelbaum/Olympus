@@ -16737,7 +16737,8 @@ function sourceIndexFtsQuery(query, options = {}) {
   if (terms.length === 0)
     return "";
   const suffix = options.prefix === false ? "" : "*";
-  return terms.map((term) => `"${escapeFtsPhrase(term)}"${suffix}`).join(" OR ");
+  const exact = queryInitialisms(query);
+  return terms.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? "" : suffix}`).join(" OR ");
 }
 function sourceIndexFtsTerms(query) {
   const seen = new Set;
@@ -16753,11 +16754,41 @@ function sourceIndexFtsTerms(query) {
     if (terms.length >= 24)
       break;
   }
+  for (const initialism of queryInitialisms(query).keys())
+    appendTerm(initialism, seen, terms);
   return terms;
+}
+function queryInitialisms(query) {
+  const words = [...query.matchAll(TOKEN_PATTERN2)].map((match) => match[0]);
+  const capitalised = (word) => /^\p{Lu}\p{Ll}/u.test(word) && !INITIALISM_CONNECTORS.has(word.toLowerCase());
+  const found = new Map;
+  for (let start = 0;start < words.length && found.size < MAX_INITIALISMS; start += 1) {
+    if (!capitalised(words[start]))
+      continue;
+    let names = 1;
+    for (let end = start + 1;end < words.length && names < 3; end += 1) {
+      const word = words[end];
+      if (INITIALISM_CONNECTORS.has(word.toLowerCase()))
+        continue;
+      if (!capitalised(word))
+        break;
+      names += 1;
+      const span = words.slice(start, end + 1);
+      const covered = span.filter(capitalised).map((entry) => entry.toLowerCase());
+      for (const letters of [span.map((entry) => entry[0]), span.filter(capitalised).map((entry) => entry[0])]) {
+        const initialism = letters.join("").toLowerCase();
+        if (initialism.length < 3 || initialism.length > 5 || found.has(initialism) || found.size >= MAX_INITIALISMS)
+          continue;
+        found.set(initialism, covered);
+      }
+    }
+  }
+  return found;
 }
 function sourceIndexFtsTermGroups(query, options = {}) {
   const seen = new Set;
   const groups = [];
+  const groupOf = new Map;
   let total = 0;
   const expandedTermLimit = options.expandedTermLimit ?? 24;
   const groupLimit = Math.max(1, Math.trunc(options.groupLimit ?? Number.MAX_SAFE_INTEGER));
@@ -16780,13 +16811,22 @@ function sourceIndexFtsTermGroups(query, options = {}) {
       group.push(normalized);
       total += 1;
     }
-    if (group.length > 0)
+    if (group.length > 0) {
       groups.push(group);
+      groupOf.set(raw, group);
+    }
+  }
+  for (const [initialism, covered] of queryInitialisms(query)) {
+    for (const word of covered) {
+      const group = groupOf.get(word);
+      if (group && !group.includes(initialism))
+        group.push(initialism);
+    }
   }
   return groups;
 }
-function sourceIndexFtsGroupQuery(group) {
-  return group.map((term) => `"${escapeFtsPhrase(term)}"*`).join(" OR ");
+function sourceIndexFtsGroupQuery(group, exact = new Set) {
+  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? "" : "*"}`).join(" OR ");
 }
 function runBoundedFtsTokenizerMigration(db, spec) {
   const indexedRows = readCount(db, spec.indexedRowCountSql);
@@ -16869,7 +16909,7 @@ function upsertFtsMaintenanceTask(db, tableName, indexedRows, inlineRebuildLimit
     recovery: "reingest through the canonical connector store"
   }), new Date().toISOString());
 }
-var SOURCE_INDEX_FTS5_TOKENIZER = "tokenize = 'porter unicode61'", DEFAULT_INLINE_FTS_REBUILD_LIMIT = 25000, TOKEN_PATTERN2, FTS_QUERY_STOPWORDS, SOURCE_INDEX_SYNONYMS;
+var SOURCE_INDEX_FTS5_TOKENIZER = "tokenize = 'porter unicode61'", DEFAULT_INLINE_FTS_REBUILD_LIMIT = 25000, TOKEN_PATTERN2, FTS_QUERY_STOPWORDS, SOURCE_INDEX_SYNONYMS, INITIALISM_CONNECTORS, MAX_INITIALISMS = 4;
 var init_fts = __esm(() => {
   TOKEN_PATTERN2 = /[\p{L}\p{N}_]+/gu;
   FTS_QUERY_STOPWORDS = new Set([
@@ -17034,6 +17074,7 @@ var init_fts = __esm(() => {
     legal: ["lawyer", "attorney", "counsel", "solicitor"],
     retainer: ["engagement", "agreement", "deposit"]
   });
+  INITIALISM_CONNECTORS = new Set(["of", "and", "for", "the", "to", "on", "in", "de", "del", "la", "le", "du", "des", "y"]);
 });
 
 // src/core/source-index/chunk-selection.ts
@@ -24913,6 +24954,7 @@ var init_local_index = __esm(() => {
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const groups = sourceIndexFtsTermGroups(query);
+      const exact = queryInitialisms(query);
       const minimumSignal = groups.length >= 2;
       const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
@@ -24958,14 +25000,14 @@ var init_local_index = __esm(() => {
           WHERE connector_store_fts MATCH ?
             AND connector_store_fts.item_pk IN (${placeholders})
             ${selectedFtsScope.sql}
-        `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params);
+        `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params);
           for (const hit of hits) {
             matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
             matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
           }
         }
         const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required2;
-        const weights = rows.every(enough) ? undefined : this.conceptWeights(groups);
+        const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
         selected = rows.filter((row) => {
           if (enough(row))
             return true;
@@ -24999,10 +25041,10 @@ var init_local_index = __esm(() => {
         }
       };
     }
-    conceptWeights(groups) {
+    conceptWeights(groups, exact) {
       const items = this.db.query("SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0").get().count;
       const of = groups.map((group) => {
-        const { count } = this.db.query("SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?").get(sourceIndexFtsGroupQuery(group));
+        const { count } = this.db.query("SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?").get(sourceIndexFtsGroupQuery(group, exact));
         return Math.max(0, Math.log((items + 1) / (count + 0.5)));
       });
       return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
@@ -119976,7 +120018,7 @@ function createChatGptMcpServer(makeOperationContext, options, makeDetachedConte
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
   return server;
 }
-var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, defaultProbeLog = (line) => {
+var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, defaultProbeLog = (line) => {
   console.warn(line);
 }, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS2 = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
@@ -120019,6 +120061,14 @@ var init_mcp_surface = __esm(() => {
       "similar, including a follow-up asking for more about something already answered; it is slower."
     ].join(" ")
   };
+  QUESTION_PROPERTY = {
+    type: "string",
+    description: [
+      "The user's message word for word, including any part you will answer another way (for example from the web).",
+      "Do not shorten it, split it or turn it into keywords. Change it only to make a follow-up stand on its own:",
+      'replace "it", "that" or "the same" with what they refer to.'
+    ].join(" ")
+  };
   SOURCE_ANSWER_TOOL = {
     name: "source_answer",
     title: "Ask Olympus",
@@ -120036,7 +120086,7 @@ var init_mcp_surface = __esm(() => {
     inputSchema: {
       type: "object",
       properties: {
-        question: { type: "string", description: "The user's question, in their own words, with any names, dates or places they gave." },
+        question: QUESTION_PROPERTY,
         detail: DETAIL_PROPERTY
       },
       required: ["question"],
@@ -120094,7 +120144,7 @@ var init_mcp_surface = __esm(() => {
     inputSchema: {
       type: "object",
       properties: {
-        question: { type: "string", description: "The user's question, in their own words, with any names, dates or places they gave." },
+        question: QUESTION_PROPERTY,
         limit: { type: "integer", minimum: 1, maximum: 48, description: "How many items to return (default 24)." },
         detail: DETAIL_PROPERTY
       },

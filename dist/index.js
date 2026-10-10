@@ -9301,7 +9301,7 @@ var init_tier_placement = __esm(() => {
 });
 
 // src/core/source-index/fts.ts
-var SOURCE_INDEX_FTS5_TOKENIZER = "tokenize = 'porter unicode61'", FTS_QUERY_STOPWORDS, SOURCE_INDEX_SYNONYMS;
+var SOURCE_INDEX_FTS5_TOKENIZER = "tokenize = 'porter unicode61'", FTS_QUERY_STOPWORDS, SOURCE_INDEX_SYNONYMS, INITIALISM_CONNECTORS;
 var init_fts = __esm(() => {
   FTS_QUERY_STOPWORDS = new Set([
     "a",
@@ -9465,6 +9465,7 @@ var init_fts = __esm(() => {
     legal: ["lawyer", "attorney", "counsel", "solicitor"],
     retainer: ["engagement", "agreement", "deposit"]
   });
+  INITIALISM_CONNECTORS = new Set(["of", "and", "for", "the", "to", "on", "in", "de", "del", "la", "le", "du", "des", "y"]);
 });
 
 // src/core/source-index/chunk-selection.ts
