@@ -123842,10 +123842,10 @@ class PrivateQuestionJobs {
       return;
     this.sweep();
     while (this.jobs.size >= this.maxJobs) {
-      const oldest = this.jobs.keys().next().value;
-      if (oldest === undefined)
+      const idle = [...this.jobs.values()].find((job2) => job2.state !== "working");
+      if (!idle)
         break;
-      this.drop(oldest);
+      this.drop(idle.id);
     }
     const engine = await generateEngineKeyPair();
     const at = this.now();
