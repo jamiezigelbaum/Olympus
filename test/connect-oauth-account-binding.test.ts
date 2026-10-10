@@ -164,6 +164,28 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     }
   });
 
+  test('a reconnect that fails to store its credential leaves no purge marker (Codex round 1 #1)', async () => {
+    const install = installDir();
+    updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
+      provider_account_id: 'dbid:main-account',
+    }));
+    const inner = install.secretStore;
+    const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
+      set: async (key: string, value: string) => {
+        if (key.endsWith('.oauth.refresh_token')) throw new Error('secret store unavailable');
+        return inner.set(key, value);
+      },
+    });
+    const server = await dropboxServer({ tokenAccountId: 'dbid:demo-account' });
+    try {
+      await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl)).rejects.toThrow();
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toEqual({ provider_account_id: 'dbid:main-account' });
+    } finally {
+      server.close();
+    }
+  });
+
   test('reconnecting a bound source with the same account needs nothing', async () => {
     const install = installDir();
     updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({

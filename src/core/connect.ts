@@ -650,22 +650,6 @@ async function completeOAuthSourceConnection(
       }));
       assertOneConnectedAccountForProposedProviders(prepared.registryPath, proposedHandles);
 
-      // Before any credential is written: a connect that fails after this
-      // leaves only a marker the worker settles against the token it reads with.
-      const sourceAccountPurgeRequired: AccountBoundSourceId[] = [];
-      for (const handleDefinition of prepared.definition.handles) {
-        if (!isAccountBoundProvider(handleDefinition.provider)) continue;
-        const outcome = recordFileSourceConnect({
-          registryPath: prepared.registryPath,
-          provider: handleDefinition.provider,
-          providerAccountId: fileSourceAccountId,
-          now: prepared.now(),
-        });
-        if (outcome === 'purge_required') {
-          sourceAccountPurgeRequired.push(accountBoundSourceIdForProvider(handleDefinition.provider)!);
-        }
-      }
-
       const secretRefs: string[] = [];
       const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
       const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
@@ -747,6 +731,25 @@ async function completeOAuthSourceConnection(
         // The new grant is in place: no token minted from the old one may be
         // handed out again by this process, whatever is left of its lifetime.
         invalidateMintedCredentialSessions(handle);
+      }
+
+      // Only once the new grant is fully stored (Codex round 1 on 6475d315):
+      // recorded first, a connect that then failed to store its credential left
+      // the previous account connected with a purge marker that would delete
+      // that account's items. The guard still catches a known account change
+      // without this marker; the marker adds the cases connect alone can tell.
+      const sourceAccountPurgeRequired: AccountBoundSourceId[] = [];
+      for (const handleDefinition of prepared.definition.handles) {
+        if (!isAccountBoundProvider(handleDefinition.provider)) continue;
+        const outcome = recordFileSourceConnect({
+          registryPath: prepared.registryPath,
+          provider: handleDefinition.provider,
+          providerAccountId: fileSourceAccountId,
+          now: prepared.now(),
+        });
+        if (outcome === 'purge_required') {
+          sourceAccountPurgeRequired.push(accountBoundSourceIdForProvider(handleDefinition.provider)!);
+        }
       }
 
       return {

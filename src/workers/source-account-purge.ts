@@ -48,6 +48,15 @@ export function purgeSourcesAwaitingAccountChange(input: {
       updateSourceAccountBinding(path, sourceId, () => undefined);
       outcomes.push({ sourceId, status: 'purged', removedPaths: result.removed.length });
     } catch {
+      // Recorded so the guard keeps the source stopped WITHOUT restarting the
+      // worker again: the same removal would fail on every start.
+      try {
+        updateSourceAccountBinding(path, sourceId, (current) => current?.purge_required
+          ? { ...current, purge_required: { ...current.purge_required, failed_at: new Date().toISOString() } }
+          : current);
+      } catch {
+        // The marker itself still stands; the guard refuses either way.
+      }
       outcomes.push({ sourceId, status: 'failed', removedPaths: 0 });
     }
   }

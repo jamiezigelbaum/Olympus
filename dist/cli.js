@@ -3360,7 +3360,7 @@ class EnvCredentialBroker {
     return this.mintCachedBearerSession(definition, capability, (cacheKey) => this.issueFreshServiceAccountJwtSession(definition, capability, cacheKey));
   }
   async mintCachedBearerSession(definition, capability, mint) {
-    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability);
+    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability, this.env);
     const now = this.now();
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
     if (cached && isReusableMintedSession(cached, now))
@@ -3466,6 +3466,7 @@ class EnvCredentialBroker {
       throw error;
     }
     await lease?.assertOwned();
+    await this.assertGrantNotSuperseded(definition, capability, refreshToken);
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
     await this.persistRefreshedOAuth2State({
       definition,
@@ -3491,6 +3492,14 @@ class EnvCredentialBroker {
       PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
     PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
     return session;
+  }
+  async assertGrantNotSuperseded(definition, capability, spentRefreshToken) {
+    const oauth2 = definition.oauth2Refresh;
+    const current = this.findHandle(definition.handle);
+    const onFile = oauth2 ? await this.resolveFirstSecret(oauth2.refreshTokenEnvNames ?? [], oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : []) ?? (await this.oauth2StateStore?.load(definition.handle))?.refreshToken?.trim() : undefined;
+    if (current?.grantGeneration === definition.grantGeneration && onFile === spentRefreshToken)
+      return;
+    throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} was reconnected while a refresh was in flight; that refresh was discarded. Retry to use the new grant.`, { handle: definition.handle, capability });
   }
   async markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now) {
     if (!this.oauth2StateStore)
@@ -3790,8 +3799,11 @@ function bearerSessionFromMintedToken(options) {
     }
   };
 }
-function mintedSessionCacheKey(namespace, definition, capability) {
-  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}`;
+function mintedSessionCacheKey(namespace, definition, capability, env) {
+  const envRefreshToken = firstNonEmptyEnv(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
+  const envGrant = envRefreshToken ? createHash("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
+${envGrant}`;
 }
 function mintedSessionCachePrefix(namespace, handle, capability) {
   return `${namespace}
@@ -5593,7 +5605,8 @@ function recordFileSourceConnect(input) {
     const at = input.now.toISOString();
     if (current?.purge_required) {
       outcome = "purge_required";
-      return current;
+      const { failed_at: _retried, ...purge } = current.purge_required;
+      return { ...current, purge_required: purge };
     }
     if (current?.provider_account_id && input.providerAccountId) {
       if (current.provider_account_id === input.providerAccountId) {
@@ -5609,35 +5622,33 @@ function recordFileSourceConnect(input) {
   return outcome;
 }
 function decideSourceAccountAction(input) {
-  const { binding, grantAccountId, tokenAccountId } = input;
-  if (grantAccountId && tokenAccountId && grantAccountId !== tokenAccountId) {
+  const { binding, grantAccountId, tokenAccountId: token } = input;
+  if (grantAccountId && token && grantAccountId !== token) {
     return { action: "refuse", reason: "token_account_mismatch" };
   }
-  const current = tokenAccountId ?? grantAccountId;
   const bindTo = (id) => ({
     action: "proceed",
     write: id ? { provider_account_id: id, bound_at: input.now.toISOString() } : null
   });
   if (binding?.purge_required) {
-    return input.laneHoldsItems ? { action: "purge", reason: binding.purge_required.reason } : bindTo(current);
+    if (input.laneHoldsItems)
+      return { action: "purge", reason: binding.purge_required.reason };
+    return bindTo(token);
   }
-  if (binding?.provider_account_id && current) {
-    if (binding.provider_account_id === current) {
-      return binding.reconnected_at ? bindTo(current) : { action: "proceed" };
-    }
-    return input.laneHoldsItems ? { action: "purge", reason: "account_changed" } : bindTo(current);
+  if (!binding?.provider_account_id && !binding?.reconnected_at) {
+    return token ? bindTo(token) : { action: "proceed" };
   }
-  if (binding?.reconnected_at) {
-    if (!input.laneHoldsItems)
-      return bindTo(current);
-    if (binding.provider_account_id)
-      return { action: "refuse", reason: "account_unverified" };
-    return { action: "purge", reason: "previous_account_unknown" };
-  }
-  if (binding?.provider_account_id) {
+  if (!token)
     return { action: "refuse", reason: "account_unverified" };
+  if (binding.provider_account_id === token) {
+    return binding.reconnected_at ? bindTo(token) : { action: "proceed" };
   }
-  return current ? bindTo(current) : { action: "proceed" };
+  if (!input.laneHoldsItems)
+    return bindTo(token);
+  return {
+    action: "purge",
+    reason: binding.provider_account_id ? "account_changed" : "previous_account_unknown"
+  };
 }
 function normalizeBindings(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -5654,13 +5665,19 @@ function normalizeBindings(value) {
       return { kind: "malformed" };
     const entry = raw;
     const purge = entry.purge_required;
-    if (purge !== undefined && (!purge || typeof purge !== "object" || purge.reason !== "account_changed" && purge.reason !== "previous_account_unknown" || typeof purge.detected_at !== "string"))
+    if (purge !== undefined && (!purge || typeof purge !== "object" || purge.reason !== "account_changed" && purge.reason !== "previous_account_unknown" || typeof purge.detected_at !== "string" || purge.failed_at !== undefined && typeof purge.failed_at !== "string"))
       return { kind: "malformed" };
     sources[key] = prune({
       ...typeof entry.provider_account_id === "string" && entry.provider_account_id.trim() ? { provider_account_id: entry.provider_account_id.trim() } : {},
       ...typeof entry.bound_at === "string" ? { bound_at: entry.bound_at } : {},
       ...typeof entry.reconnected_at === "string" ? { reconnected_at: entry.reconnected_at } : {},
-      ...purge ? { purge_required: { reason: purge.reason, detected_at: purge.detected_at } } : {}
+      ...purge ? {
+        purge_required: {
+          reason: purge.reason,
+          detected_at: purge.detected_at,
+          ...typeof purge.failed_at === "string" ? { failed_at: purge.failed_at } : {}
+        }
+      } : {}
     });
   }
   return { kind: "ok", bindings: { version: 1, sources } };
@@ -6010,20 +6027,6 @@ async function completeOAuthSourceConnection(prepared, code) {
       provider: definition.provider
     }));
     assertOneConnectedAccountForProposedProviders(prepared.registryPath, proposedHandles);
-    const sourceAccountPurgeRequired = [];
-    for (const handleDefinition of prepared.definition.handles) {
-      if (!isAccountBoundProvider(handleDefinition.provider))
-        continue;
-      const outcome = recordFileSourceConnect({
-        registryPath: prepared.registryPath,
-        provider: handleDefinition.provider,
-        providerAccountId: fileSourceAccountId,
-        now: prepared.now()
-      });
-      if (outcome === "purge_required") {
-        sourceAccountPurgeRequired.push(accountBoundSourceIdForProvider(handleDefinition.provider));
-      }
-    }
     const secretRefs = [];
     const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
     const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
@@ -6077,6 +6080,20 @@ async function completeOAuthSourceConnection(prepared, code) {
         ...providerAccountId ? { providerAccountId } : {}
       }, prepared.registryPath);
       invalidateMintedCredentialSessions(handle);
+    }
+    const sourceAccountPurgeRequired = [];
+    for (const handleDefinition of prepared.definition.handles) {
+      if (!isAccountBoundProvider(handleDefinition.provider))
+        continue;
+      const outcome = recordFileSourceConnect({
+        registryPath: prepared.registryPath,
+        provider: handleDefinition.provider,
+        providerAccountId: fileSourceAccountId,
+        now: prepared.now()
+      });
+      if (outcome === "purge_required") {
+        sourceAccountPurgeRequired.push(accountBoundSourceIdForProvider(handleDefinition.provider));
+      }
     }
     return {
       ok: true,
@@ -117141,15 +117158,15 @@ function createSourceAccountGuard(options) {
       if (decision.action === "proceed" && decision.write === undefined)
         return;
       if (decision.action !== "refuse") {
-        updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
-          decision = decide(current);
+        updateSourceAccountBinding(bindingsPath, options.sourceId, (current2) => {
+          decision = decide(current2);
           if (decision.action === "proceed") {
-            return decision.write === undefined ? current : decision.write ?? undefined;
+            return decision.write === undefined ? current2 : decision.write ?? undefined;
           }
           if (decision.action === "purge") {
-            return current?.purge_required ? current : { ...current, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
+            return current2?.purge_required ? current2 : { ...current2, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
           }
-          return current;
+          return current2;
         });
       }
       if (decision.action === "proceed")
@@ -117162,8 +117179,13 @@ function createSourceAccountGuard(options) {
       if (decision.action === "refuse") {
         throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not confirm which account the credential belongs to; nothing was synced this run.`);
       }
+      const what = `${options.sourceId} was reconnected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the previous one"}. ` + "Nothing syncs until the previous account's stored items are removed; ";
+      const current = readSourceAccountBindings(bindingsPath);
+      if (current.kind === "ok" && current.bindings.sources[options.sourceId]?.purge_required?.failed_at) {
+        throw new SourceAccountChangedError("source_account_changed", `${what}removing them at start-up failed. Disconnect the source, run \`olympus data delete --source ${options.sourceId}\`, then connect again.`);
+      }
       const restarting = options.requestPurgeRestart();
-      throw new SourceAccountChangedError("source_account_changed", `${options.sourceId} was reconnected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the previous one"}. ` + "Nothing syncs until the previous account's stored items are removed; " + (restarting ? "the worker is restarting to remove them." : "restart the Olympus worker to remove them."));
+      throw new SourceAccountChangedError("source_account_changed", what + (restarting ? "the worker is restarting to remove them." : "restart the Olympus worker to remove them."));
     }
   };
 }
@@ -117218,6 +117240,9 @@ function purgeSourcesAwaitingAccountChange(input) {
       });
       outcomes.push({ sourceId, status: "purged", removedPaths: result.removed.length });
     } catch {
+      try {
+        updateSourceAccountBinding(path, sourceId, (current) => current?.purge_required ? { ...current, purge_required: { ...current.purge_required, failed_at: new Date().toISOString() } } : current);
+      } catch {}
       outcomes.push({ sourceId, status: "failed", removedPaths: 0 });
     }
   }

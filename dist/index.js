@@ -5430,7 +5430,7 @@ class EnvCredentialBroker {
     return this.mintCachedBearerSession(definition, capability, (cacheKey) => this.issueFreshServiceAccountJwtSession(definition, capability, cacheKey));
   }
   async mintCachedBearerSession(definition, capability, mint) {
-    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability);
+    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability, this.env);
     const now = this.now();
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
     if (cached && isReusableMintedSession(cached, now))
@@ -5536,6 +5536,7 @@ class EnvCredentialBroker {
       throw error;
     }
     await lease?.assertOwned();
+    await this.assertGrantNotSuperseded(definition, capability, refreshToken);
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
     await this.persistRefreshedOAuth2State({
       definition,
@@ -5561,6 +5562,14 @@ class EnvCredentialBroker {
       PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
     PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
     return session;
+  }
+  async assertGrantNotSuperseded(definition, capability, spentRefreshToken) {
+    const oauth2 = definition.oauth2Refresh;
+    const current = this.findHandle(definition.handle);
+    const onFile = oauth2 ? await this.resolveFirstSecret(oauth2.refreshTokenEnvNames ?? [], oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : []) ?? (await this.oauth2StateStore?.load(definition.handle))?.refreshToken?.trim() : undefined;
+    if (current?.grantGeneration === definition.grantGeneration && onFile === spentRefreshToken)
+      return;
+    throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} was reconnected while a refresh was in flight; that refresh was discarded. Retry to use the new grant.`, { handle: definition.handle, capability });
   }
   async markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now) {
     if (!this.oauth2StateStore)
@@ -5860,8 +5869,11 @@ function bearerSessionFromMintedToken(options) {
     }
   };
 }
-function mintedSessionCacheKey(namespace, definition, capability) {
-  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}`;
+function mintedSessionCacheKey(namespace, definition, capability, env) {
+  const envRefreshToken = firstNonEmptyEnv2(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
+  const envGrant = envRefreshToken ? createHash4("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
+${envGrant}`;
 }
 function mintedSessionCachePrefix(namespace, handle, capability) {
   return `${namespace}

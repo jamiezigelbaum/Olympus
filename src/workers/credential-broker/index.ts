@@ -1203,7 +1203,7 @@ export class EnvCredentialBroker implements CredentialBroker {
     capability: string,
     mint: (cacheKey: string) => Promise<CredentialSession>,
   ): Promise<CredentialSession> {
-    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability);
+    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability, this.env);
     const now = this.now();
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
     if (cached && isReusableMintedSession(cached, now)) return cached;
@@ -1383,6 +1383,7 @@ export class EnvCredentialBroker implements CredentialBroker {
       throw error;
     }
     await lease?.assertOwned();
+    await this.assertGrantNotSuperseded(definition, capability, refreshToken);
 
     const scopes = tokenResponse.scopes.length > 0
       ? tokenResponse.scopes
@@ -1412,6 +1413,35 @@ export class EnvCredentialBroker implements CredentialBroker {
     if (isReusableMintedSession(session, now)) PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
     PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
     return session;
+  }
+
+  /**
+   * A refresh that was in flight when the handle was reconnected belongs to
+   * the grant it started from (Codex round 1 on 6475d315). Its access token
+   * must not be handed out, and a rotated refresh token it brought back must
+   * not overwrite the new grant's. Checked after the exchange, before anything
+   * is persisted or cached: the registry still names the grant this mint was
+   * for, and the refresh token on file is still the one it spent.
+   */
+  private async assertGrantNotSuperseded(
+    definition: EnvCredentialHandleDefinition,
+    capability: string,
+    spentRefreshToken: string,
+  ): Promise<void> {
+    const oauth2 = definition.oauth2Refresh;
+    const current = this.findHandle(definition.handle);
+    const onFile = oauth2
+      ? await this.resolveFirstSecret(
+          oauth2.refreshTokenEnvNames ?? [],
+          oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : [],
+        ) ?? (await this.oauth2StateStore?.load(definition.handle))?.refreshToken?.trim()
+      : undefined;
+    if (current?.grantGeneration === definition.grantGeneration && onFile === spentRefreshToken) return;
+    throw new CredentialBrokerError(
+      'credential_refresh_busy',
+      `Credential handle ${definition.handle} was reconnected while a refresh was in flight; that refresh was discarded. Retry to use the new grant.`,
+      { handle: definition.handle, capability },
+    );
   }
 
   /**
@@ -1993,8 +2023,17 @@ function bearerSessionFromMintedToken(options: {
   };
 }
 
-function mintedSessionCacheKey(namespace: string, definition: EnvCredentialHandleDefinition, capability: string): string {
-  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ''}`;
+function mintedSessionCacheKey(
+  namespace: string,
+  definition: EnvCredentialHandleDefinition,
+  capability: string,
+  env: Record<string, string | undefined>,
+): string {
+  // A refresh token supplied by the environment has no registry grant; a
+  // digest of it stands in, so replacing it is a new cache identity too.
+  const envRefreshToken = firstNonEmptyEnv(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
+  const envGrant = envRefreshToken ? createHash('sha256').update(envRefreshToken).digest('hex').slice(0, 32) : '';
+  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ''}\n${envGrant}`;
 }
 
 function mintedSessionCachePrefix(namespace: string, handle: string, capability: string): string {

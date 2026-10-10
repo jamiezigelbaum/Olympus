@@ -40,6 +40,12 @@ export interface SourceAccountBinding {
   purge_required?: {
     reason: SourceAccountPurgeReason;
     detected_at: string;
+    /**
+     * Set by the start-up purge when removal failed. The source stays stopped,
+     * and the guard stops asking for restarts: a removal that failed once will
+     * fail on every restart, and each restart takes the whole worker down.
+     */
+    failed_at?: string;
   };
 }
 
@@ -117,7 +123,10 @@ export function recordFileSourceConnect(input: {
     const at = input.now.toISOString();
     if (current?.purge_required) {
       outcome = 'purge_required';
-      return current;
+      // A connect is an explicit retry: a start-up removal that failed before
+      // gets another restart.
+      const { failed_at: _retried, ...purge } = current.purge_required;
+      return { ...current, purge_required: purge };
     }
     if (current?.provider_account_id && input.providerAccountId) {
       if (current.provider_account_id === input.providerAccountId) {
@@ -153,42 +162,42 @@ export function decideSourceAccountAction(input: {
   laneHoldsItems: boolean;
   now: Date;
 }): SourceAccountDecision {
-  const { binding, grantAccountId, tokenAccountId } = input;
+  const { binding, grantAccountId, tokenAccountId: token } = input;
   // The incident's own shape: a token minted for one account serving a grant
   // that belongs to another. Never read with it.
-  if (grantAccountId && tokenAccountId && grantAccountId !== tokenAccountId) {
+  if (grantAccountId && token && grantAccountId !== token) {
     return { action: 'refuse', reason: 'token_account_mismatch' };
   }
-  const current = tokenAccountId ?? grantAccountId;
   const bindTo = (id: string | undefined): SourceAccountDecision => ({
     action: 'proceed',
     write: id ? { provider_account_id: id, bound_at: input.now.toISOString() } : null,
   });
 
   if (binding?.purge_required) {
-    return input.laneHoldsItems ? { action: 'purge', reason: binding.purge_required.reason } : bindTo(current);
+    if (input.laneHoldsItems) return { action: 'purge', reason: binding.purge_required.reason };
+    // Nothing of the previous account is left. Bind only an account the token
+    // itself proved; otherwise leave the source unbound.
+    return bindTo(token);
   }
-  if (binding?.provider_account_id && current) {
-    if (binding.provider_account_id === current) {
-      return binding.reconnected_at ? bindTo(current) : { action: 'proceed' };
-    }
-    return input.laneHoldsItems ? { action: 'purge', reason: 'account_changed' } : bindTo(current);
+  if (!binding?.provider_account_id && !binding?.reconnected_at) {
+    // Never bound and never reconnected since this record existed: the stores
+    // were filled by the grant that is still connected. Adopt the account the
+    // token proves, or carry on unbound when the provider cannot say.
+    return token ? bindTo(token) : { action: 'proceed' };
   }
-  if (binding?.reconnected_at) {
-    // Reconnected, and nothing proves the stored items are this account's.
-    if (!input.laneHoldsItems) return bindTo(current);
-    // Bound, but this run cannot read the token's account: wait, do not purge.
-    if (binding.provider_account_id) return { action: 'refuse', reason: 'account_unverified' };
-    return { action: 'purge', reason: 'previous_account_unknown' };
+  // Bound or reconnected: only the token's own account counts (Codex round 1
+  // on 6475d315). The grant's recorded account says what the token SHOULD be,
+  // not what it is; an environment token or a stale mint could be another.
+  // Unverifiable this run: wait, never purge on a blip.
+  if (!token) return { action: 'refuse', reason: 'account_unverified' };
+  if (binding.provider_account_id === token) {
+    return binding.reconnected_at ? bindTo(token) : { action: 'proceed' };
   }
-  if (binding?.provider_account_id) {
-    // Bound, never reconnected, account unreadable this run (a network blip):
-    // skip this run rather than read with a token nobody has checked.
-    return { action: 'refuse', reason: 'account_unverified' };
-  }
-  // Never bound and never reconnected since this record existed: the stores
-  // were filled by the grant that is still connected. Adopt it when known.
-  return current ? bindTo(current) : { action: 'proceed' };
+  if (!input.laneHoldsItems) return bindTo(token);
+  return {
+    action: 'purge',
+    reason: binding.provider_account_id ? 'account_changed' : 'previous_account_unknown',
+  };
 }
 
 function normalizeBindings(value: unknown): SourceAccountBindingsRead {
@@ -207,6 +216,7 @@ function normalizeBindings(value: unknown): SourceAccountBindingsRead {
       !purge || typeof purge !== 'object'
       || (purge.reason !== 'account_changed' && purge.reason !== 'previous_account_unknown')
       || typeof purge.detected_at !== 'string'
+      || (purge.failed_at !== undefined && typeof purge.failed_at !== 'string')
     )) return { kind: 'malformed' };
     sources[key as AccountBoundSourceId] = prune({
       ...(typeof entry.provider_account_id === 'string' && entry.provider_account_id.trim()
@@ -214,7 +224,15 @@ function normalizeBindings(value: unknown): SourceAccountBindingsRead {
         : {}),
       ...(typeof entry.bound_at === 'string' ? { bound_at: entry.bound_at } : {}),
       ...(typeof entry.reconnected_at === 'string' ? { reconnected_at: entry.reconnected_at } : {}),
-      ...(purge ? { purge_required: { reason: purge.reason as SourceAccountPurgeReason, detected_at: purge.detected_at as string } } : {}),
+      ...(purge
+        ? {
+            purge_required: {
+              reason: purge.reason as SourceAccountPurgeReason,
+              detected_at: purge.detected_at as string,
+              ...(typeof purge.failed_at === 'string' ? { failed_at: purge.failed_at } : {}),
+            },
+          }
+        : {}),
     });
   }
   return { kind: 'ok', bindings: { version: 1, sources } };

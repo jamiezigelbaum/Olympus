@@ -154,12 +154,21 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
           `${options.sourceId}: could not confirm which account the credential belongs to; nothing was synced this run.`,
         );
       }
+      const what = `${options.sourceId} was reconnected to ${decision.reason === 'account_changed' ? 'a different account' : 'an account that could not be matched to the previous one'}. `
+        + 'Nothing syncs until the previous account\'s stored items are removed; ';
+      const current = readSourceAccountBindings(bindingsPath);
+      if (current.kind === 'ok' && current.bindings.sources[options.sourceId]?.purge_required?.failed_at) {
+        // The start-up removal already failed once: another restart would fail
+        // the same way and take every other source down with it.
+        throw new SourceAccountChangedError(
+          'source_account_changed',
+          `${what}removing them at start-up failed. Disconnect the source, run \`olympus data delete --source ${options.sourceId}\`, then connect again.`,
+        );
+      }
       const restarting = options.requestPurgeRestart();
       throw new SourceAccountChangedError(
         'source_account_changed',
-        `${options.sourceId} was reconnected to ${decision.reason === 'account_changed' ? 'a different account' : 'an account that could not be matched to the previous one'}. `
-        + 'Nothing syncs until the previous account\'s stored items are removed; '
-        + (restarting
+        what + (restarting
           ? 'the worker is restarting to remove them.'
           : 'restart the Olympus worker to remove them.'),
       );

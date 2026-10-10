@@ -96,6 +96,20 @@ describe('decideSourceAccountAction', () => {
       .toEqual({ action: 'refuse', reason: 'account_unverified' });
   });
 
+  test('a bound source never proceeds on the grant\'s word alone (Codex round 1 #2)', () => {
+    // Binding and grant both say B; the token in hand could be anything (an
+    // environment token, a stale mint). Unidentified, it waits.
+    expect(decide({ binding: { provider_account_id: 'dbid:b' }, grant: 'dbid:b' }))
+      .toEqual({ action: 'refuse', reason: 'account_unverified' });
+  });
+
+  test('an emptied source with a standing purge binds only a proven account', () => {
+    const binding: SourceAccountBinding = {
+      purge_required: { reason: 'account_changed', detected_at: NOW.toISOString() },
+    };
+    expect(decide({ binding, grant: 'dbid:b', holds: false })).toEqual({ action: 'proceed', write: null });
+  });
+
   test('a never-reconnected source adopts the connected account, or proceeds unbound when unknown', () => {
     expect(decide({ token: 'google:a' }))
       .toEqual({ action: 'proceed', write: { provider_account_id: 'google:a', bound_at: NOW.toISOString() } });
@@ -122,6 +136,20 @@ describe('recordFileSourceConnect', () => {
     // A second connect while the purge stands keeps it.
     expect(recordFileSourceConnect({ registryPath: registry, provider: 'dropbox', providerAccountId: 'dbid:a', now: NOW }))
       .toBe('purge_required');
+  });
+
+  test('a connect retries a start-up purge that failed', () => {
+    const registry = registryPath();
+    const path = sourceAccountBindingsPath(registry);
+    updateSourceAccountBinding(path, 'dropbox.files', () => ({
+      provider_account_id: 'dbid:a',
+      purge_required: { reason: 'account_changed', detected_at: NOW.toISOString(), failed_at: NOW.toISOString() },
+    }));
+    expect(recordFileSourceConnect({ registryPath: registry, provider: 'dropbox', providerAccountId: 'dbid:b', now: NOW }))
+      .toBe('purge_required');
+    const read = readSourceAccountBindings(path);
+    expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']?.purge_required)
+      .toEqual({ reason: 'account_changed', detected_at: NOW.toISOString() });
   });
 
   test('a connect with no binding, or an unknown account, leaves a reconnect marker', () => {

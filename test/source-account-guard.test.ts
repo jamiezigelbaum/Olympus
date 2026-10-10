@@ -2,7 +2,7 @@
 // and the start-up purge it hands off to when a reconnect changed the account.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -139,6 +139,34 @@ describe('the account guard', () => {
     });
   });
 
+  test('after a failed start-up purge the source stays stopped without restarting the worker again', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:demo');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({
+      provider_account_id: 'dbid:main',
+      purge_required: { reason: 'account_changed', detected_at: '2026-10-10T22:43:00.000Z', failed_at: '2026-10-10T22:44:00.000Z' },
+    }));
+    const { guard, restarts } = harness({ registryPath, tokenAccount: 'dbid:demo' });
+    const error = await accountBoundSchedulerSource({ source: lane(() => undefined), guard }).tasks[0]!.run()
+      .catch((reason: unknown) => reason);
+    expect((error as SourceAccountChangedError).code).toBe('source_account_changed');
+    expect((error as Error).message).toContain('olympus data delete --source dropbox.files');
+    expect(restarts()).toBe(0);
+  });
+
+  test('a bound source whose token cannot be identified does not sync on the grant\'s word', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:demo');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({ provider_account_id: 'dbid:demo' }));
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:main', identityStatus: 503 });
+    let ran = 0;
+    const error = await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run()
+      .catch((reason: unknown) => reason);
+    expect((error as SourceAccountChangedError).code).toBe('source_account_unverified');
+    expect(ran).toBe(0);
+    expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:demo' });
+  });
+
   test('the same account proceeds, and the token is looked up once', async () => {
     const registryPath = join(tempDir(), 'handles.json');
     writeGrant(registryPath, 'dbid:main');
@@ -192,6 +220,24 @@ describe('the start-up purge', () => {
     expect(existsSync(storePath)).toBe(false);
     const read = readSourceAccountBindings(path);
     expect(read.kind === 'ok' && read.bindings.sources).toEqual({ 'gmail.email': { provider_account_id: 'google:abc' } });
+  });
+
+  test('a removal that fails is recorded, so the guard stops asking for restarts', () => {
+    const dir = tempDir();
+    const env = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'xdg-data') };
+    const registryPath = join(dir, 'handles.json');
+    // A directory where the store file should be: removal refuses it.
+    mkdirSync(join(defaultDropboxConnectorStoreDbPath(env), 'not-a-store'), { recursive: true });
+    const path = sourceAccountBindingsPath(registryPath);
+    updateSourceAccountBinding(path, 'dropbox.files', () => ({
+      provider_account_id: 'dbid:main',
+      purge_required: { reason: 'account_changed', detected_at: '2026-10-10T22:43:00.000Z' },
+    }));
+
+    expect(purgeSourcesAwaitingAccountChange({ registryPath, env, homeDir: env.HOME }))
+      .toEqual([{ sourceId: 'dropbox.files', status: 'failed', removedPaths: 0 }]);
+    const read = readSourceAccountBindings(path);
+    expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']?.purge_required?.failed_at).toBeTruthy();
   });
 
   test('does nothing without a marker', () => {
