@@ -109,10 +109,13 @@ export class PrivateQuestionJobs {
     const installId = this.options.installId();
     if (!installId) return undefined;
     this.sweep();
+    // Over the cap, the oldest job that is not running is dropped; a job whose ask was dispatched (possibly paid for) is
+    // never evicted, so the panel that asked it still collects its outcome (Codex review of PR #227). When every retained
+    // job is running the map grows past the cap until one settles or expires.
     while (this.jobs.size >= this.maxJobs) {
-      const oldest = this.jobs.keys().next().value;
-      if (oldest === undefined) break;
-      this.drop(oldest);
+      const idle = [...this.jobs.values()].find((job) => job.state !== 'working');
+      if (!idle) break;
+      this.drop(idle.id);
     }
     const engine = await generateEngineKeyPair();
     const at = this.now();

@@ -216,6 +216,20 @@ describe('the jobs: begin → ask → collect', () => {
     await bounded.jobs.begin();
     await bounded.jobs.begin();
     expect(bounded.jobs.has(first.jobId)).toBe(false);
+
+    // A job whose ask is running is never evicted: the oldest idle job goes instead, and the running one still answers.
+    const busy = harness({ maxJobs: 2 });
+    const running = (await busy.jobs.begin())!;
+    const idle = (await busy.jobs.begin())!;
+    const runningPanel = await panelAsk(running, { v: 1, question: 'Which?', level: 'strict' });
+    expect((await busy.jobs.ask(running.jobId, runningPanel.body)).status).toBe(202);
+    const third = (await busy.jobs.begin())!;
+    expect(busy.jobs.has(running.jobId)).toBe(true);
+    expect(busy.jobs.has(idle.jobId)).toBe(false);
+    expect(busy.jobs.has(third.jobId)).toBe(true);
+    busy.answer(ANSWERED);
+    await settle();
+    expect((await busy.jobs.collect(running.jobId, runningPanel.panel.publicKey)).status).toBe(200);
   });
 
   test('collection is rate limited per job', async () => {
