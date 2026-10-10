@@ -19,6 +19,10 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   'source_watch_cancel',
   'olympus_doctor',
   'ask_anonymously',
+  // Remote mode's agent route (owner decision, 2026-10-10): native only,
+  // because only OpenClaw can vouch that the caller is the owner and run the
+  // commands on the owner's computer (a paired node).
+  'olympus_open_remote',
 ] as const;
 
 // `source_answer_result` collects a slow source_answer that handed off to a
@@ -166,6 +170,10 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'open-handler install',
   'open-handler uninstall',
   'open-handler status',
+  'server-mode status',
+  'server-mode on',
+  'server-mode off',
+  'server-mode auto',
   'source answer',
   'source index status',
   'source index search',

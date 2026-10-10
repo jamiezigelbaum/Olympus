@@ -338,6 +338,12 @@ const plugin = {
             ...(sourceWatchRoute ? { sourceWatchRoute } : {}),
           });
         }) as unknown as NativeTool);
+      } else if (operation.requiresOwnerAgentSession) {
+        // Vouched for by the host only: OpenClaw's senderIsOwner, per call.
+        api.registerTool(((toolContext: OpenClawPluginToolContext) => nativeToolFromOperation(operation, {
+          ...ctx,
+          ownerAgentSession: toolContext?.senderIsOwner === true,
+        })) as unknown as NativeTool);
       } else {
         api.registerTool(nativeToolFromOperation(operation, ctx));
       }
