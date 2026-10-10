@@ -220,6 +220,49 @@ describe('the private match floor', () => {
   });
 });
 
+describe('passages of a document in another language', () => {
+  // 2026-10-10 live: the panel read the owner's Spanish letter of intent for
+  // "what does it say about the notary", but only its opening: no English
+  // query term is in the Spanish text, so the embedding alone ranked the
+  // chunks, and the opening (0.740) took the whole budget from the deed and
+  // expenses clause (0.732). Near-tied chunks now share the budget.
+  // Stored chunks are 4,000-character windows: one section per chunk.
+  const section = (text: string) => text.repeat(Math.ceil(4_000 / text.length)).slice(0, 4_000);
+  const opening = section('Carta de intención. El comprador ofrece el precio indicado y entrega las arras. ');
+  const deed = section('La escritura pública se firmará ante notario. Los gastos e impuestos según ley. ');
+  const closing = 'Firmas. Fecha y lugar de la firma de este documento.';
+  const letter: FixtureItem = { id: 'letter', name: 'LOI_house_16-12-2025.pdf', text: `${opening}${deed}${closing}` };
+
+  async function passage(deedCosine: number): Promise<string> {
+    let text = '';
+    await withStore([letter], async (store) => {
+      const provider = chunkCosineProvider({ 'Carta de intención': 0.74, 'La escritura pública': deedCosine, Firmas: 0.6 });
+      await store.embedChunks({ provider });
+      const content = await createConnectorStoreContentProvider({ store, embeddingProvider: provider }).fetchLocalContent({
+        provenance: { sourceItem: { localItemId: `${ACCOUNT}:letter` } } as never,
+        trustDomain: 'secure_local',
+        maxChars: 1_600,
+        query: 'What does my letter of intent say about the notary?',
+      });
+      text = (content?.chunks ?? []).join('');
+    }, 'secure_local');
+    return text;
+  }
+
+  test('a near-tie shares the budget: the deed clause is read beside the opening', async () => {
+    const text = await passage(0.732);
+    expect(text).toContain('Carta de intención');
+    expect(text).toContain('La escritura pública se firmará ante notario');
+    expect(text.length).toBeLessThanOrEqual(1_600);
+  });
+
+  test('a clear leader still takes the budget', async () => {
+    const text = await passage(0.65);
+    expect(text).toContain('Carta de intención');
+    expect(text).not.toContain('escritura');
+  });
+});
+
 // A stand-in with the Arctic built-in model's identity (so its calibrated bar
 // applies). Every document sits on one axis; a query lands at a set cosine
 // to it: "below" at 0.39, "above" at 0.41, anything else at 0.30.
@@ -338,4 +381,20 @@ async function search(
 
 function hitIds(response: { hits: ReadonlyArray<{ sourceItem: { providerItemId: string } }> }): string[] {
   return response.hits.map((hit) => hit.sourceItem.providerItemId);
+}
+
+// A stand-in with the Arctic built-in model's identity whose stored chunks
+// sit at a set cosine to every query, by the words each chunk starts with.
+function chunkCosineProvider(cosineByOpening: Record<string, number>): SourceEmbeddingProvider {
+  const at = (cosine: number) => [cosine, Math.sqrt(1 - cosine * cosine)];
+  return {
+    ...builtInLikeProvider(),
+    async embed(inputs: SourceEmbeddingInput[], options): Promise<number[][]> {
+      return inputs.map((input) => {
+        if (options.taskType === 'RETRIEVAL_QUERY') return [1, 0];
+        const opening = Object.keys(cosineByOpening).find((words) => input.text.includes(words));
+        return at(opening ? cosineByOpening[opening]! : 0.3);
+      });
+    },
+  };
 }
