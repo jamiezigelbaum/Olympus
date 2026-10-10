@@ -22,6 +22,7 @@
  * `_meta` reaches only the UI, never the model, but it still leaves the Mac
  * and passes through OpenAI, so it gets the same treatment.
  */
+import { isValidPort, isValidSshTarget } from '../../core/remote-open.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
@@ -206,6 +207,15 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
       configured: view.privacy.configured === true,
       pendingCount: whole(view.privacy.pendingCount),
       ruleCount: whole(view.privacy.ruleCount),
+    };
+  }
+  const remote = view.remote;
+  if (remote && isValidPort(remote.port)) {
+    // The port and the owner's own SSH name, each checked; nothing else.
+    out.remote = {
+      port: remote.port,
+      ...(isValidSshTarget(remote.sshTarget) ? { sshTarget: remote.sshTarget.trim() } : {}),
+      agent: remote.agent === true,
     };
   }
   const progress = view.progress;

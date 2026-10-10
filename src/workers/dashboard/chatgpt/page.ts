@@ -193,6 +193,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .why .plain{margin:0.25rem 0;font-size:0.875rem}
 .why-note{font-size:0.8125rem;color:var(--muted)}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
+.remote-box{flex-basis:100%;margin-top:0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.375rem;font-size:0.875rem}
+.remote-box p{margin:0}
+.remote-line{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
+.remote-line code{flex:1 1 16rem;min-width:0;padding:0.25rem 0.5rem;border:1px solid var(--line);border-radius:0.375rem;background:var(--bg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;overflow-wrap:anywhere;user-select:all}
 .strong{font-weight:600}
 .error{color:var(--danger);font-weight:600}
 .picker-top{margin:0 0 0.75rem}

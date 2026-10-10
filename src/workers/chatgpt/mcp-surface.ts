@@ -79,6 +79,8 @@ export interface ChatGptSurfaceOptions {
   privateModel?: () => ChatGptDashboardOptions['privateModel'];
   /** The built-in transcription model, when it is this machine's transcriber (models.transcription). */
   transcription?: () => ChatGptDashboardOptions['transcription'];
+  /** Remote mode, when the engine declares it runs on a server (core/remote-open.ts). */
+  remote?: () => ChatGptDashboardOptions['remote'];
   /** Setup from ChatGPT (setup-tools.ts). Absent: the setup tools answer "unavailable". */
   setup?: ChatGptSetupBackend;
   /**
@@ -669,7 +671,14 @@ async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: Abort
   } catch {
     transcription = undefined;
   }
+  let remote: ChatGptDashboardOptions['remote'];
+  try {
+    remote = options.remote?.();
+  } catch {
+    remote = undefined;
+  }
   return buildChatGptDashboardViewModel(view, {
+    ...(remote ? { remote } : {}),
     ...(embedding ? { embedding } : {}),
     ...(privacy ? { privacy } : {}),
     ...(privateModel ? { privateModel } : {}),
