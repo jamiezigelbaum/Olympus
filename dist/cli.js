@@ -53461,7 +53461,8 @@ var init_vocabulary = __esm(() => {
     sending: "Sealing your question for your computer…",
     waiting: "Asking from your computer… this can take a few minutes.",
     empty: "Type a question first.",
-    tooLong: "The question is too long.",
+    tooLong: "The question is {n} characters; keep it under {max}.",
+    count: "{n} / {max} characters",
     slow: "Your computer is taking longer than usual to get the answer.",
     failed: "Olympus couldn't ask this from your computer.",
     claimed: "This question was already opened in another window.",
@@ -119577,7 +119578,7 @@ function chatgptPrivateQuestionProgram(config2) {
     if (!question)
       return fail(T.empty, true);
     if (question.length > info.maxChars)
-      return fail(T.tooLong, true);
+      return fail(fill2(T.tooLong, { n: num(question.length), max: num(info.maxChars) }), true);
     if (!subtle || typeof window.fetch !== "function")
       return fail(T.generic, false);
     const mine = ++run;
@@ -119752,12 +119753,19 @@ function chatgptPrivateQuestionProgram(config2) {
     field.className = "q-field";
     field.id = "q-text";
     field.rows = 4;
-    field.maxLength = current.maxChars;
     field.value = draft;
     field.setAttribute("data-key", "question");
+    const count2 = el("div", "q-count");
+    const limit = current.maxChars;
+    const recount = () => {
+      count2.textContent = fill2(T.count, { n: num(draft.length), max: num(limit) });
+      count2.classList.toggle("over", draft.length > limit);
+    };
     field.addEventListener("input", () => {
       draft = field.value;
+      recount();
     });
+    recount();
     field.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
@@ -119765,6 +119773,7 @@ function chatgptPrivateQuestionProgram(config2) {
       }
     });
     form.appendChild(field);
+    form.appendChild(count2);
     const options = el("div", "q-opts");
     options.appendChild(radio("level", "strict", T.strict, T.strictHint, level === "strict", () => {
       level = "strict";
@@ -119915,6 +119924,9 @@ function chatgptPrivateQuestionProgram(config2) {
     });
     actions.appendChild(button);
     return actions;
+  }
+  function num(value) {
+    return value.toLocaleString("en-US");
   }
   function fill2(text2, values) {
     return text2.replace(/\{(\w+)\}/g, (match, key) => (key in values) ? values[key] : match);
@@ -120082,6 +120094,8 @@ var init_private_question = __esm(() => {
 .q-label{font-size:0.8125rem;font-weight:500;color:var(--muted)}
 .q-field{width:100%;font:inherit;font-size:0.9375rem;line-height:1.45;color:var(--text);background:var(--raise);border:1px solid var(--hair);border-radius:10px;padding:0.5rem 0.625rem;resize:vertical;min-height:4.5rem}
 .q-field:focus{outline:2px solid var(--focus);outline-offset:1px}
+.q-count{font-size:0.75rem;color:var(--muted);text-align:right;margin-top:-0.25rem}
+.q-count.over{color:var(--warning);font-weight:500}
 .q-opts{display:flex;flex-direction:column;gap:0.25rem}
 .q-radio{display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;font-size:0.875rem;line-height:1.4}
 .q-radio input{margin:0.2rem 0 0;flex:none}

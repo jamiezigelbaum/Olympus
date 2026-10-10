@@ -1975,7 +1975,9 @@ export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
   sending: 'Sealing your question for your computer…',
   waiting: 'Asking from your computer… this can take a few minutes.',
   empty: 'Type a question first.',
-  tooLong: 'The question is too long.',
+  /** The box never clips a paste; the count and this message say how far over it is. */
+  tooLong: 'The question is {n} characters; keep it under {max}.',
+  count: '{n} / {max} characters',
   slow: 'Your computer is taking longer than usual to get the answer.',
   failed: 'Olympus couldn\'t ask this from your computer.',
   claimed: 'This question was already opened in another window.',

@@ -443,7 +443,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     if (!info || (phase !== 'compose' && phase !== 'error')) return;
     const question = draft.trim();
     if (!question) return fail(T.empty, true);
-    if (question.length > info.maxChars) return fail(T.tooLong, true);
+    if (question.length > info.maxChars) return fail(fill(T.tooLong, { n: num(question.length), max: num(info.maxChars) }), true);
     if (!subtle || typeof (window as Any).fetch !== 'function') return fail(T.generic, false);
     const mine = ++run;
     const jobId = info.jobId;
@@ -591,14 +591,22 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     field.className = 'q-field';
     field.id = 'q-text';
     field.rows = 4;
-    field.maxLength = current.maxChars;
     field.value = draft;
     field.setAttribute('data-key', 'question');
-    field.addEventListener('input', () => { draft = field.value; });
+    // Never clipped: a long paste keeps its length so the count below says exactly how far over it is.
+    const count = el('div', 'q-count');
+    const limit = current.maxChars;
+    const recount = () => {
+      count.textContent = fill(T.count, { n: num(draft.length), max: num(limit) });
+      count.classList.toggle('over', draft.length > limit);
+    };
+    field.addEventListener('input', () => { draft = field.value; recount(); });
+    recount();
     field.addEventListener('keydown', (event: KeyboardEvent) => {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); }
     });
     form.appendChild(field);
+    form.appendChild(count);
     const options = el('div', 'q-opts');
     options.appendChild(radio('level', 'strict', T.strict, T.strictHint, level === 'strict', () => { level = 'strict'; render(); }));
     options.appendChild(radio('level', 'standard', T.standard, T.standardHint, level === 'standard', () => { level = 'standard'; render(); }));
@@ -723,6 +731,9 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     actions.appendChild(button);
     return actions;
   }
+  function num(value: number): string {
+    return value.toLocaleString('en-US');
+  }
   function fill(text: string, values: Record<string, string>): string {
     return text.replace(/\{(\w+)\}/g, (match, key: string) => (key in values ? values[key]! : match));
   }
@@ -830,6 +841,8 @@ export const CHATGPT_PRIVATE_QUESTION_CSS = `${CHATGPT_PRIVATE_ANSWER_CSS}
 .q-label{font-size:0.8125rem;font-weight:500;color:var(--muted)}
 .q-field{width:100%;font:inherit;font-size:0.9375rem;line-height:1.45;color:var(--text);background:var(--raise);border:1px solid var(--hair);border-radius:10px;padding:0.5rem 0.625rem;resize:vertical;min-height:4.5rem}
 .q-field:focus{outline:2px solid var(--focus);outline-offset:1px}
+.q-count{font-size:0.75rem;color:var(--muted);text-align:right;margin-top:-0.25rem}
+.q-count.over{color:var(--warning);font-weight:500}
 .q-opts{display:flex;flex-direction:column;gap:0.25rem}
 .q-radio{display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;font-size:0.875rem;line-height:1.4}
 .q-radio input{margin:0.2rem 0 0;flex:none}
