@@ -1,13 +1,13 @@
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import type { WorkerLaunch } from './core/model-key-reload.ts';
 import { randomBytes } from 'node:crypto';
-import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
+import { accessSync, closeSync, constants as fsConstants, openSync, readFileSync, statSync, writeSync } from 'node:fs';
 import { olympusPackageRoot } from './core/package-root.ts';
 import { pairMessagingSource, type MessagingCaptureScopeApproval } from './core/messaging-pairing.ts';
 import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from './core/messaging-capture.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
 import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from './core/dashboard-launch.ts';
@@ -2868,7 +2868,7 @@ export async function runDashboardCommand(
       ? 'This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser.'
       : 'This link carries a single-use 15-minute ticket, not the worker token;'
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
-        + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
+        + ` For the read-only view link instead, run ${olympusCommandHint()} dashboard --read-only.`,
   };
 }
 
@@ -2919,7 +2919,7 @@ function runDashboardReadOnlyCommand(
     throw new OperationError(
       'config_error',
       'No worker auth token is configured, so there is no read-only view link to mint.',
-      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+      `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
     );
   }
   let opened = false;
@@ -2938,7 +2938,7 @@ function runDashboardReadOnlyCommand(
     hint: dependencies.noOpen
       ? 'This read-only view link was not opened locally, so it is ready to hand to the intended browser.'
       : 'This URL carries the read-only view token, not the worker token, so it cannot change anything;'
-        + ` open ${OLYMPUS_PLUGIN_BIN_HINT} dashboard (without --read-only) for a link that can.`,
+        + ` open ${olympusCommandHint()} dashboard (without --read-only) for a link that can.`,
   };
 }
 
@@ -2993,7 +2993,7 @@ async function mintDashboardOpeningUrl(
     throw new OperationError(
       'config_error',
       'No worker auth token is configured, so there is nothing to unlock.',
-      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+      `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
     );
   }
   const fetchImpl = dependencies.fetchImpl ?? fetch;
@@ -3009,14 +3009,14 @@ async function mintDashboardOpeningUrl(
     throw new OperationError(
       'email_unreachable',
       'The configured Olympus worker did not answer the opening request.',
-      `Start the worker (${OLYMPUS_PLUGIN_BIN_HINT} worker status) and run this again.`,
+      `Start the worker (${olympusCommandHint()} worker status) and run this again.`,
     );
   }
   if (!response.ok) {
     throw new OperationError(
       'email_unreachable',
       `The configured Olympus worker refused the opening request with HTTP ${response.status}.`,
-      `Check ${OLYMPUS_PLUGIN_BIN_HINT} worker status, then run this again.`,
+      `Check ${olympusCommandHint()} worker status, then run this again.`,
     );
   }
   let ticket: unknown;
@@ -3052,6 +3052,28 @@ function openInDesktopBrowser(url: string): boolean {
  * the dashboard's worker-token gate uses.
  */
 const OLYMPUS_PLUGIN_BIN_HINT = '<rootDir>/bin/olympus';
+
+/**
+ * The command to print: plain `olympus` when that is on PATH (the reader can
+ * type it), else this install's own bin/olympus, else the placeholder.
+ * Read per call, never at import (bundled dist stays lean).
+ */
+export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
+  const env = input.env ?? process.env;
+  const isExecutable = (path: string): boolean => {
+    try {
+      accessSync(path, fsConstants.X_OK);
+      return statSync(path).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const dirs = (env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':').filter(Boolean);
+  if (dirs.some((dir) => isExecutable(join(dir, 'olympus')))) return 'olympus';
+  const own = input.pluginBin ?? resolve(import.meta.dir, '..', 'bin', 'olympus');
+  if (isExecutable(own) && !/\s/.test(own)) return own;
+  return OLYMPUS_PLUGIN_BIN_HINT;
+}
 
 if (import.meta.main) {
   main().catch((error) => {

@@ -1473,8 +1473,13 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   },
   linkExpires: 'link expires in {n} min',
   linkExpired: 'link expired',
-  /** Beside a control whose fix only the Mac can make: the fix's olympusplugin.ai help page. */
-  howOnMac: 'Fix this on your computer',
+  /**
+   * Beside a control only the computer can act on: the olympusplugin.ai open
+   * page. "Fix" only beside a real problem (Needs you, the blocker); "Do"
+   * wherever nothing is broken (Models' Change, a Connect).
+   */
+  howOnComputer: 'Do this on your computer',
+  howOnComputerFix: 'Fix this on your computer',
   /** A source that is not moving and whose reason the engine did not send (never a blank row). */
   sourcePaused: 'Paused',
   /**

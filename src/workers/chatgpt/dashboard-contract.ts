@@ -41,7 +41,7 @@ export interface DashboardFix {
    * since 2026-10-09 the /open/ page that opens Olympus on the computer
    * there (open/connect/<source>/, open/fix/<section>/; core/open-targets.ts),
    * which falls back to help/on-your-computer/. The UI links it next to the
-   * control ("Fix this on your computer").
+   * control ("Fix this on your computer" beside a problem, "Do this on your computer" elsewhere).
    */
   href?: string;
   /**

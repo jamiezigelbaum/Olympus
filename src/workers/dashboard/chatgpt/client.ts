@@ -507,11 +507,20 @@ export function chatgptDashboardClient(
     return host === 'olympusplugin.ai' || host === 'www.olympusplugin.ai' ? parsed.href : '';
   }
 
-  /** "Fix this on your computer": the fix's open page, beside its control (not on the inline card). */
+  /**
+   * Beside a real problem (a Needs you item, the blocker) the help link says
+   * "Fix this on your computer"; anywhere else nothing is broken, the control
+   * only works on the computer: "Do this on your computer".
+   */
+  function howWords(key: string): string {
+    return key === 'blocker' || key.indexOf('need:') === 0 ? P.howOnComputerFix : P.howOnComputer;
+  }
+
+  /** The fix's open page, beside its control (not on the inline card). */
   function howLink(fix: Any, key: string): HTMLElement | null {
     const href = helpHref(fix && fix.href);
     if (!href || compact()) return null;
-    const link = button(P.howOnMac, key + ':how', () => openLink(href), 'plain');
+    const link = button(howWords(key), key + ':how', () => openLink(href), 'plain');
     link.className = 'btn link';
     return link;
   }
@@ -581,7 +590,7 @@ export function chatgptDashboardClient(
     } else if (typeof fix.tool === 'string' && fix.tool) action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
       // No tool, only a help page: the control is the link to it.
-      return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
+      return add(wrap, button(howWords(key), key, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {
       if (!allowConfirm) return wrap;
