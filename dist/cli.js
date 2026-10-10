@@ -52966,7 +52966,8 @@ var init_vocabulary = __esm(() => {
     },
     linkExpires: "link expires in {n} min",
     linkExpired: "link expired",
-    howOnMac: "Fix this on your computer",
+    howOnComputer: "Do this on your computer",
+    howOnComputerFix: "Fix this on your computer",
     sourcePaused: "Paused",
     syncChecking: "Checking…",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
@@ -99164,6 +99165,12 @@ function mountDashboardController(options) {
     }
     if (!focus)
       return;
+    for (let fold = focus.closest("details");fold; fold = fold.parentElement ? fold.parentElement.closest("details") : null) {
+      fold.open = true;
+    }
+    const landed = focus;
+    landed.classList.add("landed");
+    view2.setTimeout(() => landed.classList.remove("landed"), LANDED_HIGHLIGHT_MS);
     if (typeof focus.scrollIntoView === "function")
       focus.scrollIntoView({ block: "center" });
     focus.focus();
@@ -99216,6 +99223,7 @@ function mountDashboardController(options) {
     dispose
   };
 }
+var LANDED_HIGHLIGHT_MS = 4000;
 
 // src/workers/dashboard/theme.ts
 function dashboardThemeVariable(token) {
@@ -99525,6 +99533,10 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
    it, never further down the page. */
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
+/* Where an open link landed (#olympus-open=…): an accent outline that fades. */
+.landed { outline: 3px solid var(--link); outline-offset: 4px; border-radius: 10px; animation: landed-fade 2.5s ease-out 1.5s forwards; }
+@keyframes landed-fade { to { outline-color: transparent; } }
+@media (prefers-reduced-motion: reduce) { .landed { animation: none; } }
 .sheet h4 { margin: 0 0 6px; font-size: var(--fs-row); }
 .sheet p { color: var(--t2); font-size: var(--fs-body); margin: 0 0 10px; max-width: 72ch; }
 .sheet .providernote { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 9px 12px; }
@@ -101092,11 +101104,14 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return "";
     return host === "olympusplugin.ai" || host === "www.olympusplugin.ai" ? parsed.href : "";
   }
+  function howWords(key) {
+    return key === "blocker" || key.indexOf("need:") === 0 ? P.howOnComputerFix : P.howOnComputer;
+  }
   function howLink(fix, key) {
     const href = helpHref(fix && fix.href);
     if (!href || compact2())
       return null;
-    const link = button(P.howOnMac, key + ":how", () => openLink(href), "plain");
+    const link = button(howWords(key), key + ":how", () => openLink(href), "plain");
     link.className = "btn link";
     return link;
   }
@@ -101156,7 +101171,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     } else if (typeof fix.tool === "string" && fix.tool)
       action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
-      return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
+      return add(wrap, button(howWords(key), key, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {
       if (!allowConfirm)
@@ -128911,10 +128926,10 @@ init_config();
 init_dashboard_launch();
 init_open_targets();
 import { randomBytes as randomBytes19 } from "node:crypto";
-import { readFileSync as readFileSync53, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
+import { accessSync as accessSync5, closeSync as closeSync14, constants as fsConstants3, openSync as openSync14, readFileSync as readFileSync53, statSync as statSync27, writeSync as writeSync4 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve11 } from "node:path";
+import { join as join86, resolve as resolve11 } from "node:path";
 
 // src/core/open-handler.ts
 init_open_targets();
@@ -134661,7 +134676,7 @@ async function runDashboardCommand(dependencies = {}) {
   return {
     url: openUrl,
     opened,
-    hint: dependencies.noOpen ? "This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser." : `This link carries a single-use 15-minute ticket, not the worker token; open it in the browser you want unlocked, and the dashboard unlocks itself. For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`
+    hint: dependencies.noOpen ? "This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser." : `This link carries a single-use 15-minute ticket, not the worker token; open it in the browser you want unlocked, and the dashboard unlocks itself. For the read-only view link instead, run ${olympusCommandHint()} dashboard --read-only.`
   };
 }
 async function runOpenCommand(args, dependencies = {}) {
@@ -134680,7 +134695,7 @@ function runDashboardReadOnlyCommand(dependencies = {}) {
   const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(resolveWorkerAuthToken(process.env, config2));
   const openUrl = dashboardToken ? `${base}/dashboard?token=${encodeURIComponent(dashboardToken)}` : "";
   if (!openUrl) {
-    throw new OperationError("config_error", "No worker auth token is configured, so there is no read-only view link to mint.", `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
+    throw new OperationError("config_error", "No worker auth token is configured, so there is no read-only view link to mint.", `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
   }
   let opened = false;
   if (!dependencies.noOpen) {
@@ -134693,7 +134708,7 @@ function runDashboardReadOnlyCommand(dependencies = {}) {
   return {
     url: openUrl,
     opened,
-    hint: dependencies.noOpen ? "This read-only view link was not opened locally, so it is ready to hand to the intended browser." : `This URL carries the read-only view token, not the worker token, so it cannot change anything; open ${OLYMPUS_PLUGIN_BIN_HINT} dashboard (without --read-only) for a link that can.`
+    hint: dependencies.noOpen ? "This read-only view link was not opened locally, so it is ready to hand to the intended browser." : `This URL carries the read-only view token, not the worker token, so it cannot change anything; open ${olympusCommandHint()} dashboard (without --read-only) for a link that can.`
   };
 }
 function workerRootBaseUrl(baseUrl) {
@@ -134717,7 +134732,7 @@ function workerRootBaseUrl(baseUrl) {
 }
 async function mintDashboardOpeningUrl(base, token, dependencies) {
   if (!token) {
-    throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
+    throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
   }
   const fetchImpl = dependencies.fetchImpl ?? fetch;
   let response;
@@ -134729,10 +134744,10 @@ async function mintDashboardOpeningUrl(base, token, dependencies) {
       signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
     });
   } catch {
-    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${OLYMPUS_PLUGIN_BIN_HINT} worker status) and run this again.`);
+    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${olympusCommandHint()} worker status) and run this again.`);
   }
   if (!response.ok) {
-    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${OLYMPUS_PLUGIN_BIN_HINT} worker status, then run this again.`);
+    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${olympusCommandHint()} worker status, then run this again.`);
   }
   let ticket;
   try {
@@ -134751,6 +134766,24 @@ function openInDesktopBrowser(url) {
   return Bun.spawnSync([opener, url], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
 }
 var OLYMPUS_PLUGIN_BIN_HINT = "<rootDir>/bin/olympus";
+function olympusCommandHint(input2 = {}) {
+  const env = input2.env ?? process.env;
+  const isExecutable = (path) => {
+    try {
+      accessSync5(path, fsConstants3.X_OK);
+      return statSync27(path).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const dirs = (env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").filter(Boolean);
+  if (dirs.some((dir) => isExecutable(join86(dir, "olympus"))))
+    return "olympus";
+  const own = input2.pluginBin ?? resolve11(import.meta.dir, "..", "bin", "olympus");
+  if (isExecutable(own) && !/\s/.test(own))
+    return own;
+  return OLYMPUS_PLUGIN_BIN_HINT;
+}
 if (__require.main == __require.module) {
   main2().catch((error2) => {
     for (const line of formatCliFatalError(error2))
@@ -134858,6 +134891,7 @@ export {
   parseGoogleRequestBudgetFutureRecoveryArgs,
   parseEvalShardExportArgs,
   parseArgs,
+  olympusCommandHint,
   lifecycleRecoverySignalsFromWorkerHttpState,
   isV04PublicCliInvocation,
   formatCliFatalError,

@@ -38,7 +38,8 @@ import {
   openTargetToken,
   parseOlympusOpenUrl,
 } from '../src/core/open-targets.ts';
-import { mountDashboardController } from '../src/control-ui/browser-controller.ts';
+import { LANDED_HIGHLIGHT_MS, mountDashboardController } from '../src/control-ui/browser-controller.ts';
+import { DASHBOARD_THEME_CSS } from '../src/workers/dashboard/theme.ts';
 import { connectSetupSheet, setupRow } from '../src/workers/dashboard/components.ts';
 import { expectedOpenPages } from '../scripts/build-open-pages.ts';
 
@@ -214,7 +215,7 @@ describe('the dashboard opens the named panel and submits nothing', () => {
   let happy: Window;
   const previous = new Map<string, PropertyDescriptor | undefined>();
 
-  function mount(url: string): { root: HTMLElement; calls: unknown[]; dispose: () => void } {
+  function mount(url: string, before = '', after = ''): { root: HTMLElement; calls: unknown[]; dispose: () => void } {
     happy = new Window({ url });
     const values: Record<string, unknown> = {
       window: happy, document: happy.document, HTMLElement: happy.HTMLElement, HTMLFormElement: happy.HTMLFormElement,
@@ -233,7 +234,7 @@ describe('the dashboard opens the named panel and submits nothing', () => {
     });
     root.innerHTML = setupRow({ label: 'X bookmarks', sourceId: 'x.bookmarks', blurb: '', action: { label: 'Connect', kind: 'none', sheet: 'connect-x-bookmarks' } })
       + sheet
-      + '<section aria-label="Models"><h2>Models</h2><p>body</p></section>';
+      + before + '<section aria-label="Models"><h2>Models</h2><p>body</p></section>' + after;
     happy.document.body.append(root as never);
     const calls: unknown[] = [];
     const controller = mountDashboardController({
@@ -257,6 +258,8 @@ describe('the dashboard opens the named panel and submits nothing', () => {
   test('connect.x opens the X panel, clears the fragment and starts no sign-in', async () => {
     const page = mount('http://127.0.0.1:8010/dashboard?keys#olympus-open=connect.x');
     expect(page.root.querySelector('#connect-x-bookmarks')!.classList.contains('on')).toBe(true);
+    // The opened sheet carries the brief accent outline, so the reader sees where they landed.
+    expect(page.root.querySelector('#connect-x-bookmarks')!.classList.contains('landed')).toBe(true);
     expect(happy.location.hash).toBe('');
     expect(happy.location.search).toBe('?keys');
     await happy.happyDOM.waitUntilComplete();
@@ -264,11 +267,28 @@ describe('the dashboard opens the named panel and submits nothing', () => {
     page.dispose();
   });
 
-  test('fix.models takes the reader to Models', () => {
+  test('fix.models takes the reader to Models and makes it obvious', () => {
     const models = mount('http://127.0.0.1:8010/dashboard?keys#olympus-open=fix.models');
-    expect(happy.document.activeElement).toBe(models.root.querySelector('section[aria-label="Models"]') as never);
+    const section = models.root.querySelector('section[aria-label="Models"]')!;
+    expect(happy.document.activeElement).toBe(section as never);
+    expect(section.classList.contains('landed')).toBe(true);
     expect(models.root.querySelector('.sheet.on')).toBeNull();
     models.dispose();
+  });
+
+  test('a folded Models section is unfolded, and the outline goes after a few seconds', async () => {
+    const models = mount('http://127.0.0.1:8010/dashboard?keys#olympus-open=fix.answers', '<details><summary>More</summary>', '</details>');
+    const section = models.root.querySelector('section[aria-label="Models"]')!;
+    expect((section.closest('details') as unknown as { open: boolean }).open).toBe(true);
+    expect(section.classList.contains('landed')).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, LANDED_HIGHLIGHT_MS + 100));
+    expect(section.classList.contains('landed')).toBe(false);
+    models.dispose();
+  }, LANDED_HIGHLIGHT_MS + 5_000);
+
+  test('the outline fades and respects reduced motion', () => {
+    expect(DASHBOARD_THEME_CSS).toContain('.landed {');
+    expect(DASHBOARD_THEME_CSS).toMatch(/prefers-reduced-motion: reduce\) \{ \.landed \{ animation: none; \} \}/);
   });
 
   test('an unknown target opens nothing and is cleared too', async () => {

@@ -56,6 +56,9 @@ export interface OlympusBrowserController {
  * self-contained: the page serializes this trusted function into its own
  * HTML (components.ts standaloneDashboardControllerScript).
  */
+/** How long the accent outline stays on the place an open link landed (theme.ts `.landed` fades it first). */
+export const LANDED_HIGHLIGHT_MS = 4000;
+
 export function mountDashboardController(options: OlympusBrowserControllerOptions): OlympusBrowserController {
   let canWrite = options.canWrite;
   let csrfToken = options.csrfToken || '';
@@ -949,6 +952,15 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (focus && !focus.hasAttribute('tabindex')) focus.setAttribute('tabindex', '-1');
     }
     if (!focus) return;
+    // Make the place obvious (Jamie, 2026-10-10: "didn't see what I'm
+    // supposed to fix"): open anything folded around it, then a brief accent
+    // outline that fades (theme.ts `.landed`).
+    for (let fold = focus.closest('details'); fold; fold = fold.parentElement ? fold.parentElement.closest('details') : null) {
+      (fold as HTMLDetailsElement).open = true;
+    }
+    const landed = focus;
+    landed.classList.add('landed');
+    view.setTimeout(() => landed.classList.remove('landed'), LANDED_HIGHLIGHT_MS);
     if (typeof focus.scrollIntoView === 'function') focus.scrollIntoView({ block: 'center' });
     focus.focus();
   }
