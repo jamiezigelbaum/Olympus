@@ -18569,6 +18569,7 @@ var STREET_SUFFIXES = new Set([
 ]);
 
 // src/core/consult-settings.ts
+init_secret_store();
 import { closeSync as closeSync3, constants as constants4, fstatSync, openSync as openSync3, readSync } from "node:fs";
 import { join as join23 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
@@ -18576,6 +18577,9 @@ var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
 var CONSULT_LEVEL_WHEN_UNSET = "unnamed";
 var CONSULT_LEVEL_FOR_NEW_SETUP = CONSULT_LEVEL_WHEN_UNSET;
+var CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS = Object.freeze({ min: 1e4, max: 240000 });
+var MAX_MODEL_ID_CHARS = 200;
+var MAX_BASE_URL_CHARS = 500;
 var DEFAULT_CONSULT_SETTINGS = Object.freeze({
   v: CONSULT_SETTINGS_VERSION,
   revision: 0,
@@ -18586,7 +18590,9 @@ var DEFAULT_CONSULT_SETTINGS = Object.freeze({
   level: CONSULT_LEVEL_FOR_NEW_SETUP
 });
 var REQUIRED_TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
-var OPTIONAL_TOP_LEVEL_KEYS = ["level"];
+var OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel"];
+var WRITER_REQUIRED_KEYS = ["baseUrl", "model"];
+var WRITER_OPTIONAL_KEYS = ["secretRef", "timeoutMs"];
 var DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
 var OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
 var LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
@@ -18622,6 +18628,18 @@ function parseConsultSettings(value) {
     return;
   if (!DOMAIN_KEYS.every((key) => (key in domains) ? typeof domains[key] === "boolean" : OPTIONAL_DOMAIN_KEYS.includes(key)))
     return;
+  let writer;
+  if (Object.hasOwn(value, "writer")) {
+    writer = parseConsultWriterChoice(value.writer);
+    if (!writer)
+      return;
+  }
+  let chatgptFrontierModel;
+  if (Object.hasOwn(value, "chatgptFrontierModel")) {
+    chatgptFrontierModel = parseModelId(value.chatgptFrontierModel);
+    if (!chatgptFrontierModel)
+      return;
+  }
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
@@ -18629,7 +18647,47 @@ function parseConsultSettings(value) {
     languages: Object.freeze([...languages]),
     domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] : true]))),
     strict,
-    level
+    level,
+    ...writer ? { writer } : {},
+    ...chatgptFrontierModel ? { chatgptFrontierModel } : {}
+  });
+}
+function parseModelId(value) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed !== value || trimmed.length > MAX_MODEL_ID_CHARS || /[\u0000-\u001F\u007F\s]/.test(trimmed))
+    return;
+  return trimmed;
+}
+function parseConsultWriterChoice(value) {
+  if (!isPlainObject(value) || !hasKeys(value, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS))
+    return;
+  const { baseUrl, secretRef, timeoutMs } = value;
+  if (typeof baseUrl !== "string" || baseUrl.length > MAX_BASE_URL_CHARS || baseUrl.trim() !== baseUrl)
+    return;
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:")
+    return;
+  if (url.username || url.password || url.search || url.hash)
+    return;
+  const model = parseModelId(value.model);
+  if (!model)
+    return;
+  if (secretRef !== undefined && (typeof secretRef !== "string" || !normalizeSecretRef(secretRef)))
+    return;
+  if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || !Number.isSafeInteger(timeoutMs) || timeoutMs < CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS.min || timeoutMs > CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS.max))
+    return;
+  return Object.freeze({
+    baseUrl: baseUrl.replace(/\/+$/, ""),
+    model,
+    ...typeof secretRef === "string" ? { secretRef: secretRef.trim() } : {},
+    ...typeof timeoutMs === "number" ? { timeoutMs } : {}
   });
 }
 function parseConsultSettingsText(text) {
