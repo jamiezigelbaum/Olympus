@@ -118682,7 +118682,9 @@ function askAnonymouslyToolResult(raw) {
     const rewritten = record3.rewritten === true;
     const sent = clean(record3.sent, MAX_ANSWER);
     const hidden = record3.networkIdentity === "hidden";
-    const how = hidden ? "anonymously" : "through zkAPI with the network address visible (payment privacy only; Tor is off on this route)";
+    const visible = record3.networkIdentity === "visible";
+    const route = clean(record3.route, 200);
+    const how = hidden ? "anonymously" : visible ? "through zkAPI with the network address visible (payment privacy only; Tor is off on this route or was bypassed)" : `through zkAPI with the network route not verified (payment privacy; the route reads: ${route ?? "not verified"})`;
     const note = rewritten ? `Asked ${how} at ${level === "strict" ? "Strict" : "Standard"}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.` : `Asked ${how} at Standard, as written.`;
     const saveNote = clean(record3.note, 1000);
     const model = clean(record3.model, 200);
@@ -118694,8 +118696,8 @@ function askAnonymouslyToolResult(raw) {
         answer: reply,
         anonymous: hidden,
         ...model ? { model } : {},
-        ...typeof record3.route === "string" ? { route: clean(record3.route, 200) } : {},
-        ...record3.networkIdentity === "visible" ? { network_address: "visible" } : {},
+        ...route !== undefined ? { route } : {},
+        ...visible ? { network_address: "visible" } : hidden ? {} : { network_address: "not_verified" },
         level,
         rewritten,
         ...sent !== undefined ? { sent } : {},

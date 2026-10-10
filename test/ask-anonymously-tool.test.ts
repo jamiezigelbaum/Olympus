@@ -167,6 +167,13 @@ describe('ask_anonymously: the ChatGPT result', () => {
     expect(exposed.structuredContent).toMatchObject({ status: 'answered', anonymous: false, network_address: 'visible' });
     expect(exposed.content[0]!.text).not.toContain('anonymously');
     expect(exposed.content[0]!.text).toContain('network address visible');
+    // Tor ran but the route could not be verified (no confinement on Linux): neither anonymous nor "Tor off"; the route says why.
+    const unverified = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y', route: 'payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; no confinement', networkIdentity: 'not_verified', level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
+    expect(unverified.structuredContent).toMatchObject({ status: 'answered', anonymous: false, network_address: 'not_verified' });
+    expect(unverified.content[0]!.text).not.toContain('anonymously');
+    expect(unverified.content[0]!.text).not.toContain('Tor is off');
+    expect(unverified.content[0]!.text).toContain('network route not verified');
+    expect(unverified.content[0]!.text).toContain('actual route is not verified');
     // A requested save that failed is told with the answer.
     const unsaved = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y', route: 'r', level: 'standard', rewritten: false, remembered: false, note: 'Not saved; choose again next time.' });
     expect(unsaved.structuredContent).toMatchObject({ status: 'answered', note: 'Not saved; choose again next time.' });
