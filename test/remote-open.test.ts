@@ -332,7 +332,7 @@ describe('the panel in remote mode', () => {
       data: { jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params: { [OLYMPUS_HOST_CONTEXT_KEY]: { kind: 'openclaw' } } },
       source: win.parent as never,
     }));
-    const how = buttons().filter((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.howOnMac);
+    const how = buttons().filter((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.howOnComputer);
     expect(how.length).toBeGreaterThan(0);
     for (const node of how) node.click();
     expect(sent.some((message) => message.method === 'ui/open-link')).toBe(false);

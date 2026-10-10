@@ -4211,7 +4211,7 @@ export async function main(): Promise<void> {
     ...(sourceAnswer ? { sourceAnswer } : {}),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: ({ caller, ...input }, signal) => (askAnonymouslyNow
-      ? askAnonymouslyNow({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), origin: 'agent', signal })
+      ? askAnonymouslyNow({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal })
       : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
@@ -4285,7 +4285,6 @@ export async function main(): Promise<void> {
               saveWriter: (update) => dashboardConsult.saveWriter(update),
               testWriter: (update) => dashboardConsult.testWriter(update),
               saveStandard: (update) => dashboardConsult.saveStandard(update),
-              ask: (update) => dashboardConsult.ask(update),
             },
             stopMessagingCapture,
             corpusRegistry: sourceCorpusRegistry,
@@ -4440,7 +4439,7 @@ export async function main(): Promise<void> {
   // built-in private model. Without it on this machine every private match
   // reports `no_model` with counts only.
   const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
-  const { bindConsultJobPolicy, readConsultSettings } = await import('../../core/consult-settings.ts');
+  const { readConsultSettings } = await import('../../core/consult-settings.ts');
   const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
   const { createDropboxOpenTargets, localDropboxRoots, localOpenArguments } = await import('../dropbox-files/open-target.ts');
@@ -4479,15 +4478,8 @@ export async function main(): Promise<void> {
       return Object.hasOwn(sourceOpenTargets, provider) ? sourceOpenTargets[provider]!(locator) : undefined;
     },
   });
-  // The consult orchestrator (stage C4b; consult-orchestrator.ts): after a
-  // follow-up job's first delivery it may write one outside question on the
-  // writer's own model server, pass it through the outbound gate and send it
-  // through the configured zkAPI route. Bound late: the jobs engine calls
-  // its hooks. Inert unless a valid, enabled ~/.olympus/consult.json exists
-  // (every job then binds outside help off); no product path writes that
-  // file until C5.
-  let consultOrchestrator: import('../chatgpt/consult-orchestrator.ts').ConsultOrchestrator | undefined;
-  // "Ask anonymously" (the agent tool and the dashboard's box), wired inside the consult block below.
+  // "Ask anonymously" (the ask_anonymously agent tool: the only way a
+  // question goes to zkAPI), wired inside the consult block below.
   let askAnonymouslyNow: ((input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
   // The last time the ChatGPT model was missing from the live zkAPI listing (for the card); cleared by a reply.
   let chatgptModelProblem: { at: string; message: string } | undefined;
@@ -4495,12 +4487,6 @@ export async function main(): Promise<void> {
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
-    // Each job binds the outside-help settings current at its creation
-    // (~/.olympus/consult.json, read at every use, never cached): its
-    // lifetime and whether a capability-2 panel enters follow-up collection.
-    consultPolicy: () => bindConsultJobPolicy(readConsultSettings()),
-    onFirstDelivered: (jobId) => consultOrchestrator?.onFirstDelivered(jobId),
-    onAnswerActivity: () => consultOrchestrator?.onFreshAnswer(),
     // While an analysis runs (from the search) and from a claim to
     // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
@@ -4524,9 +4510,8 @@ export async function main(): Promise<void> {
   const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30_000);
   privateAnswerSweep.unref?.();
   {
-    const { createConsultOrchestrator, resolveZkapiConsultTransport } = await import('../chatgpt/consult-orchestrator.ts');
     const { CONSULT_WRITER_LIMITS, createConsultWriterServer, defaultConsultMemoryProbe, runConsultWriter, runOwnConsultWriter } = await import('../../core/consult-writer.ts');
-    const { openZkapiConsultSession } = await import('../../core/consult-transport-zkapi.ts');
+    const { openZkapiConsultSession, resolveZkapiConsultTransport } = await import('../../core/consult-transport-zkapi.ts');
     type WriterServer = import('../../core/consult-writer.ts').ConsultWriterServer;
     // The writer's own llama-server on the answer model's verified files,
     // created once those files are installed in this process; started on
@@ -4545,21 +4530,18 @@ export async function main(): Promise<void> {
     // one the transport is unavailable and no consult is sent. The key is
     // read per call from the same environment the outside-help card checks
     // (worker.env under a non-empty process value), so the card never says a key is present
-    // that the send cannot use.
-    // A consult from a ChatGPT private answer uses the ChatGPT model
-    // (consult.json `chatgptFrontierModel`, default Claude Sonnet: never the
-    // provider that holds the conversation); an agent's question arrives
-    // with its model already chosen by its hosting provider (consult-ask.ts);
-    // the dashboard's own question uses the route's model.
+    // that the send cannot use. The model arrives already chosen by the
+    // caller's hosting provider (consult-ask.ts: never the provider that
+    // holds the conversation), or named by the caller.
     const { consultChatgptFrontierModel, consultChatgptModelUnavailableMessage } = await import('../../core/consult-settings.ts');
     const chatgptModel = (): string => consultChatgptFrontierModel(readConsultSettings().settings);
-    const transport = (origin: 'chatgpt' | 'dashboard' = 'chatgpt', model?: string) => resolveZkapiConsultTransport(
+    const transport = (model: string) => resolveZkapiConsultTransport(
       sovereigntyEngine.config.modelProfiles,
       (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
-      { env: process.env, ...(origin === 'chatgpt' ? { chatgptFrontierModel: model ?? chatgptModel() } : {}) },
+      { env: process.env, model },
     );
-    // The owner's own writer model (consult.json `writer`) arrives bound to
-    // the job (control.writer; null: the built-in model writes), never reread
+    // The owner's own writer model (consult.json `writer`) arrives as the Ask
+    // read it (control.writer; null: the built-in model writes), never reread
     // here, so the writer that runs is the one whose gate net applies. Its key
     // is resolved per call from the same environment as the route's and
     // never logged.
@@ -4604,11 +4586,11 @@ export async function main(): Promise<void> {
           }),
           // Open, send with final authorization, then wait for settlement:
           // the one-shot path's steps, with the Ask's settings check at the
-          // transport's authorization boundary (review of PR #209). An
-          // agent's question uses the model set for ChatGPT questions (or
-          // the one-off model it named); the dashboard's box uses the route's.
-          send: async (text, authorize, { origin, model, signal }) => {
-            const route = transport(origin === 'agent' ? 'chatgpt' : 'dashboard', model);
+          // transport's authorization boundary (review of PR #209), on the
+          // model set for the caller's hosting provider (or the one-off model
+          // it named).
+          send: async (text, authorize, { model, signal }) => {
+            const route = transport(model);
             if (!route) return undefined;
             const opened = await openZkapiConsultSession(route, signal ? { signal } : {});
             if (!opened.ok) return { ok: false, error: opened.error };
@@ -4619,43 +4601,15 @@ export async function main(): Promise<void> {
           // only caller allowed to write consult.json (consult-settings-writer).
           remember: (choice) => dashboardConsult.rememberLevel(choice),
         });
-        // The card's "model missing from the listing" note, as the orchestrator
-        // keeps it: only for the ChatGPT setting the card shows.
-        if (input.origin === 'agent' && !input.model && input.callerProvider !== 'anthropic') {
+        // The card's "model missing from the listing" note: only for the
+        // ChatGPT setting, when the question used it.
+        if (!input.model && input.callerProvider !== 'anthropic') {
           if (!result.ok && result.code === 'model_unavailable') chatgptModelProblem = { at: new Date().toISOString(), message: consultChatgptModelUnavailableMessage(chatgptModel()) };
           else if (result.ok) chatgptModelProblem = undefined;
         }
         return result;
       };
     }
-    consultOrchestrator = createConsultOrchestrator({
-      jobs: privateAnswers,
-      eligible: privateEvidenceEligible,
-      settings: () => readConsultSettings(),
-      writer: (input, control) => runChosenWriter(input, control),
-      onTransportFailure: (code) => {
-        if (code === 'model_unavailable') chatgptModelProblem = { at: new Date().toISOString(), message: consultChatgptModelUnavailableMessage(chatgptModel()) };
-      },
-      onAppended: () => {
-        chatgptModelProblem = undefined;
-      },
-      writerDeadlineMs: CONSULT_WRITER_LIMITS.deadlineMs,
-      openSession: async (control) => {
-        const route = transport();
-        if (!route) {
-          return {
-            ok: false,
-            error: { code: 'transport_failed', message: 'No zkAPI consult route is configured.', outcome: 'not_sent', networkIdentity: 'not_verified' },
-          };
-        }
-        return openZkapiConsultSession(route, control);
-      },
-      // A route (profile and inference key) must exist before any writer
-      // work, and no private answer may be in flight when the writer starts.
-      transportAvailable: () => transport()?.apiKey !== undefined,
-      answerActivityBusy: () => answerActivity.busy,
-      completionTimeoutMs: () => transport()?.settings.timeoutMs ?? 6 * 60_000,
-    });
   }
   const remoteAgentOptions = {
     connections: remoteConnections,
@@ -4762,9 +4716,6 @@ export async function main(): Promise<void> {
     },
     requestReload: () => requestModelReload(),
     env: process.env,
-    ask: (question) => (askAnonymouslyNow
-      ? askAnonymouslyNow(question)
-      : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     chatgptModelProblem: () => chatgptModelProblem,
     // The writer capability check, on the owner's click only: the writer
     // chosen now, its key resolved here, the level and languages saved now.

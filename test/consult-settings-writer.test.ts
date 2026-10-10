@@ -305,7 +305,6 @@ describe('the writer stays off every hosted surface', () => {
     'src/workers/chatgpt/setup-tools.ts',
     'src/workers/chatgpt/setup-backend.ts',
     'src/workers/chatgpt/private-answer-jobs.ts',
-    'src/workers/chatgpt/consult-orchestrator.ts',
     'src/workers/remote-mcp.ts',
     'src/workers/remote-openapi.ts',
     'src/workers/remote-access-control.ts',

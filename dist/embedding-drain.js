@@ -24962,7 +24962,8 @@ var init_vocabulary = __esm(() => {
     },
     linkExpires: "link expires in {n} min",
     linkExpired: "link expired",
-    howOnMac: "Fix this on your computer",
+    howOnComputer: "Do this on your computer",
+    howOnComputerFix: "Fix this on your computer",
     remote: {
       title: "Olympus runs on a server, so this opens on your computer through a secure tunnel.",
       askLine: "Ask your assistant:",
@@ -24992,7 +24993,7 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      outsideHelp: { title: "Outside help", line: "Anonymous answers (zkAPI)" },
+      outsideHelp: { title: "Anonymous answers", line: "Ask top AI models without saying who you are" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
     locked: "Open dashboard controls first",
@@ -25962,18 +25963,21 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return "";
     return host === "olympusplugin.ai" || host === "www.olympusplugin.ai" ? parsed.href : "";
   }
+  function howWords(key) {
+    return key === "blocker" || key.indexOf("need:") === 0 ? P.howOnComputerFix : P.howOnComputer;
+  }
   function howLink(fix, key, source) {
     const href = helpHref(fix && fix.href);
     if (!href || compact())
       return null;
     if (remoteMode()) {
-      const toggle = button(P.howOnMac, key + ":how", () => toggleRemote(key), "plain");
+      const toggle = button(howWords(key), key + ":how", () => toggleRemote(key), "plain");
       toggle.className = "btn link";
       toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
       const wrap = add(el("span", "fix"), toggle);
       return add(wrap, remoteBox(key, href, source));
     }
-    const link = button(P.howOnMac, key + ":how", () => openLink(href), "plain");
+    const link = button(howWords(key), key + ":how", () => openLink(href), "plain");
     link.className = "btn link";
     return link;
   }
@@ -26103,11 +26107,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
       if (remoteMode()) {
-        const toggle = button(P.howOnMac, key, () => toggleRemote(key), style);
+        const toggle = button(howWords(key), key, () => toggleRemote(key), style);
         toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
         return add(wrap, toggle, remoteBox(key, helpHref(fix.href), source));
       }
-      return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
+      return add(wrap, button(howWords(key), key, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {
       if (!allowConfirm)
@@ -31834,6 +31838,10 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
    it, never further down the page. */
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
+/* Where an open link landed (#olympus-open=…): an accent outline that fades. */
+.landed { outline: 3px solid var(--link); outline-offset: 4px; border-radius: 10px; animation: landed-fade 2.5s ease-out 1.5s forwards; }
+@keyframes landed-fade { to { outline-color: transparent; } }
+@media (prefers-reduced-motion: reduce) { .landed { animation: none; } }
 .sheet h4 { margin: 0 0 6px; font-size: var(--fs-row); }
 .sheet p { color: var(--t2); font-size: var(--fs-body); margin: 0 0 10px; max-width: 72ch; }
 .sheet .providernote { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 9px 12px; }

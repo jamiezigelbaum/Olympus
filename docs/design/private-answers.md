@@ -82,15 +82,18 @@ bounded evidence at Standard (not as written); the built-in writer reads
 only the question, within its prompt-token bound. The full gate now runs only
 at Strict with the built-in writer.
 
-**Ask anonymously.** A box on the card: the typed question (at most 4,000
-characters) is prepared by Standard's mode, checked for secrets, and sent
-through the same zkAPI transport, with its caps, acknowledgements and model
-check. The answer and exactly what was sent show on the card. It never
-touches ChatGPT and involves no private evidence (`src/core/consult-ask.ts`). The
-typed question is the secrets check's context, so a labelled secret in it
-stays refused even when the writer drops the label. The Ask binds the
+**Ask anonymously.** The user asks from inside their own agent: the
+`ask_anonymously` tool (`src/core/consult-ask.ts`) takes the question (at
+most 4,000 characters), prepares it by the chosen level and Standard's mode,
+checks it, and sends it through the zkAPI transport with its caps,
+acknowledgements and model check. The answer, the model that answered and
+exactly what was sent come back in the tool result. It involves no private
+evidence. The question is the secrets check's context, so a labelled secret
+in it stays refused even when the writer drops the label. The ask binds the
 settings revision, writer and Standard mode and instruction when it starts;
 the transport's final authorization refuses the send as stale if any changed.
+The dashboard's own question box was retired on 2026-10-10 (design step 3):
+the card is for setup only.
 
 The rulings below (words of the question ChatGPT sent, copied document
 wording and their residuals) governed Standard's full gate and now apply
@@ -193,13 +196,15 @@ Decisions:
    is the user's own choice (above). Strict was measured with and without the
    evidence on Delphi after the thin-net fix (12 of 16 either way) and keeps
    it.
-4. **What escalation is for.** A question complex enough that a stronger
-   model's reasoning or outside knowledge helps, on top of what the evidence
-   shows. zkAPI never sees the documents, so it cannot fix retrieval or find
-   what the Mac missed; the writer proposes nothing when the gap is a missing
-   fact from the user's own records. The trigger is unchanged for both
-   writers: a first answer of "these items do not answer" never escalates
-   (owner change, 2026-10-10, superseding an earlier proposal to let it).
+4. **No automatic escalation** (retired 2026-10-10, design step 3). A
+   private answer with gaps no longer sends anything on its own, and the
+   private answer panel no longer shows an anonymous answer under it: a
+   question goes out only when the user asks through their agent. zkAPI
+   never sees the documents, so it cannot fix retrieval or find what the Mac
+   missed; it helps when a stronger model's reasoning or outside knowledge is
+   wanted. The evidence excerpts in item 3 return with the documents lane
+   (`use_documents`, design step 4); until then the writer reads only the
+   question.
 5. **The answering model is never the provider that holds the conversation.**
    OpenAI also holds a ChatGPT conversation and could link it to the
    anonymous question; Anthropic holds a Claude one. So the model follows who
@@ -210,8 +215,8 @@ Decisions:
      another OpenAI-hosted agent. Default: `anthropic/claude-sonnet-5.5`.
    - `claudeFrontierModel` names it for questions from an Anthropic-hosted
      agent (Claude Code, Claude Desktop: recognised by the MCP client name or
-     the connection's name). Default: `openai/gpt-5.5`. File only for now;
-     the card field comes with the card rework.
+     the connection's name). Default: `openai/gpt-5.5`. Set on the card
+     next to the ChatGPT one.
    - An agent whose provider is unknown (OpenClaw, the CLI) takes the ChatGPT
      setting, since ChatGPT is the surface most questions come through.
    - A one-off `model` from the caller's own provider is refused
@@ -220,8 +225,8 @@ Decisions:
    There is no fallback to another model: if the live zkAPI listing lacks
    the model, the consult is not sent and the card says "Claude Sonnet isn't
    available through zkAPI right now; choose another model" (the transport's
-   `model_unavailable` check). The card notes when ChatGPT questions go to
-   an OpenAI model. The dashboard's own question box uses the route's model.
+   `model_unavailable` check). The card warns when ChatGPT questions go to
+   an OpenAI model, and when Claude questions go to an Anthropic model.
 6. **Capability test, on request only.** `olympus zkapi test-writer` and the
    card's "Test your model" run six invented cases (from the leak and
    re-identification evals, plus the LOI case with and without the letter)
@@ -265,14 +270,16 @@ https or a private network.
       below).
    2. *Add money:* one transfer, fee included.
    3. *Confirm:* the six cost and risk statements (version 6), then turn it on:
-      questions go out automatically; the provider reads each question; a
+      questions go out when you ask your agent to; the provider reads each question; a
       question usually costs a few cents with up to $6 held while it runs;
       adding and taking out money each have a network fee; unused money can
       be claimed by the operator after about 30 days (the card shows the
       estimated date when Olympus knows it); zkAPI is new, so add only what you are comfortable losing.
-3. **Everyday panel behaviour.** The private answer panel shows "Asking
-   anonymously…", then "Anonymous answer · zkAPI" with "Sent without names:
-   <the exact question>", shown every time, for trust.
+3. **Everyday use.** The user asks their agent to use Olympus zkAPI; the
+   answer comes back in the agent's result with the model that answered and
+   the exact question that was sent, every time, for trust. (The private
+   answer panel's "Anonymous answer · zkAPI" block went with the automatic
+   escalation on 2026-10-10.)
 
 Ongoing: weekly use, the balance, the estimated 30-day expiry date on the
 card (a reminder before it is not built yet), and one-click off.
@@ -292,8 +299,9 @@ card (a reminder before it is not built yet), and one-click off.
 
 ## Naming
 
-"Outside help" is retired in user copy (the Mac card is "Anonymous answers ·
-zkAPI"). Internal identifiers (`consult`, `outside-help`, the
+"Outside help" is retired in user copy. The Mac card is "Anonymous answers"
+(renamed 2026-10-10); "zkAPI" stays inside the card, where the route and the
+daemon are described. Internal identifiers (`consult`, `outside-help`, the
 `/dashboard/consult/*` routes) stay.
 
 ## One-click install of Tor and zkAPI (built)

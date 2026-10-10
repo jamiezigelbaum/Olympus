@@ -314,7 +314,7 @@ describe('connection states', () => {
 });
 
 describe('ready page', () => {
-  test('a fix only the computer can make links its open page beside the control: Fix this on your computer', () => {
+  test('a control only the computer can act on links its open page: Fix beside a problem, Do where nothing is broken', () => {
     const help = (section: string) => `https://olympusplugin.ai/open/fix/${section}/`;
     const host = mount({ openai: {} });
     host.push({ structuredContent: model({
@@ -326,8 +326,10 @@ describe('ready page', () => {
       },
     }) });
     const links = host.buttons().filter((node) => node.className === 'btn link');
-    expect(links.map((node) => node.textContent)).toEqual([DASHBOARD_CHATGPT_PAGE_COPY.howOnMac, DASHBOARD_CHATGPT_PAGE_COPY.howOnMac]);
-    expect(DASHBOARD_CHATGPT_PAGE_COPY.howOnMac).toBe('Fix this on your computer');
+    // Needs you is a real problem; Models' Change (models are ready) is not.
+    expect(links.map((node) => node.textContent)).toEqual([DASHBOARD_CHATGPT_PAGE_COPY.howOnComputerFix, DASHBOARD_CHATGPT_PAGE_COPY.howOnComputer]);
+    expect(DASHBOARD_CHATGPT_PAGE_COPY.howOnComputerFix).toBe('Fix this on your computer');
+    expect(DASHBOARD_CHATGPT_PAGE_COPY.howOnComputer).toBe('Do this on your computer');
     // Check again still runs its tool; the link sits beside it.
     expect(host.button('Check again').disabled).toBe(false);
     links[0]!.click();
@@ -350,8 +352,8 @@ describe('ready page', () => {
         { id: 'c', sentence: 'Plain http.', fix: { label: 'Open', href: 'http://olympusplugin.ai/help' } },
       ],
     }) });
-    expect(host.buttons().filter((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.howOnMac)).toHaveLength(1);
-    host.button(DASHBOARD_CHATGPT_PAGE_COPY.howOnMac).click();
+    expect(host.buttons().filter((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.howOnComputerFix)).toHaveLength(1);
+    host.button(DASHBOARD_CHATGPT_PAGE_COPY.howOnComputerFix).click();
     expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://olympusplugin.ai/help/on-your-computer/#answers' }]]);
   });
 

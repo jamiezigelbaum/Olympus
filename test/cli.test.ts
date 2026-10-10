@@ -18,6 +18,7 @@ import {
   type DashboardCommandDependencies,
   isV04PublicCliInvocation,
   lifecycleRecoverySignalsFromWorkerHttpState,
+  olympusCommandHint,
   parseArgs,
   parseEvalShardExportArgs,
   parseQueuedContentRetargetArgs,
@@ -1687,3 +1688,27 @@ function withTemporaryEnv(values: Record<string, string | undefined>): { restore
     },
   };
 }
+
+describe('how a hint names the Olympus command', () => {
+  test('plain olympus when it is on PATH, else this install\'s own bin, else the placeholder', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-hint-'));
+    try {
+      const onPath = join(dir, 'path');
+      const plugin = join(dir, 'plugin', 'bin');
+      mkdirSync(onPath, { recursive: true });
+      mkdirSync(plugin, { recursive: true });
+      const own = join(plugin, 'olympus');
+      writeFileSync(own, '#!/bin/sh\n');
+      chmodSync(own, 0o755);
+      expect(olympusCommandHint({ env: { PATH: onPath }, pluginBin: own })).toBe(own);
+      writeFileSync(join(onPath, 'olympus'), '#!/bin/sh\n');
+      chmodSync(join(onPath, 'olympus'), 0o755);
+      expect(olympusCommandHint({ env: { PATH: onPath }, pluginBin: own })).toBe('olympus');
+      // Not executable is not on PATH.
+      chmodSync(join(onPath, 'olympus'), 0o644);
+      expect(olympusCommandHint({ env: { PATH: onPath }, pluginBin: join(dir, 'missing') })).toBe('<rootDir>/bin/olympus');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

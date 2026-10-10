@@ -15,7 +15,7 @@ import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { Window } from 'happy-dom';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
-import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, CONSULT_LIGHT_CLEANUP_INSTRUCTION, consultChatgptModelUnavailableMessage, readConsultSettings } from '../src/core/consult-settings.ts';
+import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT, CONSULT_LIGHT_CLEANUP_INSTRUCTION, consultChatgptModelUnavailableMessage, readConsultSettings } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultReadiness, ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
 import { zkapiFenceScope } from '../src/core/consult-transport-zkapi.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
@@ -216,8 +216,9 @@ describe('the Outside help page: states and copy', () => {
     // The switch is the one filled button in the enable form.
     expect(html).toContain(`<button type="submit" class="btn primary" data-outside-enabled="true">${W.turnOn}</button>`);
     expect(html).not.toContain(W.turnOff);
-    // Automatic, said plainly.
-    expect(text).toContain('It asks on its own');
+    // Only when asked, said plainly (the automatic escalation was retired on 2026-10-10).
+    expect(text).toContain('It asks only when you do');
+    expect(text).not.toContain('It asks on its own');
     // The revision rides on the card for compare-and-swap.
     expect(html).toContain('data-revision="0"');
     // The status block: route health in one line and today's usage, the $6 said as a hold.
@@ -233,7 +234,7 @@ describe('the Outside help page: states and copy', () => {
     // the fee buffer, the API key, key reuse, the operator and proof setup, the route not verified.
     const more = html.slice(html.indexOf('data-outside-disclosure-more'));
     const fuller = visibleText(more.slice(0, more.indexOf('</details>')));
-    for (const needle of ['within about five minutes', 'counts each question at the amount held for its model', 'no daily limit unless you set one', 'There is no top-up', 'estimates the 30-day date',
+    for (const needle of ['only when you ask your agent to use Olympus zkAPI', 'counts each question at the amount held for its model', 'no daily limit unless you set one', 'There is no top-up', 'estimates the 30-day date',
       'fee buffer', 'require an API key', 'key reuse is on', 'pause deposits and withdrawals', 'proof setup', 'cannot yet confirm the network route is anonymous']) expect(fuller).toContain(needle);
     // And the setup steps name the exact commands.
     for (const needle of ['--key-reuse-window-seconds 0', '--require-api-key', 'balance estimated to expire']) expect(text).toContain(needle);
@@ -572,7 +573,6 @@ function fakeBackend(calls: string[]): DashboardConsultBackend {
     saveWriter: async () => { calls.push('writer'); return { ok: true, status_message: 'saved', revision: 2 }; },
     testWriter: async () => { calls.push('writer-test'); return { ok: true, status_message: 'testing' }; },
     saveStandard: async () => { calls.push('standard'); return { ok: true, status_message: 'saved', revision: 2 }; },
-    ask: async () => { calls.push('ask'); return { ok: true, status_message: 'asking' }; },
   };
 }
 
@@ -738,7 +738,6 @@ function adapter(input: {
   reload?: boolean;
   source?: string;
   writerCheck?: Parameters<typeof createDashboardConsultAdapter>[0]['writerCheck'];
-  ask?: Parameters<typeof createDashboardConsultAdapter>[0]['ask'];
   chatgptModelProblem?: Parameters<typeof createDashboardConsultAdapter>[0]['chatgptModelProblem'];
 }) {
   const path = join(input.home, '.olympus', 'sovereignty.json');
@@ -760,7 +759,6 @@ function adapter(input: {
     readiness: async (options) => { probes.push(options); return readiness(input.readiness); },
     recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
     ...(input.writerCheck ? { writerCheck: input.writerCheck } : {}),
-    ...(input.ask ? { ask: input.ask } : {}),
     ...(input.chatgptModelProblem ? { chatgptModelProblem: input.chatgptModelProblem } : {}),
   });
   return { backend, reloads, probes, recoveries, path, env };
@@ -1173,7 +1171,7 @@ describe('who writes the question (owner decision 2026-10-10)', () => {
     expect(await backend.setEnabled({ enabled: true, revision: 2, level: 'general' })).toMatchObject({ ok: true, revision: 3 });
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: true, level: 'general', writer: { model: 'qwen3-32b' }, chatgptFrontierModel: 'anthropic/some-model' } });
     const status = await backend.status();
-    expect(status.writer).toMatchObject({ choice: { model: 'qwen3-32b', secretRef: 'env:HOME_MODEL_KEY', keyPresent: false }, chatgptFrontierModel: 'anthropic/some-model', routeModel: 'openai/gpt-5-mini' });
+    expect(status.writer).toMatchObject({ choice: { model: 'qwen3-32b', secretRef: 'env:HOME_MODEL_KEY', keyPresent: false }, chatgptFrontierModel: 'anthropic/some-model', effectiveChatgptModel: 'anthropic/some-model', effectiveClaudeModel: CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT });
     expect(await backend.saveWriter({ revision: 3, writer: null })).toMatchObject({ ok: true, revision: 4 });
     const cleared = readConsultSettings({ env });
     expect(cleared.state === 'valid' && cleared.settings.writer).toBeUndefined();
@@ -1207,7 +1205,7 @@ describe('who writes the question (owner decision 2026-10-10)', () => {
   test('the card: the choice, no gate on the model, the OpenAI note, the test button and its result', () => {
     const html = page({
       ...status(),
-      writer: { routeModel: 'openai/gpt-5-mini', testAvailable: true, check: { state: 'done', at: '2026-10-10T12:00:00.000Z', report: REPORT } },
+      writer: { effectiveChatgptModel: 'openai/gpt-5-mini', effectiveClaudeModel: CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT, testAvailable: true, check: { state: 'done', at: '2026-10-10T12:00:00.000Z', report: REPORT } },
     });
     const text = visibleText(html);
     expect(text).toContain('For people running a strong local model at home: ask frontier models anonymously when your model needs help.');
@@ -1224,12 +1222,85 @@ describe('who writes the question (owner decision 2026-10-10)', () => {
     expect(html).toContain('data-outside-form="writer-test"');
     expect(html).toContain('/dashboard/consult/writer/test');
     // Not an OpenAI model: no note.
-    const other = page({ ...status(), writer: { routeModel: 'openai/gpt-5-mini', chatgptFrontierModel: 'anthropic/some-model', testAvailable: true, check: { state: 'idle' } } });
+    const other = page({ ...status(), writer: { chatgptFrontierModel: 'anthropic/some-model', effectiveChatgptModel: 'anthropic/some-model', testAvailable: true, check: { state: 'idle' } } });
     expect(other).not.toContain('data-outside-writer-openai');
+  });
+
+  test('the card: the zkAPI model for questions from Claude sits next to the ChatGPT one, with the mirror warning for an Anthropic model', () => {
+    const html = page({ ...status(), writer: { effectiveChatgptModel: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, effectiveClaudeModel: CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT, testAvailable: true, check: { state: 'idle' } } });
+    const text = visibleText(html);
+    expect(text).toContain('zkAPI model for questions from ChatGPT');
+    expect(text).toContain('zkAPI model for questions from Claude (Claude Code, Claude Desktop)');
+    expect(text).toContain(W.writer.claudeFrontierHint);
+    expect(html).toContain('name="claude_frontier_model"');
+    expect(html).toContain(`placeholder="${CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT}"`);
+    // The default (an OpenAI model) gets no Anthropic warning.
+    expect(html).not.toContain('data-outside-writer-anthropic');
+    const anthropic = page({ ...status(), writer: { claudeFrontierModel: 'Anthropic/claude-opus-5.5', effectiveClaudeModel: 'Anthropic/claude-opus-5.5', testAvailable: true, check: { state: 'idle' } } });
+    expect(anthropic).toContain('data-outside-writer-anthropic');
+    expect(anthropic).toContain('value="Anthropic/claude-opus-5.5"');
+    expect(visibleText(anthropic)).toContain('Questions from Claude now go to Anthropic/claude-opus-5.5, an Anthropic model.');
+  });
+
+  test('saving only the zkAPI models keeps the built-in writer; both are validated; empty clears', async () => {
+    const home = tempHome();
+    const { backend, env } = adapter({ home });
+    expect(await backend.saveWriter({ revision: 0, chatgpt_frontier_model: 'google/gemini-3-pro', claude_frontier_model: 'x-ai/grok-5' })).toMatchObject({ ok: true, revision: 1, status_message: 'Saved the zkAPI models.' });
+    const saved = readConsultSettings({ env });
+    expect(saved).toMatchObject({ state: 'valid', settings: { chatgptFrontierModel: 'google/gemini-3-pro', claudeFrontierModel: 'x-ai/grok-5' } });
+    expect(saved.state === 'valid' && saved.settings.writer).toBeUndefined();
+    expect((await backend.status()).writer).toMatchObject({ effectiveChatgptModel: 'google/gemini-3-pro', effectiveClaudeModel: 'x-ai/grok-5' });
+    expect(await backend.saveWriter({ revision: 1, claude_frontier_model: 'not a model' })).toMatchObject({ ok: false, code: 'frontier_model_invalid' });
+    expect(await backend.saveWriter({ revision: 1, chatgpt_frontier_model: null, claude_frontier_model: '' })).toMatchObject({ ok: true, revision: 2 });
+    const cleared = readConsultSettings({ env });
+    expect(cleared.state === 'valid' && cleared.settings.chatgptFrontierModel).toBeUndefined();
+    expect(cleared.state === 'valid' && cleared.settings.claudeFrontierModel).toBeUndefined();
+    expect((await backend.status()).writer).toMatchObject({ effectiveChatgptModel: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, effectiveClaudeModel: CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT });
+  });
+
+  test('the card\'s script: with no model server named, Save posts only the two zkAPI models; a named server is posted with them', async () => {
+    const html = page({ ...status(), writer: { effectiveChatgptModel: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, effectiveClaudeModel: CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT, testAvailable: true, check: { state: 'idle' } } });
+    const window = new Window({ url: 'http://127.0.0.1:8010/dashboard?outside-help' });
+    const document = window.document;
+    const body = html.slice(html.indexOf('<body'), html.lastIndexOf('</body>'));
+    document.body.innerHTML = body.replace(/^<body[^>]*>/, '').replace(/<script>[\s\S]*?<\/script>/g, '');
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).find((code) => code.includes('[data-outside-help]'))!;
+    const posts: Array<{ url: string; init: { body: string } }> = [];
+    const fetchStub = async (url: string, init: { body: string }) => {
+      posts.push({ url, init });
+      return { ok: true, json: async () => ({ ok: true, status_message: 'saved', revision: 1 }) };
+    };
+    new Function('window', 'document', 'fetch', 'setTimeout', script)(
+      { confirm: () => true, location: { href: 'http://127.0.0.1:8010/dashboard?outside-help', reload: () => undefined } },
+      document,
+      fetchStub,
+      () => undefined,
+    );
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+    const form = document.querySelector('form[data-outside-form="writer"]')!;
+    const set = (name: string, value: string) => { (form.querySelector(`input[name="${name}"]`) as unknown as { value: string }).value = value; };
+    set('chatgpt_frontier_model', ' google/gemini-3-pro ');
+    set('claude_frontier_model', 'x-ai/grok-5');
+    form.dispatchEvent(new window.Event('submit', { cancelable: true }));
+    await settle();
+    expect(posts[0]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.writer);
+    expect(JSON.parse(posts[0]!.init.body)).toEqual({ revision: 0, chatgpt_frontier_model: 'google/gemini-3-pro', claude_frontier_model: 'x-ai/grok-5' });
+    set('writer_base_url', 'http://127.0.0.1:11434/v1');
+    set('writer_model', 'llama3.3:70b');
+    set('claude_frontier_model', '');
+    form.dispatchEvent(new window.Event('submit', { cancelable: true }));
+    await settle();
+    // The card took the saved revision from the first answer.
+    expect(JSON.parse(posts[1]!.init.body)).toEqual({
+      revision: 1,
+      chatgpt_frontier_model: 'google/gemini-3-pro',
+      claude_frontier_model: null,
+      writer: { base_url: 'http://127.0.0.1:11434/v1', model: 'llama3.3:70b', secret_ref: '' },
+    });
   });
 });
 
-describe('Standard is open, and Ask anonymously (owner decision 2026-10-10)', () => {
+describe('Standard is open (owner decision 2026-10-10)', () => {
   test('saving the mode: light cleanup by default, custom keeps its instruction verbatim, a preset drops it; the other forms carry it', async () => {
     const home = tempHome();
     const { backend, env } = adapter({ home });
@@ -1249,29 +1320,19 @@ describe('Standard is open, and Ask anonymously (owner decision 2026-10-10)', ()
     expect(await backend.saveStandard({ revision: 1, standard_mode: 'light_cleanup' })).toMatchObject({ ok: false, code: 'conflict' });
   });
 
-  test('the ask runs in the background and the card shows the reply and exactly what was sent; one at a time; unavailable without a runner', async () => {
-    const none = adapter({ home: tempHome() });
-    expect(await none.backend.ask({ question: 'x' })).toMatchObject({ ok: false, code: 'ask_unavailable' });
-    expect((await none.backend.status()).ask).toBeUndefined();
-    let finish!: () => void;
-    const gate = new Promise<void>((resolve) => { finish = resolve; });
-    const asked: unknown[] = [];
-    const { backend } = adapter({ home: tempHome(), ask: async (input) => { asked.push(input); await gate; return { ok: true, sent: 'How long do deposits take to return?', reply: 'Usually two weeks.', route: 'zkAPI via Tor', networkIdentity: 'hidden', level: 'standard', rewritten: true, remembered: false }; } });
-    expect(await backend.ask({ question: '   ' })).toMatchObject({ ok: false, code: 'question_empty' });
-    expect(await backend.ask({ question: ' When will Jo return my deposit? ' })).toMatchObject({ ok: true });
-    expect(await backend.ask({ question: 'again' })).toMatchObject({ ok: false, code: 'ask_running' });
-    expect((await backend.status()).ask?.state).toEqual({ state: 'running', question: 'When will Jo return my deposit?' });
-    finish();
-    await Bun.sleep(5);
-    expect(asked).toEqual([{ question: 'When will Jo return my deposit?', level: 'standard', origin: 'dashboard' }]);
-    const done = (await backend.status()).ask!;
-    expect(done.state).toMatchObject({ state: 'done', sent: 'How long do deposits take to return?', reply: 'Usually two weeks.' });
-    const html = page({ ...status(), ask: done, standard: (await backend.status()).standard! });
-    expect(html).toContain('data-outside-ask-sent>How long do deposits take to return?</pre>');
-    expect(html).toContain('Usually two weeks.');
-    expect(html).toContain('data-outside-form="ask"');
+  test('the card has no question box (retired 2026-10-10): the Standard form stays, the ask route is gone everywhere', async () => {
+    const { backend } = adapter({ home: tempHome() });
+    const value = await backend.status();
+    expect(value).not.toHaveProperty('ask');
+    expect('ask' in backend).toBe(false);
+    const html = page({ ...status(), standard: value.standard! });
     expect(html).toContain('data-outside-form="standard"');
     expect(visibleText(html)).toContain('How should your model prepare a question before it leaves?');
+    expect(html).not.toContain('data-outside-form="ask"');
+    expect(html).not.toContain('/dashboard/consult/ask');
+    expect(Object.values(DASHBOARD_OUTSIDE_HELP_PATHS)).not.toContain('/dashboard/consult/ask');
+    expect(DASHBOARD_CONSULT_CONTROL_PATHS).not.toContain('/dashboard/consult/ask');
+    expect(V0_4_PUBLIC_DASHBOARD_ROUTES.map((route) => route.path)).not.toContain('/dashboard/consult/ask');
   });
 
   test('the card names the ChatGPT model problem in plain words, and the effective model defaults to Claude Sonnet', async () => {

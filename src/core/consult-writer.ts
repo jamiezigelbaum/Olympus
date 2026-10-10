@@ -179,15 +179,26 @@ const CONSULT_WRITER_DIRECT_HEAD = [
   'You are the user\'s own local model. The user asked to send this question to a stronger outside model anonymously, and you write what leaves. Rewrite it into one to three short general questions that would get them the answer they need.',
   'The outside model knows nothing about the user and sees only your questions. They are sent as written, unreviewed, and each one costs money.',
   '',
-  'Always write the questions. Reply null only when nothing general can be asked: the question is empty, or it only asks what the user\'s own records say (a reference number, whether something was sent or paid).',
-  '- Ask for the rules, thresholds, usual practice or reasoning behind the user\'s situation, so they can apply the answer themselves.',
-  '- Never write "the document", "this letter" or "the contract" as if the reader had it; describe the kind of thing instead.',
-  '- Write each question yourself, in plain words.',
+  'Always write the questions. A question about the user\'s own situation is the normal case, not a reason to stop: keep its subject, drop everything that identifies them, and ask for the rules, usual practice or options behind it, so they can apply the answer themselves.',
+  'A question that is already general (a fact, a definition, how something works) is asked as it is, tidied into the form below.',
+  'Reply null only when nothing general can be asked: the question is empty, or it only asks what the user\'s own records say (a reference number, whether something was sent or paid).',
 ];
 
 const CONSULT_WRITER_COMMON_TAIL = [
   'Reply with one JSON object and nothing else: {"questions": ["...", "..."]} with one to three questions, or {"questions": null} to propose nothing.',
 ];
+
+/** Strict's rules, shared by the private answer form and the direct-ask form. */
+const CONSULT_WRITER_STRICT_RULES = [
+  'Strict: ask only general questions; nothing about this user\'s situation leaves.',
+  '- Never relay private content: no names of people, companies, products or projects, no places, employers, dates, amounts, account or reference numbers, titles, file names, health, legal or relationship details, and nothing quoted from the material, the answer or the user.',
+  '- Never name a place, person, organisation or product that the material only implies: a country suggested by a city, a currency or a language, an employer suggested by a job title. Ask about the class of thing instead. Name a country only when the answer genuinely depends on it, and never a city or region.',
+  '- Use bands and orders of magnitude, never exact figures, years or dates.',
+  '- Ask for rules, thresholds, units and the traps between them, never for a verdict on this user\'s situation; the user applies the answer locally. Each question must make sense coming from any stranger.',
+];
+
+const CONSULT_WRITER_STRICT_FORM =
+  'Form: each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary words of the user\'s language only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings or spelled-out letters. At most three questions, on one subject, at most 600 bytes and 80 words in all; do not reuse wording between them.';
 
 /**
  * The Strict level's rules (`general`): general questions only, nothing about
@@ -198,13 +209,9 @@ const CONSULT_WRITER_COMMON_TAIL = [
 export const CONSULT_WRITER_SYSTEM = [
   ...CONSULT_WRITER_COMMON_HEAD,
   '',
-  'Strict: ask only general questions; nothing about this user\'s situation leaves.',
-  '- Never relay private content: no names of people, companies, products or projects, no places, employers, dates, amounts, account or reference numbers, titles, file names, health, legal or relationship details, and nothing quoted from the material, the answer or the user.',
-  '- Never name a place, person, organisation or product that the material only implies: a country suggested by a city, a currency or a language, an employer suggested by a job title. Ask about the class of thing instead. Name a country only when the answer genuinely depends on it, and never a city or region.',
-  '- Use bands and orders of magnitude, never exact figures, years or dates.',
-  '- Ask for rules, thresholds, units and the traps between them, never for a verdict on this user\'s situation; the user applies the answer locally. Each question must make sense coming from any stranger.',
+  ...CONSULT_WRITER_STRICT_RULES,
   '',
-  'Form: each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary words of the user\'s language only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings or spelled-out letters. At most three questions, on one subject, at most 600 bytes and 80 words in all; do not reuse wording between them.',
+  CONSULT_WRITER_STRICT_FORM,
   '',
   'Shapes, not templates (never reuse their topics or words):',
   '- Missing: whether a new antibiotic clashes with a blood thinner. Ask: "Which interactions are usually checked when an antibiotic is prescribed with a blood thinner?"',
@@ -241,10 +248,26 @@ export const CONSULT_WRITER_SYSTEM_UNNAMED = [
   ...CONSULT_WRITER_COMMON_TAIL,
 ].join('\n');
 
-/** Strict's rules for a direct ask: the same rules, shapes and form, under the direct head. */
+/**
+ * Strict's rules for a direct ask: the same rules and form under the direct
+ * head, with shapes that show a question about the user's own situation
+ * being generalised (the built-in writer otherwise declines those).
+ */
 export const CONSULT_WRITER_SYSTEM_DIRECT = [
   ...CONSULT_WRITER_DIRECT_HEAD,
-  ...CONSULT_WRITER_SYSTEM.split('\n').slice(CONSULT_WRITER_COMMON_HEAD.length),
+  '',
+  ...CONSULT_WRITER_STRICT_RULES,
+  '',
+  CONSULT_WRITER_STRICT_FORM,
+  '',
+  'Shapes, not templates (never reuse their topics or words):',
+  '- Asked: what to do about the landlord of the user\'s shop raising the rent by a large amount next year. Ask: "What options does a small business tenant usually have when a landlord proposes a large rent increase?"',
+  '- Asked: how to negotiate a raise at a named employer after a few years. Ask: "How is a pay rise usually negotiated after several years in the same role?"',
+  '- Asked: whether the antibiotic just prescribed clashes with the user\'s blood thinner. Ask: "Which interactions are usually checked when an antibiotic is prescribed with a blood thinner?"',
+  '- Asked: which city is the capital of a named country. Already general; ask it as it is: "Which city is the capital of that country?" with the country named, since the answer depends on it.',
+  '- Asked: the user\'s own booking reference. Reply null: only their own records hold it.',
+  '',
+  ...CONSULT_WRITER_COMMON_TAIL,
 ].join('\n');
 
 /** The writer's rules for a level: Strict (`general`, or its direct-ask form) or Standard (`unnamed`). */

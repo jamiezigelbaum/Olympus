@@ -34,14 +34,11 @@ import {
   CONSULT_SETTINGS_MAX_BYTES,
   DEFAULT_CONSULT_SETTINGS,
   __consultSettingsTestHooks,
-  bindConsultJobPolicy,
   consultGateOptionsFromSettings,
-  consultOutsideHelpEnabled,
   consultSettingsPath,
   parseConsultSettings,
   parseConsultSettingsText,
   readConsultSettings,
-  recheckConsultJobPolicy,
 } from '../src/core/consult-settings.ts';
 import { operations } from '../src/core/operations.ts';
 
@@ -207,7 +204,7 @@ describe('parseConsultSettingsText rejects duplicate keys before the schema', ()
   test('"enabled":false,"enabled":true is refused, not read as on', () => {
     const read = parseConsultSettingsText(body('"enabled":false,"enabled":true'));
     expect(read).toMatchObject({ state: 'invalid', reason: 'duplicate_key' });
-    expect(consultOutsideHelpEnabled(read)).toBe(false);
+    expect(read.settings.enabled).toBe(false);
   });
   test('an escaped spelling of the same key is a duplicate', () => {
     expect(parseConsultSettingsText(body('"enabled":false,"\\u0065nabled":true'))).toMatchObject({ reason: 'duplicate_key' });
@@ -237,16 +234,16 @@ describe('readConsultSettings fails closed', () => {
     placeSettings(home, VALID);
     const read = readConsultSettings({ env: { HOME: home } });
     expect(read.state).toBe('valid');
-    expect(consultOutsideHelpEnabled(read)).toBe(true);
+    expect(read.settings.enabled).toBe(true);
     expect(consultGateOptionsFromSettings(read.settings)).toEqual({ languages: ['en', 'pt-BR'], domains: VALID.domains, level: 'unnamed' });
   });
 
   test('reads at each use: a change is visible to the next read with no restart', () => {
     const home = tempHome();
     const location = { env: { HOME: home } };
-    expect(consultOutsideHelpEnabled(readConsultSettings(location))).toBe(false);
+    expect(readConsultSettings(location).settings.enabled).toBe(false);
     placeSettings(home, VALID);
-    expect(consultOutsideHelpEnabled(readConsultSettings(location))).toBe(true);
+    expect(readConsultSettings(location).settings.enabled).toBe(true);
     placeSettings(home, { ...VALID, revision: 4, enabled: false });
     expect(readConsultSettings(location)).toMatchObject({ state: 'valid', settings: { revision: 4, enabled: false } });
   });
@@ -274,8 +271,7 @@ describe('readConsultSettings fails closed', () => {
       const read = readConsultSettings({ env: { HOME: home } });
       expect(read).toMatchObject({ state: 'invalid', reason });
       expect(read.settings).toBe(DEFAULT_CONSULT_SETTINGS);
-      expect(consultOutsideHelpEnabled(read)).toBe(false);
-      expect(bindConsultJobPolicy(read).outsideHelp).toBe(false);
+      expect(read.settings.enabled).toBe(false);
     });
   }
 
@@ -342,7 +338,7 @@ describe('the file examined is the file read', () => {
     expect(bytesRead).toBe(CONSULT_SETTINGS_MAX_BYTES + 1);
     expect(statSync(settingsFile(home)).size).toBeGreaterThan(4 * CONSULT_SETTINGS_MAX_BYTES);
     expect(read).toMatchObject({ state: 'invalid', reason: 'too_large', settings: DEFAULT_CONSULT_SETTINGS });
-    expect(consultOutsideHelpEnabled(read)).toBe(false);
+    expect(read.settings.enabled).toBe(false);
   });
 
   test('a file that grows past the limit after open is too large', () => {
@@ -362,95 +358,8 @@ describe('settings location honours the injected HOME', () => {
   });
 });
 
-describe('per-job binding', () => {
-  test('Standard\'s mode and instruction are bound: a change refuses as stale, even at the same revision', () => {
-    const read = (extra: Record<string, unknown>) => ({ state: 'valid' as const, settings: parseConsultSettings({ ...VALID, ...extra })! });
-    const policy = bindConsultJobPolicy(read({ standardMode: 'custom', standardInstruction: 'One.' }));
-    expect(policy.standard).toEqual({ mode: 'custom', instruction: 'One.' });
-    expect(recheckConsultJobPolicy(policy, read({ standardMode: 'custom', standardInstruction: 'One.' }))).toEqual({ ok: true });
-    expect(recheckConsultJobPolicy(policy, read({ standardMode: 'custom', standardInstruction: 'Two.' }))).toEqual({ ok: false, reason: 'settings_stale' });
-    expect(recheckConsultJobPolicy(policy, read({ standardMode: 'as_written' }))).toEqual({ ok: false, reason: 'settings_stale' });
-  });
-
-  test('a job keeps the policy it bound and authorizes only at that revision', () => {
-    const home = tempHome();
-    const location = { env: { HOME: home } };
-    placeSettings(home, VALID);
-    const policy = bindConsultJobPolicy(readConsultSettings(location));
-    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false, level: 'unnamed', writer: null, standard: { mode: 'light_cleanup', instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION } });
-    expect(Object.isFrozen(policy) && Object.isFrozen(policy.languages) && Object.isFrozen(policy.domains)).toBe(true);
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: true });
-
-    // A later change does not alter the bound policy, and it refuses.
-    placeSettings(home, { ...VALID, revision: 4, languages: ['en'] });
-    expect(policy.languages).toEqual(['en', 'pt-BR']);
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
-
-    // A different revision is stale even when it also turned outside help off.
-    placeSettings(home, { ...VALID, revision: 5, enabled: false });
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
-
-    // A writer named by hand at the bound revision is stale too: the writer selects the gate net.
-    placeSettings(home, { ...VALID, writer: { baseUrl: 'http://192.168.1.20:8090/v1', model: 'home/model' } });
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
-
-    // Off at the bound revision (not something a compare-and-swap writer produces) is still off.
-    placeSettings(home, { ...VALID, enabled: false });
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_off' });
-
-    rmSync(settingsFile(home));
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_absent' });
-
-    placeFile(home, 'not json');
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_invalid' });
-  });
-
-  test('the level is bound: a level change refuses as stale, even at the same revision (a hand edit)', () => {
-    const home = tempHome();
-    const location = { env: { HOME: home } };
-    placeSettings(home, { ...VALID, level: 'general' });
-    const policy = bindConsultJobPolicy(readConsultSettings(location));
-    expect(policy.level).toBe('general');
-    placeSettings(home, { ...VALID, level: 'unnamed' });
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
-    placeSettings(home, { ...VALID, revision: 4, level: 'unnamed' });
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
-    // A file without the key reads as unnamed (Standard): a job bound to general refuses, one bound to unnamed authorizes.
-    const { level: _level, ...old } = VALID;
-    placeSettings(home, old);
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
-    placeSettings(home, { ...VALID, level: 'unnamed' });
-    const unnamed = bindConsultJobPolicy(readConsultSettings(location));
-    placeSettings(home, old);
-    expect(recheckConsultJobPolicy(unnamed, readConsultSettings(location))).toEqual({ ok: true });
-  });
-
-  test('turning outside help off and on again between bind and recheck refuses', () => {
-    const home = tempHome();
-    const location = { env: { HOME: home } };
-    placeSettings(home, VALID);
-    const policy = bindConsultJobPolicy(readConsultSettings(location));
-    placeSettings(home, { ...VALID, revision: 4, enabled: false });
-    placeSettings(home, { ...VALID, revision: 5, enabled: true });
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
-  });
-
-  test('a job bound while outside help was off never consults, even if it is turned on later', () => {
-    const home = tempHome();
-    const location = { env: { HOME: home } };
-    const policy = bindConsultJobPolicy(readConsultSettings(location));
-    expect(policy).toMatchObject({ settingsRevision: 0, outsideHelp: false });
-    placeSettings(home, VALID);
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'bound_off' });
-  });
-});
-
 // Design §A.9: changed only on the Mac, never from ChatGPT, an agent tool or
-// the relay. No writer ships yet. The readers: doctor (its status line), and
-// since stage C4a the private-answer jobs engine, which binds each job's
-// policy at creation (`bindConsultJobPolicy`) through the production wiring
-// in the worker server. Both only read; the list below is exact so a new
-// importer is a reviewed decision.
+// the relay. The list below is exact so a new importer is a reviewed decision.
 describe('the settings module stays off the hosted surfaces', () => {
   const SETTINGS_MODULE = 'src/core/consult-settings.ts';
   const SETTINGS_IMPORTERS: readonly string[] = [
@@ -458,10 +367,8 @@ describe('the settings module stays off the hosted surfaces', () => {
     // Ask anonymously (owner decision 2026-10-10) reads Standard's mode for
     // the typed question; it only reads.
     'src/core/consult-ask.ts',
-    // The C4b orchestrator re-reads the settings at the gate and inside
-    // final authorization (recheckConsultJobPolicy); it only reads.
-    'src/workers/chatgpt/consult-orchestrator.ts',
-    'src/workers/chatgpt/private-answer-jobs.ts',
+    // The worker server wires ask_anonymously: the settings read, the zkAPI
+    // model for the caller and the writer's deadline; it only reads.
     'src/workers/email-source/server.ts',
     // The C5 writer (its own module) reuses the reader's parser and re-reads
     // the file under its lease for compare-and-swap; it only writes through

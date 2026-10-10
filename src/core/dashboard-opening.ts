@@ -8,6 +8,8 @@
  * carries a single-use 15-minute ticket bound to that origin (port included;
  * core/dashboard-launch.ts), never the worker token.
  */
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from './dashboard-launch.ts';
 import { DASHBOARD_LAUNCH_OPEN_KEY, openTargetToken, type OpenTarget } from './open-targets.ts';
 import { OperationError } from './operation-error.ts';
@@ -30,6 +32,33 @@ export interface DashboardOpeningMintOptions {
  * the dashboard's worker-token gate uses.
  */
 export const OLYMPUS_PLUGIN_BIN_HINT = '<rootDir>/bin/olympus';
+
+/**
+ * The command to print: plain `olympus` when that is on PATH (the reader can
+ * type it), else this install's own bin/olympus, else the placeholder.
+ * Read per call, never at import (bundled dist stays lean). This file runs as
+ * src/core/*.ts and bundled as dist/*.js, so the install root is one or two
+ * levels up.
+ */
+export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
+  const env = input.env ?? process.env;
+  const isExecutable = (path: string): boolean => {
+    try {
+      accessSync(path, fsConstants.X_OK);
+      return statSync(path).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const dirs = (env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':').filter(Boolean);
+  if (dirs.some((dir) => isExecutable(join(dir, 'olympus')))) return 'olympus';
+  const candidates = input.pluginBin !== undefined
+    ? [input.pluginBin]
+    : [resolve(import.meta.dir, '..', 'bin', 'olympus'), resolve(import.meta.dir, '..', '..', 'bin', 'olympus')];
+  const own = candidates.find(isExecutable);
+  if (own && !/\s/.test(own)) return own;
+  return OLYMPUS_PLUGIN_BIN_HINT;
+}
 
 const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
 
@@ -84,7 +113,7 @@ export async function mintDashboardOpeningUrl(
     throw new OperationError(
       'config_error',
       'No worker auth token is configured, so there is nothing to unlock.',
-      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+      `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
     );
   }
   const fetchImpl = dependencies.fetchImpl ?? fetch;
@@ -100,14 +129,14 @@ export async function mintDashboardOpeningUrl(
     throw new OperationError(
       'email_unreachable',
       'The configured Olympus worker did not answer the opening request.',
-      `Start the worker (${OLYMPUS_PLUGIN_BIN_HINT} worker status) and run this again.`,
+      `Start the worker (${olympusCommandHint()} worker status) and run this again.`,
     );
   }
   if (!response.ok) {
     throw new OperationError(
       'email_unreachable',
       `The configured Olympus worker refused the opening request with HTTP ${response.status}.`,
-      `Check ${OLYMPUS_PLUGIN_BIN_HINT} worker status, then run this again.`,
+      `Check ${olympusCommandHint()} worker status, then run this again.`,
     );
   }
   let ticket: unknown;

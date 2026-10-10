@@ -7421,7 +7421,8 @@ var init_vocabulary = __esm(() => {
     },
     linkExpires: "link expires in {n} min",
     linkExpired: "link expired",
-    howOnMac: "Fix this on your computer",
+    howOnComputer: "Do this on your computer",
+    howOnComputerFix: "Fix this on your computer",
     remote: {
       title: "Olympus runs on a server, so this opens on your computer through a secure tunnel.",
       askLine: "Ask your assistant:",
@@ -20336,8 +20337,29 @@ init_venice_models();
 init_public_surface();
 
 // src/core/dashboard-opening.ts
+import { accessSync as accessSync5, constants as fsConstants2, statSync as statSync14 } from "node:fs";
+import { join as join25, resolve as resolve3 } from "node:path";
 init_operation_error();
 var OLYMPUS_PLUGIN_BIN_HINT = "<rootDir>/bin/olympus";
+function olympusCommandHint(input = {}) {
+  const env = input.env ?? process.env;
+  const isExecutable = (path) => {
+    try {
+      accessSync5(path, fsConstants2.X_OK);
+      return statSync14(path).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const dirs = (env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").filter(Boolean);
+  if (dirs.some((dir) => isExecutable(join25(dir, "olympus"))))
+    return "olympus";
+  const candidates = input.pluginBin !== undefined ? [input.pluginBin] : [resolve3(import.meta.dir, "..", "bin", "olympus"), resolve3(import.meta.dir, "..", "..", "bin", "olympus")];
+  const own = candidates.find(isExecutable);
+  if (own && !/\s/.test(own))
+    return own;
+  return OLYMPUS_PLUGIN_BIN_HINT;
+}
 var DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 1e4;
 function workerRootBaseUrl(baseUrl) {
   let url;
@@ -20360,7 +20382,7 @@ function workerRootBaseUrl(baseUrl) {
 }
 async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
   if (!token) {
-    throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
+    throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
   }
   const fetchImpl = dependencies.fetchImpl ?? fetch;
   let response;
@@ -20372,10 +20394,10 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
       signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
     });
   } catch {
-    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${OLYMPUS_PLUGIN_BIN_HINT} worker status) and run this again.`);
+    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${olympusCommandHint()} worker status) and run this again.`);
   }
   if (!response.ok) {
-    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${OLYMPUS_PLUGIN_BIN_HINT} worker status, then run this again.`);
+    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${olympusCommandHint()} worker status, then run this again.`);
   }
   let ticket;
   try {

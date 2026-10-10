@@ -1,8 +1,7 @@
 /**
- * The panel payload contract: one authoritative set of limits, a total
- * serializer and an exact-size padder, enforced at the jobs boundary before
- * first delivery on every install (design docs/design/frontier-consult-lane.md
- * §A.5.1, AD-2; stage C4a).
+ * The panel payload contract: one authoritative set of limits and a total
+ * serializer, enforced at the jobs boundary before first delivery on every
+ * install.
  *
  * Limits (after normalization), and what they tighten against the previous
  * jobs boundary on every install:
@@ -22,15 +21,14 @@
  * above the contract is clamped here.
  *
  * The serializer is total: every input yields JSON whose fields sit inside
- * their byte budgets (below), so the padded envelope always fits. Lone
- * surrogates become U+FFFD; control, bidirectional-override and zero-width
- * characters are stripped; URLs go through `new URL().href` (non-https
- * dropped); a field over its budget is cut at a code-point boundary with "…"
- * inside the budget; list entries beyond their count are dropped. The padder
- * pads to exactly PRIVATE_ANSWER_ENVELOPE_BYTES and rejects anything larger:
- * it never grows the envelope and never truncates JSON into something invalid.
+ * their byte budgets (below). Lone surrogates become U+FFFD; control,
+ * bidirectional-override and zero-width characters are stripped; URLs go
+ * through `new URL().href` (non-https dropped); a field over its budget is cut
+ * at a code-point boundary with "…" inside the budget; list entries beyond
+ * their count are dropped. The sealed plaintext is then bucket-padded
+ * (private-answer-crypto.ts).
  */
-import type { PrivateAnswerCitation, PrivateAnswerEnvelopeV1, PrivateAnswerOutsideBlockV1, PrivateAnswerPlaintextV1 } from './private-answer-contract.ts';
+import type { PrivateAnswerCitation, PrivateAnswerPlaintextV1 } from './private-answer-contract.ts';
 
 export const PRIVATE_ANSWER_PAYLOAD_LIMITS = Object.freeze({
   /** UTF-16 code units of the answer. */
@@ -46,35 +44,14 @@ export const PRIVATE_ANSWER_PAYLOAD_LIMITS = Object.freeze({
   gaps: 4,
   /** UTF-16 code units of one gap line. */
   gapUnits: 300,
-  /** Serialized UTF-8 bytes (quotes included) of the outside block's text, question and route label. */
-  outsideTextBytes: 4_096,
-  outsideQuestionBytes: 1_280,
-  outsideRouteBytes: 64,
-  /** The outside text's line policy (design §A.6). */
-  outsideLines: 40,
-  outsideLineChars: 240,
 });
 
-/** Serialized UTF-8 byte budgets per part (design §A.5.1). Their sum is `total`. */
+/** Serialized UTF-8 byte budgets per part: the answer, each citation, each gap line. */
 export const PRIVATE_ANSWER_BYTE_BUDGETS = Object.freeze({
   answer: 8_192,
   citation: 4_096,
   gap: 1_024,
-  outside: 6_144,
-  scalars: 512,
-  total: 35_328,
 });
-
-/** Every follow-up envelope is padded to exactly this many bytes of plaintext (36 KiB). */
-export const PRIVATE_ANSWER_ENVELOPE_BYTES = 36_864;
-
-/** Thrown by the padder when a plaintext is larger than the envelope: a bug upstream, failed closed by the caller. */
-export class PrivateAnswerEnvelopeOverflowError extends Error {
-  constructor(readonly bytes: number) {
-    super(`private answer plaintext of ${bytes} bytes exceeds the ${PRIVATE_ANSWER_ENVELOPE_BYTES}-byte envelope`);
-    this.name = 'PrivateAnswerEnvelopeOverflowError';
-  }
-}
 
 const CUT_MARK = '…';
 /**
@@ -164,47 +141,6 @@ export function fitJsonString(text: string, budget: number): { text: string; cut
   return { text: kept + CUT_MARK, cut: true };
 }
 
-/**
- * The outside block's text under the line policy (design §A.6): line endings
- * normalized, control and bidirectional characters stripped, runs of blank
- * lines collapsed to one, at most 40 lines of at most 240 characters, and at
- * most 4,096 serialized bytes with "…" inside. `cut` says whether anything was
- * shortened.
- */
-export function boundOutsideText(value: unknown): { text: string; cut: boolean } {
-  if (typeof value !== 'string') return { text: '', cut: false };
-  const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
-  const normalized = wellFormed(value).replace(/\r\n?/g, '\n').replace(UNSAFE, '').replace(WHITESPACE_CONTROLS, ' ');
-  let cut = false;
-  const lines: string[] = [];
-  let blank = false;
-  for (const raw of normalized.split('\n')) {
-    const line = raw.replace(/\s+$/, '');
-    if (line === '') {
-      // Leading blank lines and runs of blank lines collapse (normalization, not a cut).
-      if (blank || lines.length === 0) continue;
-      blank = true;
-      lines.push('');
-      continue;
-    }
-    blank = false;
-    const points = [...line];
-    if (points.length > limits.outsideLineChars) {
-      cut = true;
-      lines.push(points.slice(0, limits.outsideLineChars - 1).join('') + CUT_MARK);
-    } else {
-      lines.push(line);
-    }
-  }
-  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-  if (lines.length > limits.outsideLines) {
-    cut = true;
-    lines.length = limits.outsideLines;
-  }
-  const fitted = fitJsonString(lines.join('\n'), limits.outsideTextBytes);
-  return { text: fitted.text, cut: cut || fitted.cut };
-}
-
 /** A citation as the model returned it, normalized to the contract; `localPath` is kept beside it for the open-token map. */
 export interface PreparedPrivateAnswer {
   answer: string;
@@ -287,7 +223,7 @@ function fitCitation(citation: PrivateAnswerCitation): PrivateAnswerCitation {
   return out;
 }
 
-/** The first-answer fields inside their byte budgets, in the contract's key order: what a follow-up job retains. */
+/** The first-answer fields inside their byte budgets, in the contract's key order. */
 export function fitFirstAnswer(answer: { answer: string; citations: readonly PrivateAnswerCitation[]; unanswered?: readonly string[] | undefined }): {
   answer: string;
   citations: PrivateAnswerCitation[];
@@ -308,66 +244,10 @@ export function fitFirstAnswer(answer: { answer: string; citations: readonly Pri
   return { answer: text, citations, ...(unanswered.length > 0 ? { unanswered } : {}) };
 }
 
-/** The outside block inside its byte budget (text, then question, then route are cut; the state and level are always kept): what a job retains. */
-export function fitOutsideBlock(block: PrivateAnswerOutsideBlockV1): PrivateAnswerOutsideBlockV1 {
-  const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
-  const state: PrivateAnswerOutsideBlockV1['state'] = block.state === 'pending' || block.state === 'appended' || block.state === 'paused' ? block.state : 'idle';
-  const out: PrivateAnswerOutsideBlockV1 = { state };
-  if (state === 'appended') {
-    const text = boundOutsideText(block.text);
-    out.text = text.text;
-    if (text.cut || block.cut === true) out.cut = true;
-    const question = cleanTextField(block.question, limits.outsideQuestionBytes);
-    if (question) out.question = fitJsonString(question, limits.outsideQuestionBytes).text;
-    const route = cleanTextField(block.route, limits.outsideRouteBytes);
-    if (route) out.route = fitJsonString(route, limits.outsideRouteBytes).text;
-    // A closed value (at most 19 bytes serialized): never cut, never anything else.
-    if (block.level === 'unnamed' || block.level === 'general') out.level = block.level;
-  }
-  const budget = PRIVATE_ANSWER_BYTE_BUDGETS.outside;
-  const over = () => utf8Bytes(JSON.stringify(out)) - budget;
-  if (over() > 0 && out.text !== undefined) {
-    out.text = fitJsonString(out.text, Math.max(0, utf8Bytes(JSON.stringify(out.text)) - over())).text;
-    out.cut = true;
-  }
-  if (over() > 0) delete out.question;
-  if (over() > 0) delete out.route;
-  return out;
-}
-
 /**
- * Today's plaintext (`{v, answer, citations, unanswered?}`) serialized under
- * the contract's limits and byte budgets. Jobs outside the follow-up protocol
- * seal this, bucket-padded, exactly as before.
+ * The plaintext (`{v, answer, citations, unanswered?}`) serialized under the
+ * contract's limits and byte budgets. Every job seals this, bucket-padded.
  */
 export function serializePrivateAnswerPlaintext(plaintext: PrivateAnswerPlaintextV1): string {
   return JSON.stringify({ v: 1, ...fitFirstAnswer(plaintext) });
-}
-
-/**
- * A follow-up envelope (plaintext version 1, extended: design §A.5.2)
- * serialized under the contract. Every field sits inside its budget, so the
- * result is at most PRIVATE_ANSWER_BYTE_BUDGETS.total bytes.
- */
-export function serializePrivateAnswerEnvelope(envelope: PrivateAnswerEnvelopeV1): string {
-  const rev = Number.isSafeInteger(envelope.rev) && envelope.rev >= 0 ? envelope.rev : 0;
-  const followSeconds = Number.isSafeInteger(envelope.followSeconds) && envelope.followSeconds >= 0 ? envelope.followSeconds : 0;
-  const outside = fitOutsideBlock(envelope.outside ?? { state: 'idle' });
-  if (envelope.state === 'withdrawn') {
-    return JSON.stringify({ v: 1, rev, state: 'withdrawn', followSeconds, outside });
-  }
-  const answer = fitFirstAnswer({ answer: envelope.answer ?? '', citations: envelope.citations ?? [], unanswered: envelope.unanswered });
-  return JSON.stringify({ v: 1, rev, state: 'answer', ...answer, followSeconds, outside });
-}
-
-/**
- * Pads a JSON plaintext with trailing spaces to exactly
- * PRIVATE_ANSWER_ENVELOPE_BYTES (UTF-8). JSON.parse ignores trailing
- * whitespace, so the panel reads the same value. A larger plaintext throws:
- * it is never grown and never cut.
- */
-export function padPrivateAnswerEnvelope(json: string): string {
-  const bytes = utf8Bytes(json);
-  if (bytes > PRIVATE_ANSWER_ENVELOPE_BYTES) throw new PrivateAnswerEnvelopeOverflowError(bytes);
-  return json + ' '.repeat(PRIVATE_ANSWER_ENVELOPE_BYTES - bytes);
 }

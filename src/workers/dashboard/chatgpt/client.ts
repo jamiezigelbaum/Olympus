@@ -507,19 +507,28 @@ export function chatgptDashboardClient(
     return host === 'olympusplugin.ai' || host === 'www.olympusplugin.ai' ? parsed.href : '';
   }
 
-  /** "Fix this on your computer": the fix's open page, beside its control (not on the inline card). */
+  /**
+   * Beside a real problem (a Needs you item, the blocker) the help link says
+   * "Fix this on your computer"; anywhere else nothing is broken, the control
+   * only works on the computer: "Do this on your computer".
+   */
+  function howWords(key: string): string {
+    return key === 'blocker' || key.indexOf('need:') === 0 ? P.howOnComputerFix : P.howOnComputer;
+  }
+
+  /** The fix's open page, beside its control (not on the inline card). */
   function howLink(fix: Any, key: string, source?: { id: string; label: string }): HTMLElement | null {
     const href = helpHref(fix && fix.href);
     if (!href || compact()) return null;
     if (remoteMode()) {
       // Remote mode: the same words open the tunnel instructions in place.
-      const toggle = button(P.howOnMac, key + ':how', () => toggleRemote(key), 'plain');
+      const toggle = button(howWords(key), key + ':how', () => toggleRemote(key), 'plain');
       toggle.className = 'btn link';
       toggle.setAttribute('aria-expanded', state.open['remote:' + key] ? 'true' : 'false');
       const wrap = add(el('span', 'fix'), toggle);
       return add(wrap, remoteBox(key, href, source));
     }
-    const link = button(P.howOnMac, key + ':how', () => openLink(href), 'plain');
+    const link = button(howWords(key), key + ':how', () => openLink(href), 'plain');
     link.className = 'btn link';
     return link;
   }
@@ -690,11 +699,11 @@ export function chatgptDashboardClient(
       // mode it shows the tunnel instructions in place: the open page's
       // olympus:// would wake Olympus on this computer, not the server's.
       if (remoteMode()) {
-        const toggle = button(P.howOnMac, key, () => toggleRemote(key), style);
+        const toggle = button(howWords(key), key, () => toggleRemote(key), style);
         toggle.setAttribute('aria-expanded', state.open['remote:' + key] ? 'true' : 'false');
         return add(wrap, toggle, remoteBox(key, helpHref(fix.href), source));
       }
-      return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
+      return add(wrap, button(howWords(key), key, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {
       if (!allowConfirm) return wrap;

@@ -2,7 +2,7 @@
 
 Owner decision, 2026-10-09: a "do this on your computer" action in the
 ChatGPT panel (Connect for X bookmarks, Readwise, Telegram and WhatsApp, and
-every "Fix this on your computer" link) opens Olympus on the computer
+every "Fix this on your computer" or "Do this on your computer" link) opens Olympus on the computer
 directly, with no Terminal step. Keys stay on the computer; the relay stays a
 pass-through and is not involved.
 

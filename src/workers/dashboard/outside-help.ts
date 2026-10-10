@@ -85,8 +85,9 @@ export type DashboardOutsideHelpRoute =
 
 /**
  * Who writes the outside question (owner decision 2026-10-10): the built-in
- * model, or the owner's own model server; the zkAPI model for ChatGPT
- * questions; and the writer check, run only on the owner's click.
+ * model, or the owner's own model server; the zkAPI model for questions from
+ * ChatGPT and the one for questions from Claude; and the writer check, run
+ * only on the owner's click.
  */
 export interface DashboardOutsideHelpWriter {
   /** The owner's own writer; absent: the built-in model writes. The key itself is never here. */
@@ -94,8 +95,9 @@ export interface DashboardOutsideHelpWriter {
   readonly chatgptFrontierModel?: string;
   /** The model ChatGPT questions go to now (the choice, else Claude Sonnet). */
   readonly effectiveChatgptModel?: string;
-  /** The zkAPI route's own model (the dashboard's own questions use it). */
-  readonly routeModel?: string;
+  readonly claudeFrontierModel?: string;
+  /** The model questions from Claude (Claude Code, Claude Desktop) go to now (the choice, else the OpenAI default). */
+  readonly effectiveClaudeModel?: string;
   /** The ChatGPT model was missing from the live zkAPI listing at the last consult. */
   readonly modelProblem?: { readonly at: string; readonly message: string };
   /** Whether this Olympus can run the check. */
@@ -136,15 +138,6 @@ export interface DashboardOutsideHelpStatus {
     readonly instruction?: string;
     readonly maxChars: number;
   };
-  /** "Ask anonymously": absent when this Olympus cannot ask. */
-  readonly ask?: {
-    readonly maxChars: number;
-    readonly state:
-      | { readonly state: 'idle' }
-      | { readonly state: 'running'; readonly question: string }
-      | { readonly state: 'done'; readonly at: string; readonly question: string; readonly sent: string; readonly reply: string; readonly route: string }
-      | { readonly state: 'failed'; readonly at: string; readonly question: string; readonly message: string; readonly sent?: string };
-  };
 }
 
 /** The query flag the page answers to; same /dashboard path and auth as every page. */
@@ -160,12 +153,10 @@ export const DASHBOARD_OUTSIDE_HELP_PATHS = {
   recover: '/dashboard/consult/recover',
   abandon: '/dashboard/consult/abandon',
   installTools: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
-  /** The owner's own writer model and the zkAPI model for ChatGPT questions (consult.json). */
+  /** The owner's own writer model and the zkAPI models for questions from ChatGPT and from Claude (consult.json). */
   writer: '/dashboard/consult/writer',
   /** How Standard prepares a question (consult.json `standardMode`, `standardInstruction`). */
   standard: '/dashboard/consult/standard',
-  /** "Ask anonymously": one typed question through Standard's preparation and zkAPI. */
-  ask: '/dashboard/consult/ask',
   /** The writer check: started only by the owner's click; sends nothing to zkAPI. */
   writerTest: '/dashboard/consult/writer/test',
 } as const;
@@ -260,8 +251,6 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   parts.push(renderLevel(status, canEdit));
   if (status.standard) parts.push(renderStandard(status.standard, status.settings.state === 'invalid' ? false : canEdit));
   if (status.writer?.modelProblem) parts.push(`<p class="pnote ohwarn" data-outside-model-problem>${escapeHtml(status.writer.modelProblem.message)}</p>`);
-  // 1c. Ask anonymously, from the card itself.
-  if (status.ask) parts.push(renderAsk(status.ask, canEdit && route.state === 'configured'));
 
   // 2. Problems, one list, each line with its fix.
   parts.push(renderProblems(status, canEdit));
@@ -552,17 +541,23 @@ function openAiModel(model: string | undefined): boolean {
   return typeof model === 'string' && /^openai\//i.test(model.trim());
 }
 
+/** True when a model id names an Anthropic model (the zkAPI catalog's `anthropic/` prefix). */
+function anthropicModel(model: string | undefined): boolean {
+  return typeof model === 'string' && /^anthropic\//i.test(model.trim());
+}
+
 /**
  * "Who writes the question": the built-in model by default, or the owner's
- * own model server; the zkAPI model for ChatGPT questions; and the test
- * button, which runs only when clicked. No gate on the model: the copy only
- * says a substantial model works best.
+ * own model server; the zkAPI models for questions from ChatGPT and from
+ * Claude; and the test button, which runs only when clicked. No gate on the
+ * model: the copy only says a substantial model works best.
  */
 function renderWriter(writer: DashboardOutsideHelpWriter, canEdit: boolean): string {
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
   const C = W.writer;
   const choice = writer.choice;
-  const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel ?? writer.routeModel;
+  const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel;
+  const effectiveClaudeModel = writer.effectiveClaudeModel ?? writer.claudeFrontierModel;
   const parts: string[] = [`<p class="pnote">${escapeHtml(C.intro)}</p>`];
   parts.push(`<p class="pnote" data-outside-writer-current="${choice ? 'own' : 'built_in'}">${escapeHtml(choice ? fill(C.currentOwn, { model: choice.model, address: choice.baseUrl }) : C.currentBuiltIn)}</p>`);
   if (choice?.secretRef && choice.keyPresent === false) parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml(fill(C.keyMissing, { secretRef: choice.secretRef }))}</p>`);
@@ -575,9 +570,13 @@ function renderWriter(writer: DashboardOutsideHelpWriter, canEdit: boolean): str
     + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml(choice?.secretRef ?? '')}"${disabled}>`
     + `<p class="pnote ohsmall">${escapeHtml(C.where)}</p>`
     + `<label class="plabel" for="outside-frontier-model">${escapeHtml(C.frontierModel)}</label>`
-    + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml(writer.effectiveChatgptModel ?? writer.routeModel ?? '')}" value="${escapeHtml(writer.chatgptFrontierModel ?? '')}"${disabled}>`
+    + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml(writer.effectiveChatgptModel ?? '')}" value="${escapeHtml(writer.chatgptFrontierModel ?? '')}"${disabled}>`
     + `<p class="pnote ohsmall">${escapeHtml(C.frontierHint)}</p>`
     + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml(fill(C.openAiNote, { model: effectiveModel ?? '' }))}</p>` : '')
+    + `<label class="plabel" for="outside-claude-frontier-model">${escapeHtml(C.claudeFrontierModel)}</label>`
+    + `<input class="keyfield ptextline" id="outside-claude-frontier-model" name="claude_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml(writer.effectiveClaudeModel ?? '')}" value="${escapeHtml(writer.claudeFrontierModel ?? '')}"${disabled}>`
+    + `<p class="pnote ohsmall">${escapeHtml(C.claudeFrontierHint)}</p>`
+    + (anthropicModel(effectiveClaudeModel) ? `<p class="pnote ohwarn" data-outside-writer-anthropic>${escapeHtml(fill(C.anthropicNote, { model: effectiveClaudeModel ?? '' }))}</p>` : '')
     + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml(C.save)}</button>`
     + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled}>${escapeHtml(C.useBuiltIn)}</button>` : '')
     + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
@@ -607,32 +606,6 @@ function renderStandard(standard: NonNullable<DashboardOutsideHelpStatus['standa
     + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml(text)}</textarea>`
     + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml(C.save)}</button></div>`
     + `<span class="actmsg" data-action-message role="status"></span></form>`;
-}
-
-/** "Ask anonymously": the typed question, and the last answer with exactly what was sent. */
-function renderAsk(ask: NonNullable<DashboardOutsideHelpStatus['ask']>, canEdit: boolean): string {
-  const C = W.ask;
-  const state = ask.state;
-  const disabled = canEdit && state.state !== 'running' ? '' : ' disabled aria-disabled="true"';
-  const parts: string[] = [`<div class="sect">${escapeHtml(C.title)}</div>`, `<p class="pnote">${escapeHtml(C.intro)}</p>`];
-  parts.push(`<form class="ohform" data-outside-form="ask">`
-    + `<label class="plabel" for="outside-ask-question">${escapeHtml(C.label)}</label>`
-    + `<textarea class="keyfield" id="outside-ask-question" name="question" rows="3" maxlength="${ask.maxChars}"${disabled}>${escapeHtml(state.state === 'idle' ? '' : state.question)}</textarea>`
-    + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml(C.send)}</button></div>`
-    + `<span class="actmsg" data-action-message role="status"></span></form>`);
-  if (state.state === 'running') parts.push(`<p class="pnote" role="status">${escapeHtml(C.running)}</p>`);
-  if (state.state === 'done') {
-    parts.push(`<div class="sect">${escapeHtml(C.replyTitle)}</div><p class="pnote" data-outside-ask-reply>${escapeHtml(state.reply)}</p>`);
-    parts.push(`<div class="sect">${escapeHtml(C.sentTitle)}</div><pre class="pnote" data-outside-ask-sent>${escapeHtml(state.sent)}</pre>`);
-    parts.push(`<p class="pnote ohsmall">${escapeHtml(state.route)}</p>`);
-  }
-  if (state.state === 'failed') {
-    parts.push(`<p class="pnote ohwarn" role="status" data-outside-ask-failed>${escapeHtml(state.message)}</p>`);
-    parts.push(state.sent !== undefined
-      ? `<div class="sect">${escapeHtml(C.sentTitle)}</div><pre class="pnote" data-outside-ask-sent>${escapeHtml(state.sent)}</pre>`
-      : `<p class="pnote ohsmall">${escapeHtml(C.notSent)}</p>`);
-  }
-  return `<div class="ohpanel" data-outside-ask="${escapeHtml(state.state)}">${parts.join('')}</div>`;
 }
 
 function renderWriterCheck(writer: DashboardOutsideHelpWriter, canEdit: boolean): string {
@@ -836,12 +809,17 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       var clearing = submitter && submitter.hasAttribute('data-outside-writer-clear');
       var revisionNow = Number(root.getAttribute('data-revision') || '0');
       var frontier = String(field('chatgpt_frontier_model') || '').trim();
+      var claudeFrontier = String(field('claude_frontier_model') || '').trim();
       if (clearing) return { revision: revisionNow, writer: null };
-      return {
+      var writerBody = { base_url: String(field('writer_base_url') || '').trim(), model: String(field('writer_model') || '').trim(), secret_ref: String(field('writer_secret_ref') || '').trim() };
+      var writerSave = {
         revision: revisionNow,
-        writer: { base_url: String(field('writer_base_url') || '').trim(), model: String(field('writer_model') || '').trim(), secret_ref: String(field('writer_secret_ref') || '').trim() },
         chatgpt_frontier_model: frontier === '' ? null : frontier,
+        claude_frontier_model: claudeFrontier === '' ? null : claudeFrontier,
       };
+      // No server named: the writer stays as it is (the built-in one), and only the zkAPI models are saved.
+      if (writerBody.base_url !== '' || writerBody.model !== '' || writerBody.secret_ref !== '') writerSave.writer = writerBody;
+      return writerSave;
     }
     if (kind === 'standard') {
       var mode = form.querySelector('input[name="standard_mode"]:checked');
@@ -853,7 +831,6 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       if (chosen === 'custom') standardBody.standard_instruction = instruction;
       return standardBody;
     }
-    if (kind === 'ask') return { question: String(field('question') || '') };
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
     return { confirm: true };
@@ -869,9 +846,9 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     }
     setTimeout(poll, delay);
   }
-  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard, ask: config.paths.ask };
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard };
   // While the writer check runs (only after the owner's click), the page re-reads itself.
-  if ((root.querySelector('[data-outside-writer-check="running"]') || root.querySelector('[data-outside-ask="running"]')) && config.writerPollMs) {
+  if (root.querySelector('[data-outside-writer-check="running"]') && config.writerPollMs) {
     setTimeout(function () { window.location.reload(); }, config.writerPollMs);
   }
   // One post; a network failure (Olympus restarting, say) is its own answer, never a thrown error.

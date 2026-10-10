@@ -20,6 +20,13 @@
   install` sets up (`olympus open-handler install|uninstall|status` by hand;
   the uninstaller removes it). A link only opens a page; it changes nothing.
   The page keeps the two steps by hand for a phone or an older install.
+- **"Fix" only where something is broken.** Beside a control that only
+  works on the computer while nothing is wrong (Models' Change, a Connect),
+  the link now says "Do this on your computer"; "Fix this on your computer"
+  stays beside real problems. Landing from an open link unfolds the place
+  and outlines it briefly (the Models section, or the source's Connect
+  panel), and `olympus dashboard` names the command as plain `olympus` when
+  that is on PATH (else this install's own bin/olympus).
 - **A full disk says how much to free.** A model download that failed for
   space reads "Free up 3 GB, then Try again", and Models no longer repeats
   the Needs-you line.

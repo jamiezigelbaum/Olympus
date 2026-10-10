@@ -263,7 +263,6 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/consult/writer' },
   { method: 'POST', path: '/dashboard/consult/writer/test' },
   { method: 'POST', path: '/dashboard/consult/standard' },
-  { method: 'POST', path: '/dashboard/consult/ask' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [

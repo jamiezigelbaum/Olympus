@@ -10,7 +10,9 @@ import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
-import { OLYMPUS_PLUGIN_BIN_HINT, mintDashboardOpeningUrl, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
+import { mintDashboardOpeningUrl, olympusCommandHint, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
+
+export { olympusCommandHint };
 import { allOpenTargets, openTargetFromPath, openTargetPath, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
 import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenHandlerResult } from './core/open-handler.ts';
 import {
@@ -2893,7 +2895,7 @@ export async function runDashboardCommand(
       ? 'This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser.'
       : 'This link carries a single-use 15-minute ticket, not the worker token;'
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
-        + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
+        + ` For the read-only view link instead, run ${olympusCommandHint()} dashboard --read-only.`,
   };
 }
 
@@ -2944,7 +2946,7 @@ function runDashboardReadOnlyCommand(
     throw new OperationError(
       'config_error',
       'No worker auth token is configured, so there is no read-only view link to mint.',
-      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+      `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
     );
   }
   let opened = false;
@@ -2963,7 +2965,7 @@ function runDashboardReadOnlyCommand(
     hint: dependencies.noOpen
       ? 'This read-only view link was not opened locally, so it is ready to hand to the intended browser.'
       : 'This URL carries the read-only view token, not the worker token, so it cannot change anything;'
-        + ` open ${OLYMPUS_PLUGIN_BIN_HINT} dashboard (without --read-only) for a link that can.`,
+        + ` open ${olympusCommandHint()} dashboard (without --read-only) for a link that can.`,
   };
 }
 

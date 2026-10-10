@@ -1839,7 +1839,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             : url.pathname === '/dashboard/consult/writer' ? await backend.saveWriter(record)
             : url.pathname === '/dashboard/consult/writer/test' ? await backend.testWriter(record)
             : url.pathname === '/dashboard/consult/standard' ? await backend.saveStandard(record)
-            : url.pathname === '/dashboard/consult/ask' ? await backend.ask(record)
             : await backend.abandon(record);
           if (!outcome.ok) {
             return json({ ok: false, error: { code: outcome.code, message: outcome.message }, ...(outcome.revision !== undefined ? { revision: outcome.revision } : {}) }, outcome.httpStatus);

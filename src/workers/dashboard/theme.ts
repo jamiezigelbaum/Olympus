@@ -375,6 +375,10 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
    it, never further down the page. */
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
+/* Where an open link landed (#olympus-open=…): an accent outline that fades. */
+.landed { outline: 3px solid var(--link); outline-offset: 4px; border-radius: 10px; animation: landed-fade 2.5s ease-out 1.5s forwards; }
+@keyframes landed-fade { to { outline-color: transparent; } }
+@media (prefers-reduced-motion: reduce) { .landed { animation: none; } }
 .sheet h4 { margin: 0 0 6px; font-size: var(--fs-row); }
 .sheet p { color: var(--t2); font-size: var(--fs-body); margin: 0 0 10px; max-width: 72ch; }
 .sheet .providernote { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 9px 12px; }
