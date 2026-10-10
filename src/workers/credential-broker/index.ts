@@ -939,7 +939,7 @@ export class JsonCredentialOAuth2StateStore implements CredentialOAuth2StateStor
       }
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir(dirname(this.path), { recursive: true });
+        await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -951,7 +951,7 @@ export class JsonCredentialOAuth2StateStore implements CredentialOAuth2StateStor
       if (!Object.prototype.hasOwnProperty.call(store.handles, handle)) return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir(dirname(this.path), { recursive: true });
+        await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });

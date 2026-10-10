@@ -386,7 +386,7 @@ export function writeSourceIngestionExclusionsFile(options: {
     copyFileSync(path, backupPath);
     chmodSync(backupPath, 0o600);
   } else {
-    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   }
   writePrivateFileAtomicSync(path, text);
   return {

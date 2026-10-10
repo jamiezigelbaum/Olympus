@@ -165,6 +165,7 @@ describe('native OpenClaw plugin adapter', () => {
             'plugins.entries.olympus.config.email.baseUrl',
             'plugins.entries.olympus.config.sourceIndex',
             'plugins.entries.olympus.config.sovereignty',
+            'plugins.entries.olympus.config.remote.demoConsent',
           ],
         },
         start: expect.any(Function),

@@ -1269,7 +1269,7 @@ function copySanitizedJsonIfPresent(source: string, destination: string, files: 
     return false;
   }
   const parsed = JSON.parse(readFileSync(source, 'utf8')) as unknown;
-  mkdirSync(dirname(destination), { recursive: true });
+  mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
   writePrivateFileAtomicSync(destination, JSON.stringify(sanitizeForExport(parsed), null, 2));
   files.push(destination);
   return true;
@@ -1305,7 +1305,7 @@ export function exportDurabilityBoundary(destination: string): string {
  * directories are made durable before anything is written into them.
  */
 function makeDurableDirectory(path: string, boundary: string): void {
-  mkdirSync(path, { recursive: true });
+  mkdirSync(path, { recursive: true, mode: 0o700 });
   let current = resolve(path);
   for (;;) {
     syncDirectorySync(current);

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { basename, delimiter, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configFromPluginConfig, type OlympusConfig } from './config.ts';
+import { configFromPluginConfig, NATIVE_REMOTE_CONFIG_ENV, type OlympusConfig } from './config.ts';
 import {
   createNativeProcessService,
   NativeProcessConfigurationError,
@@ -91,6 +91,10 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
         'plugins.entries.olympus.config.email.baseUrl',
         'plugins.entries.olympus.config.sourceIndex',
         'plugins.entries.olympus.config.sovereignty',
+        // Only the demo sign-in is read by the worker; remote.enabled and the
+        // relay address belong to the relay service, and restarting the worker
+        // on the dashboard's own remote-access toggle would drop the dashboard.
+        'plugins.entries.olympus.config.remote.demoConsent',
       ],
     },
     initialConfig: options.initialPluginConfig,
@@ -276,6 +280,10 @@ function applyNativeWorkerConfigEnv(config: OlympusConfig, env: NodeJS.ProcessEn
   env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES = String(config.worker.scheduler.maxTransientRetries);
   env[NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram] = String(config.worker.telegramCapture.enabled);
   env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp] = String(config.worker.whatsappCapture.enabled);
+  // The plugin config is the only source of remote settings here: a value
+  // inherited from the Gateway or worker.env never survives into the child.
+  if (config.remote) env[NATIVE_REMOTE_CONFIG_ENV] = JSON.stringify(config.remote);
+  else delete env[NATIVE_REMOTE_CONFIG_ENV];
 }
 
 export function resolveBunRuntimePath(configured: string | undefined, env: NodeJS.ProcessEnv): string {
