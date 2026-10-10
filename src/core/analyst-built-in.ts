@@ -456,29 +456,6 @@ export interface PrivateAnswer {
   unanswered: string[];
   /** The model that wrote the answer, e.g. `built_in/qwen3.5-4b-q4_k_m-e87f176`. */
   modelId: string;
-  /**
-   * Internal metadata for the consult trigger and the outbound gate (design
-   * frontier-consult-lane.md §A.2–A.3, stage C4b): the model's own verdict
-   * on its answer and the exact evidence pack its main call received, after
-   * relevance selection, depth reads and fitting. Never part of the answer
-   * the panel shows; it stays in this process. Absent from a stub answer,
-   * which then never triggers a consult.
-   */
-  consult?: PrivateAnswerConsultMetadata;
-}
-
-/** The model's verdict on its own answer, carried internally; never in the panel plaintext. */
-export interface PrivateAnswerVerdict {
-  /** The model's `"sufficient"` field: true when it called its answer complete; undefined when it did not say. */
-  readonly sufficient: boolean | undefined;
-  /** The answer is the fixed "these items do not answer" text (an ungrounded or failed answer). */
-  readonly noAnswer: boolean;
-}
-
-export interface PrivateAnswerConsultMetadata {
-  readonly verdict: PrivateAnswerVerdict;
-  /** The fitted pack exactly as the main model call received it (by reference; frozen by the jobs engine on the consulting job's path). */
-  readonly pack: EvidencePack;
 }
 
 export interface AnswerPrivatelyOptions {
@@ -501,14 +478,6 @@ export interface AnswerPrivatelyOptions {
   /** Called after each model call with its stage and timing (counts only, never content). */
   onModelCall?: (call: PrivateModelCallTiming) => void;
   signal?: AbortSignal;
-  /**
-   * Return the consult metadata (`PrivateAnswer.consult`: the verdict and the
-   * fitted pack as the main call received it, by reference; the jobs engine
-   * clones and freezes it on the consulting job's own path). Off by default;
-   * the jobs engine asks for it only when a job that bound outside help on
-   * shares the analysis.
-   */
-  consultMetadata?: boolean;
 }
 
 /** One model call of answerPrivately: what it cost, never what it said. */
@@ -572,23 +541,16 @@ export async function answerPrivately(
   // plainly that these items did not answer the question. An answer that
   // reproduces the evidence blocks' formatting (field labels, provenance
   // JSON) is a failed answer, not an answer, and is reported the same way.
-  // By reference: no cloning or freezing on the answer's completion path (a
-  // job without outside help sharing this analysis is unaffected).
-  const consult = (noAnswer: boolean): Pick<PrivateAnswer, 'consult'> => (options.consultMetadata
-    ? { consult: { verdict: { sufficient: verdict.sufficient, noAnswer }, pack } }
-    : {});
   if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
     return {
       answer: PRIVATE_ANSWER_NOT_FOUND,
       citations: [],
       unanswered: cleanUnanswered(unanswered, '', { maxChars: gapChars, complete: false }),
       modelId,
-      ...consult(true),
     };
   }
   return {
     answer: result.answer,
-    ...consult(false),
     unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;

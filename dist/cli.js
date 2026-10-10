@@ -7908,8 +7908,7 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/consult/tools/install" },
     { method: "POST", path: "/dashboard/consult/writer" },
     { method: "POST", path: "/dashboard/consult/writer/test" },
-    { method: "POST", path: "/dashboard/consult/standard" },
-    { method: "POST", path: "/dashboard/consult/ask" }
+    { method: "POST", path: "/dashboard/consult/standard" }
   ];
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
@@ -53003,7 +53002,7 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      outsideHelp: { title: "Outside help", line: "Anonymous answers (zkAPI)" },
+      outsideHelp: { title: "Anonymous answers", line: "Ask top AI models without saying who you are" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
     locked: "Open dashboard controls first",
@@ -53322,15 +53321,7 @@ var init_vocabulary = __esm(() => {
     sourcesToggle: "Sources ({n})",
     openedOnMac: "Opened on your computer",
     openFailed: "Couldn't open it on your computer",
-    unanswered: "Not found in your private items: {list}",
-    withdrawn: "This private answer is no longer available from your computer.",
-    outsideTitle: "Anonymous answer · zkAPI",
-    outsideNote: "General information from an outside model. It did not read your documents and has not been checked.",
-    outsidePending: "Looking up general background…",
-    outsidePaused: "Anonymous answers are paused.",
-    outsideAsked: "What Olympus asked:",
-    outsideSentUnnamed: "Sent without names:",
-    outsideShortened: "Shortened by Olympus."
+    unanswered: "Not found in your private items: {list}"
   };
   DASHBOARD_LOCAL_COPY = {
     needsYou: DASHBOARD_CHATGPT_PAGE_COPY.needsYou,
@@ -53404,23 +53395,23 @@ var init_vocabulary = __esm(() => {
   };
   DASHBOARD_OUTSIDE_HELP_COPY = {
     crumb: "Anonymous answers",
-    title: "Anonymous answers · zkAPI",
+    title: "Anonymous answers",
     sectionTitle: "Private answers",
     row: {
-      off: "Anonymous answers (zkAPI): off",
-      on: "Anonymous answers (zkAPI): on",
-      invalid: "Anonymous answers (zkAPI): off · settings file damaged",
-      route_not_configured: "Anonymous answers (zkAPI): off · not set up",
-      fence_held: "Anonymous answers (zkAPI): paused · unfinished payment",
-      needs_acceptance: "Anonymous answers (zkAPI): paused · accept the updated statements"
+      off: "Anonymous answers: off",
+      on: "Anonymous answers: on",
+      invalid: "Anonymous answers: off · settings file damaged",
+      route_not_configured: "Anonymous answers: off · not set up",
+      fence_held: "Anonymous answers: paused · unfinished payment",
+      needs_acceptance: "Anonymous answers: paused · accept the updated statements"
     },
     experimental: "Experimental: on macOS, Olympus can't yet confirm the connection is anonymous (network route not verified).",
-    intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. When the answer from your computer is missing something, Olympus can send a top AI model a short question through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.",
+    intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.",
     levelTitle: "What may zkAPI send?",
     writer: {
       title: "Who writes the question",
       builtInShort: "the model built into Olympus",
-      intro: "By default the small model built into Olympus writes the outside question from the first answer. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it reads the private material the answer used, decides whether a frontier model would help, and writes the question. At Strict, Olympus's privacy check still runs before anything is sent; at Standard, only passwords, keys and tokens are stopped. This works best with a substantial model.",
+      intro: "By default the small model built into Olympus prepares your question before it leaves. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it rewrites the question into general ones at Strict, or prepares it the way you chose at Standard. At Strict, Olympus's privacy check still runs before anything is sent; at Standard, only passwords, keys and tokens are stopped. This works best with a substantial model.",
       currentBuiltIn: "Now: the model built into Olympus.",
       currentOwn: "Now: your model {model} at {address}.",
       baseUrl: "Your model server's address (OpenAI-compatible, usually ending in /v1)",
@@ -53428,9 +53419,12 @@ var init_vocabulary = __esm(() => {
       secretRef: "Key reference, if your server needs one (optional: env:NAME or store:name)",
       where: "Your private material goes to this address, so use a server you control. A server on another computer is reached over your network; prefer https or a private network such as a tailnet.",
       keyMissing: "The key reference {secretRef} is not set on this computer, so your model cannot be used until it is.",
-      frontierModel: "zkAPI model for questions from ChatGPT (optional)",
+      frontierModel: "zkAPI model for questions from ChatGPT",
       frontierHint: "A model from a provider other than OpenAI is better here: OpenAI also holds your ChatGPT conversation and could link the two. Empty uses Claude Sonnet.",
       openAiNote: "Questions from ChatGPT now go to {model}, an OpenAI model. OpenAI also holds your ChatGPT conversation; a model from another provider is better here.",
+      claudeFrontierModel: "zkAPI model for questions from Claude (Claude Code, Claude Desktop)",
+      claudeFrontierHint: "A model from a provider other than Anthropic is better here: Anthropic also holds your Claude conversation and could link the two. Empty uses GPT-5.5.",
+      anthropicNote: "Questions from Claude now go to {model}, an Anthropic model. Anthropic also holds your Claude conversation; a model from another provider is better here.",
       save: "Save",
       useBuiltIn: "Use the built-in model",
       testTitle: "Test your model",
@@ -53471,16 +53465,6 @@ var init_vocabulary = __esm(() => {
       instructionLabel: "Instruction for your model",
       save: "Save"
     },
-    ask: {
-      title: "Ask anonymously",
-      intro: "Type a question. It is prepared the way you chose above, sent through zkAPI, and the answer shows here. It never goes to ChatGPT. Each question costs a little from your zkAPI balance.",
-      label: "Your question",
-      send: "Ask",
-      running: "Asking anonymously… Starting a private route takes a minute or two.",
-      sentTitle: "What was sent",
-      replyTitle: "Answer",
-      notSent: "Nothing was sent."
-    },
     levelSave: "Save",
     levelAcceptSave: "Accept and save",
     levelAcceptIntro: "Nothing is sent until you accept these:",
@@ -53513,12 +53497,12 @@ var init_vocabulary = __esm(() => {
     problemsTitle: "To fix",
     disclosureTitle: "Before you turn this on",
     disclosureShort: [
-      "It asks on its own: when an answer from your computer is missing something, Olympus may send one short question. You can turn it off at any time.",
+      "It asks only when you do: tell your agent to use Olympus zkAPI, and Olympus sends one short question.",
       "The provider reads the question, prepared the way you choose; zkAPI hides who paid."
     ],
     disclosureMore: "Everything to know first",
     disclosure: [
-      "Olympus sends a question only within about five minutes of a private answer appearing in ChatGPT, and only if the panel was recently active. Closing the panel does not guarantee nothing is sent in that window.",
+      "Olympus sends a question only when you ask your agent to use Olympus zkAPI. Nothing is sent on its own.",
       "A question usually costs a few cents. While it runs, up to $6 of your zkAPI balance is held, and the rest comes back when it settles. Olympus counts each question at the amount held for its model (between $1 and $6) when checking the daily limits you set.",
       "There is no daily limit unless you set one under Balance and limits. Your balance is the most that can be spent.",
       "Adding money and taking it out are each an Ethereum transaction with its own network fee (about $7 each when Olympus last checked). There is no top-up: each deposit starts a new balance with its own fee and its own 30-day clock.",
@@ -58641,6 +58625,7 @@ __export(exports_consult_transport_zkapi, {
   standardExecutableDirectories: () => standardExecutableDirectories,
   sendZkapiConsult: () => sendZkapiConsult,
   resolveZkapiExecutable: () => resolveZkapiExecutable,
+  resolveZkapiConsultTransport: () => resolveZkapiConsultTransport,
   resolveExecutable: () => resolveExecutable,
   reserveZkapiRequest: () => reserveZkapiRequest,
   recoverZkapiSession: () => recoverZkapiSession,
@@ -58679,6 +58664,26 @@ function formatZkapiStageTable(timings) {
   const msWidth = Math.max(...rows.map((row) => String(row.ms).length));
   return rows.map((row) => `${row.label.padEnd(width)}  ${String(row.ms).padStart(msWidth)} ms`).join(`
 `);
+}
+function resolveZkapiConsultTransport(profiles, resolveSecret, extra = {}) {
+  const routes = Object.values(profiles).filter((profile) => profile.provider === "zkapi" && profile.zkapi && profile.baseUrl);
+  if (routes.length !== 1)
+    return;
+  const route = routes[0];
+  let apiKey;
+  try {
+    apiKey = resolveSecret(route.secretRef);
+  } catch {
+    apiKey = undefined;
+  }
+  return {
+    baseUrl: route.baseUrl,
+    model: extra.model ?? route.model ?? "",
+    ...apiKey ? { apiKey } : {},
+    settings: route.zkapi,
+    ...extra.env ? { env: extra.env } : {},
+    ...extra.statePath ? { statePath: extra.statePath } : {}
+  };
 }
 function failure(code, outcome, networkIdentity, extra = {}) {
   return { ok: false, error: { code, message: MESSAGES[code], outcome, networkIdentity, ...extra } };
@@ -63538,7 +63543,6 @@ var init_consult_gate = __esm(() => {
 // src/core/consult-settings.ts
 var exports_consult_settings = {};
 __export(exports_consult_settings, {
-  recheckConsultJobPolicy: () => recheckConsultJobPolicy,
   readConsultSettings: () => readConsultSettings,
   parseConsultWriterChoice: () => parseConsultWriterChoice,
   parseConsultSettingsText: () => parseConsultSettingsText,
@@ -63548,14 +63552,12 @@ __export(exports_consult_settings, {
   consultStandardInstruction: () => consultStandardInstruction,
   consultStandardBinding: () => consultStandardBinding,
   consultSettingsPath: () => consultSettingsPath,
-  consultOutsideHelpEnabled: () => consultOutsideHelpEnabled,
   consultModelProvider: () => consultModelProvider,
   consultGateOptionsFromSettings: () => consultGateOptionsFromSettings,
   consultFrontierModelFor: () => consultFrontierModelFor,
   consultClaudeFrontierModel: () => consultClaudeFrontierModel,
   consultChatgptModelUnavailableMessage: () => consultChatgptModelUnavailableMessage,
   consultChatgptFrontierModel: () => consultChatgptFrontierModel,
-  bindConsultJobPolicy: () => bindConsultJobPolicy,
   __consultSettingsTestHooks: () => __consultSettingsTestHooks,
   DEFAULT_CONSULT_SETTINGS: () => DEFAULT_CONSULT_SETTINGS,
   CONSULT_STANDARD_MODE_WHEN_UNSET: () => CONSULT_STANDARD_MODE_WHEN_UNSET,
@@ -63786,9 +63788,6 @@ function readConsultSettings(location = {}) {
     return invalid("unreadable");
   }
 }
-function consultOutsideHelpEnabled(read) {
-  return read.state === "valid" && read.settings.enabled;
-}
 function consultGateOptionsFromSettings(settings) {
   return { languages: [...settings.languages], domains: { ...settings.domains }, level: settings.level };
 }
@@ -63801,38 +63800,6 @@ function consultWriterIdentity(choice) {
   if (!choice)
     return "built-in";
   return JSON.stringify([choice.baseUrl, choice.model, choice.secretRef ?? null, choice.timeoutMs ?? null]);
-}
-function bindConsultJobPolicy(read) {
-  const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS;
-  return Object.freeze({
-    settingsRevision: settings.revision,
-    outsideHelp: consultOutsideHelpEnabled(read),
-    languages: Object.freeze([...settings.languages]),
-    domains: Object.freeze({ ...settings.domains }),
-    strict: settings.strict,
-    level: settings.level,
-    writer: settings.writer ? Object.freeze({ ...settings.writer }) : null,
-    standard: consultStandardBinding(settings)
-  });
-}
-function recheckConsultJobPolicy(policy, current) {
-  if (!policy.outsideHelp)
-    return { ok: false, reason: "bound_off" };
-  if (current.state === "absent")
-    return { ok: false, reason: "settings_absent" };
-  if (current.state === "invalid")
-    return { ok: false, reason: "settings_invalid" };
-  if (current.settings.revision !== policy.settingsRevision)
-    return { ok: false, reason: "settings_stale" };
-  if (current.settings.level !== policy.level)
-    return { ok: false, reason: "settings_stale" };
-  if (consultWriterIdentity(current.settings.writer) !== consultWriterIdentity(policy.writer ?? null))
-    return { ok: false, reason: "settings_stale" };
-  if (JSON.stringify(consultStandardBinding(current.settings)) !== JSON.stringify(policy.standard ?? consultStandardBinding(DEFAULT_CONSULT_SETTINGS)))
-    return { ok: false, reason: "settings_stale" };
-  if (!current.settings.enabled)
-    return { ok: false, reason: "settings_off" };
-  return { ok: true };
 }
 function invalid(reason) {
   return { state: "invalid", reason, settings: DEFAULT_CONSULT_SETTINGS };
@@ -100194,8 +100161,6 @@ function renderOutsideHelpCard(status, input) {
     parts.push(renderStandard(status.standard, status.settings.state === "invalid" ? false : canEdit));
   if (status.writer?.modelProblem)
     parts.push(`<p class="pnote ohwarn" data-outside-model-problem>${escapeHtml2(status.writer.modelProblem.message)}</p>`);
-  if (status.ask)
-    parts.push(renderAsk(status.ask, canEdit && route.state === "configured"));
   parts.push(renderProblems(status, canEdit));
   const shortList = `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
   const fullList = `<ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
@@ -100369,16 +100334,20 @@ function renderFence(ready, canEdit) {
 function openAiModel(model) {
   return typeof model === "string" && /^openai\//i.test(model.trim());
 }
+function anthropicModel(model) {
+  return typeof model === "string" && /^anthropic\//i.test(model.trim());
+}
 function renderWriter(writer, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const C2 = DASHBOARD_OUTSIDE_HELP_COPY.writer;
   const choice = writer.choice;
-  const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel ?? writer.routeModel;
+  const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel;
+  const effectiveClaudeModel = writer.effectiveClaudeModel ?? writer.claudeFrontierModel;
   const parts = [`<p class="pnote">${escapeHtml2(C2.intro)}</p>`];
   parts.push(`<p class="pnote" data-outside-writer-current="${choice ? "own" : "built_in"}">${escapeHtml2(choice ? fill(C2.currentOwn, { model: choice.model, address: choice.baseUrl }) : C2.currentBuiltIn)}</p>`);
   if (choice?.secretRef && choice.keyPresent === false)
     parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml2(fill(C2.keyMissing, { secretRef: choice.secretRef }))}</p>`);
-  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml2(C2.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml2(choice?.baseUrl ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml2(C2.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml2(choice?.model ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml2(C2.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml2(choice?.secretRef ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml2(C2.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveChatgptModel ?? writer.routeModel ?? "")}" value="${escapeHtml2(writer.chatgptFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml2(fill(C2.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml2(C2.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled}>${escapeHtml2(C2.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
+  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml2(C2.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml2(choice?.baseUrl ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml2(C2.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml2(choice?.model ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml2(C2.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml2(choice?.secretRef ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml2(C2.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveChatgptModel ?? "")}" value="${escapeHtml2(writer.chatgptFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml2(fill(C2.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<label class="plabel" for="outside-claude-frontier-model">${escapeHtml2(C2.claudeFrontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-claude-frontier-model" name="claude_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveClaudeModel ?? "")}" value="${escapeHtml2(writer.claudeFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C2.claudeFrontierHint)}</p>` + (anthropicModel(effectiveClaudeModel) ? `<p class="pnote ohwarn" data-outside-writer-anthropic>${escapeHtml2(fill(C2.anthropicNote, { model: effectiveClaudeModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml2(C2.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled}>${escapeHtml2(C2.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
   parts.push(renderWriterCheck(writer, canEdit));
   const summary = choice ? choice.model : C2.builtInShort;
   return renderSection({ id: "writer", title: C2.title, summary, open: writer.check.state !== "idle", body: `<div data-outside-writer>${parts.join("")}</div>` });
@@ -100392,25 +100361,6 @@ function renderStandard(standard, canEdit) {
   }).join("");
   const text = standard.mode === "custom" && standard.instruction !== undefined ? standard.instruction : standard.preset;
   return `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml2(standard.mode)}" data-outside-preset="${escapeHtml2(standard.preset)}">` + `<div class="sect">${escapeHtml2(C2.title)}</div>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml2(C2.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml2(text)}</textarea>` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(C2.save)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
-}
-function renderAsk(ask, canEdit) {
-  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.ask;
-  const state = ask.state;
-  const disabled = canEdit && state.state !== "running" ? "" : ' disabled aria-disabled="true"';
-  const parts = [`<div class="sect">${escapeHtml2(C2.title)}</div>`, `<p class="pnote">${escapeHtml2(C2.intro)}</p>`];
-  parts.push(`<form class="ohform" data-outside-form="ask">` + `<label class="plabel" for="outside-ask-question">${escapeHtml2(C2.label)}</label>` + `<textarea class="keyfield" id="outside-ask-question" name="question" rows="3" maxlength="${ask.maxChars}"${disabled}>${escapeHtml2(state.state === "idle" ? "" : state.question)}</textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(C2.send)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
-  if (state.state === "running")
-    parts.push(`<p class="pnote" role="status">${escapeHtml2(C2.running)}</p>`);
-  if (state.state === "done") {
-    parts.push(`<div class="sect">${escapeHtml2(C2.replyTitle)}</div><p class="pnote" data-outside-ask-reply>${escapeHtml2(state.reply)}</p>`);
-    parts.push(`<div class="sect">${escapeHtml2(C2.sentTitle)}</div><pre class="pnote" data-outside-ask-sent>${escapeHtml2(state.sent)}</pre>`);
-    parts.push(`<p class="pnote ohsmall">${escapeHtml2(state.route)}</p>`);
-  }
-  if (state.state === "failed") {
-    parts.push(`<p class="pnote ohwarn" role="status" data-outside-ask-failed>${escapeHtml2(state.message)}</p>`);
-    parts.push(state.sent !== undefined ? `<div class="sect">${escapeHtml2(C2.sentTitle)}</div><pre class="pnote" data-outside-ask-sent>${escapeHtml2(state.sent)}</pre>` : `<p class="pnote ohsmall">${escapeHtml2(C2.notSent)}</p>`);
-  }
-  return `<div class="ohpanel" data-outside-ask="${escapeHtml2(state.state)}">${parts.join("")}</div>`;
 }
 function renderWriterCheck(writer, canEdit) {
   const C2 = DASHBOARD_OUTSIDE_HELP_COPY.writer;
@@ -100581,12 +100531,17 @@ function outsideHelpClientScript(config2) {
       var clearing = submitter && submitter.hasAttribute('data-outside-writer-clear');
       var revisionNow = Number(root.getAttribute('data-revision') || '0');
       var frontier = String(field('chatgpt_frontier_model') || '').trim();
+      var claudeFrontier = String(field('claude_frontier_model') || '').trim();
       if (clearing) return { revision: revisionNow, writer: null };
-      return {
+      var writerBody = { base_url: String(field('writer_base_url') || '').trim(), model: String(field('writer_model') || '').trim(), secret_ref: String(field('writer_secret_ref') || '').trim() };
+      var writerSave = {
         revision: revisionNow,
-        writer: { base_url: String(field('writer_base_url') || '').trim(), model: String(field('writer_model') || '').trim(), secret_ref: String(field('writer_secret_ref') || '').trim() },
         chatgpt_frontier_model: frontier === '' ? null : frontier,
+        claude_frontier_model: claudeFrontier === '' ? null : claudeFrontier,
       };
+      // No server named: the writer stays as it is (the built-in one), and only the zkAPI models are saved.
+      if (writerBody.base_url !== '' || writerBody.model !== '' || writerBody.secret_ref !== '') writerSave.writer = writerBody;
+      return writerSave;
     }
     if (kind === 'standard') {
       var mode = form.querySelector('input[name="standard_mode"]:checked');
@@ -100598,7 +100553,6 @@ function outsideHelpClientScript(config2) {
       if (chosen === 'custom') standardBody.standard_instruction = instruction;
       return standardBody;
     }
-    if (kind === 'ask') return { question: String(field('question') || '') };
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
     return { confirm: true };
@@ -100614,9 +100568,9 @@ function outsideHelpClientScript(config2) {
     }
     setTimeout(poll, delay);
   }
-  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard, ask: config.paths.ask };
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard };
   // While the writer check runs (only after the owner's click), the page re-reads itself.
-  if ((root.querySelector('[data-outside-writer-check="running"]') || root.querySelector('[data-outside-ask="running"]')) && config.writerPollMs) {
+  if (root.querySelector('[data-outside-writer-check="running"]') && config.writerPollMs) {
     setTimeout(function () { window.location.reload(); }, config.writerPollMs);
   }
   // One post; a network failure (Olympus restarting, say) is its own answer, never a thrown error.
@@ -100706,7 +100660,6 @@ var init_outside_help = __esm(() => {
     installTools: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
     writer: "/dashboard/consult/writer",
     standard: "/dashboard/consult/standard",
-    ask: "/dashboard/consult/ask",
     writerTest: "/dashboard/consult/writer/test"
   };
   LANGUAGE_NAMES = {
@@ -106985,8 +106938,7 @@ var init_http = __esm(() => {
     "/dashboard/consult/tools/install",
     "/dashboard/consult/writer",
     "/dashboard/consult/writer/test",
-    "/dashboard/consult/standard",
-    "/dashboard/consult/ask"
+    "/dashboard/consult/standard"
   ];
   GRADE_CODES = { bearer: "b", local: "l" };
 });
@@ -108332,7 +108284,7 @@ function createEmailSourceWorker(options = {}) {
           }
           const record3 = await parseObjectBody(request);
           const backend = sourceDashboard.consult;
-          const outcome = url.pathname === "/dashboard/consult" ? await backend.setEnabled(record3) : url.pathname === "/dashboard/consult/route" ? await backend.saveRoute(record3) : url.pathname === "/dashboard/consult/route/add" ? await backend.addRoute(record3) : url.pathname === "/dashboard/consult/recover" ? await backend.recover(record3) : url.pathname === "/dashboard/consult/tools/install" ? await backend.installTools(record3) : url.pathname === "/dashboard/consult/writer" ? await backend.saveWriter(record3) : url.pathname === "/dashboard/consult/writer/test" ? await backend.testWriter(record3) : url.pathname === "/dashboard/consult/standard" ? await backend.saveStandard(record3) : url.pathname === "/dashboard/consult/ask" ? await backend.ask(record3) : await backend.abandon(record3);
+          const outcome = url.pathname === "/dashboard/consult" ? await backend.setEnabled(record3) : url.pathname === "/dashboard/consult/route" ? await backend.saveRoute(record3) : url.pathname === "/dashboard/consult/route/add" ? await backend.addRoute(record3) : url.pathname === "/dashboard/consult/recover" ? await backend.recover(record3) : url.pathname === "/dashboard/consult/tools/install" ? await backend.installTools(record3) : url.pathname === "/dashboard/consult/writer" ? await backend.saveWriter(record3) : url.pathname === "/dashboard/consult/writer/test" ? await backend.testWriter(record3) : url.pathname === "/dashboard/consult/standard" ? await backend.saveStandard(record3) : await backend.abandon(record3);
           if (!outcome.ok) {
             return json({ ok: false, error: { code: outcome.code, message: outcome.message }, ...outcome.revision !== undefined ? { revision: outcome.revision } : {} }, outcome.httpStatus);
           }
@@ -111795,19 +111747,16 @@ async function answerPrivately(question, evidence, options = {}) {
   const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
   const unanswered = result.unanswered.filter((line) => !echoesEvidenceScaffolding(line));
   const gapChars = analystSchemaGapChars(options.maxAnswerChars ?? DEFAULT_PRIVATE_ANSWER_CHARS);
-  const consult = (noAnswer) => options.consultMetadata ? { consult: { verdict: { sufficient: verdict.sufficient, noAnswer }, pack } } : {};
   if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
     return {
       answer: PRIVATE_ANSWER_NOT_FOUND,
       citations: [],
       unanswered: cleanUnanswered(unanswered, "", { maxChars: gapChars, complete: false }),
-      modelId,
-      ...consult(true)
+      modelId
     };
   }
   return {
     answer: result.answer,
-    ...consult(false),
     unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;
@@ -117255,11 +117204,9 @@ async function checkPrivateEvidence(guard, items) {
     return items.map(() => false);
   return answer.map((value) => value === true);
 }
-var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS, PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, PRIVATE_ANSWER_PANEL_CAPABILITY = 2, PRIVATE_MATCH_COUNT_CAP = 50, NoPrivateEvidenceError;
+var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50, NoPrivateEvidenceError;
 var init_private_answer_contract = __esm(() => {
   PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
-  PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS = 30 * 60000;
-  PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS = 20 * 60000;
   NoPrivateEvidenceError = class NoPrivateEvidenceError extends Error {
     constructor() {
       super("no private evidence may be read");
@@ -117286,8 +117233,6 @@ function chatgptPrivateAnswerProgram(config2) {
   let run = 0;
   let theme = "";
   let focusAfter = "";
-  let follow = null;
-  let gone = false;
   let nextId = 1;
   const pending = {};
   function post2(message) {
@@ -117375,8 +117320,6 @@ function chatgptPrivateAnswerProgram(config2) {
       errorText = "";
       canRetry = false;
       answer = null;
-      follow = null;
-      gone = false;
       sourcesOpen = false;
       notes = {};
       pair = null;
@@ -117563,82 +117506,8 @@ function chatgptPrivateAnswerProgram(config2) {
     }
     return null;
   }
-  function boundOutside(value) {
-    if (typeof value !== "string")
-      return { text: "", cut: false };
-    let text2 = value;
-    if (typeof text2.toWellFormed === "function")
-      text2 = text2.toWellFormed();
-    text2 = text2.replace(/\r\n?/g, `
-`).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "").replace(/\t/g, " ");
-    let cut = false;
-    const lines = [];
-    let blank = false;
-    const parts = text2.split(`
-`);
-    for (let i = 0;i < parts.length; i++) {
-      const line = parts[i].replace(/\s+$/, "");
-      if (line === "") {
-        if (blank || lines.length === 0)
-          continue;
-        blank = true;
-        lines.push("");
-        continue;
-      }
-      blank = false;
-      const points = Array.from(line);
-      if (points.length > config2.outsideLineChars) {
-        cut = true;
-        lines.push(points.slice(0, config2.outsideLineChars - 1).join("") + "…");
-      } else {
-        lines.push(line);
-      }
-    }
-    while (lines.length && lines[lines.length - 1] === "")
-      lines.pop();
-    if (lines.length > config2.outsideLines) {
-      cut = true;
-      lines.length = config2.outsideLines;
-    }
-    let joined = lines.join(`
-`);
-    const encoder = new TextEncoder;
-    if (encoder.encode(joined).length + 2 > config2.outsideBytes) {
-      cut = true;
-      const all = Array.from(joined);
-      let kept = "";
-      let room = config2.outsideBytes - 2 - 3;
-      for (let i = 0;i < all.length; i++) {
-        const bytes = encoder.encode(all[i]).length;
-        if (bytes > room)
-          break;
-        room -= bytes;
-        kept += all[i];
-      }
-      joined = kept + "…";
-    }
-    return { text: joined, cut };
-  }
-  function readOutside(value) {
-    if (!value || typeof value !== "object")
-      return null;
-    const state = value.state === "pending" || value.state === "appended" || value.state === "paused" ? value.state : "idle";
-    if (state !== "appended")
-      return { state, text: "", cut: false, question: "", level: "" };
-    const bounded2 = boundOutside(value.text);
-    const question = typeof value.question === "string" ? boundOutside(value.question).text : "";
-    const level = value.level === "unnamed" || value.level === "general" ? value.level : "";
-    return { state, text: bounded2.text, cut: bounded2.cut || value.cut === true, question, level };
-  }
   function readAnswer(value) {
-    if (!value || typeof value !== "object" || value.v !== 1)
-      return null;
-    const rev = typeof value.rev === "number" && isFinite(value.rev) && value.rev >= 0 ? Math.floor(value.rev) : 0;
-    if (value.state === "withdrawn") {
-      const left = typeof value.followSeconds === "number" && isFinite(value.followSeconds) && value.followSeconds > 0 ? Math.floor(value.followSeconds) : 0;
-      return { kind: "withdrawn", rev, followSeconds: left };
-    }
-    if (typeof value.answer !== "string")
+    if (!value || typeof value !== "object" || value.v !== 1 || typeof value.answer !== "string")
       return null;
     const sources = [];
     const seen = {};
@@ -117654,20 +117523,7 @@ function chatgptPrivateAnswerProgram(config2) {
       }
     }
     const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : []).filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
-    const outside = readOutside(value.outside);
-    const followSeconds = typeof value.followSeconds === "number" && isFinite(value.followSeconds) && value.followSeconds > 0 ? Math.floor(value.followSeconds) : 0;
-    return {
-      kind: "answer",
-      answer: {
-        text: value.answer,
-        sources,
-        unanswered,
-        follow: outside !== null,
-        rev,
-        followSeconds: outside ? followSeconds : 0,
-        outside: outside || { state: "idle", text: "", cut: false, question: "", level: "" }
-      }
-    };
+    return { text: value.answer, sources, unanswered };
   }
   function wait(ms) {
     return new Promise((resolve11) => setTimeout(resolve11, ms));
@@ -117705,12 +117561,6 @@ function chatgptPrivateAnswerProgram(config2) {
     render();
   }
   function show() {
-    if (gone) {
-      phase = "withdrawn";
-      focusAfter = "status";
-      render();
-      return;
-    }
     if (!answer)
       return void collect(true);
     phase = "revealed";
@@ -117758,7 +117608,7 @@ function chatgptPrivateAnswerProgram(config2) {
           response = await bounded(window.fetch(config2.relayOrigin + "/private/" + jobId, {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify(requestBody(keys.publicKey)),
+            body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
             credentials: "omit",
             cache: "no-store",
             referrerPolicy: "no-referrer",
@@ -117806,18 +117656,12 @@ function chatgptPrivateAnswerProgram(config2) {
             fail(T.generic, false, byUser);
             return;
           }
-          if (opened.kind === "withdrawn")
-            return withdrawn(byUser);
-          answer = opened.answer;
+          answer = opened;
           sourcesOpen = false;
           notes = {};
           phase = "revealed";
           focusAfter = byUser ? "answer" : "";
           render();
-          if (answer.follow) {
-            follow = { rev: answer.rev, until: Date.now() + answer.followSeconds * config2.secondMs };
-            followUp(mine, jobId, keys);
-          }
           return;
         }
         if (code === 200 && status === "failed")
@@ -117848,87 +117692,6 @@ function chatgptPrivateAnswerProgram(config2) {
     phase = "hidden";
     focusAfter = "show";
     render();
-  }
-  function requestBody(publicKey) {
-    return { v: 1, publicKey, cap: config2.capability };
-  }
-  function withdrawn(byUser) {
-    answer = null;
-    gone = true;
-    follow = null;
-    sourcesOpen = false;
-    notes = {};
-    errorText = T.withdrawn;
-    canRetry = false;
-    if (phase !== "hidden") {
-      phase = "withdrawn";
-      focusAfter = byUser ? "status" : "";
-    }
-    render();
-  }
-  async function followUp(mine, jobId, keys) {
-    for (;; ) {
-      if (mine !== run || !follow)
-        return;
-      const left = follow.until - Date.now();
-      if (left <= 0)
-        return;
-      await wait(Math.min(config2.followPollMs, left));
-      if (mine !== run || !follow)
-        return;
-      const controller = typeof window.AbortController === "function" ? new window.AbortController : null;
-      let response;
-      let body = null;
-      try {
-        response = await bounded(window.fetch(config2.relayOrigin + "/private/" + jobId, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(requestBody(keys.publicKey)),
-          credentials: "omit",
-          cache: "no-store",
-          referrerPolicy: "no-referrer",
-          mode: "cors",
-          signal: controller ? controller.signal : undefined
-        }), config2.requestTimeoutMs, controller);
-        if (mine !== run)
-          return;
-        try {
-          body = await bounded(response.json(), config2.requestTimeoutMs, controller);
-        } catch {
-          body = null;
-        }
-      } catch {
-        continue;
-      }
-      if (mine !== run || !follow)
-        return;
-      const code = response.status;
-      if (code === 410 || code === 404 || code === 409)
-        return;
-      if (code !== 200 || !body || body.status !== "ready")
-        continue;
-      let opened = null;
-      try {
-        opened = readAnswer(await open7(jobId, keys.privateKey, body));
-      } catch {
-        opened = null;
-      }
-      if (mine !== run || !follow || !opened)
-        continue;
-      if (opened.kind === "withdrawn")
-        return withdrawn(false);
-      if (!opened.answer.follow)
-        continue;
-      follow.until = Date.now() + opened.answer.followSeconds * config2.secondMs;
-      if (answer && opened.answer.rev >= follow.rev) {
-        follow.rev = opened.answer.rev;
-        answer.rev = opened.answer.rev;
-        answer.followSeconds = opened.answer.followSeconds;
-        answer.outside = opened.answer.outside;
-        if (phase === "revealed")
-          render();
-      }
-    }
   }
   function toggleSources() {
     sourcesOpen = !sourcesOpen;
@@ -118132,14 +117895,14 @@ function chatgptPrivateAnswerProgram(config2) {
       }
       return view.card;
     }
-    if (phase === "error" || phase === "slow" || phase === "withdrawn") {
+    if (phase === "error" || phase === "slow") {
       line.className = "sub warn";
       line.textContent = errorText;
       if (canRetry)
         view.row.appendChild(button(T.tryAgain, "retry", () => void collect(true)));
       return view.card;
     }
-    if (phase === "hidden" && (answer || gone)) {
+    if (phase === "hidden" && answer) {
       line.textContent = T.hidden;
       view.row.appendChild(button(T.show, "show", show, T.showLabel));
       return view.card;
@@ -118148,43 +117911,6 @@ function chatgptPrivateAnswerProgram(config2) {
     line.appendChild(el("span", "spinner"));
     line.appendChild(doc2.createTextNode(info && info.full ? T.preparingFull : T.preparing));
     return view.card;
-  }
-  function outsideView(shown) {
-    const box = el("section", "outside");
-    box.setAttribute("aria-label", T.outsideTitle);
-    const head = el("div", "out-head");
-    head.appendChild(el("h3", "out-title", T.outsideTitle));
-    head.appendChild(el("p", "out-note", T.outsideNote));
-    box.appendChild(head);
-    const body = el("div", "out-body");
-    const state = shown.outside.state;
-    if (state === "appended") {
-      if (shown.outside.question) {
-        const asked = el("div", "asked");
-        asked.setAttribute("data-key", "asked");
-        asked.setAttribute("data-level", shown.outside.level || "general");
-        asked.appendChild(el("p", "asked-label", shown.outside.level === "unnamed" ? T.outsideSentUnnamed : T.outsideAsked));
-        const question = el("p", "asked-text");
-        question.textContent = shown.outside.question;
-        asked.appendChild(question);
-        body.appendChild(asked);
-      }
-      const text2 = el("div", "out-text");
-      text2.setAttribute("data-key", "outside");
-      text2.textContent = shown.outside.text;
-      body.appendChild(text2);
-      if (shown.outside.cut)
-        body.appendChild(el("p", "out-foot", T.outsideShortened));
-    } else if (state === "pending") {
-      const line = el("p", "out-sub working");
-      line.appendChild(el("span", "spinner"));
-      line.appendChild(doc2.createTextNode(T.outsidePending));
-      body.appendChild(line);
-    } else {
-      body.appendChild(el("p", "out-sub", T.outsidePaused));
-    }
-    box.appendChild(body);
-    return box;
   }
   function revealedView(shown) {
     const view = card(true);
@@ -118212,12 +117938,8 @@ function chatgptPrivateAnswerProgram(config2) {
     const active = doc2.activeElement;
     const had = active && root.contains(active) ? active.getAttribute("data-key") || "" : "";
     root.textContent = "";
-    if (info) {
-      const revealed = phase === "revealed" && answer;
-      root.appendChild(revealed ? revealedView(answer) : cardView(info));
-      if (revealed && answer.follow && answer.outside.state !== "idle")
-        root.appendChild(outsideView(answer));
-    }
+    if (info)
+      root.appendChild(phase === "revealed" && answer ? revealedView(answer) : cardView(info));
     if (!focusAfter && had)
       focusAfter = had;
     if (focusAfter) {
@@ -118231,22 +117953,15 @@ function chatgptPrivateAnswerProgram(config2) {
     afterLayout();
   }
   function cardHeight() {
-    if (!info)
+    const node = info ? root.firstChild : null;
+    if (!node)
       return 0;
-    let total = 0;
-    for (let i = 0;i < root.children.length; i++) {
-      const node = root.children[i];
-      let margins = 0;
-      if (typeof window.getComputedStyle === "function") {
-        const style = window.getComputedStyle(node);
-        margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
-      }
-      total += (node.offsetHeight || 0) + margins;
+    let margins = 0;
+    if (typeof window.getComputedStyle === "function") {
+      const style = window.getComputedStyle(node);
+      margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
     }
-    return Math.ceil(total);
-  }
-  function cardWidth() {
-    return info && root.firstChild ? Math.ceil(root.firstChild.offsetWidth || 0) : 0;
+    return Math.ceil((node.offsetHeight || 0) + margins);
   }
   let initialized = false;
   let lastHeight = -1;
@@ -118260,7 +117975,7 @@ function chatgptPrivateAnswerProgram(config2) {
     const host = openai();
     if (host && typeof host.notifyIntrinsicHeight === "function")
       host.notifyIntrinsicHeight(height);
-    const width = cardWidth();
+    const width = info && root.firstChild ? Math.ceil(root.firstChild.offsetWidth || 0) : 0;
     notify("ui/notifications/size-changed", width > 0 ? { width, height } : { height });
   }
   let scheduled = false;
@@ -118284,7 +117999,7 @@ function chatgptPrivateAnswerProgram(config2) {
     if (!observer && typeof window.ResizeObserver === "function") {
       observer = new window.ResizeObserver(() => afterLayout());
     }
-    const node = info ? root : null;
+    const node = info ? root.firstChild : null;
     if (!observer || node === observed)
       return;
     if (observed)
@@ -118345,12 +118060,7 @@ function chatgptPrivateAnswerPageHtml(options) {
     noteMs: options.noteMs ?? 4000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
-    keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore },
-    capability: CHATGPT_PRIVATE_ANSWER_CAPABILITY,
-    followPollMs: options.followPollMs ?? CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS,
-    outsideLines: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES,
-    outsideLineChars: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS,
-    outsideBytes: CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES
+    keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore }
   };
   return [
     "<!doctype html>",
@@ -118373,7 +118083,7 @@ function chatgptPrivateAnswerPageHtml(options) {
 function scriptJson3(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250000, CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CHATGPT_PRIVATE_ANSWER_CAPABILITY = 2, CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS = 30000, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES = 40, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS = 240, CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES = 4096, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250000, CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
 var init_private_answer2 = __esm(() => {
   init_vocabulary();
   init_private_answer_contract();
@@ -118402,17 +118112,6 @@ html:root>body #panel{display:block!important;height:auto!important;min-height:0
 #panel:empty{display:none!important}
 html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}
 .card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
-.outside{display:block;box-sizing:border-box;margin:0.5rem 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);max-height:20rem;overflow:auto;overflow-wrap:anywhere}
-.out-head{position:sticky;top:0;z-index:1;padding:0.625rem 0.875rem 0.375rem;background:var(--tint);border-bottom:1px solid var(--hair)}
-.out-title{margin:0;font-size:0.8125rem;font-weight:600;line-height:1.35}
-.out-note{margin:0.0625rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
-.out-body{padding:0.5rem 0.875rem 0.75rem}
-.out-text{font-size:0.875rem;line-height:1.5;white-space:pre-wrap}
-.out-sub{margin:0;font-size:0.8125rem;line-height:1.4;color:var(--muted)}
-.out-foot{margin:0.375rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
-.asked{margin:0 0 0.5rem}
-.asked-label{margin:0;font-size:0.75rem;line-height:1.4;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em}
-.asked-text{margin:0.25rem 0 0;font-size:0.8125rem;line-height:1.45;white-space:pre-wrap}
 .row{display:flex;align-items:center;gap:0.75rem}
 .icon{flex:none;display:flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:50%;background:var(--raise);border:1px solid var(--hair)}
 .lock{width:1rem;height:1rem;fill:none;stroke:var(--text);stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
@@ -121779,44 +121478,6 @@ function fitJsonString(text3, budget) {
   }
   return { text: kept + CUT_MARK, cut: true };
 }
-function boundOutsideText(value) {
-  if (typeof value !== "string")
-    return { text: "", cut: false };
-  const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
-  const normalized = wellFormed(value).replace(/\r\n?/g, `
-`).replace(UNSAFE, "").replace(WHITESPACE_CONTROLS, " ");
-  let cut = false;
-  const lines = [];
-  let blank = false;
-  for (const raw of normalized.split(`
-`)) {
-    const line = raw.replace(/\s+$/, "");
-    if (line === "") {
-      if (blank || lines.length === 0)
-        continue;
-      blank = true;
-      lines.push("");
-      continue;
-    }
-    blank = false;
-    const points = [...line];
-    if (points.length > limits.outsideLineChars) {
-      cut = true;
-      lines.push(points.slice(0, limits.outsideLineChars - 1).join("") + CUT_MARK);
-    } else {
-      lines.push(line);
-    }
-  }
-  while (lines.length > 0 && lines[lines.length - 1] === "")
-    lines.pop();
-  if (lines.length > limits.outsideLines) {
-    cut = true;
-    lines.length = limits.outsideLines;
-  }
-  const fitted = fitJsonString(lines.join(`
-`), limits.outsideTextBytes);
-  return { text: fitted.text, cut: cut || fitted.cut };
-}
 function preparePrivateAnswer(result) {
   const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
   const citations = [];
@@ -121910,56 +121571,10 @@ function fitFirstAnswer(answer) {
   const unanswered = (answer.unanswered ?? []).slice(0, limits.gaps).map((line) => cleanTextField(line, limits.gapUnits)).filter((line) => line !== undefined).map((line) => fitJsonString(line, PRIVATE_ANSWER_BYTE_BUDGETS.gap).text).filter(Boolean);
   return { answer: text3, citations, ...unanswered.length > 0 ? { unanswered } : {} };
 }
-function fitOutsideBlock(block) {
-  const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
-  const state = block.state === "pending" || block.state === "appended" || block.state === "paused" ? block.state : "idle";
-  const out = { state };
-  if (state === "appended") {
-    const text3 = boundOutsideText(block.text);
-    out.text = text3.text;
-    if (text3.cut || block.cut === true)
-      out.cut = true;
-    const question = cleanTextField(block.question, limits.outsideQuestionBytes);
-    if (question)
-      out.question = fitJsonString(question, limits.outsideQuestionBytes).text;
-    const route = cleanTextField(block.route, limits.outsideRouteBytes);
-    if (route)
-      out.route = fitJsonString(route, limits.outsideRouteBytes).text;
-    if (block.level === "unnamed" || block.level === "general")
-      out.level = block.level;
-  }
-  const budget = PRIVATE_ANSWER_BYTE_BUDGETS.outside;
-  const over = () => utf8Bytes2(JSON.stringify(out)) - budget;
-  if (over() > 0 && out.text !== undefined) {
-    out.text = fitJsonString(out.text, Math.max(0, utf8Bytes2(JSON.stringify(out.text)) - over())).text;
-    out.cut = true;
-  }
-  if (over() > 0)
-    delete out.question;
-  if (over() > 0)
-    delete out.route;
-  return out;
-}
 function serializePrivateAnswerPlaintext(plaintext) {
   return JSON.stringify({ v: 1, ...fitFirstAnswer(plaintext) });
 }
-function serializePrivateAnswerEnvelope(envelope) {
-  const rev = Number.isSafeInteger(envelope.rev) && envelope.rev >= 0 ? envelope.rev : 0;
-  const followSeconds = Number.isSafeInteger(envelope.followSeconds) && envelope.followSeconds >= 0 ? envelope.followSeconds : 0;
-  const outside = fitOutsideBlock(envelope.outside ?? { state: "idle" });
-  if (envelope.state === "withdrawn") {
-    return JSON.stringify({ v: 1, rev, state: "withdrawn", followSeconds, outside });
-  }
-  const answer = fitFirstAnswer({ answer: envelope.answer ?? "", citations: envelope.citations ?? [], unanswered: envelope.unanswered });
-  return JSON.stringify({ v: 1, rev, state: "answer", ...answer, followSeconds, outside });
-}
-function padPrivateAnswerEnvelope(json2) {
-  const bytes = utf8Bytes2(json2);
-  if (bytes > PRIVATE_ANSWER_ENVELOPE_BYTES)
-    throw new PrivateAnswerEnvelopeOverflowError(bytes);
-  return json2 + " ".repeat(PRIVATE_ANSWER_ENVELOPE_BYTES - bytes);
-}
-var PRIVATE_ANSWER_PAYLOAD_LIMITS, PRIVATE_ANSWER_BYTE_BUDGETS, PRIVATE_ANSWER_ENVELOPE_BYTES = 36864, PrivateAnswerEnvelopeOverflowError, CUT_MARK = "…", UNSAFE, WHITESPACE_CONTROLS, encoder, OPEN_TOKEN;
+var PRIVATE_ANSWER_PAYLOAD_LIMITS, PRIVATE_ANSWER_BYTE_BUDGETS, CUT_MARK = "…", UNSAFE, WHITESPACE_CONTROLS, encoder, OPEN_TOKEN;
 var init_private_answer_payload = __esm(() => {
   PRIVATE_ANSWER_PAYLOAD_LIMITS = Object.freeze({
     answerUnits: 2700,
@@ -121969,29 +121584,13 @@ var init_private_answer_payload = __esm(() => {
     urlChars: 2048,
     openTokenChars: 43,
     gaps: 4,
-    gapUnits: 300,
-    outsideTextBytes: 4096,
-    outsideQuestionBytes: 1280,
-    outsideRouteBytes: 64,
-    outsideLines: 40,
-    outsideLineChars: 240
+    gapUnits: 300
   });
   PRIVATE_ANSWER_BYTE_BUDGETS = Object.freeze({
     answer: 8192,
     citation: 4096,
-    gap: 1024,
-    outside: 6144,
-    scalars: 512,
-    total: 35328
+    gap: 1024
   });
-  PrivateAnswerEnvelopeOverflowError = class PrivateAnswerEnvelopeOverflowError extends Error {
-    bytes;
-    constructor(bytes) {
-      super(`private answer plaintext of ${bytes} bytes exceeds the ${PRIVATE_ANSWER_ENVELOPE_BYTES}-byte envelope`);
-      this.bytes = bytes;
-      this.name = "PrivateAnswerEnvelopeOverflowError";
-    }
-  };
   UNSAFE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
   WHITESPACE_CONTROLS = /[\u0009]/g;
   encoder = new TextEncoder;
@@ -122013,7 +121612,6 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS: () => PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS,
   PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS,
   PRIVATE_ANSWER_DEDUPE_MS: () => PRIVATE_ANSWER_DEDUPE_MS,
-  PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS: () => PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS,
   PRIVATE_ANSWER_CLAIM_HOLD_MS: () => PRIVATE_ANSWER_CLAIM_HOLD_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
@@ -122116,9 +121714,6 @@ class PrivateAnswerJobs {
   openRefilledAt;
   openRate;
   openRateGlobal;
-  outsideHelpTtlMs;
-  followUpWindowMs;
-  consultSnapshotMs;
   resetting;
   options;
   constructor(options) {
@@ -122145,9 +121740,6 @@ class PrivateAnswerJobs {
     this.openRateGlobal = options.openRateGlobal ?? { capacity: 10, refillPerSecond: 0.2 };
     this.openTokens = this.openRateGlobal.capacity;
     this.openRefilledAt = this.now();
-    this.outsideHelpTtlMs = options.outsideHelpTtlMs ?? PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS;
-    this.followUpWindowMs = options.followUpWindowMs ?? PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS;
-    this.consultSnapshotMs = options.consultSnapshotMs ?? PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS;
   }
   get size() {
     return this.jobs.size;
@@ -122179,24 +121771,18 @@ class PrivateAnswerJobs {
     }
     const id = `oly2p.${installId}.${randomBytes18(32).toString("base64url")}`;
     const at = this.now();
-    const policy = this.bindPolicy();
     const job = {
       id,
       createdAt: at,
-      expiresAt: at + (policy.outsideHelp ? this.outsideHelpTtlMs : this.ttlMs),
+      expiresAt: at + this.ttlMs,
       caller: input.caller,
       detail: input.detail === "full" ? "full" : "summary",
-      policy,
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
       analysis: undefined,
-      followUp: false,
       pollTokens: this.pollRate.capacity,
       pollRefilledAt: at,
-      rev: 0,
-      outside: { state: "idle" },
-      consult: { snapshot: undefined, snapshotExpiresAt: undefined, latch: false, settled: false },
       openTokens: this.openRate.capacity,
       openRefilledAt: at
     };
@@ -122205,7 +121791,7 @@ class PrivateAnswerJobs {
       this.precompute(job);
     return { count: count2, panelState: "ready", jobId: id, ...job.detail === "full" ? { detail: "full" } : {} };
   }
-  async claim(jobId, publicKey, capability = 1) {
+  async claim(jobId, publicKey) {
     this.sweep();
     const job = this.jobs.get(jobId);
     if (!job || privateAnswerInstallId(jobId) !== this.options.installId())
@@ -122223,8 +121809,6 @@ class PrivateAnswerJobs {
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
-      job.panelCapability = capability === PRIVATE_ANSWER_PANEL_CAPABILITY ? PRIVATE_ANSWER_PANEL_CAPABILITY : 1;
-      job.followUp = job.policy.outsideHelp && job.panelCapability === PRIVATE_ANSWER_PANEL_CAPABILITY;
       const settled = this.startClaim(job, panel.key);
       const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
       if (holdMs > 0) {
@@ -122246,214 +121830,11 @@ class PrivateAnswerJobs {
     }
     if (outcome.kind === "failed")
       return { status: 200, body: { status: "failed" } };
-    if (outcome.kind === "retained" || outcome.kind === "withdrawn")
-      return this.followUpResponse(job, panel.key);
     if (!await this.stillReleasable(job))
       return this.jobs.get(jobId) === job ? { status: 200, body: { status: "failed" } } : gone();
     if (this.jobs.get(jobId) !== job || job.outcome !== outcome)
       return job.outcome?.kind === "failed" ? { status: 200, body: { status: "failed" } } : gone();
     return { status: 200, body: { status: "ready", v: 1, ...outcome.sealed } };
-  }
-  async followUpResponse(job, panelKey) {
-    const at = this.now();
-    for (let attempt = 0;; attempt += 1) {
-      await this.guardFollowUp(job);
-      if (this.jobs.get(job.id) !== job)
-        return gone();
-      if (attempt >= FOLLOW_UP_SEAL_ATTEMPTS)
-        this.withdraw(job);
-      const rev = job.rev;
-      const kind = job.outcome?.kind;
-      const followUntil = job.followUntil ?? Math.min(at + this.followUpWindowMs, job.expiresAt);
-      const plaintext = this.envelopeFor(job, followUntil);
-      if (plaintext === undefined)
-        return gone();
-      const sealed = await sealPrivateAnswer(job.id, panelKey, plaintext);
-      await this.guardFollowUp(job);
-      if (this.jobs.get(job.id) !== job)
-        return gone();
-      if (job.rev !== rev || job.outcome?.kind !== kind)
-        continue;
-      if (job.followUntil !== undefined && job.followUntil !== followUntil)
-        continue;
-      const first = job.firstDeliveredAt === undefined;
-      if (first) {
-        job.firstDeliveredAt = at;
-        job.followUntil = followUntil;
-        if (job.consult.snapshot)
-          job.consult.snapshotExpiresAt = at + this.consultSnapshotMs;
-      }
-      job.lastCollectedAt = Math.max(job.lastCollectedAt ?? 0, at);
-      if (first) {
-        try {
-          this.options.onFirstDelivered?.(job.id);
-        } catch {}
-      }
-      return { status: 200, body: { status: "ready", v: 1, ...sealed } };
-    }
-  }
-  async guardFollowUp(job) {
-    if (job.outcome?.kind !== "retained")
-      return;
-    const items = job.sealedItems;
-    const ok = await checkPrivateEvidence(this.options.eligible, items ?? []);
-    if (job.outcome?.kind !== "retained")
-      return;
-    if (items !== undefined && ok.every(Boolean))
-      return;
-    this.withdraw(job);
-  }
-  envelopeFor(job, followUntil) {
-    const outcome = job.outcome;
-    if (!outcome || outcome.kind !== "retained" && outcome.kind !== "withdrawn")
-      return;
-    const followSeconds = Math.max(0, Math.ceil((followUntil - this.now()) / 1000));
-    const envelope = () => job.outcome?.kind === "retained" ? { v: 1, rev: job.rev, state: "answer", answer: job.outcome.answer.answer, citations: [...job.outcome.answer.citations], ...job.outcome.answer.unanswered ? { unanswered: [...job.outcome.answer.unanswered] } : {}, followSeconds, outside: { ...job.outside } } : { v: 1, rev: job.rev, state: "withdrawn", followSeconds, outside: { state: "idle" } };
-    try {
-      return padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope(envelope()));
-    } catch {
-      if (job.outcome?.kind === "retained" && job.outside.state !== "idle") {
-        job.outside = { state: "idle" };
-        job.rev += 1;
-        try {
-          return padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope(envelope()));
-        } catch {}
-      }
-      this.withdraw(job);
-      return padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope(envelope()));
-    }
-  }
-  withdraw(job) {
-    if (job.outcome?.kind === "withdrawn")
-      return;
-    job.outcome = { kind: "withdrawn" };
-    job.outside = { state: "idle" };
-    job.question = undefined;
-    job.sealedItems = undefined;
-    job.opens = undefined;
-    this.forgetConsultSnapshot(job);
-    job.consult.settled = true;
-    job.rev += 1;
-  }
-  consultSnapshot(jobId) {
-    this.sweep();
-    const job = this.jobs.get(jobId);
-    if (!job || !job.followUp || job.outcome?.kind !== "retained" || job.firstDeliveredAt === undefined)
-      return;
-    if (job.consult.settled)
-      return;
-    this.expireConsultSnapshot(job, this.now());
-    return job.consult.snapshot;
-  }
-  dropConsultSnapshot(jobId) {
-    const job = this.jobs.get(jobId);
-    if (job)
-      this.forgetConsultSnapshot(job);
-  }
-  takeConsultLatch(jobId) {
-    this.sweep();
-    const job = this.jobs.get(jobId);
-    if (!job || !job.followUp || job.outcome?.kind !== "retained" || job.firstDeliveredAt === undefined || job.followUntil === undefined)
-      return false;
-    if (job.consult.latch || job.consult.settled || job.outside.state !== "pending")
-      return false;
-    if (this.now() > job.followUntil)
-      return false;
-    job.consult.latch = true;
-    return true;
-  }
-  forgetConsultSnapshot(job) {
-    job.consult.snapshot = undefined;
-    job.consult.snapshotExpiresAt = undefined;
-  }
-  expireConsultSnapshot(job, at) {
-    if (job.consult.snapshotExpiresAt !== undefined && at >= job.consult.snapshotExpiresAt)
-      this.forgetConsultSnapshot(job);
-  }
-  outsideSeam(jobId) {
-    this.sweep();
-    const job = this.jobs.get(jobId);
-    if (!job || !job.followUp || job.panelCapability === undefined)
-      return;
-    const state = job.outcome?.kind === "retained" ? "answer" : job.outcome?.kind === "withdrawn" ? "withdrawn" : "pending";
-    return {
-      rev: job.rev,
-      state,
-      outside: job.outside.state,
-      policy: job.policy,
-      panelCapability: job.panelCapability,
-      createdAt: job.createdAt,
-      expiresAt: job.expiresAt,
-      firstDeliveredAt: job.firstDeliveredAt,
-      followUntil: job.followUntil,
-      lastCollectedAt: job.lastCollectedAt
-    };
-  }
-  markOutside(jobId, expectedRev, state) {
-    if (state === "failed") {
-      this.sweep();
-      const job2 = this.jobs.get(jobId);
-      if (!job2 || !job2.followUp)
-        return { ok: false, reason: "unknown" };
-      if (job2.outcome?.kind === "withdrawn")
-        return { ok: false, reason: "withdrawn" };
-      if (job2.outside.state === "appended")
-        return { ok: false, reason: "already_appended" };
-      if (job2.rev !== expectedRev)
-        return { ok: false, reason: "stale_rev" };
-      job2.consult.settled = true;
-      this.forgetConsultSnapshot(job2);
-      if (job2.outside.state === "idle")
-        return { ok: true, rev: job2.rev };
-      job2.outside = { state: "idle" };
-      job2.rev += 1;
-      return { ok: true, rev: job2.rev };
-    }
-    const check = this.outsideWritable(jobId, expectedRev);
-    if (!check.ok)
-      return check;
-    const job = check.job;
-    if (state === "pending" && job.consult.settled)
-      return { ok: false, reason: "already_appended" };
-    if (job.outside.state === state)
-      return { ok: true, rev: job.rev };
-    job.outside = { state };
-    job.rev += 1;
-    return { ok: true, rev: job.rev };
-  }
-  appendOutsideBlock(jobId, expectedRev, block) {
-    const check = this.outsideWritable(jobId, expectedRev);
-    if (!check.ok)
-      return check;
-    const job = check.job;
-    job.outside = fitOutsideBlock({
-      state: "appended",
-      text: typeof block.text === "string" ? block.text : "",
-      ...typeof block.question === "string" ? { question: block.question } : {},
-      ...typeof block.route === "string" ? { route: block.route } : {},
-      ...block.level === "unnamed" || block.level === "general" ? { level: block.level } : {}
-    });
-    job.consult.settled = true;
-    this.forgetConsultSnapshot(job);
-    job.rev += 1;
-    return { ok: true, rev: job.rev };
-  }
-  outsideWritable(jobId, expectedRev) {
-    this.sweep();
-    const job = this.jobs.get(jobId);
-    if (!job || !job.followUp)
-      return { ok: false, reason: "unknown" };
-    if (job.outcome?.kind === "withdrawn")
-      return { ok: false, reason: "withdrawn" };
-    if (job.outcome?.kind !== "retained" || job.firstDeliveredAt === undefined || job.followUntil === undefined)
-      return { ok: false, reason: "not_delivered" };
-    if (this.now() > job.followUntil)
-      return { ok: false, reason: "window_closed" };
-    if (job.outside.state === "appended")
-      return { ok: false, reason: "already_appended" };
-    if (job.rev !== expectedRev)
-      return { ok: false, reason: "stale_rev" };
-    return { ok: true, job };
   }
   async open(jobId, token) {
     this.sweep();
@@ -122486,16 +121867,12 @@ class PrivateAnswerJobs {
   }
   async stillReleasable(job) {
     const kind = job.outcome?.kind;
-    if (kind !== "sealed" && kind !== "retained")
+    if (kind !== "sealed")
       return false;
     const ok = await checkPrivateEvidence(this.options.eligible, job.sealedItems ?? []);
     const current = job.outcome?.kind;
     if (job.sealedItems !== undefined && ok.every(Boolean) && current === kind)
       return true;
-    if (current === "retained" || current === "withdrawn") {
-      this.withdraw(job);
-      return false;
-    }
     job.outcome = { kind: "failed" };
     job.sealedItems = undefined;
     job.opens = undefined;
@@ -122505,8 +121882,6 @@ class PrivateAnswerJobs {
     for (const [id, job] of this.jobs) {
       if (job.expiresAt <= at)
         this.drop(id);
-      else
-        this.expireConsultSnapshot(job, at);
     }
     for (const [key, analysis] of this.shared) {
       if (analysis.createdAt + this.dedupeMs <= at || analysis.state === "failed")
@@ -122523,22 +121898,9 @@ class PrivateAnswerJobs {
     job.evidence = undefined;
     job.refresh = undefined;
     job.outcome = undefined;
-    job.outside = { state: "idle" };
     job.opens = undefined;
     job.sealedItems = undefined;
-    this.forgetConsultSnapshot(job);
     this.jobs.delete(id);
-  }
-  bindPolicy() {
-    const read = this.options.consultPolicy;
-    if (!read)
-      return OUTSIDE_HELP_OFF;
-    try {
-      const policy = read();
-      return typeof policy === "object" && policy !== null && typeof policy.outsideHelp === "boolean" ? policy : OUTSIDE_HELP_OFF;
-    } catch {
-      return OUTSIDE_HELP_OFF;
-    }
   }
   precompute(job) {
     const evidence = (job.evidence ?? []).filter(isPrivateEligible);
@@ -122748,10 +122110,7 @@ class PrivateAnswerJobs {
           modelCall: (call) => {
             analysis.stats.calls.push(call);
           }
-        }, {
-          detail: analysis.detail,
-          ...[...analysis.jobs].some((job) => job.policy.outsideHelp) ? { consult: true } : {}
-        });
+        }, { detail: analysis.detail });
         return { result, used };
       } catch (error2) {
         if (error2 instanceof NoPrivateEvidenceError)
@@ -122780,8 +122139,7 @@ class PrivateAnswerJobs {
       analysis.result = {
         ...preparedAnswer(done.result),
         usedKeys: usedKeys(evidence, done.used),
-        usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity),
-        consult: done.result.consult
+        usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity)
       };
       this.finish(analysis, "done");
     } catch (error2) {
@@ -122814,7 +122172,7 @@ class PrivateAnswerJobs {
       if (this.jobs.get(job.id) === job)
         job.outcome = outcome;
       this.detach(job);
-      timing.outcome = outcome?.kind === "sealed" || outcome?.kind === "retained" ? "sealed" : "failed";
+      timing.outcome = outcome?.kind === "sealed" ? "sealed" : "failed";
       if (reason)
         timing.reason = reason;
       timing.totalMs = this.now() - claimedAt;
@@ -122894,30 +122252,8 @@ class PrivateAnswerJobs {
           if (settled)
             return;
           const plaintext = this.withOpenTokens(job, result.plaintext, result.localPaths);
-          let outcome;
-          if (job.followUp) {
-            const retained = retainedAnswer(plaintext);
-            try {
-              padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope({
-                v: 1,
-                rev: 1,
-                state: "answer",
-                answer: retained.answer,
-                citations: [...retained.citations],
-                ...retained.unanswered ? { unanswered: [...retained.unanswered] } : {},
-                followSeconds: Math.ceil(this.followUpWindowMs / 1000),
-                outside: { state: "idle" }
-              }));
-            } catch {
-              job.opens = undefined;
-              settle({ kind: "failed" }, "error");
-              return;
-            }
-            outcome = { kind: "retained", answer: retained };
-          } else {
-            const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
-            outcome = { kind: "sealed", sealed };
-          }
+          const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
+          const outcome = { kind: "sealed", sealed };
           if (settled)
             return;
           if (await stillReadable()) {
@@ -122926,11 +122262,6 @@ class PrivateAnswerJobs {
             timing.precomputed = precomputed;
             timing.waitAtClaimMs = this.now() - claimedAt;
             job.sealedItems = result.usedItems;
-            if (outcome.kind === "retained") {
-              job.rev = 1;
-              const input = consultSnapshotInput(result.consult);
-              job.consult.snapshot = input ? consultSnapshot(question, outcome.answer, input, result.usedItems) : undefined;
-            }
             settle(outcome);
             return;
           }
@@ -122957,9 +122288,6 @@ class PrivateAnswerJobs {
     return detail === "full" ? Math.max(this.analysisTimeoutMs, this.fullAnalysisTimeoutMs) : this.analysisTimeoutMs;
   }
   beginActivity() {
-    try {
-      this.options.onAnswerActivity?.();
-    } catch {}
     let release;
     try {
       release = this.options.activity?.begin();
@@ -123130,47 +122458,6 @@ function preparedAnswer(result) {
     localPaths: prepared.localPaths
   };
 }
-function consultSnapshotInput(value) {
-  const record3 = asRecord17(value);
-  const verdict = asRecord17(record3?.verdict);
-  const pack = asRecord17(record3?.pack);
-  if (!record3 || !verdict || !pack || typeof verdict.noAnswer !== "boolean")
-    return;
-  if (verdict.sufficient !== undefined && typeof verdict.sufficient !== "boolean")
-    return;
-  if (typeof pack.question !== "string" || !Array.isArray(pack.candidates))
-    return;
-  return deepFreeze({
-    verdict: { sufficient: verdict.sufficient, noAnswer: verdict.noAnswer },
-    pack: structuredClone(pack)
-  });
-}
-function consultSnapshot(question, retained, input, items) {
-  return deepFreeze({
-    question,
-    answer: retained.answer,
-    gaps: [...retained.unanswered ?? []],
-    verdict: { sufficient: input.verdict.sufficient, noAnswer: input.verdict.noAnswer },
-    pack: input.pack,
-    items: items.map((item) => structuredClone(item))
-  });
-}
-function deepFreeze(value) {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value))
-    return value;
-  Object.freeze(value);
-  for (const entry of Object.values(value))
-    deepFreeze(entry);
-  return value;
-}
-function retainedAnswer(plaintext) {
-  const fitted = fitFirstAnswer(plaintext);
-  return Object.freeze({
-    answer: fitted.answer,
-    citations: Object.freeze(fitted.citations),
-    unanswered: fitted.unanswered && fitted.unanswered.length > 0 ? Object.freeze(fitted.unanswered) : undefined
-  });
-}
 function isPrivateAnswerRequest(request) {
   return new URL(request.url).pathname.startsWith("/private/");
 }
@@ -123203,7 +122490,7 @@ function createPrivateAnswerHandler(options) {
       return reply({ status: 400, body: { status: "invalid" } });
     if (route.action === "open")
       return reply(await options.jobs.open(jobId, record3.open));
-    return reply(await options.jobs.claim(jobId, record3.publicKey, record3.cap === PRIVATE_ANSWER_PANEL_CAPABILITY ? PRIVATE_ANSWER_PANEL_CAPABILITY : 1));
+    return reply(await options.jobs.claim(jobId, record3.publicKey));
   };
 }
 function reply(claim, extra = {}) {
@@ -123244,7 +122531,7 @@ async function boundedText(request, max) {
 }
 var AnalysisStop, defaultLog = (line) => {
   console.log(line);
-}, MAX_QUESTION_CHARS = 4000, FOLLOW_UP_SEAL_ATTEMPTS = 8, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS, OUTSIDE_HELP_OFF, defaultAudit = (event) => {
+}, MAX_QUESTION_CHARS = 4000, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 }, IDENTITY_FIELDS, SOURCE_ITEM_FIELDS;
 var init_private_answer_jobs = __esm(() => {
@@ -123252,7 +122539,6 @@ var init_private_answer_jobs = __esm(() => {
   init_private_answer_contract();
   init_private_answer_crypto();
   init_private_answer_payload();
-  init_consult_settings();
   AnalysisStop = class AnalysisStop extends Error {
     reason;
     constructor(reason) {
@@ -123263,8 +122549,6 @@ var init_private_answer_jobs = __esm(() => {
   OPEN_TOKEN_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${PRIVATE_ANSWER_PAYLOAD_LIMITS.openTokenChars}}$`);
   PRIVATE_ANSWER_DEDUPE_MS = 3 * 60000;
   PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60000;
-  PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS = 5 * 60000;
-  OUTSIDE_HELP_OFF = bindConsultJobPolicy({ state: "absent", settings: DEFAULT_CONSULT_SETTINGS });
   IDENTITY_FIELDS = [
     "corpusId",
     "trustDomain",
@@ -123417,7 +122701,6 @@ function createBuiltInPrivateAnswerModel(options) {
           maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
           audit: limits.audit,
           evidenceFormat: "compact",
-          ...request?.consult ? { consultMetadata: true } : {},
           ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
           ...signal ? { signal } : {}
         });
@@ -123462,8 +122745,7 @@ function createBuiltInPrivateAnswerModel(options) {
       return {
         answer: versionNote ? `${answerText} ${versionNote}` : answerText,
         citations,
-        unanswered,
-        ...result.consult ? { consult: { verdict: result.consult.verdict, pack: result.consult.pack } } : {}
+        unanswered
       };
     },
     async reset() {
@@ -123936,358 +123218,6 @@ var init_open_target = __esm(() => {
   ]);
 });
 
-// src/workers/chatgpt/consult-orchestrator.ts
-var exports_consult_orchestrator = {};
-__export(exports_consult_orchestrator, {
-  resolveZkapiConsultTransport: () => resolveZkapiConsultTransport,
-  createConsultOrchestrator: () => createConsultOrchestrator,
-  CONSULT_WRITER_DEADLINE_MS: () => CONSULT_WRITER_DEADLINE_MS,
-  CONSULT_RECENT_ACTIVITY_MS: () => CONSULT_RECENT_ACTIVITY_MS,
-  CONSULT_DISPATCH_WINDOW_MS: () => CONSULT_DISPATCH_WINDOW_MS,
-  CONSULT_DELIVERY_MARGIN_MS: () => CONSULT_DELIVERY_MARGIN_MS,
-  CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS: () => CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS
-});
-function createConsultOrchestrator(options) {
-  const now = options.now ?? Date.now;
-  const log = options.log ?? ((line) => console.log(line));
-  const completionTimeoutMs = () => {
-    try {
-      const value = options.completionTimeoutMs?.();
-      return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS;
-    } catch {
-      return CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS;
-    }
-  };
-  const builtInDeadlineMs = () => {
-    try {
-      const value = typeof options.writerDeadlineMs === "function" ? options.writerDeadlineMs() : options.writerDeadlineMs;
-      return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : CONSULT_WRITER_DEADLINE_MS;
-    } catch {
-      return CONSULT_WRITER_DEADLINE_MS;
-    }
-  };
-  const boundWriter = (policy) => policy.writer ?? null;
-  const writerDeadlineMs = (policy) => {
-    const own = boundWriter(policy);
-    return own ? own.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS : builtInDeadlineMs();
-  };
-  const notifyTransport = (code) => {
-    try {
-      options.onTransportFailure?.(code);
-    } catch {}
-  };
-  const recent = [];
-  const inFlight = new Map;
-  let fresh2 = new AbortController;
-  const record4 = (jobId, outcome, startedAt, code) => {
-    try {
-      log(`[consult] outcome=${outcome}${code ? ` code=${code}` : ""} ms=${Math.max(0, now() - startedAt)}`);
-    } catch {}
-  };
-  const fail = (jobId) => {
-    options.jobs.dropConsultSnapshot(jobId);
-    const seam = options.jobs.outsideSeam(jobId);
-    if (!seam)
-      return;
-    options.jobs.markOutside(jobId, seam.rev, "failed");
-  };
-  const windowOpen = (trigger2, at, extraMs = 0) => at <= trigger2.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS && at + extraMs + completionTimeoutMs() + CONSULT_DELIVERY_MARGIN_MS <= trigger2.followUntil;
-  const recentlyActive = (lastCollectedAt, at) => lastCollectedAt !== undefined && at - lastCollectedAt <= CONSULT_RECENT_ACTIVITY_MS;
-  const trigger = (jobId) => {
-    const seam = options.jobs.outsideSeam(jobId);
-    if (!seam)
-      return;
-    if (!seam.policy.outsideHelp || seam.panelCapability !== 2)
-      return;
-    if (seam.state !== "answer" || seam.outside !== "idle")
-      return;
-    if (seam.firstDeliveredAt === undefined || seam.followUntil === undefined)
-      return;
-    const at = now();
-    if (!recentlyActive(seam.lastCollectedAt, at))
-      return;
-    const snapshot = options.jobs.consultSnapshot(jobId);
-    if (!snapshot)
-      return;
-    if (snapshot.verdict.noAnswer)
-      return;
-    if (snapshot.verdict.sufficient !== false && snapshot.gaps.length === 0)
-      return;
-    const candidate = { rev: seam.rev, policy: seam.policy, firstDeliveredAt: seam.firstDeliveredAt, followUntil: seam.followUntil };
-    if (!windowOpen(candidate, at, writerDeadlineMs(candidate.policy)))
-      return;
-    return candidate;
-  };
-  const safe = (read, fallback) => {
-    try {
-      return read ? read() : fallback;
-    } catch {
-      return !fallback;
-    }
-  };
-  const run = async (jobId, scheduled) => {
-    const startedAt = now();
-    if (!safe(options.transportAvailable, true)) {
-      fail(jobId);
-      record4(jobId, "transport_unavailable", startedAt, "no_route");
-      return;
-    }
-    if (safe(options.answerActivityBusy, false)) {
-      fail(jobId);
-      record4(jobId, "superseded", startedAt, "answer_busy");
-      return;
-    }
-    const kill = fresh2.signal;
-    const first = options.jobs.consultSnapshot(jobId);
-    if (!first) {
-      fail(jobId);
-      record4(jobId, "error", startedAt, "snapshot_gone");
-      return;
-    }
-    const items = first.items;
-    if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) {
-      fail(jobId);
-      record4(jobId, "ineligible", startedAt, "e1");
-      return;
-    }
-    if (kill.aborted) {
-      fail(jobId);
-      record4(jobId, "superseded", startedAt, "fresh_answer");
-      return;
-    }
-    const held = options.jobs.consultSnapshot(jobId);
-    if (held !== first) {
-      fail(jobId);
-      record4(jobId, "error", startedAt, "snapshot_gone");
-      return;
-    }
-    if (safe(options.answerActivityBusy, false)) {
-      fail(jobId);
-      record4(jobId, "superseded", startedAt, "answer_busy");
-      return;
-    }
-    const writerChoice = boundWriter(scheduled.policy);
-    const own = writerChoice !== null;
-    const standard = scheduled.policy.level === "unnamed" ? scheduled.policy.standard ?? consultStandardBinding(DEFAULT_CONSULT_SETTINGS) : undefined;
-    const bounded = boundConsultWriterInput(standard ? {
-      question: held.question,
-      answer: "",
-      gaps: [],
-      ...standard.instruction !== undefined ? { instruction: standard.instruction } : {},
-      ...own && standard.mode !== "as_written" ? { evidence: consultWriterEvidence(held.pack) } : {}
-    } : {
-      question: held.question,
-      answer: held.answer,
-      gaps: held.gaps,
-      ...own ? { evidence: consultWriterEvidence(held.pack) } : {}
-    });
-    const sessionAbort = new AbortController;
-    const openDeadlineMs = Math.max(1000, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
-    const opening = options.openSession({ signal: sessionAbort.signal, deadlineMs: openDeadlineMs });
-    opening.catch(() => {
-      return;
-    });
-    const closeSession = async () => {
-      sessionAbort.abort();
-      const opened2 = await opening.catch(() => {
-        return;
-      });
-      if (opened2?.ok)
-        opened2.session.cancel();
-    };
-    let written;
-    try {
-      written = standard?.mode === "as_written" ? { kind: "questions", questions: Object.freeze([held.question.trim()]), promptTokens: 0, ms: 0 } : await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs(scheduled.policy), level: scheduled.policy.level, writer: writerChoice });
-    } catch {
-      written = { kind: "failed", reason: "request_failed" };
-    }
-    if (written.kind !== "questions") {
-      await closeSession();
-      fail(jobId);
-      record4(jobId, written.kind === "skipped" ? "writer_skipped" : written.kind === "killed" ? "writer_killed" : written.kind === "declined" ? "writer_declined" : "writer_failed", startedAt, "reason" in written ? written.reason : undefined);
-      return;
-    }
-    const settingsAtGate = options.settings();
-    const policyNow = recheckConsultJobPolicy(scheduled.policy, settingsAtGate);
-    if (!policyNow.ok) {
-      await closeSession();
-      fail(jobId);
-      record4(jobId, "authorization_refused", startedAt, policyNow.reason);
-      return;
-    }
-    const current = options.jobs.consultSnapshot(jobId);
-    if (current !== first) {
-      await closeSession();
-      fail(jobId);
-      record4(jobId, "error", startedAt, "snapshot_gone");
-      return;
-    }
-    const verdict = evaluateConsultRequest(written.questions, consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question], writerAnswerTexts: [bounded.answer, ...bounded.gaps] }), {}, { recentApprovedQuestions: [...recent] }, {
-      ...consultGateOptionsFromSettings(settingsAtGate.settings),
-      level: scheduled.policy.level,
-      askedQuestionTexts: [bounded.question],
-      askedQuestionFullTexts: [current.question],
-      net: standard ? "secrets" : own ? "thin" : "full"
-    });
-    if (verdict.decision !== "pass") {
-      await closeSession();
-      fail(jobId);
-      record4(jobId, "gate_refused", startedAt, [...verdict.reasons].sort().join(","));
-      return;
-    }
-    const opened = await opening.catch(() => {
-      return;
-    });
-    if (!opened || !opened.ok) {
-      fail(jobId);
-      record4(jobId, "transport_unavailable", startedAt, opened?.ok === false ? opened.error.code : "open_threw");
-      if (opened?.ok === false)
-        notifyTransport(opened.error.code);
-      return;
-    }
-    const session = opened.session;
-    const questions = written.questions;
-    const questionText = questions.join(`
-`);
-    const sendDeadlineMs = Math.max(1, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
-    let authorized = false;
-    const authorize = async (signal) => {
-      if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean))
-        return false;
-      if (signal.aborted)
-        return false;
-      if (!recheckConsultJobPolicy(scheduled.policy, options.settings()).ok)
-        return false;
-      const seam2 = options.jobs.outsideSeam(jobId);
-      if (!seam2 || seam2.state !== "answer" || seam2.outside !== "pending" || seam2.panelCapability !== 2)
-        return false;
-      const at = now();
-      if (!recentlyActive(seam2.lastCollectedAt, at))
-        return false;
-      if (!windowOpen(scheduled, at))
-        return false;
-      if (!options.jobs.takeConsultLatch(jobId))
-        return false;
-      authorized = true;
-      for (const question of questions) {
-        recent.push(question);
-        while (recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS)
-          recent.shift();
-      }
-      return true;
-    };
-    options.jobs.dropConsultSnapshot(jobId);
-    const dispatched = session.send(questionText, { authorize, deadlineMs: sendDeadlineMs });
-    dispatched.catch(() => {
-      return;
-    });
-    const reply2 = await dispatched.catch(() => {
-      return;
-    });
-    if (!authorized) {
-      fail(jobId);
-      record4(jobId, "authorization_refused", startedAt, reply2 && reply2.kind === "failed" ? reply2.error.code : undefined);
-      return;
-    }
-    session.finished.then((result) => {
-      try {
-        log(`[consult] finished=${result.ok ? "ok" : result.error.code} ms=${Math.max(0, now() - startedAt)}`);
-      } catch {}
-    }, () => {
-      return;
-    });
-    if (!reply2 || reply2.kind !== "reply") {
-      fail(jobId);
-      record4(jobId, "reply_failed", startedAt, reply2?.kind === "failed" ? reply2.error.code : "no_reply");
-      if (reply2?.kind === "failed")
-        notifyTransport(reply2.error.code);
-      return;
-    }
-    if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) {
-      fail(jobId);
-      record4(jobId, "ineligible", startedAt, "reply");
-      return;
-    }
-    const seam = options.jobs.outsideSeam(jobId);
-    const appended = seam ? options.jobs.appendOutsideBlock(jobId, seam.rev, { text: reply2.text, question: questionText, route: reply2.routeLabel, level: scheduled.policy.level }) : undefined;
-    if (!appended?.ok) {
-      fail(jobId);
-      record4(jobId, "append_refused", startedAt, appended ? appended.reason : "job_gone");
-      return;
-    }
-    record4(jobId, "appended", startedAt, `reply_ms=${reply2.elapsedMs}`);
-    try {
-      options.onAppended?.();
-    } catch {}
-  };
-  return {
-    onFirstDelivered(jobId) {
-      if (inFlight.has(jobId))
-        return;
-      const scheduled = trigger(jobId);
-      if (!scheduled)
-        return;
-      const marked = options.jobs.markOutside(jobId, scheduled.rev, "pending");
-      if (!marked.ok)
-        return;
-      const task = run(jobId, scheduled).catch(() => {
-        try {
-          fail(jobId);
-        } catch {}
-        record4(jobId, "error", now(), "threw");
-      }).finally(() => {
-        inFlight.delete(jobId);
-      });
-      inFlight.set(jobId, task);
-    },
-    onFreshAnswer() {
-      const current = fresh2;
-      fresh2 = new AbortController;
-      current.abort();
-    },
-    get inFlight() {
-      return inFlight.size;
-    },
-    async idle() {
-      while (inFlight.size > 0)
-        await Promise.allSettled([...inFlight.values()]);
-    },
-    get recentQuestions() {
-      return [...recent];
-    }
-  };
-}
-function resolveZkapiConsultTransport(profiles, resolveSecret, extra = {}) {
-  const routes = Object.values(profiles).filter((profile) => profile.provider === "zkapi" && profile.zkapi && profile.baseUrl);
-  if (routes.length !== 1)
-    return;
-  const route = routes[0];
-  let apiKey;
-  try {
-    apiKey = resolveSecret(route.secretRef);
-  } catch {
-    apiKey = undefined;
-  }
-  return {
-    baseUrl: route.baseUrl,
-    model: extra.chatgptFrontierModel ?? route.model ?? "",
-    ...apiKey ? { apiKey } : {},
-    settings: route.zkapi,
-    ...extra.env ? { env: extra.env } : {},
-    ...extra.statePath ? { statePath: extra.statePath } : {}
-  };
-}
-var CONSULT_DISPATCH_WINDOW_MS, CONSULT_RECENT_ACTIVITY_MS = 75000, CONSULT_DELIVERY_MARGIN_MS, CONSULT_WRITER_DEADLINE_MS = 60000, CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS;
-var init_consult_orchestrator = __esm(() => {
-  init_consult_gate();
-  init_consult_settings();
-  init_consult_writer();
-  init_private_answer_contract();
-  CONSULT_DISPATCH_WINDOW_MS = 5 * 60000;
-  CONSULT_DELIVERY_MARGIN_MS = 2 * 60000;
-  CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS = 6 * 60000;
-});
-
 // src/core/consult-ask.ts
 var exports_consult_ask = {};
 __export(exports_consult_ask, {
@@ -124446,10 +123376,10 @@ async function askAnonymously(input, deps) {
     stale = askBinding(current) !== bound;
     return !stale;
   };
-  const model = input.origin === "agent" ? input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider) : input.model;
+  const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
   let result;
   try {
-    result = await deps.send(sent, authorize, { origin: input.origin, ...model !== undefined ? { model } : {}, ...input.signal ? { signal: input.signal } : {} });
+    result = await deps.send(sent, authorize, { model, ...input.signal ? { signal: input.signal } : {} });
   } catch {
     result = { ok: false, error: { code: "internal_error", message: "The zkAPI session failed inside Olympus.", outcome: "unknown", networkIdentity: "not_verified" } };
   }
@@ -124471,7 +123401,7 @@ async function askAnonymously(input, deps) {
     ...strict ? {} : { cleanup },
     rewritten,
     remembered,
-    ...model !== undefined ? { model } : {},
+    model,
     ...rememberNote ? { note: rememberNote } : {}
   };
 }
@@ -125237,7 +124167,6 @@ function createDashboardConsultAdapter(options) {
   let policy = options.sovereignty.config;
   let restartPending = false;
   let writerCheck = { state: "idle" };
-  let askState = { state: "idle" };
   const zkapiProfile = () => {
     const entries = Object.entries(policy.modelProfiles).filter(([, profile2]) => profile2.provider === "zkapi");
     if (entries.length !== 1)
@@ -125271,8 +124200,6 @@ function createDashboardConsultAdapter(options) {
   const writerView = () => {
     const read = readConsultSettings(location);
     const settings = read.state === "valid" ? read.settings : undefined;
-    const route = zkapiProfile();
-    const routeModel = route && "model" in route.profile && typeof route.profile.model === "string" ? route.profile.model : undefined;
     return {
       ...settings?.writer ? {
         choice: {
@@ -125283,7 +124210,8 @@ function createDashboardConsultAdapter(options) {
       } : {},
       ...settings?.chatgptFrontierModel ? { chatgptFrontierModel: settings.chatgptFrontierModel } : {},
       effectiveChatgptModel: consultChatgptFrontierModel(settings ?? DEFAULT_CONSULT_SETTINGS),
-      ...routeModel ? { routeModel } : {},
+      ...settings?.claudeFrontierModel ? { claudeFrontierModel: settings.claudeFrontierModel } : {},
+      effectiveClaudeModel: consultClaudeFrontierModel(settings ?? DEFAULT_CONSULT_SETTINGS),
       ...options.chatgptModelProblem?.() ? { modelProblem: options.chatgptModelProblem() } : {},
       testAvailable: options.writerCheck !== undefined,
       check: writerCheck
@@ -125410,8 +124338,7 @@ function createDashboardConsultAdapter(options) {
         restartPending,
         tools: { tools: toolsState(), install: dashboardInstallView(toolsJob.progress()) },
         writer: writerView(),
-        standard: standardView(),
-        ...options.ask ? { ask: { state: askState, maxChars: CONSULT_ASK_MAX_CHARS } } : {}
+        standard: standardView()
       };
     },
     async saveStandard(update) {
@@ -125447,29 +124374,6 @@ function createDashboardConsultAdapter(options) {
       if (!result.ok)
         return writeRefusal(result.reason, result.current?.state === "valid" ? result.current.settings.revision : 0);
       return { ok: true, status_message: MESSAGES2.standardSaved, revision: result.settings.revision };
-    },
-    async ask(update) {
-      if (!options.ask)
-        return { ok: false, httpStatus: 501, code: "ask_unavailable", message: MESSAGES2.askUnavailable };
-      if (askState.state === "running")
-        return { ok: false, httpStatus: 409, code: "ask_running", message: MESSAGES2.askRunning };
-      const question = typeof update.question === "string" ? update.question.trim() : "";
-      if (!question)
-        return invalid3(MESSAGES2.askEmpty, "question_empty");
-      const runner = options.ask;
-      askState = { state: "running", question };
-      (async () => {
-        let result;
-        try {
-          const read = readConsultSettings(location);
-          const level = (read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS).level === "general" ? "strict" : "standard";
-          result = await runner({ question, level, origin: "dashboard" });
-        } catch {
-          result = { ok: false, code: "internal_error", message: MESSAGES2.askUnavailable };
-        }
-        askState = result.ok ? { state: "done", at: now().toISOString(), question, sent: result.sent, reply: result.reply, route: result.route } : { state: "failed", at: now().toISOString(), question, message: result.message, ..."sent" in result && result.sent !== undefined ? { sent: result.sent } : {} };
-      })();
-      return { ok: true, status_message: MESSAGES2.askStarted };
     },
     async rememberLevel(choice) {
       const current = readConsultSettings(location);
@@ -125524,17 +124428,19 @@ function createDashboardConsultAdapter(options) {
           return invalid3(MESSAGES2.writerInvalid, "writer_invalid");
         writer = parsed;
       }
-      let chatgptFrontierModel = base.chatgptFrontierModel;
-      if (update.chatgpt_frontier_model !== undefined) {
-        const raw = update.chatgpt_frontier_model;
-        if (raw === null || typeof raw === "string" && raw.trim() === "") {
-          chatgptFrontierModel = undefined;
-        } else if (typeof raw === "string" && /^\S{1,200}$/.test(raw.trim())) {
-          chatgptFrontierModel = raw.trim();
-        } else {
-          return invalid3(MESSAGES2.frontierModelInvalid, "frontier_model_invalid");
-        }
-      }
+      const frontierModel = (raw, current2) => {
+        if (raw === undefined)
+          return { ok: true, model: current2 };
+        if (raw === null || typeof raw === "string" && raw.trim() === "")
+          return { ok: true, model: undefined };
+        if (typeof raw === "string" && /^\S{1,200}$/.test(raw.trim()))
+          return { ok: true, model: raw.trim() };
+        return { ok: false };
+      };
+      const chatgpt = frontierModel(update.chatgpt_frontier_model, base.chatgptFrontierModel);
+      const claude = frontierModel(update.claude_frontier_model, base.claudeFrontierModel);
+      if (!chatgpt.ok || !claude.ok)
+        return invalid3(MESSAGES2.frontierModelInvalid, "frontier_model_invalid");
       const result = writeConsultSettings({
         enabled: base.enabled,
         languages: [...base.languages],
@@ -125542,8 +124448,8 @@ function createDashboardConsultAdapter(options) {
         strict: base.strict,
         level: base.level,
         ...writer ? { writer } : {},
-        ...chatgptFrontierModel ? { chatgptFrontierModel } : {},
-        ...base.claudeFrontierModel ? { claudeFrontierModel: base.claudeFrontierModel } : {},
+        ...chatgpt.model ? { chatgptFrontierModel: chatgpt.model } : {},
+        ...claude.model ? { claudeFrontierModel: claude.model } : {},
         ...standardCarried(base),
         ...base.levelChosen ? { levelChosen: true } : {},
         expectedRevision: revision
@@ -125552,7 +124458,8 @@ function createDashboardConsultAdapter(options) {
         return writeRefusal(result.reason, result.current?.state === "valid" ? result.current.settings.revision : 0);
       if (update.writer !== undefined)
         writerCheck = { state: "idle" };
-      return { ok: true, status_message: writer ? MESSAGES2.writerSaved : MESSAGES2.writerCleared, revision: result.settings.revision };
+      const message = update.writer === undefined ? MESSAGES2.frontierModelsSaved : writer ? MESSAGES2.writerSaved : MESSAGES2.writerCleared;
+      return { ok: true, status_message: message, revision: result.settings.revision };
     },
     async testWriter(update) {
       if (update.confirm !== true)
@@ -125788,14 +124695,12 @@ var DASHBOARD_ZKAPI_PROFILE_ID = "zkapi-consult", DASHBOARD_ZKAPI_API_KEY_ENV = 
 var init_dashboard_consult = __esm(() => {
   init_consult_gate();
   init_consult_settings();
-  init_consult_ask();
   init_consult_settings_writer();
   init_consult_transport_zkapi();
   init_sovereignty();
   init_zkapi_consult_settings();
   init_operation_error();
   init_managed_tools();
-  init_consult_orchestrator();
   ALL_LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
   ACKNOWLEDGEMENT_IDS = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id);
   MESSAGES2 = {
@@ -125826,7 +124731,7 @@ var init_dashboard_consult = __esm(() => {
     noFence: "There is no held request to recover.",
     otherWallet: "The held request belongs to another wallet folder. Recover it there, or abandon it.",
     scope: "Name which held request to abandon.",
-    turnedOn: "Anonymous answers are on. When a private answer in ChatGPT is missing something, Olympus may ask one anonymous question for it.",
+    turnedOn: "Anonymous answers are on. Ask your agent to use Olympus zkAPI to send a question anonymously.",
     turnedOff: "Anonymous answers are off. No question is sent.",
     routeSavedRestart: "Saved. Olympus is restarting its worker to apply the change; this page will refresh.",
     routeSavedNoRestart: "Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.",
@@ -125839,15 +124744,12 @@ var init_dashboard_consult = __esm(() => {
     installRunning: "An install is already running.",
     writerSaved: "Saved. Your model writes the outside questions from now on.",
     writerCleared: "Saved. The model built into Olympus writes the outside questions again.",
+    frontierModelsSaved: "Saved the zkAPI models.",
     writerInvalid: "Enter the address of an OpenAI-compatible server (http:// or https://, usually ending in /v1) and a model name. A key reference is env:NAME or store:name.",
     frontierModelInvalid: "Enter a zkAPI model name such as provider/model, or leave it empty.",
     writerTestStarted: "Testing your model on invented cases. Nothing is sent to zkAPI. This can take several minutes.",
     standardSaved: "Saved how your questions are prepared.",
     standardInvalid: "Choose one of the three ways, and write an instruction for your own.",
-    askStarted: "Asking anonymously. Starting a private route takes a minute or two.",
-    askRunning: "A question is already on its way. Wait for its answer first.",
-    askUnavailable: "Asking anonymously is not available here.",
-    askEmpty: "Type a question first.",
     writerTestRunning: "A test is already running.",
     writerTestNoWriter: "Choose your model and save it first. The test runs on your own model.",
     writerTestUnavailable: "This Olympus cannot run the test."
@@ -128495,7 +127397,7 @@ async function main() {
     },
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
-    consultAsk: ({ caller, ...input }, signal) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, origin: "agent", signal }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
+    consultAsk: ({ caller, ...input }, signal) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
     ...sourceIndexStatus ? { sourceIndexStatus } : {},
     currentReadwiseSync,
@@ -128558,8 +127460,7 @@ async function main() {
           installTools: (update) => dashboardConsult.installTools(update),
           saveWriter: (update) => dashboardConsult.saveWriter(update),
           testWriter: (update) => dashboardConsult.testWriter(update),
-          saveStandard: (update) => dashboardConsult.saveStandard(update),
-          ask: (update) => dashboardConsult.ask(update)
+          saveStandard: (update) => dashboardConsult.saveStandard(update)
         },
         stopMessagingCapture,
         corpusRegistry: sourceCorpusRegistry2,
@@ -128668,7 +127569,7 @@ async function main() {
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30000);
   sourceAnswerJobSweep.unref?.();
   const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
-  const { bindConsultJobPolicy: bindConsultJobPolicy2, readConsultSettings: readConsultSettings2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+  const { readConsultSettings: readConsultSettings2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
   const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2, embeddingPanelRelevance: embeddingPanelRelevance2 } = await Promise.resolve().then(() => (init_private_answer_model(), exports_private_answer_model));
   const { DASHBOARD_UI_DOMAIN: DASHBOARD_UI_DOMAIN2 } = await Promise.resolve().then(() => (init_dashboard_resource(), exports_dashboard_resource));
   const { createDropboxOpenTargets: createDropboxOpenTargets2, localDropboxRoots: localDropboxRoots2, localOpenArguments: localOpenArguments2 } = await Promise.resolve().then(() => (init_open_target(), exports_open_target));
@@ -128692,16 +127593,12 @@ async function main() {
       return Object.hasOwn(sourceOpenTargets, provider) ? sourceOpenTargets[provider](locator) : undefined;
     }
   });
-  let consultOrchestrator;
   let askAnonymouslyNow;
   let chatgptModelProblem;
   const privateAnswers = new PrivateAnswerJobs2({
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
-    consultPolicy: () => bindConsultJobPolicy2(readConsultSettings2()),
-    onFirstDelivered: (jobId) => consultOrchestrator?.onFirstDelivered(jobId),
-    onAnswerActivity: () => consultOrchestrator?.onFreshAnswer(),
     activity: answerActivity,
     ...process.platform === "darwin" ? {
       openFile: (path) => new Promise((resolve11, reject) => {
@@ -128717,9 +127614,8 @@ async function main() {
   const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30000);
   privateAnswerSweep.unref?.();
   {
-    const { createConsultOrchestrator: createConsultOrchestrator2, resolveZkapiConsultTransport: resolveZkapiConsultTransport2 } = await Promise.resolve().then(() => (init_consult_orchestrator(), exports_consult_orchestrator));
     const { CONSULT_WRITER_LIMITS: CONSULT_WRITER_LIMITS2, createConsultWriterServer: createConsultWriterServer2, defaultConsultMemoryProbe: defaultConsultMemoryProbe2, runConsultWriter: runConsultWriter2, runOwnConsultWriter: runOwnConsultWriter2 } = await Promise.resolve().then(() => (init_consult_writer(), exports_consult_writer));
-    const { openZkapiConsultSession: openZkapiConsultSession2 } = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
+    const { openZkapiConsultSession: openZkapiConsultSession2, resolveZkapiConsultTransport: resolveZkapiConsultTransport2 } = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
     let writerServer;
     const writerServerFor = () => {
       if (writerServer)
@@ -128733,7 +127629,7 @@ async function main() {
     const memory = defaultConsultMemoryProbe2();
     const { consultChatgptFrontierModel: consultChatgptFrontierModel2, consultChatgptModelUnavailableMessage: consultChatgptModelUnavailableMessage2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
     const chatgptModel = () => consultChatgptFrontierModel2(readConsultSettings2().settings);
-    const transport = (origin = "chatgpt", model) => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }), { env: process.env, ...origin === "chatgpt" ? { chatgptFrontierModel: model ?? chatgptModel() } : {} });
+    const transport = (model) => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }), { env: process.env, model });
     const runChosenWriter = (input, control) => {
       const choice = control.writer;
       if (choice) {
@@ -128772,8 +127668,8 @@ async function main() {
             level,
             writer
           }),
-          send: async (text4, authorize, { origin, model, signal }) => {
-            const route = transport(origin === "agent" ? "chatgpt" : "dashboard", model);
+          send: async (text4, authorize, { model, signal }) => {
+            const route = transport(model);
             if (!route)
               return;
             const opened = await openZkapiConsultSession2(route, signal ? { signal } : {});
@@ -128784,7 +127680,7 @@ async function main() {
           },
           remember: (choice) => dashboardConsult.rememberLevel(choice)
         });
-        if (input.origin === "agent" && !input.model && input.callerProvider !== "anthropic") {
+        if (!input.model && input.callerProvider !== "anthropic") {
           if (!result.ok && result.code === "model_unavailable")
             chatgptModelProblem = { at: new Date().toISOString(), message: consultChatgptModelUnavailableMessage2(chatgptModel()) };
           else if (result.ok)
@@ -128793,33 +127689,6 @@ async function main() {
         return result;
       };
     }
-    consultOrchestrator = createConsultOrchestrator2({
-      jobs: privateAnswers,
-      eligible: privateEvidenceEligible,
-      settings: () => readConsultSettings2(),
-      writer: (input, control) => runChosenWriter(input, control),
-      onTransportFailure: (code) => {
-        if (code === "model_unavailable")
-          chatgptModelProblem = { at: new Date().toISOString(), message: consultChatgptModelUnavailableMessage2(chatgptModel()) };
-      },
-      onAppended: () => {
-        chatgptModelProblem = undefined;
-      },
-      writerDeadlineMs: CONSULT_WRITER_LIMITS2.deadlineMs,
-      openSession: async (control) => {
-        const route = transport();
-        if (!route) {
-          return {
-            ok: false,
-            error: { code: "transport_failed", message: "No zkAPI consult route is configured.", outcome: "not_sent", networkIdentity: "not_verified" }
-          };
-        }
-        return openZkapiConsultSession2(route, control);
-      },
-      transportAvailable: () => transport()?.apiKey !== undefined,
-      answerActivityBusy: () => answerActivity.busy,
-      completionTimeoutMs: () => transport()?.settings.timeoutMs ?? 360000
-    });
   }
   const remoteAgentOptions = {
     connections: remoteConnections,
@@ -128908,7 +127777,6 @@ async function main() {
     },
     requestReload: () => requestModelReload(),
     env: process.env,
-    ask: (question) => askAnonymouslyNow ? askAnonymouslyNow(question) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
     chatgptModelProblem: () => chatgptModelProblem,
     writerCheck: async ({ onCase }) => {
       const { readConsultSettings: readConsultSettings3, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));

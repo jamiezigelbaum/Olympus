@@ -61,42 +61,15 @@
  * model work (the tier sniffer) yields to it, and each settled claim logs
  * one content-free line of stage timings.
  *
- * 5. Follow-up collection (design docs/design/frontier-consult-lane.md
- *    §A.5, stage C4a; AD-2 in private-answer-contract.ts). A job binds the
- *    outside-help policy current when it is created (`consultPolicy`); the
- *    claiming panel declares its capability (`cap`) in every request. When
- *    the policy has outside help on AND the panel declared capability 2, the
- *    first `ready` is the transition (first delivery, recorded by the engine)
- *    into a uniform phase: from then on every request by the claiming key
- *    gets `200 ready` with a freshly sealed envelope of exactly 36,864 padded
- *    plaintext bytes (private-answer-payload.ts), whatever an outside consult
- *    did. The job keeps its first-answer plaintext (bounded by the payload
- *    contract) and its source-open tokens, in memory only, for its lifetime;
- *    the outside block's state lives inside the envelope; a withdrawal (an
- *    item no longer eligible) is terminal and also lives inside the envelope.
- *    Such a job lives 30 minutes; its follow-up window is fixed at first
- *    delivery (20 minutes, capped by expiry) and a remount never extends it.
- *    The content is sealed; that outside help ran on a question may be
- *    inferred from timing, sizes and polling (accepted for version one).
- *    Every other job keeps the behavior above exactly: stored sealed bytes,
- *    bucket padding, plaintext `failed`.
- * 6. The consult handoff (design §A.2–A.3, stage C4b). The analysis keeps,
- *    beside its answer, the model's own verdict and the exact fitted pack its
- *    main call received (a reused precompute brings its search-time pack). At
- *    first delivery a follow-up job holds an immutable consult snapshot of
- *    that pack, the question, the answer and the gaps as retained, and the
- *    identities of the items read, for at most PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS;
- *    `onFirstDelivered` hands the job id to the consult orchestrator
- *    (consult-orchestrator.ts), which reads the snapshot through
- *    `consultSnapshot`, drops it at its dispatch decision, and writes the
- *    outside block through the `outside*` seams. `onAnswerActivity` tells it
- *    a fresh answer is starting (any analysis or claim), so a writer in
- *    flight is killed. Nothing in the snapshot ever enters an envelope.
+ * The answer is bounded by the payload contract (private-answer-payload.ts)
+ * before it is sealed, on every job. A request body's `cap` (sent by panels
+ * from the retired follow-up protocol) is ignored: every panel gets the
+ * behavior above.
  *
  * Pending polls by the claiming key are rate limited per job (429), never
- * destructive. Unknown, expired (ten minutes from creation; thirty with
- * outside help on) and wrong-install jobs answer 410 `gone`: the endpoint is
- * no oracle for which ids existed.
+ * destructive. Unknown, expired (ten minutes from creation) and
+ * wrong-install jobs answer 410 `gone`: the endpoint is no oracle for which
+ * ids existed.
  * Analyses run one at a time, and after a deadline the next one waits for
  * the model's reset (bounded). Claims of live jobs are rate limited; a claim
  * of an unknown id spends nothing. Nothing here is persisted: an engine
@@ -113,19 +86,12 @@ import {
   type PrivateAnswerWireStatus,
 } from '../../../connect-relay/shared/private-answer.ts';
 import {
-  PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS,
   PRIVATE_ANSWER_JOB_TTL_MS,
-  PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS,
-  PRIVATE_ANSWER_PANEL_CAPABILITY,
   PRIVATE_MATCH_COUNT_CAP,
   type PrivateAnswerCitation,
-  type PrivateAnswerConsultSnapshotInput,
   type PrivateAnswerDetail,
-  type PrivateAnswerEnvelopeV1,
   type PrivateAnswerModel,
   type PrivateAnswerModelCall,
-  type PrivateAnswerOutsideBlockV1,
-  type PrivateAnswerPanelCapability,
   type PrivateAnswerPlaintextV1,
   type PrivateEvidenceGuard,
   type PrivateEvidenceItem,
@@ -136,14 +102,9 @@ import {
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer, type SealedPrivateAnswer } from './private-answer-crypto.ts';
 import {
   PRIVATE_ANSWER_PAYLOAD_LIMITS,
-  fitFirstAnswer,
-  fitOutsideBlock,
-  padPrivateAnswerEnvelope,
   preparePrivateAnswer,
-  serializePrivateAnswerEnvelope,
   serializePrivateAnswerPlaintext,
 } from './private-answer-payload.ts';
-import { DEFAULT_CONSULT_SETTINGS, bindConsultJobPolicy, type ConsultJobPolicy } from '../../core/consult-settings.ts';
 
 /** A content-free local audit event: no job id, no question, no key. */
 export type PrivateAnswerAuditEvent = 'claimed_by_other_key' | 'analysis_deadline';
@@ -216,32 +177,6 @@ export interface PrivateAnswerJobsOptions {
   openRate?: { capacity: number; refillPerSecond: number };
   /** Open requests across all jobs (burst, refill per second). */
   openRateGlobal?: { capacity: number; refillPerSecond: number };
-  /**
-   * The outside-help policy a job binds when it is created (design "Job
-   * policy"): read at every `begin`, never cached here. Production passes
-   * `() => bindConsultJobPolicy(readConsultSettings())`; without it every job
-   * binds outside help off, so nothing here ever enters follow-up collection.
-   */
-  consultPolicy?: () => ConsultJobPolicy;
-  /** A job with outside help on lives this long (default PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS). */
-  outsideHelpTtlMs?: number;
-  /** The follow-up window from first delivery (default PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS), capped by the job's expiry. */
-  followUpWindowMs?: number;
-  /**
-   * First delivery of a follow-up job (the first `ready` actually returned to
-   * the claiming key): the consult orchestrator's trigger. Called once per
-   * job, synchronously, after the clocks are published. A throw never fails
-   * the response.
-   */
-  onFirstDelivered?: (jobId: string) => void;
-  /**
-   * A fresh private answer is starting (an analysis runs, or a job is
-   * claimed): the signal that kills a consult writer in flight (design §A.7).
-   * Called beside `activity.begin`.
-   */
-  onAnswerActivity?: () => void;
-  /** How long a consult snapshot is kept after first delivery (default PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS). */
-  consultSnapshotMs?: number;
 }
 
 /** One claim's stage costs, logged once it settles. No id, question, evidence or answer. */
@@ -337,14 +272,6 @@ interface Analysis {
     usedKeys: readonly string[] | undefined;
     /** The evidence items the answer read, checked against the live guard before it is sealed. */
     usedItems: readonly PrivateEvidenceItem[];
-    /**
-     * The model's verdict and the fitted pack it read (C4b), exactly as the
-     * model returned them (no clone, no freeze: a job without outside help
-     * sharing this analysis is unaffected); undefined from a model that
-     * supplies none. The consulting job's own continuation validates, clones
-     * and freezes it into its snapshot.
-     */
-    consult: unknown;
   } | undefined;
   failReason: AnalysisTiming['reason'] | undefined;
   startedAt: number | undefined;
@@ -356,64 +283,24 @@ interface Analysis {
   settle: () => void;
 }
 
-/** The first answer a follow-up job keeps, bounded by the payload contract, with its open tokens already in place. */
-interface RetainedAnswer {
-  readonly answer: string;
-  readonly citations: readonly PrivateAnswerCitation[];
-  readonly unanswered: readonly string[] | undefined;
-}
-
 interface Job {
   readonly id: string;
   readonly createdAt: number;
   readonly expiresAt: number;
   readonly caller: string | undefined;
   readonly detail: PrivateAnswerDetail;
-  /** The outside-help policy bound at creation; later setting changes never alter it. */
-  readonly policy: ConsultJobPolicy;
   question: string | undefined;
   evidence: readonly PrivateEvidenceItem[] | undefined;
   refresh: PrivateEvidenceRefresh | undefined;
   analysis: Analysis | undefined;
   claimKey?: string;
-  /** The capability the claiming panel declared in its first request (1 when it sent none). */
-  panelCapability?: PrivateAnswerPanelCapability;
-  /** Decided at the claim: outside help on in the policy and capability 2 declared. */
-  followUp: boolean;
   pollTokens: number;
   pollRefilledAt: number;
-  /**
-   * `sealed`: today's stored bytes, handed out again. `retained`: a follow-up
-   * job's first answer, sealed afresh on every request. `withdrawn`: a
-   * follow-up job whose answer was withdrawn, terminal, told inside the
-   * envelope. `failed`: before first delivery, or any other job, in plaintext.
-   */
+  /** `sealed`: the stored bytes, handed out again. `failed`: told in plaintext. */
   outcome?:
     | { kind: 'sealed'; sealed: SealedPrivateAnswer }
-    | { kind: 'retained'; answer: RetainedAnswer }
-    | { kind: 'withdrawn' }
     | { kind: 'failed' }
     | undefined;
-  /** Follow-up state: the revision only increases; the outside block lives here until it is sealed. */
-  rev: number;
-  outside: PrivateAnswerOutsideBlockV1;
-  /** Server-owned clocks (design §A.5.6): published only with the first `ready` actually returned to the claiming key. */
-  firstDeliveredAt?: number;
-  followUntil?: number;
-  /** The last collection by the claiming key (the recent-activity input of final authorization, C4b). */
-  lastCollectedAt?: number;
-  /**
-   * The consult handoff (C4b): the immutable snapshot the gate compares
-   * against, kept from first delivery for at most consultSnapshotMs; the
-   * send-once latch; and whether the consult for this job is over (sent,
-   * refused, skipped or failed), so it is never triggered twice.
-   */
-  consult: {
-    snapshot: PrivateAnswerConsultSnapshot | undefined;
-    snapshotExpiresAt: number | undefined;
-    latch: boolean;
-    settled: boolean;
-  };
   /**
    * The evidence items the sealed answer read, identities only (no text):
    * every later hand-out of the sealed bytes, and every source open, asks
@@ -438,8 +325,6 @@ export interface ClaimResponse {
 }
 
 const MAX_QUESTION_CHARS = 4_000;
-/** Seals one phase-2 response may make over a state that keeps changing before the job is withdrawn instead. */
-const FOLLOW_UP_SEAL_ATTEMPTS = 8;
 /** A source-open token: 32 random bytes, base64url. */
 const OPEN_TOKEN_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${PRIVATE_ANSWER_PAYLOAD_LIMITS.openTokenChars}}$`);
 const MAX_EVIDENCE_ITEMS = 50;
@@ -464,10 +349,6 @@ export const PRIVATE_ANSWER_DEDUPE_MS = 3 * 60_000;
 export const PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60_000;
 /** How long the claiming POST holds for a ready answer (refresh and seal) before it answers 202. */
 export const PRIVATE_ANSWER_CLAIM_HOLD_MS = 1_500;
-/** A consult snapshot lives this long after first delivery (design §A.3: until the dispatch decision, at most 5 minutes). */
-export const PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS = 5 * 60_000;
-/** A job that binds no reader binds this: outside help off, so no follow-up collection. */
-const OUTSIDE_HELP_OFF: ConsultJobPolicy = bindConsultJobPolicy({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
 
 const defaultAudit = (event: PrivateAnswerAuditEvent) => {
   console.warn(`[olympus] private answer audit: ${event === 'claimed_by_other_key'
@@ -543,9 +424,6 @@ export class PrivateAnswerJobs {
   private openRefilledAt: number;
   private readonly openRate: { capacity: number; refillPerSecond: number };
   private readonly openRateGlobal: { capacity: number; refillPerSecond: number };
-  private readonly outsideHelpTtlMs: number;
-  private readonly followUpWindowMs: number;
-  private readonly consultSnapshotMs: number;
   /** A deadline's background reset, bounded by resetTimeoutMs; the next analysis waits for it. */
   private resetting: Promise<void> | undefined;
   private readonly options: PrivateAnswerJobsOptions;
@@ -574,9 +452,6 @@ export class PrivateAnswerJobs {
     this.openRateGlobal = options.openRateGlobal ?? { capacity: 10, refillPerSecond: 0.2 };
     this.openTokens = this.openRateGlobal.capacity;
     this.openRefilledAt = this.now();
-    this.outsideHelpTtlMs = options.outsideHelpTtlMs ?? PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS;
-    this.followUpWindowMs = options.followUpWindowMs ?? PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS;
-    this.consultSnapshotMs = options.consultSnapshotMs ?? PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS;
   }
 
   get size(): number {
@@ -629,26 +504,18 @@ export class PrivateAnswerJobs {
     }
     const id = `oly2p.${installId}.${randomBytes(32).toString('base64url')}`;
     const at = this.now();
-    // The policy is bound now, once, for the job's whole life: its lifetime
-    // follows it, and a later change to the settings never alters it.
-    const policy = this.bindPolicy();
     const job: Job = {
       id,
       createdAt: at,
-      expiresAt: at + (policy.outsideHelp ? this.outsideHelpTtlMs : this.ttlMs),
+      expiresAt: at + this.ttlMs,
       caller: input.caller,
       detail: input.detail === 'full' ? 'full' : 'summary',
-      policy,
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
       analysis: undefined,
-      followUp: false,
       pollTokens: this.pollRate.capacity,
       pollRefilledAt: at,
-      rev: 0,
-      outside: { state: 'idle' },
-      consult: { snapshot: undefined, snapshotExpiresAt: undefined, latch: false, settled: false },
       openTokens: this.openRate.capacity,
       openRefilledAt: at,
     };
@@ -657,12 +524,8 @@ export class PrivateAnswerJobs {
     return { count, panelState: 'ready', jobId: id, ...(job.detail === 'full' ? { detail: 'full' as const } : {}) };
   }
 
-  /**
-   * One panel POST: claim, poll, or collect (idempotent for the claiming key
-   * until expiry). `capability` is what the request body declared (`cap`);
-   * it is recorded at the claim and ignored afterwards.
-   */
-  async claim(jobId: string, publicKey: unknown, capability: PrivateAnswerPanelCapability = 1): Promise<ClaimResponse> {
+  /** One panel POST: claim, poll, or collect (idempotent for the claiming key until expiry). */
+  async claim(jobId: string, publicKey: unknown): Promise<ClaimResponse> {
     this.sweep();
     const job = this.jobs.get(jobId);
     // Wrong install, unknown or expired: one answer for all, and no claim
@@ -679,10 +542,6 @@ export class PrivateAnswerJobs {
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
-      job.panelCapability = capability === PRIVATE_ANSWER_PANEL_CAPABILITY ? PRIVATE_ANSWER_PANEL_CAPABILITY : 1;
-      // Follow-up collection needs both: the policy bound at creation and
-      // the panel's declared capability. Neither depends on any consult.
-      job.followUp = job.policy.outsideHelp && job.panelCapability === PRIVATE_ANSWER_PANEL_CAPABILITY;
       const settled = this.startClaim(job, panel.key);
       // A precomputed answer needs only the evidence re-read and the seal:
       // wait briefly so the panel gets it in this response.
@@ -703,286 +562,11 @@ export class PrivateAnswerJobs {
       return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     }
     if (outcome.kind === 'failed') return { status: 200, body: { status: 'failed' } };
-    // Phase 2: from first delivery, one response shape for every state.
-    if (outcome.kind === 'retained' || outcome.kind === 'withdrawn') return this.followUpResponse(job, panel.key);
     // Every hand-out of the sealed bytes, not only the first: an item the
     // answer read that is no longer eligible withdraws it for good.
     if (!(await this.stillReleasable(job))) return this.jobs.get(jobId) === job ? { status: 200, body: { status: 'failed' } } : gone();
     if (this.jobs.get(jobId) !== job || job.outcome !== outcome) return job.outcome?.kind === 'failed' ? { status: 200, body: { status: 'failed' } } : gone();
     return { status: 200, body: { status: 'ready', v: 1, ...outcome.sealed } };
-  }
-
-  /* -------------------------------------------------------------- */
-  /* Follow-up collection (phase 2)                                   */
-  /* -------------------------------------------------------------- */
-
-  /**
-   * The phase-2 response: a freshly sealed, exactly-sized envelope carrying
-   * the job's current state (design §A.5.3 race rules).
-   *
-   * 1. Read the revision and the state.
-   * 2. Run the eligibility guard (a withdrawal is terminal, in-envelope).
-   * 3. Seal.
-   * 4. Run the guard again and re-read the revision, the state and the
-   *    deadline. A ciphertext sealed over a state that has since changed is
-   *    never handed out: the loop seals again over the current state. A
-   *    withdrawal always wins, and is stable, so the loop ends; a state that
-   *    keeps moving past the retry budget withdraws the job (fail closed)
-   *    and returns that.
-   * 5. Only then are the delivery clocks published: first delivery is the
-   *    first `ready` actually returned, never a seal that failed.
-   */
-  private async followUpResponse(job: Job, panelKey: CryptoKey): Promise<ClaimResponse> {
-    const at = this.now();
-    for (let attempt = 0; ; attempt += 1) {
-      await this.guardFollowUp(job);
-      if (this.jobs.get(job.id) !== job) return gone();
-      if (attempt >= FOLLOW_UP_SEAL_ATTEMPTS) this.withdraw(job);
-      const rev = job.rev;
-      const kind = job.outcome?.kind;
-      // The window the envelope reports: the committed one, or this request's
-      // proposal when none is committed yet. Overlapping first collections
-      // each propose their own; the first successful seal commits, and a
-      // later one sealed over a different proposal is sealed again over the
-      // committed window, so every envelope reports the same deadline.
-      const followUntil = job.followUntil ?? Math.min(at + this.followUpWindowMs, job.expiresAt);
-      const plaintext = this.envelopeFor(job, followUntil);
-      if (plaintext === undefined) return gone();
-      const sealed = await sealPrivateAnswer(job.id, panelKey, plaintext);
-      // The final release checks, after the seal and immediately before the hand-out.
-      await this.guardFollowUp(job);
-      if (this.jobs.get(job.id) !== job) return gone();
-      if (job.rev !== rev || job.outcome?.kind !== kind) continue;
-      if (job.followUntil !== undefined && job.followUntil !== followUntil) continue;
-      const first = job.firstDeliveredAt === undefined;
-      if (first) {
-        // First delivery: the transition into phase 2, and the one moment the
-        // follow-up window is fixed. A remount later never moves it.
-        job.firstDeliveredAt = at;
-        job.followUntil = followUntil;
-        // The consult snapshot's clock starts here (design §A.3 retention).
-        if (job.consult.snapshot) job.consult.snapshotExpiresAt = at + this.consultSnapshotMs;
-      }
-      // The most recent collection by the claiming key; never earlier than one already recorded.
-      job.lastCollectedAt = Math.max(job.lastCollectedAt ?? 0, at);
-      if (first) {
-        try {
-          this.options.onFirstDelivered?.(job.id);
-        } catch {
-          // The orchestrator never fails a response.
-        }
-      }
-      return { status: 200, body: { status: 'ready', v: 1, ...sealed } };
-    }
-  }
-
-  /**
-   * The live guard over the items a retained answer read, on every phase-2
-   * hand-out: an item refused now withdraws the answer (terminal).
-   */
-  private async guardFollowUp(job: Job): Promise<void> {
-    if (job.outcome?.kind !== 'retained') return;
-    const items = job.sealedItems;
-    const ok = await checkPrivateEvidence(this.options.eligible, items ?? []);
-    if ((job.outcome as Job['outcome'])?.kind !== 'retained') return;
-    if (items !== undefined && ok.every(Boolean)) return;
-    this.withdraw(job);
-  }
-
-  /**
-   * The padded envelope plaintext for the job's current state, or undefined
-   * when the job is gone. A plaintext the padder rejects is a bug upstream
-   * and fails closed: the outside block is dropped; if it still does not
-   * fit, the answer is withdrawn.
-   */
-  private envelopeFor(job: Job, followUntil: number): string | undefined {
-    const outcome = job.outcome;
-    if (!outcome || (outcome.kind !== 'retained' && outcome.kind !== 'withdrawn')) return undefined;
-    const followSeconds = Math.max(0, Math.ceil((followUntil - this.now()) / 1000));
-    const envelope = (): PrivateAnswerEnvelopeV1 => (job.outcome?.kind === 'retained'
-      ? { v: 1, rev: job.rev, state: 'answer', answer: job.outcome.answer.answer, citations: [...job.outcome.answer.citations], ...(job.outcome.answer.unanswered ? { unanswered: [...job.outcome.answer.unanswered] } : {}), followSeconds, outside: { ...job.outside } }
-      : { v: 1, rev: job.rev, state: 'withdrawn', followSeconds, outside: { state: 'idle' } });
-    try {
-      return padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope(envelope()));
-    } catch {
-      if (job.outcome?.kind === 'retained' && job.outside.state !== 'idle') {
-        job.outside = { state: 'idle' };
-        job.rev += 1;
-        try {
-          return padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope(envelope()));
-        } catch {
-          // Falls through to the withdrawal.
-        }
-      }
-      this.withdraw(job);
-      return padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope(envelope()));
-    }
-  }
-
-  /** Terminal: the answer, the outside block, the question, the items, the tokens and the consult snapshot are gone; the revision moves once more. */
-  private withdraw(job: Job): void {
-    if (job.outcome?.kind === 'withdrawn') return;
-    job.outcome = { kind: 'withdrawn' };
-    job.outside = { state: 'idle' };
-    job.question = undefined;
-    job.sealedItems = undefined;
-    job.opens = undefined;
-    this.forgetConsultSnapshot(job);
-    job.consult.settled = true;
-    job.rev += 1;
-  }
-
-  /* -------------------------------------------------------------- */
-  /* The consult handoff (C4b)                                        */
-  /* -------------------------------------------------------------- */
-
-  /**
-   * The job's consult snapshot (design §A.3): the fitted pack the first
-   * answer's model call read, the question, the answer and the gaps as
-   * retained, the verdict and the identities of the items read. Frozen, and
-   * the same object on every read. Undefined for a job that is unknown, not
-   * in follow-up collection, not yet delivered, withdrawn, past the snapshot's
-   * retention, or whose consult is over.
-   */
-  consultSnapshot(jobId: string): PrivateAnswerConsultSnapshot | undefined {
-    this.sweep();
-    const job = this.jobs.get(jobId);
-    if (!job || !job.followUp || job.outcome?.kind !== 'retained' || job.firstDeliveredAt === undefined) return undefined;
-    if (job.consult.settled) return undefined;
-    this.expireConsultSnapshot(job, this.now());
-    return job.consult.snapshot;
-  }
-
-  /** Drops the job's consult snapshot now (the orchestrator's dispatch decision, or its refusal). */
-  dropConsultSnapshot(jobId: string): void {
-    const job = this.jobs.get(jobId);
-    if (job) this.forgetConsultSnapshot(job);
-  }
-
-  /**
-   * The send-once latch (design §A.5.6), set inside final authorization:
-   * true exactly once per job, for a delivered follow-up job in state
-   * `answer` whose block is `pending` and whose follow-up window is open.
-   * Synchronous, so two authorizations cannot both take it.
-   */
-  takeConsultLatch(jobId: string): boolean {
-    this.sweep();
-    const job = this.jobs.get(jobId);
-    if (!job || !job.followUp || job.outcome?.kind !== 'retained' || job.firstDeliveredAt === undefined || job.followUntil === undefined) return false;
-    if (job.consult.latch || job.consult.settled || job.outside.state !== 'pending') return false;
-    if (this.now() > job.followUntil) return false;
-    job.consult.latch = true;
-    return true;
-  }
-
-  private forgetConsultSnapshot(job: Job): void {
-    job.consult.snapshot = undefined;
-    job.consult.snapshotExpiresAt = undefined;
-  }
-
-  private expireConsultSnapshot(job: Job, at: number): void {
-    if (job.consult.snapshotExpiresAt !== undefined && at >= job.consult.snapshotExpiresAt) this.forgetConsultSnapshot(job);
-  }
-
-  /**
-   * What stage C4b reads before it writes a consult: the follow-up state of
-   * one job, or undefined when the job is unknown, expired, or not in
-   * follow-up collection. Clocks are the server's. No answer text.
-   */
-  outsideSeam(jobId: string): PrivateAnswerFollowUpState | undefined {
-    this.sweep();
-    const job = this.jobs.get(jobId);
-    if (!job || !job.followUp || job.panelCapability === undefined) return undefined;
-    const state = job.outcome?.kind === 'retained' ? 'answer' : job.outcome?.kind === 'withdrawn' ? 'withdrawn' : 'pending';
-    return {
-      rev: job.rev,
-      state,
-      outside: job.outside.state,
-      policy: job.policy,
-      panelCapability: job.panelCapability,
-      createdAt: job.createdAt,
-      expiresAt: job.expiresAt,
-      firstDeliveredAt: job.firstDeliveredAt,
-      followUntil: job.followUntil,
-      lastCollectedAt: job.lastCollectedAt,
-    };
-  }
-
-  /**
-   * Moves the outside block to `pending` or `paused`, or back to `idle`, by a
-   * compare-and-set on the revision (C4b seam). Only a delivered follow-up
-   * job in state `answer`, inside its follow-up window, whose block is not
-   * yet appended accepts it. `failed` ends the job's consult for good (the
-   * block reads `idle`, the snapshot is dropped, and nothing triggers it
-   * again): the panel shows nothing more. `pending` is the schedule mark; it
-   * is refused once the consult is over.
-   */
-  markOutside(jobId: string, expectedRev: number, state: 'idle' | 'pending' | 'paused' | 'failed'): OutsideSeamResult {
-    if (state === 'failed') {
-      // Ending a consult is allowed after the window too, so a block never
-      // stays `pending` once its consult is over; the revision rule holds.
-      this.sweep();
-      const job = this.jobs.get(jobId);
-      if (!job || !job.followUp) return { ok: false, reason: 'unknown' };
-      if (job.outcome?.kind === 'withdrawn') return { ok: false, reason: 'withdrawn' };
-      if (job.outside.state === 'appended') return { ok: false, reason: 'already_appended' };
-      if (job.rev !== expectedRev) return { ok: false, reason: 'stale_rev' };
-      job.consult.settled = true;
-      this.forgetConsultSnapshot(job);
-      if (job.outside.state === 'idle') return { ok: true, rev: job.rev };
-      job.outside = { state: 'idle' };
-      job.rev += 1;
-      return { ok: true, rev: job.rev };
-    }
-    const check = this.outsideWritable(jobId, expectedRev);
-    if (!check.ok) return check;
-    const job = check.job;
-    if (state === 'pending' && job.consult.settled) return { ok: false, reason: 'already_appended' };
-    // Idempotent: writing the state the block already has moves nothing, so
-    // a writer repeating itself cannot drive the re-seal loop.
-    if (job.outside.state === state) return { ok: true, rev: job.rev };
-    job.outside = { state };
-    job.rev += 1;
-    return { ok: true, rev: job.rev };
-  }
-
-  /**
-   * Appends the outside reply to a delivered follow-up job (C4b seam): a
-   * synchronous compare-and-set on the revision, only while the job is in
-   * state `answer`, at most once per job, never after the follow-up window.
-   * The block is normalized and budgeted by the payload contract before it
-   * is retained (only the fitted fields and `cut` are kept), so what a job
-   * holds is bounded whatever the reply was. A reply for a withdrawn,
-   * expired or evicted job is discarded: nothing restores a withdrawn job.
-   */
-  appendOutsideBlock(jobId: string, expectedRev: number, block: { text: string; question?: string; route?: string; level?: 'unnamed' | 'general' }): OutsideSeamResult {
-    const check = this.outsideWritable(jobId, expectedRev);
-    if (!check.ok) return check;
-    const job = check.job;
-    job.outside = fitOutsideBlock({
-      state: 'appended',
-      text: typeof block.text === 'string' ? block.text : '',
-      ...(typeof block.question === 'string' ? { question: block.question } : {}),
-      ...(typeof block.route === 'string' ? { route: block.route } : {}),
-      ...(block.level === 'unnamed' || block.level === 'general' ? { level: block.level } : {}),
-    });
-    job.consult.settled = true;
-    this.forgetConsultSnapshot(job);
-    job.rev += 1;
-    return { ok: true, rev: job.rev };
-  }
-
-  /** The shared condition of both outside seams, the follow-up window included. */
-  private outsideWritable(jobId: string, expectedRev: number): { ok: true; job: Job } | (OutsideSeamResult & { ok: false }) {
-    this.sweep();
-    const job = this.jobs.get(jobId);
-    if (!job || !job.followUp) return { ok: false, reason: 'unknown' };
-    if (job.outcome?.kind === 'withdrawn') return { ok: false, reason: 'withdrawn' };
-    if (job.outcome?.kind !== 'retained' || job.firstDeliveredAt === undefined || job.followUntil === undefined) return { ok: false, reason: 'not_delivered' };
-    if (this.now() > job.followUntil) return { ok: false, reason: 'window_closed' };
-    if (job.outside.state === 'appended') return { ok: false, reason: 'already_appended' };
-    if (job.rev !== expectedRev) return { ok: false, reason: 'stale_rev' };
-    return { ok: true, job };
   }
 
   /**
@@ -1026,16 +610,11 @@ export class PrivateAnswerJobs {
    */
   private async stillReleasable(job: Job): Promise<boolean> {
     const kind = job.outcome?.kind;
-    if (kind !== 'sealed' && kind !== 'retained') return false;
+    if (kind !== 'sealed') return false;
     const ok = await checkPrivateEvidence(this.options.eligible, job.sealedItems ?? []);
     const current = (job.outcome as Job['outcome'])?.kind;
     // (An answer that read no item, such as "nothing was readable", holds no item text.)
     if (job.sealedItems !== undefined && ok.every(Boolean) && current === kind) return true;
-    if (current === 'retained' || current === 'withdrawn') {
-      // Phase 2: the withdrawal is told inside the next envelope, never as a plaintext status.
-      this.withdraw(job);
-      return false;
-    }
     job.outcome = { kind: 'failed' };
     job.sealedItems = undefined;
     job.opens = undefined;
@@ -1046,7 +625,6 @@ export class PrivateAnswerJobs {
   sweep(at = this.now()): void {
     for (const [id, job] of this.jobs) {
       if (job.expiresAt <= at) this.drop(id);
-      else this.expireConsultSnapshot(job, at);
     }
     for (const [key, analysis] of this.shared) {
       if (analysis.createdAt + this.dedupeMs <= at || analysis.state === 'failed') this.shared.delete(key);
@@ -1062,23 +640,9 @@ export class PrivateAnswerJobs {
     job.evidence = undefined;
     job.refresh = undefined;
     job.outcome = undefined;
-    job.outside = { state: 'idle' };
     job.opens = undefined;
     job.sealedItems = undefined;
-    this.forgetConsultSnapshot(job);
     this.jobs.delete(id);
-  }
-
-  private bindPolicy(): ConsultJobPolicy {
-    const read = this.options.consultPolicy;
-    if (!read) return OUTSIDE_HELP_OFF;
-    try {
-      const policy = read();
-      // Anything but a policy object with a boolean flag binds outside help off (fail closed).
-      return typeof policy === 'object' && policy !== null && typeof policy.outsideHelp === 'boolean' ? policy : OUTSIDE_HELP_OFF;
-    } catch {
-      return OUTSIDE_HELP_OFF;
-    }
   }
 
   /* -------------------------------------------------------------- */
@@ -1305,12 +869,7 @@ export class PrivateAnswerJobs {
           modelCall: (call) => {
             analysis.stats.calls.push(call);
           },
-        }, {
-          detail: analysis.detail,
-          // The consult snapshot is built only for a job that bound outside
-          // help on; an install without it does no extra cloning.
-          ...([...analysis.jobs].some((job) => job.policy.outsideHelp) ? { consult: true } : {}),
-        });
+        }, { detail: analysis.detail });
         return { result, used };
       } catch (error) {
         if (error instanceof NoPrivateEvidenceError) throw new AnalysisStop('no_evidence');
@@ -1335,7 +894,6 @@ export class PrivateAnswerJobs {
         ...preparedAnswer(done.result),
         usedKeys: usedKeys(evidence, done.used),
         usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity),
-        consult: done.result.consult,
       };
       this.finish(analysis, 'done');
     } catch (error) {
@@ -1373,7 +931,7 @@ export class PrivateAnswerJobs {
       if (this.jobs.get(job.id) === job) job.outcome = outcome;
       // The sealed bytes (or the failure) are all the job keeps.
       this.detach(job);
-      timing.outcome = outcome?.kind === 'sealed' || outcome?.kind === 'retained' ? 'sealed' : 'failed';
+      timing.outcome = outcome?.kind === 'sealed' ? 'sealed' : 'failed';
       if (reason) timing.reason = reason;
       timing.totalMs = this.now() - claimedAt;
       endActivity();
@@ -1466,50 +1024,14 @@ export class PrivateAnswerJobs {
           const plaintext = this.withOpenTokens(job, result.plaintext, result.localPaths);
           // The payload contract is enforced here, before first delivery, on
           // every job: the limits and byte budgets in private-answer-payload.ts.
-          let outcome: Job['outcome'];
-          if (job.followUp) {
-            // Follow-up collection keeps the bounded plaintext and seals it
-            // afresh per request; the envelope must fit the fixed size now
-            // (it always does after budgeting; a rejection fails the job).
-            // Retained in its fitted form: exactly the fields and bytes the envelope carries.
-            const retained = retainedAnswer(plaintext);
-            try {
-              padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope({
-                v: 1,
-                rev: 1,
-                state: 'answer',
-                answer: retained.answer,
-                citations: [...retained.citations],
-                ...(retained.unanswered ? { unanswered: [...retained.unanswered] } : {}),
-                followSeconds: Math.ceil(this.followUpWindowMs / 1000),
-                outside: { state: 'idle' },
-              }));
-            } catch {
-              job.opens = undefined;
-              settle({ kind: 'failed' }, 'error');
-              return;
-            }
-            outcome = { kind: 'retained', answer: retained };
-          } else {
-            const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
-            outcome = { kind: 'sealed', sealed };
-          }
+          const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
+          const outcome: Job['outcome'] = { kind: 'sealed', sealed };
           if (settled) return;
           if (await stillReadable()) {
             if (settled) return;
             timing.precomputed = precomputed;
             timing.waitAtClaimMs = this.now() - claimedAt;
             job.sealedItems = result.usedItems;
-            if (outcome.kind === 'retained') {
-              job.rev = 1;
-              // The consult snapshot (C4b): exactly what the gate compares
-              // against, built from the analysis that produced the answer (a
-              // reused precompute brings its search-time pack). Frozen; its
-              // retention clock starts at first delivery.
-              // Validated, cloned and frozen here, on this job's own path only.
-              const input = consultSnapshotInput(result.consult);
-              job.consult.snapshot = input ? consultSnapshot(question, outcome.answer, input, result.usedItems) : undefined;
-            }
             settle(outcome);
             return;
           }
@@ -1542,12 +1064,6 @@ export class PrivateAnswerJobs {
 
   /** Begins one answer activity; the returned function ends exactly that one, once. */
   private beginActivity(): () => void {
-    // A fresh answer is starting: a consult writer in flight is killed (C4b).
-    try {
-      this.options.onAnswerActivity?.();
-    } catch {
-      // A hook never fails a job.
-    }
     let release: (() => void) | void;
     try {
       release = this.options.activity?.begin();
@@ -1753,89 +1269,6 @@ function preparedAnswer(result: { answer: unknown; citations?: unknown; unanswer
   };
 }
 
-/** The model's consult metadata as the analysis keeps it: frozen, or undefined when the model supplied none or a malformed one. */
-function consultSnapshotInput(value: unknown): PrivateAnswerConsultSnapshotInput | undefined {
-  const record = asRecord(value);
-  const verdict = asRecord(record?.verdict);
-  const pack = asRecord(record?.pack);
-  if (!record || !verdict || !pack || typeof verdict.noAnswer !== 'boolean') return undefined;
-  if (verdict.sufficient !== undefined && typeof verdict.sufficient !== 'boolean') return undefined;
-  if (typeof pack.question !== 'string' || !Array.isArray(pack.candidates)) return undefined;
-  return deepFreeze({
-    verdict: { sufficient: verdict.sufficient as boolean | undefined, noAnswer: verdict.noAnswer },
-    pack: structuredClone(pack) as unknown as PrivateAnswerConsultSnapshotInput['pack'],
-  });
-}
-
-/** The job's consult snapshot: the analysis's pack and verdict, the question, and the answer and gaps exactly as retained. Deep-frozen. */
-function consultSnapshot(
-  question: string,
-  retained: RetainedAnswer,
-  input: PrivateAnswerConsultSnapshotInput,
-  items: readonly PrivateEvidenceItem[],
-): PrivateAnswerConsultSnapshot {
-  return deepFreeze({
-    question,
-    answer: retained.answer,
-    gaps: [...(retained.unanswered ?? [])],
-    verdict: { sufficient: input.verdict.sufficient, noAnswer: input.verdict.noAnswer },
-    pack: input.pack,
-    items: items.map((item) => structuredClone(item)),
-  });
-}
-
-/** Freezes a plain-data value and everything reachable from it. */
-function deepFreeze<T>(value: T): T {
-  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
-  Object.freeze(value);
-  for (const entry of Object.values(value as Record<string, unknown>)) deepFreeze(entry);
-  return value;
-}
-
-/** The first answer a follow-up job retains: the plaintext's fields in their budgeted form, frozen. */
-function retainedAnswer(plaintext: PrivateAnswerPlaintextV1): RetainedAnswer {
-  const fitted = fitFirstAnswer(plaintext);
-  return Object.freeze({
-    answer: fitted.answer,
-    citations: Object.freeze(fitted.citations),
-    unanswered: fitted.unanswered && fitted.unanswered.length > 0 ? Object.freeze(fitted.unanswered) : undefined,
-  });
-}
-
-/** One job's follow-up state as the C4b writer reads it (`outsideSeam`): clocks and states only, no text. */
-export interface PrivateAnswerFollowUpState {
-  rev: number;
-  /** `pending`: claimed, not yet delivered. */
-  state: 'pending' | 'answer' | 'withdrawn';
-  outside: PrivateAnswerOutsideBlockV1['state'];
-  policy: ConsultJobPolicy;
-  panelCapability: PrivateAnswerPanelCapability;
-  createdAt: number;
-  expiresAt: number;
-  firstDeliveredAt: number | undefined;
-  followUntil: number | undefined;
-  lastCollectedAt: number | undefined;
-}
-
-/**
- * The consult snapshot (design §A.3), as the orchestrator reads it: the
- * evidence as the pack, plus the question, answer and gaps exactly as the
- * writer will see them, the verdict, and the identities (no text) of the
- * items the answer read, for the eligibility checks E1 and E2. Deep-frozen.
- */
-export interface PrivateAnswerConsultSnapshot {
-  readonly question: string;
-  readonly answer: string;
-  readonly gaps: readonly string[];
-  readonly verdict: { readonly sufficient: boolean | undefined; readonly noAnswer: boolean };
-  readonly pack: PrivateAnswerConsultSnapshotInput['pack'];
-  readonly items: readonly PrivateEvidenceItem[];
-}
-
-export type OutsideSeamResult =
-  | { ok: true; rev: number }
-  | { ok: false; reason: 'unknown' | 'not_delivered' | 'withdrawn' | 'already_appended' | 'stale_rev' | 'window_closed' };
-
 /* ------------------------------------------------------------------ */
 /* HTTP                                                                */
 /* ------------------------------------------------------------------ */
@@ -1880,8 +1313,8 @@ export function createPrivateAnswerHandler(options: PrivateAnswerHandlerOptions)
     const record = typeof body === 'object' && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
     if (!record || record.v !== 1) return reply({ status: 400, body: { status: 'invalid' } });
     if (route.action === 'open') return reply(await options.jobs.open(jobId, record.open));
-    // The capability handshake: `cap: 2` from every new panel, in every request.
-    return reply(await options.jobs.claim(jobId, record.publicKey, record.cap === PRIVATE_ANSWER_PANEL_CAPABILITY ? PRIVATE_ANSWER_PANEL_CAPABILITY : 1));
+    // A `cap` field from an older cached panel is ignored: every claim gets the sealed answer.
+    return reply(await options.jobs.claim(jobId, record.publicKey));
   };
 }
 

@@ -474,10 +474,9 @@ describe('collecting the private answer', () => {
       expect(call.init.method).toBe('POST');
       expect(call.init.credentials).toBe('omit');
       expect(call.init.headers).toEqual({ 'content-type': 'application/json' });
-      // The capability handshake rides every request, phase 1 included.
-      expect(Object.keys(call.body).sort()).toEqual(['cap', 'publicKey', 'v']);
+      // The key and the version only (the follow-up `cap` handshake was retired on 2026-10-10).
+      expect(Object.keys(call.body).sort()).toEqual(['publicKey', 'v']);
       expect(call.body.v).toBe(1);
-      expect((call.body as { cap?: number }).cap).toBe(2);
       expect(call.body.publicKey).toMatch(/^[A-Za-z0-9_-]{87}$/);
     }
 

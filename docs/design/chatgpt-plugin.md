@@ -729,6 +729,14 @@ relay), `busy` (503), and `opened` (204, no body, `/open` only).
 
 ### Follow-up collection (added 2026-10-07, stage C4a; AD-2)
 
+**Retired on 2026-10-10** (Anonymous answers redesign, step 3) with the
+automatic escalation it carried. What remains: the payload limits (first
+bullet below) on every install; everything else in this section (the `cap`
+handshake, phase 2, the fixed-size envelope, the outside block, the
+policy-bound lifetime and the C4b seams) is gone. A `cap` field from a panel
+cached before the change is ignored, so that panel gets the bucket-padded
+answer it already understands. The text below is the record of what shipped.
+
 The panel protocol's compatibility record, AD-2 of the design
 `docs/design/frontier-consult-lane.md` §A.11 (revision 8, on its proposal
 branch until the lane ships; owner-accepted 2026-10-07). The authoritative text is the header of
@@ -829,6 +837,13 @@ yet (the Mac dashboard card is C5, the public CLI command C8).
   leaves no window and no writable state.
 
 ### Consult scheduling (added 2026-10-07, stage C4b)
+
+**Retired on 2026-10-10** (Anonymous answers redesign, step 3): the trigger,
+`consult-orchestrator.ts`, the snapshot and the model's consult metadata are
+removed. An anonymous question now goes out only when the user asks through
+their agent (`ask_anonymously`, `src/core/consult-ask.ts`); the writer, gate
+and transport below are what it reuses. The text below is the record of what
+shipped.
 
 Design `docs/design/frontier-consult-lane.md` §A.2, §A.3, §A.7 (candidate
 B2), §A.8 and §A.5.6. The code is `src/core/consult-writer.ts` (the writer
@@ -1026,7 +1041,8 @@ the writer's one caller), `src/workers/dashboard/outside-help.ts` and
 - **Release gate.** The quiet-machine B2 first-token rerun (§A.7: load
   below 3, n ≥ 20 per phase, 30 control pairs) must pass before the enable
   path ships; it is owed, and is the C5 release gate rather than a merge
-  gate. Acceptance with fakes: `test/consult-enable-acceptance.test.ts`.
+  gate. (The end-to-end acceptance test with fakes went with the automatic
+  escalation on 2026-10-10.)
 
 ### Relay
 

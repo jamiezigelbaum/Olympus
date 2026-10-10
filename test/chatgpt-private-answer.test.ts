@@ -22,6 +22,7 @@ import {
   type PrivateAnswerModel,
 } from '../src/workers/chatgpt/private-answer-contract.ts';
 import {
+  PRIVATE_ANSWER_PAD_BUCKETS,
   fromBase64Url,
   generatePanelKeyPair,
   importPanelPublicKey,
@@ -530,6 +531,25 @@ describe('the /private/<id> endpoint', () => {
     const replay = await post(handler, jobId!, good);
     expect(replay.status).toBe(200);
     expect(await replay.text()).toBe(text);
+  });
+
+  test('a panel cached from the retired follow-up protocol (it sends `cap: 2`) gets today\'s bucket-padded answer, the same bytes again', async () => {
+    const jobs = makeJobs(readyModel());
+    const handler = createPrivateAnswerHandler({ jobs, isRelayed: relayed });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
+    const panel = await generatePanelKeyPair();
+    const old = { v: 1, publicKey: panel.publicKey, cap: 2 };
+    expect((await post(handler, jobId!, old)).status).toBe(202);
+    await settled(jobs);
+    const ready = await post(handler, jobId!, old);
+    expect(ready.status).toBe(200);
+    const text = await ready.text();
+    const opened = await openPrivateAnswer(jobId!, panel.privateKey, JSON.parse(text));
+    expect(PRIVATE_ANSWER_PAD_BUCKETS as readonly number[]).toContain(new TextEncoder().encode(opened).byteLength);
+    const plaintext = JSON.parse(opened);
+    expect(plaintext.answer).toBe(SECRET_ANSWER);
+    expect(Object.keys(plaintext).filter((key) => !['v', 'answer', 'citations', 'unanswered'].includes(key))).toEqual([]);
+    expect((await (await post(handler, jobId!, old)).text())).toBe(text);
   });
 });
 

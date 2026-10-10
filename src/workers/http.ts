@@ -558,7 +558,6 @@ export const DASHBOARD_CONSULT_CONTROL_PATHS: readonly string[] = [
   '/dashboard/consult/writer',
   '/dashboard/consult/writer/test',
   '/dashboard/consult/standard',
-  '/dashboard/consult/ask',
 ];
 
 export function isDashboardConsultControlRoute(request: Request): boolean {

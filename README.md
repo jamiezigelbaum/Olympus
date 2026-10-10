@@ -521,8 +521,9 @@ Only the question goes out, never documents, and never to the provider that
 hosts the agent asking: a question from ChatGPT goes to Claude Sonnet by
 default, one from Claude Code or Claude Desktop to an OpenAI model, and a
 one-off `model` from the agent's own provider is refused. Setup (the zkAPI
-route, the writer model, the spend limit) lives on the dashboard's Anonymous
-answers card; see
+route, the writer model, the zkAPI models for questions from ChatGPT and from
+Claude, the spend limit) lives on the dashboard's Anonymous answers card, which
+is for setup only: questions are asked through an agent (or `olympus ask`); see
 [`docs/design/private-answers.md`](docs/design/private-answers.md).
 
 MCP clients cap how long one tool call may run, and an answer can take several

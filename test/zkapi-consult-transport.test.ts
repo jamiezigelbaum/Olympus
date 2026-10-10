@@ -36,6 +36,7 @@ import {
   inspectLoopbackListener,
   reserveZkapiRequest,
   resolveExecutable,
+  resolveZkapiConsultTransport,
   sendZkapiConsult,
   standardExecutableDirectories,
   trustedFallbackExecutable,
@@ -1105,5 +1106,26 @@ describe('zkAPI consult transport: the daemon finds its wallet companion', () =>
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('the zkAPI route from the sovereignty profiles', () => {
+  test('exactly one zkapi profile with settings and a base URL gives transport options with the resolved key; none or two give undefined', () => {
+    const zkapi = { tor: 'required', timeoutMs: 360_000 } as unknown as NonNullable<Parameters<typeof resolveZkapiConsultTransport>[0][string]['zkapi']>;
+    const one = resolveZkapiConsultTransport(
+      { a: { provider: 'openai', baseUrl: 'https://x' }, z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', secretRef: 'env:K', model: 'openai/gpt-5-mini', zkapi } },
+      (ref) => (ref === 'env:K' ? 'key' : undefined),
+      { statePath: '/tmp/state.json' },
+    );
+    expect(one).toEqual({ baseUrl: 'http://127.0.0.1:8787/v1', model: 'openai/gpt-5-mini', apiKey: 'key', settings: zkapi, statePath: '/tmp/state.json' });
+    expect(resolveZkapiConsultTransport({ a: { provider: 'openai' } }, () => undefined)).toBeUndefined();
+    expect(resolveZkapiConsultTransport({ z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', zkapi }, y: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8788/v1', zkapi } }, () => undefined)).toBeUndefined();
+    expect(resolveZkapiConsultTransport({ z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', zkapi } }, () => { throw new Error('no store'); })).toMatchObject({ baseUrl: 'http://127.0.0.1:8787/v1' });
+  });
+
+  test('the zkAPI model for the question replaces the route\'s model only when set', () => {
+    const profiles = { z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', model: 'openai/gpt-5-mini', zkapi: {} as never } };
+    expect(resolveZkapiConsultTransport(profiles, () => undefined)?.model).toBe('openai/gpt-5-mini');
+    expect(resolveZkapiConsultTransport(profiles, () => undefined, { model: 'other/model' })?.model).toBe('other/model');
   });
 });
