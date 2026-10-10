@@ -158,6 +158,22 @@ const DETAIL_PROPERTY = {
   ].join(' '),
 } as const;
 
+/**
+ * The `question` argument. Olympus searches with it as given, and the user's
+ * own wording finds more than a model's keyword rewrite: on 2026-10-10 the
+ * full question found the owner's letter of intent and its deed clause,
+ * while the rewrite "Letter of Intent notary costs allocation" missed the
+ * letter entirely.
+ */
+const QUESTION_PROPERTY = {
+  type: 'string',
+  description: [
+    'The user\'s message word for word, including any part you will answer another way (for example from the web).',
+    'Do not shorten it, split it or turn it into keywords. Change it only to make a follow-up stand on its own:',
+    'replace "it", "that" or "the same" with what they refer to.',
+  ].join(' '),
+} as const;
+
 export const SOURCE_ANSWER_TOOL: ChatGptToolDefinition = {
   name: 'source_answer',
   title: 'Ask Olympus',
@@ -175,7 +191,7 @@ export const SOURCE_ANSWER_TOOL: ChatGptToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      question: { type: 'string', description: 'The user\'s question, in their own words, with any names, dates or places they gave.' },
+      question: QUESTION_PROPERTY,
       detail: DETAIL_PROPERTY,
     },
     required: ['question'],
@@ -236,7 +252,7 @@ export const SEARCH_TOOL: ChatGptToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      question: { type: 'string', description: 'The user\'s question, in their own words, with any names, dates or places they gave.' },
+      question: QUESTION_PROPERTY,
       limit: { type: 'integer', minimum: 1, maximum: 48, description: 'How many items to return (default 24).' },
       detail: DETAIL_PROPERTY,
     },

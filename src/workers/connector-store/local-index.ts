@@ -84,6 +84,7 @@ import {
   SOURCE_INDEX_FTS5_TOKENIZER,
   runBoundedFtsTokenizerMigration,
   sourceIndexFtsGroupQuery,
+  queryInitialisms,
   sourceIndexFtsQuery,
   sourceIndexFtsTermGroups,
   type SourceIndexFtsMigrationSpec,
@@ -9565,6 +9566,7 @@ export class LocalConnectorStore {
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = sourceIndexFtsTermGroups(query);
+    const exact = queryInitialisms(query);
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
@@ -9629,14 +9631,14 @@ export class LocalConnectorStore {
           WHERE connector_store_fts MATCH ?
             AND connector_store_fts.item_pk IN (${placeholders})
             ${selectedFtsScope.sql}
-        `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
+        `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
         for (const hit of hits) {
           matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
           matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
         }
       }
       const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-      const weights = rows.every(enough) ? undefined : this.conceptWeights(groups);
+      const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
       selected = rows.filter((row) => {
         if (enough(row)) return true;
         if (!weights) return false;
@@ -9685,12 +9687,12 @@ export class LocalConnectorStore {
    * weighs the most, so the question's missing words still count against a
    * partial match.
    */
-  private conceptWeights(groups: ReadonlyArray<readonly string[]>): { of: number[]; total: number } {
+  private conceptWeights(groups: ReadonlyArray<readonly string[]>, exact: ReadonlyMap<string, unknown>): { of: number[]; total: number } {
     const items = (this.db.query('SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0').get() as { count: number }).count;
     const of = groups.map((group) => {
       const { count } = this.db.query(
         'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
-      ).get(sourceIndexFtsGroupQuery(group)) as { count: number };
+      ).get(sourceIndexFtsGroupQuery(group, exact)) as { count: number };
       return Math.max(0, Math.log((items + 1) / (count + 0.5)));
     });
     return { of, total: of.reduce((sum, weight) => sum + weight, 0) };

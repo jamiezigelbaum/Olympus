@@ -581,6 +581,18 @@ describe('the response builder', () => {
     const answerTools = CHATGPT_TOOLS.filter((tool) => tool.name === 'source_answer' || tool.name === 'source_answer_result');
     for (const tool of answerTools) expect(tool._meta).toEqual({ ui: { resourceUri: PRIVATE_ANSWER_RESOURCE_VERSIONED_URI }, 'openai/outputTemplate': PRIVATE_ANSWER_RESOURCE_VERSIONED_URI });
   });
+
+  // 2026-10-10 live: ChatGPT sent "Letter of Intent notary costs allocation"
+  // for a two-part question; the rewrite missed the letter the full question finds.
+  test('the question goes to Olympus word for word, the whole message, not keywords', () => {
+    for (const name of ['source_answer', 'olympus_search']) {
+      const tool = CHATGPT_TOOLS.find((entry) => entry.name === name)!;
+      const question = (tool.inputSchema as unknown as { properties: { question: { description: string } } }).properties.question.description;
+      expect(question).toContain('word for word');
+      expect(question).toContain('including any part you will answer another way');
+      expect(question).toContain('Do not shorten it, split it or turn it into keywords');
+    }
+  });
 });
 
 describe('sentinel: over the real MCP surface', () => {
