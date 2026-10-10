@@ -109,6 +109,18 @@ or credentials). Credentials live in 1Password, never in this repository.
 > type a general question in the panel that opens, and choose Ask
 > anonymously. The answer appears in the panel only and can take up to three
 > minutes. Nothing is sold, bought or paid in ChatGPT.
+>
+> How Olympus handles sensitive data: Olympus is software the user runs on
+> their own Mac. It indexes the user's own mail and files there, which can
+> contain health, financial or identity information. Olympus labels each item
+> Personal, Private or Secret on the Mac. Only Personal items can reach
+> ChatGPT's model. Private items are answered on the Mac and shown only in
+> an encrypted Olympus panel that ChatGPT's model does not receive, and
+> Secret items (passwords, recovery codes, keys) are never given to any
+> model. The plugin does not ask users for sensitive data, OCU keeps no
+> hosted copy of anyone's content, and the privacy policy asks users not to
+> submit such data through the plugin. Owner decision 2026-10-10: submit with
+> this explanation rather than narrow the build.
 
 ## 3. Test cases
 
