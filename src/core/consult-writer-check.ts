@@ -18,7 +18,7 @@
 // intent needs a notary, once with the letter missing from the evidence and
 // once with it present). Everything in them is invented.
 
-import { consultWriterContextFromPack, evaluateConsultRequest, type ConsultGateReason, type ConsultLanguage, type ConsultLevel } from './consult-gate.ts';
+import { consultWriterContextFromPack, evaluateConsultRequest, type ConsultGateNet, type ConsultGateReason, type ConsultLanguage, type ConsultLevel } from './consult-gate.ts';
 import type { EvidencePack } from './contracts.ts';
 import { consultWriterEvidence, runOwnConsultWriter, type ConsultWriterInput, type ConsultWriterOutcome } from './consult-writer.ts';
 
@@ -210,6 +210,8 @@ export interface ConsultWriterCheckOptions {
   /** Whether the writer reads evidence excerpts (the owner's own writer does; the built-in one does not). */
   readonly withEvidence: boolean;
   readonly languages?: readonly ConsultLanguage[];
+  /** The gate net the product applies to this writer: thin for the owner's own writer. */
+  readonly net?: ConsultGateNet;
   readonly cases?: readonly ConsultWriterCheckCase[];
   /** Called after each case, for progress. */
   readonly onCase?: (result: ConsultWriterCheckResult, index: number, total: number) => void;
@@ -238,6 +240,7 @@ export async function runConsultWriterCheck(options: ConsultWriterCheckOptions):
         level: options.level,
         askedQuestionTexts: [entry.userQuestion],
         askedQuestionFullTexts: [entry.userQuestion],
+        net: options.net ?? 'full',
       });
       gate = verdict.decision;
       gateReasons = [...verdict.reasons];
@@ -284,6 +287,8 @@ export async function checkOwnConsultWriter(input: {
   return runConsultWriterCheck({
     level: input.level,
     withEvidence: true,
+    // The net the product applies to the owner's own writer.
+    net: 'thin',
     ...(input.languages ? { languages: input.languages } : {}),
     ...(input.onCase ? { onCase: input.onCase } : {}),
     ...(input.signal ? { signal: input.signal } : {}),

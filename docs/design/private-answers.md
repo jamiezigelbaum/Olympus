@@ -143,8 +143,10 @@ Decisions:
    all), the question, the first answer and its gaps. It decides whether a
    frontier model would help and writes the request in its own words. The
    built-in writer keeps its inputs (question, answer, gaps) and token bound.
-   Both use the same rewritten rules (consult-writer-instructions.md), and the
-   outbound gate stays the backstop at the chosen level.
+   Both use the same rewritten rules (consult-writer-instructions.md): Strict
+   keeps Vitalik's rules (the skill file in ethereum/zkapi PR #16), Standard
+   is the more revealing option. Strict was measured with and without the
+   evidence and keeps it (16 of 16 passed with, 15 of 16 without).
 4. **What escalation is for.** A question complex enough that a stronger
    model's reasoning or outside knowledge helps, on top of what the evidence
    shows. zkAPI never sees the documents, so it cannot fix retrieval or find
@@ -165,7 +167,22 @@ Decisions:
    questions written, what the gate would send or refuse, any invented name or
    figure that got past, and any question about a document. It never runs on
    its own.
-7. **Wording.** "Paid and sent anonymously, with identifiers removed." Never
+7. **A thin net under the owner's writer** (owner decision, 2026-10-10).
+   Vitalik's only content filter is the local model rewriting under his skill
+   file: no detectors, no placeholders, no second check. Our full gate went
+   further and, under a strong writer, refused most good questions (Strict 1
+   of 16 on Delphi, mostly for sharing four words with the evidence). So when
+   `writer` is set, at both levels, the gate refuses only hard identifiers:
+   names written in the private snapshot, exact dates and years, exact
+   amounts, account, phone and ID numbers, addresses, mail addresses, handles,
+   links and secrets, with the existing detectors
+   (`ConsultGateOptions.net = 'thin'`). Dropped for it: the vocabulary list,
+   the question-structure limits and every copy rule; a dictionary word the
+   snapshot capitalizes or labels ("Patient:", "Defined benefit scheme") is
+   the topic, unless the request itself writes it capitalized. Every labelled
+   leak of the unnamed eval set stays refused. The built-in 4B writer keeps
+   the full gate unchanged.
+8. **Wording.** "Paid and sent anonymously, with identifiers removed." Never
    "unlinkable": the provider reads the question, and an unusual situation can
    still hint at who asked.
 

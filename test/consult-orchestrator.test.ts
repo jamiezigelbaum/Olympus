@@ -916,13 +916,17 @@ describe('the owner\'s own writer (owner decision 2026-10-10)', () => {
     }
   });
 
-  test('a copied phrase from the evidence the own writer read is still refused by the gate at Strict', async () => {
+  test('the own writer gets the thin net: a copied phrase goes out at Strict, where the built-in writer\'s full gate refuses it', async () => {
     const general: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true, level: 'general' } };
-    const h = harness({ ownWriter: true, policy: bindConsultJobPolicy(general), settings: general, writerOutcome: { kind: 'questions', questions: [COPIED_QUESTION], promptTokens: 0, ms: 1 } });
-    await consult(h);
-    expect(h.writer.calls[0]!.evidence?.length).toBeGreaterThan(0);
-    expect(h.transport.sessions.flatMap((session) => session.sends)).toEqual([]);
-    expect(h.logs.some((line) => line.startsWith('[consult] outcome=gate_refused'))).toBe(true);
+    const own = harness({ ownWriter: true, policy: bindConsultJobPolicy(general), settings: general, writerOutcome: { kind: 'questions', questions: [COPIED_QUESTION], promptTokens: 0, ms: 1 } });
+    await consult(own);
+    expect(own.writer.calls[0]!.evidence?.length).toBeGreaterThan(0);
+    expect(own.transport.sessions[0]!.sends.map((send) => send.question)).toEqual([COPIED_QUESTION]);
+
+    const builtIn = harness({ ownWriter: false, policy: bindConsultJobPolicy(general), settings: general, writerOutcome: { kind: 'questions', questions: [COPIED_QUESTION], promptTokens: 0, ms: 1 } });
+    await consult(builtIn);
+    expect(builtIn.transport.sessions.flatMap((session) => session.sends)).toEqual([]);
+    expect(builtIn.logs.some((line) => line.startsWith('[consult] outcome=gate_refused'))).toBe(true);
   });
 
   test('the zkAPI model for ChatGPT questions replaces the route\'s model only when set', () => {

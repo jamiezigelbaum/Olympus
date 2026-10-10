@@ -772,7 +772,9 @@ function evaluateCheckedRequest(
   }
 
   // 2. The request on its own. Any refusal here returns before snapshot work.
-  const unnamed = options?.level === 'unnamed';
+  const thin = options?.net === 'thin';
+  // The thin net judges the snapshot with the unnamed level's exemptions at both levels.
+  const unnamed = thin || options?.level === 'unnamed';
   const reasons = new Set<ConsultGateReason>();
   let tokenCount = 0;
   for (const question of subQuestions) {
@@ -783,14 +785,14 @@ function evaluateCheckedRequest(
     for (const reason of characterReasons(question)) reasons.add(reason);
     const nfkc = question.normalize('NFKC');
     for (const reason of scriptReasons(nfkc)) reasons.add(reason);
-    for (const reason of unnamed
+    if (!thin) for (const reason of unnamed
       ? questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES)
       : questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION)) reasons.add(reason);
     if (hasEncodedBlob(nfkc)) reasons.add('encoded_blob');
     if (secretLabelsInText(question).length > 0 || secretLabelsInText(nfkc).length > 0) reasons.add('secret_detected');
     if (hasIdentifierShape(nfkc)) reasons.add('identifier_shape');
     if (hasTechnicalFingerprint(nfkc)) reasons.add('technical_fingerprint');
-    if (hasUnknownWord(nfkc, vocabulary)) {
+    if (!thin && hasUnknownWord(nfkc, vocabulary)) {
       reasons.add('unknown_word');
       // A language the owner asked for whose pack is not installed (German,
       // Italian) makes every word of that language unknown; say so rather than
@@ -820,12 +822,34 @@ function evaluateCheckedRequest(
   const copySource: unknown = options?.askedQuestionFullTexts ?? options?.askedQuestionTexts;
   if (copySource !== undefined) {
     if (!askedTextsValid(copySource)) return refuse(['writer_context_malformed']);
-    if (copiesAskedQuestion(model, copySource)) reasons.add('owner_question_copy');
+    if (!thin && copiesAskedQuestion(model, copySource)) reasons.add('owner_question_copy');
   }
   const asked = unnamed ? askedWords(options?.askedQuestionTexts) : undefined;
-  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked)) reasons.add(reason);
+  // Thin net: the words the request itself writes as names (capitalized
+  // mid-sentence). Only these keep the snapshot's capitalization evidence
+  // when they are ordinary dictionary words; see compareWithSnapshot.
+  const writtenAsNames = thin ? namesWrittenIn(subQuestions) : undefined;
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, writtenAsNames)) reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent)) reasons.add(reason);
   return reasons.size > 0 ? refuse([...reasons]) : { decision: 'pass', reasons: [] };
+}
+
+/**
+ * Thin net: words a request writes capitalized, anywhere (how a name is
+ * written), except function words. Sentence starts count too: a given name
+ * that is also a dictionary word ("Grace raised the price") is written there
+ * as often as mid-sentence: exempting them let 88 of the 438 sample given
+ * names and surnames (eval/consult-leak/name-sample.ts) through a sentence
+ * start on 2026-10-10; counting them, 8 pass (the full gate: 6).
+ */
+function namesWrittenIn(subQuestions: readonly string[]): Set<string> {
+  const names = new Set<string>();
+  for (const question of subQuestions) {
+    forEachToken(foldText(question.normalize('NFKC')), (token) => {
+      if (token.capitalized && !FUNCTION_WORDS.has(token.norm) && !NAME_STOPWORDS.has(token.norm)) names.add(token.norm);
+    });
+  }
+  return names;
 }
 
 function refuse(reasons: readonly ConsultGateReason[]): ConsultGateVerdict {
@@ -1197,7 +1221,27 @@ export interface ConsultGateOptions {
    * a short list of strings refuses the request (`writer_context_malformed`).
    */
   readonly askedQuestionFullTexts?: readonly string[];
+  /**
+   * How much of the gate runs (owner decision 2026-10-10, "Writer: your own
+   * local model" in docs/design/private-answers.md). "full", the default, is
+   * every rule: the built-in writer always gets it. "thin" is the net under a
+   * strong writer the owner runs himself, at both levels, after Vitalik
+   * Buterin's approach (the local model rewriting under a skill file is the
+   * content filter): it refuses only hard identifiers. Kept: character,
+   * script and encoding rules, secrets, identifier shapes (mail addresses,
+   * handles, links, long digit runs), technical fingerprints, the request's
+   * byte and token bounds, and the snapshot's names, identifiers, addresses,
+   * dates, hosts and figures, judged with the unnamed level's exemptions (a
+   * dictionary word the snapshot also writes in lower case is not a name; a
+   * short duration that defines the problem is not a figure). Dropped: the
+   * vocabulary rule (`unknown_word`), the question-structure rules (content
+   * words, sentences, question mark) and every copy rule (`shared_token_run`,
+   * `owner_question_copy`, copied wording).
+   */
+  readonly net?: ConsultGateNet;
 }
+
+export type ConsultGateNet = 'full' | 'thin';
 
 export const DEFAULT_CONSULT_LANGUAGES: readonly ConsultLanguage[] = Object.freeze(['en']);
 
@@ -2131,7 +2175,16 @@ function compareWithSnapshot(
   unnamed: boolean,
   ordinaryWord?: (token: string) => boolean,
   asked?: AskedWords,
+  // Thin net (ConsultGateOptions.net): present only then; the request's words written as names.
+  writtenAsNames?: ReadonlySet<string>,
 ): Set<ConsultGateReason> {
+  const thin = writtenAsNames !== undefined;
+  // Thin net: an ordinary dictionary word (or country) of the owner's
+  // languages that the request does not write as a name is the topic, not a
+  // name, however the snapshot capitalizes or labels it ("Patient: ...",
+  // "Defined benefit scheme", "Employment contract"). Every other word keeps
+  // the rules below, so a snapshot name the request writes stays refused.
+  const plainWord = (token: string): boolean => thin && ordinaryWord !== undefined && ordinaryWord(token) && !writtenAsNames.has(token);
   const reasons = new Set<ConsultGateReason>();
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
   const contentTokens = model.tokens.filter(isContent);
@@ -2143,6 +2196,8 @@ function compareWithSnapshot(
   const copiedWords = unnamed ? new Set<string>() : undefined;
   let copyFromQuestion = false;
   const copyHit = (words: Iterable<string>): void => {
+    // Thin net: copies are not refused, and copied words keep the ordinary name rule.
+    if (thin) return;
     if (!copiedWords || copyFromQuestion) {
       reasons.add('shared_token_run');
       return;
@@ -2434,6 +2489,7 @@ function compareWithSnapshot(
   for (const pair of pairCandidates.values()) {
     // A capitalized pair is a name once it was written with one part
     // mid-sentence; lower-case occurrences elsewhere do not cancel it.
+    if (plainWord(pair.left) && plainWord(pair.right)) continue;
     if (!pair.midSentence) {
       const namelike = (part: string): boolean => statOf(part).capitalized >= statOf(part).lower;
       if (!namelike(pair.left) && !namelike(pair.right)) continue;
@@ -2448,7 +2504,7 @@ function compareWithSnapshot(
     if (!pair.midSentence) continue;
     for (const part of [pair.left, pair.right]) {
       const partSource = model.forms.get(part);
-      if (partSource && part.length >= 3 && neverLower(part) && !askedToken(part)) nameHit(partSource);
+      if (partSource && part.length >= 3 && neverLower(part) && !askedToken(part) && !plainWord(part)) nameHit(partSource);
     }
   }
   for (const [token, single] of singleCandidates) {
@@ -2472,6 +2528,7 @@ function compareWithSnapshot(
     // Inside copied document wording (CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS)
     // that exemption does not apply: a copy may go out, a name in it may not.
     if (!single.strongLabel && !copiedWords?.has(token) && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0) continue;
+    if (plainWord(token)) continue;
     // A word of the question ChatGPT sent (CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS).
     if (askedToken(token)) continue;
     const stat = statOf(token);
@@ -2491,7 +2548,7 @@ function compareWithSnapshot(
   // use in prose or in the owner's question. A lower-case component that is a
   // dictionary word (a folder named "tenancy") is not protected: it is the
   // topic, and protecting it would refuse every question about that topic.
-  for (const [token, source] of componentCandidates) if (statOf(token).lowerAnywhere === 0 && !askedToken(token)) identifierHit(source);
+  for (const [token, source] of componentCandidates) if (statOf(token).lowerAnywhere === 0 && !askedToken(token) && !plainWord(token)) identifierHit(source);
   return reasons;
 }
 

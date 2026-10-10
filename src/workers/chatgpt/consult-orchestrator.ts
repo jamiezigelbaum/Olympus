@@ -135,8 +135,9 @@ export interface ConsultOrchestratorOptions {
   readonly writerDeadlineMs?: number | (() => number);
   /**
    * Whether the owner's own writer model is chosen now (consult.json
-   * `writer`). It is then given evidence excerpts. Default: the built-in
-   * writer. The trigger is the same for both writers.
+   * `writer`). It is then given evidence excerpts and its questions pass the
+   * gate's thin net (consult-gate.ts ConsultGateOptions.net). Default: the
+   * built-in writer, full gate. The trigger is the same for both writers.
    */
   readonly ownWriter?: () => boolean;
 }
@@ -302,11 +303,13 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     // One bounded input (§A.3): what the writer sees is exactly what the gate
     // compares against. The owner's own writer also reads evidence excerpts
     // from the same pack the gate compares the questions with.
+    // Read once: the writer that runs is the one whose gate net applies.
+    const own = ownWriter();
     const bounded = boundConsultWriterInput({
       question: held.question,
       answer: held.answer,
       gaps: held.gaps,
-      ...(ownWriter() ? { evidence: consultWriterEvidence(held.pack) } : {}),
+      ...(own ? { evidence: consultWriterEvidence(held.pack) } : {}),
     });
     // The writer and the transport warm-up overlap (§A.8, speed measure 2).
     // The session's own open deadline is the dispatch window's remainder.
@@ -373,6 +376,9 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
         level: scheduled.policy.level,
         askedQuestionTexts: [bounded.question],
         askedQuestionFullTexts: [current.question],
+        // The owner's own writer gets the thin net (hard identifiers only,
+        // owner decision 2026-10-10); the built-in writer the full gate.
+        net: own ? 'thin' : 'full',
       },
     );
     if (verdict.decision !== 'pass') {
