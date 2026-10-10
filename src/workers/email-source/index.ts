@@ -519,6 +519,14 @@ export interface EmailSourceWorkerOptions {
      */
     panelTools?: DashboardPanelTools;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
+    /**
+     * A connect handed a file source a different account while its stores hold
+     * the previous account's items. The product server restarts the supervised
+     * worker so its start-up purge removes them before anything is served or
+     * synced again (source-account-purge.ts). Absent: the account guard still
+     * refuses every sync until the worker restarts.
+     */
+    onSourceAccountPurgeRequired?: (sourceIds: readonly string[]) => void;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
      * The sources `triggerSourceSync` actually serves.
@@ -1586,9 +1594,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               if (dashboardOAuthAttempts.get(source) !== attempt) {
                 throw new Error('OAuth connection attempt is no longer active.');
               }
-              await attempt.pending.completeCallback({ state, code });
+              const connected = await attempt.pending.completeCallback({ state, code });
               clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
               markDashboardSourceConnected(source, dashboardDisconnectedSources);
+              if (connected.sourceAccountPurgeRequired?.length) {
+                sourceDashboard?.onSourceAccountPurgeRequired?.(connected.sourceAccountPurgeRequired);
+              }
               // Folder-capable sources stop at connected + scope_pending.
               // OAuth consent is credential consent, not corpus consent.
               if (source !== 'google-drive' && source !== 'dropbox') {

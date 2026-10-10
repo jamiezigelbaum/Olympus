@@ -5280,7 +5280,9 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
       allowedCapabilities: [...handle.allowedCapabilities],
       scopes: [...handle.scopes],
       tokenEnvNames: [],
-      expiresInSeconds: 3600
+      expiresInSeconds: 3600,
+      grantGeneration: `${handle.connectedAt}
+${handle.providerAccountId ?? ""}`
     };
     if (handle.sessionKind)
       definition.sessionKind = handle.sessionKind;
@@ -5705,6 +5707,7 @@ class EnvCredentialBroker {
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
     if (cached && isReusableMintedSession(cached, now))
       return cached;
+    forgetSupersededGrantSessions(this.oauth2CacheNamespace, definition, capability, cacheKey);
     const backoff = PROCESS_MINT_FAILURE_BACKOFF.get(cacheKey);
     if (backoff && now.getTime() < backoff.untilMs)
       throw backoff.error;
@@ -6130,9 +6133,22 @@ function bearerSessionFromMintedToken(options) {
   };
 }
 function mintedSessionCacheKey(namespace, definition, capability) {
+  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}`;
+}
+function mintedSessionCachePrefix(namespace, handle, capability) {
   return `${namespace}
-${definition.handle}
-${capability}`;
+${handle}
+${capability}
+`;
+}
+function forgetSupersededGrantSessions(namespace, definition, capability, currentKey) {
+  const prefix = mintedSessionCachePrefix(namespace, definition.handle, capability);
+  for (const cache of [PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_FAILURE_BACKOFF]) {
+    for (const key of [...cache.keys()]) {
+      if (key !== currentKey && key.startsWith(prefix))
+        cache.delete(key);
+    }
+  }
 }
 function isReusableMintedSession(session, now) {
   if (!session.expiresAt)
@@ -6483,7 +6499,8 @@ function mergeRegistryHandleWithDefault(registry, fallback) {
     ...registry.accountRole ?? fallback.accountRole ? { accountRole: registry.accountRole ?? fallback.accountRole } : {},
     ...registry.trustDomain ?? fallback.trustDomain ? { trustDomain: registry.trustDomain ?? fallback.trustDomain } : {},
     ...registry.expiresInSeconds ?? fallback.expiresInSeconds ? { expiresInSeconds: registry.expiresInSeconds ?? fallback.expiresInSeconds } : {},
-    ...registry.backendState ?? fallback.backendState ? { backendState: registry.backendState ?? fallback.backendState } : {}
+    ...registry.backendState ?? fallback.backendState ? { backendState: registry.backendState ?? fallback.backendState } : {},
+    ...registry.grantGeneration ? { grantGeneration: registry.grantGeneration } : {}
   };
 }
 function backendStateStoreFromEnv(env) {
@@ -18852,6 +18869,9 @@ var init_local_index = __esm(() => {
       const row = this.db.query("SELECT reactions_json FROM items WHERE local_item_id = ? AND tombstoned = 0").get(localItemId);
       return parseStoredSourceReactions(row?.reactions_json);
     }
+    holdsAnyItem() {
+      return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
+    }
     status(scope) {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
@@ -22907,6 +22927,19 @@ var init_worker_service = __esm(() => {
   WORKER_LOG_TAIL_BYTES = 64 * 1024;
 });
 
+// src/core/provider-account-identity.ts
+var IDENTITY_RESPONSE_LIMIT_CHARS;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  IDENTITY_RESPONSE_LIMIT_CHARS = 64 * 1024;
+});
+
+// src/core/source-account-binding.ts
+var init_source_account_binding = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+});
+
 // src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
@@ -22920,6 +22953,8 @@ var init_connect = __esm(() => {
   init_connected_handles();
   init_unpaired_sources();
   init_credential_broker();
+  init_provider_account_identity();
+  init_source_account_binding();
   DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
   DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
   OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -30593,6 +30628,37 @@ var init_credential_degradation = __esm(() => {
   DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
 });
 
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+});
+
 // src/core/owner-config-read.ts
 import { readFileSync as readFileSync12, statSync as statSync8 } from "node:fs";
 function ownerConfigStamp(path) {
@@ -33798,6 +33864,32 @@ init_gmail();
 init_request_budget();
 var GMAIL_PICKER_DAILY_REQUEST_BUDGET = 4 * GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
 var SKIPPABLE_SYSTEM_LABELS = new Set(["SENT", "CHAT"]);
+
+// src/workers/source-account-guard.ts
+init_provider_account_identity();
+init_source_account_binding();
+init_connected_handles();
+init_credential_broker();
+// src/data-lifecycle.ts
+init_atomic_file();
+init_operation_error();
+init_sqlite_migrations();
+init_remote_connections();
+init_source_ingestion_policy();
+init_dropbox_files();
+init_google_connectors();
+init_telegram_messages();
+init_readwise();
+init_tier_set2();
+init_x_bookmarks();
+init_tier_set3();
+init_sovereignty();
+init_public_source_capabilities();
+init_worker_service();
+init_media_cache();
+
+// src/workers/source-account-purge.ts
+init_source_account_binding();
 
 // src/workers/email-source/server.ts
 init_request_budget();

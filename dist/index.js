@@ -5435,6 +5435,7 @@ class EnvCredentialBroker {
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
     if (cached && isReusableMintedSession(cached, now))
       return cached;
+    forgetSupersededGrantSessions(this.oauth2CacheNamespace, definition, capability, cacheKey);
     const backoff = PROCESS_MINT_FAILURE_BACKOFF.get(cacheKey);
     if (backoff && now.getTime() < backoff.untilMs)
       throw backoff.error;
@@ -5860,9 +5861,22 @@ function bearerSessionFromMintedToken(options) {
   };
 }
 function mintedSessionCacheKey(namespace, definition, capability) {
+  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}`;
+}
+function mintedSessionCachePrefix(namespace, handle, capability) {
   return `${namespace}
-${definition.handle}
-${capability}`;
+${handle}
+${capability}
+`;
+}
+function forgetSupersededGrantSessions(namespace, definition, capability, currentKey) {
+  const prefix = mintedSessionCachePrefix(namespace, definition.handle, capability);
+  for (const cache of [PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_FAILURE_BACKOFF]) {
+    for (const key of [...cache.keys()]) {
+      if (key !== currentKey && key.startsWith(prefix))
+        cache.delete(key);
+    }
+  }
 }
 function isReusableMintedSession(session, now) {
   if (!session.expiresAt)
@@ -6213,7 +6227,8 @@ function mergeRegistryHandleWithDefault(registry, fallback) {
     ...registry.accountRole ?? fallback.accountRole ? { accountRole: registry.accountRole ?? fallback.accountRole } : {},
     ...registry.trustDomain ?? fallback.trustDomain ? { trustDomain: registry.trustDomain ?? fallback.trustDomain } : {},
     ...registry.expiresInSeconds ?? fallback.expiresInSeconds ? { expiresInSeconds: registry.expiresInSeconds ?? fallback.expiresInSeconds } : {},
-    ...registry.backendState ?? fallback.backendState ? { backendState: registry.backendState ?? fallback.backendState } : {}
+    ...registry.backendState ?? fallback.backendState ? { backendState: registry.backendState ?? fallback.backendState } : {},
+    ...registry.grantGeneration ? { grantGeneration: registry.grantGeneration } : {}
   };
 }
 function backendStateStoreFromEnv(env) {
@@ -6997,7 +7012,9 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
       allowedCapabilities: [...handle.allowedCapabilities],
       scopes: [...handle.scopes],
       tokenEnvNames: [],
-      expiresInSeconds: 3600
+      expiresInSeconds: 3600,
+      grantGeneration: `${handle.connectedAt}
+${handle.providerAccountId ?? ""}`
     };
     if (handle.sessionKind)
       definition.sessionKind = handle.sessionKind;
@@ -17727,6 +17744,16 @@ var UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_
 
 // src/core/connect.ts
 init_credential_broker();
+
+// src/core/provider-account-identity.ts
+init_http_timeout();
+var IDENTITY_RESPONSE_LIMIT_CHARS = 64 * 1024;
+
+// src/core/source-account-binding.ts
+init_atomic_file();
+init_file_lease();
+
+// src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
 var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;

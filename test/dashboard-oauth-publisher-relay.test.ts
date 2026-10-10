@@ -9,6 +9,7 @@
 // `redirect_uri` is readable and can be compared with what /start sent: the two
 // must be the identical string or the providers refuse the exchange.
 
+import { DEFAULT_PROVIDER_IDENTITY_ENDPOINTS } from '../src/core/provider-account-identity.ts';
 import { createHmac } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -120,6 +121,9 @@ function fixture(
   const exchanges: URLSearchParams[] = [];
   const exchangeUrls: string[] = [];
   const oauthFetch: OAuthFetch = async (url, init) => {
+    // The connected-account lookup (provider-account-identity.ts) is not a
+    // token exchange; it answers here and stays out of the exchange record.
+    if (isGoogleIdentityLookup(String(url))) return googleIdentityResponse();
     exchangeUrls.push(String(url));
     const body = String(init?.body ?? '');
     const contentType = new Headers(init?.headers).get('content-type');
@@ -1598,3 +1602,14 @@ describe('Gmail and Google Drive with no Google Desktop client (Olympus 1.0 rele
     expect(importers).toEqual(['src/workers/email-source/index.ts']);
   });
 });
+
+function isGoogleIdentityLookup(url: string): boolean {
+  return url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail || url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_drive;
+}
+
+function googleIdentityResponse(): Response {
+  return new Response(JSON.stringify({ emailAddress: 'owner@example.test', user: { emailAddress: 'owner@example.test' } }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}

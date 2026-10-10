@@ -39,8 +39,20 @@ import {
 } from '../workers/credential-broker/unpaired-sources.ts';
 import {
   credentialOAuth2StateStoreFromEnv,
+  invalidateMintedCredentialSessions,
   type CredentialOAuth2StateStore,
 } from '../workers/credential-broker/index.ts';
+import {
+  dropboxAccountIdFromTokenPayload,
+  fetchProviderAccountId,
+  isAccountBoundProvider,
+  type AccountBoundProvider,
+} from './provider-account-identity.ts';
+import {
+  accountBoundSourceIdForProvider,
+  recordFileSourceConnect,
+  type AccountBoundSourceId,
+} from './source-account-binding.ts';
 
 const DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
@@ -100,6 +112,13 @@ export interface ConnectResult {
   secretRefs: string[];
   next?: string;
   messages?: string[];
+  /**
+   * File sources this connect handed a different account (or one it could not
+   * prove was the same) while their stores still hold the previous account's
+   * items. Nothing syncs them until those items are removed; the worker does
+   * that at its next start, which the dashboard requests at once.
+   */
+  sourceAccountPurgeRequired?: AccountBoundSourceId[];
 }
 
 export interface PendingOAuthConnection {
@@ -605,6 +624,22 @@ async function completeOAuthSourceConnection(
     });
   }
 
+  // Which account this grant authorizes, for the sources that must never mix
+  // two accounts. Best effort: an unknown answer is settled by the worker
+  // against the token itself before anything syncs, so it never blocks connect.
+  const accountBoundProvider = prepared.definition.handles
+    .map((definition) => definition.provider)
+    .find(isAccountBoundProvider);
+  const fileSourceAccountId = accountBoundProvider
+    ? token.providerAccountId ?? await lookupConnectedAccountId({
+        provider: accountBoundProvider,
+        tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+        accessToken: token.accessToken,
+        fetchImpl: prepared.options.fetch ?? fetch,
+        timeoutMs: prepared.tokenExchangeTimeoutMs,
+      })
+    : undefined;
+
   return withConnectedHandleGrantCustody(
     prepared.registryPath,
     { expectedEpoch: prepared.grantEpoch },
@@ -614,6 +649,22 @@ async function completeOAuthSourceConnection(
         provider: definition.provider,
       }));
       assertOneConnectedAccountForProposedProviders(prepared.registryPath, proposedHandles);
+
+      // Before any credential is written: a connect that fails after this
+      // leaves only a marker the worker settles against the token it reads with.
+      const sourceAccountPurgeRequired: AccountBoundSourceId[] = [];
+      for (const handleDefinition of prepared.definition.handles) {
+        if (!isAccountBoundProvider(handleDefinition.provider)) continue;
+        const outcome = recordFileSourceConnect({
+          registryPath: prepared.registryPath,
+          provider: handleDefinition.provider,
+          providerAccountId: fileSourceAccountId,
+          now: prepared.now(),
+        });
+        if (outcome === 'purge_required') {
+          sourceAccountPurgeRequired.push(accountBoundSourceIdForProvider(handleDefinition.provider)!);
+        }
+      }
 
       const secretRefs: string[] = [];
       const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
@@ -658,12 +709,14 @@ async function completeOAuthSourceConnection(
       for (const handleDefinition of prepared.definition.handles) {
         const handle = handleDefinition.handle(prepared.accountRole);
         handles.push(handle);
+        const providerAccountId = xUserId
+          ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
         await prepared.oauth2StateStore?.save(handle, {
           refreshToken,
           scopes: handleDefinition.scopes,
           status: 'available',
           updatedAt: connectedAt.toISOString(),
-          ...(xUserId ? { providerAccountId: xUserId } : {}),
+          ...(providerAccountId ? { providerAccountId } : {}),
         });
         upsertConnectedHandle({
           handle,
@@ -689,8 +742,11 @@ async function completeOAuthSourceConnection(
             },
           } : {}),
           connectedAt: connectedAt.toISOString(),
-          ...(xUserId ? { providerAccountId: xUserId } : {}),
+          ...(providerAccountId ? { providerAccountId } : {}),
         }, prepared.registryPath);
+        // The new grant is in place: no token minted from the old one may be
+        // handed out again by this process, whatever is left of its lifetime.
+        invalidateMintedCredentialSessions(handle);
       }
 
       return {
@@ -700,6 +756,7 @@ async function completeOAuthSourceConnection(
         registryPath: prepared.registryPath,
         oauth2StateWrite: prepared.oauth2StateStore ? 'updated' : 'not_configured',
         secretRefs: secretRefs.sort(),
+        ...(sourceAccountPurgeRequired.length > 0 ? { sourceAccountPurgeRequired } : {}),
       };
     },
   );
@@ -1496,18 +1553,23 @@ export function oauthAuthorizeOrigin(source: ConnectOAuthOptions['source']): str
   return new URL(oauthSourceDefinition(source).authUrl).origin;
 }
 
+const DROPBOX_OAUTH_SCOPES = ['files.metadata.read', 'files.content.read', 'sharing.read', 'account_info.read'];
+
 function oauthSourceDefinition(source: ConnectOAuthOptions['source']): OAuthSourceDefinition {
   if (source === 'dropbox') {
     return {
       authUrl: 'https://www.dropbox.com/oauth2/authorize',
       tokenUrl: 'https://api.dropboxapi.com/oauth2/token',
-      scopes: ['files.metadata.read', 'files.content.read', 'sharing.read'],
+      // account_info.read names the connected account (users/get_current_account),
+      // so a reconnect to a different account is caught. Dropbox registers it on
+      // every user-linked app, the publisher app included.
+      scopes: DROPBOX_OAUTH_SCOPES,
       handles: [{
         handle: (role: string) => role === 'personal' ? 'dropbox.personal' : `dropbox.${role}`,
         provider: 'dropbox',
         capability: 'dropbox.files.sync',
         trustDomain: 'secure_local',
-        scopes: ['files.metadata.read', 'files.content.read', 'sharing.read'],
+        scopes: DROPBOX_OAUTH_SCOPES,
       }],
     };
   }
@@ -1647,7 +1709,7 @@ async function exchangeAuthorizationCode(options: {
    * "Why state verification is not possible here"). Unused on every other
    * path. */
   state?: string;
-}): Promise<{ accessToken: string; refreshToken?: string; expiresInSeconds?: number; scopes: string[] }> {
+}): Promise<{ accessToken: string; refreshToken?: string; expiresInSeconds?: number; scopes: string[]; providerAccountId?: string }> {
   // Google's publisher **Web** client is a confidential client whose token
   // endpoint requires `client_secret`, which Olympus — public source — cannot
   // ship. That leg is delegated to a small publisher-run Cloudflare Worker
@@ -1725,7 +1787,43 @@ async function exchangeAuthorizationCode(options: {
       : {}),
     ...(typeof payload.expires_in === 'number' ? { expiresInSeconds: payload.expires_in } : {}),
     scopes: typeof payload.scope === 'string' ? payload.scope.split(/\s+/).filter(Boolean) : [],
+    // Dropbox's code exchange names the account the grant belongs to.
+    ...(options.source === 'dropbox' && dropboxAccountIdFromTokenPayload(payload)
+      ? { providerAccountId: dropboxAccountIdFromTokenPayload(payload)! }
+      : {}),
   };
+}
+
+/**
+ * Ask the provider which account a freshly exchanged token belongs to. The
+ * lookup sits on the token endpoint's own host for Dropbox (as X's does), and
+ * on Google's API hosts for the real Google token endpoint; a token endpoint
+ * on any other origin (a local mock, a self-hosted relay) answers it itself.
+ */
+async function lookupConnectedAccountId(options: {
+  provider: AccountBoundProvider;
+  tokenUrl: string;
+  accessToken: string;
+  fetchImpl: OAuthFetch;
+  timeoutMs: number;
+}): Promise<string | undefined> {
+  const tokenOrigin = new URL(options.tokenUrl).origin;
+  const endpoint = options.provider === 'dropbox'
+    ? new URL('/2/users/get_current_account', options.tokenUrl).toString()
+    : tokenOrigin === 'https://oauth2.googleapis.com'
+      ? undefined
+      : new URL(options.provider === 'gmail' ? '/gmail/v1/users/me/profile' : '/drive/v3/about?fields=user(emailAddress)', options.tokenUrl).toString();
+  try {
+    return await fetchProviderAccountId({
+      provider: options.provider,
+      accessToken: options.accessToken,
+      fetchImpl: (url, init) => options.fetchImpl(url, init),
+      timeoutMs: options.timeoutMs,
+      ...(endpoint ? { endpoints: { [options.provider]: endpoint } } : {}),
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 /** A token response is a small JSON object on every provider Olympus talks to. */

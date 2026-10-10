@@ -9994,6 +9994,15 @@ export class LocalConnectorStore {
     return parseStoredSourceReactions(row?.reactions_json);
   }
 
+  /**
+   * Whether the store holds any item row at all, tombstones included. The
+   * account guard asks this before deciding a reconnect needs a purge: an
+   * empty store has nothing of a previous account to remove.
+   */
+  holdsAnyItem(): boolean {
+    return this.db.query('SELECT 1 AS present FROM items LIMIT 1').get() !== null;
+  }
+
   status(scope?: ConnectorStoreStatusScope): ConnectorStoreStatus {
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);

@@ -409,6 +409,14 @@ export interface EnvCredentialHandleDefinition {
   trustDomain?: SourceTrustDomain;
   expiresInSeconds?: number;
   backendState?: CredentialSessionBackendStateInput;
+  /**
+   * Which authorization this definition carries: the registry's connect time
+   * and provider account. A reconnect writes a new one, and a minted access
+   * token is cached under it, so a token minted from the previous grant is
+   * never handed out for the new one (2026-10-10: a reconnect to a different
+   * Dropbox account kept syncing the first account on its cached token).
+   */
+  grantGeneration?: string;
 }
 
 export interface EnvCredentialBrokerOptions {
@@ -1199,6 +1207,7 @@ export class EnvCredentialBroker implements CredentialBroker {
     const now = this.now();
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
     if (cached && isReusableMintedSession(cached, now)) return cached;
+    forgetSupersededGrantSessions(this.oauth2CacheNamespace, definition, capability, cacheKey);
 
     const backoff = PROCESS_MINT_FAILURE_BACKOFF.get(cacheKey);
     if (backoff && now.getTime() < backoff.untilMs) throw backoff.error;
@@ -1985,7 +1994,41 @@ function bearerSessionFromMintedToken(options: {
 }
 
 function mintedSessionCacheKey(namespace: string, definition: EnvCredentialHandleDefinition, capability: string): string {
-  return `${namespace}\n${definition.handle}\n${capability}`;
+  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ''}`;
+}
+
+function mintedSessionCachePrefix(namespace: string, handle: string, capability: string): string {
+  return `${namespace}\n${handle}\n${capability}\n`;
+}
+
+/** Drop what an earlier grant of this handle left cached: its token and its failure backoff. */
+function forgetSupersededGrantSessions(
+  namespace: string,
+  definition: EnvCredentialHandleDefinition,
+  capability: string,
+  currentKey: string,
+): void {
+  const prefix = mintedSessionCachePrefix(namespace, definition.handle, capability);
+  for (const cache of [PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_FAILURE_BACKOFF]) {
+    for (const key of [...cache.keys()]) {
+      if (key !== currentKey && key.startsWith(prefix)) cache.delete(key);
+    }
+  }
+}
+
+/**
+ * Forget every access token this process minted for a handle, in every cache
+ * namespace and for every capability. Called when the handle's credential is
+ * replaced or found to belong to another account: the grant generation in the
+ * cache key already keeps a reconnect from reusing an old token, and this
+ * removes the old token outright rather than leaving it to expire.
+ */
+export function invalidateMintedCredentialSessions(handle: string): void {
+  for (const cache of [PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_FAILURE_BACKOFF]) {
+    for (const key of [...cache.keys()]) {
+      if (key.split('\n')[1] === handle) cache.delete(key);
+    }
+  }
 }
 
 function isReusableMintedSession(session: CredentialSession, now: Date): boolean {
@@ -2562,6 +2605,9 @@ function mergeRegistryHandleWithDefault(
     ...(registry.backendState ?? fallback.backendState
       ? { backendState: registry.backendState ?? fallback.backendState }
       : {}),
+    // The registry's grant, never a default's: a reconnect must change the
+    // minted-token cache key for the well-known handles too.
+    ...(registry.grantGeneration ? { grantGeneration: registry.grantGeneration } : {}),
   };
 }
 

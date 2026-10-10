@@ -1,0 +1,225 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { withFileLeaseSync } from './file-lease.ts';
+import type { AccountBoundProvider } from './provider-account-identity.ts';
+
+/**
+ * One source, one provider account: which account a file source's stored items
+ * came from, and whether a reconnect has put that in doubt.
+ *
+ * A source's stores are filled by whichever account its credential belonged to
+ * at the time. When a reconnect hands the source a different account, the items
+ * already stored belong to an account the install no longer holds a credential
+ * for, and syncing on top of them mixes two people's files in one source (the
+ * 2026-10-10 reviewer-demo incident). This file is the durable record that
+ * keeps that from happening:
+ *
+ * - `provider_account_id` is the account the source's stores were filled from.
+ *   The worker binds it on the first sync it verifies.
+ * - `reconnected_at` is written by every connect that could not prove it is
+ *   the same account (no earlier binding, or the provider did not say). The
+ *   worker settles it against the token's own account before syncing.
+ * - `purge_required` is written when the accounts are known to differ. Nothing
+ *   syncs while it stands; the worker removes the source's stored data at its
+ *   next start (before any store is open) and then binds the new account.
+ *
+ * It sits beside the connected-handle registry so the CLI and the dashboard
+ * connect paths, and the worker, all read and write the same file.
+ */
+export type AccountBoundSourceId = 'dropbox.files' | 'google_drive.docs' | 'gmail.email';
+
+export const ACCOUNT_BOUND_SOURCE_IDS: readonly AccountBoundSourceId[] = ['dropbox.files', 'google_drive.docs', 'gmail.email'];
+
+export type SourceAccountPurgeReason = 'account_changed' | 'previous_account_unknown';
+
+export interface SourceAccountBinding {
+  provider_account_id?: string;
+  bound_at?: string;
+  reconnected_at?: string;
+  purge_required?: {
+    reason: SourceAccountPurgeReason;
+    detected_at: string;
+  };
+}
+
+export interface SourceAccountBindings {
+  version: 1;
+  sources: Partial<Record<AccountBoundSourceId, SourceAccountBinding>>;
+}
+
+export type SourceAccountBindingsRead =
+  | { kind: 'ok'; bindings: SourceAccountBindings }
+  | { kind: 'malformed' };
+
+export class SourceAccountBindingsUnreadableError extends Error {
+  constructor(path: string) {
+    super(`The source account record at ${path} is unreadable; no file source syncs until it is repaired or removed.`);
+    this.name = 'SourceAccountBindingsUnreadableError';
+  }
+}
+
+export function sourceAccountBindingsPath(registryPath: string): string {
+  return join(dirname(registryPath), 'source-account-bindings.json');
+}
+
+export function accountBoundSourceIdForProvider(provider: string): AccountBoundSourceId | undefined {
+  if (provider === 'dropbox') return 'dropbox.files';
+  if (provider === 'google_drive') return 'google_drive.docs';
+  if (provider === 'gmail') return 'gmail.email';
+  return undefined;
+}
+
+export function readSourceAccountBindings(path: string): SourceAccountBindingsRead {
+  if (!existsSync(path)) return { kind: 'ok', bindings: { version: 1, sources: {} } };
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    return normalizeBindings(parsed);
+  } catch {
+    return { kind: 'malformed' };
+  }
+}
+
+/** Read-modify-write one source's entry under the file's cross-process lease. */
+export function updateSourceAccountBinding(
+  path: string,
+  sourceId: AccountBoundSourceId,
+  mutate: (current: SourceAccountBinding | undefined) => SourceAccountBinding | undefined,
+): SourceAccountBinding | undefined {
+  return withFileLeaseSync(path, (lease) => {
+    const read = readSourceAccountBindings(path);
+    if (read.kind === 'malformed') throw new SourceAccountBindingsUnreadableError(path);
+    const next = mutate(read.bindings.sources[sourceId]);
+    const sources = { ...read.bindings.sources };
+    if (next) sources[sourceId] = prune(next);
+    else delete sources[sourceId];
+    lease.commit(() => writePrivateFileAtomicSync(path, `${JSON.stringify({ version: 1, sources }, null, 2)}\n`));
+    return next;
+  });
+}
+
+export type FileSourceConnectOutcome = 'same_account' | 'reconnected' | 'purge_required';
+
+/**
+ * What a connect that is about to store a grant for `provider` means for the
+ * source's stored items. Runs before the grant is written, so a connect that
+ * fails afterwards leaves at most a marker the worker settles harmlessly.
+ */
+export function recordFileSourceConnect(input: {
+  registryPath: string;
+  provider: AccountBoundProvider;
+  providerAccountId: string | undefined;
+  now: Date;
+}): FileSourceConnectOutcome {
+  const sourceId = accountBoundSourceIdForProvider(input.provider)!;
+  let outcome: FileSourceConnectOutcome = 'reconnected';
+  updateSourceAccountBinding(sourceAccountBindingsPath(input.registryPath), sourceId, (current) => {
+    const at = input.now.toISOString();
+    if (current?.purge_required) {
+      outcome = 'purge_required';
+      return current;
+    }
+    if (current?.provider_account_id && input.providerAccountId) {
+      if (current.provider_account_id === input.providerAccountId) {
+        outcome = 'same_account';
+        const { reconnected_at: _settled, ...rest } = current;
+        return rest;
+      }
+      outcome = 'purge_required';
+      return { ...current, purge_required: { reason: 'account_changed', detected_at: at } };
+    }
+    return { ...current, reconnected_at: at };
+  });
+  return outcome;
+}
+
+export type SourceAccountDecision =
+  | { action: 'proceed'; write?: SourceAccountBinding | null }
+  | { action: 'refuse'; reason: 'token_account_mismatch' | 'account_unverified' }
+  | { action: 'purge'; reason: SourceAccountPurgeReason };
+
+/**
+ * The worker's decision before a file source touches its provider or stores.
+ *
+ * `grantAccountId` is the account the registry says the grant authorizes
+ * (written at connect); `tokenAccountId` is what the provider says about the
+ * access token this run would use, or undefined when it could not be asked.
+ * `write` is the entry to store (null removes it; absent leaves it).
+ */
+export function decideSourceAccountAction(input: {
+  binding: SourceAccountBinding | undefined;
+  grantAccountId: string | undefined;
+  tokenAccountId: string | undefined;
+  laneHoldsItems: boolean;
+  now: Date;
+}): SourceAccountDecision {
+  const { binding, grantAccountId, tokenAccountId } = input;
+  // The incident's own shape: a token minted for one account serving a grant
+  // that belongs to another. Never read with it.
+  if (grantAccountId && tokenAccountId && grantAccountId !== tokenAccountId) {
+    return { action: 'refuse', reason: 'token_account_mismatch' };
+  }
+  const current = tokenAccountId ?? grantAccountId;
+  const bindTo = (id: string | undefined): SourceAccountDecision => ({
+    action: 'proceed',
+    write: id ? { provider_account_id: id, bound_at: input.now.toISOString() } : null,
+  });
+
+  if (binding?.purge_required) {
+    return input.laneHoldsItems ? { action: 'purge', reason: binding.purge_required.reason } : bindTo(current);
+  }
+  if (binding?.provider_account_id && current) {
+    if (binding.provider_account_id === current) {
+      return binding.reconnected_at ? bindTo(current) : { action: 'proceed' };
+    }
+    return input.laneHoldsItems ? { action: 'purge', reason: 'account_changed' } : bindTo(current);
+  }
+  if (binding?.reconnected_at) {
+    // Reconnected, and nothing proves the stored items are this account's.
+    if (!input.laneHoldsItems) return bindTo(current);
+    // Bound, but this run cannot read the token's account: wait, do not purge.
+    if (binding.provider_account_id) return { action: 'refuse', reason: 'account_unverified' };
+    return { action: 'purge', reason: 'previous_account_unknown' };
+  }
+  if (binding?.provider_account_id) {
+    // Bound, never reconnected, account unreadable this run (a network blip):
+    // skip this run rather than read with a token nobody has checked.
+    return { action: 'refuse', reason: 'account_unverified' };
+  }
+  // Never bound and never reconnected since this record existed: the stores
+  // were filled by the grant that is still connected. Adopt it when known.
+  return current ? bindTo(current) : { action: 'proceed' };
+}
+
+function normalizeBindings(value: unknown): SourceAccountBindingsRead {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { kind: 'malformed' };
+  const record = value as Record<string, unknown>;
+  if (record.version !== 1 || !record.sources || typeof record.sources !== 'object' || Array.isArray(record.sources)) {
+    return { kind: 'malformed' };
+  }
+  const sources: SourceAccountBindings['sources'] = {};
+  for (const [key, raw] of Object.entries(record.sources as Record<string, unknown>)) {
+    if (!(ACCOUNT_BOUND_SOURCE_IDS as readonly string[]).includes(key)) continue;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { kind: 'malformed' };
+    const entry = raw as Record<string, unknown>;
+    const purge = entry.purge_required as Record<string, unknown> | undefined;
+    if (purge !== undefined && (
+      !purge || typeof purge !== 'object'
+      || (purge.reason !== 'account_changed' && purge.reason !== 'previous_account_unknown')
+      || typeof purge.detected_at !== 'string'
+    )) return { kind: 'malformed' };
+    sources[key as AccountBoundSourceId] = prune({
+      ...(typeof entry.provider_account_id === 'string' && entry.provider_account_id.trim()
+        ? { provider_account_id: entry.provider_account_id.trim() }
+        : {}),
+      ...(typeof entry.bound_at === 'string' ? { bound_at: entry.bound_at } : {}),
+      ...(typeof entry.reconnected_at === 'string' ? { reconnected_at: entry.reconnected_at } : {}),
+      ...(purge ? { purge_required: { reason: purge.reason as SourceAccountPurgeReason, detected_at: purge.detected_at as string } } : {}),
+    });
+  }
+  return { kind: 'ok', bindings: { version: 1, sources } };
+}
+
+function prune(entry: SourceAccountBinding): SourceAccountBinding {
+  return Object.fromEntries(Object.entries(entry).filter(([, value]) => value !== undefined)) as SourceAccountBinding;
+}

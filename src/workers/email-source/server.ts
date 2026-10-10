@@ -343,6 +343,14 @@ import {
   type FileSourceScopePolicyRef,
 } from '../source-scope-runtime.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
+import {
+  accountBoundSchedulerSource,
+  createSourceAccountGuard,
+  type SourceAccountGuard,
+} from '../source-account-guard.ts';
+import { purgeSourcesAwaitingAccountChange } from '../source-account-purge.ts';
+import type { AccountBoundProvider } from '../../core/provider-account-identity.ts';
+import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
 import { MAIL_SCOPE_WINDOW_LABELS, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
@@ -1800,6 +1808,17 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
 }
 
 export async function main(): Promise<void> {
+  // Before anything opens a store: a file source reconnected to a different
+  // account has its previous account's stored data removed here, the only
+  // point in a live worker where no handle to it is open.
+  for (const outcome of purgeSourcesAwaitingAccountChange({
+    registryPath: handleRegistryPathFromEnv(process.env, true),
+    env: process.env,
+  })) {
+    console.log(outcome.status === 'purged'
+      ? `[source-account] ${outcome.sourceId}: removed the previous account's stored data (${outcome.removedPaths} paths) after a reconnect to a different account.`
+      : `[source-account] ${outcome.sourceId}: could not remove the previous account's stored data; the source stays stopped.`);
+  }
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010');
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
@@ -3598,6 +3617,46 @@ export async function main(): Promise<void> {
     capability: 'readwise.sync',
     handles: readActiveConnectedHandles(process.env),
   }));
+  // One provider account per file source (source-account-guard.ts): every
+  // task of the Dropbox, Drive and Gmail lanes first checks that the token it
+  // reads with, the connected grant and the stored items name one account.
+  // Kept across scheduler rebuilds so a token is looked up once, not per pass.
+  const sourceAccountGuards = new Map<string, SourceAccountGuard>();
+  const holdsItems = (
+    stores: ReadonlyArray<LocalConnectorStore | undefined>,
+    onDemand: ReadonlyArray<OnDemandTierStore | undefined>,
+  ) => (): boolean => stores.some((store) => store?.holdsAnyItem() === true)
+    // A tier store not opened this run counts as holding items when its file
+    // exists: the purge removes it either way, and guessing "empty" could bind
+    // a new account over a previous account's rows.
+    || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false);
+  const withSourceAccountGuard = (
+    source: SourceSchedulerSource | undefined,
+    lane: {
+      sourceId: AccountBoundSourceId;
+      provider: AccountBoundProvider;
+      capability: string;
+      handle: string | undefined;
+      laneHoldsItems: () => boolean;
+    },
+  ): SourceSchedulerSource | undefined => {
+    if (!source || !lane.handle || !connectedHandleRegistryPath) return source;
+    const key = `${lane.sourceId}\n${lane.handle}`;
+    let guard = sourceAccountGuards.get(key);
+    if (!guard) {
+      guard = createSourceAccountGuard({
+        sourceId: lane.sourceId,
+        provider: lane.provider,
+        handle: lane.handle,
+        capability: lane.capability,
+        registryPath: connectedHandleRegistryPath,
+        laneHoldsItems: lane.laneHoldsItems,
+        requestPurgeRestart: () => requestModelReload(),
+      });
+      sourceAccountGuards.set(key, guard);
+    }
+    return accountBoundSchedulerSource({ source, guard });
+  };
   const schedulerSourcesForHandles = (handles: readonly ConnectedCredentialHandle[]): {
     sources: SourceSchedulerSource[];
     decisions: SourceSchedulerConstructionDecision[];
@@ -3752,9 +3811,15 @@ export async function main(): Promise<void> {
           });
           // Keyed to the mail scope revision like the folder lanes: a new
           // revision is a new task id and so a fresh scheduler checkpoint.
-          return source && currentGmailScopeRef && fileSourceScopeAuthority
+          return withSourceAccountGuard(source && currentGmailScopeRef && fileSourceScopeAuthority
             ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentGmailScopeRef })
-            : undefined;
+            : undefined, {
+            sourceId: 'gmail.email',
+            provider: 'gmail',
+            capability: 'gmail.email.sync',
+            handle: currentGmailHandle?.handle,
+            laneHoldsItems: holdsItems([gmailInternalConnectorStore, gmailSecureConnectorStore], [gmailTierLane?.publicStore]),
+          });
         },
       ),
       recordLane(
@@ -3770,9 +3835,18 @@ export async function main(): Promise<void> {
           extractionAccountScope: currentGoogleDriveHandle?.accountRole?.trim()
             || accountFromGoogleHandle(currentGoogleDriveHandle?.handle),
           });
-          return source && currentGoogleDriveScopeRef && fileSourceScopeAuthority
+          return withSourceAccountGuard(source && currentGoogleDriveScopeRef && fileSourceScopeAuthority
             ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentGoogleDriveScopeRef })
-            : undefined;
+            : undefined, {
+            sourceId: 'google_drive.docs',
+            provider: 'google_drive',
+            capability: 'google_drive.docs.sync',
+            handle: currentGoogleDriveHandle?.handle,
+            laneHoldsItems: holdsItems(
+              [googleDriveInternalConnectorStore, googleDriveSecureConnectorStore],
+              [googleDriveTierLane?.publicStore],
+            ),
+          });
         },
       ),
       recordLane(
@@ -3807,9 +3881,18 @@ export async function main(): Promise<void> {
               }
             : {}),
           });
-          return source && currentDropboxScopeRef && fileSourceScopeAuthority
+          return withSourceAccountGuard(source && currentDropboxScopeRef && fileSourceScopeAuthority
             ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentDropboxScopeRef })
-            : undefined;
+            : undefined, {
+            sourceId: 'dropbox.files',
+            provider: 'dropbox',
+            capability: 'dropbox.files.sync',
+            handle: currentDropboxHandle?.handle,
+            laneHoldsItems: holdsItems(
+              [dropboxConnectorStore],
+              dropboxTierLane ? [dropboxTierLane.internal, dropboxTierLane.public] : [],
+            ),
+          });
         },
       ),
       recordLane(
@@ -4311,6 +4394,9 @@ export async function main(): Promise<void> {
       ? {
           sourceDashboard: {
             sovereigntyEngine,
+            // A reconnect to a different account: restart now so the start-up
+            // purge removes the previous account's items instead of serving them.
+            onSourceAccountPurgeRequired: () => { requestModelReload(); },
             modelSetup: getModelSetup,
             checkModelSetup: () => modelSetup.checkLocalModels(),
             connectModelKey,
