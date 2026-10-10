@@ -14,6 +14,7 @@ import {
   sealPrivateQuestion,
 } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import type { PrivateAnswerModel } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { PRIVATE_QUESTION_MAX_CHARS, type PrivateQuestionMetaV1, type PrivateQuestionResultV1 } from '../src/workers/chatgpt/private-question-contract.ts';
 import { PrivateQuestionJobs, resultOf } from '../src/workers/chatgpt/private-question-jobs.ts';
 import {
@@ -24,6 +25,8 @@ import {
 } from '../connect-relay/shared/private-answer.ts';
 
 const INSTALL = 'a'.repeat(32);
+/** A private answer model that is never asked: these tests exercise the question jobs only. */
+const NO_MODEL: PrivateAnswerModel = { status: () => ({ state: 'ready' }), answerPrivately: async () => ({ answer: '', citations: [] }) };
 const PANEL_ORIGIN = 'https://olympus.web-sandbox.oaiusercontent.com';
 const ANSWERED: ConsultAskResult = {
   ok: true, sent: 'What options does a tenant usually have?', reply: 'Negotiate, or move.', route: 'zkapi', networkIdentity: 'hidden',
@@ -237,7 +240,8 @@ describe('the jobs: begin → ask → collect', () => {
   });
 
   test('resultOf maps the ask lane\'s outcome field by field', () => {
-    expect(resultOf({ ...ANSWERED, rewritten: false, model: undefined, cleanup: 'as_written', level: 'standard' })).toEqual({
+    const { model: _model, ...unnamed } = ANSWERED as Extract<ConsultAskResult, { ok: true }>;
+    expect(resultOf({ ...unnamed, rewritten: false, cleanup: 'as_written', level: 'standard' })).toEqual({
       v: 1, state: 'answered', answer: 'Negotiate, or move.', level: 'standard', cleanup: 'as_written', rewritten: false, route: 'zkapi', networkIdentity: 'hidden',
     });
     expect(resultOf({ ok: false, code: 'needs_choice', message: 'm', options: {} as never })).toEqual({ v: 1, state: 'refused', code: 'needs_choice', message: 'm' });
@@ -255,7 +259,7 @@ describe('the HTTP handler: /ask and the collection of a question job', () => {
 
   test('routes /ask and the collection to the question jobs, with the private answer checks in front', async () => {
     const h = harness({}, ANSWERED);
-    const answers = new PrivateAnswerJobs({ eligible: async (items) => items.map(() => true), model: () => undefined, installId: () => INSTALL, log: () => {} });
+    const answers = new PrivateAnswerJobs({ eligible: async (items) => items.map(() => true), model: () => NO_MODEL, installId: () => INSTALL, log: () => {} });
     const handler = createPrivateAnswerHandler({ jobs: answers, questions: h.jobs, isRelayed: relayed });
     const meta = (await h.jobs.begin())!;
     const { panel, body } = await panelAsk(meta, { v: 1, question: 'q', level: 'strict' });
@@ -284,7 +288,7 @@ describe('the HTTP handler: /ask and the collection of a question job', () => {
   });
 
   test('without question jobs, /ask is gone and a private answer collection is untouched', async () => {
-    const answers = new PrivateAnswerJobs({ eligible: async (items) => items.map(() => true), model: () => undefined, installId: () => INSTALL, log: () => {} });
+    const answers = new PrivateAnswerJobs({ eligible: async (items) => items.map(() => true), model: () => NO_MODEL, installId: () => INSTALL, log: () => {} });
     const handler = createPrivateAnswerHandler({ jobs: answers, isRelayed: relayed });
     const jobId = `oly2p.${INSTALL}.${'B'.repeat(43)}`;
     const panel = await generatePanelKeyPair();

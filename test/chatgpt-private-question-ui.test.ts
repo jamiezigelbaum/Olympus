@@ -209,7 +209,7 @@ function mount(options: MountOptions): Host {
 function type(host: Host, text: string): void {
   const field = host.field();
   field.value = text;
-  field.dispatchEvent(new host.win.Event('input'));
+  field.dispatchEvent(new host.win.Event('input') as unknown as Event);
 }
 
 /** Nothing of the question or the answer may reach the host: no tool call, no widget state, no follow-up, no message body. */
