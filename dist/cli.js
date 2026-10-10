@@ -53305,9 +53305,9 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
         await sleep2(300);
         return anyExited() ? "session_process_exited" : "daemon_identity_failed";
       };
-      const ready = await waitFor(async (remainingMs) => Boolean(facts.listen) && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: "GET" }, sessionSignal, Math.min(2000, remainingMs))), settings.daemonReadyTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: 250 });
+      const ready = await waitFor(async (remainingMs) => Boolean(facts.listen) && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: "GET" }, sessionSignal, Math.min(2000, remainingMs))) && (!filtered || await owned()), settings.daemonReadyTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: 250 });
       if (!ready)
-        return result = fail(sessionSignal.aborted ? interrupted() : "daemon_start_failed");
+        return result = fail(sessionSignal.aborted ? interrupted() : filtered && facts.listen ? "daemon_identity_failed" : "daemon_start_failed");
       stage("daemonVerifyMs");
       receipt.daemonVersion = facts.version;
       if (!versionSupported(facts.version))

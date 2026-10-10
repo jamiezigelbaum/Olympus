@@ -2526,11 +2526,15 @@ async function runSession(
 
     const ready = await waitFor(
       async (remainingMs) => Boolean(facts.listen)
-        && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: 'GET' }, sessionSignal, Math.min(2_000, remainingMs))),
+        && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: 'GET' }, sessionSignal, Math.min(2_000, remainingMs)))
+        // The API can bind before the Rust companion finishes starting. Do
+        // not send a key until every required listener has proven ownership.
+        && (!filtered || await owned()),
       settings.daemonReadyTimeoutMs,
       { signal: sessionSignal, giveUp: anyExited, pollMs: 250 },
     );
-    if (!ready) return (result = fail(sessionSignal.aborted ? interrupted() : 'daemon_start_failed'));
+    if (!ready) return (result = fail(sessionSignal.aborted ? interrupted()
+      : filtered && facts.listen ? 'daemon_identity_failed' : 'daemon_start_failed'));
     stage('daemonVerifyMs');
     receipt.daemonVersion = facts.version!;
     if (!versionSupported(facts.version)) return (result = fail('daemon_version_unsupported'));

@@ -188,6 +188,15 @@ describe('zkAPI consult transport: a supervised session', () => {
     await expectProcessesGone();
   }, SLOW);
 
+  test('waits for the managed companion listener before authenticated probes or dispatch', async () => {
+    writePlan({ walletBindDelayMs: 1000 });
+    expect(await sendZkapiConsult(QUESTION, transport({ confinement: filteredConfinement }))).toMatchObject({
+      ok: true, networkIdentity: 'hidden',
+    });
+    expect(completions()).toHaveLength(1);
+    await expectProcessesGone();
+  }, SLOW);
+
   test('an older daemon refuses before starting Tor or sending a question', async () => {
     writePlan({ noSupervisor: true });
     const result = await sendZkapiConsult(QUESTION, transport({ confinement: filteredConfinement }));

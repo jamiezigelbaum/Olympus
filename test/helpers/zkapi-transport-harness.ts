@@ -97,7 +97,10 @@ let key = 0;
 let request = 0;
 (async () => {
   if (supervised) {
-    for (const address of [proxyListen, walletListen]) Bun.listen({ hostname: '127.0.0.1', port: Number(address.split(':')[1]), socket: { open(s) { s.end(); }, data() {} } });
+    const bind = (address) => Bun.listen({ hostname: '127.0.0.1', port: Number(address.split(':')[1]), socket: { open(s) { s.end(); }, data() {} } });
+    bind(proxyListen);
+    if (plan.walletBindDelayMs) setTimeout(() => bind(walletListen), plan.walletBindDelayMs);
+    else bind(walletListen);
     event('supervisor ' + JSON.stringify(process.argv.slice(3)));
   }
   if (!(await relayUp())) { log('ERROR configuration check failed'); process.exit(1); }
@@ -209,6 +212,7 @@ export interface Plan {
   egressProbe?: number;
   transportStatus?: Record<string, string>;
   noSupervisor?: boolean;
+  walletBindDelayMs?: number;
 }
 
 /** Injected stand-in; the macOS test uses the real platform confinement. */
