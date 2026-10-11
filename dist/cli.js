@@ -125128,10 +125128,11 @@ async function callSetupTool(name, args, backend) {
   }
 }
 function confirmationsFor(backend) {
-  let issued = privacyConfirmations.get(backend);
+  const scope = backend.privacyConfirmationScope ?? backend;
+  let issued = privacyConfirmations.get(scope);
   if (!issued) {
     issued = new Map;
-    privacyConfirmations.set(backend, issued);
+    privacyConfirmations.set(scope, issued);
   }
   const now = Date.now();
   for (const [token, expiresAt] of issued)
@@ -130607,9 +130608,10 @@ __export(exports_dashboard_panel_tools, {
 function refused(text4, code) {
   return { content: [{ type: "text", text: text4 }], structuredContent: { error: code }, isError: true };
 }
-function computerSetup(options, context2) {
+function computerSetup(options, context2, privacyConfirmationScope) {
   return {
     ...options.setup,
+    privacyConfirmationScope,
     directSignIn: true,
     async startOAuth(source) {
       const headers = { "Content-Type": "application/json" };
@@ -130761,6 +130763,7 @@ function computerUnpairEntries(view) {
 }
 function createDashboardPanelTools(options) {
   const allowed = new Set(COMPUTER_HOST_TOOL_NAMES);
+  const privacyConfirmationScope = {};
   return {
     allows: (name) => allowed.has(name),
     async call(name, args, context2) {
@@ -130779,7 +130782,7 @@ function createDashboardPanelTools(options) {
       let view;
       const surface = {
         ...base,
-        setup: computerSetup(options, context2),
+        setup: computerSetup(options, context2, privacyConfirmationScope),
         dashboardView: async (viewSignal) => view = await base.dashboardView(viewSignal)
       };
       const result = await callChatGptTool(name, args, options.makeContext(signal), surface, signal);
