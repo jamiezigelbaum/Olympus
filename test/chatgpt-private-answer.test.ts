@@ -617,6 +617,11 @@ describe('the response builder', () => {
       expect(note).toContain('Answer the question from the evidence above as usual');
       expect(note).toContain('Olympus may also add a private answer in the panel above');
       expect(note).not.toContain('Keep your reply short');
+      // Review of #272: weak Personal hits must not become the answer; with
+      // none answering, the reply is the original short panel notice.
+      expect(note).toContain("If none of the evidence above answers the question, don't answer from it or comment on it; "
+        + 'instead keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; '
+        + "it'll appear in the panel above, visible only to you (");
       // Every prohibition of the short note still holds.
       expect(note).toContain("Don't suggest changing folder settings for those items.");
       expect(note).toContain("Don't ask the user to upload, attach or paste those files");

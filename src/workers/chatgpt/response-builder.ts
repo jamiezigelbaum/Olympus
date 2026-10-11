@@ -483,7 +483,9 @@ function privatePanelWithEvidenceNote(wait: string): string {
     + 'Answer the question from the evidence above as usual, using only the items that actually answer it and citing them. '
     + 'Then add one short line, along the lines of: “Olympus may also add a private answer in the panel above, '
     + `visible only to you (${wait}).” `
-    + 'If none of the evidence above answers the question, say so briefly instead of guessing. '
+    + 'If none of the evidence above answers the question, don\'t answer from it or comment on it; '
+    + 'instead keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; '
+    + `it'll appear in the panel above, visible only to you (${wait}).” `
     + 'Don\'t mention coverage counts, unread items, or any file name other than those of the evidence you cite. '
     + PRIVATE_PANEL_RULES;
 }

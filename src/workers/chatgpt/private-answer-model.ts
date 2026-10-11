@@ -796,32 +796,35 @@ export function withoutEvidenceMarkers(answer: string): string {
     .trim();
 }
 
-/** A sentence this short (in words) is never treated as a repeat: "Dr.", "Yes.", a table rule. */
+/** A sentence this short (in words) is never treated as a repeat: "Dr.", "Yes.". */
 const MIN_REPEAT_WORDS = 3;
 
 /**
- * The answer with every repeat of an earlier sentence or line taken out,
- * conservatively: two sentences are the same only when they match after
- * case, spacing, a leading list marker and trailing punctuation are set
- * aside. Line breaks and every first occurrence are kept as they were; a
- * line left empty is dropped. Sentences of fewer than three words are
- * never dropped. No meaning is judged: a reworded repeat stays.
+ * The answer with a sentence taken out where it only repeats the sentence
+ * right before it in the same prose paragraph (a small model looping),
+ * conservatively: the two must match after case, spacing and trailing
+ * punctuation are set aside. A blank line, a heading, a list item or a table
+ * row ends the paragraph, and those lines are never touched, so the same
+ * value under two subjects ("September: the fee is €25." and "October: …")
+ * stays. Sentences of fewer than three words are never dropped; a reworded
+ * repeat stays. An answer with no such repeat is returned as given.
  */
 export function withoutRepeatedSentences(answer: string): string {
-  const seen = new Set<string>();
   const lines: string[] = [];
   let changed = false;
+  /** The last sentence kept in the current prose paragraph. */
+  let previous: string | undefined;
   for (const line of answer.split('\n')) {
-    if (!line.trim()) {
+    if (!line.trim() || !isProseLine(line)) {
+      previous = undefined;
       lines.push(line);
       continue;
     }
     const sentences = sentencesOf(line.trim());
     const kept = sentences.filter((sentence) => {
       const key = repeatKey(sentence);
-      if (key === undefined) return true;
-      if (seen.has(key)) return false;
-      seen.add(key);
+      if (key !== undefined && key === previous) return false;
+      previous = key;
       return true;
     });
     if (kept.length === sentences.length) {
@@ -831,7 +834,21 @@ export function withoutRepeatedSentences(answer: string): string {
     changed = true;
     if (kept.length > 0) lines.push(`${/^\s*/.exec(line)![0]}${kept.join(' ')}`);
   }
-  return changed ? lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() : answer;
+  return changed ? lines.join('\n').trim() : answer;
+}
+
+/**
+ * A line of running prose: not a heading (markdown #, a line in bold alone,
+ * or a short label ending in a colon), a list item or a table row.
+ */
+function isProseLine(line: string): boolean {
+  const text = line.trim();
+  if (/^#{1,6}\s/u.test(text)) return false;
+  if (/^(?:[-*+•]|\d{1,3}[.)])\s+/u.test(text)) return false;
+  if (text.startsWith('|')) return false;
+  if (/^(?:\*\*|__)[^*_]+(?:\*\*|__):?$/u.test(text)) return false;
+  if (text.endsWith(':') && wordCount(text) <= 8) return false;
+  return true;
 }
 
 /** Each entry once, by the same comparison as withoutRepeatedSentences. */
@@ -877,7 +894,6 @@ function repeatKey(sentence: string): string | undefined {
   return sentence
     .normalize('NFKC')
     .toLowerCase()
-    .replace(/^\s*(?:[-*•]|\d{1,3}[.)])\s+/u, '')
     .replace(/\s+([,.;:!?])/gu, '$1')
     .replace(/[\s.,;:!?…]+$/u, '')
     .replace(/\s+/gu, ' ')

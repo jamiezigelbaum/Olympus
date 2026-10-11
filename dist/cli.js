@@ -122347,9 +122347,10 @@ function chatgptPrivateAnswerProgram(config2) {
     if (host.theme === "light" || host.theme === "dark")
       theme = host.theme;
     if (host.toolResponseMetadata)
-      accept(host.toolResponseMetadata, true, true);
-    else if (host.toolOutput !== undefined && host.toolOutput !== null)
-      accept(undefined, true, true);
+      accept(host.toolResponseMetadata, true, delivered(host));
+  }
+  function delivered(host) {
+    return host.toolOutput !== undefined && host.toolOutput !== null;
   }
   window.addEventListener("openai:set_globals", () => {
     const host = openai();
@@ -122359,13 +122360,12 @@ function chatgptPrivateAnswerProgram(config2) {
     if (host.theme === "light" || host.theme === "dark")
       theme = host.theme;
     if (host.toolResponseMetadata)
-      accept(host.toolResponseMetadata, false, true);
-    else if (host.toolOutput !== undefined && host.toolOutput !== null)
-      accept(undefined, false, true);
+      accept(host.toolResponseMetadata, false, delivered(host));
     if (theme !== before)
       render();
   });
-  function accept(meta2, quiet, arrived) {
+  let zeroResent = false;
+  function accept(meta2, quiet, landed) {
     const value = meta2 && typeof meta2 === "object" ? meta2[config2.metaKey] : undefined;
     if (value === undefined && info)
       return;
@@ -122381,8 +122381,10 @@ function chatgptPrivateAnswerProgram(config2) {
       };
     }
     const same = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
-    if (!info && !next && arrived)
-      closeWhenEmpty();
+    if (!info && !next && landed && !zeroResent) {
+      zeroResent = true;
+      reportHeight(true);
+    }
     if (same || !info && !next)
       return;
     if (!next || !info || next.jobId !== info.jobId) {
@@ -122396,38 +122398,10 @@ function chatgptPrivateAnswerProgram(config2) {
       pair = null;
     }
     info = next;
-    if (info)
-      keepOpen();
-    else if (arrived)
-      closeWhenEmpty();
     if (info && info.state === "ready" && phase === "idle")
       collect(false);
     else if (!quiet)
       render();
-  }
-  let closeTimer = null;
-  let closeRequested = false;
-  function closeWhenEmpty() {
-    if (info || closeRequested || closeTimer !== null)
-      return;
-    closeTimer = setTimeout(() => {
-      closeTimer = null;
-      if (info || closeRequested)
-        return;
-      const host = openai();
-      if (!host || typeof host.requestClose !== "function")
-        return;
-      closeRequested = true;
-      try {
-        host.requestClose();
-      } catch {}
-    }, config2.closeEmptyMs);
-  }
-  function keepOpen() {
-    if (closeTimer === null)
-      return;
-    clearTimeout(closeTimer);
-    closeTimer = null;
   }
   const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
   const utf83 = (text2) => new TextEncoder().encode(text2);
@@ -123165,7 +123139,6 @@ function chatgptPrivateAnswerPageHtml(options) {
     noteMs: options.noteMs ?? 4000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
-    closeEmptyMs: options.closeEmptyMs ?? 1500,
     keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore }
   };
   return [
@@ -124852,7 +124825,7 @@ function privatePanelNote(wait) {
   return PRIVATE_PANEL_LEAD + "Keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; " + `it'll appear in the panel above, visible only to you (${wait}).” ` + "Don't comment on other search results unless they actually answer the question, " + "and don't mention coverage counts, unread items or file names. " + PRIVATE_PANEL_RULES;
 }
 function privatePanelWithEvidenceNote(wait) {
-  return PRIVATE_PANEL_LEAD + "Answer the question from the evidence above as usual, using only the items that actually answer it and citing them. " + "Then add one short line, along the lines of: “Olympus may also add a private answer in the panel above, " + `visible only to you (${wait}).” ` + "If none of the evidence above answers the question, say so briefly instead of guessing. " + "Don't mention coverage counts, unread items, or any file name other than those of the evidence you cite. " + PRIVATE_PANEL_RULES;
+  return PRIVATE_PANEL_LEAD + "Answer the question from the evidence above as usual, using only the items that actually answer it and citing them. " + "Then add one short line, along the lines of: “Olympus may also add a private answer in the panel above, " + `visible only to you (${wait}).” ` + "If none of the evidence above answers the question, don't answer from it or comment on it; " + "instead keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; " + `it'll appear in the panel above, visible only to you (${wait}).” ` + "Don't mention coverage counts, unread items, or any file name other than those of the evidence you cite. " + PRIVATE_PANEL_RULES;
 }
 function privateMatchNote(match, contentPrivateMatches = 0, releasedEvidence2 = false) {
   const panel = copyPrivateMatch(match);
@@ -129977,23 +129950,22 @@ function withoutEvidenceMarkers(answer) {
   return answer.replace(/\s*\[\d{1,2}(?:\s*[,;–-]\s*\d{1,2})*\]/g, "").trim();
 }
 function withoutRepeatedSentences(answer) {
-  const seen = new Set;
   const lines = [];
   let changed = false;
+  let previous;
   for (const line of answer.split(`
 `)) {
-    if (!line.trim()) {
+    if (!line.trim() || !isProseLine(line)) {
+      previous = undefined;
       lines.push(line);
       continue;
     }
     const sentences = sentencesOf(line.trim());
     const kept = sentences.filter((sentence) => {
       const key2 = repeatKey(sentence);
-      if (key2 === undefined)
-        return true;
-      if (seen.has(key2))
+      if (key2 !== undefined && key2 === previous)
         return false;
-      seen.add(key2);
+      previous = key2;
       return true;
     });
     if (kept.length === sentences.length) {
@@ -130005,9 +129977,21 @@ function withoutRepeatedSentences(answer) {
       lines.push(`${/^\s*/.exec(line)[0]}${kept.join(" ")}`);
   }
   return changed ? lines.join(`
-`).replace(/\n{3,}/g, `
-
 `).trim() : answer;
+}
+function isProseLine(line) {
+  const text4 = line.trim();
+  if (/^#{1,6}\s/u.test(text4))
+    return false;
+  if (/^(?:[-*+•]|\d{1,3}[.)])\s+/u.test(text4))
+    return false;
+  if (text4.startsWith("|"))
+    return false;
+  if (/^(?:\*\*|__)[^*_]+(?:\*\*|__):?$/u.test(text4))
+    return false;
+  if (text4.endsWith(":") && wordCount(text4) <= 8)
+    return false;
+  return true;
 }
 function withoutRepeatedEntries(entries) {
   const seen = new Set;
@@ -130043,7 +130027,7 @@ function wordCount(text4) {
 function repeatKey(sentence) {
   if (wordCount(sentence) < MIN_REPEAT_WORDS)
     return;
-  return sentence.normalize("NFKC").toLowerCase().replace(/^\s*(?:[-*•]|\d{1,3}[.)])\s+/u, "").replace(/\s+([,.;:!?])/gu, "$1").replace(/[\s.,;:!?…]+$/u, "").replace(/\s+/gu, " ").trim();
+  return sentence.normalize("NFKC").toLowerCase().replace(/\s+([,.;:!?])/gu, "$1").replace(/[\s.,;:!?…]+$/u, "").replace(/\s+/gu, " ").trim();
 }
 function unreadableNote(count2) {
   return count2 === 1 ? "1 matching private item has no readable text on this computer, so it was not read." : `${count2} matching private items have no readable text on this computer, so they were not read.`;

@@ -142,13 +142,13 @@ describe('the panel answer', () => {
 });
 
 describe('repeated sentences', () => {
-  test('exact and spacing/punctuation-level repeats are removed; first occurrences and line breaks are kept', () => {
+  test('a sentence repeating the one right before it in a prose paragraph is removed; line breaks are kept', () => {
     const balance = 'Your September statement shows an account balance of $8,940.00.';
     expect(withoutRepeatedSentences(`${balance} ${balance} ${balance} The loan balance is $12,300.`))
       .toBe(`${balance} The loan balance is $12,300.`);
     expect(withoutRepeatedSentences(`${balance}\n${balance}\n${balance}\nThe loan balance is $12,300.`))
       .toBe(`${balance}\nThe loan balance is $12,300.`);
-    expect(withoutRepeatedSentences('- Ferritin was 41 ng/mL.\n- ferritin  was 41 ng/mL\n- TSH was 2.1.')).toBe('- Ferritin was 41 ng/mL.\n- TSH was 2.1.');
+    expect(withoutRepeatedSentences('Ferritin was 41 ng/mL. ferritin  was 41 ng/mL\nTSH was 2.1 mIU/L.')).toBe('Ferritin was 41 ng/mL.\nTSH was 2.1 mIU/L.');
     // Nothing repeated: returned exactly as given.
     const plain = 'Line one says a thing.\n\n  - Indented item stays.\n| a | b |\n|---|---|';
     expect(withoutRepeatedSentences(plain)).toBe(plain);
@@ -165,6 +165,25 @@ describe('repeated sentences', () => {
     // Different numbers are different sentences.
     const values = 'The balance was $8,940.00 in September. The balance was $8,490.00 in September.';
     expect(withoutRepeatedSentences(values)).toBe(values);
+  });
+
+  // Review of #272: one fee under two months is two facts, not a repeat.
+  test('a repeat under another heading or subject stays; headings, list items and table rows are never touched', () => {
+    const fee = 'The fee is €25.';
+    const contextual = [
+      `September:\n${fee}\nOctober:\n${fee}`,
+      `## September\n${fee}\n\n## October\n${fee}`,
+      `**September**\n${fee}\n**October**\n${fee}`,
+      `September statement:\n- ${fee}\n- ${fee}\nOctober statement:\n- ${fee}`,
+      '| Month | Fee |\n|---|---|\n| September fee charged | €25 |\n| September fee charged | €25 |',
+      // Not consecutive: another sentence sits between.
+      `${fee} Rent is due monthly. ${fee}`,
+      // Another paragraph (a blank line between).
+      `${fee}\n\n${fee}`,
+      // One line, two subjects.
+      'In September the fee is €25. In October the fee is €25.',
+    ];
+    for (const answer of contextual) expect(withoutRepeatedSentences(answer)).toBe(answer);
   });
 
   test('gap lines are listed once', () => {
