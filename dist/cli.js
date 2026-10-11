@@ -44048,6 +44048,37 @@ var init_connector3 = __esm(() => {
   });
 });
 
+// src/workers/x-bookmarks/grant-fence.ts
+async function issueGrantFencedXSession(input) {
+  const { broker, credentialHandle } = input;
+  const generation = broker.grantGeneration?.(credentialHandle);
+  const session = requireBearerTokenCredentialSession(await broker.issueSession({
+    handle: credentialHandle,
+    provider: "x",
+    capability: "x.bookmarks.sync",
+    trustDomain: "internal",
+    purpose: input.purpose
+  }), credentialHandle);
+  const assertGrantCurrent = () => {
+    if (broker.grantGeneration && broker.grantGeneration(credentialHandle) !== generation) {
+      throw new XBookmarksGrantChangedError;
+    }
+  };
+  assertGrantCurrent();
+  return { token: session.token, assertGrantCurrent };
+}
+var XBookmarksGrantChangedError;
+var init_grant_fence = __esm(() => {
+  init_credential_broker();
+  XBookmarksGrantChangedError = class XBookmarksGrantChangedError extends Error {
+    code = "x_bookmarks_grant_changed";
+    constructor() {
+      super("The X bookmarks credential was reconnected during this run; nothing from the previous grant was stored.");
+      this.name = "XBookmarksGrantChangedError";
+    }
+  };
+});
+
 // src/workers/x-bookmarks/live-control.ts
 import { createHash as createHash28, randomUUID as randomUUID10 } from "node:crypto";
 import { chmodSync as chmodSync8, lstatSync as lstatSync11, mkdirSync as mkdirSync17 } from "node:fs";
@@ -47410,12 +47441,7 @@ function createXBookmarksApiSourceConnector(options) {
   let acquired = false;
   let completedSnapshotAt;
   let latest = emptyStatus(options.mode);
-  let grantFence;
-  const assertGrantCurrent = () => {
-    if (grantFence && broker.grantGeneration?.(credentialHandle) !== grantFence.generation) {
-      throw new XBookmarksGrantChangedError;
-    }
-  };
+  let assertGrantCurrent = () => {};
   const connector = {
     id: "x_bookmarks_live",
     family: "x",
@@ -47424,18 +47450,12 @@ function createXBookmarksApiSourceConnector(options) {
         return;
       if (!userId)
         throw new Error("X bookmarks connector requires OLYMPUS_SOURCE_INDEX_X_USER_ID.");
-      const generationBefore = broker.grantGeneration?.(credentialHandle);
-      const session = requireBearerTokenCredentialSession(await broker.issueSession({
-        handle: credentialHandle,
-        provider: "x",
-        capability: "x.bookmarks.sync",
-        trustDomain: "internal",
+      const session = await issueGrantFencedXSession({
+        broker,
+        credentialHandle,
         purpose: "Synchronize X bookmarks into the Olympus shared connector store."
-      }), credentialHandle);
-      if (broker.grantGeneration) {
-        grantFence = { generation: generationBefore };
-        assertGrantCurrent();
-      }
+      });
+      assertGrantCurrent = session.assertGrantCurrent;
       client = grantFencedClient(new XApiClient({
         token: session.token,
         userId,
@@ -47485,7 +47505,7 @@ function createXBookmarksApiSourceConnector(options) {
     classificationSignals(item) {
       return (snapshot ?? createXBookmarksSourceConnector({ account, posts: [] })).classificationSignals(item);
     },
-    assertGrantCurrent,
+    assertGrantCurrent: () => assertGrantCurrent(),
     status: () => latest,
     apiUsageStatus: () => options.usageStore.status({ account, config, now: clock() }),
     async markReconciliationDisposition(disposition, outcome) {
@@ -48284,13 +48304,15 @@ function validDate5(value) {
     throw new TypeError("X connector attemptedAt must be valid.");
   return value;
 }
-var X_BOOKMARKS_FOLDER_PROVIDER_MAX_ATTEMPTS = 3, XBookmarksLiveSyncError, XBookmarksGrantChangedError, X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
+var X_BOOKMARKS_FOLDER_PROVIDER_MAX_ATTEMPTS = 3, XBookmarksLiveSyncError, X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
 var init_api_connector = __esm(() => {
   init_credential_broker();
+  init_grant_fence();
   init_api2();
   init_connector3();
   init_live_control2();
   init_reconcile_state();
+  init_grant_fence();
   XBookmarksLiveSyncError = class XBookmarksLiveSyncError extends Error {
     errorKind;
     retryAt;
@@ -48307,13 +48329,6 @@ var init_api_connector = __esm(() => {
       this.warnings = options.warnings ?? [];
       this.counts = options.counts;
       this.providerStatus = options.providerStatus;
-    }
-  };
-  XBookmarksGrantChangedError = class XBookmarksGrantChangedError extends Error {
-    code = "x_bookmarks_grant_changed";
-    constructor() {
-      super("The X bookmarks credential was reconnected during this run; nothing from the previous grant was stored.");
-      this.name = "XBookmarksGrantChangedError";
     }
   };
   X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY = Object.freeze({
@@ -48344,18 +48359,22 @@ async function runXBookmarksWindowDiagnostic(options) {
     throw new TypeError("X bookmark diagnostic account must be non-empty.");
   const attemptedAt = validDate6(options.attemptedAt);
   const provenance = xApiInvocationProvenance(options.provenance);
-  const client = await diagnosticClient(options, env);
-  const request = (paginationToken, headOnly) => diagnosticRequest({
-    client,
-    usageStore: options.usageStore,
-    account,
-    config,
-    attemptedAt,
-    provenance,
-    pageSize: config.reconcilePageSize,
-    ...paginationToken ? { paginationToken } : {},
-    headOnly
-  });
+  const { client, assertGrantCurrent } = await diagnosticClient(options, env);
+  const request = async (paginationToken, headOnly) => {
+    const result = await diagnosticRequest({
+      client,
+      usageStore: options.usageStore,
+      account,
+      config,
+      attemptedAt,
+      provenance,
+      pageSize: config.reconcilePageSize,
+      ...paginationToken ? { paginationToken } : {},
+      headOnly
+    });
+    assertGrantCurrent();
+    return result;
+  };
   const rootObservation = await request(undefined, false);
   const freshRoot = summarizeProbe("fresh_root_global", [rootObservation.observation]);
   const retryObservations = [];
@@ -48401,7 +48420,7 @@ async function runXBookmarksWindowDiagnostic(options) {
 }
 async function diagnosticClient(options, env) {
   if (options.sourceClient)
-    return options.sourceClient;
+    return { client: options.sourceClient, assertGrantCurrent: () => {} };
   const userId = options.userId?.trim() || env.OLYMPUS_SOURCE_INDEX_X_USER_ID?.trim();
   if (!userId) {
     throw new Error("X bookmarks window diagnostic requires an explicit provider user id.");
@@ -48411,20 +48430,21 @@ async function diagnosticClient(options, env) {
     env,
     ...options.fetch ? { fetch: options.fetch } : {}
   });
-  const session = requireBearerTokenCredentialSession(await broker.issueSession({
-    handle: credentialHandle,
-    provider: "x",
-    capability: "x.bookmarks.sync",
-    trustDomain: "internal",
+  const session = await issueGrantFencedXSession({
+    broker,
+    credentialHandle,
     purpose: "Run the bounded content-free X bookmarks window diagnostic."
-  }), credentialHandle);
-  return new XApiClient({
-    token: session.token,
-    userId,
-    ...options.fetch ? { fetch: options.fetch } : {},
-    ...options.apiBaseUrl ? { baseUrl: options.apiBaseUrl } : {},
-    ...options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}
   });
+  return {
+    client: new XApiClient({
+      token: session.token,
+      userId,
+      ...options.fetch ? { fetch: options.fetch } : {},
+      ...options.apiBaseUrl ? { baseUrl: options.apiBaseUrl } : {},
+      ...options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}
+    }),
+    assertGrantCurrent: session.assertGrantCurrent
+  };
 }
 async function traversalProbe(name, headOnly, request) {
   const observations = [];
@@ -48593,6 +48613,7 @@ function validDate6(value) {
 var MAX_DIAGNOSTIC_PAGES = 3;
 var init_window_diagnostic = __esm(() => {
   init_credential_broker();
+  init_grant_fence();
   init_api2();
   init_live_control2();
 });
@@ -49072,15 +49093,19 @@ function createXBookmarksContentRecoveryHandler(options) {
       const requestedCandidates = recoverable.slice(0, requestedCount);
       counts.items_deferred = recoverable.length - requestedCandidates.length;
       let client;
+      let assertGrantCurrent = () => {};
       try {
-        client = options.sourceClient ?? await authenticatedClient({
-          broker,
-          credentialHandle,
-          userId,
-          ...options.fetch ? { fetch: options.fetch } : {},
-          ...options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {},
-          ...options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}
-        });
+        if (options.sourceClient)
+          client = options.sourceClient;
+        else
+          ({ client, assertGrantCurrent } = await authenticatedClient({
+            broker,
+            credentialHandle,
+            userId,
+            ...options.fetch ? { fetch: options.fetch } : {},
+            ...options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {},
+            ...options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}
+          }));
       } catch {
         options.usageStore.cancelUndispatchedRequest({ reservation });
         counts.items_deferred += requestedCandidates.length;
@@ -49126,6 +49151,14 @@ function createXBookmarksContentRecoveryHandler(options) {
         counts.items_deferred += requestedCandidates.length;
         const retryAt = recoveryRetryAt(error, config, dispatchAt);
         return writeReceipt(receiptPath, buildReceipt(retryAt ? "deferred" : "failed", counts, retryAt));
+      }
+      try {
+        assertGrantCurrent();
+      } catch (error) {
+        if (!(error instanceof XBookmarksGrantChangedError))
+          throw error;
+        counts.items_deferred += requestedCandidates.length;
+        return writeReceipt(receiptPath, buildReceipt("deferred", counts));
       }
       counts.provider_items_returned = lookup3.posts.length;
       const postsWithText = lookup3.posts.filter((post) => Boolean(post.text?.trim()));
@@ -49206,20 +49239,21 @@ function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
   return resolve6(`${storePath}.content-recovery-receipt.json`);
 }
 async function authenticatedClient(input) {
-  const session = requireBearerTokenCredentialSession(await input.broker.issueSession({
-    handle: input.credentialHandle,
-    provider: "x",
-    capability: "x.bookmarks.sync",
-    trustDomain: "internal",
+  const session = await issueGrantFencedXSession({
+    broker: input.broker,
+    credentialHandle: input.credentialHandle,
     purpose: "Recover missing content for already-indexed X bookmarks."
-  }), input.credentialHandle);
-  return new XApiClient({
-    token: session.token,
-    userId: input.userId,
-    ...input.fetch ? { fetch: input.fetch } : {},
-    ...input.apiBaseUrl ? { baseUrl: input.apiBaseUrl } : {},
-    ...input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}
   });
+  return {
+    client: new XApiClient({
+      token: session.token,
+      userId: input.userId,
+      ...input.fetch ? { fetch: input.fetch } : {},
+      ...input.apiBaseUrl ? { baseUrl: input.apiBaseUrl } : {},
+      ...input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}
+    }),
+    assertGrantCurrent: session.assertGrantCurrent
+  };
 }
 function recoveryRawItem(post, account, fetchedAt) {
   const item = xBookmarkRawItemFromPost(post, account, [], fetchedAt);
@@ -49333,6 +49367,7 @@ var init_content_recovery = __esm(() => {
   init_connector3();
   init_folder_facets();
   init_live_control2();
+  init_grant_fence();
 });
 
 // src/workers/x-bookmarks/index.ts

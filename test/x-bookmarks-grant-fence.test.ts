@@ -7,7 +7,7 @@
 // bookmarks and stores them in the lane that now belongs to B.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SecretStore } from '../src/core/secret-store.ts';
@@ -21,8 +21,12 @@ import {
   LocalXBookmarksReconcileStateStore,
   XBookmarksGrantChangedError,
   createXBookmarksApiSourceConnector,
+  createXBookmarksConnectorStore,
   createXBookmarksConnectorStoreSyncHandler,
+  createXBookmarksContentRecoveryHandler,
+  createXBookmarksSourceConnector,
   defaultXBookmarksLiveSyncConfig,
+  runXBookmarksWindowDiagnostic,
   type XBookmarksLiveSyncConfig,
 } from '../src/workers/x-bookmarks/index.ts';
 import { X_BOOKMARKS_STORE_PLACEMENT } from '../src/workers/x-bookmarks/connector.ts';
@@ -120,6 +124,100 @@ describe('X bookmarks grant fence', () => {
   });
 });
 
+describe('X bookmarks content recovery grant fence', () => {
+  test('a reconnect during the lookup restores nothing, and the next run uses the new grant', async () => {
+    const f = fixture();
+    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    const store = createXBookmarksConnectorStore(join(f.dir, 'x-recovery.sqlite'));
+    closers.push(() => store.close());
+    // A bookmark stored by id only, waiting for its text.
+    await store.syncFromConnector(createXBookmarksSourceConnector({
+      account: ACCOUNT,
+      posts: [{ id: '2076846914813788163' }],
+      fetchedAt: NOW.toISOString(),
+    }), { fetchContent: true });
+    const recovery = createXBookmarksContentRecoveryHandler({
+      store,
+      usageStore: f.usage,
+      account: ACCOUNT,
+      userId: USER_ID,
+      credentialBroker: f.broker,
+      credentialHandle: HANDLE,
+      fetch: f.xFetch,
+      config: testConfig(),
+      receiptPath: join(f.dir, 'recovery-receipt.json'),
+      now: () => NOW,
+    });
+
+    f.respond = (token) => {
+      f.reconnect('2026-10-11T08:30:00.000Z', 'x-user-b');
+      return token === 'access-for-refresh-token-a'
+        ? [post('2076846914813788163', 'zebraquill')]
+        : [];
+    };
+    const deferred = await recovery.recover({ execute: true });
+    expect(deferred).toMatchObject({
+      status: 'deferred',
+      counts: { api_requests: 1, items_recovered: 0, items_deferred: 1 },
+    });
+    expect(f.tokensUsed).toEqual(['access-for-refresh-token-a']);
+    expect(store.searchItems('zebraquill', 5)).toHaveLength(0);
+
+    f.respond = (token) => token === 'access-for-refresh-token-b'
+      ? [post('2076846914813788163', 'account b recovered text')]
+      : [];
+    const completed = await recovery.recover({ execute: true });
+    expect(completed).toMatchObject({ status: 'completed', counts: { items_recovered: 1 } });
+    expect(f.tokensUsed.at(-1)).toBe('access-for-refresh-token-b');
+    expect(store.searchItems('account b recovered text', 5)).toHaveLength(1);
+    expect(store.searchItems('zebraquill', 5)).toHaveLength(0);
+  });
+});
+
+describe('X bookmarks window diagnostic grant fence', () => {
+  test('a reconnect during the diagnostic writes no report', async () => {
+    const f = fixture();
+    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    f.respond = () => {
+      f.reconnect('2026-10-11T08:30:00.000Z', 'x-user-b');
+      return [post('201', 'account a marker')];
+    };
+    const reportPath = join(f.dir, 'diagnostic.json');
+    await expect(runXBookmarksWindowDiagnostic({
+      account: ACCOUNT,
+      attemptedAt: NOW,
+      usageStore: f.usage,
+      reportPath,
+      credentialBroker: f.broker,
+      credentialHandle: HANDLE,
+      userId: USER_ID,
+      fetch: f.xFetch,
+      config: testConfig(),
+    })).rejects.toBeInstanceOf(XBookmarksGrantChangedError);
+    expect(f.tokensUsed).toEqual(['access-for-refresh-token-a']);
+    expect(existsSync(reportPath)).toBe(false);
+  });
+
+  test('an unchanged grant writes the report', async () => {
+    const f = fixture();
+    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    f.respond = () => [post('201', 'account a marker')];
+    const reportPath = join(f.dir, 'diagnostic.json');
+    await runXBookmarksWindowDiagnostic({
+      account: ACCOUNT,
+      attemptedAt: NOW,
+      usageStore: f.usage,
+      reportPath,
+      credentialBroker: f.broker,
+      credentialHandle: HANDLE,
+      userId: USER_ID,
+      fetch: f.xFetch,
+      config: testConfig(),
+    });
+    expect(existsSync(reportPath)).toBe(true);
+  });
+});
+
 interface Post { id: string; text: string }
 
 function post(id: string, text: string): Post {
@@ -176,6 +274,7 @@ function fixture() {
   };
 
   const state = {
+    dir,
     store,
     usage,
     broker,

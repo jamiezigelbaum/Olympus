@@ -11055,6 +11055,11 @@ var init_connector2 = __esm(() => {
   });
 });
 
+// src/workers/x-bookmarks/grant-fence.ts
+var init_grant_fence = __esm(() => {
+  init_credential_broker();
+});
+
 // src/workers/x-bookmarks/live-control.ts
 var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, EMPTY_SHA256, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
 var init_live_control2 = __esm(() => {
@@ -11079,10 +11084,12 @@ var init_reconcile_state = __esm(() => {
 var X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
 var init_api_connector = __esm(() => {
   init_credential_broker();
+  init_grant_fence();
   init_api2();
   init_connector2();
   init_live_control2();
   init_reconcile_state();
+  init_grant_fence();
   X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY = Object.freeze({
     algorithmVersion: X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION,
     approvedProviderErrorTypes: Object.freeze([]),
@@ -11094,6 +11101,7 @@ var init_api_connector = __esm(() => {
 // src/workers/x-bookmarks/window-diagnostic.ts
 var init_window_diagnostic = __esm(() => {
   init_credential_broker();
+  init_grant_fence();
   init_api2();
   init_live_control2();
 });
@@ -11119,6 +11127,7 @@ var init_content_recovery = __esm(() => {
   init_connector2();
   init_folder_facets();
   init_live_control2();
+  init_grant_fence();
 });
 
 // src/workers/x-bookmarks/index.ts
