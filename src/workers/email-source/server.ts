@@ -1826,7 +1826,7 @@ export async function main(): Promise<void> {
   if (workerLaunch.nativeServiceSupervised !== true) {
     const openClawRemote = readOpenClawPluginRemote(process.env);
     if (openClawRemote.hosted && 'unreadable' in openClawRemote) {
-      console.warn(`[remote] ${openClawRemote.path} names Olympus but could not be read; remote access and demo sign-in are off for this worker.`);
+      console.warn(`[remote] ${openClawRemote.path} could not be read or parsed; remote access and demo sign-in are off for this worker.`);
     }
   }
   const sourceCorpusRegistry = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);

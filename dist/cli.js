@@ -10901,18 +10901,17 @@ function openClawConfigPath(homeDir, env) {
 }
 function readOpenClawPluginRemote(env) {
   const path = openClawConfigPath(env.HOME?.trim() || homedir14(), env);
-  if (!existsSync13(path))
-    return { hosted: false };
   let text;
   try {
     text = readFileSync16(path, "utf8");
-  } catch {
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { hosted: false };
     return { hosted: true, path, unreadable: true };
   }
   const parsed = parseOpenClawConfigText(text);
-  if (parsed === undefined) {
-    return /["']?\bolympus\b["']?\s*:/.test(text) ? { hosted: true, path, unreadable: true } : { hosted: false };
-  }
+  if (parsed === undefined)
+    return { hosted: true, path, unreadable: true };
   const entries = asRecord4(asRecord4(asRecord4(parsed)?.plugins)?.entries);
   const entry = entries && Object.hasOwn(entries, "olympus") ? asRecord4(entries.olympus) : undefined;
   if (!entry || entry.enabled === false)
@@ -132255,7 +132254,7 @@ async function main() {
   if (workerLaunch.nativeServiceSupervised !== true) {
     const openClawRemote = readOpenClawPluginRemote(process.env);
     if (openClawRemote.hosted && "unreadable" in openClawRemote) {
-      console.warn(`[remote] ${openClawRemote.path} names Olympus but could not be read; remote access and demo sign-in are off for this worker.`);
+      console.warn(`[remote] ${openClawRemote.path} could not be read or parsed; remote access and demo sign-in are off for this worker.`);
     }
   }
   const sourceCorpusRegistry2 = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);

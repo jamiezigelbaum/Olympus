@@ -2738,18 +2738,17 @@ function openClawConfigPath(homeDir, env) {
 }
 function readOpenClawPluginRemote(env) {
   const path = openClawConfigPath(env.HOME?.trim() || homedir3(), env);
-  if (!existsSync4(path))
-    return { hosted: false };
   let text;
   try {
     text = readFileSync5(path, "utf8");
-  } catch {
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { hosted: false };
     return { hosted: true, path, unreadable: true };
   }
   const parsed = parseOpenClawConfigText(text);
-  if (parsed === undefined) {
-    return /["']?\bolympus\b["']?\s*:/.test(text) ? { hosted: true, path, unreadable: true } : { hosted: false };
-  }
+  if (parsed === undefined)
+    return { hosted: true, path, unreadable: true };
   const entries = asRecord4(asRecord4(asRecord4(parsed)?.plugins)?.entries);
   const entry = entries && Object.hasOwn(entries, "olympus") ? asRecord4(entries.olympus) : undefined;
   if (!entry || entry.enabled === false)

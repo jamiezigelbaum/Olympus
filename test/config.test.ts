@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -121,9 +121,25 @@ describe('config', () => {
       // Hand-edited JSON5 is read too.
       writeOpenClaw(`{ plugins: { entries: { olympus: { config: { remote: { enabled: true, demoConsent: { enabled: true, username: 'json5', passwordHash: '$argon2id$v=19$m=65536,t=2,p=1$fixture' } } } } } }, }`);
       expect(loadWorkerConfig(systemd, env).remote?.demoConsent?.username).toBe('json5');
-      // Unreadable but naming Olympus: remote turns off rather than falling back to engine.json.
+      // Unparseable or unreadable: remote turns off rather than falling back to engine.json,
+      // whether or not the damage left the olympus entry in view.
       writeOpenClaw('{ "plugins": { "entries": { "olympus": { ');
       expect(loadWorkerConfig(systemd, env).remote).toBeUndefined();
+      writeOpenClaw('{');
+      expect(loadWorkerConfig(systemd, env).remote).toBeUndefined();
+      rmSync(openclawPath);
+      mkdirSync(openclawPath);
+      expect(loadWorkerConfig(systemd, env).remote).toBeUndefined();
+      rmSync(openclawPath, { recursive: true });
+      if (process.getuid?.() !== 0) {
+        writeOpenClaw({ plugins: { entries: { olympus: { config: { remote: demoRemote } } } } });
+        chmodSync(join(home, '.openclaw'), 0o000);
+        try {
+          expect(loadWorkerConfig(systemd, env).remote).toBeUndefined();
+        } finally {
+          chmodSync(join(home, '.openclaw'), 0o700);
+        }
+      }
 
       // Where OpenClaw does not run Olympus, engine.json stays in charge.
       writeOpenClaw({ plugins: { entries: { olympus: { enabled: false, config: { remote: demoRemote } } } } });

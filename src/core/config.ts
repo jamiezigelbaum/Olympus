@@ -613,8 +613,8 @@ export function openClawConfigPath(homeDir: string, env: Record<string, string |
  *   disabled. OpenClaw does not run Olympus here and has nothing to say.
  * - `hosted: true` with `remote`: the section as written (undefined when the
  *   entry has no `remote`).
- * - `hosted: true` with `unreadable`: the file mentions Olympus but could not
- *   be read or parsed, so its remote settings are unknown.
+ * - `hosted: true` with `unreadable`: the file exists but could not be read or
+ *   parsed, so its remote settings are unknown.
  *
  * Values are read as written. OpenClaw resolves SecretRefs, `${VAR}`
  * substitution and `$include` before the Gateway hands config to its own
@@ -628,17 +628,20 @@ export type OpenClawPluginRemote =
 
 export function readOpenClawPluginRemote(env: Record<string, string | undefined>): OpenClawPluginRemote {
   const path = openClawConfigPath(env.HOME?.trim() || homedir(), env);
-  if (!existsSync(path)) return { hosted: false };
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
-  } catch {
+  } catch (error) {
+    // Only a file that is not there says nothing. One that cannot be read may
+    // hold a remote section, and falling back to engine.json then could bring
+    // back demo credentials openclaw.json has since turned off.
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { hosted: false };
     return { hosted: true, path, unreadable: true };
   }
   const parsed = parseOpenClawConfigText(text);
-  if (parsed === undefined) {
-    return /["']?\bolympus\b["']?\s*:/.test(text) ? { hosted: true, path, unreadable: true } : { hosted: false };
-  }
+  // Unparseable for the same reason: a truncated file may have lost the very
+  // entry that disabled demo sign-in.
+  if (parsed === undefined) return { hosted: true, path, unreadable: true };
   const entries = asRecord(asRecord(asRecord(parsed)?.plugins)?.entries);
   const entry = entries && Object.hasOwn(entries, 'olympus') ? asRecord(entries.olympus) : undefined;
   if (!entry || entry.enabled === false) return { hosted: false };
@@ -695,8 +698,8 @@ function applyRemoteSource(
  * 404'd until engine.json carried a copy, 2026-10-11). Where OpenClaw runs
  * Olympus, that section is the only source of `remote`, as for the Gateway's
  * child: it replaces engine.json/config.json, and no section means none. An
- * openclaw.json that names Olympus but cannot be read turns remote off rather
- * than falling back to another file. Where OpenClaw does not run Olympus
+ * openclaw.json that exists but cannot be read or parsed turns remote off
+ * rather than falling back to another file. Where OpenClaw does not run Olympus
  * (no file, no entry, entry disabled), engine.json/config.json stay in charge.
  */
 function applyOpenClawPluginRemote(config: OlympusConfig, env: Record<string, string | undefined>): void {
