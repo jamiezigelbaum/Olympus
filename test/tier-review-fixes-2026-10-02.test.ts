@@ -19,6 +19,8 @@
 //    fresh-install-tiers.test.ts) and a revocation sticks.
 // 10. olympus_search does not preempt the sniffer.
 // T-1. A private lane that exists but is not ready holds read items.
+// 12. A per-item owner override applies to an item already stored, in both
+//     directions, without the file changing (reviewer demo, 2026-10-11).
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -43,8 +45,9 @@ import {
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { runTierCommand, runTierSet } from '../src/workers/classification/tier-cli.ts';
 import { classifyItemTiers, TIER_CLASSIFIER_VERSION, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
-import { TierLedger, type TierPlacementPlan } from '../src/workers/classification/tier-ledger.ts';
+import { TierLedger, TierLedgerGenerationConflictError, type TierPlacementPlan } from '../src/workers/classification/tier-ledger.ts';
 import {
   CLASSIFICATION_LEDGER_OWNER_APPROVAL,
   isClassifierApproved,
@@ -60,6 +63,7 @@ import { moveTieredItem, TierMoveRefusedError } from '../src/workers/connector-s
 import { defaultStoreTrustTier } from '../src/workers/connector-store/tier-placement.ts';
 import { settleNamesOnlyItems } from '../src/workers/connector-store/tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
+import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
@@ -72,6 +76,18 @@ import {
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { TieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
+import {
+  CORPORA,
+  cloudProvider,
+  fixtureConnector,
+  identityOf as fixtureIdentityOf,
+  localProvider,
+  openLegStore,
+  openTierFixture,
+  storePaths as fixtureStorePaths,
+  tempDir,
+} from './helpers/tier-fixtures.ts';
 
 // Built at runtime: the repository refuses literal credential patterns.
 const FAKE_AWS_KEY = ['AKIA', 'QRSTUVWXYZ234567'].join('');
@@ -585,3 +601,316 @@ describe('10. olympus_search is not an answer on the private pool', () => {
   });
 });
 
+
+describe('12. a per-item owner override applies to an item already stored (no file change)', () => {
+  const bank = identity('id:bank');
+  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), env.OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH!];
+  const currentCopies = (install: Install, id: ReturnType<typeof identity>) =>
+    install.lane.ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
+  /** How many evidence items the search returns for one title (a duplicate across stores would be two). */
+  const evidenceFor = (result: string, title: string) =>
+    (JSON.parse(result) as { structuredContent: { evidence: Array<{ title: string }> } }).structuredContent.evidence
+      .filter((entry) => entry.title === title).length;
+
+  test('down: a Private item set Personal moves to the Personal store at the next tick, once, and stays there through an unchanged sync', async () => {
+    const model = registeredBuiltIn(PRIVATE_VERDICT);
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+    const service = snifferFor(install, model.builtIn);
+    for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(currentCopies(install, bank)).toEqual([SECURE_CORPUS]);
+    expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
+
+    const set = await runTierCommand(['set', 'id:bank', 'personal'], { storePaths: storePaths() });
+    expect(set).toMatchObject({ results: [{ override: 'Personal', outcome: 'set_applies_next_pass' }] });
+    // A lowering exposes nothing before the move: still Private until it lands.
+    expect(currentCopies(install, bank)).toEqual([SECURE_CORPUS]);
+
+    await service.runOnce();
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({
+      state: 'current', metadataTier: 'private', contentTier: 'private', decidedBy: 'override',
+    });
+    // One store serves it: the Personal one. The Private copy is kept, never searched.
+    expect(currentCopies(install, bank)).toEqual([INTERNAL_CORPUS]);
+    expect(evidenceFor(await olympusSearch(install, 'loan terms'), 'bank letter.pdf')).toBe(1);
+
+    // An unchanged sync and later ticks keep the owner's decision.
+    await install.sync.pull({ approved_scope_key: 'dropbox.personal:/' });
+    await service.runOnce();
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'override' });
+    expect(currentCopies(install, bank)).toEqual([INTERNAL_CORPUS]);
+    expect(evidenceFor(await olympusSearch(install, 'loan terms'), 'bank letter.pdf')).toBe(1);
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ checked: 1, updated: 0, raised: 0, lowered: 0, heldMoving: 0 });
+  });
+
+  test('up: a Personal item set Private is hidden by the command itself, then moves, and stays Private through an unchanged sync', async () => {
+    const { install, service } = await gardenSettledPersonal();
+    expect(currentCopies(install, garden)).toEqual([INTERNAL_CORPUS]);
+    expect(await olympusSearch(install, 'orchard')).toContain('pruning plan');
+
+    const set = await runTierCommand(['set', 'id:garden', 'private'], { storePaths: storePaths() });
+    expect(set).toMatchObject({ results: [{ override: 'Private', outcome: 'hidden_now_move_queued' }] });
+    // Hidden at once, before any tick or sync runs.
+    expect(currentCopies(install, garden)).toEqual([]);
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'moving', targetMetadataTier: 'secure', targetContentTier: 'secure' });
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+
+    await service.runOnce();
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+    expect(currentCopies(install, garden)).toEqual([SECURE_CORPUS]);
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+
+    await install.sync.pull({ approved_scope_key: 'dropbox.personal:/' });
+    await service.runOnce();
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
+    expect(currentCopies(install, garden)).toEqual([SECURE_CORPUS]);
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+  });
+
+  test('the set\'s own pass raises an override it finds (hidden first), once, with no private model at all', async () => {
+    const install = await freshInstall();
+    expect(currentCopies(install, garden)).toEqual([INTERNAL_CORPUS]);
+    install.lane.ledger.setOverride(garden, { kind: 'tier', tier: 'secure' });
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ checked: 1, raised: 1 });
+    expect(currentCopies(install, garden)).toEqual([]);
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+    // The queued move carries the override: nothing more to do.
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ raised: 0, lowered: 0, heldMoving: 0 });
+  });
+
+  test('Secrets: the command hides every copy at once; the set\'s pass records the location and settles the copies', async () => {
+    const install = await freshInstall();
+    const set = await runTierCommand(['set', 'id:garden', 'secrets'], { storePaths: storePaths() });
+    expect(set).toMatchObject({ results: [{ override: 'Secrets', outcome: 'hidden_now' }] });
+    expect(currentCopies(install, garden)).toEqual([]);
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ secrets: 1 });
+    expect(install.secrets.get(garden)).toMatchObject({ providerItemId: 'id:garden', findingKinds: ['owner_marked_secret'] });
+    expect(install.lane.ledger.copies(garden)).toEqual([]);
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ secrets: 0 });
+  });
+});
+
+describe('12b. owner overrides under interleaving (review of PR #255)', () => {
+  const bank = identity('id:bank');
+  const bankItem = { ...bank, family: 'file' as const, localItemId: 'personal:id:bank' };
+  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), env.OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH!];
+  const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
+    ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
+
+  /** The bank letter judged Private by the model and resting in the Private store. */
+  async function bankPrivate() {
+    const model = registeredBuiltIn(PRIVATE_VERDICT);
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+    const service = snifferFor(install, model.builtIn);
+    for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
+    expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
+    return { install, service };
+  }
+
+  test('a raise landing while a queued lower is mid-flip invalidates it: the stale move never publishes Personal content', async () => {
+    const { install, service } = await bankPrivate();
+    install.lane.ledger.setOverride(bank, { kind: 'tier', tier: 'private' });
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ lowered: 1 });
+
+    let raised: unknown;
+    const move = moveTieredItem({
+      set: install.lane.set,
+      identity: bankItem,
+      target: { metadataTier: 'private', contentTier: 'private' },
+      // The owner sets Private from another process after the destination is
+      // written and before the flip.
+      beforeFlip: () => { raised = runTierSet(['id:bank', 'private'], { storePaths: storePaths() }); },
+    });
+    await expect(move).rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
+    expect(raised).toMatchObject({ results: [{ override: 'Private', outcome: 'move_retargeted' }] });
+    // Never current in the Personal store; the staged copy is kept hidden.
+    expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
+    expect(install.lane.ledger.copies(bank).find((copy) => copy.corpusId === INTERNAL_CORPUS)).toMatchObject({ state: 'superseded' });
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'moving', targetMetadataTier: 'secure', targetContentTier: 'secure' });
+    expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
+
+    // The retargeted move lands Private.
+    await service.runOnce();
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
+    expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
+    expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
+  });
+
+  test('an override replaced or cleared after the pass read it authorizes nothing', async () => {
+    const { install } = await bankPrivate();
+    const ledger = install.lane.ledger;
+    ledger.setOverride(bank, { kind: 'tier', tier: 'private' });
+    expect(applyOwnerOverrides({ set: install.lane.set, afterRead: () => ledger.setOverride(bank, { kind: 'tier', tier: 'secure' }) }))
+      .toMatchObject({ lowered: 0 });
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
+
+    ledger.setOverride(bank, { kind: 'tier', tier: 'private' });
+    expect(applyOwnerOverrides({ set: install.lane.set, afterRead: () => ledger.clearOverride(bank) })).toMatchObject({ lowered: 0 });
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(currentCopies(ledger, bank)).toEqual([SECURE_CORPUS]);
+  });
+
+  test('a queued lower whose override was cleared before it lands is refused at the flip', async () => {
+    const { install } = await bankPrivate();
+    const ledger = install.lane.ledger;
+    ledger.setOverride(bank, { kind: 'tier', tier: 'private' });
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ lowered: 1 });
+    ledger.clearOverride(bank);
+    await expect(moveTieredItem({ set: install.lane.set, identity: bankItem, target: { metadataTier: 'private', contentTier: 'private' } }))
+      .rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
+    expect(currentCopies(ledger, bank)).toEqual([SECURE_CORPUS]);
+    expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
+  });
+
+  test('a hit collected before a Secret\'s copies were settled is rejected by the final visibility check', async () => {
+    const install = await freshInstall();
+    const hit = { corpusId: INTERNAL_CORPUS, trustDomain: 'internal', sourceItem: { ...garden, family: 'file', localItemId: 'personal:id:garden' } };
+    const legacy = { ...hit, sourceItem: { ...hit.sourceItem, providerItemId: 'id:never-routed', localItemId: 'personal:id:never-routed' } };
+    const gate = createTierVisibilityGate(() => [{ ledger: install.lane.ledger, corpusIds: new Set([INTERNAL_CORPUS, SECURE_CORPUS]) }]);
+    expect(gate([hit, legacy] as never)).toHaveLength(2);
+
+    await runTierCommand(['set', 'id:garden', 'secrets'], { storePaths: storePaths() });
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ secrets: 1 });
+    expect(install.lane.ledger.copies(garden)).toEqual([]);
+    // The routed Secret has no copy rows left: hidden, never mistaken for legacy.
+    expect(gate([hit, legacy] as never) as unknown[]).toEqual([legacy]);
+  });
+
+  test('an owner override lowers an item out of a lane whose items rest Private (the floor yields to the owner only)', async () => {
+    const { dir, cleanup } = (() => {
+      const path = mkdtempSync(join(tmpdir(), 'olympus-tier-floor-'));
+      return { dir: path, cleanup: () => rmSync(path, { recursive: true, force: true }) };
+    })();
+    closers.push(cleanup);
+    const paths = fixtureStorePaths(dir);
+    const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local) });
+    const internal = openLegStore(paths, 'internal', ledger);
+    const secure = openLegStore(paths, 'secure_local', ledger);
+    closers.push(() => { internal.close(); secure.close(); ledger.close(); });
+    const set = new TieredStoreSet({
+      setId: 'fixture.chat',
+      ledger,
+      splitLayers: false,
+      laneFloor: { trustDomain: 'secure_local', liftedByOwnerRule: ['chat'] },
+      registerWithLedger: false,
+      legs: [
+        { trustDomain: 'internal', corpusId: CORPORA.internal, store: internal, embeddingProvider: cloudProvider() },
+        { trustDomain: 'secure_local', corpusId: CORPORA.secure_local, store: secure, embeddingProvider: localProvider() },
+      ],
+    });
+    await set.sync(fixtureConnector(() => [{ id: 'm1', name: 'garden chat.txt', text: 'Seed order for the spring beds.' }]));
+    const m1 = fixtureIdentityOf('m1');
+    expect(currentCopies(ledger, m1)).toEqual([CORPORA.secure_local]);
+
+    ledger.setOverride(m1, { kind: 'tier', tier: 'private' });
+    expect(applyOwnerOverrides({ set })).toMatchObject({ lowered: 1 });
+    // As the automatic moves call it: target tiers only.
+    await moveTieredItem({ set, identity: m1, target: { metadataTier: 'private', contentTier: 'private' } });
+    expect(currentCopies(ledger, m1)).toEqual([CORPORA.internal]);
+    expect(ledger.getCurrent(m1)).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'override' });
+    // Settled: no move queued again.
+    expect(applyOwnerOverrides({ set })).toMatchObject({ lowered: 0, updated: 0, raised: 0 });
+  });
+});
+
+describe('12c. owner overrides under interleaving, round 2 (review of PR #255)', () => {
+  const bank = identity('id:bank');
+  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), env.OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH!];
+  const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
+    ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId).sort();
+  const verdicts = (tier: string, category: string, confidence: number) =>
+    JSON.stringify({ verdicts: [1, 2, 3, 4, 5, 6].map((i) => ({ i, tier, category, confidence })) });
+
+  test('an owner raise that needs no move: a lower read before it is refused, and no flip lands below the owner', async () => {
+    const { dir, cleanup } = tempDir('olympus-tier-stale-lower-');
+    closers.push(cleanup);
+    const fx = openTierFixture(dir, { embed: false });
+    closers.push(() => fx.close());
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    const d1 = fixtureIdentityOf('d1');
+    const judged = (metadataTier: 'private' | 'secure', contentTier: 'private' | 'secure'): TierDecision => ({
+      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'x' }),
+      metadataTier, contentTier, decidedBy: 'sniffer', state: 'current',
+      contentRead: true, contentPending: false, metadataPending: false,
+    });
+    const allPrivate = judged('secure', 'secure');
+    fx.ledger.recordRoutedPlacement(d1, allPrivate, fx.set.placementFor(allPrivate));
+    await moveTieredItem({ set: fx.set, identity: d1, target: { metadataTier: 'secure', contentTier: 'secure' } });
+    expect(currentCopies(fx.ledger, d1)).toEqual([CORPORA.secure_local]);
+
+    // A background writer (a re-judge, a sniffer answer) reads the row: no override yet.
+    const read = fx.ledger.getCurrent(d1)!;
+    // The owner sets it Private. It already is, so nothing moves.
+    fx.ledger.setOverride(d1, { kind: 'tier', tier: 'secure' });
+    expect(fx.ledger.queueOwnerRaise(d1, { ...allPrivate, decidedBy: 'override' }, 'secure_local')).toBe('none');
+    // The writer's lower, checked against its read, is refused.
+    const lower = judged('private', 'private');
+    expect(() => fx.ledger.recordRoutedPlacement(d1, lower, fx.set.placementFor(lower), { guard: { generation: read.generation, override: undefined } }))
+      .toThrow(TierLedgerGenerationConflictError);
+    // A lower queued without that check never flips past the owner either.
+    expect(fx.ledger.recordRoutedPlacement(d1, lower, fx.set.placementFor(lower)).outcome).toBe('queued_move');
+    await expect(moveTieredItem({ set: fx.set, identity: d1, target: { metadataTier: 'private', contentTier: 'private' } }))
+      .rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
+    expect(currentCopies(fx.ledger, d1)).toEqual([CORPORA.secure_local]);
+  });
+
+  test('a raise queued without hiding (moves wait for the migration) is hidden at once when the owner sets the same tier', async () => {
+    const { dir, cleanup } = tempDir('olympus-tier-unhidden-raise-');
+    closers.push(cleanup);
+    const fx = openTierFixture(dir, { embed: false });
+    closers.push(() => fx.close());
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    const d1 = fixtureIdentityOf('d1');
+    const judged = (metadataTier: 'private' | 'secure', contentTier: 'private' | 'secure'): TierDecision => ({
+      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'x' }),
+      metadataTier, contentTier, decidedBy: 'sniffer', state: 'current',
+      contentRead: true, contentPending: false, metadataPending: false,
+    });
+    const personal = judged('private', 'private');
+    if (fx.ledger.recordRoutedPlacement(d1, personal, fx.set.placementFor(personal)).outcome === 'queued_move') {
+      await moveTieredItem({ set: fx.set, identity: d1, target: { metadataTier: 'private', contentTier: 'private' } });
+    }
+    expect(currentCopies(fx.ledger, d1)).toEqual([CORPORA.internal]);
+
+    // A re-home (or a re-judge on an install whose moves wait for the
+    // migration) queues Private without hiding: still visible in Personal.
+    const allPrivate = judged('secure', 'secure');
+    expect(fx.ledger.recordRoutedPlacement(d1, allPrivate, fx.set.placementFor(allPrivate), { queueWithoutHiding: true }).outcome)
+      .toBe('queued_move');
+    expect(currentCopies(fx.ledger, d1)).toEqual([CORPORA.internal]);
+
+    // The owner sets the same tier the move already targets: hidden now.
+    fx.ledger.setOverride(d1, { kind: 'tier', tier: 'secure' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ raised: 1 });
+    expect(currentCopies(fx.ledger, d1)).toEqual([]);
+    await moveTieredItem({ set: fx.set, identity: d1, target: { metadataTier: 'secure', contentTier: 'secure' } });
+    expect(currentCopies(fx.ledger, d1)).toEqual([CORPORA.secure_local]);
+  });
+
+  test('Public names with Private content: a cleared Personal override never lets the content land Personal', async () => {
+    const { dir, cleanup } = tempDir('olympus-tier-mixed-');
+    closers.push(cleanup);
+    const fx = openTierFixture(dir, { embed: false });
+    closers.push(() => fx.close());
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    const d1 = fixtureIdentityOf('d1');
+    const split: TierDecision = {
+      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'x' }),
+      metadataTier: 'public', contentTier: 'secure', decidedBy: 'sniffer', state: 'current',
+      contentRead: true, contentPending: false, metadataPending: false,
+    };
+    fx.ledger.recordRoutedPlacement(d1, split, fx.set.placementFor(split));
+    await moveTieredItem({ set: fx.set, identity: d1, target: { metadataTier: 'public', contentTier: 'secure' } });
+    expect(currentCopies(fx.ledger, d1)).toEqual([CORPORA.public_safe, CORPORA.secure_local].sort());
+
+    // Personal: the names rise (so the move hides its sources), the content lowers.
+    fx.ledger.setOverride(d1, { kind: 'tier', tier: 'private' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ raised: 1 });
+    fx.ledger.clearOverride(d1);
+    await expect(moveTieredItem({ set: fx.set, identity: d1, target: { metadataTier: 'private', contentTier: 'private' } }))
+      .rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
+    expect(currentCopies(fx.ledger, d1)).not.toContain(CORPORA.internal);
+  });
+});

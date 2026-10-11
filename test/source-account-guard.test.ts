@@ -55,6 +55,7 @@ function harness(input: {
   storesStale?: boolean;
   restarts?: boolean;
   evidence?: { folders?: string[] | undefined; opens?: boolean | undefined };
+  duringCheck?: () => void;
 }) {
   let reopenRequests = 0;
   const evidenceCalls = { record: 0, check: [] as string[][] };
@@ -96,6 +97,7 @@ function harness(input: {
             record: async () => { evidenceCalls.record += 1; return input.evidence!.folders; },
             check: async (_token: string, folderIds: readonly string[]) => {
               evidenceCalls.check.push([...folderIds]);
+              input.duringCheck?.();
               return input.evidence!.opens;
             },
           },
@@ -143,7 +145,7 @@ describe('the account guard', () => {
     expect(binding(reconnected)).toEqual({ reconnected_at: '2026-10-10T22:42:00.000Z' });
   });
 
-  test('a legacy grant binds on reconnect only when the new token opens every recorded folder (independent review round 13)', async () => {
+  test('a legacy grant binds on reconnect only when the new token owns a recorded folder (independent review rounds 13-14)', async () => {
     const cases = [
       { folders: ['id:own1', 'id:own2'], opens: true, binds: true },
       { folders: ['id:own1', 'id:own2'], opens: false, binds: false },
@@ -173,6 +175,32 @@ describe('the account guard', () => {
         expect(binding(registryPath)).toMatchObject({ purge_required: { reason: 'previous_account_unknown' } });
       }
     }
+  });
+
+  test('a reconnect landing while the evidence is checked is never overwritten by the bind (independent review round 14)', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:main');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({
+      reconnected_at: '2026-10-10T22:42:00.000Z',
+      previous_account_folders: ['id:own1'],
+      purge_required: { reason: 'previous_account_unknown', detected_at: '2026-10-10T22:42:30.000Z' },
+    }));
+    const before = binding(registryPath);
+    // Connect B publishes its grant while the provider is being asked; its
+    // marker leaves the standing purge as it is.
+    const { guard, evidenceCalls } = harness({
+      registryPath,
+      tokenAccount: 'dbid:main',
+      evidence: { opens: true },
+      duringCheck: () => writeGrant(registryPath, 'dbid:other', '2026-10-10T22:44:00.000Z'),
+    });
+    let ran = 0;
+    const error = await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run()
+      .catch((reason: unknown) => reason);
+    expect(evidenceCalls.check).toEqual([['id:own1']]);
+    expect((error as SourceAccountChangedError).code).toBe('source_account_unverified');
+    expect(ran).toBe(0);
+    expect(binding(registryPath)).toEqual(before);
   });
 
   test('an embedding sweep appended to a lane is guarded with it (independent review round 10)', async () => {

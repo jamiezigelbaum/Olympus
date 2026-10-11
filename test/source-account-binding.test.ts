@@ -298,17 +298,38 @@ describe('a connector store notices its file was deleted under it', () => {
 });
 
 describe('Dropbox account evidence for legacy grants without account_info.read', () => {
-  test('true only when every sampled id opens; false on a not-found; unknown otherwise', async () => {
-    const { dropboxItemsOpenForToken } = await import('../src/core/provider-account-identity.ts');
-    const answer = (byId: Record<string, Response>) => async (_url: string, init: RequestInit) => {
+  test('one recorded folder that opens unshared proves the account; deleted or shared ones prove nothing (independent review round 14)', async () => {
+    const { dropboxOwnsOneOfFolders } = await import('../src/core/provider-account-identity.ts');
+    const folder = (id: string, shared = false) => new Response(JSON.stringify({
+      '.tag': 'folder', id, name: 'x', ...(shared ? { sharing_info: { read_only: false, shared_folder_id: '9' } } : {}),
+    }), { status: 200 });
+    const notFound = () => new Response('{"error_summary":"path/not_found/..","error":{".tag":"path","path":{".tag":"not_found"}}}', { status: 409 });
+    const answer = (byId: Record<string, () => Response>) => async (_url: string, init: RequestInit) => {
       const id = (JSON.parse(String(init.body)) as { path: string }).path;
-      return byId[id]?.clone() ?? new Response('{}', { status: 200 });
+      return byId[id]?.() ?? notFound();
     };
-    const notFound = new Response('{"error_summary":"path/not_found/..","error":{".tag":"path","path":{".tag":"not_found"}}}', { status: 409 });
-    expect(await dropboxItemsOpenForToken({ accessToken: 't', itemIds: ['id:a', 'id:b'], fetchImpl: answer({}) })).toBe(true);
-    expect(await dropboxItemsOpenForToken({ accessToken: 't', itemIds: ['id:a', 'id:b'], fetchImpl: answer({ 'id:b': notFound }) })).toBe(false);
-    expect(await dropboxItemsOpenForToken({ accessToken: 't', itemIds: ['id:a'], fetchImpl: answer({ 'id:a': new Response('{}', { status: 500 }) }) })).toBeUndefined();
-    expect(await dropboxItemsOpenForToken({ accessToken: 't', itemIds: ['not-an-id'], fetchImpl: answer({}) })).toBeUndefined();
+    // One deleted, one still the owner's: the same account.
+    expect(await dropboxOwnsOneOfFolders({ accessToken: 't', folderIds: ['id:gone', 'id:own'], fetchImpl: answer({ 'id:own': () => folder('id:own') }) })).toBe(true);
+    // Another account: nothing opens, or only a folder shared with it since.
+    expect(await dropboxOwnsOneOfFolders({ accessToken: 't', folderIds: ['id:a', 'id:b'], fetchImpl: answer({}) })).toBe(false);
+    expect(await dropboxOwnsOneOfFolders({ accessToken: 't', folderIds: ['id:a'], fetchImpl: answer({ 'id:a': () => folder('id:a', true) }) })).toBe(false);
+    // Dropbox could not say for one and none proved it.
+    expect(await dropboxOwnsOneOfFolders({ accessToken: 't', folderIds: ['id:a', 'id:b'], fetchImpl: answer({ 'id:a': () => new Response('{}', { status: 500 }) }) })).toBeUndefined();
+  });
+
+  test('own-folder evidence follows the listing past pages without an unshared folder (independent review round 14)', async () => {
+    const { dropboxOwnRootFolderIds } = await import('../src/core/provider-account-identity.ts');
+    const urls: string[] = [];
+    const pages = [
+      { entries: [{ '.tag': 'file', id: 'id:f1' }, { '.tag': 'folder', id: 'id:s1', sharing_info: {} }], has_more: true, cursor: 'c1' },
+      { entries: [{ '.tag': 'folder', id: 'id:own9' }], has_more: false, cursor: 'c2' },
+    ];
+    const ids = await dropboxOwnRootFolderIds({
+      accessToken: 't',
+      fetchImpl: async (url) => { urls.push(String(url)); return new Response(JSON.stringify(pages[urls.length - 1]), { status: 200 }); },
+    });
+    expect(ids).toEqual(['id:own9']);
+    expect(urls).toEqual(['https://api.dropboxapi.com/2/files/list_folder', 'https://api.dropboxapi.com/2/files/list_folder/continue']);
   });
 
   test('own-folder evidence lists only unshared folders at the root', async () => {

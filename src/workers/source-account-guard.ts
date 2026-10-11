@@ -60,7 +60,7 @@ export interface SourceAccountGuardOptions {
    * Evidence of the account for grants whose account cannot be read (Dropbox
    * grants made before `account_info.read`; PR review). `record` names
    * folders only the token's account can open, kept while that grant syncs;
-   * `check` says whether a later token opens all of them (the same account).
+   * `check` says whether a later token owns one of them (the same account).
    * Arbitrary stored items are no evidence: a shared item opens for every
    * account it is shared with (independent review round 13).
    */
@@ -168,19 +168,26 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
       if (decision.action === 'purge' && decision.reason === 'previous_account_unknown' && token
         && lastAccessToken && current?.previous_account_folders?.length
         && await evidenceOpens(lastAccessToken, current.previous_account_folders) === true) {
-        // The new token opens folders only the previous account could: it is
-        // that account. Bound only while the record still names no account;
-        // a connect landing meanwhile is decided afresh below.
+        // The new token opens a folder only the previous account could: it is
+        // that account. Bound only if neither the grant nor the record moved
+        // while the provider was asked; a connect landing meanwhile (its
+        // marker may leave a standing purge untouched) means this token may no
+        // longer be the grant's, so this run waits (independent review round 14).
         let bound = false;
         updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => {
-          if (latest?.provider_account_id) return latest;
+          const grantNow = readConnectedHandleRegistry(options.registryPath).handles
+            .find((entry) => entry.handle === options.handle);
+          if (JSON.stringify(latest ?? null) !== JSON.stringify(current ?? null)
+            || grantNow?.connectedAt !== handle.connectedAt
+            || grantNow?.providerAccountId !== handle.providerAccountId) return latest;
           bound = true;
           return { provider_account_id: token, bound_at: now().toISOString() };
         });
         if (bound) return;
-        const reread = readSourceAccountBindings(bindingsPath);
-        if (reread.kind === 'malformed') throw new SourceAccountBindingsUnreadableError(bindingsPath);
-        decision = decide(reread.bindings.sources[options.sourceId]);
+        throw new SourceAccountChangedError(
+          'source_account_unverified',
+          `${options.sourceId} was reconnected while its account was being confirmed; it is checked again on the next run.`,
+        );
       }
       if (decision.action === 'proceed' && decision.write === undefined && !token && lastAccessToken
         && options.ownAccountEvidence && !evidenceRecordAttempted

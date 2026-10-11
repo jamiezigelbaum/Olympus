@@ -1,3 +1,4 @@
+import { withKeywordRequestScope } from './keyword-context.ts';
 import type {
   RetrievalDegradation,
   RetrievalLaneAudit,
@@ -124,6 +125,8 @@ export interface SourceIndexRoutedMatchCount extends SourceIndexCorpusMatchCount
 
 export interface SourceIndexCorpusSearchAdapter {
   (request: SourceIndexCorpusSearchRequest): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>;
+  // Optional local-only preparation before lane deadlines start.
+  prepareKeywords?: (query: string) => Promise<void>;
   hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability;
   /**
    * The corpus's nearest semantic neighbours of the query, nearest first,
@@ -298,6 +301,10 @@ const NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set(
 );
 
 export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOptions): Promise<SourceIndexRoutedSearchResponse> {
+  return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
+}
+
+async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOptions): Promise<SourceIndexRoutedSearchResponse> {
   const request = normalizeSearchRequest(options.request);
   const candidateCorpora = options.registry.list();
   const skippedCorpora: SourceIndexSkippedCorpus[] = [];
@@ -336,6 +343,11 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
     searchableCorpora.push(corpus);
   }
 
+  // Preparation never sees corpus content and owns its own bounded timeout.
+  // A cold local model must not spend the store's lock/vector deadline.
+  await Promise.all(searchableCorpora.map(async (corpus) => {
+    try { await options.adapters[corpus.corpusId]!.prepareKeywords?.(request.query); } catch { /* original query remains usable */ }
+  }));
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;

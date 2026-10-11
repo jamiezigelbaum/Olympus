@@ -48,7 +48,7 @@ export interface SourceAccountBinding {
   /**
    * For a grant whose account cannot be read (Dropbox grants made before
    * `account_info.read`): ids of folders only that account can open,
-   * recorded while it was connected. A reconnect that opens all of them is
+   * recorded while it was connected. A reconnect that owns one of them is
    * the same account.
    */
   previous_account_folders?: string[];

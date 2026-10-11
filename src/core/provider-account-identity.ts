@@ -133,22 +133,27 @@ function providerLabel(provider: AccountBoundProvider): string {
 }
 
 /**
- * Whether every one of these Dropbox ids still opens for this token's
- * account: true when all do, false as soon as one is not found, undefined
- * when Dropbox could not say. Used with the ids of folders only the previous
- * account could open (see dropboxOwnRootFolderIds), never with arbitrary
- * stored items: a shared item opens for every account it is shared with.
+ * Whether this token's account owns one of these folders, recorded earlier as
+ * unshared root folders of the previous account (see dropboxOwnRootFolderIds).
+ * True as soon as one opens and is still shared with no one: only its owner
+ * can open such a folder. False when every one is not found or now shared
+ * (deleted, or another account's); undefined when Dropbox could not say for a
+ * folder and none proved it. One proving folder is enough, so deleting or
+ * sharing some of them does not strand a same-account reconnect
+ * (independent review round 14). Never used with arbitrary stored items: a
+ * shared item opens for every account it is shared with.
  */
-export async function dropboxItemsOpenForToken(options: {
+export async function dropboxOwnsOneOfFolders(options: {
   accessToken: string;
-  itemIds: readonly string[];
+  folderIds: readonly string[];
   fetchImpl?: TimeoutFetch;
   timeoutMs?: number;
   endpoint?: string;
 }): Promise<boolean | undefined> {
   const endpoint = options.endpoint ?? 'https://api.dropboxapi.com/2/files/get_metadata';
-  for (const id of options.itemIds) {
-    if (!/^id:[A-Za-z0-9_-]{1,200}$/.test(id)) return undefined;
+  let unknown = false;
+  for (const id of options.folderIds) {
+    if (!/^id:[A-Za-z0-9_-]{1,200}$/.test(id)) { unknown = true; continue; }
     let response: Response;
     let text: string;
     try {
@@ -163,14 +168,22 @@ export async function dropboxItemsOpenForToken(options: {
         { timeoutMs: options.timeoutMs ?? 15_000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES },
       ));
     } catch {
-      return undefined;
+      unknown = true;
+      continue;
     }
-    if (response.ok) continue;
+    if (response.ok) {
+      let entry: Record<string, unknown> | undefined;
+      try { entry = JSON.parse(text) as Record<string, unknown>; } catch { entry = undefined; }
+      if (!entry || typeof entry !== 'object') { unknown = true; continue; }
+      if (entry['.tag'] === 'folder' && entry.id === id && entry.sharing_info === undefined) return true;
+      // Opens, but shared now (or not the folder recorded): proves nothing.
+      continue;
+    }
     // 409 carries a route error; only `path/not_found` means "not this account's".
-    if (response.status === 409 && /"not_found"/.test(text)) return false;
-    return undefined;
+    if (response.status === 409 && /"not_found"/.test(text)) continue;
+    unknown = true;
   }
-  return true;
+  return unknown ? undefined : false;
 }
 
 /**
@@ -187,37 +200,52 @@ export async function dropboxOwnRootFolderIds(options: {
   timeoutMs?: number;
   endpoint?: string;
 }): Promise<string[] | undefined> {
-  let response: Response;
-  let text: string;
-  try {
-    ({ response, text } = await fetchBoundedText(
-      options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)),
-      options.endpoint ?? 'https://api.dropboxapi.com/2/files/list_folder',
-      {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${options.accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: '', recursive: false, limit: 200 }),
-      },
-      { timeoutMs: options.timeoutMs ?? 15_000, limitBytes: 1024 * 1024 },
-    ));
-  } catch {
-    return undefined;
-  }
-  if (!response.ok) return undefined;
-  try {
-    const parsed = JSON.parse(text) as { entries?: unknown };
+  const limit = options.limit ?? 5;
+  const listUrl = options.endpoint ?? 'https://api.dropboxapi.com/2/files/list_folder';
+  const found: string[] = [];
+  let cursor: string | undefined;
+  // Follow the listing until enough folders are found or it ends (independent
+  // review round 14); a root this large without one is treated as unknown.
+  for (let page = 0; page < 20; page += 1) {
+    let response: Response;
+    let text: string;
+    try {
+      ({ response, text } = await fetchBoundedText(
+        options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)),
+        cursor === undefined ? listUrl : `${listUrl}/continue`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${options.accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(cursor === undefined ? { path: '', recursive: false, limit: 200 } : { cursor }),
+        },
+        { timeoutMs: options.timeoutMs ?? 15_000, limitBytes: 1024 * 1024 },
+      ));
+    } catch {
+      return undefined;
+    }
+    if (!response.ok) return undefined;
+    let parsed: { entries?: unknown; has_more?: unknown; cursor?: unknown };
+    try {
+      parsed = JSON.parse(text) as typeof parsed;
+    } catch {
+      return undefined;
+    }
     if (!Array.isArray(parsed.entries)) return undefined;
-    return parsed.entries
-      .filter((entry): entry is { '.tag': string; id: string; sharing_info?: unknown } =>
-        !!entry && typeof entry === 'object'
-        && (entry as Record<string, unknown>)['.tag'] === 'folder'
-        && typeof (entry as Record<string, unknown>).id === 'string'
-        && /^id:[A-Za-z0-9_-]{1,200}$/.test((entry as Record<string, unknown>).id as string)
+    for (const raw of parsed.entries) {
+      const entry = raw as Record<string, unknown> | null;
+      if (entry && typeof entry === 'object'
+        && entry['.tag'] === 'folder'
+        && typeof entry.id === 'string'
+        && /^id:[A-Za-z0-9_-]{1,200}$/.test(entry.id)
         // Present on a shared folder and on anything inside one.
-        && (entry as Record<string, unknown>).sharing_info === undefined)
-      .slice(0, options.limit ?? 5)
-      .map((entry) => entry.id);
-  } catch {
-    return undefined;
+        && entry.sharing_info === undefined) {
+        found.push(entry.id);
+        if (found.length >= limit) return found;
+      }
+    }
+    if (parsed.has_more !== true) return found;
+    if (typeof parsed.cursor !== 'string' || !parsed.cursor) return undefined;
+    cursor = parsed.cursor;
   }
+  return found.length > 0 ? found : undefined;
 }

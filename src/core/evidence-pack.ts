@@ -1,3 +1,4 @@
+import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 // buildEvidencePack: the retrieval -> reasoning boundary (Contract 2).
 //
 // Retrieval (router + corpus adapters) is a hard membrane: it returns locators
@@ -273,7 +274,11 @@ export async function buildEvidencePack(input: BuildEvidencePackInput): Promise<
   return (await buildEvidencePackDetailed(input)).pack;
 }
 
-export async function buildEvidencePackDetailed(
+export async function buildEvidencePackDetailed(input: BuildEvidencePackInput): Promise<EvidencePackBuildDetail> {
+  return withKeywordRequestScope(() => buildPreparedEvidencePackDetailed(input));
+}
+
+async function buildPreparedEvidencePackDetailed(
   input: BuildEvidencePackInput,
 ): Promise<EvidencePackBuildDetail> {
   const routed = input.selectedItems?.length

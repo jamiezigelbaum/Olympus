@@ -349,7 +349,7 @@ import {
   type SourceAccountGuard,
   type SourceAccountGuardOptions,
 } from '../source-account-guard.ts';
-import { dropboxItemsOpenForToken, dropboxOwnRootFolderIds, type AccountBoundProvider } from '../../core/provider-account-identity.ts';
+import { dropboxOwnRootFolderIds, dropboxOwnsOneOfFolders, type AccountBoundProvider } from '../../core/provider-account-identity.ts';
 import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
@@ -3905,7 +3905,7 @@ export async function main(): Promise<void> {
             // folders only that account can open stand in for it.
             ownAccountEvidence: {
               record: (accessToken) => dropboxOwnRootFolderIds({ accessToken }),
-              check: (accessToken, folderIds) => dropboxItemsOpenForToken({ accessToken, itemIds: folderIds }),
+              check: (accessToken, folderIds) => dropboxOwnsOneOfFolders({ accessToken, folderIds }),
             },
           });
         },
