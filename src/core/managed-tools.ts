@@ -101,7 +101,9 @@ export interface ManagedToolPin {
 // (an upstream daemon is refused with daemon_supervisor_unsupported).
 // zkapi-walletd and share/zkapi-clientd/ are upstream's bytes.
 const ZKAPI_VERSION = '0.1.6-olympus2';
-const ZKAPI_RELEASE = `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v${ZKAPI_VERSION}`;
+// A plain literal: the packaged-bundle scan exempts exactly this public
+// download address (scripts/owner-identifier-patterns.ts).
+const ZKAPI_RELEASE = 'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2';
 const ZKAPI_REQUIRED = [
   'bin/zkapi-clientd',
   'bin/zkapi-walletd',
@@ -140,7 +142,7 @@ function torLinuxAsset(name: string, sha256: string, bytes: number): ManagedTool
 
 /**
  * The pinned builds (docs/design/private-answers.md). zkapi-clientd, verified
- * 2026-10-11: release clientd-v0.1.6-olympus2 of jamiezigelbaum/zkapi, built
+ * 2026-10-11: release clientd-v0.1.6-olympus2 of the Olympus fork (ZKAPI_RELEASE), built
  * by its olympus-release workflow from fork commit 14fcba96; hashes computed
  * from the downloaded archives and matched to the release's SHA256SUMS and
  * GitHub's asset digests, each file's build-provenance attestation verified

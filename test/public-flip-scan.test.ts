@@ -139,6 +139,20 @@ describe('public flip owner-identifier scan', () => {
     }
   });
 
+  test('only the exact quoted zkAPI release URL is exempt, and only in the installer and its bundles', () => {
+    const url = 'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2';
+    for (const path of ['src/core/managed-tools.ts', 'dist/cli.js', 'dist/index.js']) {
+      const clean = fixtureTree({ [path]: `const a = '${url}';\nconst b = "${url}";\n` });
+      expect(scanTree(clean.root, clean.paths).blockers).toHaveLength(0);
+      for (const invalid of [`'${url}/private'`, `'${url}-x'`, `'${url.replace('/zkapi/', '/other/')}'`, `// ${url}`, `\`${url}/\${name}\``]) {
+        const tree = fixtureTree({ [path]: invalid });
+        expect(scanTree(tree.root, tree.paths).blockers.map((hit) => hit.match)).toContain('jamiezigelbaum');
+      }
+    }
+    const elsewhere = fixtureTree({ 'src/elsewhere.ts': `'${url}'` });
+    expect(scanTree(elsewhere.root, elsewhere.paths).blockers.map((hit) => hit.match)).toContain('jamiezigelbaum');
+  });
+
   test('neutral fixture values are allowed anywhere, real ones are not', () => {
     const { root, paths } = fixtureTree({
       'test/a.test.ts': "const home = '/Users/owner/Health/notes';\n",
