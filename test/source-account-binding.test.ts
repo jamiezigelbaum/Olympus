@@ -296,3 +296,25 @@ describe('a connector store notices its file was deleted under it', () => {
     }
   });
 });
+
+describe('Dropbox reach over stored items (legacy grants without account_info.read)', () => {
+  test('true only when every sampled id opens; false on a not-found; unknown otherwise', async () => {
+    const { dropboxItemsOpenForToken } = await import('../src/core/provider-account-identity.ts');
+    const answer = (byId: Record<string, Response>) => async (_url: string, init: RequestInit) => {
+      const id = (JSON.parse(String(init.body)) as { path: string }).path;
+      return byId[id]?.clone() ?? new Response('{}', { status: 200 });
+    };
+    const notFound = new Response('{"error_summary":"path/not_found/..","error":{".tag":"path","path":{".tag":"not_found"}}}', { status: 409 });
+    expect(await dropboxItemsOpenForToken({ accessToken: 't', itemIds: ['id:a', 'id:b'], fetchImpl: answer({}) })).toBe(true);
+    expect(await dropboxItemsOpenForToken({ accessToken: 't', itemIds: ['id:a', 'id:b'], fetchImpl: answer({ 'id:b': notFound }) })).toBe(false);
+    expect(await dropboxItemsOpenForToken({ accessToken: 't', itemIds: ['id:a'], fetchImpl: answer({ 'id:a': new Response('{}', { status: 500 }) }) })).toBeUndefined();
+    expect(await dropboxItemsOpenForToken({ accessToken: 't', itemIds: ['not-an-id'], fetchImpl: answer({}) })).toBeUndefined();
+  });
+
+  test('a fresh store samples nothing', async () => {
+    const { LocalConnectorStore } = await import('../src/workers/connector-store/local-index.ts');
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'dropbox.files', family: 'file', trustDomain: 'internal' });
+    expect(store.sampleProviderItemIds(20)).toEqual([]);
+    store.close();
+  });
+});

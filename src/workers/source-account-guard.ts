@@ -56,6 +56,14 @@ export interface SourceAccountGuardOptions {
   laneStoresStale?: () => boolean;
   /** Ask a supervised worker to restart and reopen its stores; false when it cannot. */
   requestStoreReopen?: () => boolean;
+  /**
+   * Whether the stored items still open for the account of this access token
+   * (true), visibly do not (false), or the provider could not say. The
+   * migration for grants whose account could never be read (Dropbox grants
+   * made before `account_info.read`): with no recorded account, reach is the
+   * only proof a reconnect is the same account (PR review).
+   */
+  storedItemsOpenForToken?: (accessToken: string) => Promise<boolean | undefined>;
   broker?: CredentialBroker;
   fetch?: TimeoutFetch;
   identityEndpoints?: ProviderIdentityEndpoints;
@@ -73,6 +81,21 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
   const bindingsPath = sourceAccountBindingsPath(options.registryPath);
   // One provider lookup per access token, not per task run.
   const verified = new Map<string, string>();
+  // The token the last lookup was about, for the reach check below.
+  let lastAccessToken: string | undefined;
+  // One reach check per access token: it costs a provider call per sample.
+  const reached = new Map<string, boolean>();
+  const storedItemsOpen = async (accessToken: string): Promise<boolean | undefined> => {
+    const key = createHash('sha256').update(accessToken).digest('hex');
+    const known = reached.get(key);
+    if (known !== undefined) return known;
+    const answer = await options.storedItemsOpenForToken?.(accessToken).catch(() => undefined);
+    if (answer !== undefined) {
+      if (reached.size >= 8) reached.clear();
+      reached.set(key, answer);
+    }
+    return answer;
+  };
 
   const tokenAccountId = async (): Promise<string | undefined> => {
     const handle = readConnectedHandleRegistry(options.registryPath).handles
@@ -85,6 +108,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
       purpose: 'Confirm which provider account the source credential belongs to before syncing.',
     });
     if (session.kind !== 'bearer_token') return undefined;
+    lastAccessToken = session.token;
     const key = createHash('sha256').update(session.token).digest('hex');
     const known = verified.get(key);
     if (known) return known;
@@ -135,6 +159,23 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
       const read = readSourceAccountBindings(bindingsPath);
       if (read.kind === 'malformed') throw new SourceAccountBindingsUnreadableError(bindingsPath);
       let decision = decide(read.bindings.sources[options.sourceId]);
+      if (decision.action === 'purge' && decision.reason === 'previous_account_unknown' && token
+        && lastAccessToken && options.storedItemsOpenForToken
+        && await storedItemsOpen(lastAccessToken) === true) {
+        // Every sampled stored item opens for this account: they are its
+        // items, so it binds. Only while the record still names no account;
+        // a connect landing meanwhile is decided afresh below.
+        let bound = false;
+        updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
+          if (current?.provider_account_id) return current;
+          bound = true;
+          return { provider_account_id: token, bound_at: now().toISOString() };
+        });
+        if (bound) return;
+        const reread = readSourceAccountBindings(bindingsPath);
+        if (reread.kind === 'malformed') throw new SourceAccountBindingsUnreadableError(bindingsPath);
+        decision = decide(reread.bindings.sources[options.sourceId]);
+      }
       if (decision.action === 'proceed' && decision.write === undefined) return;
       if (decision.action !== 'refuse') {
         // Decide again under the record's lease: a connect may have landed

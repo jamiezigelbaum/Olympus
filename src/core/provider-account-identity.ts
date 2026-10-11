@@ -131,3 +131,48 @@ function accountIdFromIdentityPayload(provider: AccountBoundProvider, payload: R
 function providerLabel(provider: AccountBoundProvider): string {
   return provider === 'dropbox' ? 'Dropbox' : provider === 'gmail' ? 'Gmail' : 'Google Drive';
 }
+
+/**
+ * Whether every sampled stored Dropbox item still opens for this token's
+ * account: the migration for grants made before `account_info.read` was
+ * requested, whose account could never be read (PR review). Their source has
+ * no recorded account, so a reconnect cannot be told apart from an account
+ * change by identity; it can by reach. True only when every id resolves;
+ * false as soon as one is not found (another account's file); undefined when
+ * Dropbox could not say. Items in a folder shared with both accounts resolve
+ * for either, so a source whose sample lies wholly in shared folders binds to
+ * whichever account can open them, which is also who can read them.
+ */
+export async function dropboxItemsOpenForToken(options: {
+  accessToken: string;
+  itemIds: readonly string[];
+  fetchImpl?: TimeoutFetch;
+  timeoutMs?: number;
+  endpoint?: string;
+}): Promise<boolean | undefined> {
+  const endpoint = options.endpoint ?? 'https://api.dropboxapi.com/2/files/get_metadata';
+  for (const id of options.itemIds) {
+    if (!/^id:[A-Za-z0-9_-]{1,200}$/.test(id)) return undefined;
+    let response: Response;
+    let text: string;
+    try {
+      ({ response, text } = await fetchBoundedText(
+        options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)),
+        endpoint,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${options.accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: id }),
+        },
+        { timeoutMs: options.timeoutMs ?? 15_000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES },
+      ));
+    } catch {
+      return undefined;
+    }
+    if (response.ok) continue;
+    // 409 carries a route error; only `path/not_found` means "not this account's".
+    if (response.status === 409 && /"not_found"/.test(text)) return false;
+    return undefined;
+  }
+  return true;
+}

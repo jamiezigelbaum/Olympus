@@ -117,10 +117,10 @@ async function connectDropbox(install: ReturnType<typeof installDir>, baseUrl: s
 
 // The grant a reconnect replaces, with its own refresh token: a provider
 // that hands back the token already on file has changed nothing.
-async function seedPreviousGrant(install: ReturnType<typeof installDir>) {
+async function seedPreviousGrant(install: ReturnType<typeof installDir>, withStateStore = true) {
   const previous = await dropboxServer({ refreshToken: 'refresh-token-previous' });
   try {
-    await connectDropbox(install, previous.baseUrl);
+    await connectDropbox(install, previous.baseUrl, withStateStore);
   } finally {
     previous.close();
   }
@@ -230,6 +230,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     // #2); one that fails puts the entry back, because the old grant is still
     // in force.
     const install = installDir();
+    await seedPreviousGrant(install, false);
     updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
       provider_account_id: 'dbid:main-account',
     }));
@@ -320,6 +321,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
 
   test('a state save that commits and then reports failure keeps the marker (independent review round 11)', async () => {
     const install = installDir();
+    await seedPreviousGrant(install);
     updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
       provider_account_id: 'dbid:main-account',
     }));
@@ -345,8 +347,41 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     }
   });
 
+  test('a registry rewrite that moves the refresh-token route keeps the marker even before any token write (independent review round 12)', async () => {
+    const install = installDir();
+    await seedPreviousGrant(install, false);
+    // A legacy entry whose refresh token lives under another key.
+    const entry = readConnectedHandleRegistry(install.registryPath).handles[0]!;
+    upsertConnectedHandle({
+      ...entry,
+      oauth2Refresh: { ...entry.oauth2Refresh!, refreshTokenSecretRef: 'store:dropbox.legacy.oauth.refresh_token' },
+    }, install.registryPath);
+    updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
+      provider_account_id: 'dbid:main-account',
+    }));
+    const inner = install.secretStore;
+    const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
+      set: async (key: string, value: string) => {
+        if (key.endsWith('.oauth.client_id')) throw new Error('secret store unavailable');
+        return inner.set(key, value);
+      },
+    });
+    const server = await dropboxServer({ tokenAccountId: 'dbid:demo-account' });
+    try {
+      await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl, false)).rejects.toThrow();
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toMatchObject({
+        provider_account_id: 'dbid:main-account',
+        reconnected_at: expect.any(String),
+      });
+    } finally {
+      server.close();
+    }
+  });
+
   test('a state save that never commits leaves the old grant in force and puts the marker back (PR review)', async () => {
     const install = installDir();
+    await seedPreviousGrant(install);
     updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
       provider_account_id: 'dbid:main-account',
     }));

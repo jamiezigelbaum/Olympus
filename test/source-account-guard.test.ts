@@ -54,6 +54,7 @@ function harness(input: {
   identityStatus?: number;
   storesStale?: boolean;
   restarts?: boolean;
+  itemsOpen?: boolean | undefined | 'unset';
 }) {
   let reopenRequests = 0;
   const issued: CredentialSessionRequest[] = [];
@@ -88,6 +89,9 @@ function harness(input: {
     laneHoldsItems: () => input.holdsItems ?? true,
     laneStoresStale: () => input.storesStale ?? false,
     requestStoreReopen: () => { reopenRequests += 1; return input.restarts ?? false; },
+    ...(input.itemsOpen === 'unset' || !('itemsOpen' in input)
+      ? {}
+      : { storedItemsOpenForToken: async () => input.itemsOpen as boolean | undefined }),
     broker,
     fetch: async (_url, init) => {
       const token = String((init.headers as Record<string, string>).Authorization).replace('Bearer token-of-', '');
@@ -107,6 +111,29 @@ function binding(registryPath: string) {
 }
 
 describe('the account guard', () => {
+  test('a legacy grant with no readable account binds on reconnect only when the stored items open for the new account (PR review)', async () => {
+    for (const [itemsOpen, binds] of [[true, true], [false, false], [undefined, false]] as const) {
+      const registryPath = join(tempDir(), 'handles.json');
+      writeGrant(registryPath, 'dbid:demo');
+      // Reconnected over items whose account was never read.
+      updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({
+        reconnected_at: '2026-10-10T22:42:00.000Z',
+      }));
+      const { guard } = harness({ registryPath, tokenAccount: 'dbid:demo', itemsOpen });
+      let ran = 0;
+      const outcome = await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run()
+        .catch((reason: unknown) => reason);
+      if (binds) {
+        expect(ran).toBe(1);
+        expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:demo', bound_at: '2026-10-10T22:43:00.000Z' });
+      } else {
+        expect((outcome as SourceAccountChangedError).code).toBe('source_account_changed');
+        expect(ran).toBe(0);
+        expect(binding(registryPath)).toMatchObject({ purge_required: { reason: 'previous_account_unknown' } });
+      }
+    }
+  });
+
   test('an embedding sweep appended to a lane is guarded with it (independent review round 10)', async () => {
     let swept = 0;
     let synced = 0;

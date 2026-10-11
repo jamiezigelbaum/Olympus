@@ -5590,6 +5590,30 @@ function accountIdFromIdentityPayload(provider, payload) {
 function providerLabel(provider) {
   return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : "Google Drive";
 }
+async function dropboxItemsOpenForToken(options) {
+  const endpoint = options.endpoint ?? "https://api.dropboxapi.com/2/files/get_metadata";
+  for (const id of options.itemIds) {
+    if (!/^id:[A-Za-z0-9_-]{1,200}$/.test(id))
+      return;
+    let response;
+    let text;
+    try {
+      ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ path: id })
+      }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
+    } catch {
+      return;
+    }
+    if (response.ok)
+      continue;
+    if (response.status === 409 && /"not_found"/.test(text))
+      return false;
+    return;
+  }
+  return true;
+}
 var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, ProviderAccountIdentityError;
 var init_provider_account_identity = __esm(() => {
   init_http_timeout();
@@ -6170,8 +6194,21 @@ async function completeOAuthSourceConnection(prepared, code) {
     } catch {
       firstStateBefore = undefined;
     }
+    const newRefreshRoute = registryOwnsOAuth ? `store:${refreshKey}` : undefined;
+    let refreshRoutesUnchanged = false;
+    try {
+      const before = readConnectedHandleRegistry(prepared.registryPath).handles;
+      refreshRoutesUnchanged = handleNames.every((name) => {
+        const entry = before.find((candidate) => candidate.handle === name);
+        return entry !== undefined && entry.oauth2Refresh?.refreshTokenSecretRef === newRefreshRoute;
+      });
+    } catch {
+      refreshRoutesUnchanged = false;
+    }
     let tokenWritesAttempted = 0;
     const oldGrantStillMints = async () => {
+      if (!refreshRoutesUnchanged)
+        return false;
       if (tokenWritesAttempted === 0)
         return true;
       if (tokenWritesAttempted > 1 || firstStateBefore === undefined || !prepared.oauth2StateStore)
@@ -25954,6 +25991,10 @@ var init_local_index = __esm(() => {
     }
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
+    }
+    sampleProviderItemIds(limit) {
+      const rows = this.db.query("SELECT provider_item_id FROM items WHERE tombstoned = 0 AND provider_item_id IS NOT NULL ORDER BY random() LIMIT ?").all(Math.max(0, Math.floor(limit)));
+      return rows.map((row) => row.provider_item_id);
     }
     fileReplacedOrRemoved() {
       if (!this.openedFile)
@@ -116511,6 +116552,23 @@ function createSourceAccountGuard(options) {
   const now = options.now ?? (() => new Date);
   const bindingsPath = sourceAccountBindingsPath(options.registryPath);
   const verified = new Map;
+  let lastAccessToken;
+  const reached = new Map;
+  const storedItemsOpen = async (accessToken) => {
+    const key = createHash61("sha256").update(accessToken).digest("hex");
+    const known = reached.get(key);
+    if (known !== undefined)
+      return known;
+    const answer = await options.storedItemsOpenForToken?.(accessToken).catch(() => {
+      return;
+    });
+    if (answer !== undefined) {
+      if (reached.size >= 8)
+        reached.clear();
+      reached.set(key, answer);
+    }
+    return answer;
+  };
   const tokenAccountId = async () => {
     const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
     const session = await broker.issueSession({
@@ -116522,6 +116580,7 @@ function createSourceAccountGuard(options) {
     });
     if (session.kind !== "bearer_token")
       return;
+    lastAccessToken = session.token;
     const key = createHash61("sha256").update(session.token).digest("hex");
     const known = verified.get(key);
     if (known)
@@ -116564,6 +116623,21 @@ function createSourceAccountGuard(options) {
       if (read.kind === "malformed")
         throw new SourceAccountBindingsUnreadableError(bindingsPath);
       let decision = decide(read.bindings.sources[options.sourceId]);
+      if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && options.storedItemsOpenForToken && await storedItemsOpen(lastAccessToken) === true) {
+        let bound = false;
+        updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
+          if (current?.provider_account_id)
+            return current;
+          bound = true;
+          return { provider_account_id: token, bound_at: now().toISOString() };
+        });
+        if (bound)
+          return;
+        const reread = readSourceAccountBindings(bindingsPath);
+        if (reread.kind === "malformed")
+          throw new SourceAccountBindingsUnreadableError(bindingsPath);
+        decision = decide(reread.bindings.sources[options.sourceId]);
+      }
       if (decision.action === "proceed" && decision.write === undefined)
         return;
       if (decision.action !== "refuse") {
@@ -131211,6 +131285,7 @@ async function main() {
     handles: readActiveConnectedHandles(process.env)
   }));
   const sourceAccountGuards = new Map;
+  const DROPBOX_REACH_SAMPLE = 20;
   const laneGuards = new Map;
   const laneStores = (stores, onDemand) => ({
     laneHoldsItems: () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
@@ -131231,7 +131306,8 @@ ${lane.handle}`;
         registryPath: connectedHandleRegistryPath,
         laneHoldsItems: lane.laneHoldsItems,
         laneStoresStale: lane.laneStoresStale,
-        requestStoreReopen: () => requestModelReload()
+        requestStoreReopen: () => requestModelReload(),
+        ...lane.storedItemsOpenForToken ? { storedItemsOpenForToken: lane.storedItemsOpenForToken } : {}
       });
       sourceAccountGuards.set(key, guard);
     }
@@ -131386,7 +131462,11 @@ ${lane.handle}`;
           provider: "dropbox",
           capability: "dropbox.files.sync",
           handle: currentDropboxHandle?.handle,
-          ...laneStores([dropboxConnectorStore], dropboxTierLane ? [dropboxTierLane.internal, dropboxTierLane.public] : [])
+          ...laneStores([dropboxConnectorStore], dropboxTierLane ? [dropboxTierLane.internal, dropboxTierLane.public] : []),
+          storedItemsOpenForToken: async (accessToken) => {
+            const sample = [dropboxConnectorStore, dropboxTierLane?.internal.current(), dropboxTierLane?.public.current()].flatMap((store) => store?.sampleProviderItemIds(DROPBOX_REACH_SAMPLE) ?? []).slice(0, DROPBOX_REACH_SAMPLE);
+            return sample.length > 0 ? dropboxItemsOpenForToken({ accessToken, itemIds: sample }) : undefined;
+          }
         });
       }),
       recordLane(SCHEDULER_SOURCE_IDS.readwise, !currentReadwiseHandle ? "no_handle" : !currentReadwiseConnectorStoreSync ? "no_store_sync" : undefined, () => createReadwiseSchedulerSource({
@@ -132925,6 +133005,7 @@ var init_server5 = __esm(async () => {
   init_source_scope_runtime();
   init_gmail_scope_browser();
   init_source_account_guard();
+  init_provider_account_identity();
   init_request_budget();
   init_gmail();
   init_mail_source_scope();

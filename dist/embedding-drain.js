@@ -18995,6 +18995,10 @@ var init_local_index = __esm(() => {
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
     }
+    sampleProviderItemIds(limit) {
+      const rows = this.db.query("SELECT provider_item_id FROM items WHERE tombstoned = 0 AND provider_item_id IS NOT NULL ORDER BY random() LIMIT ?").all(Math.max(0, Math.floor(limit)));
+      return rows.map((row) => row.provider_item_id);
+    }
     fileReplacedOrRemoved() {
       if (!this.openedFile)
         return false;
@@ -33982,6 +33986,7 @@ init_connected_handles();
 init_credential_broker();
 
 // src/workers/email-source/server.ts
+init_provider_account_identity();
 init_request_budget();
 init_gmail();
 init_mail_source_scope();

@@ -769,10 +769,11 @@ async function completeOAuthSourceConnection(
       // inside the same grant-custody fence.
       const registryOwnsOAuth = prepared.options.source !== 'x' || !prepared.oauth2StateStore;
       // Which writes can change the token a handle mints with: the state
-      // store's refresh token (the broker's fallback) and the refresh-token
-      // secret. The registry entries and client secrets go first and cannot;
-      // a failure among them leaves every handle minting exactly as before,
-      // so the markers go back. Once a token write is attempted the markers
+      // store's refresh token (the broker's fallback), the refresh-token
+      // secret, and a registry rewrite that moves the token's route. The
+      // registry entries (route unchanged) and client secrets go first; a
+      // failure among them leaves every handle minting exactly as before, so
+      // the markers go back. Once a token write is attempted the markers
       // stay, because a write that throws may still have landed (independent
       // review rounds 6, 7 and 11), with one provable exception: the first
       // state save failing while a fresh read shows its handle unchanged (PR
@@ -787,8 +788,25 @@ async function completeOAuthSourceConnection(
       } catch {
         firstStateBefore = undefined;
       }
+      // The registry entry names where each handle's refresh token lives; a
+      // rewrite that points it somewhere else (a legacy per-source secret
+      // replaced by the shared Google one, say) can make an existing,
+      // different grant mint without any token write (independent review
+      // round 12). Rollback needs every route to stay where it was.
+      const newRefreshRoute = registryOwnsOAuth ? `store:${refreshKey}` : undefined;
+      let refreshRoutesUnchanged = false;
+      try {
+        const before = readConnectedHandleRegistry(prepared.registryPath).handles;
+        refreshRoutesUnchanged = handleNames.every((name) => {
+          const entry = before.find((candidate) => candidate.handle === name);
+          return entry !== undefined && entry.oauth2Refresh?.refreshTokenSecretRef === newRefreshRoute;
+        });
+      } catch {
+        refreshRoutesUnchanged = false;
+      }
       let tokenWritesAttempted = 0;
       const oldGrantStillMints = async (): Promise<boolean> => {
+        if (!refreshRoutesUnchanged) return false;
         if (tokenWritesAttempted === 0) return true;
         if (tokenWritesAttempted > 1 || firstStateBefore === undefined || !prepared.oauth2StateStore) return false;
         try {
