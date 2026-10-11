@@ -3350,6 +3350,9 @@ class EnvCredentialBroker {
     }
     return this.statusFromEnvDefinition(definition, now);
   }
+  grantGeneration(handle) {
+    return this.findHandle(handle)?.grantGeneration;
+  }
   requireHandle(request) {
     const definition = this.findHandle(request.handle);
     if (!definition) {
@@ -47548,6 +47551,12 @@ function createXBookmarksApiSourceConnector(options) {
   let acquired = false;
   let completedSnapshotAt;
   let latest = emptyStatus(options.mode);
+  let grantFence;
+  const assertGrantCurrent = () => {
+    if (grantFence && broker.grantGeneration?.(credentialHandle) !== grantFence.generation) {
+      throw new XBookmarksGrantChangedError;
+    }
+  };
   const connector = {
     id: "x_bookmarks_live",
     family: "x",
@@ -47556,6 +47565,7 @@ function createXBookmarksApiSourceConnector(options) {
         return;
       if (!userId)
         throw new Error("X bookmarks connector requires OLYMPUS_SOURCE_INDEX_X_USER_ID.");
+      const generationBefore = broker.grantGeneration?.(credentialHandle);
       const session = requireBearerTokenCredentialSession(await broker.issueSession({
         handle: credentialHandle,
         provider: "x",
@@ -47563,13 +47573,17 @@ function createXBookmarksApiSourceConnector(options) {
         trustDomain: "internal",
         purpose: "Synchronize X bookmarks into the Olympus shared connector store."
       }), credentialHandle);
-      client = new XApiClient({
+      if (broker.grantGeneration) {
+        grantFence = { generation: generationBefore };
+        assertGrantCurrent();
+      }
+      client = grantFencedClient(new XApiClient({
         token: session.token,
         userId,
         ...options.fetch ? { fetch: options.fetch } : {},
         ...options.apiBaseUrl ? { baseUrl: options.apiBaseUrl } : {},
         ...options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}
-      });
+      }), assertGrantCurrent);
     },
     async probe(cursor) {
       await connector.authenticate();
@@ -47594,6 +47608,7 @@ function createXBookmarksApiSourceConnector(options) {
       if (!activeSnapshot)
         throw new Error("X bookmark connector acquisition produced no snapshot.");
       for await (const page of activeSnapshot.listItems(listOptions.limit ? { limit: listOptions.limit } : undefined)) {
+        assertGrantCurrent();
         yield {
           items: page.items,
           ...latest.checkpoint ? { nextCursor: latest.checkpoint } : {},
@@ -47604,11 +47619,14 @@ function createXBookmarksApiSourceConnector(options) {
     async fetchItem(localItemId) {
       if (!snapshot)
         throw new Error("X bookmark connector fetchItem requires listItems first.");
-      return snapshot.fetchItem(localItemId);
+      const item = await snapshot.fetchItem(localItemId);
+      assertGrantCurrent();
+      return item;
     },
     classificationSignals(item) {
       return (snapshot ?? createXBookmarksSourceConnector({ account, posts: [] })).classificationSignals(item);
     },
+    assertGrantCurrent,
     status: () => latest,
     apiUsageStatus: () => options.usageStore.status({ account, config, now: clock() }),
     async markReconciliationDisposition(disposition, outcome) {
@@ -47625,6 +47643,25 @@ function createXBookmarksApiSourceConnector(options) {
     }
   };
   return connector;
+}
+function grantFencedClient(client, assertGrantCurrent) {
+  return {
+    async fetchBookmarks(request) {
+      const page = await client.fetchBookmarks(request);
+      assertGrantCurrent();
+      return page;
+    },
+    async fetchBookmarkFolders(request) {
+      const page = await client.fetchBookmarkFolders(request);
+      assertGrantCurrent();
+      return page;
+    },
+    async fetchBookmarksInFolder(folderId, request) {
+      const page = await client.fetchBookmarksInFolder(folderId, request);
+      assertGrantCurrent();
+      return page;
+    }
+  };
 }
 async function acquireIncremental(client, checkpoint, usage, account, config, clock, provenance) {
   const previous = usage.headCheckpoint(account) || checkpoint?.trim();
@@ -48388,7 +48425,7 @@ function validDate5(value) {
     throw new TypeError("X connector attemptedAt must be valid.");
   return value;
 }
-var X_BOOKMARKS_FOLDER_PROVIDER_MAX_ATTEMPTS = 3, XBookmarksLiveSyncError, X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
+var X_BOOKMARKS_FOLDER_PROVIDER_MAX_ATTEMPTS = 3, XBookmarksLiveSyncError, XBookmarksGrantChangedError, X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
 var init_api_connector = __esm(() => {
   init_credential_broker();
   init_api2();
@@ -48411,6 +48448,13 @@ var init_api_connector = __esm(() => {
       this.warnings = options.warnings ?? [];
       this.counts = options.counts;
       this.providerStatus = options.providerStatus;
+    }
+  };
+  XBookmarksGrantChangedError = class XBookmarksGrantChangedError extends Error {
+    code = "x_bookmarks_grant_changed";
+    constructor() {
+      super("The X bookmarks credential was reconnected during this run; nothing from the previous grant was stored.");
+      this.name = "XBookmarksGrantChangedError";
     }
   };
   X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY = Object.freeze({
@@ -48777,6 +48821,7 @@ function createXBookmarksConnectorStoreSyncHandler(options) {
       });
       const probed = await connector.probe(request.checkpoint?.trim());
       if (!probed.changed) {
+        connector.assertGrantCurrent();
         if (probed.checkpoint && probed.counts.headTruncationDeferrals === 0) {
           usageStore.recordHeadCheckpoint(account, probed.checkpoint, validAttemptedAt(undefined, now));
         } else if (probed.counts.headTruncationDeferrals > 0) {
@@ -48801,6 +48846,7 @@ function createXBookmarksConnectorStoreSyncHandler(options) {
         ...request.checkpoint?.trim() ? { cursor: request.checkpoint.trim() } : {}
       });
       const status = connector.status();
+      connector.assertGrantCurrent();
       if (status.checkpoint && status.counts.headTruncationDeferrals === 0) {
         usageStore.recordHeadCheckpoint(account, status.checkpoint, validAttemptedAt(undefined, now));
       } else if (status.counts.headTruncationDeferrals > 0) {
@@ -125270,10 +125316,11 @@ async function callSetupTool(name, args, backend) {
   }
 }
 function confirmationsFor(backend) {
-  let issued = privacyConfirmations.get(backend);
+  const scope = backend.privacyConfirmationScope ?? backend;
+  let issued = privacyConfirmations.get(scope);
   if (!issued) {
     issued = new Map;
-    privacyConfirmations.set(backend, issued);
+    privacyConfirmations.set(scope, issued);
   }
   const now = Date.now();
   for (const [token, expiresAt] of issued)
@@ -130749,9 +130796,10 @@ __export(exports_dashboard_panel_tools, {
 function refused(text4, code) {
   return { content: [{ type: "text", text: text4 }], structuredContent: { error: code }, isError: true };
 }
-function computerSetup(options, context2) {
+function computerSetup(options, context2, privacyConfirmationScope) {
   return {
     ...options.setup,
+    privacyConfirmationScope,
     directSignIn: true,
     async startOAuth(source) {
       const headers = { "Content-Type": "application/json" };
@@ -130903,6 +130951,7 @@ function computerUnpairEntries(view) {
 }
 function createDashboardPanelTools(options) {
   const allowed = new Set(COMPUTER_HOST_TOOL_NAMES);
+  const privacyConfirmationScope = {};
   return {
     allows: (name) => allowed.has(name),
     async call(name, args, context2) {
@@ -130921,7 +130970,7 @@ function createDashboardPanelTools(options) {
       let view;
       const surface = {
         ...base,
-        setup: computerSetup(options, context2),
+        setup: computerSetup(options, context2, privacyConfirmationScope),
         dashboardView: async (viewSignal) => view = await base.dashboardView(viewSignal)
       };
       const result = await callChatGptTool(name, args, options.makeContext(signal), surface, signal);

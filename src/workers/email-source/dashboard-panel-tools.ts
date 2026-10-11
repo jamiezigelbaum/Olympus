@@ -93,9 +93,17 @@ function refused(text: string, code: string): ChatGptToolResult {
 }
 
 /** A Connect that starts and finishes on this computer. */
-function computerSetup(options: DashboardPanelToolsOptions, context: DashboardPanelCallContext): ChatGptSetupBackend {
+function computerSetup(
+  options: DashboardPanelToolsOptions,
+  context: DashboardPanelCallContext,
+  privacyConfirmationScope: object,
+): ChatGptSetupBackend {
   return {
     ...options.setup,
+    // A fresh wrapper per call: the privacy confirmations live on one stable
+    // scope instead, or a save could never spend the confirmation its
+    // olympus_privacy_get issued (2026-10-11: every first save failed).
+    privacyConfirmationScope,
     directSignIn: true,
     async startOAuth(source) {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -275,6 +283,7 @@ export function computerUnpairEntries(view: SourceDashboardViewModel | undefined
 
 export function createDashboardPanelTools(options: DashboardPanelToolsOptions): DashboardPanelTools {
   const allowed = new Set(COMPUTER_HOST_TOOL_NAMES);
+  const privacyConfirmationScope = {};
   return {
     allows: (name) => allowed.has(name),
     async call(name, args, context) {
@@ -289,7 +298,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       let view: SourceDashboardViewModel | undefined;
       const surface = {
         ...base,
-        setup: computerSetup(options, context),
+        setup: computerSetup(options, context, privacyConfirmationScope),
         dashboardView: async (viewSignal?: AbortSignal) => (view = await base.dashboardView(viewSignal)),
       };
       const result = await callChatGptTool(name, args, options.makeContext(signal), surface, signal);

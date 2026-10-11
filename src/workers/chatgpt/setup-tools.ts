@@ -133,6 +133,13 @@ export interface ChatGptSetupBackend {
   privacySettings(): PrivacySettings;
   /** Saves a validated update (each field given replaces the saved one); returns the settings now. */
   savePrivacy(update: { description?: string; rules?: PrivacyRuleView[] }): PrivacySettings;
+  /**
+   * Whose privacy confirmations these are. A host that wraps the backend per
+   * call (the computer's panel tools) passes one stable object, so the
+   * confirmation an olympus_privacy_get issues is still valid on the save that
+   * follows it. Absent: the backend object itself.
+   */
+  readonly privacyConfirmationScope?: object;
 }
 
 interface ToolDefinition {
@@ -506,17 +513,19 @@ export async function callSetupTool(
  * Panel confirmations for privacy changes that lower protection. One is
  * issued with every olympus_privacy_get, in its result `_meta` (which reaches
  * the widget only, never the model), lives PRIVACY_CONFIRMATION_TTL_MS and is
- * spent by the save it confirms. Per backend, so each engine has its own.
+ * spent by the save it confirms. Per backend (or its privacyConfirmationScope),
+ * so each engine has its own.
  */
 export const PRIVACY_CONFIRMATION_TTL_MS = 30 * 60_000;
 const PRIVACY_CONFIRMATIONS_MAX = 32;
-const privacyConfirmations = new WeakMap<ChatGptSetupBackend, Map<string, number>>();
+const privacyConfirmations = new WeakMap<object, Map<string, number>>();
 
 function confirmationsFor(backend: ChatGptSetupBackend): Map<string, number> {
-  let issued = privacyConfirmations.get(backend);
+  const scope = backend.privacyConfirmationScope ?? backend;
+  let issued = privacyConfirmations.get(scope);
   if (!issued) {
     issued = new Map();
-    privacyConfirmations.set(backend, issued);
+    privacyConfirmations.set(scope, issued);
   }
   const now = Date.now();
   for (const [token, expiresAt] of issued) if (expiresAt <= now) issued.delete(token);

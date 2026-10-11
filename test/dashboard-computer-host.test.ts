@@ -815,6 +815,53 @@ describe('Unpair through the panel tools', () => {
   });
 });
 
+// ---- privacy saves through the panel tools ------------------------------------
+
+describe('Privacy saves through the panel tools', () => {
+  function tools() {
+    let saved: { description: string; rules: unknown[] } | undefined;
+    const settings = () => ({
+      configured: saved !== undefined,
+      description: saved?.description ?? '',
+      rules: [],
+      pendingCount: 0,
+      revision: saved ? 'prv1.saved' : 'prv1.unset',
+    });
+    const setup = {
+      secretLocations: () => ({ folderKeys: new Set<string>(), pathPrefixes: [], labelIds: new Set<string>(), senders: [] }),
+      privacySettings: settings,
+      savePrivacy: (update: { description?: string }) => {
+        saved = { description: update.description ?? '', rules: [] };
+        return settings();
+      },
+    };
+    const panelTools = createDashboardPanelTools({
+      surface: () => ({}) as never,
+      setup: setup as never,
+      workerFetch: async () => { throw new Error('privacy never reaches the worker routes'); },
+      makeContext: () => ({}) as never,
+      indexFasterState: async () => undefined,
+    });
+    return { panelTools, saved: () => saved };
+  }
+
+  test('the confirmation one call issues is spent by the save that follows it (a fresh wrapper per call)', async () => {
+    const { panelTools, saved } = tools();
+    const got = await panelTools.call('olympus_privacy_get', {}, { origin: ORIGIN });
+    const meta = (got._meta as Record<string, any>)['olympus/privacy'];
+    expect(typeof meta.confirmation).toBe('string');
+    // Without the confirmation, a description change is still the owner's alone.
+    const refused = await panelTools.call('olympus_privacy_set', { revision: meta.revision, description: 'My health.' }, { origin: ORIGIN });
+    expect(refused.structuredContent).toEqual({ error: 'privacy_owner_only' });
+    const result = await panelTools.call('olympus_privacy_set', { revision: meta.revision, confirmation: meta.confirmation, description: 'My health.' }, { origin: ORIGIN });
+    expect(result.isError).toBeUndefined();
+    expect(saved()?.description).toBe('My health.');
+    // Spent: the same confirmation does not confirm a second change.
+    const again = await panelTools.call('olympus_privacy_set', { revision: 'prv1.saved', confirmation: meta.confirmation, description: 'Money.' }, { origin: ORIGIN });
+    expect(again.structuredContent).toEqual({ error: 'privacy_owner_only' });
+  });
+});
+
 // ---- a session that expires while the page is open ---------------------------
 
 describe('the host page when its session expires', () => {
