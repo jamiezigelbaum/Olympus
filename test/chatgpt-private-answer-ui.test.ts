@@ -168,6 +168,7 @@ interface MountOptions {
   openReply?: number | 'throw';
   heightResendMs?: number;
   initFallbackMs?: number;
+  closeEmptyMs?: number;
 }
 
 function mount(options: MountOptions = {}): Host {
@@ -181,6 +182,7 @@ function mount(options: MountOptions = {}): Host {
     noteMs: 60_000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
+    ...(options.closeEmptyMs === undefined ? {} : { closeEmptyMs: options.closeEmptyMs }),
   });
   const start = html.indexOf('<script>') + '<script>'.length;
   const script = html.slice(start, html.indexOf('</script>', start));
@@ -251,6 +253,7 @@ function mount(options: MountOptions = {}): Host {
     (win as any).openai = {
       ...options.openai,
       notifyIntrinsicHeight: (height: number) => calls.push(['notifyIntrinsicHeight', height]),
+      requestClose: () => calls.push(['requestClose', undefined]),
       setWidgetState: (args: unknown) => calls.push(['setWidgetState', args]),
       sendFollowUpMessage: (args: unknown) => calls.push(['sendFollowUpMessage', args]),
       callTool: (...args: unknown[]) => calls.push(['callTool', args]),
@@ -320,6 +323,36 @@ describe('nothing to show', () => {
     expect(host.text()).toBe('');
     await sleep(10);
     expect(host.fetched).toHaveLength(0);
+  });
+
+  // Live 2026-10-11: ChatGPT kept an empty frame about 200px tall under a
+  // reply with no Private match, despite the zero height.
+  test('a delivered result without a match asks the host to close the panel, once', async () => {
+    const host = mount({ closeEmptyMs: 10 });
+    const closes = () => host.calls.filter(([name]) => name === 'requestClose').length;
+    await sleep(30);
+    // No result yet (the host is still running the tool): nothing is closed.
+    expect(closes()).toBe(0);
+    host.push({ content: [], structuredContent: { status: 'found' }, _meta: {} });
+    await host.until(() => closes() === 1, 'requestClose');
+    host.push({ content: [], _meta: {} });
+    await sleep(30);
+    expect(closes()).toBe(1);
+    expect(host.text()).toBe('');
+  });
+
+  test('a result already in the globals without a match closes the panel', async () => {
+    const host = mount({ closeEmptyMs: 10, openai: { toolOutput: { status: 'found' }, toolResponseMetadata: {} } });
+    await host.until(() => host.calls.some(([name]) => name === 'requestClose'), 'requestClose');
+  });
+
+  test('a match delivered before the close is due keeps the panel open', async () => {
+    const host = mount({ closeEmptyMs: 40, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '30' }] });
+    host.push({ content: [], _meta: {} });
+    host.push(ready());
+    await sleep(80);
+    expect(host.calls.some(([name]) => name === 'requestClose')).toBe(false);
+    expect(host.text()).toContain(W.title);
   });
 
   test('a match that is explicitly withdrawn collapses back to zero height', async () => {

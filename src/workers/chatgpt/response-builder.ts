@@ -462,22 +462,48 @@ export const NO_SOURCES_CONNECTED_TEXT = 'No sources are connected to Olympus ye
  * question, not the conversation).
  */
 function privatePanelNote(wait: string): string {
-  return 'Some items matching this question are marked Private in Olympus. '
-    + 'Olympus is answering from them privately on the user\'s computer, in the private answer panel above, '
-    + 'visible only to the user; you can\'t see that answer. '
+  return PRIVATE_PANEL_LEAD
     + 'Keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; '
     + `it'll appear in the panel above, visible only to you (${wait}).” `
     + 'Don\'t comment on other search results unless they actually answer the question, '
     + 'and don\'t mention coverage counts, unread items or file names. '
-    + 'Don\'t suggest changing folder settings for those items. '
-    + 'Don\'t ask the user to upload, attach or paste those files: Olympus already has them. '
-    + 'Follow-up questions about them are answered privately in the panel the same way: '
-    + 'search Olympus again with the follow-up as a complete question (name the item, its date or subject), '
-    + 'and set the detail argument to full when the user asks for all the details, the full results or every value.';
+    + PRIVATE_PANEL_RULES;
 }
-export const PRIVATE_MATCH_PANEL_NOTE = privatePanelNote('it can take up to a minute');
+/**
+ * The same note when the result also carries released Public or Personal
+ * evidence that ChatGPT can read. A Private match can be weak (a keyword
+ * match on another subject) while the Personal evidence answers the
+ * question (live 2026-10-11: a budget question got a tax note in the panel
+ * and no answer from the budget note and email ChatGPT held). So the model
+ * answers from its evidence as usual and adds one short line about the
+ * panel, without presenting the panel as the answer.
+ */
+function privatePanelWithEvidenceNote(wait: string): string {
+  return PRIVATE_PANEL_LEAD
+    + 'Answer the question from the evidence above as usual, using only the items that actually answer it and citing them. '
+    + 'Then add one short line, along the lines of: “Olympus may also add a private answer in the panel above, '
+    + `visible only to you (${wait}).” `
+    + 'If none of the evidence above answers the question, say so briefly instead of guessing. '
+    + 'Don\'t mention coverage counts, unread items, or any file name other than those of the evidence you cite. '
+    + PRIVATE_PANEL_RULES;
+}
+const PRIVATE_PANEL_LEAD = 'Some items matching this question are marked Private in Olympus. '
+  + 'Olympus is answering from them privately on the user\'s computer, in the private answer panel above, '
+  + 'visible only to the user; you can\'t see that answer. ';
+const PRIVATE_PANEL_RULES = 'Don\'t suggest changing folder settings for those items. '
+  + 'Don\'t ask the user to upload, attach or paste those files: Olympus already has them. '
+  + 'Follow-up questions about them are answered privately in the panel the same way: '
+  + 'search Olympus again with the follow-up as a complete question (name the item, its date or subject), '
+  + 'and set the detail argument to full when the user asks for all the details, the full results or every value.';
+const PANEL_WAIT = 'it can take up to a minute';
+const PANEL_FULL_WAIT = 'reading the full report can take a few minutes';
+export const PRIVATE_MATCH_PANEL_NOTE = privatePanelNote(PANEL_WAIT);
 /** The same note when the panel reads the whole report (detail: full), which takes longer. */
-export const PRIVATE_MATCH_PANEL_FULL_NOTE = privatePanelNote('reading the full report can take a few minutes');
+export const PRIVATE_MATCH_PANEL_FULL_NOTE = privatePanelNote(PANEL_FULL_WAIT);
+/** The panel note when the result also carries released evidence: answer from it, one line about the panel. */
+export const PRIVATE_MATCH_PANEL_EVIDENCE_NOTE = privatePanelWithEvidenceNote(PANEL_WAIT);
+/** The same, for a full-detail panel read. */
+export const PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE = privatePanelWithEvidenceNote(PANEL_FULL_WAIT);
 /** The same bit while the panel cannot answer yet (no private model, or it is still downloading). */
 export const PRIVATE_MATCH_PANEL_SETUP_NOTE = 'Some items matching this question are marked Private in Olympus. '
   + 'Their contents stay on the user\'s computer and are never shown to you; the private answer panel above '
@@ -490,15 +516,20 @@ export const PRIVATE_MATCH_NOTE = 'Some items matching this question are marked 
 /**
  * The model-visible Private note for a result, or none: from the panel
  * summary when a panel accompanies the result, else from the released
- * coverage's count of matches whose contents are tiered Private.
+ * coverage's count of matches whose contents are tiered Private. With the
+ * panel answering, `releasedEvidence` (the result carries Public or
+ * Personal evidence with readable text, or a released answer) picks the
+ * note that has the model answer from that evidence as well.
  */
 export function privateMatchNote(
   match: (PrivateMatchSummary & { jobId?: string }) | undefined,
   contentPrivateMatches = 0,
+  releasedEvidence = false,
 ): string | undefined {
   const panel = copyPrivateMatch(match);
   if (panel) {
     if (panel.state !== 'ready') return PRIVATE_MATCH_PANEL_SETUP_NOTE;
+    if (releasedEvidence) return panel.detail === 'full' ? PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE : PRIVATE_MATCH_PANEL_EVIDENCE_NOTE;
     return panel.detail === 'full' ? PRIVATE_MATCH_PANEL_FULL_NOTE : PRIVATE_MATCH_PANEL_NOTE;
   }
   return contentPrivateMatches > 0 ? PRIVATE_MATCH_NOTE : undefined;
@@ -650,7 +681,8 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (usedPrivate) privateMatched = true;
   const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record.answer.replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER);
   const shownCitations = usedPrivate ? [] : citations;
-  const privateNote = privateMatchNote(options.privateMatch);
+  // A released answer with citations is evidence the model answers from.
+  const privateNote = privateMatchNote(options.privateMatch, 0, !usedPrivate && shownCitations.length > 0);
   const notes = privateNote ? [privateNote] : privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
   const textParts = [answer];
   if (shownCitations.length > 0) {
@@ -758,7 +790,8 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (!panelActive && nothingRead && coverage.namesOnlyItems > 0) notes.push(namesOnlyCoverageNote(coverage.namesOnlyItems));
   if (!panelActive && whole(record.withheld) > 0) notes.push(HELD_BACK_NOTE);
   if (flagged) notes.push(FLAGGED_NOTE);
-  const privateNote = privateMatchNote(options.privateMatch, whole(coverageRecord.content_private_items));
+  // Readable Public or Personal evidence: the model answers from it as well (not only "see the panel").
+  const privateNote = privateMatchNote(options.privateMatch, whole(coverageRecord.content_private_items), !nothingRead);
   if (privateNote) notes.push(privateNote);
   else if (privateMatched) notes.push(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
   const structured: SearchResult = { status: evidence.length > 0 ? 'found' : 'none', evidence, coverage, notes };

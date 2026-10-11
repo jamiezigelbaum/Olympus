@@ -28,7 +28,7 @@ import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard
 import {
   copyDashboardViewModel,
   PRIVATE_MATCH_NOTE,
-  PRIVATE_MATCH_PANEL_NOTE,
+  PRIVATE_MATCH_PANEL_EVIDENCE_NOTE,
   SEARCH_COVERAGE_INSTRUCTION,
   searchToolResult,
 } from '../src/workers/chatgpt/response-builder.ts';
@@ -211,8 +211,8 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     // note (owner decision 2026-10-02); no count, state, job, title or content.
     const visible = JSON.stringify({ content: result.content, structuredContent: result.structuredContent });
     expect(visible).toContain('Flat inventory');
-    expect(visible.split(JSON.stringify(PRIVATE_MATCH_PANEL_NOTE).slice(1, -1)).length - 1).toBe(2);
-    expect((result.structuredContent as { notes?: string[] }).notes).toContain(PRIVATE_MATCH_PANEL_NOTE);
+    expect(visible.split(JSON.stringify(PRIVATE_MATCH_PANEL_EVIDENCE_NOTE).slice(1, -1)).length - 1).toBe(2);
+    expect((result.structuredContent as { notes?: string[] }).notes).toContain(PRIVATE_MATCH_PANEL_EVIDENCE_NOTE);
     expect(visible).not.toContain(String(meta.jobId));
     expect(visible).not.toMatch(/privateMatch|panelState|"count"/);
     expect(visible).not.toContain(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
@@ -700,11 +700,11 @@ describe('content held Private is answered in the panel, not listed as name-only
       instruction: SEARCH_COVERAGE_INSTRUCTION,
     });
     // Exactly the one Private note: no held-back, Names-only or coverage sentence.
-    expect(structured.notes).toEqual([PRIVATE_MATCH_PANEL_NOTE]);
+    expect(structured.notes).toEqual([PRIVATE_MATCH_PANEL_EVIDENCE_NOTE]);
     const text = (result.content[0] as { text: string }).text;
     expect(text).toStartWith('Use this evidence only where it actually answers the question');
     expect(text).not.toMatch(/Coverage|unreadable|names only|privacy tiers|folder picker|held back|could not read/);
-    expect(text.split(PRIVATE_MATCH_PANEL_NOTE).length - 1).toBe(1);
+    expect(text.split(PRIVATE_MATCH_PANEL_EVIDENCE_NOTE).length - 1).toBe(1);
 
     // Without a panel: one terse coverage line, prefixed by when to mention it.
     const plain = (searchToolResult(raw).content[0] as { text: string }).text;

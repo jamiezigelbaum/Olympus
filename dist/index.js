@@ -10665,6 +10665,8 @@ var init_analyst = __esm(() => {
     "- First decide which items are about what the question asks (its subject, and any date or name it gives). Answer from those items only and cite each by its [number].",
     "- An item that only shares words with the question is not evidence: do not cite it.",
     '- If the evidence does not contain the answer, say so plainly and list what is missing in "unanswered". Never invent facts, names, dates, or values.',
+    "- If no item is about what the question asks, the whole answer is one short sentence saying the evidence does not answer it, with no citations. Never describe an item about something else as if it answered the question.",
+    "- State each fact once: never repeat a sentence or a line.",
     "- Copy values, units, dates, and names exactly as the evidence gives them.",
     CONFLICT_RULE,
     "- Keep the answer under six short sentences, unless the question asks for details, all results, or a full list: then give every requested value the cited items hold, one short line each.",

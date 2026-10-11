@@ -33,6 +33,8 @@ import { PRIVATE_ANSWER_META_KEY } from '../src/workers/chatgpt/private-answer-c
 import { generatePanelKeyPair, openPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import {
   PRIVATE_MATCH_NOTE,
+  PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE,
+  PRIVATE_MATCH_PANEL_EVIDENCE_NOTE,
   PRIVATE_MATCH_PANEL_FULL_NOTE,
   PRIVATE_MATCH_PANEL_NOTE,
   PRIVATE_MATCH_PANEL_SETUP_NOTE,
@@ -163,7 +165,9 @@ export function panelMeta(result: ToolResultLike): PanelMeta | undefined {
 }
 
 /** Which fixed Private note the model-visible text carries, if any. */
-export function privateNoteKind(text: string): 'panel' | 'panel_full' | 'panel_setup' | 'no_panel' | undefined {
+export function privateNoteKind(text: string): 'panel' | 'panel_full' | 'panel_evidence' | 'panel_evidence_full' | 'panel_setup' | 'no_panel' | undefined {
+  if (text.includes(PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE)) return 'panel_evidence_full';
+  if (text.includes(PRIVATE_MATCH_PANEL_EVIDENCE_NOTE)) return 'panel_evidence';
   if (text.includes(PRIVATE_MATCH_PANEL_FULL_NOTE)) return 'panel_full';
   if (text.includes(PRIVATE_MATCH_PANEL_NOTE)) return 'panel';
   if (text.includes(PRIVATE_MATCH_PANEL_SETUP_NOTE)) return 'panel_setup';

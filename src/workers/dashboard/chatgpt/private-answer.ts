@@ -3,7 +3,10 @@
  * under every Olympus search or answer result in ChatGPT.
  *
  * It renders nothing (zero height) unless the result's widget-only `_meta`
- * says Private items match (private-answer-contract.ts). Then it is one
+ * says Private items match (private-answer-contract.ts); once a result
+ * without a match has settled, it also asks the host to close it
+ * (`window.openai.requestClose`), since ChatGPT kept an empty frame about
+ * 200px tall under a reply with no Private match (live 2026-10-11). Then it is one
  * compact card that collects the answer straight from the relay as soon as it
  * renders, sealed to a key that exists only on this device, and shows it as
  * text inside the card ("Hide" folds it away; "Show" brings it back from
@@ -62,6 +65,12 @@ export interface ChatGptPrivateAnswerConfig {
   /** The handshake: re-send the height this long after initialized, and send anyway if the host never answers. */
   heightResendMs: number;
   initFallbackMs: number;
+  /**
+   * How long a delivered result without a Private match must stay that way
+   * before the panel asks the host to close it: a re-delivery carrying the
+   * match within this time keeps it open.
+   */
+  closeEmptyMs: number;
   /** Where the key pair per job id is kept across re-mounts. */
   keyStore: { database: string; store: string; maxAgeMs: number; timeoutMs: number };
 }
@@ -75,6 +84,7 @@ export interface ChatGptPrivateAnswerPageOptions {
   noteMs?: number;
   heightResendMs?: number;
   initFallbackMs?: number;
+  closeEmptyMs?: number;
   /** Tests shorten the store's timeout. */
   keyStore?: Partial<ChatGptPrivateAnswerConfig['keyStore']>;
 }
@@ -157,7 +167,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       done(message.result);
       return;
     }
-    if (message.method === 'ui/notifications/tool-result' && message.params) accept(message.params._meta);
+    if (message.method === 'ui/notifications/tool-result' && message.params) accept(message.params._meta, false, true);
     else if (message.method === 'ui/notifications/host-context-changed') hostContext(message.params);
   });
 
@@ -173,7 +183,8 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     const host = openai();
     if (!host) return;
     if (host.theme === 'light' || host.theme === 'dark') theme = host.theme;
-    if (host.toolResponseMetadata) accept(host.toolResponseMetadata, true);
+    if (host.toolResponseMetadata) accept(host.toolResponseMetadata, true, true);
+    else if (host.toolOutput !== undefined && host.toolOutput !== null) accept(undefined, true, true);
   }
   // The host announces globals often (its own layout changes included). Redraw
   // only for a new theme; a new result redraws through accept.
@@ -182,13 +193,18 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     if (!host) return;
     const before = theme;
     if (host.theme === 'light' || host.theme === 'dark') theme = host.theme;
-    if (host.toolResponseMetadata) accept(host.toolResponseMetadata);
+    if (host.toolResponseMetadata) accept(host.toolResponseMetadata, false, true);
+    else if (host.toolOutput !== undefined && host.toolOutput !== null) accept(undefined, false, true);
     if (theme !== before) render();
   });
 
   // ---- the tool result ---------------------------------------------------
-  /** Reads `_meta[metaKey]`; anything unexpected renders nothing. */
-  function accept(meta: Any, quiet?: boolean): void {
+  /**
+   * Reads `_meta[metaKey]`; anything unexpected renders nothing. `arrived`:
+   * this is a delivered tool result (not a host still waiting for one), so
+   * no match means the panel has nothing to show for it.
+   */
+  function accept(meta: Any, quiet?: boolean, arrived?: boolean): void {
     const value = meta && typeof meta === 'object' ? meta[config.metaKey] : undefined;
     // The host re-delivers results and globals while the answer loads, some
     // without our key. Absence is no news: only an explicit value replaces
@@ -211,6 +227,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     }
     const same = !!info && !!next && info.count === next.count && info.state === next.state
       && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
+    if (!info && !next && arrived) closeWhenEmpty();
     if (same || (!info && !next)) return;
     if (!next || !info || next.jobId !== info.jobId) {
       // Another result: forget everything about the last one.
@@ -224,8 +241,37 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       pair = null;
     }
     info = next;
+    if (info) keepOpen();
+    else if (arrived) closeWhenEmpty();
     if (info && info.state === 'ready' && phase === 'idle') void collect(false);
     else if (!quiet) render();
+  }
+
+  // ---- no match: close -----------------------------------------------------
+  // Zero height alone left an empty frame in ChatGPT (live 2026-10-11), so a
+  // result without a match, once settled, asks the host to close the panel.
+  // Once only; a match arriving first cancels it.
+  let closeTimer: Any = null;
+  let closeRequested = false;
+  function closeWhenEmpty(): void {
+    if (info || closeRequested || closeTimer !== null) return;
+    closeTimer = setTimeout(() => {
+      closeTimer = null;
+      if (info || closeRequested) return;
+      const host = openai();
+      if (!host || typeof host.requestClose !== 'function') return;
+      closeRequested = true;
+      try {
+        host.requestClose();
+      } catch {
+        // A host that refuses keeps the zero-height frame.
+      }
+    }, config.closeEmptyMs);
+  }
+  function keepOpen(): void {
+    if (closeTimer === null) return;
+    clearTimeout(closeTimer);
+    closeTimer = null;
   }
 
   // ---- crypto ------------------------------------------------------------
@@ -1034,6 +1080,7 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     noteMs: options.noteMs ?? 4000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
+    closeEmptyMs: options.closeEmptyMs ?? 1500,
     keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore },
   };
   return [
