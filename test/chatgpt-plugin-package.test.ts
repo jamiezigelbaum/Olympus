@@ -98,7 +98,7 @@ describe('chatgpt-plugin/mcp.json', () => {
     expect(servers[0]![1]).toEqual({
       type: 'streamable-http',
       url: 'https://mcp.olympusplugin.ai/openai/mcp',
-      extensions: { 'com.openai': { auth: { type: 'oauth', client: { mode: 'cimd' } } } },
+      extensions: { 'com.openai': { auth: { type: 'oauth' } } },
     });
   });
 });
