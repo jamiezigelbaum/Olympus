@@ -20,8 +20,8 @@
   `olympus data delete --source x.bookmarks`, and connect again. Sync now and
   bookmark text recovery pass the same check, and no X run reads with a
   credential for an account other than the one it was started for. That
-  delete now also clears the previous account's reconcile state, so the next
-  account's first full sync is not refused.
+  delete now also clears the previous account's reconcile state and sync
+  checkpoints, so the next account's first syncs start from its own bookmarks.
 - **X bookmarks stop at a reconnect too.** A bookmarks sync already running
   when X is reconnected stops at its next page and stores nothing it read
   with the previous connection; the next run uses the new one. Recovering

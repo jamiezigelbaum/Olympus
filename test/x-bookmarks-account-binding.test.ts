@@ -29,7 +29,12 @@ import {
   accountCheckedXBookmarksRuntime,
   type XBookmarksConnectorStoreRuntime,
 } from '../src/workers/email-source/server.ts';
-import { createSourceAccountGuard, SourceAccountChangedError } from '../src/workers/source-account-guard.ts';
+import {
+  createExclusiveRunner,
+  createSourceAccountGuard,
+  SourceAccountChangedError,
+  type ExclusiveRunner,
+} from '../src/workers/source-account-guard.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -218,26 +223,33 @@ describe('a failed X reconnect leaves the previous grant as it was', () => {
 });
 
 describe('the X account guard', () => {
-  function guardFor(input: { registryPath: string; readAccount: () => string | undefined; holdsItems: boolean }) {
+  function guardFor(input: {
+    registryPath: string;
+    readAccount: () => string | undefined;
+    holdsItems: boolean;
+    exclusive?: ExclusiveRunner;
+    holds?: { items: boolean };
+  }) {
     const broker: CredentialBroker = {
       async issueSession() { throw new Error('the X guard must not take a token'); },
     };
-    let holdsItems = input.holdsItems;
+    const holds = input.holds ?? { items: input.holdsItems };
     const guard = createSourceAccountGuard({
       sourceId: 'x.bookmarks',
       provider: 'x',
       handle: 'x.bookmarks.personal',
       capability: 'x.bookmarks.sync',
       registryPath: input.registryPath,
-      laneHoldsItems: () => holdsItems,
+      laneHoldsItems: () => holds.items,
       readAccountId: input.readAccount,
+      ...(input.exclusive ? { exclusive: input.exclusive } : {}),
       broker,
       fetch: async () => { throw new Error('the X guard must not call the provider'); },
     });
-    return { guard, setHoldsItems: (value: boolean) => { holdsItems = value; } };
+    return { guard, setHoldsItems: (value: boolean) => { holds.items = value; } };
   }
 
-  function writeXGrant(registryPath: string, providerAccountId: string, connectedAt = '2026-10-11T08:00:00.000Z') {
+  function writeXGrant(registryPath: string, providerAccountId: string | undefined, connectedAt = '2026-10-11T08:00:00.000Z') {
     upsertConnectedHandle({
       handle: 'x.bookmarks.personal',
       provider: 'x',
@@ -246,7 +258,7 @@ describe('the X account guard', () => {
       allowedCapabilities: ['x.bookmarks.sync'],
       scopes: ['tweet.read', 'users.read', 'bookmark.read', 'offline.access'],
       connectedAt,
-      providerAccountId,
+      ...(providerAccountId ? { providerAccountId } : {}),
     }, registryPath);
   }
 
@@ -296,6 +308,61 @@ describe('the X account guard', () => {
     expect(failure).toBeInstanceOf(SourceAccountChangedError);
     expect((failure as SourceAccountChangedError).code).toBe('source_account_token_mismatch');
     expect((failure as Error).message).toContain('set to read a different account');
+  });
+
+  test('a grant that names no account never binds the source to the configured read account', async () => {
+    // A configured user id is not evidence: adopting it would bind a legacy
+    // source's items to an account they never came from (PR #264 review, Astra).
+    const registryPath = join(tempDir(), 'handles.json');
+    writeXGrant(registryPath, undefined);
+    const { guard } = guardFor({ registryPath, readAccount: () => '2002', holdsItems: true });
+    await guard.assertAccount();
+    expect(bindingOf(registryPath)?.provider_account_id).toBeUndefined();
+  });
+
+  test("a check for the next account waits for the previous account's task to finish writing", async () => {
+    // Account A's task is admitted and writing; B is connected meanwhile. B's
+    // check must not find A's stores empty mid-write and bind B over them
+    // (PR #264 review, Astra).
+    const registryPath = join(tempDir(), 'handles.json');
+    writeXGrant(registryPath, '1001');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'x.bookmarks', () => ({
+      provider_account_id: '1001',
+      bound_at: '2026-10-11T08:00:00.000Z',
+    }));
+    const exclusive = createExclusiveRunner();
+    const holds = { items: false };
+    const a = guardFor({ registryPath, readAccount: () => '1001', holdsItems: false, exclusive, holds }).guard;
+    const b = guardFor({ registryPath, readAccount: () => '2002', holdsItems: false, exclusive, holds }).guard;
+
+    let release!: () => void;
+    const writing = new Promise<void>((resolve) => { release = resolve; });
+    const runA = a.run!(async () => {
+      await writing;
+      holds.items = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The connect for B, as connect.ts records it over a bound source.
+    writeXGrant(registryPath, '2002', '2026-10-11T09:00:00.000Z');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'x.bookmarks', (current) => ({
+      ...current,
+      reconnected_at: '2026-10-11T09:00:00.000Z',
+      purge_required: { reason: 'account_changed', detected_at: '2026-10-11T09:00:00.000Z' },
+    }));
+    let bRan = false;
+    const runB = b.run!(async () => { bRan = true; }).catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    release();
+    await runA;
+
+    const failure = await runB;
+    expect(failure).toBeInstanceOf(SourceAccountChangedError);
+    expect((failure as SourceAccountChangedError).code).toBe('source_account_changed');
+    expect(bRan).toBe(false);
+    expect(bindingOf(registryPath)).toMatchObject({
+      provider_account_id: '1001',
+      purge_required: { reason: 'account_changed' },
+    });
   });
 
   test('a lane with no read account yet waits rather than binding', async () => {

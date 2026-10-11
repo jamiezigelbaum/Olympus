@@ -347,7 +347,10 @@ import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../
 import {
   SourceAccountChangedError,
   guardAccountBoundLanes,
+  createExclusiveRunner,
   createSourceAccountGuard,
+  runGuarded,
+  type ExclusiveRunner,
   type SourceAccountGuard,
   type SourceAccountGuardOptions,
 } from '../source-account-guard.ts';
@@ -3623,6 +3626,17 @@ export async function main(): Promise<void> {
   // reads with, the connected grant and the stored items name one account.
   // Kept across scheduler rebuilds so a token is looked up once, not per pass.
   const sourceAccountGuards = new Map<string, SourceAccountGuard>();
+  // One runner per source, shared by its guards: X has one guard per runtime
+  // read account, and a task of one must not overlap a check of another.
+  const sourceExclusiveRunners = new Map<string, ExclusiveRunner>();
+  const exclusiveRunnerFor = (sourceId: string): ExclusiveRunner => {
+    let runner = sourceExclusiveRunners.get(sourceId);
+    if (!runner) {
+      runner = createExclusiveRunner();
+      sourceExclusiveRunners.set(sourceId, runner);
+    }
+    return runner;
+  };
   // The guards of the lanes being assembled, applied once every task of the
   // lane is attached: an embedding sweep or watch task appended later writes
   // the same stores and must not run past the guard (independent review
@@ -3671,7 +3685,11 @@ export async function main(): Promise<void> {
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
         ...(lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}),
-        ...(lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId } : {}),
+        // X tasks are bounded runs, so the X lane runs them one at a time
+        // (both scheduler tasks and the operator routes).
+        ...(lane.readsAs
+          ? { readAccountId: () => lane.readsAs?.accountId, exclusive: exclusiveRunnerFor(lane.sourceId) }
+          : {}),
       });
       sourceAccountGuards.set(key, guard);
     }
@@ -5512,17 +5530,13 @@ export function accountCheckedXBookmarksRuntime(
   runtime: XBookmarksConnectorStoreRuntime,
   guard: SourceAccountGuard,
 ): XBookmarksConnectorStoreRuntime {
-  const checked = async <T>(run: () => Promise<T>): Promise<T> => {
-    try {
-      await guard.assertAccount();
-    } catch (error) {
-      if (error instanceof SourceAccountChangedError) {
-        throw new EmailSourceWorkerError(409, error.code, error.message);
-      }
-      throw error;
+  const checked = <T>(run: () => Promise<T>): Promise<T> => runGuarded(guard, run).catch((error: unknown) => {
+    // Only the check throws this; a run's own errors pass through unchanged.
+    if (error instanceof SourceAccountChangedError) {
+      throw new EmailSourceWorkerError(409, error.code, error.message);
     }
-    return run();
-  };
+    throw error;
+  });
   const { sync, contentRecovery } = runtime;
   return {
     ...runtime,

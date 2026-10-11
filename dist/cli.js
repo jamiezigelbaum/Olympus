@@ -44227,6 +44227,9 @@ class LocalXBookmarksApiUsageStore {
   close() {
     closeSqliteStore(this.db);
   }
+  clearSyncState() {
+    return this.db.query("DELETE FROM x_bookmarks_live_state").run().changes;
+  }
   headCheckpoint(account) {
     const row = this.db.query(`
       SELECT head_checkpoint FROM x_bookmarks_live_state WHERE account_id = ?
@@ -118271,6 +118274,19 @@ var init_gmail_scope_browser = __esm(() => {
 
 // src/workers/source-account-guard.ts
 import { createHash as createHash61 } from "node:crypto";
+function createExclusiveRunner() {
+  let tail = Promise.resolve();
+  return (task) => {
+    const run = tail.then(task, task);
+    tail = run.catch(() => {
+      return;
+    });
+    return run;
+  };
+}
+function runGuarded(guard, task) {
+  return guard.run ? guard.run(task) : guard.assertAccount().then(task);
+}
 function createSourceAccountGuard(options) {
   const broker = options.broker ?? createEnvCredentialBroker();
   const now = options.now ?? (() => new Date);
@@ -118296,9 +118312,10 @@ ${folderIds.join(",")}`).digest("hex");
   };
   let evidenceRecordAttempted = false;
   const tokenAccountId = async () => {
-    if (options.readAccountId)
-      return options.readAccountId()?.trim() || undefined;
     const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
+    if (options.readAccountId) {
+      return handle?.providerAccountId?.trim() ? options.readAccountId()?.trim() || undefined : undefined;
+    }
     const session = await broker.issueSession({
       handle: options.handle,
       provider: options.provider,
@@ -118329,7 +118346,14 @@ ${folderIds.join(",")}`).digest("hex");
       return;
     }
   };
-  return {
+  const guard = {
+    run(task) {
+      const checked = async () => {
+        await guard.assertAccount();
+        return task();
+      };
+      return options.exclusive ? options.exclusive(checked) : checked();
+    },
     async assertAccount() {
       const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
       if (!handle) {
@@ -118405,6 +118429,7 @@ ${folderIds.join(",")}`).digest("hex");
       throw new SourceAccountChangedError("source_account_changed", `${options.sourceId} is now connected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the one its items came from"}, ` + "so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
     }
   };
+  return guard;
 }
 function guardAccountBoundLanes(sources, guards) {
   return sources.map((source) => {
@@ -118417,10 +118442,7 @@ function accountBoundSchedulerSource(input) {
     ...input.source,
     tasks: input.source.tasks.map((task) => ({
       ...task,
-      async run(context2) {
-        await input.guard.assertAccount();
-        return task.run(context2);
-      }
+      run: (context2) => runGuarded(input.guard, () => task.run(context2))
     }))
   };
 }
@@ -133024,6 +133046,15 @@ async function main() {
     handles: readActiveConnectedHandles(process.env)
   }));
   const sourceAccountGuards = new Map;
+  const sourceExclusiveRunners = new Map;
+  const exclusiveRunnerFor = (sourceId) => {
+    let runner = sourceExclusiveRunners.get(sourceId);
+    if (!runner) {
+      runner = createExclusiveRunner();
+      sourceExclusiveRunners.set(sourceId, runner);
+    }
+    return runner;
+  };
   const laneGuards = new Map;
   const laneStores = (stores, onDemand) => ({
     laneHoldsItems: () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
@@ -133047,7 +133078,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
         ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {},
-        ...lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId } : {}
+        ...lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId, exclusive: exclusiveRunnerFor(lane.sourceId) } : {}
       });
       sourceAccountGuards.set(key2, guard);
     }
@@ -134284,17 +134315,12 @@ function selectedSourceCredentialHandle(input) {
   return selection.handle;
 }
 function accountCheckedXBookmarksRuntime(runtime, guard) {
-  const checked = async (run) => {
-    try {
-      await guard.assertAccount();
-    } catch (error2) {
-      if (error2 instanceof SourceAccountChangedError) {
-        throw new EmailSourceWorkerError(409, error2.code, error2.message);
-      }
-      throw error2;
+  const checked = (run) => runGuarded(guard, run).catch((error2) => {
+    if (error2 instanceof SourceAccountChangedError) {
+      throw new EmailSourceWorkerError(409, error2.code, error2.message);
     }
-    return run();
-  };
+    throw error2;
+  });
   const { sync, contentRecovery } = runtime;
   return {
     ...runtime,
@@ -135573,6 +135599,20 @@ function lifecycleSourceSpecs() {
         defaultXBookmarksConnectorStoreDbPath(envForContext(context2)),
         defaultXBookmarksSecureConnectorStoreDbPath(envForContext(context2))
       ],
+      resetAccountState: (context2, dryRun) => {
+        const usagePath = defaultXBookmarksApiUsageDbPath(envForContext(context2));
+        if (usagePath === ":memory:" || !existsSync28(usagePath))
+          return [];
+        if (!dryRun) {
+          const usage = new LocalXBookmarksApiUsageStore(usagePath);
+          try {
+            usage.clearSyncState();
+          } finally {
+            usage.close();
+          }
+        }
+        return [usagePath];
+      },
       accountStateSqlite: (context2) => {
         const env = envForContext(context2);
         return [{
@@ -135768,6 +135808,7 @@ function deleteOlympusData(options) {
       assertDeleteTargetSafe(target);
   }
   const sourceMedia = selectedSource ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? []) : [];
+  const reset = selectedSource?.resetAccountState?.(options, options.dryRun === true) ?? [];
   for (const target of uniqueDeleteTargets) {
     if (!existsSync28(target.path)) {
       missing.push(target.path);
@@ -135785,7 +135826,8 @@ function deleteOlympusData(options) {
     ...selectedSource ? { sourceId: selectedSource.sourceId } : {},
     dryRun: options.dryRun === true,
     removed,
-    missing
+    missing,
+    ...reset.length > 0 ? { reset } : {}
   };
 }
 function deleteOlympusDataWithCustody(options) {

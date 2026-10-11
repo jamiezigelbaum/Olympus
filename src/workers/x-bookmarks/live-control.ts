@@ -439,6 +439,17 @@ export class LocalXBookmarksApiUsageStore {
     closeSqliteStore(this.db);
   }
 
+  /**
+   * Forget every account's sync position (head checkpoint, truncation
+   * deferral, reconcile watermark) and keep the API usage ledger. Rows are
+   * keyed by the account label, not the X user id, so a source deleted to
+   * connect another X account must not hand the next account the previous
+   * one's checkpoint (PR #264 review, Astra). Returns the rows removed.
+   */
+  clearSyncState(): number {
+    return this.db.query('DELETE FROM x_bookmarks_live_state').run().changes;
+  }
+
   headCheckpoint(account: string): string | undefined {
     const row = this.db.query(`
       SELECT head_checkpoint FROM x_bookmarks_live_state WHERE account_id = ?

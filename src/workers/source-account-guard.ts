@@ -76,6 +76,13 @@ export interface SourceAccountGuardOptions {
    * check costs no provider call and takes no token of its own.
    */
   readAccountId?: () => string | undefined;
+  /**
+   * Runs each guarded task alone among the source's tasks (createExclusiveRunner),
+   * shared by every guard of the source. Without it, a task admitted for one
+   * account could still be writing when a later task's check found the stores
+   * empty and bound the next account over them (PR #264 review, Astra).
+   */
+  exclusive?: ExclusiveRunner;
   broker?: CredentialBroker;
   fetch?: TimeoutFetch;
   identityEndpoints?: ProviderIdentityEndpoints;
@@ -85,6 +92,25 @@ export interface SourceAccountGuardOptions {
 
 export interface SourceAccountGuard {
   assertAccount(): Promise<void>;
+  /** The check, then the task, both inside the source's exclusive runner when it has one. */
+  run?<T>(task: () => Promise<T>): Promise<T>;
+}
+
+export type ExclusiveRunner = <T>(task: () => Promise<T>) => Promise<T>;
+
+/** One task at a time, in arrival order; a failed task does not stop the next. */
+export function createExclusiveRunner(): ExclusiveRunner {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(task: () => Promise<T>): Promise<T> => {
+    const run = tail.then(task, task);
+    tail = run.catch(() => undefined);
+    return run;
+  };
+}
+
+/** Check the account, then run the task, as the guard runs its tasks. */
+export function runGuarded<T>(guard: SourceAccountGuard, task: () => Promise<T>): Promise<T> {
+  return guard.run ? guard.run(task) : guard.assertAccount().then(task);
 }
 
 export function createSourceAccountGuard(options: SourceAccountGuardOptions): SourceAccountGuard {
@@ -111,9 +137,15 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
   let evidenceRecordAttempted = false;
 
   const tokenAccountId = async (): Promise<string | undefined> => {
-    if (options.readAccountId) return options.readAccountId()?.trim() || undefined;
     const handle = readConnectedHandleRegistry(options.registryPath).handles
       .find((entry) => entry.handle === options.handle);
+    if (options.readAccountId) {
+      // The id the lane reads as is configuration until a grant names its
+      // account: alone, an override could bind a legacy source's items to an
+      // account they never came from (PR #264 review, Astra). Against a grant
+      // that names one it is evidence, matching or not.
+      return handle?.providerAccountId?.trim() ? options.readAccountId()?.trim() || undefined : undefined;
+    }
     const session = await broker.issueSession({
       handle: options.handle,
       provider: options.provider,
@@ -142,7 +174,14 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
     }
   };
 
-  return {
+  const guard: SourceAccountGuard = {
+    run<T>(task: () => Promise<T>): Promise<T> {
+      const checked = async (): Promise<T> => {
+        await guard.assertAccount();
+        return task();
+      };
+      return options.exclusive ? options.exclusive(checked) : checked();
+    },
     async assertAccount(): Promise<void> {
       const handle = readConnectedHandleRegistry(options.registryPath).handles
         .find((entry) => entry.handle === options.handle);
@@ -263,6 +302,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
       );
     },
   };
+  return guard;
 }
 
 /** Put the account check in front of every task of a file-source lane. */
@@ -290,10 +330,7 @@ export function accountBoundSchedulerSource(input: {
     ...input.source,
     tasks: input.source.tasks.map((task) => ({
       ...task,
-      async run(context) {
-        await input.guard.assertAccount();
-        return task.run(context);
-      },
+      run: (context) => runGuarded(input.guard, () => task.run(context)),
     })),
   };
 }
