@@ -6361,7 +6361,29 @@ async function completeOAuthSourceConnection(prepared, code) {
       timeoutMs: prepared.tokenExchangeTimeoutMs
     }));
   }
+  for (const definition of prepared.definition.handles) {
+    if (!isAccountBoundProvider(definition.provider))
+      continue;
+    const replaced = replacedGrants.get(definition.handle(prepared.accountRole));
+    if (!replaced?.addressOnlyBinding)
+      continue;
+    const newAccount = fileSourceAccountIds.get(definition.provider);
+    if (newAccount && compareProviderAccounts(replaced.addressOnlyBinding, newAccount) === "same")
+      continue;
+    if (newAccount && replaced.ownAccountId)
+      continue;
+    if (replaced.ownGrantGone)
+      continue;
+    throw new Error(`Olympus could not confirm that this is the same ${definition.provider === "gmail" ? "Gmail" : "Google Drive"} account the source was filled from, because a provider lookup did not answer. ` + "No credentials were stored and nothing changed; connect again.");
+  }
   return withConnectedHandleGrantCustody(prepared.registryPath, { expectedEpoch: prepared.grantEpoch }, async () => {
+    const grantsNow = readConnectedHandleRegistry(prepared.registryPath).handles;
+    for (const [handle, replaced] of replacedGrants) {
+      const now = grantsNow.find((entry) => entry.handle === handle);
+      if (replaced && (now?.connectedAt !== replaced.grantConnectedAt || now?.providerAccountId !== replaced.recordedAccountId)) {
+        replacedGrants.set(handle, { ...replaced, ownAccountId: undefined });
+      }
+    }
     const proposedHandles = prepared.definition.handles.map((definition) => ({
       handle: definition.handle(prepared.accountRole),
       provider: definition.provider
@@ -7070,60 +7092,74 @@ async function exchangeAuthorizationCode(options) {
   };
 }
 async function identifyReplacedGrantAccount(options) {
+  let registry;
+  let existing;
+  let binding;
   try {
-    const registry = readConnectedHandleRegistry(options.registryPath);
-    const existing = registry.handles.find((entry) => entry.handle === options.handle);
+    registry = readConnectedHandleRegistry(options.registryPath);
+    existing = registry.handles.find((entry) => entry.handle === options.handle);
     if (!existing)
       return;
     const read = readSourceAccountBindings(sourceAccountBindingsPath(options.registryPath));
     if (read.kind !== "ok")
       return;
-    const binding = read.bindings.sources[accountBoundSourceIdForProvider(options.provider)];
-    if (binding?.purge_required || binding?.reconnected_at)
-      return;
-    const neverBound = !binding?.provider_account_id;
-    if (!neverBound && hasImmutableAccountLabel(binding.provider_account_id))
-      return;
-    const identify = async (broker) => {
-      try {
-        const session = await broker.issueSession({
-          handle: options.handle,
-          provider: options.provider,
-          capability: options.capability,
-          ...options.trustDomain ? { trustDomain: options.trustDomain } : {},
-          purpose: "Identify the account of the grant being replaced, so a same-account reconnect keeps the source's items."
-        });
-        if (session.kind !== "bearer_token")
-          return;
-        return await lookupConnectedAccountId({
-          provider: options.provider,
-          tokenUrl: options.tokenUrl,
-          accessToken: session.token,
-          fetchImpl: options.fetchImpl,
-          timeoutMs: options.timeoutMs
-        });
-      } catch {
-        return;
-      }
-    };
-    const brokerOptions = {
-      secretStore: options.secretStore,
-      ...options.oauth2StateStore ? { oauth2StateStore: options.oauth2StateStore } : {},
-      fetch: (url, init) => options.fetchImpl(url, init)
-    };
-    const ownAccountId = await identify(createEnvCredentialBroker({
-      ...brokerOptions,
-      handles: deriveEnvCredentialHandlesFromRegistry(registry).filter((entry) => entry.handle === options.handle)
-    }));
-    const adoptAccountId = neverBound ? ownAccountId ?? await identify(createEnvCredentialBroker({ ...brokerOptions, handleRegistryPath: options.registryPath })) : undefined;
-    return {
-      ...existing.providerAccountId ? { recordedAccountId: existing.providerAccountId } : {},
-      ...ownAccountId ? { ownAccountId } : {},
-      ...adoptAccountId ? { adoptAccountId } : {}
-    };
+    binding = read.bindings.sources[accountBoundSourceIdForProvider(options.provider)];
   } catch {
     return;
   }
+  if (binding?.purge_required || binding?.reconnected_at)
+    return;
+  const neverBound = !binding?.provider_account_id;
+  if (!neverBound && hasImmutableAccountLabel(binding.provider_account_id))
+    return;
+  const identify = async (broker) => {
+    let session;
+    try {
+      session = await broker.issueSession({
+        handle: options.handle,
+        provider: options.provider,
+        capability: options.capability,
+        ...options.trustDomain ? { trustDomain: options.trustDomain } : {},
+        purpose: "Identify the account of the grant being replaced, so a same-account reconnect keeps the source's items."
+      });
+    } catch (error) {
+      return { gone: error instanceof CredentialBrokerError && error.code === "credential_reauth_required" };
+    }
+    if (session.kind !== "bearer_token")
+      return { gone: true };
+    const id = await lookupConnectedAccountId({
+      provider: options.provider,
+      tokenUrl: options.tokenUrl,
+      accessToken: session.token,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs
+    });
+    return id ? { id } : {};
+  };
+  const brokerOptions = {
+    secretStore: options.secretStore,
+    ...options.oauth2StateStore ? { oauth2StateStore: options.oauth2StateStore } : {},
+    fetch: (url, init) => options.fetchImpl(url, init),
+    handleRegistryPath: options.registryPath
+  };
+  const base = {
+    grantConnectedAt: existing.connectedAt,
+    ...existing.providerAccountId ? { recordedAccountId: existing.providerAccountId } : {}
+  };
+  if (neverBound) {
+    const adopt = await identify(createEnvCredentialBroker(brokerOptions));
+    return { ...base, ...adopt.id ? { adoptAccountId: adopt.id } : {} };
+  }
+  const own = await identify(createEnvCredentialBroker({
+    ...brokerOptions,
+    handles: deriveEnvCredentialHandlesFromRegistry(registry).filter((entry) => entry.handle === options.handle)
+  }));
+  return {
+    ...base,
+    addressOnlyBinding: binding.provider_account_id,
+    ...own.id ? { ownAccountId: own.id } : {},
+    ...own.gone ? { ownGrantGone: true } : {}
+  };
 }
 async function lookupConnectedAccountId(options) {
   const tokenOrigin = new URL(options.tokenUrl).origin;

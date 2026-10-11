@@ -29,7 +29,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-async function dropboxServer(account: { tokenAccountId?: string; lookupAccountId?: string; refreshToken?: string }) {
+async function dropboxServer(account: { tokenAccountId?: string; lookupAccountId?: string; refreshToken?: string; lookupByToken?: Record<string, string> }) {
   const authorizeScopes: string[] = [];
   const lookups: string[] = [];
   const server = createServer((request, response) => {
@@ -52,6 +52,11 @@ async function dropboxServer(account: { tokenAccountId?: string; lookupAccountId
     }
     if (url.pathname === '/2/users/get_current_account' && request.method === 'POST') {
       lookups.push(String(request.headers.authorization));
+      const byToken = account.lookupByToken?.[String(request.headers.authorization).replace(/^Bearer /, '')];
+      if (byToken) {
+        response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ account_id: byToken }));
+        return;
+      }
       if (!account.lookupAccountId) {
         response.writeHead(401).end('{}');
         return;
@@ -518,6 +523,34 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     }
   });
 
+  test('a never-bound source adopts the account of the credential the worker synced with, environment token included (independent review round 2)', async () => {
+    const install = installDir();
+    const account: { tokenAccountId?: string; lookupByToken?: Record<string, string> } = {};
+    const server = await dropboxServer(account);
+    const envName = 'OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_ACCESS_TOKEN';
+    const before = process.env[envName];
+    try {
+      await connectDropbox(install, server.baseUrl);
+      rmSync(sourceAccountBindingsPath(install.registryPath), { force: true });
+      // The worker read with an environment token for one account while the
+      // stored grant belongs to another; the owner reconnects the stored one.
+      process.env[envName] = 'env-token-fixture';
+      account.lookupByToken = { 'env-token-fixture': 'dbid:env-account', 'dropbox-access-token-fixture': 'dbid:demo-account' };
+      account.tokenAccountId = 'dbid:demo-account';
+      const result = await connectDropbox(install, server.baseUrl);
+      expect(result.sourceAccountPurgeRequired).toEqual(['dropbox.files']);
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toMatchObject({
+        provider_account_id: 'dbid:env-account',
+        purge_required: { reason: 'account_changed' },
+      });
+    } finally {
+      if (before === undefined) delete process.env[envName];
+      else process.env[envName] = before;
+      server.close();
+    }
+  });
+
   test('the new refresh token is only ever on file under the new grant (Codex round 3)', async () => {
     const install = installDir();
     const account: { tokenAccountId?: string; refreshToken?: string } = {
@@ -744,6 +777,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     }));
     // The admin renamed the address: both the old grant's token and the new
     // grant's read the new address; only the new grant was given openid.
+    let oldGrantLookupFails = false;
     const bearer = (init: RequestInit | undefined) =>
       String(new Headers(init?.headers).get('authorization') ?? '').replace(/^Bearer /, '');
     const fetchMock = async (input: URL | RequestInfo, init?: RequestInit) => {
@@ -752,6 +786,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
         return new Response(JSON.stringify({ emailAddress: 'renamed@example.test' }), { status: 200 });
       }
       if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo) {
+        if (bearer(init) !== 'new-access' && oldGrantLookupFails) return new Response('{}', { status: 503 });
         return new Response(JSON.stringify(bearer(init) === 'new-access'
           ? { sub: '109876543210987654321', scope: 'openid https://www.googleapis.com/auth/gmail.readonly' }
           : { scope: 'https://www.googleapis.com/auth/gmail.readonly' }), { status: 200 });
@@ -764,7 +799,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
         headers: { 'Content-Type': 'application/json' },
       });
     };
-    const result = await connectOAuthSource({
+    const connect = () => connectOAuthSource({
       source: 'gmail',
       clientId: 'google-test-client',
       clientSecret: 'google-test-secret',
@@ -781,6 +816,17 @@ describe('Dropbox connect records the account its grant belongs to', () => {
         await fetch(callback);
       },
     });
+    // First the replaced grant's lookup does not answer: nothing is stored,
+    // the old grant stays in force, and nothing is marked for removal.
+    oldGrantLookupFails = true;
+    await expect(connect()).rejects.toThrow('could not confirm that this is the same Gmail account');
+    expect(await install.secretStore.get(`${handle}.oauth.refresh_token`)).toBe('gmail-old-refresh');
+    const between = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+    expect(between.kind === 'ok' ? between.bindings.sources['gmail.email'] : undefined)
+      .toEqual({ provider_account_id: googleAccountIdFromAddress('owner@example.test') });
+    // Then it answers, and the reconnect keeps the source.
+    oldGrantLookupFails = false;
+    const result = await connect();
     expect(result.sourceAccountPurgeRequired).toBeUndefined();
     const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
     expect(read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined).toEqual({
