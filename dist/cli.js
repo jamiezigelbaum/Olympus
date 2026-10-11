@@ -10731,8 +10731,7 @@ function loadConfig(env = process.env, options = {}) {
   if (engineConfig) {
     const config2 = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
     applyEnvironmentOverrides(config2, env);
-    if (options.nativeRemoteHandoff === true)
-      applyNativeRemoteHandoff(config2, env);
+    applyRemoteSource(config2, env, options);
     validateConfig(config2);
     return config2;
   }
@@ -10743,8 +10742,7 @@ function loadConfig(env = process.env, options = {}) {
     mergeConfig(config, raw);
   }
   applyEnvironmentOverrides(config, env);
-  if (options.nativeRemoteHandoff === true)
-    applyNativeRemoteHandoff(config, env);
+  applyRemoteSource(config, env, options);
   validateConfig(config);
   return config;
 }
@@ -10893,6 +10891,66 @@ function applyNativeRemoteHandoff(config, env) {
   if (!remote)
     throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
   config.remote = parseRemoteConfig(remote);
+}
+function openClawConfigPath(homeDir, env) {
+  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
+  if (explicit && isAbsolutePath(explicit))
+    return explicit;
+  const stateDir = env.OPENCLAW_STATE_DIR?.trim();
+  return join17(stateDir && isAbsolutePath(stateDir) ? stateDir : join17(homeDir, ".openclaw"), "openclaw.json");
+}
+function readOpenClawPluginRemote(env) {
+  const path = openClawConfigPath(env.HOME?.trim() || homedir14(), env);
+  if (!existsSync13(path))
+    return { hosted: false };
+  let text;
+  try {
+    text = readFileSync16(path, "utf8");
+  } catch {
+    return { hosted: true, path, unreadable: true };
+  }
+  const parsed = parseOpenClawConfigText(text);
+  if (parsed === undefined) {
+    return /["']?\bolympus\b["']?\s*:/.test(text) ? { hosted: true, path, unreadable: true } : { hosted: false };
+  }
+  const entries = asRecord4(asRecord4(asRecord4(parsed)?.plugins)?.entries);
+  const entry = entries && Object.hasOwn(entries, "olympus") ? asRecord4(entries.olympus) : undefined;
+  if (!entry || entry.enabled === false)
+    return { hosted: false };
+  return { hosted: true, path, remote: asRecord4(asRecord4(entry.config)?.remote) };
+}
+function parseOpenClawConfigText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const json5 = globalThis.Bun?.JSON5;
+    if (!json5)
+      return;
+    try {
+      return json5.parse(text);
+    } catch {
+      return;
+    }
+  }
+}
+function loadWorkerConfig(launch, env = process.env) {
+  return loadConfig(env, launch.nativeServiceSupervised === true ? { nativeRemoteHandoff: true } : { openClawPluginRemote: true });
+}
+function applyRemoteSource(config, env, options) {
+  if (options.nativeRemoteHandoff === true)
+    applyNativeRemoteHandoff(config, env);
+  else if (options.openClawPluginRemote === true)
+    applyOpenClawPluginRemote(config, env);
+}
+function applyOpenClawPluginRemote(config, env) {
+  const section = readOpenClawPluginRemote(env);
+  if (!section.hosted)
+    return;
+  if ("unreadable" in section || !section.remote) {
+    delete config.remote;
+    return;
+  }
+  config.remote = parseRemoteConfig(section.remote);
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
@@ -57087,13 +57145,6 @@ function engineSovereigntySeedBlocker(input) {
   }
   return;
 }
-function openClawConfigPath(homeDir, env) {
-  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
-  if (explicit && isAbsolute12(explicit))
-    return explicit;
-  const stateDir = env.OPENCLAW_STATE_DIR?.trim();
-  return join50(stateDir && isAbsolute12(stateDir) ? stateDir : join50(homeDir, ".openclaw"), "openclaw.json");
-}
 function openClawConfigHasOlympus(text, stateDir) {
   try {
     const parsed = JSON.parse(text);
@@ -57555,6 +57606,7 @@ var init_engine_service = __esm(() => {
   init_atomic_file();
   init_engine_children();
   init_operation_error();
+  init_config();
   init_package_root();
   init_remote_access();
   init_sovereignty();
@@ -132199,7 +132251,13 @@ async function main() {
   if (dashboardSessionSecret.source !== "file") {
     console.log(`[dashboard] control-session secret ${dashboardSessionSecret.source} at ${dashboardSessionSecret.path}${dashboardSessionSecret.source === "memory" ? " (could not be written; sessions end with this worker)" : ""}`);
   }
-  const olympusConfig = loadConfig(process.env, { nativeRemoteHandoff: workerLaunch.nativeServiceSupervised === true });
+  const olympusConfig = loadWorkerConfig(workerLaunch, process.env);
+  if (workerLaunch.nativeServiceSupervised !== true) {
+    const openClawRemote = readOpenClawPluginRemote(process.env);
+    if (openClawRemote.hosted && "unreadable" in openClawRemote) {
+      console.warn(`[remote] ${openClawRemote.path} names Olympus but could not be read; remote access and demo sign-in are off for this worker.`);
+    }
+  }
   const sourceCorpusRegistry2 = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,

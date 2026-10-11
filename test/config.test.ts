@@ -7,6 +7,7 @@ import {
   configWithEnvironmentOverrides,
   defaultConfig,
   loadConfig,
+  loadWorkerConfig,
   NATIVE_REMOTE_CONFIG_ENV,
   parseBoolean,
   parseLane,
@@ -18,8 +19,7 @@ import { resolveDemoConsent } from '../src/workers/remote-oauth/demo-consent.ts'
 describe('config', () => {
   test('a Gateway-supervised worker reads the plugin remote section, demo sign-in included', () => {
     // The worker child builds its config from its environment; before the
-    // handoff its remote section was always empty on OpenClaw hosts, so
-    // /connect/demo/authorize answered 404 on the hosted demo (2026-10-10).
+    // handoff a Gateway-launched worker's remote section was always empty.
     const remote = {
       enabled: true,
       relayHost: ' relay.example.test ',
@@ -72,6 +72,71 @@ describe('config', () => {
         { nativeRemoteHandoff: true },
       );
       expect(resolveDemoConsent(disabled.remote, () => true)).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('a worker the Gateway did not launch reads the plugin remote section from openclaw.json', () => {
+    // The olympus-demo box runs its worker as a systemd unit (`__worker-service-run`,
+    // no instance id): no handoff ever reaches it, and its demo sign-in 404'd
+    // until engine.json carried a copy (2026-10-11).
+    const home = mkdtempSync(join(tmpdir(), 'olympus-config-openclaw-remote-'));
+    try {
+      mkdirSync(join(home, '.olympus'));
+      mkdirSync(join(home, '.openclaw'));
+      const enginePath = join(home, '.olympus', 'engine.json');
+      const openclawPath = join(home, '.openclaw', 'openclaw.json');
+      const writeOpenClaw = (value: unknown) => writeFileSync(openclawPath, typeof value === 'string' ? value : JSON.stringify(value));
+      const demoRemote = {
+        enabled: true,
+        relayHost: 'relay.example.test',
+        demoConsent: { enabled: true, username: 'reviewer', passwordHash: '$argon2id$v=19$m=65536,t=2,p=1$fixture' },
+      };
+      writeFileSync(enginePath, JSON.stringify({
+        remote: { enabled: true, demoConsent: { enabled: true, username: 'stale', passwordHash: '$argon2id$stale' } },
+      }));
+      const env = { HOME: home, OLYMPUS_ENGINE_HOST: '1' };
+      const systemd = { nativeServiceSupervised: false };
+
+      writeOpenClaw({ plugins: { entries: { olympus: { enabled: true, config: { remote: demoRemote } } } } });
+      const config = loadWorkerConfig(systemd, env);
+      expect(config.remote).toEqual(demoRemote);
+      expect(resolveDemoConsent(config.remote, () => true)?.username).toBe('reviewer');
+      // The Gateway's own child still reads only its handoff, never the file.
+      expect(loadWorkerConfig({ nativeServiceSupervised: true }, env).remote).toBeUndefined();
+      // Neither does any other config caller (CLI, doctor).
+      expect(loadConfig(env).remote?.demoConsent?.username).toBe('stale');
+      // An ambient handoff variable does not reach a systemd worker either.
+      expect(loadWorkerConfig(systemd, {
+        ...env,
+        [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify({ enabled: true, demoConsent: { enabled: true, username: 'ambient' } }),
+      }).remote?.demoConsent?.username).toBe('reviewer');
+
+      // Where OpenClaw runs Olympus, its section is the only source: none means none.
+      writeOpenClaw({ plugins: { entries: { olympus: { config: { email: { enabled: true } } } } } });
+      expect(loadWorkerConfig(systemd, env).remote).toBeUndefined();
+      writeOpenClaw({ plugins: { entries: { olympus: { config: { remote: { enabled: false, demoConsent: { enabled: false } } } } } } });
+      expect(resolveDemoConsent(loadWorkerConfig(systemd, env).remote, () => true)).toBeUndefined();
+      // Hand-edited JSON5 is read too.
+      writeOpenClaw(`{ plugins: { entries: { olympus: { config: { remote: { enabled: true, demoConsent: { enabled: true, username: 'json5', passwordHash: '$argon2id$v=19$m=65536,t=2,p=1$fixture' } } } } } }, }`);
+      expect(loadWorkerConfig(systemd, env).remote?.demoConsent?.username).toBe('json5');
+      // Unreadable but naming Olympus: remote turns off rather than falling back to engine.json.
+      writeOpenClaw('{ "plugins": { "entries": { "olympus": { ');
+      expect(loadWorkerConfig(systemd, env).remote).toBeUndefined();
+
+      // Where OpenClaw does not run Olympus, engine.json stays in charge.
+      writeOpenClaw({ plugins: { entries: { olympus: { enabled: false, config: { remote: demoRemote } } } } });
+      expect(loadWorkerConfig(systemd, env).remote?.demoConsent?.username).toBe('stale');
+      writeOpenClaw({ plugins: { entries: { other: {} } } });
+      expect(loadWorkerConfig(systemd, env).remote?.demoConsent?.username).toBe('stale');
+      rmSync(openclawPath);
+      expect(loadWorkerConfig(systemd, env).remote?.demoConsent?.username).toBe('stale');
+
+      // OPENCLAW_CONFIG_PATH names the file, as for OpenClaw itself.
+      const elsewhere = join(home, 'elsewhere.json');
+      writeFileSync(elsewhere, JSON.stringify({ plugins: { entries: { olympus: { config: { remote: demoRemote } } } } }));
+      expect(loadWorkerConfig(systemd, { ...env, OPENCLAW_CONFIG_PATH: elsewhere }).remote?.demoConsent?.username).toBe('reviewer');
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

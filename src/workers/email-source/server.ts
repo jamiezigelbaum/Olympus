@@ -105,7 +105,7 @@ import {
 } from '../../core/venice-models.ts';
 import { createOpenAICompatibleAnalystModel, type OpenAIReasoningEffort } from '../../core/analyst-openai.ts';
 import { createAnalystQueryPlanner } from '../../core/query-planner.ts';
-import { defaultConfig, loadConfig, parseLane, parseModelProfile, parseOptionalBooleanEnv } from '../../core/config.ts';
+import { defaultConfig, loadConfig, loadWorkerConfig, parseLane, readOpenClawPluginRemote, parseModelProfile, parseOptionalBooleanEnv } from '../../core/config.ts';
 import { DelphiClient } from '../../core/delphi.ts';
 import {
   describeSovereigntyPolicy,
@@ -1819,8 +1819,16 @@ export async function main(): Promise<void> {
     console.log(`[dashboard] control-session secret ${dashboardSessionSecret.source} at ${dashboardSessionSecret.path}${dashboardSessionSecret.source === 'memory' ? ' (could not be written; sessions end with this worker)' : ''}`);
   }
   // A Gateway- or engine-supervised child takes `remote` from the plugin config
-  // its supervisor handed over; a foreground worker never reads that handoff.
-  const olympusConfig = loadConfig(process.env, { nativeRemoteHandoff: workerLaunch.nativeServiceSupervised === true });
+  // its supervisor handed over and never from anything else. Any other launch
+  // (a systemd or launchd worker unit, `olympus worker run`) never reads that
+  // handoff; on an OpenClaw host it reads the plugin's `remote` from openclaw.json.
+  const olympusConfig = loadWorkerConfig(workerLaunch, process.env);
+  if (workerLaunch.nativeServiceSupervised !== true) {
+    const openClawRemote = readOpenClawPluginRemote(process.env);
+    if (openClawRemote.hosted && 'unreadable' in openClawRemote) {
+      console.warn(`[remote] ${openClawRemote.path} names Olympus but could not be read; remote access and demo sign-in are off for this worker.`);
+    }
+  }
   const sourceCorpusRegistry = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,

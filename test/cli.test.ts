@@ -28,6 +28,8 @@ import {
   runWorkerForeground,
 } from '../src/cli.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
+import { loadWorkerConfig, NATIVE_REMOTE_CONFIG_ENV } from '../src/core/config.ts';
+import { resolveDemoConsent } from '../src/workers/remote-oauth/demo-consent.ts';
 import {
   DASHBOARD_LAUNCH_REDEEM_PATH,
   DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY,
@@ -42,6 +44,43 @@ import { V0_4_PUBLIC_CLI_COMMANDS } from '../src/core/public-surface.ts';
 type DashboardFetch = NonNullable<DashboardCommandDependencies['fetchImpl']>;
 
 describe('CLI tool surface', () => {
+  test('a systemd worker unit (__worker-service-run, no instance id) takes remote from openclaw.json', async () => {
+    // The olympus-demo box: OpenClaw hosts the plugin, the worker runs from
+    // olympus-worker.service, and worker.env sets OLYMPUS_ENGINE_HOST=1 beside
+    // an engine.json copy of the remote settings (the workaround, 2026-10-11).
+    const home = mkdtempSync(join(tmpdir(), 'olympus-cli-systemd-remote-'));
+    try {
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+      mkdirSync(join(home, '.olympus'));
+      mkdirSync(join(home, '.openclaw'));
+      writeFileSync(join(home, '.config', 'olympus', 'worker.env'), `OLYMPUS_ENGINE_HOST=1\n${NATIVE_REMOTE_CONFIG_ENV}={"enabled":true,"demoConsent":{"enabled":true,"username":"ambient"}}\n`, { mode: 0o600 });
+      writeFileSync(join(home, '.olympus', 'engine.json'), JSON.stringify({
+        remote: { enabled: true, demoConsent: { enabled: true, username: 'engine-copy', passwordHash: '$argon2id$copy' } },
+      }));
+      writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({
+        plugins: { entries: { olympus: { enabled: true, config: { remote: {
+          enabled: true,
+          relayHost: 'relay.example.test',
+          demoConsent: { enabled: true, username: 'reviewer', passwordHash: '$argon2id$v=19$m=65536,t=2,p=1$fixture' },
+        } } } } },
+      }));
+      const env: Record<string, string | undefined> = { HOME: home };
+      const configs: ReturnType<typeof loadWorkerConfig>[] = [];
+      await runWorkerForeground({
+        env,
+        startWorker: (launch) => { configs.push(loadWorkerConfig(launch, env)); },
+      });
+      // The real worker.env loaded (the unit's EnvironmentFile), and the plugin
+      // section won over both the engine.json copy and the ambient handoff.
+      expect(env.OLYMPUS_ENGINE_HOST).toBe('1');
+      expect(configs).toHaveLength(1);
+      expect(configs[0]!.remote?.relayHost).toBe('relay.example.test');
+      expect(resolveDemoConsent(configs[0]!.remote, () => true)?.username).toBe('reviewer');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test('native managed foreground preserves the parent-finalized environment exactly once', async () => {
     const instanceId = '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f';
     let setupLoads = 0;

@@ -16585,6 +16585,7 @@ var PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UT
 
 // src/core/engine-service.ts
 init_operation_error();
+init_config();
 init_remote_access();
 init_sovereignty();
 init_worker_auth();
