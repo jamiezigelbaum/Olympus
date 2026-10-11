@@ -36,6 +36,104 @@ export async function fetchWithTimeout(
   }
 }
 
+// Statuses whose Response may not carry a body; they are returned as received.
+const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+
+/**
+ * `fetch` with one deadline over the request AND the body, for a caller that
+ * reads the body itself (`text()`, `arrayBuffer()`) and has no byte cap to
+ * impose in this layer.
+ *
+ * The returned Response's body is relayed through a stream that fails with an
+ * `AbortError` once the deadline passes, whether the peer never answers, never
+ * sends another chunk, or ignores the abort signal: the read is raced against
+ * the deadline, and the upstream body is cancelled. A writer awaiting the body
+ * therefore always settles, which is what lets a lane that runs its tasks one
+ * at a time (source-account-guard.ts) move on to the next one (PR #267
+ * review, Astra). A body nobody reads is aborted when the deadline passes.
+ */
+export async function fetchWithBodyDeadline(
+  fetchImpl: TimeoutFetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return fetchImpl(url, init);
+  const controller = new AbortController();
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener: (() => void) | undefined;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener('abort', abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener('abort', abortFromUpstream);
+    }
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settle = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    removeUpstreamAbortListener?.();
+    removeUpstreamAbortListener = undefined;
+  };
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timer = undefined;
+      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+      error.name = 'AbortError';
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  // Rejects only into the races below or into nothing: never unhandled.
+  deadline.catch(() => undefined);
+
+  let response: Response;
+  try {
+    response = await Promise.race([fetchImpl(url, { ...init, signal: controller.signal }), deadline]);
+  } catch (error) {
+    settle();
+    throw error;
+  }
+  if (!response.body || NULL_BODY_STATUSES.has(response.status)) {
+    settle();
+    return response;
+  }
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(stream) {
+      try {
+        const { done, value } = await Promise.race([reader.read(), deadline]);
+        if (done) {
+          settle();
+          stream.close();
+          return;
+        }
+        if (value) stream.enqueue(value);
+      } catch (error) {
+        settle();
+        // Fail the reader first: an upstream whose cancel never settles must
+        // not hold the caller past its deadline (PR #267 review, Astra round 2).
+        stream.error(error);
+        reader.cancel().catch(() => undefined);
+      }
+    },
+    cancel(reason) {
+      settle();
+      controller.abort();
+      reader.cancel(reason).catch(() => undefined);
+    },
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
 export function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
@@ -147,7 +245,15 @@ export async function fetchBoundedText(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     removeUpstreamAbortListener?.();
-    if (activeReader) await releaseBodyReader(activeReader);
+    // Awaited only until the next macrotask: a cancel that settles at once has
+    // unlocked the body by then, and one that never settles must not hold the
+    // caller past its deadline (PR #267 review, Astra round 2).
+    if (activeReader) {
+      await Promise.race([
+        releaseBodyReader(activeReader),
+        new Promise<void>((resolve) => { setTimeout(resolve, 0); }),
+      ]);
+    }
   }
 }
 

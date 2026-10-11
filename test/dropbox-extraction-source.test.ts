@@ -109,6 +109,7 @@ function makeSource(options: {
   id?: string;
   corpusId?: string;
   provider?: string;
+  downloadTimeoutMs?: number;
 } = {}): DropboxExtractionSource {
   return new DropboxExtractionSource({
     id: options.id ?? 'dropbox.personal',
@@ -121,6 +122,7 @@ function makeSource(options: {
     ...(options.localRoots ? { localRoots: options.localRoots } : {}),
     fetch: options.fetch ?? neverFetch(),
     contentBaseUrl: 'https://content.example.test/2',
+    ...(options.downloadTimeoutMs !== undefined ? { downloadTimeoutMs: options.downloadTimeoutMs } : {}),
   });
 }
 
@@ -650,6 +652,22 @@ describe('Dropbox extraction source: the unreadable item', () => {
     expect(error.errorKind).toBe('network_unreachable');
     expect(error.retryable).toBe(true);
     expect(error.message).not.toContain('162.125');
+  });
+
+  test('a download whose body stalls settles as a retryable transport failure at its deadline (PR #267 review, Astra)', async () => {
+    const stalled = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])); },
+    });
+    const source = makeSource({
+      fetch: () => Promise.resolve(new Response(stalled, { status: 200 })),
+      downloadTimeoutMs: 30,
+    });
+    const error = await source.fetch(refFor(), {}).then(() => undefined, (caught: unknown) => caught) as {
+      errorKind: string;
+      retryable: boolean;
+    };
+    expect(error.errorKind).toBe('network_socket_closed');
+    expect(error.retryable).toBe(true);
   });
 
   test('no provider text, path or filename reaches the error', async () => {

@@ -11,6 +11,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   BoundedResponseTooLargeError,
   fetchBoundedText,
+  fetchWithBodyDeadline,
 } from '../src/core/http-timeout.ts';
 
 const URL_UNDER_TEST = 'https://token-endpoint.test/token';
@@ -90,5 +91,55 @@ describe('fetchBoundedText leaves no reader holding a body it abandoned', () => 
 
     expect(cancels()).toBe(1);
     expect(response.body?.locked).toBe(false);
+  });
+});
+
+describe('fetchWithBodyDeadline', () => {
+  test('a body that stalls and ignores the signal fails at the deadline and is cancelled', async () => {
+    const { response, cancels } = stalledBody();
+    const relayed = await fetchWithBodyDeadline(async () => response, URL_UNDER_TEST, {}, 30);
+    const started = Date.now();
+    const failure = await relayed.text().then(() => undefined, (error: unknown) => error);
+    expect((failure as Error).name).toBe('AbortError');
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(cancels()).toBe(1);
+  });
+
+  test('headers that never arrive fail at the deadline', async () => {
+    const failure = await fetchWithBodyDeadline(() => new Promise<Response>(() => undefined), URL_UNDER_TEST, {}, 30)
+      .then(() => undefined, (error: unknown) => error);
+    expect((failure as Error).name).toBe('AbortError');
+  });
+
+  test('a body that finishes in time arrives whole, with its status and headers', async () => {
+    const relayed = await fetchWithBodyDeadline(
+      async () => new Response('{"entries":[]}', { status: 409, headers: { 'content-type': 'application/json' } }),
+      URL_UNDER_TEST,
+      {},
+      1_000,
+    );
+    expect(relayed.status).toBe(409);
+    expect(relayed.headers.get('content-type')).toBe('application/json');
+    expect(await relayed.text()).toBe('{"entries":[]}');
+  });
+});
+
+describe('a stalled body whose cancel never settles still fails at the deadline (PR #267 review, Astra round 2)', () => {
+  function hungCancelBody(): Response {
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('{"access_token":"')); },
+      cancel() { return new Promise<void>(() => undefined); },
+    }), { status: 200 });
+  }
+
+  test('fetchWithBodyDeadline', async () => {
+    const relayed = await fetchWithBodyDeadline(async () => hungCancelBody(), URL_UNDER_TEST, {}, 30);
+    const failure = await relayed.text().then(() => undefined, (error: unknown) => error);
+    expect((failure as Error).name).toBe('AbortError');
+  });
+
+  test('fetchBoundedText', async () => {
+    await expect(fetchBoundedText(async () => hungCancelBody(), URL_UNDER_TEST, {}, { timeoutMs: 30 }))
+      .rejects.toThrow(/deadline/);
   });
 });

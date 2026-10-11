@@ -347,10 +347,8 @@ import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../
 import {
   SourceAccountChangedError,
   guardAccountBoundLanes,
-  createExclusiveRunner,
   createSourceAccountGuard,
   runGuarded,
-  type ExclusiveRunner,
   type SourceAccountGuard,
   type SourceAccountGuardOptions,
 } from '../source-account-guard.ts';
@@ -3634,17 +3632,6 @@ export async function main(): Promise<void> {
   // reads with, the connected grant and the stored items name one account.
   // Kept across scheduler rebuilds so a token is looked up once, not per pass.
   const sourceAccountGuards = new Map<string, SourceAccountGuard>();
-  // One runner per source, shared by its guards: X has one guard per runtime
-  // read account, and a task of one must not overlap a check of another.
-  const sourceExclusiveRunners = new Map<string, ExclusiveRunner>();
-  const exclusiveRunnerFor = (sourceId: string): ExclusiveRunner => {
-    let runner = sourceExclusiveRunners.get(sourceId);
-    if (!runner) {
-      runner = createExclusiveRunner();
-      sourceExclusiveRunners.set(sourceId, runner);
-    }
-    return runner;
-  };
   // The guards of the lanes being assembled, applied once every task of the
   // lane is attached: an embedding sweep or watch task appended later writes
   // the same stores and must not run past the guard (independent review
@@ -3693,11 +3680,10 @@ export async function main(): Promise<void> {
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
         ...(lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}),
-        // X tasks are bounded runs, so the X lane runs them one at a time
-        // (both scheduler tasks and the operator routes).
-        ...(lane.readsAs
-          ? { readAccountId: () => lane.readsAs?.accountId, exclusive: exclusiveRunnerFor(lane.sourceId) }
-          : {}),
+        // Every guard of a source runs its tasks one at a time (scheduler
+        // tasks, the Dropbox dashboard hook and the X operator routes alike):
+        // the guard shares one runner per source by itself.
+        ...(lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId } : {}),
       });
       sourceAccountGuards.set(key, guard);
     }

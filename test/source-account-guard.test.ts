@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   readSourceAccountBindings,
+  recordFileSourceConnect,
   sourceAccountBindingsPath,
   updateSourceAccountBinding,
 } from '../src/core/source-account-binding.ts';
@@ -20,6 +21,7 @@ import {
   SourceAccountChangedError,
 } from '../src/workers/source-account-guard.ts';
 import { withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { DropboxApiMetadataClient } from '../src/workers/dropbox-files/provider-client.ts';
 import { readFileSync } from 'node:fs';
 import {
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS,
@@ -56,6 +58,8 @@ function harness(input: {
   registryPath: string;
   tokenAccount: string;
   holdsItems?: boolean;
+  /** Shared between harnesses: the stores two lanes of one source both write. */
+  holds?: { items: boolean };
   identityStatus?: number;
   storesStale?: boolean;
   restarts?: boolean;
@@ -93,7 +97,7 @@ function harness(input: {
     handle: 'dropbox.personal',
     capability: 'dropbox.files.sync',
     registryPath: input.registryPath,
-    laneHoldsItems: () => input.holdsItems ?? true,
+    laneHoldsItems: () => input.holds ? input.holds.items : input.holdsItems ?? true,
     laneStoresStale: () => input.storesStale ?? false,
     requestStoreReopen: () => { reopenRequests += 1; return input.restarts ?? false; },
     ...(input.evidence
@@ -206,6 +210,94 @@ describe('the account guard', () => {
     expect((error as SourceAccountChangedError).code).toBe('source_account_unverified');
     expect(ran).toBe(0);
     expect(binding(registryPath)).toEqual(before);
+  });
+
+  test("a check for the next account waits for the previous account's run to finish writing", async () => {
+    // The Dropbox dashboard hook (no scheduler lane for Dropbox: scheduler
+    // disabled, or Dropbox outside its allowlist) runs a freshly built lane's
+    // tasks directly, so a Sync now and a post-connect sync can overlap. A's
+    // run is admitted and still listing when B is connected and B's run is
+    // checked: with the stores still empty, B would bind over A's coming items.
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:A');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({
+      provider_account_id: 'dbid:A',
+      bound_at: '2026-10-10T22:00:00.000Z',
+    }));
+    const holds = { items: false };
+    const laneOf = (guard: ReturnType<typeof harness>['guard'], run: () => Promise<void>) => accountBoundSchedulerSource({
+      guard,
+      source: {
+        sourceId: 'dropbox.files',
+        corpusId: 'dropbox.files.secure',
+        cadence: 'continuous',
+        intervalMs: 60_000,
+        freshnessThresholdHours: 1,
+        tasks: [{
+          id: 'dropbox.files_store_pull.x',
+          kind: 'sync',
+          writer: true,
+          run: async () => { await run(); return { status: 'progress' }; },
+        }],
+      },
+    }).tasks[0]!;
+
+    let admitted!: () => void;
+    const listing = new Promise<void>((resolve) => { admitted = resolve; });
+    let release!: () => void;
+    const pageFetched = new Promise<void>((resolve) => { release = resolve; });
+    const runA = laneOf(harness({ registryPath, tokenAccount: 'dbid:A', holds }).guard, async () => {
+      admitted();
+      await pageFetched;
+      holds.items = true;
+    }).run();
+    await listing;
+
+    // B is connected, as connect.ts records it over a bound source.
+    writeGrant(registryPath, 'dbid:B', '2026-10-10T22:44:00.000Z');
+    expect(recordFileSourceConnect({
+      registryPath,
+      provider: 'dropbox',
+      providerAccountId: 'dbid:B',
+      now: new Date('2026-10-10T22:44:00.000Z'),
+    })).toBe('purge_required');
+    let bRan = false;
+    const b = harness({ registryPath, tokenAccount: 'dbid:B', holds });
+    const runB = laneOf(b.guard, async () => { bRan = true; })
+      .run()
+      .catch((error: unknown) => error);
+    // Unserialized, B's check takes a token at once and decides on it; queued,
+    // it has not asked for one while A is still writing.
+    for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(b.issued).toHaveLength(0);
+    expect(binding(registryPath)).toMatchObject({ provider_account_id: 'dbid:A', purge_required: { reason: 'account_changed' } });
+    release();
+    await runA;
+
+    const failure = await runB;
+    expect(failure).toBeInstanceOf(SourceAccountChangedError);
+    expect((failure as SourceAccountChangedError).code).toBe('source_account_changed');
+    expect(bRan).toBe(false);
+    expect(binding(registryPath)).toMatchObject({ provider_account_id: 'dbid:A', purge_required: { reason: 'account_changed' } });
+  });
+
+  test('a Dropbox read that stalls ends at its deadline, so the next queued run proceeds (PR #267 review, Astra)', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:A');
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:A' });
+    // Headers, then a body that never finishes and ignores the abort signal.
+    const client = new DropboxApiMetadataClient({
+      token: 'token-of-dbid:A',
+      requestTimeoutMs: 30,
+      fetch: async () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode('{"entries":[')); },
+      }), { status: 200 }),
+    });
+    const stalled = guard.run!(() => client.listFolder({ path: '', recursive: true, limit: 100 }))
+      .then(() => undefined, (error: unknown) => error);
+    const next = guard.run!(async () => 'ran');
+    expect(((await stalled) as Error).name).toBe('AbortError');
+    expect(await next).toBe('ran');
   });
 
   test('an embedding sweep appended to a lane is guarded with it (independent review round 10)', async () => {

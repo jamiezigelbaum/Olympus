@@ -442,6 +442,8 @@ export interface EnvCredentialBrokerOptions {
   fetch?: CredentialBrokerFetch;
   oauth2StateStore?: CredentialOAuth2StateStore;
   oauth2RefreshFailureBackoffMs?: number;
+  /** A direct provider refresh, request and body; defaults to OAUTH2_DIRECT_REFRESH_TIMEOUT_MS. */
+  oauth2RefreshTimeoutMs?: number;
   oauth2CacheNamespace?: string;
   oauth2LeaseOptions?: FileLeaseOptions;
   backendStates?: Record<string, unknown>;
@@ -1113,6 +1115,7 @@ export class EnvCredentialBroker implements CredentialBroker {
   private readonly fetchImpl: CredentialBrokerFetch;
   private readonly oauth2StateStore: CredentialOAuth2StateStore | undefined;
   private readonly oauth2RefreshFailureBackoffMs: number;
+  private readonly oauth2RefreshTimeoutMs: number;
   private readonly oauth2CacheNamespace: string;
   private readonly oauth2LeaseOptions: FileLeaseOptions;
   private readonly backendStateStore: CredentialSessionBackendStateStore | undefined;
@@ -1131,6 +1134,7 @@ export class EnvCredentialBroker implements CredentialBroker {
     this.fetchImpl = options.fetch ?? fetch;
     this.oauth2StateStore = options.oauth2StateStore ?? credentialOAuth2StateStoreFromEnv(this.env);
     this.oauth2RefreshFailureBackoffMs = Math.max(0, options.oauth2RefreshFailureBackoffMs ?? 30_000);
+    this.oauth2RefreshTimeoutMs = options.oauth2RefreshTimeoutMs ?? OAUTH2_DIRECT_REFRESH_TIMEOUT_MS;
     this.oauth2CacheNamespace = options.oauth2CacheNamespace?.trim()
       || this.env.OLYMPUS_CREDENTIAL_BROKER_CACHE_NAMESPACE?.trim()
       || 'runtime';
@@ -1397,6 +1401,7 @@ export class EnvCredentialBroker implements CredentialBroker {
         clientSecret,
         refreshToken,
         fetchImpl: this.fetchImpl,
+        timeoutMs: this.oauth2RefreshTimeoutMs,
         ...(exchangeVia ? { exchangeVia } : {}),
       });
     } catch (error) {
@@ -2328,6 +2333,17 @@ function sessionKindFromDefinition(
 /** Bounded so a stalled publisher endpoint cannot hang a refresh indefinitely. */
 const GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20_000;
 
+/**
+ * A direct provider refresh, request and body. Token endpoints answer in well
+ * under a second; this only ends a stalled one. It is not optional because a
+ * source's guarded tasks run one at a time and mint inside that turn
+ * (source-account-guard.ts), so a refresh that never finished held every later
+ * task of the source behind it (PR #267 review, Astra round 2). A refresh that
+ * times out leaves its marker standing, as any unanswered refresh does: the
+ * provider may have rotated the token before the answer was lost.
+ */
+const OAUTH2_DIRECT_REFRESH_TIMEOUT_MS = 60_000;
+
 /** A token response is a small JSON object on every provider Olympus talks to. */
 const OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
@@ -2365,6 +2381,8 @@ async function refreshOAuth2AccessToken(options: {
   clientSecret: string | undefined;
   refreshToken: string;
   fetchImpl: CredentialBrokerFetch;
+  /** The direct lane's deadline, request and body (OAUTH2_DIRECT_REFRESH_TIMEOUT_MS). */
+  timeoutMs: number;
   /**
    * Where this refresh goes, decided by the caller.
    *
@@ -2415,16 +2433,22 @@ async function refreshOAuth2AccessToken(options: {
     } else {
       body.set('client_id', options.clientId);
     }
-    // No deadline here: the direct-provider lane's timeout behaviour is
-    // unchanged. The byte cap is not a deadline and applies to every lane —
+    // Headers and body under one deadline, and the byte cap every lane has:
     // no token endpoint has an honest answer measured in megabytes.
     try {
       ({ response, text } = await fetchBoundedText(options.fetchImpl, options.tokenUrl, {
         method: 'POST',
         headers,
         body,
-      }, { limitBytes: OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES }));
+      }, { timeoutMs: options.timeoutMs, limitBytes: OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES }));
     } catch (error) {
+      if (isAbortError(error)) {
+        throw new OAuth2TokenEndpointError({
+          status: 504,
+          providerError: 'upstream_timeout',
+          safeDetail: `token endpoint timed out after ${options.timeoutMs}ms`,
+        });
+      }
       if (!isBoundedResponseTooLargeError(error)) throw error;
       throw new OAuth2TokenEndpointError({
         status: 502,

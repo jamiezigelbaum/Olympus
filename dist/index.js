@@ -3993,8 +3993,14 @@ async function fetchBoundedText(fetchImpl, url, init, options = {}) {
     if (timer !== undefined)
       clearTimeout(timer);
     removeUpstreamAbortListener?.();
-    if (activeReader)
-      await releaseBodyReader(activeReader);
+    if (activeReader) {
+      await Promise.race([
+        releaseBodyReader(activeReader),
+        new Promise((resolve3) => {
+          setTimeout(resolve3, 0);
+        })
+      ]);
+    }
   }
 }
 async function releaseBodyReader(reader) {
@@ -4043,8 +4049,9 @@ async function readBoundedText(response, limitBytes, controller, onReader) {
     await releaseBodyReader(reader);
   }
 }
-var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
+var NULL_BODY_STATUSES, DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
 var init_http_timeout = __esm(() => {
+  NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
   DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
   BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
     limitBytes;
@@ -5380,6 +5387,7 @@ class EnvCredentialBroker {
   fetchImpl;
   oauth2StateStore;
   oauth2RefreshFailureBackoffMs;
+  oauth2RefreshTimeoutMs;
   oauth2CacheNamespace;
   oauth2LeaseOptions;
   backendStateStore;
@@ -5394,6 +5402,7 @@ class EnvCredentialBroker {
     this.fetchImpl = options.fetch ?? fetch;
     this.oauth2StateStore = options.oauth2StateStore ?? credentialOAuth2StateStoreFromEnv(this.env);
     this.oauth2RefreshFailureBackoffMs = Math.max(0, options.oauth2RefreshFailureBackoffMs ?? 30000);
+    this.oauth2RefreshTimeoutMs = options.oauth2RefreshTimeoutMs ?? OAUTH2_DIRECT_REFRESH_TIMEOUT_MS;
     this.oauth2CacheNamespace = options.oauth2CacheNamespace?.trim() || this.env.OLYMPUS_CREDENTIAL_BROKER_CACHE_NAMESPACE?.trim() || "runtime";
     this.oauth2LeaseOptions = options.oauth2LeaseOptions ?? {};
     this.backendStateStore = options.backendStateStore ?? (options.backendStates ? new StaticCredentialSessionBackendStateStore(options.backendStates) : undefined) ?? backendStateStoreFromEnv(this.env);
@@ -5537,6 +5546,7 @@ class EnvCredentialBroker {
         clientSecret,
         refreshToken,
         fetchImpl: this.fetchImpl,
+        timeoutMs: this.oauth2RefreshTimeoutMs,
         ...exchangeVia ? { exchangeVia } : {}
       });
     } catch (error) {
@@ -6115,8 +6125,15 @@ async function refreshOAuth2AccessToken(options) {
         method: "POST",
         headers,
         body
-      }, { limitBytes: OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES }));
+      }, { timeoutMs: options.timeoutMs, limitBytes: OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES }));
     } catch (error) {
+      if (isAbortError2(error)) {
+        throw new OAuth2TokenEndpointError({
+          status: 504,
+          providerError: "upstream_timeout",
+          safeDetail: `token endpoint timed out after ${options.timeoutMs}ms`
+        });
+      }
       if (!isBoundedResponseTooLargeError(error))
         throw error;
       throw new OAuth2TokenEndpointError({
@@ -6551,7 +6568,7 @@ function uniqueStrings(values) {
 function isNodeError(error) {
   return !!error && typeof error === "object" && "code" in error;
 }
-var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20000, OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
+var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20000, OAUTH2_DIRECT_REFRESH_TIMEOUT_MS = 60000, OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
 var init_credential_broker = __esm(() => {
   init_atomic_file();
   init_file_lease();
@@ -11149,7 +11166,11 @@ var init_x_bookmarks = __esm(() => {
   init_reconcile_state();
 });
 // src/workers/dropbox-files/provider-client.ts
-var init_provider_client = () => {};
+var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
+var init_provider_client = __esm(() => {
+  init_http_timeout();
+  DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
+});
 
 // src/workers/dropbox-files/connector.ts
 var init_connector3 = __esm(() => {

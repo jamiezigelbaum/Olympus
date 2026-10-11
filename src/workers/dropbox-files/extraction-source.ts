@@ -30,6 +30,8 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { computeDropboxContentHash } from './dropbox-content-hash.ts';
+import { DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS } from './provider-client.ts';
+import { fetchWithBodyDeadline, isAbortError } from '../../core/http-timeout.ts';
 import {
   FileExtractionSourceError,
   splitScopedLocalItemId,
@@ -112,7 +114,7 @@ export interface DropboxItemLocatorReader {
 
 export type DropboxExtractionFetch = (
   url: string,
-  init: { method: string; headers: Record<string, string> },
+  init: { method: string; headers: Record<string, string>; signal?: AbortSignal },
 ) => Promise<Response>;
 
 export interface DropboxExtractionSourceOptions {
@@ -131,6 +133,8 @@ export interface DropboxExtractionSourceOptions {
   localRoots?: readonly DropboxExtractionLocalRootConfig[];
   fetch?: DropboxExtractionFetch;
   contentBaseUrl?: string;
+  /** Per download, body included (PR #267 review, Astra). */
+  downloadTimeoutMs?: number;
 }
 
 export class DropboxExtractionSource implements FileExtractionSource {
@@ -145,6 +149,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
   private readonly localRoots: readonly DropboxExtractionLocalRootConfig[];
   private readonly fetchImpl: DropboxExtractionFetch;
   private readonly contentBaseUrl: string;
+  private readonly downloadTimeoutMs: number;
   private readonly canonicalRootCache = new Map<string, Promise<string | undefined>>();
 
   constructor(options: DropboxExtractionSourceOptions) {
@@ -160,6 +165,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
       .filter((root): root is DropboxExtractionLocalRootConfig => Boolean(root));
     this.fetchImpl = options.fetch ?? ((url, init) => fetch(url, init));
     this.contentBaseUrl = options.contentBaseUrl?.replace(/\/+$/, '') || DROPBOX_CONTENT_BASE_URL;
+    this.downloadTimeoutMs = options.downloadTimeoutMs ?? DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
   }
 
   /**
@@ -338,13 +344,18 @@ export class DropboxExtractionSource implements FileExtractionSource {
   ): Promise<FetchedBytes> {
     let response: Response;
     try {
-      response = await this.fetchImpl(`${this.contentBaseUrl}/files/download`, {
+      // The deadline adds only its abort signal to the init built here.
+      const fetchImpl = (url: string, init: RequestInit) => this.fetchImpl(
+        url,
+        init as Parameters<DropboxExtractionFetch>[1],
+      );
+      response = await fetchWithBodyDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${this.token}`,
           'Dropbox-API-Arg': JSON.stringify(dropboxDownloadArg(ref)),
         },
-      });
+      }, this.downloadTimeoutMs);
     } catch {
       // The transport never reached Dropbox, so this says nothing about the
       // item. Spelled as the job store spells it, so the janitor's network
@@ -361,7 +372,15 @@ export class DropboxExtractionSource implements FileExtractionSource {
     if (maxBytes !== undefined && declaredSize !== undefined && declaredSize > maxBytes) {
       throw new FileExtractionSourceError('source_too_large');
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      // A body that stalled past its deadline says nothing about the item:
+      // the transport kind the janitor requeues.
+      if (isAbortError(error)) throw new FileExtractionSourceError('network_socket_closed');
+      throw error;
+    }
     if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
       throw new FileExtractionSourceError('source_too_large');
     }
