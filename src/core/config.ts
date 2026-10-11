@@ -349,7 +349,7 @@ export function defaultConfig(): OlympusConfig {
 
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
-  options: { nativeRemoteHandoff?: boolean } = {},
+  options: { nativeRemoteHandoff?: boolean; openClawPluginRemote?: boolean } = {},
 ): OlympusConfig {
   // On a Mac running the standalone engine, its engine.json is the config:
   // a leftover ~/.olympus/config.json from an older setup (pointing at a
@@ -358,7 +358,7 @@ export function loadConfig(
   if (engineConfig) {
     const config = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
     applyEnvironmentOverrides(config, env);
-    if (options.nativeRemoteHandoff === true) applyNativeRemoteHandoff(config, env);
+    applyRemoteSource(config, env, options);
     validateConfig(config);
     return config;
   }
@@ -371,7 +371,7 @@ export function loadConfig(
   }
 
   applyEnvironmentOverrides(config, env);
-  if (options.nativeRemoteHandoff === true) applyNativeRemoteHandoff(config, env);
+  applyRemoteSource(config, env, options);
 
   validateConfig(config);
   return config;
@@ -563,8 +563,9 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
  * The Gateway hands the plugin's `remote` section to the worker it supervises
  * through this variable (core/native-worker-service.ts): the worker child
  * builds its config from its environment, and without it a remote setting in
- * openclaw.json never reached the worker (demo sign-in 404 on a hosted demo,
- * 2026-10-10). Read only by `loadConfig(env, { nativeRemoteHandoff: true })`,
+ * openclaw.json never reached a Gateway-launched worker. (The hosted demo's
+ * 404 of 2026-10-10 was a systemd worker, which this handoff never reaches:
+ * applyOpenClawPluginRemote covers that launch.) Read only by `loadConfig(env, { nativeRemoteHandoff: true })`,
  * which the worker passes after its entry point validated a native-service
  * launch (cli.ts runWorkerForeground) — never from an ambient variable, so a
  * worker.env or a foreground worker cannot switch on remote access or demo
@@ -592,6 +593,123 @@ function applyNativeRemoteHandoff(config: OlympusConfig, env: Record<string, str
   const remote = asRecord(parsed);
   if (!remote) throw new OperationError('config_error', `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
   config.remote = parseRemoteConfig(remote);
+}
+
+/** Where OpenClaw keeps its config: OPENCLAW_CONFIG_PATH, else the state folder's openclaw.json. */
+export function openClawConfigPath(homeDir: string, env: Record<string, string | undefined>): string {
+  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
+  if (explicit && isAbsolutePath(explicit)) return explicit;
+  const stateDir = env.OPENCLAW_STATE_DIR?.trim();
+  return join(stateDir && isAbsolutePath(stateDir) ? stateDir : join(homeDir, '.openclaw'), 'openclaw.json');
+}
+
+/**
+ * What openclaw.json says about the Olympus plugin's `remote` section, for a
+ * worker the Gateway did not launch (a systemd or launchd worker unit, or
+ * `olympus worker run`). Such a worker gets no handoff from the Gateway, so it
+ * reads the section from the file the Gateway reads.
+ *
+ * - `hosted: false`: no openclaw.json, no `olympus` entry, or the entry is
+ *   disabled. OpenClaw does not run Olympus here and has nothing to say.
+ * - `hosted: true` with `remote`: the section as written (undefined when the
+ *   entry has no `remote`).
+ * - `hosted: true` with `unreadable`: the file exists but could not be read or
+ *   parsed, so its remote settings are unknown.
+ *
+ * Values are read as written. OpenClaw resolves SecretRefs, `${VAR}`
+ * substitution and `$include` before the Gateway hands config to its own
+ * services; this reader does none of that, so a value written that way does
+ * not resolve to a usable setting here.
+ */
+export type OpenClawPluginRemote =
+  | { hosted: false }
+  | { hosted: true; path: string; remote: Record<string, unknown> | undefined }
+  | { hosted: true; path: string; unreadable: true };
+
+export function readOpenClawPluginRemote(env: Record<string, string | undefined>): OpenClawPluginRemote {
+  const path = openClawConfigPath(env.HOME?.trim() || homedir(), env);
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    // Only a file that is not there says nothing. One that cannot be read may
+    // hold a remote section, and falling back to engine.json then could bring
+    // back demo credentials openclaw.json has since turned off.
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { hosted: false };
+    return { hosted: true, path, unreadable: true };
+  }
+  const parsed = parseOpenClawConfigText(text);
+  // Unparseable for the same reason: a truncated file may have lost the very
+  // entry that disabled demo sign-in.
+  if (parsed === undefined) return { hosted: true, path, unreadable: true };
+  const entries = asRecord(asRecord(asRecord(parsed)?.plugins)?.entries);
+  const entry = entries && Object.hasOwn(entries, 'olympus') ? asRecord(entries.olympus) : undefined;
+  if (!entry || entry.enabled === false) return { hosted: false };
+  return { hosted: true, path, remote: asRecord(asRecord(entry.config)?.remote) };
+}
+
+/** openclaw.json is JSON as OpenClaw writes it, and may be JSON5 when edited by hand. */
+function parseOpenClawConfigText(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // The worker runs on Bun, which parses JSON5; elsewhere strict JSON is all there is.
+    const json5 = (globalThis as { Bun?: { JSON5?: { parse(text: string): unknown } } }).Bun?.JSON5;
+    if (!json5) return undefined;
+    try {
+      return json5.parse(text);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * The worker's own config, for the launch cli.ts runWorkerForeground validated
+ * (workers/email-source/server.ts main): the Gateway's child reads `remote`
+ * from the handoff only, any other launch from openclaw.json where OpenClaw
+ * runs Olympus.
+ */
+export function loadWorkerConfig(
+  launch: { nativeServiceSupervised?: boolean },
+  env: Record<string, string | undefined> = process.env,
+): OlympusConfig {
+  return loadConfig(env, launch.nativeServiceSupervised === true ? { nativeRemoteHandoff: true } : { openClawPluginRemote: true });
+}
+
+/**
+ * Where a worker takes `remote` from. The Gateway's validated child takes the
+ * handoff; any other worker on an OpenClaw host (a systemd or launchd unit,
+ * `olympus worker run`) reads the plugin's section from openclaw.json itself.
+ */
+function applyRemoteSource(
+  config: OlympusConfig,
+  env: Record<string, string | undefined>,
+  options: { nativeRemoteHandoff?: boolean; openClawPluginRemote?: boolean },
+): void {
+  if (options.nativeRemoteHandoff === true) applyNativeRemoteHandoff(config, env);
+  else if (options.openClawPluginRemote === true) applyOpenClawPluginRemote(config, env);
+}
+
+/**
+ * A worker the Gateway did not launch gets no handoff, so on an OpenClaw host
+ * it reads `plugins.entries.olympus.config.remote` from openclaw.json (the
+ * olympus-demo box runs its worker as a systemd unit, and its demo sign-in
+ * 404'd until engine.json carried a copy, 2026-10-11). Where OpenClaw runs
+ * Olympus, that section is the only source of `remote`, as for the Gateway's
+ * child: it replaces engine.json/config.json, and no section means none. An
+ * openclaw.json that exists but cannot be read or parsed turns remote off
+ * rather than falling back to another file. Where OpenClaw does not run Olympus
+ * (no file, no entry, entry disabled), engine.json/config.json stay in charge.
+ */
+function applyOpenClawPluginRemote(config: OlympusConfig, env: Record<string, string | undefined>): void {
+  const section = readOpenClawPluginRemote(env);
+  if (!section.hosted) return;
+  if ('unreadable' in section || !section.remote) {
+    delete config.remote;
+    return;
+  }
+  config.remote = parseRemoteConfig(section.remote);
 }
 
 /** The `remote` plugin-config section, kept to its known fields. */

@@ -2574,8 +2574,7 @@ function loadConfig(env = process.env, options = {}) {
   if (engineConfig) {
     const config2 = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
     applyEnvironmentOverrides(config2, env);
-    if (options.nativeRemoteHandoff === true)
-      applyNativeRemoteHandoff(config2, env);
+    applyRemoteSource(config2, env, options);
     validateConfig(config2);
     return config2;
   }
@@ -2586,8 +2585,7 @@ function loadConfig(env = process.env, options = {}) {
     mergeConfig(config, raw);
   }
   applyEnvironmentOverrides(config, env);
-  if (options.nativeRemoteHandoff === true)
-    applyNativeRemoteHandoff(config, env);
+  applyRemoteSource(config, env, options);
   validateConfig(config);
   return config;
 }
@@ -2730,6 +2728,62 @@ function applyNativeRemoteHandoff(config, env) {
   if (!remote)
     throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
   config.remote = parseRemoteConfig(remote);
+}
+function openClawConfigPath(homeDir, env) {
+  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
+  if (explicit && isAbsolutePath(explicit))
+    return explicit;
+  const stateDir = env.OPENCLAW_STATE_DIR?.trim();
+  return join4(stateDir && isAbsolutePath(stateDir) ? stateDir : join4(homeDir, ".openclaw"), "openclaw.json");
+}
+function readOpenClawPluginRemote(env) {
+  const path = openClawConfigPath(env.HOME?.trim() || homedir3(), env);
+  let text;
+  try {
+    text = readFileSync5(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { hosted: false };
+    return { hosted: true, path, unreadable: true };
+  }
+  const parsed = parseOpenClawConfigText(text);
+  if (parsed === undefined)
+    return { hosted: true, path, unreadable: true };
+  const entries = asRecord4(asRecord4(asRecord4(parsed)?.plugins)?.entries);
+  const entry = entries && Object.hasOwn(entries, "olympus") ? asRecord4(entries.olympus) : undefined;
+  if (!entry || entry.enabled === false)
+    return { hosted: false };
+  return { hosted: true, path, remote: asRecord4(asRecord4(entry.config)?.remote) };
+}
+function parseOpenClawConfigText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const json5 = globalThis.Bun?.JSON5;
+    if (!json5)
+      return;
+    try {
+      return json5.parse(text);
+    } catch {
+      return;
+    }
+  }
+}
+function applyRemoteSource(config, env, options) {
+  if (options.nativeRemoteHandoff === true)
+    applyNativeRemoteHandoff(config, env);
+  else if (options.openClawPluginRemote === true)
+    applyOpenClawPluginRemote(config, env);
+}
+function applyOpenClawPluginRemote(config, env) {
+  const section = readOpenClawPluginRemote(env);
+  if (!section.hosted)
+    return;
+  if ("unreadable" in section || !section.remote) {
+    delete config.remote;
+    return;
+  }
+  config.remote = parseRemoteConfig(section.remote);
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
