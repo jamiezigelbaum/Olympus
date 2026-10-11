@@ -672,11 +672,13 @@ describe('the response builder', () => {
 
   // 2026-10-10 live: ChatGPT sent "Letter of Intent notary costs allocation"
   // for a two-part question; the rewrite missed the letter the full question finds.
-  test('the question goes to Olympus word for word, the whole message, not keywords', () => {
+  test('the question goes to Olympus as asked and complete, not keywords, and asks for nothing more', () => {
     for (const name of ['source_answer', 'olympus_search']) {
       const tool = CHATGPT_TOOLS.find((entry) => entry.name === name)!;
       const question = (tool.inputSchema as unknown as { properties: { question: { description: string } } }).properties.question.description;
-      expect(question).toContain('word for word');
+      expect(question).toContain('The question to look up, as the user asked it and complete');
+      // The directory scan flags wording that reads as asking for the conversation.
+      expect(question).not.toMatch(/message|conversation|history|transcript|word for word/i);
       expect(question).toContain('including any part you will answer another way');
       expect(question).toContain('Do not shorten it, split it or turn it into keywords');
     }

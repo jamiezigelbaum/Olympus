@@ -81,11 +81,10 @@ or credentials). Credentials live in 1Password, never in this repository.
 > Olympus engine with made-up sample data is connected to the same relay, and
 > it alone accepts a username and password.
 >
-> 1. Add the Olympus plugin and start a chat. Ask "Show my Olympus dashboard."
->    Before you connect, the dashboard says Olympus is not set up yet; this
->    is expected.
-> 2. Ask a question such as "What did Sam say about the lease renewal?".
->    ChatGPT asks you to connect Olympus and opens a sign-in page at
+> 1. Add the Olympus plugin and start a new chat. Type @Olympus, choose it,
+>    and ask "What did Sam say about renewing my lease?" (or open Settings >
+>    Apps > Olympus > Connect).
+> 2. ChatGPT asks you to connect Olympus and opens a sign-in page at
 >    mcp.olympusplugin.ai.
 > 3. On that page, choose **"Reviewing Olympus? Sign in to the demo"**.
 > 4. On "Sign in to the Olympus demo", enter the username and password from

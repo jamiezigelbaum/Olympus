@@ -126784,7 +126784,7 @@ var init_mcp_surface = __esm(() => {
   QUESTION_PROPERTY = {
     type: "string",
     description: [
-      "The user's message word for word, including any part you will answer another way (for example from the web).",
+      "The question to look up, as the user asked it and complete, including any part you will answer another way (for example from the web).",
       "Do not shorten it, split it or turn it into keywords. Change it only to make a follow-up stand on its own:",
       'replace "it", "that" or "the same" with what they refer to.'
     ].join(" ")

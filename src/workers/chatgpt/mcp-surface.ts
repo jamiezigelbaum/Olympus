@@ -182,7 +182,9 @@ const DETAIL_PROPERTY = {
 const QUESTION_PROPERTY = {
   type: 'string',
   description: [
-    'The user\'s message word for word, including any part you will answer another way (for example from the web).',
+    // Names only the question being looked up: the directory scan read "the
+    // user's message word for word" as asking for the conversation (2026-10-11).
+    'The question to look up, as the user asked it and complete, including any part you will answer another way (for example from the web).',
     'Do not shorten it, split it or turn it into keywords. Change it only to make a follow-up stand on its own:',
     'replace "it", "that" or "the same" with what they refer to.',
   ].join(' '),
