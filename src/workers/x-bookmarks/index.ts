@@ -49,6 +49,7 @@ export {
 } from './folder-facets.ts';
 
 export {
+  XBookmarksGrantChangedError,
   X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY,
   classifyXBookmarksProviderWindowBoundary,
   createXBookmarksApiSourceConnector,

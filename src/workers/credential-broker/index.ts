@@ -249,6 +249,13 @@ export interface CredentialHandleStatus {
 export interface CredentialBroker {
   issueSession(request: CredentialSessionRequest): Promise<CredentialSession>;
   status?(handle: string): Promise<CredentialHandleStatus>;
+  /**
+   * The handle's current grant generation, read fresh. A consumer holding a
+   * token compares it with the one it started under: the broker stops serving
+   * a replaced grant's token, but one already handed out is the consumer's to
+   * fence. Undefined for a handle with no recorded grant.
+   */
+  grantGeneration?(handle: string): string | undefined;
 }
 
 export interface CredentialOAuth2HandleState {
@@ -1165,6 +1172,10 @@ export class EnvCredentialBroker implements CredentialBroker {
       );
     }
     return this.statusFromEnvDefinition(definition, now);
+  }
+
+  grantGeneration(handle: string): string | undefined {
+    return this.findHandle(handle)?.grantGeneration;
   }
 
   private requireHandle(request: CredentialSessionRequest): EnvCredentialHandleDefinition {

@@ -13,6 +13,9 @@
   deleted for you: reconnect the previous account to carry on, or Disconnect,
   run `olympus data delete --source <id>`, and connect again to start over
   with the new one.
+- **X bookmarks stop at a reconnect too.** A bookmarks sync already running
+  when X is reconnected stops at its next page and stores nothing it read
+  with the previous connection; the next run uses the new one.
 - **Olympus on a server opens on your computer.** When the engine runs on a
   server (`olympus server-mode on --ssh-target you@your-server`, or found
   automatically on a Linux host with no screen), Connect and "Fix this on

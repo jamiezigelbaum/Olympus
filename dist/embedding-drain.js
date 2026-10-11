@@ -5735,6 +5735,9 @@ class EnvCredentialBroker {
     }
     return this.statusFromEnvDefinition(definition, now);
   }
+  grantGeneration(handle) {
+    return this.findHandle(handle)?.grantGeneration;
+  }
   requireHandle(request) {
     const definition = this.findHandle(request.handle);
     if (!definition) {

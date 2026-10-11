@@ -93,6 +93,23 @@ export class XBookmarksLiveSyncError extends Error {
   }
 }
 
+/**
+ * The X credential was reconnected while this run held the previous grant's
+ * token. The broker stops serving a replaced grant's token, but one already
+ * handed out still works at X, so the run checks the grant after every
+ * provider answer and before anything reaches a store, as the Dropbox, Drive
+ * and Gmail lanes do (PR #254). Nothing read under the old grant is stored;
+ * the next run starts under the new one.
+ */
+export class XBookmarksGrantChangedError extends Error {
+  readonly code = 'x_bookmarks_grant_changed';
+
+  constructor() {
+    super('The X bookmarks credential was reconnected during this run; nothing from the previous grant was stored.');
+    this.name = 'XBookmarksGrantChangedError';
+  }
+}
+
 export interface XBookmarksLiveSourceClient {
   fetchBookmarks(request?: {
     maxResults?: number;
@@ -163,6 +180,12 @@ export interface XBookmarksApiConnectorStatus {
 export interface XBookmarksApiSourceConnector extends SourceConnector {
   /** Source-owned minimal acquisition; caches results for the next listItems. */
   probe(cursor?: string): Promise<XBookmarksApiConnectorStatus>;
+  /**
+   * Throws XBookmarksGrantChangedError unless the grant this run's token came
+   * from is still the connected one. A no-op for an injected client or a
+   * broker that records no grant generation.
+   */
+  assertGrantCurrent(): void;
   status(): XBookmarksApiConnectorStatus;
   apiUsageStatus(): XApiUsageStatus;
   markReconciliationDisposition(
@@ -271,6 +294,14 @@ export function createXBookmarksApiSourceConnector(
   let acquired = false;
   let completedSnapshotAt: string | undefined;
   let latest: XBookmarksApiConnectorStatus = emptyStatus(options.mode);
+  // The grant generation the token was issued under; set only when the broker
+  // records one, so an injected client or a static broker stays unfenced.
+  let grantFence: { generation: string | undefined } | undefined;
+  const assertGrantCurrent = (): void => {
+    if (grantFence && broker.grantGeneration?.(credentialHandle) !== grantFence.generation) {
+      throw new XBookmarksGrantChangedError();
+    }
+  };
 
   const connector: XBookmarksApiSourceConnector = {
     id: 'x_bookmarks_live',
@@ -279,6 +310,9 @@ export function createXBookmarksApiSourceConnector(
     async authenticate(): Promise<void> {
       if (client) return;
       if (!userId) throw new Error('X bookmarks connector requires OLYMPUS_SOURCE_INDEX_X_USER_ID.');
+      // Read before and after the issue: unchanged across it means the token
+      // belongs to that generation (the broker serves only the current grant's).
+      const generationBefore = broker.grantGeneration?.(credentialHandle);
       const session = requireBearerTokenCredentialSession(await broker.issueSession({
         handle: credentialHandle,
         provider: 'x',
@@ -286,13 +320,17 @@ export function createXBookmarksApiSourceConnector(
         trustDomain: 'internal',
         purpose: 'Synchronize X bookmarks into the Olympus shared connector store.',
       }), credentialHandle);
-      client = new XApiClient({
+      if (broker.grantGeneration) {
+        grantFence = { generation: generationBefore };
+        assertGrantCurrent();
+      }
+      client = grantFencedClient(new XApiClient({
         token: session.token,
         userId,
         ...(options.fetch ? { fetch: options.fetch } : {}),
         ...(options.apiBaseUrl ? { baseUrl: options.apiBaseUrl } : {}),
         ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
-      });
+      }), assertGrantCurrent);
     },
 
     async probe(cursor?: string): Promise<XBookmarksApiConnectorStatus> {
@@ -326,6 +364,7 @@ export function createXBookmarksApiSourceConnector(
       const activeSnapshot = snapshot;
       if (!activeSnapshot) throw new Error('X bookmark connector acquisition produced no snapshot.');
       for await (const page of activeSnapshot.listItems(listOptions.limit ? { limit: listOptions.limit } : undefined)) {
+        assertGrantCurrent();
         yield {
           items: page.items,
           ...(latest.checkpoint ? { nextCursor: latest.checkpoint } : {}),
@@ -336,13 +375,16 @@ export function createXBookmarksApiSourceConnector(
 
     async fetchItem(localItemId: string): Promise<RawItem> {
       if (!snapshot) throw new Error('X bookmark connector fetchItem requires listItems first.');
-      return snapshot.fetchItem(localItemId);
+      const item = await snapshot.fetchItem(localItemId);
+      assertGrantCurrent();
+      return item;
     },
 
     classificationSignals(item: RawItem): SourceClassificationSignals {
       return (snapshot ?? createXBookmarksSourceConnector({ account, posts: [] })).classificationSignals(item);
     },
 
+    assertGrantCurrent,
     status: () => latest,
     apiUsageStatus: () => options.usageStore.status({ account, config, now: clock() }),
     async markReconciliationDisposition(
@@ -379,6 +421,30 @@ export function createXBookmarksApiSourceConnector(
     },
   };
   return connector;
+}
+
+/** Checks the grant after every provider answer, before the page is used. */
+function grantFencedClient(
+  client: XBookmarksLiveSourceClient,
+  assertGrantCurrent: () => void,
+): XBookmarksLiveSourceClient {
+  return {
+    async fetchBookmarks(request) {
+      const page = await client.fetchBookmarks(request);
+      assertGrantCurrent();
+      return page;
+    },
+    async fetchBookmarkFolders(request) {
+      const page = await client.fetchBookmarkFolders(request);
+      assertGrantCurrent();
+      return page;
+    },
+    async fetchBookmarksInFolder(folderId, request) {
+      const page = await client.fetchBookmarksInFolder(folderId, request);
+      assertGrantCurrent();
+      return page;
+    },
+  };
 }
 
 async function acquireIncremental(
