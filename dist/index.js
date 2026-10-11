@@ -4043,8 +4043,9 @@ async function readBoundedText(response, limitBytes, controller, onReader) {
     await releaseBodyReader(reader);
   }
 }
-var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
+var NULL_BODY_STATUSES, DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
 var init_http_timeout = __esm(() => {
+  NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
   DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
   BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
     limitBytes;
@@ -11149,7 +11150,11 @@ var init_x_bookmarks = __esm(() => {
   init_reconcile_state();
 });
 // src/workers/dropbox-files/provider-client.ts
-var init_provider_client = () => {};
+var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
+var init_provider_client = __esm(() => {
+  init_http_timeout();
+  DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
+});
 
 // src/workers/dropbox-files/connector.ts
 var init_connector3 = __esm(() => {

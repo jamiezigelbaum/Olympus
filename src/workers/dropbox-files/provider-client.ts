@@ -4,11 +4,21 @@
 // crawl frontier, extraction queue, and answer runtime. Normal product startup
 // can therefore use the provider without loading either legacy monolith.
 
+import { fetchWithBodyDeadline } from '../../core/http-timeout.ts';
 import type { CredentialBrokerFetch } from '../credential-broker/index.ts';
 
 /** Bounded retries for the statuses Dropbox uses to say "slow down". */
 const DEFAULT_DROPBOX_MAX_RETRIES = 3;
 const MAX_DROPBOX_RETRY_DELAY_MS = 30_000;
+/**
+ * One metadata request, body included. A Dropbox page is a few MB at most;
+ * a response that has not finished in this long is stalled, and the lane runs
+ * its tasks one at a time, so a stalled read would hold every later Dropbox
+ * task behind it (PR #267 review, Astra).
+ */
+export const DROPBOX_METADATA_REQUEST_TIMEOUT_MS = 60_000;
+/** One content download, body included, for the same reason. */
+export const DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 
 export interface DropboxMetadataPage {
   entries: DropboxMetadataEntry[];
@@ -152,6 +162,8 @@ export interface DropboxApiMetadataClientOptions {
   baseUrl?: string;
   maxRetries?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** Per request, body included. */
+  requestTimeoutMs?: number;
 }
 
 export class DropboxApiMetadataClient implements DropboxMetadataClient {
@@ -162,6 +174,7 @@ export class DropboxApiMetadataClient implements DropboxMetadataClient {
   private readonly baseUrl: string;
   private readonly maxRetries: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: DropboxApiMetadataClientOptions) {
     this.token = required(options.token, 'Dropbox metadata token');
@@ -169,6 +182,7 @@ export class DropboxApiMetadataClient implements DropboxMetadataClient {
     this.baseUrl = options.baseUrl?.replace(/\/+$/, '') || 'https://api.dropboxapi.com/2';
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_DROPBOX_MAX_RETRIES));
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DROPBOX_METADATA_REQUEST_TIMEOUT_MS;
   }
 
   async listFolder(request: DropboxMetadataListRequest): Promise<DropboxMetadataPage> {
@@ -203,14 +217,14 @@ export class DropboxApiMetadataClient implements DropboxMetadataClient {
   private async send(path: string, body: Record<string, unknown>): Promise<Response> {
     let attempt = 0;
     while (true) {
-      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      const response = await fetchWithBodyDeadline(this.fetchImpl, `${this.baseUrl}${path}`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${this.token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
-      });
+      }, this.requestTimeoutMs);
       if (response.ok) return response;
       // Drained on every failed attempt, retried or not, so a discarded
       // response never holds its connection open.
@@ -327,6 +341,8 @@ export interface DropboxApiContentDownloadClientOptions {
   token: string;
   fetch?: (input: string, init: RequestInit) => Promise<Response>;
   contentBaseUrl?: string;
+  /** Per download, body included. */
+  requestTimeoutMs?: number;
 }
 
 export class DropboxContentTooLargeError extends Error {
@@ -342,21 +358,23 @@ export class DropboxApiContentDownloadClient implements DropboxContentDownloadCl
   private readonly token: string;
   private readonly fetchImpl: (input: string, init: RequestInit) => Promise<Response>;
   private readonly contentBaseUrl: string;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: DropboxApiContentDownloadClientOptions) {
     this.token = required(options.token, 'Dropbox content token');
     this.fetchImpl = options.fetch ?? fetch;
     this.contentBaseUrl = options.contentBaseUrl?.replace(/\/+$/, '') || 'https://content.dropboxapi.com/2';
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
   }
 
   async download(request: DropboxContentDownloadRequest): Promise<DropboxContentDownloadResult> {
-    const response = await this.fetchImpl(`${this.contentBaseUrl}/files/download`, {
+    const response = await fetchWithBodyDeadline(this.fetchImpl, `${this.contentBaseUrl}/files/download`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.token}`,
         'Dropbox-API-Arg': JSON.stringify(dropboxDownloadArg(request.job)),
       },
-    });
+    }, this.requestTimeoutMs);
     if (!response.ok) throw new Error(`Dropbox content API request failed (${response.status}).`);
     const declaredSize = parsePositiveInteger(response.headers.get('content-length') ?? undefined);
     if (

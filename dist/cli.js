@@ -2703,6 +2703,87 @@ async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
     removeUpstreamAbortListener?.();
   }
 }
+async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    return fetchImpl(url, init);
+  const controller = new AbortController;
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  let timer;
+  const settle = () => {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    timer = undefined;
+    removeUpstreamAbortListener?.();
+    removeUpstreamAbortListener = undefined;
+  };
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timer = undefined;
+      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+      error.name = "AbortError";
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  deadline.catch(() => {
+    return;
+  });
+  let response;
+  try {
+    response = await Promise.race([fetchImpl(url, { ...init, signal: controller.signal }), deadline]);
+  } catch (error) {
+    settle();
+    throw error;
+  }
+  if (!response.body || NULL_BODY_STATUSES.has(response.status)) {
+    settle();
+    return response;
+  }
+  const reader = response.body.getReader();
+  const body = new ReadableStream({
+    async pull(stream) {
+      try {
+        const { done, value } = await Promise.race([reader.read(), deadline]);
+        if (done) {
+          settle();
+          stream.close();
+          return;
+        }
+        if (value)
+          stream.enqueue(value);
+      } catch (error) {
+        settle();
+        await reader.cancel().catch(() => {
+          return;
+        });
+        stream.error(error);
+      }
+    },
+    async cancel(reason) {
+      settle();
+      controller.abort();
+      await reader.cancel(reason).catch(() => {
+        return;
+      });
+    }
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  });
+}
 function isAbortError(error) {
   return error instanceof Error && error.name === "AbortError";
 }
@@ -2806,8 +2887,9 @@ async function readBoundedText(response, limitBytes, controller, onReader) {
     await releaseBodyReader(reader);
   }
 }
-var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
+var NULL_BODY_STATUSES, DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
 var init_http_timeout = __esm(() => {
+  NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
   DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
   BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
     limitBytes;
@@ -12820,12 +12902,14 @@ class DropboxApiMetadataClient {
   baseUrl;
   maxRetries;
   sleep;
+  requestTimeoutMs;
   constructor(options) {
     this.token = required(options.token, "Dropbox metadata token");
     this.fetchImpl = options.fetch ?? fetch;
     this.baseUrl = options.baseUrl?.replace(/\/+$/, "") || "https://api.dropboxapi.com/2";
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_DROPBOX_MAX_RETRIES));
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve6) => setTimeout(resolve6, ms)));
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DROPBOX_METADATA_REQUEST_TIMEOUT_MS;
   }
   async listFolder(request) {
     return this.postMetadataPage("/files/list_folder", {
@@ -12847,14 +12931,14 @@ class DropboxApiMetadataClient {
   async send(path, body) {
     let attempt = 0;
     while (true) {
-      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      const response = await fetchWithBodyDeadline(this.fetchImpl, `${this.baseUrl}${path}`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.token}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify(body)
-      });
+      }, this.requestTimeoutMs);
       if (response.ok)
         return response;
       const detail = await response.text().catch(() => "");
@@ -12933,19 +13017,21 @@ class DropboxApiContentDownloadClient {
   token;
   fetchImpl;
   contentBaseUrl;
+  requestTimeoutMs;
   constructor(options) {
     this.token = required(options.token, "Dropbox content token");
     this.fetchImpl = options.fetch ?? fetch;
     this.contentBaseUrl = options.contentBaseUrl?.replace(/\/+$/, "") || "https://content.dropboxapi.com/2";
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
   }
   async download(request) {
-    const response = await this.fetchImpl(`${this.contentBaseUrl}/files/download`, {
+    const response = await fetchWithBodyDeadline(this.fetchImpl, `${this.contentBaseUrl}/files/download`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
         "Dropbox-API-Arg": JSON.stringify(dropboxDownloadArg(request.job))
       }
-    });
+    }, this.requestTimeoutMs);
     if (!response.ok)
       throw new Error(`Dropbox content API request failed (${response.status}).`);
     const declaredSize = parsePositiveInteger(response.headers.get("content-length") ?? undefined);
@@ -13118,8 +13204,10 @@ function required(value, label) {
     throw new Error(`${label} is required.`);
   return normalized;
 }
-var DEFAULT_DROPBOX_MAX_RETRIES = 3, MAX_DROPBOX_RETRY_DELAY_MS = 30000, DropboxApiError, DropboxCursorResetError, DropboxRateLimitError, DropboxContentTooLargeError;
+var DEFAULT_DROPBOX_MAX_RETRIES = 3, MAX_DROPBOX_RETRY_DELAY_MS = 30000, DROPBOX_METADATA_REQUEST_TIMEOUT_MS = 60000, DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS, DropboxApiError, DropboxCursorResetError, DropboxRateLimitError, DropboxContentTooLargeError;
 var init_provider_client = __esm(() => {
+  init_http_timeout();
+  DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
   DropboxApiError = class DropboxApiError extends Error {
     status;
     tag;
@@ -91548,6 +91636,7 @@ class DropboxExtractionSource {
   localRoots;
   fetchImpl;
   contentBaseUrl;
+  downloadTimeoutMs;
   canonicalRootCache = new Map;
   constructor(options) {
     this.id = requireNonEmpty6(options.id, "Dropbox extraction source id");
@@ -91560,6 +91649,7 @@ class DropboxExtractionSource {
     this.localRoots = (options.localRoots ?? []).map((root) => normalizeRootConfig(root)).filter((root) => Boolean(root));
     this.fetchImpl = options.fetch ?? ((url, init) => fetch(url, init));
     this.contentBaseUrl = options.contentBaseUrl?.replace(/\/+$/, "") || DROPBOX_CONTENT_BASE_URL;
+    this.downloadTimeoutMs = options.downloadTimeoutMs ?? DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
   }
   async listCandidates(options) {
     const scopes = this.scopesFor(options.approvedScopeKeys);
@@ -91694,13 +91784,14 @@ class DropboxExtractionSource {
   async downloadFromProvider(ref, maxBytes) {
     let response;
     try {
-      response = await this.fetchImpl(`${this.contentBaseUrl}/files/download`, {
+      const fetchImpl = (url, init) => this.fetchImpl(url, init);
+      response = await fetchWithBodyDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.token}`,
           "Dropbox-API-Arg": JSON.stringify(dropboxDownloadArg2(ref))
         }
-      });
+      }, this.downloadTimeoutMs);
     } catch {
       throw new FileExtractionSourceError("network_unreachable");
     }
@@ -91710,7 +91801,14 @@ class DropboxExtractionSource {
     if (maxBytes !== undefined && declaredSize !== undefined && declaredSize > maxBytes) {
       throw new FileExtractionSourceError("source_too_large");
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    let bytes;
+    try {
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } catch (error2) {
+      if (isAbortError(error2))
+        throw new FileExtractionSourceError("network_socket_closed");
+      throw error2;
+    }
     if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
       throw new FileExtractionSourceError("source_too_large");
     }
@@ -91877,6 +91975,8 @@ function requireNonEmpty6(value, label) {
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2", DROPBOX_SCOPE_KEY_PROVIDER_PREFIX = "dropbox.", DROPBOX_FOLDER_ID_SCOPE_PREFIX = "folder_id:", MAX_PROVIDER_DETAIL_CHARS = 500, LOCATOR_LOOKUP_MAX_CHARS = 1;
 var init_extraction_source2 = __esm(() => {
   init_dropbox_content_hash();
+  init_provider_client();
+  init_http_timeout();
   init_file_extraction_source();
 });
 

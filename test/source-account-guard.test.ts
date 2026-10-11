@@ -21,6 +21,7 @@ import {
   SourceAccountChangedError,
 } from '../src/workers/source-account-guard.ts';
 import { withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { DropboxApiMetadataClient } from '../src/workers/dropbox-files/provider-client.ts';
 import { readFileSync } from 'node:fs';
 
 const dirs: string[] = [];
@@ -256,10 +257,14 @@ describe('the account guard', () => {
       now: new Date('2026-10-10T22:44:00.000Z'),
     })).toBe('purge_required');
     let bRan = false;
-    const runB = laneOf(harness({ registryPath, tokenAccount: 'dbid:B', holds }).guard, async () => { bRan = true; })
+    const b = harness({ registryPath, tokenAccount: 'dbid:B', holds });
+    const runB = laneOf(b.guard, async () => { bRan = true; })
       .run()
       .catch((error: unknown) => error);
-    for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    // Unserialized, B's check takes a token at once and decides on it; queued,
+    // it has not asked for one while A is still writing.
+    for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(b.issued).toHaveLength(0);
     expect(binding(registryPath)).toMatchObject({ provider_account_id: 'dbid:A', purge_required: { reason: 'account_changed' } });
     release();
     await runA;
@@ -269,6 +274,25 @@ describe('the account guard', () => {
     expect((failure as SourceAccountChangedError).code).toBe('source_account_changed');
     expect(bRan).toBe(false);
     expect(binding(registryPath)).toMatchObject({ provider_account_id: 'dbid:A', purge_required: { reason: 'account_changed' } });
+  });
+
+  test('a Dropbox read that stalls ends at its deadline, so the next queued run proceeds (PR #267 review, Astra)', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:A');
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:A' });
+    // Headers, then a body that never finishes and ignores the abort signal.
+    const client = new DropboxApiMetadataClient({
+      token: 'token-of-dbid:A',
+      requestTimeoutMs: 30,
+      fetch: async () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode('{"entries":[')); },
+      }), { status: 200 }),
+    });
+    const stalled = guard.run!(() => client.listFolder({ path: '', recursive: true, limit: 100 }))
+      .then(() => undefined, (error: unknown) => error);
+    const next = guard.run!(async () => 'ran');
+    expect(((await stalled) as Error).name).toBe('AbortError');
+    expect(await next).toBe('ran');
   });
 
   test('an embedding sweep appended to a lane is guarded with it (independent review round 10)', async () => {
