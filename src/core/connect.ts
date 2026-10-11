@@ -691,14 +691,17 @@ async function completeOAuthSourceConnection(
   // asked for a passing reason, stop before anything is stored: replaced,
   // the old grant could never be asked again, and a same-account rename
   // would read as an account change for good (independent review round 2).
+  // Which sources keep their items only through that proof.
+  const renameProofNeeded = new Set<string>();
   for (const definition of prepared.definition.handles) {
     if (!isAccountBoundProvider(definition.provider)) continue;
-    const replaced = replacedGrants.get(definition.handle(prepared.accountRole));
-    if (!replaced?.addressOnlyBinding) continue;
+    const handle = definition.handle(prepared.accountRole);
+    const replaced = replacedGrants.get(handle);
+    if (!replaced?.addressOnlyBinding || replaced.ownGrantGone) continue;
     const newAccount = fileSourceAccountIds.get(definition.provider);
     if (newAccount && compareProviderAccounts(replaced.addressOnlyBinding, newAccount) === 'same') continue;
+    renameProofNeeded.add(handle);
     if (newAccount && replaced.ownAccountId) continue;
-    if (replaced.ownGrantGone) continue;
     throw new Error(
       `Olympus could not confirm that this is the same ${definition.provider === 'gmail' ? 'Gmail' : 'Google Drive'} account the source was filled from, because a provider lookup did not answer. `
         + 'No credentials were stored and nothing changed; connect again.',
@@ -712,10 +715,16 @@ async function completeOAuthSourceConnection(
       // The rename proof stands only for the grant it was asked of: a connect
       // that landed meanwhile replaced it, and the token minted may be that
       // connect's (independent review round 2).
+      // Where the proof is what keeps the source's items, stop before
+      // anything changes and let the owner connect again, so it is asked
+      // afresh (independent review round 3); nowhere else does it matter.
       const grantsNow = readConnectedHandleRegistry(prepared.registryPath).handles;
       for (const [handle, replaced] of replacedGrants) {
         const now = grantsNow.find((entry) => entry.handle === handle);
         if (replaced && (now?.connectedAt !== replaced.grantConnectedAt || now?.providerAccountId !== replaced.recordedAccountId)) {
+          if (renameProofNeeded.has(handle)) {
+            throw new Error('Another connection change landed while this one confirmed the account. No credentials were stored and nothing changed; connect again.');
+          }
           replacedGrants.set(handle, { ...replaced, ownAccountId: undefined });
         }
       }
@@ -2027,7 +2036,11 @@ interface ReplacedGrantAccount {
    * only for a source bound by an address alone.
    */
   ownAccountId?: string | undefined;
-  /** The replaced grant can no longer mint at all (reauthorization required). */
+  /**
+   * The replaced grant cannot mint without the owner (reauthorization
+   * required, or its credential material is missing or unusable): asking
+   * again would not help, so connect proceeds without the proof.
+   */
   ownGrantGone?: boolean;
   /** The binding, when it names its account by a Google address alone. */
   addressOnlyBinding?: string;
@@ -2092,7 +2105,9 @@ async function identifyReplacedGrantAccount(options: {
         purpose: 'Identify the account of the grant being replaced, so a same-account reconnect keeps the source\'s items.',
       });
     } catch (error) {
-      return { gone: error instanceof CredentialBrokerError && error.code === 'credential_reauth_required' };
+      // Only a refresh that is busy or failed in passing is worth asking
+      // again; anything else needs the owner (independent review round 3).
+      return { gone: !(error instanceof CredentialBrokerError && error.retryable) };
     }
     if (session.kind !== 'bearer_token') return { gone: true };
     const id = await lookupConnectedAccountId({

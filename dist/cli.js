@@ -6361,18 +6361,19 @@ async function completeOAuthSourceConnection(prepared, code) {
       timeoutMs: prepared.tokenExchangeTimeoutMs
     }));
   }
+  const renameProofNeeded = new Set;
   for (const definition of prepared.definition.handles) {
     if (!isAccountBoundProvider(definition.provider))
       continue;
-    const replaced = replacedGrants.get(definition.handle(prepared.accountRole));
-    if (!replaced?.addressOnlyBinding)
+    const handle = definition.handle(prepared.accountRole);
+    const replaced = replacedGrants.get(handle);
+    if (!replaced?.addressOnlyBinding || replaced.ownGrantGone)
       continue;
     const newAccount = fileSourceAccountIds.get(definition.provider);
     if (newAccount && compareProviderAccounts(replaced.addressOnlyBinding, newAccount) === "same")
       continue;
+    renameProofNeeded.add(handle);
     if (newAccount && replaced.ownAccountId)
-      continue;
-    if (replaced.ownGrantGone)
       continue;
     throw new Error(`Olympus could not confirm that this is the same ${definition.provider === "gmail" ? "Gmail" : "Google Drive"} account the source was filled from, because a provider lookup did not answer. ` + "No credentials were stored and nothing changed; connect again.");
   }
@@ -6381,6 +6382,9 @@ async function completeOAuthSourceConnection(prepared, code) {
     for (const [handle, replaced] of replacedGrants) {
       const now = grantsNow.find((entry) => entry.handle === handle);
       if (replaced && (now?.connectedAt !== replaced.grantConnectedAt || now?.providerAccountId !== replaced.recordedAccountId)) {
+        if (renameProofNeeded.has(handle)) {
+          throw new Error("Another connection change landed while this one confirmed the account. No credentials were stored and nothing changed; connect again.");
+        }
         replacedGrants.set(handle, { ...replaced, ownAccountId: undefined });
       }
     }
@@ -7123,7 +7127,7 @@ async function identifyReplacedGrantAccount(options) {
         purpose: "Identify the account of the grant being replaced, so a same-account reconnect keeps the source's items."
       });
     } catch (error) {
-      return { gone: error instanceof CredentialBrokerError && error.code === "credential_reauth_required" };
+      return { gone: !(error instanceof CredentialBrokerError && error.retryable) };
     }
     if (session.kind !== "bearer_token")
       return { gone: true };
