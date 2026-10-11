@@ -168,7 +168,7 @@ describe('the account guard', () => {
       expect(evidenceCalls.record).toBe(0);
       if (binds) {
         expect(ran).toBe(1);
-        expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:demo', bound_at: '2026-10-10T22:43:00.000Z' });
+        expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:demo', bound_at: '2026-10-10T22:43:00.000Z', bound_grant: '2026-10-10T22:42:00.000Z' });
       } else {
         expect((outcome as SourceAccountChangedError).code).toBe('source_account_changed');
         expect(ran).toBe(0);
@@ -296,7 +296,7 @@ describe('the account guard', () => {
     let ran = 0;
     await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run();
     expect(ran).toBe(1);
-    expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:main', bound_at: '2026-10-10T22:43:00.000Z' });
+    expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:main', bound_at: '2026-10-10T22:43:00.000Z', bound_grant: '2026-10-10T22:42:00.000Z' });
   });
 
   test('once the owner has removed the previous account\'s items, the new account is bound', async () => {
@@ -310,7 +310,7 @@ describe('the account guard', () => {
     let ran = 0;
     await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run();
     expect(ran).toBe(1);
-    expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:demo', bound_at: '2026-10-10T22:43:00.000Z' });
+    expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:demo', bound_at: '2026-10-10T22:43:00.000Z', bound_grant: '2026-10-10T22:42:00.000Z' });
   });
 
   test('a bound source whose token cannot be identified does not sync on the grant\'s word', async () => {

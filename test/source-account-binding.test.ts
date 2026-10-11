@@ -16,8 +16,13 @@ import {
 } from '../src/core/source-account-binding.ts';
 import {
   dropboxAccountIdFromTokenPayload,
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS,
   fetchProviderAccountId,
   googleAccountIdFromAddress,
+  googlePermissionLabel,
+  googleSubjectLabel,
+  mergeProviderAccountIds,
+  sameProviderAccount,
 } from '../src/core/provider-account-identity.ts';
 
 const dirs: string[] = [];
@@ -36,12 +41,14 @@ function registryPath(): string {
 function decide(input: {
   binding?: SourceAccountBinding | undefined;
   grant?: string;
+  grantConnectedAt?: string;
   token?: string;
   holds?: boolean;
 }) {
   return decideSourceAccountAction({
     binding: input.binding,
     grantAccountId: input.grant,
+    ...(input.grantConnectedAt ? { grantConnectedAt: input.grantConnectedAt } : {}),
     tokenAccountId: input.token,
     laneHoldsItems: input.holds ?? true,
     now: NOW,
@@ -233,7 +240,7 @@ describe('provider account identity', () => {
     expect(seen[0]!.init.body).toBe('null');
   });
 
-  test('Google accounts are an opaque digest of the address, the same from Gmail and Drive', async () => {
+  test('a Google token without openid is named by an opaque digest of its address, the same from Gmail and Drive', async () => {
     const gmail = await fetchProviderAccountId({
       provider: 'gmail',
       accessToken: 'access-token-fixture',
@@ -266,6 +273,155 @@ describe('provider account identity', () => {
       accessToken: 'access-token-fixture',
       fetchImpl: async () => new Response('{"error_summary":"missing_scope/"}', { status: 401 }),
     })).rejects.toThrow('status 401');
+  });
+});
+
+describe('Google accounts survive an address rename (immutable labels)', () => {
+  const OLD = googleAccountIdFromAddress('owner@example.test');
+  const RENAMED = googleAccountIdFromAddress('renamed@example.test');
+  const SUB = googleSubjectLabel('109876543210987654321');
+  const OTHER_SUB = googleSubjectLabel('100000000000000000001');
+  const PERM = googlePermissionLabel('01234567890123456789');
+  const GRANTED = '2026-10-01T00:00:00.000Z';
+
+  function googleFetch(answers: { address: string; sub?: string; permissionId?: string; scope?: string; tokeninfoStatus?: number }) {
+    const seen: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      seen.push({ url, init });
+      if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo) {
+        if (answers.tokeninfoStatus) return new Response('{}', { status: answers.tokeninfoStatus });
+        return new Response(JSON.stringify({
+          aud: 'client.apps.googleusercontent.com',
+          scope: answers.scope ?? (answers.sub ? 'openid https://www.googleapis.com/auth/gmail.readonly' : 'https://www.googleapis.com/auth/gmail.readonly'),
+          ...(answers.sub ? { sub: answers.sub } : {}),
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        emailAddress: answers.address,
+        user: { emailAddress: answers.address, ...(answers.permissionId ? { permissionId: answers.permissionId } : {}) },
+      }), { status: 200 });
+    };
+    return { seen, fetchImpl };
+  }
+
+  test('an openid token is named by its subject and address; Drive adds its permission id', async () => {
+    const gmail = googleFetch({ address: 'Owner@Example.test', sub: '109876543210987654321' });
+    expect(await fetchProviderAccountId({ provider: 'gmail', accessToken: 'access-token-fixture', fetchImpl: gmail.fetchImpl }))
+      .toBe(`${SUB}.${OLD}`);
+    // The token travels as a bearer header, never in tokeninfo's URL.
+    const tokeninfo = gmail.seen.find((call) => call.url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo)!;
+    expect(tokeninfo.url).not.toContain('access-token-fixture');
+    expect(new Headers(tokeninfo.init.headers).get('authorization')).toBe('Bearer access-token-fixture');
+
+    const drive = googleFetch({ address: 'owner@example.test', sub: '109876543210987654321', permissionId: '01234567890123456789' });
+    const driveId = await fetchProviderAccountId({ provider: 'google_drive', accessToken: 'access-token-fixture', fetchImpl: drive.fetchImpl });
+    expect(driveId).toBe(`${SUB}.${PERM}.${OLD}`);
+    expect(drive.seen[0]!.url).toContain('permissionId');
+    // Within the registry's label alphabet and length.
+    expect(driveId).toMatch(/^[a-zA-Z0-9._:-]{1,160}$/);
+    // Nothing of the address or the raw ids is written.
+    expect(driveId).not.toContain('example');
+    expect(driveId).not.toContain('109876543210987654321');
+  });
+
+  test('a pre-openid Drive token still carries its permission id; a pre-openid Gmail token only its address', async () => {
+    expect(await fetchProviderAccountId({
+      provider: 'google_drive',
+      accessToken: 'access-token-fixture',
+      fetchImpl: googleFetch({ address: 'owner@example.test', permissionId: '01234567890123456789' }).fetchImpl,
+    })).toBe(`${PERM}.${OLD}`);
+    expect(await fetchProviderAccountId({
+      provider: 'gmail',
+      accessToken: 'access-token-fixture',
+      fetchImpl: googleFetch({ address: 'owner@example.test' }).fetchImpl,
+    })).toBe(OLD);
+  });
+
+  test('a tokeninfo that cannot answer, or an openid token with no subject, is unknown, never the address alone', async () => {
+    await expect(fetchProviderAccountId({
+      provider: 'gmail',
+      accessToken: 'access-token-fixture',
+      fetchImpl: googleFetch({ address: 'owner@example.test', tokeninfoStatus: 503 }).fetchImpl,
+    })).rejects.toThrow('refused the token lookup');
+    await expect(fetchProviderAccountId({
+      provider: 'gmail',
+      accessToken: 'access-token-fixture',
+      fetchImpl: googleFetch({ address: 'owner@example.test', scope: 'openid https://www.googleapis.com/auth/gmail.readonly' }).fetchImpl,
+    })).rejects.toThrow('did not name the subject');
+  });
+
+  test('matching: immutable labels decide when both sides have one; the address only when neither shares one', () => {
+    // A rename: the same subject under a new address.
+    expect(sameProviderAccount(`${SUB}.${OLD}`, `${SUB}.${RENAMED}`)).toBe(true);
+    // The old address now held by someone else.
+    expect(sameProviderAccount(`${SUB}.${OLD}`, `${OTHER_SUB}.${OLD}`)).toBe(false);
+    // The transition: a record from an address alone matches that address.
+    expect(sameProviderAccount(OLD, `${SUB}.${OLD}`)).toBe(true);
+    expect(sameProviderAccount(OLD, `${SUB}.${RENAMED}`)).toBe(false);
+    // Drive's permission id carries a rename too.
+    expect(sameProviderAccount(`${PERM}.${OLD}`, `${SUB}.${PERM}.${RENAMED}`)).toBe(true);
+    // Dropbox and anything unparsed compare whole.
+    expect(sameProviderAccount('dbid:a', 'dbid:a')).toBe(true);
+    expect(sameProviderAccount('dbid:a', 'dbid:b')).toBe(false);
+    expect(sameProviderAccount('opaque', 'opaque')).toBe(true);
+    // Merging keeps every immutable label and the address as it is now.
+    expect(mergeProviderAccountIds(OLD, `${SUB}.${OLD}`)).toBe(`${SUB}.${OLD}`);
+    expect(mergeProviderAccountIds(`${PERM}.${OLD}`, `${SUB}.${RENAMED}`)).toBe(`${SUB}.${PERM}.${RENAMED}`);
+  });
+
+  test('an address-only binding migrates on its first matching token, then outlives a rename under the same grant', () => {
+    // Before this change: grant and binding named by the address.
+    const migrated = decide({ binding: { provider_account_id: OLD, bound_at: GRANTED }, grant: OLD, grantConnectedAt: GRANTED, token: `${PERM}.${OLD}` });
+    expect(migrated).toEqual({
+      action: 'proceed',
+      write: { provider_account_id: `${PERM}.${OLD}`, bound_at: GRANTED, bound_grant: GRANTED },
+    });
+    const binding = (migrated as { write: SourceAccountBinding }).write;
+    // The Workspace admin renames the address: the grant still records the old
+    // one, but this grant's own tokens confirmed the account, so it syncs and
+    // the binding follows the new address.
+    expect(decide({ binding, grant: OLD, grantConnectedAt: GRANTED, token: `${PERM}.${RENAMED}` })).toEqual({
+      action: 'proceed',
+      write: { provider_account_id: `${PERM}.${RENAMED}`, bound_at: GRANTED, bound_grant: GRANTED },
+    });
+    // Under any other grant the bridge does not hold: the grant's word decides.
+    expect(decide({ binding, grant: OLD, grantConnectedAt: '2026-10-11T00:00:00.000Z', token: `${PERM}.${RENAMED}` }))
+      .toEqual({ action: 'refuse', reason: 'token_account_mismatch' });
+    // A different account at the old address is never this one.
+    expect(decide({ binding, grant: OLD, grantConnectedAt: GRANTED, token: `${googlePermissionLabel('99999999999999999999')}.${OLD}` }))
+      .toEqual({ action: 'purge', reason: 'account_changed' });
+  });
+
+  test('a binding that already names the account and grant proceeds without writing', () => {
+    expect(decide({
+      binding: { provider_account_id: `${SUB}.${OLD}`, bound_at: GRANTED, bound_grant: GRANTED },
+      grant: `${SUB}.${OLD}`,
+      grantConnectedAt: GRANTED,
+      token: `${SUB}.${OLD}`,
+    })).toEqual({ action: 'proceed' });
+  });
+
+  test('a reconnect after a rename keeps a migrated source; an unmigrated one still fails closed', () => {
+    const path = registryPath();
+    const bindingsPath = sourceAccountBindingsPath(path);
+    updateSourceAccountBinding(bindingsPath, 'google_drive.docs', () => ({ provider_account_id: `${PERM}.${OLD}`, bound_at: GRANTED }));
+    updateSourceAccountBinding(bindingsPath, 'gmail.email', () => ({ provider_account_id: OLD, bound_at: GRANTED }));
+    expect(recordFileSourceConnect({ registryPath: path, provider: 'google_drive', providerAccountId: `${SUB}.${PERM}.${RENAMED}`, now: NOW }))
+      .toBe('same_account');
+    expect(recordFileSourceConnect({ registryPath: path, provider: 'gmail', providerAccountId: `${SUB}.${RENAMED}`, now: NOW }))
+      .toBe('purge_required');
+    const read = readSourceAccountBindings(bindingsPath);
+    const sources = read.kind === 'ok' ? read.bindings.sources : {};
+    expect(sources['google_drive.docs']?.provider_account_id).toBe(`${SUB}.${PERM}.${RENAMED}`);
+    expect(sources['gmail.email']?.purge_required?.reason).toBe('account_changed');
+  });
+
+  test('bound_grant survives a read', () => {
+    const path = registryPath();
+    updateSourceAccountBinding(sourceAccountBindingsPath(path), 'gmail.email', () => ({ provider_account_id: `${SUB}.${OLD}`, bound_grant: GRANTED }));
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(path));
+    expect(read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined)
+      .toEqual({ provider_account_id: `${SUB}.${OLD}`, bound_grant: GRANTED });
   });
 });
 

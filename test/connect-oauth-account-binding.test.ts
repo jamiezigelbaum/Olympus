@@ -16,7 +16,12 @@ import {
   updateSourceAccountBinding,
 } from '../src/core/source-account-binding.ts';
 import { readConnectedHandleRegistry, upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
-import { DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, googleAccountIdFromAddress } from '../src/core/provider-account-identity.ts';
+import {
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS,
+  googleAccountIdFromAddress,
+  googlePermissionLabel,
+  googleSubjectLabel,
+} from '../src/core/provider-account-identity.ts';
 import { JsonCredentialOAuth2StateStore } from '../src/workers/credential-broker/index.ts';
 
 const dirs: string[] = [];
@@ -640,5 +645,75 @@ describe('Dropbox connect records the account its grant belongs to', () => {
       purge_required: { reason: 'account_changed' },
     });
     expect(result.sourceAccountPurgeRequired).toEqual(['google_drive.docs']);
+  }, 30_000);
+
+  test('a Google connect requests openid and records each source by its immutable labels, so a renamed address reconnects as the same account', async () => {
+    const install = installDir();
+    let address = 'owner@example.test';
+    const authorizeScopes: string[] = [];
+    const fetchMock = async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail) {
+        return new Response(JSON.stringify({ emailAddress: address }), { status: 200 });
+      }
+      if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_drive) {
+        return new Response(JSON.stringify({ user: { emailAddress: address, permissionId: '01234567890123456789' } }), { status: 200 });
+      }
+      if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo) {
+        expect(new Headers(init?.headers).get('authorization')).toBe('Bearer new-access');
+        return new Response(JSON.stringify({ sub: '109876543210987654321', scope: 'openid https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.readonly' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+    const connect = () => connectOAuthSource({
+      source: 'google',
+      clientId: 'google-test-client',
+      clientSecret: 'google-test-secret',
+      registryPath: install.registryPath,
+      oauth2StateStore: new JsonCredentialOAuth2StateStore(install.statePath),
+      secretStore: install.secretStore,
+      openBrowser: false,
+      fetch: fetchMock,
+      onAuthorizationUrl: async (url) => {
+        const consent = new URL(url);
+        authorizeScopes.push(consent.searchParams.get('scope') ?? '');
+        const callback = new URL(consent.searchParams.get('redirect_uri')!);
+        callback.searchParams.set('state', consent.searchParams.get('state')!);
+        callback.searchParams.set('code', 'fixture-code');
+        await fetch(callback);
+      },
+    });
+    await connect();
+    expect(authorizeScopes[0]!.split(' ').sort()).toEqual([
+      'https://www.googleapis.com/auth/drive.readonly',
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'openid',
+    ]);
+    const sub = googleSubjectLabel('109876543210987654321');
+    const perm = googlePermissionLabel('01234567890123456789');
+    const handles = readConnectedHandleRegistry(install.registryPath).handles;
+    expect(handles.find((handle) => handle.handle === 'gmail.personal')?.providerAccountId)
+      .toBe(`${sub}.${googleAccountIdFromAddress('owner@example.test')}`);
+    expect(handles.find((handle) => handle.handle === 'google_drive.personal')?.providerAccountId)
+      .toBe(`${sub}.${perm}.${googleAccountIdFromAddress('owner@example.test')}`);
+
+    // The worker binds both sources on their first verified sync.
+    for (const [sourceId, id] of [
+      ['gmail.email', `${sub}.${googleAccountIdFromAddress('owner@example.test')}`],
+      ['google_drive.docs', `${sub}.${perm}.${googleAccountIdFromAddress('owner@example.test')}`],
+    ] as const) {
+      updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), sourceId, () => ({ provider_account_id: id }));
+    }
+    // The Workspace admin renames the address; the owner reconnects.
+    address = 'renamed@example.test';
+    const result = await connect();
+    expect(result.sourceAccountPurgeRequired).toBeUndefined();
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+    const sources = read.kind === 'ok' ? read.bindings.sources : {};
+    expect(sources['gmail.email']).toEqual({ provider_account_id: `${sub}.${googleAccountIdFromAddress('renamed@example.test')}` });
+    expect(sources['google_drive.docs']).toEqual({ provider_account_id: `${sub}.${perm}.${googleAccountIdFromAddress('renamed@example.test')}` });
   }, 30_000);
 });

@@ -5549,6 +5549,67 @@ function dropboxAccountIdFromTokenPayload(payload) {
 function googleAccountIdFromAddress(address) {
   return `google:${createHash2("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 40)}`;
 }
+function googleSubjectLabel(subject) {
+  return `google-sub:${createHash2("sha256").update(`sub
+${subject.trim()}`).digest("hex").slice(0, 32)}`;
+}
+function googlePermissionLabel(permissionId) {
+  return `google-perm:${createHash2("sha256").update(`perm
+${permissionId.trim()}`).digest("hex").slice(0, 32)}`;
+}
+function composeProviderAccountId(labels) {
+  const byKind = new Map;
+  for (const label of labels) {
+    const kind = LABEL.exec(label)?.[1];
+    if (kind && !byKind.has(kind))
+      byKind.set(kind, label);
+  }
+  const ordered = [
+    ...IMMUTABLE_LABEL_KINDS.map((kind) => byKind.get(kind)),
+    byKind.get("google")
+  ].filter((label) => Boolean(label));
+  return ordered.length > 0 ? ordered.join(".") : undefined;
+}
+function parseProviderAccountId(id) {
+  const labels = new Map;
+  for (const label of id.trim().split(".")) {
+    const kind = LABEL.exec(label)?.[1];
+    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
+      return;
+    if (labels.has(kind))
+      return;
+    labels.set(kind, label);
+  }
+  return labels.size > 0 ? labels : undefined;
+}
+function sameProviderAccount(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return recorded.trim() === observed.trim();
+  let shared = false;
+  for (const kind of IMMUTABLE_LABEL_KINDS) {
+    const left = a.get(kind);
+    const right = b.get(kind);
+    if (left === undefined || right === undefined)
+      continue;
+    if (left !== right)
+      return false;
+    shared = true;
+  }
+  if (shared)
+    return true;
+  const address = a.get("google");
+  return address !== undefined && address === b.get("google");
+}
+function mergeProviderAccountIds(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return observed.trim();
+  const labels = IMMUTABLE_LABEL_KINDS.map((kind) => b.get(kind) ?? a.get(kind)).concat(b.get("google") ?? a.get("google")).filter((label) => Boolean(label));
+  return composeProviderAccountId(labels);
+}
 async function fetchProviderAccountId(options) {
   const endpoint = options.endpoints?.[options.provider] ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS[options.provider];
   const init = options.provider === "dropbox" ? {
@@ -5575,17 +5636,65 @@ async function fetchProviderAccountId(options) {
   } catch {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} returned an unreadable account lookup.`);
   }
-  const id = accountIdFromIdentityPayload(options.provider, payload);
-  if (!id) {
+  const labels = labelsFromIdentityPayload(options.provider, payload);
+  if (!labels) {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not name the connected account.`);
   }
-  return id;
+  if (options.provider !== "dropbox") {
+    const subject = await fetchGoogleSubject({
+      accessToken: options.accessToken,
+      endpoint: options.endpoints?.google_tokeninfo ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs
+    });
+    if (subject)
+      labels.push(googleSubjectLabel(subject));
+  }
+  return composeProviderAccountId(labels);
 }
-function accountIdFromIdentityPayload(provider, payload) {
-  if (provider === "dropbox")
-    return dropboxAccountIdFromTokenPayload(payload);
-  const address = provider === "gmail" ? payload.emailAddress : payload.user && typeof payload.user === "object" && !Array.isArray(payload.user) ? payload.user.emailAddress : undefined;
-  return typeof address === "string" && address.includes("@") ? googleAccountIdFromAddress(address) : undefined;
+async function fetchGoogleSubject(options) {
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), options.endpoint, { method: "POST", headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" } }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
+  } catch {
+    throw new ProviderAccountIdentityError("Google did not answer the token lookup.");
+  }
+  if (!response.ok)
+    throw new ProviderAccountIdentityError(`Google refused the token lookup with status ${response.status}.`);
+  let payload;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("not an object");
+    payload = parsed;
+  } catch {
+    throw new ProviderAccountIdentityError("Google returned an unreadable token lookup.");
+  }
+  const subject = typeof payload.sub === "string" ? payload.sub.trim() : "";
+  if (/^[A-Za-z0-9_-]{1,255}$/.test(subject))
+    return subject;
+  const scopes = typeof payload.scope === "string" ? payload.scope.split(/\s+/) : [];
+  if (subject || scopes.includes("openid")) {
+    throw new ProviderAccountIdentityError("Google did not name the subject of an openid token.");
+  }
+  return;
+}
+function labelsFromIdentityPayload(provider, payload) {
+  if (provider === "dropbox") {
+    const id = dropboxAccountIdFromTokenPayload(payload);
+    return id ? [id] : undefined;
+  }
+  const user = payload.user && typeof payload.user === "object" && !Array.isArray(payload.user) ? payload.user : undefined;
+  const address = provider === "gmail" ? payload.emailAddress : user?.emailAddress;
+  if (typeof address !== "string" || !address.includes("@"))
+    return;
+  const labels = [googleAccountIdFromAddress(address)];
+  const permissionId = typeof user?.permissionId === "string" ? user.permissionId.trim() : "";
+  if (provider === "google_drive" && /^[A-Za-z0-9_-]{1,255}$/.test(permissionId)) {
+    labels.push(googlePermissionLabel(permissionId));
+  }
+  return labels;
 }
 function providerLabel(provider) {
   return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : "Google Drive";
@@ -5674,14 +5783,15 @@ async function dropboxOwnRootFolderIds(options) {
   }
   return found.length > 0 ? found : undefined;
 }
-var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, ProviderAccountIdentityError;
+var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, ProviderAccountIdentityError, IMMUTABLE_LABEL_KINDS, LABEL;
 var init_provider_account_identity = __esm(() => {
   init_http_timeout();
   ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive"];
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
     dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
     gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
   DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
@@ -5691,6 +5801,8 @@ var init_provider_account_identity = __esm(() => {
       this.name = "ProviderAccountIdentityError";
     }
   };
+  IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
+  LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
 });
 
 // src/core/source-account-binding.ts
@@ -5754,19 +5866,19 @@ function recordFileSourceConnect(input) {
   updateSourceAccountBinding(sourceAccountBindingsPath(input.registryPath), sourceId, (current) => {
     const at = input.now.toISOString();
     if (current?.purge_required) {
-      if (current.provider_account_id && current.provider_account_id === input.providerAccountId) {
+      if (current.provider_account_id && input.providerAccountId && sameProviderAccount(current.provider_account_id, input.providerAccountId)) {
         outcome = "same_account";
         const { purge_required: _lifted, reconnected_at: _settled, ...rest } = current;
-        return rest;
+        return { ...rest, provider_account_id: mergeProviderAccountIds(current.provider_account_id, input.providerAccountId) };
       }
       outcome = "purge_required";
       return current;
     }
     if (current?.provider_account_id && input.providerAccountId) {
-      if (current.provider_account_id === input.providerAccountId) {
+      if (sameProviderAccount(current.provider_account_id, input.providerAccountId)) {
         outcome = "same_account";
         const { reconnected_at: _settled, ...rest } = current;
-        return rest;
+        return { ...rest, provider_account_id: mergeProviderAccountIds(current.provider_account_id, input.providerAccountId) };
       }
       outcome = "purge_required";
       return { ...current, purge_required: { reason: "account_changed", detected_at: at } };
@@ -5777,16 +5889,23 @@ function recordFileSourceConnect(input) {
 }
 function decideSourceAccountAction(input) {
   const { binding, grantAccountId, tokenAccountId: token } = input;
-  if (grantAccountId && token && grantAccountId !== token) {
-    return { action: "refuse", reason: "token_account_mismatch" };
+  const tokenIsBound = Boolean(binding?.provider_account_id && token && sameProviderAccount(binding.provider_account_id, token));
+  if (grantAccountId && token && !sameProviderAccount(grantAccountId, token)) {
+    const confirmedUnderThisGrant = tokenIsBound && !binding?.purge_required && input.grantConnectedAt !== undefined && binding?.bound_grant === input.grantConnectedAt;
+    if (!confirmedUnderThisGrant)
+      return { action: "refuse", reason: "token_account_mismatch" };
   }
   const bindTo = (id) => ({
     action: "proceed",
-    write: id ? { provider_account_id: id, bound_at: input.now.toISOString() } : null
+    write: id ? {
+      provider_account_id: id,
+      bound_at: input.now.toISOString(),
+      ...input.grantConnectedAt ? { bound_grant: input.grantConnectedAt } : {}
+    } : null
   });
   if (binding?.purge_required) {
-    if (binding.provider_account_id && token === binding.provider_account_id)
-      return bindTo(token);
+    if (tokenIsBound)
+      return bindTo(mergeProviderAccountIds(binding.provider_account_id, token));
     if (input.laneHoldsItems)
       return { action: "purge", reason: binding.purge_required.reason };
     return bindTo(token);
@@ -5796,8 +5915,21 @@ function decideSourceAccountAction(input) {
   }
   if (!token)
     return { action: "refuse", reason: "account_unverified" };
-  if (binding.provider_account_id === token) {
-    return binding.reconnected_at ? bindTo(token) : { action: "proceed" };
+  if (tokenIsBound) {
+    const merged = mergeProviderAccountIds(binding.provider_account_id, token);
+    if (binding.reconnected_at)
+      return bindTo(merged);
+    if (merged === binding.provider_account_id && (input.grantConnectedAt === undefined || binding.bound_grant === input.grantConnectedAt)) {
+      return { action: "proceed" };
+    }
+    return {
+      action: "proceed",
+      write: {
+        ...binding,
+        provider_account_id: merged,
+        ...input.grantConnectedAt ? { bound_grant: input.grantConnectedAt } : {}
+      }
+    };
   }
   if (!input.laneHoldsItems)
     return bindTo(token);
@@ -5827,6 +5959,7 @@ function normalizeBindings(value) {
     sources[key] = prune({
       ...typeof entry.provider_account_id === "string" && entry.provider_account_id.trim() ? { provider_account_id: entry.provider_account_id.trim() } : {},
       ...typeof entry.bound_at === "string" ? { bound_at: entry.bound_at } : {},
+      ...typeof entry.bound_grant === "string" ? { bound_grant: entry.bound_grant } : {},
       ...typeof entry.reconnected_at === "string" ? { reconnected_at: entry.reconnected_at } : {},
       ...folders.length > 0 ? { previous_account_folders: folders } : {},
       ...purge ? {
@@ -5846,6 +5979,7 @@ var ACCOUNT_BOUND_SOURCE_IDS, SourceAccountBindingsUnreadableError;
 var init_source_account_binding = __esm(() => {
   init_atomic_file();
   init_file_lease();
+  init_provider_account_identity();
   ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email"];
   SourceAccountBindingsUnreadableError = class SourceAccountBindingsUnreadableError extends Error {
     constructor(path) {
@@ -6172,14 +6306,18 @@ async function completeOAuthSourceConnection(prepared, code) {
       timeoutMs: prepared.tokenExchangeTimeoutMs
     });
   }
-  const accountBoundProvider = prepared.definition.handles.map((definition) => definition.provider).find(isAccountBoundProvider);
-  const fileSourceAccountId = accountBoundProvider ? token.providerAccountId ?? await lookupConnectedAccountId({
-    provider: accountBoundProvider,
-    tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
-    accessToken: token.accessToken,
-    fetchImpl: prepared.options.fetch ?? fetch,
-    timeoutMs: prepared.tokenExchangeTimeoutMs
-  }) : undefined;
+  const fileSourceAccountIds = new Map;
+  for (const definition of prepared.definition.handles) {
+    if (!isAccountBoundProvider(definition.provider) || fileSourceAccountIds.has(definition.provider))
+      continue;
+    fileSourceAccountIds.set(definition.provider, token.providerAccountId ?? await lookupConnectedAccountId({
+      provider: definition.provider,
+      tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      accessToken: token.accessToken,
+      fetchImpl: prepared.options.fetch ?? fetch,
+      timeoutMs: prepared.tokenExchangeTimeoutMs
+    }));
+  }
   const previousFileSourceAccountIds = new Map;
   for (const definition of prepared.definition.handles) {
     if (!isAccountBoundProvider(definition.provider))
@@ -6285,7 +6423,7 @@ async function completeOAuthSourceConnection(prepared, code) {
       for (const handleDefinition of prepared.definition.handles) {
         const handle = handleDefinition.handle(prepared.accountRole);
         handles.push(handle);
-        const providerAccountId = xUserId ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
+        const providerAccountId = xUserId ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountIds.get(handleDefinition.provider) : undefined);
         upsertConnectedHandle({
           handle,
           provider: handleDefinition.provider,
@@ -6313,7 +6451,7 @@ async function completeOAuthSourceConnection(prepared, code) {
         if (!prepared.oauth2StateStore)
           break;
         const handle = handleDefinition.handle(prepared.accountRole);
-        const providerAccountId = xUserId ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
+        const providerAccountId = xUserId ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountIds.get(handleDefinition.provider) : undefined);
         tokenWritesAttempted += 1;
         await prepared.oauth2StateStore.save(handle, {
           refreshToken,
@@ -6345,7 +6483,7 @@ async function completeOAuthSourceConnection(prepared, code) {
       const outcome = recordFileSourceConnect({
         registryPath: prepared.registryPath,
         provider: handleDefinition.provider,
-        providerAccountId: fileSourceAccountId,
+        providerAccountId: fileSourceAccountIds.get(handleDefinition.provider),
         now: prepared.now()
       });
       if (outcome === "purge_required") {
@@ -6779,19 +6917,19 @@ function oauthSourceDefinition(source) {
     provider: "gmail",
     capability: "gmail.email.sync",
     trustDomain: "secure_local",
-    scopes: ["https://www.googleapis.com/auth/gmail.readonly"]
+    scopes: ["https://www.googleapis.com/auth/gmail.readonly", "openid"]
   };
   const drive = {
     handle: (role) => role === "personal" ? "google_drive.personal" : `google_drive.${role}`,
     provider: "google_drive",
     capability: "google_drive.docs.sync",
     trustDomain: "internal",
-    scopes: ["https://www.googleapis.com/auth/drive.readonly"]
+    scopes: ["https://www.googleapis.com/auth/drive.readonly", "openid"]
   };
   return {
     authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
-    scopes: source === "gmail" ? gmail.scopes : source === "google-drive" ? drive.scopes : [...gmail.scopes, ...drive.scopes],
+    scopes: source === "gmail" ? gmail.scopes : source === "google-drive" ? drive.scopes : [...new Set([...gmail.scopes, ...drive.scopes])],
     handles: source === "gmail" ? [gmail] : source === "google-drive" ? [drive] : [gmail, drive]
   };
 }
@@ -6943,14 +7081,17 @@ async function identifyReplacedGrantAccount(options) {
 }
 async function lookupConnectedAccountId(options) {
   const tokenOrigin = new URL(options.tokenUrl).origin;
-  const endpoint = options.provider === "dropbox" ? new URL("/2/users/get_current_account", options.tokenUrl).toString() : tokenOrigin === "https://oauth2.googleapis.com" ? undefined : (options.provider === "gmail" ? new URL("users/me/profile", new URL("/gmail/v1/", options.tokenUrl)) : new URL("/drive/v3/about?fields=user(emailAddress)", options.tokenUrl)).toString();
+  const endpoints = options.provider === "dropbox" ? { dropbox: new URL("/2/users/get_current_account", options.tokenUrl).toString() } : tokenOrigin === "https://oauth2.googleapis.com" ? undefined : {
+    [options.provider]: (options.provider === "gmail" ? new URL("users/me/profile", new URL("/gmail/v1/", options.tokenUrl)) : new URL("/drive/v3/about?fields=user(emailAddress,permissionId)", options.tokenUrl)).toString(),
+    google_tokeninfo: new URL("/tokeninfo", options.tokenUrl).toString()
+  };
   try {
     return await fetchProviderAccountId({
       provider: options.provider,
       accessToken: options.accessToken,
       fetchImpl: (url, init) => options.fetchImpl(url, init),
       timeoutMs: options.timeoutMs,
-      ...endpoint ? { endpoints: { [options.provider]: endpoint } } : {}
+      ...endpoints ? { endpoints } : {}
     });
   } catch {
     return;
@@ -118221,6 +118362,7 @@ ${folderIds.join(",")}`).digest("hex");
       const decide = (binding) => decideSourceAccountAction({
         binding,
         grantAccountId: handle.providerAccountId,
+        grantConnectedAt: handle.connectedAt,
         tokenAccountId: token,
         laneHoldsItems: options.laneHoldsItems(),
         now: now()
@@ -118237,7 +118379,7 @@ ${folderIds.join(",")}`).digest("hex");
           if (JSON.stringify(latest ?? null) !== JSON.stringify(current ?? null) || grantNow?.connectedAt !== handle.connectedAt || grantNow?.providerAccountId !== handle.providerAccountId)
             return latest;
           bound = true;
-          return { provider_account_id: token, bound_at: now().toISOString() };
+          return { provider_account_id: token, bound_at: now().toISOString(), bound_grant: handle.connectedAt };
         });
         if (bound)
           return;

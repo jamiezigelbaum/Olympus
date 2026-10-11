@@ -17996,7 +17996,8 @@ init_http_timeout();
 var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
   dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
   gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+  google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
 };
 var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 

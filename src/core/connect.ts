@@ -49,6 +49,7 @@ import {
   fetchProviderAccountId,
   isAccountBoundProvider,
   type AccountBoundProvider,
+  type ProviderIdentityEndpoints,
 } from './provider-account-identity.ts';
 import {
   ACCOUNT_BOUND_SOURCE_IDS,
@@ -643,18 +644,19 @@ async function completeOAuthSourceConnection(
   // Which account this grant authorizes, for the sources that must never mix
   // two accounts. Best effort: an unknown answer is settled by the worker
   // against the token itself before anything syncs, so it never blocks connect.
-  const accountBoundProvider = prepared.definition.handles
-    .map((definition) => definition.provider)
-    .find(isAccountBoundProvider);
-  const fileSourceAccountId = accountBoundProvider
-    ? token.providerAccountId ?? await lookupConnectedAccountId({
-        provider: accountBoundProvider,
-        tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
-        accessToken: token.accessToken,
-        fetchImpl: prepared.options.fetch ?? fetch,
-        timeoutMs: prepared.tokenExchangeTimeoutMs,
-      })
-    : undefined;
+  // Asked per provider: one Google grant reads as Gmail's subject and address,
+  // and as Drive's subject, permission id and address.
+  const fileSourceAccountIds = new Map<AccountBoundProvider, string | undefined>();
+  for (const definition of prepared.definition.handles) {
+    if (!isAccountBoundProvider(definition.provider) || fileSourceAccountIds.has(definition.provider)) continue;
+    fileSourceAccountIds.set(definition.provider, token.providerAccountId ?? await lookupConnectedAccountId({
+      provider: definition.provider,
+      tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      accessToken: token.accessToken,
+      fetchImpl: prepared.options.fetch ?? fetch,
+      timeoutMs: prepared.tokenExchangeTimeoutMs,
+    }));
+  }
   // And which account the grant being replaced belongs to, for a source that
   // was never bound (Codex round 2 on this change). Asked here, outside the
   // custody fence: it mints from the old grant, and the broker commits a
@@ -820,7 +822,7 @@ async function completeOAuthSourceConnection(
           const handle = handleDefinition.handle(prepared.accountRole);
           handles.push(handle);
           const providerAccountId = xUserId
-            ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
+            ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountIds.get(handleDefinition.provider) : undefined);
           upsertConnectedHandle({
             handle,
             provider: handleDefinition.provider,
@@ -853,7 +855,7 @@ async function completeOAuthSourceConnection(
           if (!prepared.oauth2StateStore) break;
           const handle = handleDefinition.handle(prepared.accountRole);
           const providerAccountId = xUserId
-            ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
+            ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountIds.get(handleDefinition.provider) : undefined);
           tokenWritesAttempted += 1;
           await prepared.oauth2StateStore.save(handle, {
             refreshToken,
@@ -899,7 +901,7 @@ async function completeOAuthSourceConnection(
         const outcome = recordFileSourceConnect({
           registryPath: prepared.registryPath,
           provider: handleDefinition.provider,
-          providerAccountId: fileSourceAccountId,
+          providerAccountId: fileSourceAccountIds.get(handleDefinition.provider),
           now: prepared.now(),
         });
         if (outcome === 'purge_required') {
@@ -1759,12 +1761,16 @@ function oauthSourceDefinition(source: ConnectOAuthOptions['source']): OAuthSour
       }],
     };
   }
+  // `openid` adds no data access: it lets tokeninfo name the account's
+  // immutable subject, so a renamed Google address is still recognised as the
+  // same account (provider-account-identity.ts). Refreshes send no scope, so
+  // grants made before it keep working and are matched by address.
   const gmail = {
     handle: (role: string) => role === 'personal' ? 'gmail.personal' : `gmail.${role}`,
     provider: 'gmail' as const,
     capability: 'gmail.email.sync',
     trustDomain: 'secure_local' as const,
-    scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+    scopes: ['https://www.googleapis.com/auth/gmail.readonly', 'openid'],
   };
   const drive = {
     handle: (role: string) => role === 'personal' ? 'google_drive.personal' : `google_drive.${role}`,
@@ -1774,7 +1780,7 @@ function oauthSourceDefinition(source: ConnectOAuthOptions['source']): OAuthSour
     // drive.readonly only: the Drive connectors read document text through the
     // Drive export endpoint (files/{id}/export), never the Docs API, so
     // documents.readonly was consented to and never exercised.
-    scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+    scopes: ['https://www.googleapis.com/auth/drive.readonly', 'openid'],
   };
   return {
     authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
@@ -1783,7 +1789,7 @@ function oauthSourceDefinition(source: ConnectOAuthOptions['source']): OAuthSour
       ? gmail.scopes
       : source === 'google-drive'
         ? drive.scopes
-        : [...gmail.scopes, ...drive.scopes],
+        : [...new Set([...gmail.scopes, ...drive.scopes])],
     handles: source === 'gmail'
       ? [gmail]
       : source === 'google-drive'
@@ -2032,20 +2038,23 @@ async function lookupConnectedAccountId(options: {
   timeoutMs: number;
 }): Promise<string | undefined> {
   const tokenOrigin = new URL(options.tokenUrl).origin;
-  const endpoint = options.provider === 'dropbox'
-    ? new URL('/2/users/get_current_account', options.tokenUrl).toString()
+  const endpoints: ProviderIdentityEndpoints | undefined = options.provider === 'dropbox'
+    ? { dropbox: new URL('/2/users/get_current_account', options.tokenUrl).toString() }
     : tokenOrigin === 'https://oauth2.googleapis.com'
       ? undefined
-      : (options.provider === 'gmail'
-        ? new URL('users/me/profile', new URL('/gmail/v1/', options.tokenUrl))
-        : new URL('/drive/v3/about?fields=user(emailAddress)', options.tokenUrl)).toString();
+      : {
+          [options.provider]: (options.provider === 'gmail'
+            ? new URL('users/me/profile', new URL('/gmail/v1/', options.tokenUrl))
+            : new URL('/drive/v3/about?fields=user(emailAddress,permissionId)', options.tokenUrl)).toString(),
+          google_tokeninfo: new URL('/tokeninfo', options.tokenUrl).toString(),
+        };
   try {
     return await fetchProviderAccountId({
       provider: options.provider,
       accessToken: options.accessToken,
       fetchImpl: (url, init) => options.fetchImpl(url, init),
       timeoutMs: options.timeoutMs,
-      ...(endpoint ? { endpoints: { [options.provider]: endpoint } } : {}),
+      ...(endpoints ? { endpoints } : {}),
     });
   } catch {
     return undefined;
