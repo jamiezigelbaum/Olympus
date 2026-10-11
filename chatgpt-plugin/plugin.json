@@ -96,6 +96,7 @@
             }
           ]
         },
+        "demo_recording_url": "https://drive.google.com/file/d/1fBwokDYwiAc7F--qrGrp4klTW9uKJV-0/view?usp=sharing",
         "commerce": false,
         "commerce_description": "Nothing is sold, bought or paid in ChatGPT. The optional anonymous questions use the user's own zkAPI account, set up outside ChatGPT in Olympus on their Mac; each question uses a little of that account's balance. The plugin never offers, links to or starts a purchase or payment."
       },

@@ -151,7 +151,7 @@ recording of ChatGPT on the web, with captions, no voice needed.
 | 7 | 65-78 s | P3 bank overdraft notice | Short ChatGPT reply; the private answer panel opens under it with the answer and "Not sent to ChatGPT"; caption: "Private answers appear only in this panel. Secrets are never answered." |
 | 8 | 78-88 s | End card | olympusplugin.ai · Privacy · Support |
 
-Upload unlisted; paste the URL as `demo_recording_url` in the form.
+Recorded 2026-10-11 as one unedited take (about 3½ minutes, real waits kept; the developer-mode "CSP off" badge is left as ChatGPT shows it). Link-shared Drive file in `plugin.json` `review.demo_recording_url`.
 
 ## 5. Pre-submission checklist
 
@@ -244,7 +244,7 @@ Reviewer demo
       built-in private model is ready so N1's panel shows an answer.
 - [ ] All 5 positive and 3 negative cases pass on the demo engine through the
       relay, from a fresh ChatGPT account.
-- [ ] Demo video recorded last, from the tested dashboard.
+- [x] Demo video recorded last, from the tested dashboard.
 
 Policy
 - [ ] Sensitive data decided and documented: users' sources can hold health,
