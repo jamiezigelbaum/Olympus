@@ -38547,7 +38547,7 @@ function createGmailConnectorStoreSyncHandler(options) {
     ...options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened(store) } : {}
   });
   const runBothStores = async (input) => {
-    const traversal = scopedTraversal(input.connector, connectorId);
+    const traversal = scopedTraversal(input.connector, connectorId, options.assertScopeCurrent);
     const sync = {
       fetchContent: true,
       classification,
@@ -38653,14 +38653,38 @@ function gmailLegOf(run, domain) {
     throw new Error(`The Gmail ${domain} store did not run.`);
   return { sync: leg.sync, embed: leg.embed };
 }
-function scopedTraversal(connector, connectorId) {
+function scopedTraversal(connector, connectorId, assertScopeCurrent) {
+  if (!assertScopeCurrent) {
+    return {
+      id: connectorId,
+      family: connector.family,
+      authenticate: () => connector.authenticate(),
+      fetchItem: (localItemId) => connector.fetchItem(localItemId),
+      classificationSignals: (item) => connector.classificationSignals(item),
+      listItems: (options) => connector.listItems(options)
+    };
+  }
   return {
     id: connectorId,
     family: connector.family,
-    authenticate: () => connector.authenticate(),
-    fetchItem: (localItemId) => connector.fetchItem(localItemId),
+    authenticate: async () => {
+      await connector.authenticate();
+      assertScopeCurrent();
+    },
+    fetchItem: async (localItemId) => {
+      const item = await connector.fetchItem(localItemId);
+      assertScopeCurrent();
+      return item;
+    },
     classificationSignals: (item) => connector.classificationSignals(item),
-    listItems: (options) => connector.listItems(options)
+    listItems: (options) => ({
+      async* [Symbol.asyncIterator]() {
+        for await (const page of connector.listItems(options)) {
+          assertScopeCurrent();
+          yield page;
+        }
+      }
+    })
   };
 }
 function gmailCursorConnectorId(account, scope) {
@@ -131609,6 +131633,9 @@ async function main() {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      assertScopeCurrent: () => {
+        fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+      },
       ...gmailTierLane?.publicStore ? { publicStore: gmailTierLane.publicStore } : {},
       ...gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {},
       ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority, scopeRef) } : {},

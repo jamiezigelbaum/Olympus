@@ -3059,6 +3059,9 @@ export async function main(): Promise<void> {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      assertScopeCurrent: () => {
+        fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+      },
       ...(gmailTierLane?.publicStore ? { publicStore: gmailTierLane.publicStore } : {}),
       ...(gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {}),
       // A fresh provider traversal is a bounded, resumable history walk.
