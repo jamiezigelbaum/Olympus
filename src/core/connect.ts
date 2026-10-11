@@ -718,7 +718,7 @@ async function completeOAuthSourceConnection(
       const secretWrites: Array<[key: string, value: string]> = [];
       const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
       const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
-      secretWrites.push([clientIdKey, prepared.clientId], [refreshKey, refreshToken]);
+      secretWrites.push([clientIdKey, prepared.clientId]);
       secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
       // Written only when the caller states it, which today means only the
       // dashboard's publisher-relay start route: the plain CLI connect path has
@@ -747,11 +747,20 @@ async function completeOAuthSourceConnection(
       }
 
       const handles: string[] = [];
-      const connectedAt = prepared.now();
+      // Strictly later than the grant it replaces: `connectedAt` is part of
+      // the grant generation every cache key and supersession check reads,
+      // so two connects landing in the same millisecond (with no account id
+      // to tell them apart) must still be two generations (PR review).
+      const replacedConnectedAt = Math.max(0, ...readConnectedHandleRegistry(prepared.registryPath).handles
+        .filter((entry) => proposedHandles.some((proposed) => proposed.handle === entry.handle))
+        .map((entry) => Date.parse(entry.connectedAt))
+        .filter((ms) => Number.isFinite(ms)));
+      const connectedAt = new Date(Math.max(prepared.now().getTime(), replacedConnectedAt + 1));
       // An activated X lane may keep its rotating token in the local OAuth
       // state store and leave handles.json metadata-only. Both writes remain
       // inside the same grant-custody fence.
       const registryOwnsOAuth = prepared.options.source !== 'x' || !prepared.oauth2StateStore;
+      let oldGrantIntact = true;
       try {
         for (const handleDefinition of prepared.definition.handles) {
           const handle = handleDefinition.handle(prepared.accountRole);
@@ -793,13 +802,22 @@ async function completeOAuthSourceConnection(
           }, prepared.registryPath);
         }
         for (const [key, value] of secretWrites) await prepared.secretStore.set(key, value);
+        // The refresh token goes last: until its write starts, the token on
+        // file is still the old grant's, so a failure up to here may put the
+        // markers back. Once it starts, the new grant may be live and the
+        // markers stay, so the worker verifies before anything syncs
+        // (independent review round 6).
+        oldGrantIntact = false;
+        await prepared.secretStore.set(refreshKey, refreshToken);
       } catch (error) {
-        try {
-          for (const [sourceId, snapshot] of intentSnapshots) {
-            updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
+        if (oldGrantIntact) {
+          try {
+            for (const [sourceId, snapshot] of intentSnapshots) {
+              updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
+            }
+          } catch {
+            // The marker stays; the worker then fails closed, never mixes.
           }
-        } catch {
-          // The marker stays; the worker then fails closed, never mixes.
         }
         throw error;
       }

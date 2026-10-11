@@ -6110,7 +6110,7 @@ async function completeOAuthSourceConnection(prepared, code) {
     const secretWrites = [];
     const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
     const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
-    secretWrites.push([clientIdKey, prepared.clientId], [refreshKey, refreshToken]);
+    secretWrites.push([clientIdKey, prepared.clientId]);
     secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
     if (prepared.options.clientIdSource !== undefined) {
       const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
@@ -6125,8 +6125,10 @@ async function completeOAuthSourceConnection(prepared, code) {
       secretRefs.push(clientSecretRef);
     }
     const handles = [];
-    const connectedAt = prepared.now();
+    const replacedConnectedAt = Math.max(0, ...readConnectedHandleRegistry(prepared.registryPath).handles.filter((entry) => proposedHandles.some((proposed) => proposed.handle === entry.handle)).map((entry) => Date.parse(entry.connectedAt)).filter((ms) => Number.isFinite(ms)));
+    const connectedAt = new Date(Math.max(prepared.now().getTime(), replacedConnectedAt + 1));
     const registryOwnsOAuth = prepared.options.source !== "x" || !prepared.oauth2StateStore;
+    let oldGrantIntact = true;
     try {
       for (const handleDefinition of prepared.definition.handles) {
         const handle = handleDefinition.handle(prepared.accountRole);
@@ -6162,12 +6164,16 @@ async function completeOAuthSourceConnection(prepared, code) {
       }
       for (const [key, value] of secretWrites)
         await prepared.secretStore.set(key, value);
+      oldGrantIntact = false;
+      await prepared.secretStore.set(refreshKey, refreshToken);
     } catch (error) {
-      try {
-        for (const [sourceId, snapshot] of intentSnapshots) {
-          updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
-        }
-      } catch {}
+      if (oldGrantIntact) {
+        try {
+          for (const [sourceId, snapshot] of intentSnapshots) {
+            updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
+          }
+        } catch {}
+      }
       throw error;
     }
     for (const handle of handles)

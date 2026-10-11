@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { connectOAuthSource } from '../src/core/connect.ts';
 import { EncryptedFileSecretStore } from '../src/core/secret-store.ts';
 import {
+  decideSourceAccountAction,
   readSourceAccountBindings,
   sourceAccountBindingsPath,
   updateSourceAccountBinding,
@@ -71,6 +72,25 @@ function installDir() {
       encryptedFilePath: join(dir, 'secrets.enc'),
       keyFilePath: join(dir, 'secrets.key'),
     }),
+  };
+}
+
+function dropboxOptions(install: ReturnType<typeof installDir>, baseUrl: string) {
+  return {
+    source: 'dropbox' as const,
+    clientId: 'dropbox-client-id-fixture',
+    authUrl: `${baseUrl}/authorize`,
+    tokenUrl: `${baseUrl}/oauth2/token`,
+    registryPath: install.registryPath,
+    oauth2StateStore: new JsonCredentialOAuth2StateStore(install.statePath),
+    secretStore: install.secretStore,
+    openBrowser: false,
+    onAuthorizationUrl: async (url: string) => {
+      const authResponse = await fetch(url, { redirect: 'manual' });
+      const location = authResponse.headers.get('location');
+      if (!location) throw new Error('mock authorization did not redirect');
+      await fetch(location);
+    },
   };
 }
 
@@ -179,7 +199,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     const inner = install.secretStore;
     const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
       set: async (key: string, value: string) => {
-        if (key.endsWith('.oauth.refresh_token')) throw new Error('secret store unavailable');
+        if (key.endsWith('.oauth.client_id')) throw new Error('secret store unavailable');
         return inner.set(key, value);
       },
     });
@@ -218,13 +238,59 @@ describe('Dropbox connect records the account its grant belongs to', () => {
       const inner = install.secretStore;
       const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
         set: async (key: string, value: string) => {
-          if (key.endsWith('.oauth.refresh_token')) throw new Error('secret store unavailable');
+          if (key.endsWith('.oauth.client_id')) throw new Error('secret store unavailable');
           return inner.set(key, value);
         },
       });
       await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl)).rejects.toThrow();
       const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
       expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  test('once the new refresh token may be on file, a failure keeps the marker and sync stays blocked (independent review round 6)', async () => {
+    const install = installDir();
+    const server = await dropboxServer({});
+    try {
+      await connectDropbox(install, server.baseUrl);
+      rmSync(sourceAccountBindingsPath(install.registryPath), { force: true });
+      // The store keeps the new refresh token, then reports a failure.
+      const inner = install.secretStore;
+      const flaky = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
+        set: async (key: string, value: string) => {
+          await inner.set(key, value);
+          if (key.endsWith('.oauth.refresh_token')) throw new Error('fsync failed after write');
+        },
+      });
+      await expect(connectDropbox({ ...install, secretStore: flaky }, server.baseUrl)).rejects.toThrow();
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      const binding = read.kind === 'ok' ? read.bindings.sources['dropbox.files'] : undefined;
+      expect(binding?.reconnected_at).toBeTruthy();
+      // The worker cannot adopt the new account over the old rows.
+      expect(decideSourceAccountAction({
+        binding,
+        grantAccountId: undefined,
+        tokenAccountId: 'dbid:new-account',
+        laneHoldsItems: true,
+        now: new Date('2026-10-11T00:00:00.000Z'),
+      })).toEqual({ action: 'purge', reason: 'previous_account_unknown' });
+    } finally {
+      server.close();
+    }
+  });
+
+  test('two connects in the same millisecond are still two grant generations (PR review)', async () => {
+    const install = installDir();
+    const server = await dropboxServer({});
+    try {
+      const at = new Date('2026-10-11T00:00:00.000Z');
+      await connectOAuthSource({ ...dropboxOptions(install, server.baseUrl), now: () => at });
+      const first = readConnectedHandleRegistry(install.registryPath).handles[0]!.connectedAt;
+      await connectOAuthSource({ ...dropboxOptions(install, server.baseUrl), now: () => at });
+      const second = readConnectedHandleRegistry(install.registryPath).handles[0]!.connectedAt;
+      expect(Date.parse(second)).toBeGreaterThan(Date.parse(first));
     } finally {
       server.close();
     }
