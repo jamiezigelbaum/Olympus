@@ -15,7 +15,8 @@
   with the new one.
 - **X bookmarks stop at a reconnect too.** A bookmarks sync already running
   when X is reconnected stops at its next page and stores nothing it read
-  with the previous connection; the next run uses the new one.
+  with the previous connection; the next run uses the new one. Recovering
+  missing bookmark text and the X window diagnostic stop the same way.
 - **Olympus on a server opens on your computer.** When the engine runs on a
   server (`olympus server-mode on --ssh-target you@your-server`, or found
   automatically on a Linux host with no screen), Connect and "Fix this on

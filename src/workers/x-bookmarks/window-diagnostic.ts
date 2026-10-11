@@ -11,9 +11,9 @@ import {
 import { dirname } from 'node:path';
 import {
   createEnvCredentialBroker,
-  requireBearerTokenCredentialSession,
   type CredentialBroker,
 } from '../credential-broker/index.ts';
+import { issueGrantFencedXSession } from './grant-fence.ts';
 import {
   XApiClient,
   XApiError,
@@ -130,21 +130,28 @@ export async function runXBookmarksWindowDiagnostic(
   if (!account) throw new TypeError('X bookmark diagnostic account must be non-empty.');
   const attemptedAt = validDate(options.attemptedAt);
   const provenance = xApiInvocationProvenance(options.provenance);
-  const client = await diagnosticClient(options, env);
-  const request = (
+  const { client, assertGrantCurrent } = await diagnosticClient(options, env);
+  // Checked after every answer, outside the request's own error handling: a
+  // reconnect mid-run would otherwise mix two accounts' observations into one
+  // report. The run throws and writes no report.
+  const request = async (
     paginationToken: string | undefined,
     headOnly: boolean,
-  ) => diagnosticRequest({
-    client,
-    usageStore: options.usageStore,
-    account,
-    config,
-    attemptedAt,
-    provenance,
-    pageSize: config.reconcilePageSize,
-    ...(paginationToken ? { paginationToken } : {}),
-    headOnly,
-  });
+  ): Promise<DiagnosticRequestResult> => {
+    const result = await diagnosticRequest({
+      client,
+      usageStore: options.usageStore,
+      account,
+      config,
+      attemptedAt,
+      provenance,
+      pageSize: config.reconcilePageSize,
+      ...(paginationToken ? { paginationToken } : {}),
+      headOnly,
+    });
+    assertGrantCurrent();
+    return result;
+  };
 
   const rootObservation = await request(undefined, false);
   const freshRoot = summarizeProbe('fresh_root_global', [rootObservation.observation]);
@@ -197,8 +204,9 @@ export async function runXBookmarksWindowDiagnostic(
 async function diagnosticClient(
   options: XBookmarksWindowDiagnosticOptions,
   env: Record<string, string | undefined>,
-): Promise<XBookmarksLiveSourceClient> {
-  if (options.sourceClient) return options.sourceClient;
+): Promise<{ client: XBookmarksLiveSourceClient; assertGrantCurrent: () => void }> {
+  // An injected client takes no token and stays unfenced.
+  if (options.sourceClient) return { client: options.sourceClient, assertGrantCurrent: () => {} };
   const userId = options.userId?.trim() || env.OLYMPUS_SOURCE_INDEX_X_USER_ID?.trim();
   if (!userId) {
     throw new Error('X bookmarks window diagnostic requires an explicit provider user id.');
@@ -210,20 +218,21 @@ async function diagnosticClient(
     env,
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
-  const session = requireBearerTokenCredentialSession(await broker.issueSession({
-    handle: credentialHandle,
-    provider: 'x',
-    capability: 'x.bookmarks.sync',
-    trustDomain: 'internal',
+  const session = await issueGrantFencedXSession({
+    broker,
+    credentialHandle,
     purpose: 'Run the bounded content-free X bookmarks window diagnostic.',
-  }), credentialHandle);
-  return new XApiClient({
-    token: session.token,
-    userId,
-    ...(options.fetch ? { fetch: options.fetch } : {}),
-    ...(options.apiBaseUrl ? { baseUrl: options.apiBaseUrl } : {}),
-    ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
   });
+  return {
+    client: new XApiClient({
+      token: session.token,
+      userId,
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+      ...(options.apiBaseUrl ? { baseUrl: options.apiBaseUrl } : {}),
+      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    }),
+    assertGrantCurrent: session.assertGrantCurrent,
+  };
 }
 
 async function traversalProbe(

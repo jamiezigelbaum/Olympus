@@ -13,9 +13,9 @@ import type {
 import type { SourceSensitivity } from '../../core/source-index/types.ts';
 import {
   createEnvCredentialBroker,
-  requireBearerTokenCredentialSession,
   type CredentialBroker,
 } from '../credential-broker/index.ts';
+import { issueGrantFencedXSession } from './grant-fence.ts';
 import {
   XApiClient,
   XApiError,
@@ -93,22 +93,7 @@ export class XBookmarksLiveSyncError extends Error {
   }
 }
 
-/**
- * The X credential was reconnected while this run held the previous grant's
- * token. The broker stops serving a replaced grant's token, but one already
- * handed out still works at X, so the run checks the grant after every
- * provider answer and before anything reaches a store, as the Dropbox, Drive
- * and Gmail lanes do (PR #254). Nothing read under the old grant is stored;
- * the next run starts under the new one.
- */
-export class XBookmarksGrantChangedError extends Error {
-  readonly code = 'x_bookmarks_grant_changed';
-
-  constructor() {
-    super('The X bookmarks credential was reconnected during this run; nothing from the previous grant was stored.');
-    this.name = 'XBookmarksGrantChangedError';
-  }
-}
+export { XBookmarksGrantChangedError } from './grant-fence.ts';
 
 export interface XBookmarksLiveSourceClient {
   fetchBookmarks(request?: {
@@ -294,14 +279,9 @@ export function createXBookmarksApiSourceConnector(
   let acquired = false;
   let completedSnapshotAt: string | undefined;
   let latest: XBookmarksApiConnectorStatus = emptyStatus(options.mode);
-  // The grant generation the token was issued under; set only when the broker
-  // records one, so an injected client or a static broker stays unfenced.
-  let grantFence: { generation: string | undefined } | undefined;
-  const assertGrantCurrent = (): void => {
-    if (grantFence && broker.grantGeneration?.(credentialHandle) !== grantFence.generation) {
-      throw new XBookmarksGrantChangedError();
-    }
-  };
+  // The fence for the grant the token was issued under; an injected client
+  // takes no token and stays unfenced.
+  let assertGrantCurrent = (): void => {};
 
   const connector: XBookmarksApiSourceConnector = {
     id: 'x_bookmarks_live',
@@ -310,20 +290,12 @@ export function createXBookmarksApiSourceConnector(
     async authenticate(): Promise<void> {
       if (client) return;
       if (!userId) throw new Error('X bookmarks connector requires OLYMPUS_SOURCE_INDEX_X_USER_ID.');
-      // Read before and after the issue: unchanged across it means the token
-      // belongs to that generation (the broker serves only the current grant's).
-      const generationBefore = broker.grantGeneration?.(credentialHandle);
-      const session = requireBearerTokenCredentialSession(await broker.issueSession({
-        handle: credentialHandle,
-        provider: 'x',
-        capability: 'x.bookmarks.sync',
-        trustDomain: 'internal',
+      const session = await issueGrantFencedXSession({
+        broker,
+        credentialHandle,
         purpose: 'Synchronize X bookmarks into the Olympus shared connector store.',
-      }), credentialHandle);
-      if (broker.grantGeneration) {
-        grantFence = { generation: generationBefore };
-        assertGrantCurrent();
-      }
+      });
+      assertGrantCurrent = session.assertGrantCurrent;
       client = grantFencedClient(new XApiClient({
         token: session.token,
         userId,
@@ -384,7 +356,7 @@ export function createXBookmarksApiSourceConnector(
       return (snapshot ?? createXBookmarksSourceConnector({ account, posts: [] })).classificationSignals(item);
     },
 
-    assertGrantCurrent,
+    assertGrantCurrent: () => assertGrantCurrent(),
     status: () => latest,
     apiUsageStatus: () => options.usageStore.status({ account, config, now: clock() }),
     async markReconciliationDisposition(

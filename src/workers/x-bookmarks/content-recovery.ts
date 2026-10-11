@@ -18,7 +18,6 @@ import {
 } from '../connector-store/index.ts';
 import {
   createEnvCredentialBroker,
-  requireBearerTokenCredentialSession,
   type CredentialBroker,
 } from '../credential-broker/index.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
@@ -45,6 +44,7 @@ import {
 } from './live-control.ts';
 import type { LocalXBookmarksReconcileStateStore } from './reconcile-state.ts';
 import type { XBookmarksFolderFacetRefreshAuthority } from './reconcile-state.ts';
+import { XBookmarksGrantChangedError, issueGrantFencedXSession } from './grant-fence.ts';
 
 const RECOVERY_CONNECTOR_ID = 'x_bookmarks_content_recovery';
 const MAX_RECOVERY_ITEMS = 100;
@@ -205,15 +205,18 @@ export function createXBookmarksContentRecoveryHandler(
       counts.items_deferred = recoverable.length - requestedCandidates.length;
 
       let client: XBookmarkContentLookupClient;
+      // An injected client takes no token and stays unfenced.
+      let assertGrantCurrent = (): void => {};
       try {
-        client = options.sourceClient ?? await authenticatedClient({
+        if (options.sourceClient) client = options.sourceClient;
+        else ({ client, assertGrantCurrent } = await authenticatedClient({
           broker,
           credentialHandle,
           userId,
           ...(options.fetch ? { fetch: options.fetch } : {}),
           ...(options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {}),
           ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
-        });
+        }));
       } catch {
         options.usageStore.cancelUndispatchedRequest({ reservation });
         counts.items_deferred += requestedCandidates.length;
@@ -274,6 +277,17 @@ export function createXBookmarksContentRecoveryHandler(
         );
       }
 
+      try {
+        // Nothing between here and the restore awaits, so this is the last
+        // look before the text is written: a reconnect that landed while the
+        // lookup was in flight means these posts were read with the previous
+        // account's token. Nothing is restored; the next run uses the new one.
+        assertGrantCurrent();
+      } catch (error) {
+        if (!(error instanceof XBookmarksGrantChangedError)) throw error;
+        counts.items_deferred += requestedCandidates.length;
+        return writeReceipt(receiptPath, buildReceipt('deferred', counts));
+      }
       counts.provider_items_returned = lookup.posts.length;
       const postsWithText = lookup.posts.filter((post) => Boolean(post.text?.trim()));
       counts.items_unrecoverable = lookup.unavailableCount + lookup.posts.length - postsWithText.length;
@@ -412,21 +426,22 @@ async function authenticatedClient(input: {
   fetch?: XBookmarksFetch;
   apiBaseUrl?: string;
   timeoutMs?: number;
-}): Promise<XBookmarkContentLookupClient> {
-  const session = requireBearerTokenCredentialSession(await input.broker.issueSession({
-    handle: input.credentialHandle,
-    provider: 'x',
-    capability: 'x.bookmarks.sync',
-    trustDomain: 'internal',
+}): Promise<{ client: XBookmarkContentLookupClient; assertGrantCurrent: () => void }> {
+  const session = await issueGrantFencedXSession({
+    broker: input.broker,
+    credentialHandle: input.credentialHandle,
     purpose: 'Recover missing content for already-indexed X bookmarks.',
-  }), input.credentialHandle);
-  return new XApiClient({
-    token: session.token,
-    userId: input.userId,
-    ...(input.fetch ? { fetch: input.fetch } : {}),
-    ...(input.apiBaseUrl ? { baseUrl: input.apiBaseUrl } : {}),
-    ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
   });
+  return {
+    client: new XApiClient({
+      token: session.token,
+      userId: input.userId,
+      ...(input.fetch ? { fetch: input.fetch } : {}),
+      ...(input.apiBaseUrl ? { baseUrl: input.apiBaseUrl } : {}),
+      ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
+    }),
+    assertGrantCurrent: session.assertGrantCurrent,
+  };
 }
 
 function recoveryRawItem(post: XBookmarkPost, account: string, fetchedAt: string): RawItem {
