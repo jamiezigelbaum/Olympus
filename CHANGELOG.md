@@ -1,6 +1,20 @@
 # Changelog
 
-## 1.0.0-rc.3 - unreleased
+## 1.0.0-rc.4 - 2026-10-12
+
+- **Search uses EmbeddingGemma 2, built in.** The model that indexes and
+  searches your sources is now Google's EmbeddingGemma 2, run on the machine
+  through LiteRT-LM. It downloads itself once on first use; nothing to
+  install, no key, nothing leaves the machine. On a Mac it also reads
+  pictures, so photos are searchable by what is in them.
+- **Audio is transcribed on the machine.** Dropbox audio files, voice notes
+  and the sound of videos are transcribed by Qwen3-ASR 0.6B on the built-in
+  `llama-server`; the model downloads only when an approved source holds
+  audio.
+- **A Google account keeps its sources after an address change.** Google
+  connections are bound to the account's permanent id, not only its email
+  address.
+
 
 - **Ask anonymously works on Linux hosts.** The built-in question writer
   (levels Standard with **Lightly cleaned**, and Strict) checks the
@@ -80,6 +94,8 @@
 - **A full disk says how much to free.** A model download that failed for
   space reads "Free up 3 GB, then Try again", and Models no longer repeats
   the Needs-you line.
+
+## 1.0.0-rc.3 - 2026-10-04
 
 - **A first question before anything is connected says so.** With no source
   connected, an empty `olympus_search` tells ChatGPT nothing is connected yet
