@@ -77,10 +77,14 @@ export interface SourceAccountGuardOptions {
    */
   readAccountId?: () => string | undefined;
   /**
-   * Runs each guarded task alone among the source's tasks (createExclusiveRunner),
-   * shared by every guard of the source. Without it, a task admitted for one
+   * Runs each guarded task alone among the source's tasks. Defaults to one
+   * runner per source and record, shared by every guard this process builds
+   * for it (a reconnect under a new handle, X's per-read-account guards), so
+   * no lane can be wired without it. Without it, a task admitted for one
    * account could still be writing when a later task's check found the stores
-   * empty and bound the next account over them (PR #264 review, Astra).
+   * empty and bound the next account over them (PR #264 review, Astra): the
+   * Dropbox dashboard hook runs lane tasks outside the scheduler, so a Sync
+   * now and a post-connect sync could overlap that way.
    */
   exclusive?: ExclusiveRunner;
   broker?: CredentialBroker;
@@ -92,7 +96,7 @@ export interface SourceAccountGuardOptions {
 
 export interface SourceAccountGuard {
   assertAccount(): Promise<void>;
-  /** The check, then the task, both inside the source's exclusive runner when it has one. */
+  /** The check, then the task, both inside the source's exclusive runner. */
   run?<T>(task: () => Promise<T>): Promise<T>;
 }
 
@@ -108,6 +112,21 @@ export function createExclusiveRunner(): ExclusiveRunner {
   };
 }
 
+// Every guard of one source in this process shares one runner. Every task
+// these guards run is a bounded pass (the scheduler already serializes a
+// source's tasks on its corpus key), so none holds the runner indefinitely.
+const sourceExclusiveRunners = new Map<string, ExclusiveRunner>();
+
+function sourceExclusiveRunner(bindingsPath: string, sourceId: AccountBoundSourceId): ExclusiveRunner {
+  const key = `${bindingsPath}\n${sourceId}`;
+  let runner = sourceExclusiveRunners.get(key);
+  if (!runner) {
+    runner = createExclusiveRunner();
+    sourceExclusiveRunners.set(key, runner);
+  }
+  return runner;
+}
+
 /** Check the account, then run the task, as the guard runs its tasks. */
 export function runGuarded<T>(guard: SourceAccountGuard, task: () => Promise<T>): Promise<T> {
   return guard.run ? guard.run(task) : guard.assertAccount().then(task);
@@ -117,6 +136,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
   const broker = options.broker ?? createEnvCredentialBroker();
   const now = options.now ?? (() => new Date());
   const bindingsPath = sourceAccountBindingsPath(options.registryPath);
+  const exclusive = options.exclusive ?? sourceExclusiveRunner(bindingsPath, options.sourceId);
   // One provider lookup per access token, not per task run.
   const verified = new Map<string, string>();
   // The token the last lookup was about, for the reach check below.
@@ -180,7 +200,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
         await guard.assertAccount();
         return task();
       };
-      return options.exclusive ? options.exclusive(checked) : checked();
+      return exclusive(checked);
     },
     async assertAccount(): Promise<void> {
       const handle = readConnectedHandleRegistry(options.registryPath).handles

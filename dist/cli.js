@@ -118284,6 +118284,16 @@ function createExclusiveRunner() {
     return run;
   };
 }
+function sourceExclusiveRunner(bindingsPath, sourceId) {
+  const key2 = `${bindingsPath}
+${sourceId}`;
+  let runner = sourceExclusiveRunners.get(key2);
+  if (!runner) {
+    runner = createExclusiveRunner();
+    sourceExclusiveRunners.set(key2, runner);
+  }
+  return runner;
+}
 function runGuarded(guard, task) {
   return guard.run ? guard.run(task) : guard.assertAccount().then(task);
 }
@@ -118291,6 +118301,7 @@ function createSourceAccountGuard(options) {
   const broker = options.broker ?? createEnvCredentialBroker();
   const now = options.now ?? (() => new Date);
   const bindingsPath = sourceAccountBindingsPath(options.registryPath);
+  const exclusive = options.exclusive ?? sourceExclusiveRunner(bindingsPath, options.sourceId);
   const verified = new Map;
   let lastAccessToken;
   const evidenceChecked = new Map;
@@ -118352,7 +118363,7 @@ ${folderIds.join(",")}`).digest("hex");
         await guard.assertAccount();
         return task();
       };
-      return options.exclusive ? options.exclusive(checked) : checked();
+      return exclusive(checked);
     },
     async assertAccount() {
       const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
@@ -118446,7 +118457,7 @@ function accountBoundSchedulerSource(input) {
     }))
   };
 }
-var SourceAccountChangedError;
+var SourceAccountChangedError, sourceExclusiveRunners;
 var init_source_account_guard = __esm(() => {
   init_provider_account_identity();
   init_source_account_binding();
@@ -118460,6 +118471,7 @@ var init_source_account_guard = __esm(() => {
       this.code = code;
     }
   };
+  sourceExclusiveRunners = new Map;
 });
 
 // src/workers/source-scope-browser.ts
@@ -133046,15 +133058,6 @@ async function main() {
     handles: readActiveConnectedHandles(process.env)
   }));
   const sourceAccountGuards = new Map;
-  const sourceExclusiveRunners = new Map;
-  const exclusiveRunnerFor = (sourceId) => {
-    let runner = sourceExclusiveRunners.get(sourceId);
-    if (!runner) {
-      runner = createExclusiveRunner();
-      sourceExclusiveRunners.set(sourceId, runner);
-    }
-    return runner;
-  };
   const laneGuards = new Map;
   const laneStores = (stores, onDemand) => ({
     laneHoldsItems: () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
@@ -133078,7 +133081,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
         ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {},
-        ...lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId, exclusive: exclusiveRunnerFor(lane.sourceId) } : {}
+        ...lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId } : {}
       });
       sourceAccountGuards.set(key2, guard);
     }

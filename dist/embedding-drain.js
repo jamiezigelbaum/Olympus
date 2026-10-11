@@ -35123,6 +35123,7 @@ init_provider_account_identity();
 init_source_account_binding();
 init_connected_handles();
 init_credential_broker();
+var sourceExclusiveRunners = new Map;
 
 // src/workers/email-source/server.ts
 init_provider_account_identity();
