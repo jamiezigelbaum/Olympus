@@ -42,6 +42,7 @@ import {
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
+import { applyOwnerOverrides } from '../connector-store/tier-override-settle.ts';
 import { sweepImageContentToPrivate } from '../connector-store/tier-image-content-sweep.ts';
 import { applyMediaJudgments } from '../connector-store/tier-media-judgment-sweep.ts';
 import {
@@ -605,6 +606,9 @@ export class TierSnifferService {
     const autoMoves = this.options.autoMoves && !signal.aborted && !this.answering() && this.options.autoMoves.localEmbeddingsOnly()
       ? await this.runAutoMoves(this.options.autoMoves, signal)
       : undefined;
+    // A move that just landed may have carried an item whose owner override
+    // came while it was queued: apply the override now, not a tick later.
+    if (autoMoves && autoMoves.moved > 0) this.applyOwnerOverrides();
     return { state: 'ran', report, ...(rejudged.seen > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
   }
 
@@ -623,6 +627,7 @@ export class TierSnifferService {
    * (tier-names-only-settle.ts). Never throws.
    */
   private settleStoredItems(): void {
+    this.applyOwnerOverrides();
     for (const ledgerPath of this.ledgerPaths()) {
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
@@ -667,6 +672,30 @@ export class TierSnifferService {
         }
       } catch {
         // Left pending this tick.
+      }
+    }
+  }
+
+  /**
+   * Per-item owner overrides applied to items already stored, in both
+   * directions (tier-override-settle.ts): `olympus tier set` on an unchanged
+   * file takes effect within a tick, not at the file's next change. Never throws.
+   */
+  private applyOwnerOverrides(): void {
+    for (const ledgerPath of this.ledgerPaths()) {
+      const set = tierSetForLedger(ledgerPath);
+      if (!set) continue;
+      try {
+        const report = applyOwnerOverrides({ set });
+        if (report.raised > 0 || report.lowered > 0 || report.secrets > 0 || report.updated > 0) {
+          this.options.log?.(
+            `Olympus tier overrides: ${report.raised + report.lowered + report.secrets + report.updated} stored item(s) set by the owner applied `
+            + `(${report.raised} raised, hidden first; ${report.lowered} move(s) down queued`
+            + `${report.secrets ? `; ${report.secrets} made Secrets` : ''}).`,
+          );
+        }
+      } catch {
+        // A set that cannot be read keeps its placements this tick.
       }
     }
   }

@@ -29,6 +29,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   TIER_KEYS,
   maxTier,
+  tierRank,
   type ContentTierDecision,
   type ItemTierOverride,
   type TierDecidedBy,
@@ -166,6 +167,21 @@ export type TierRoutedOutcome =
    * the store copies and then removes the rows.
    */
   | 'secrets';
+
+/**
+ * What a background pass read before it acts on an owner override: the
+ * item's generation and the override itself. The write re-reads both inside
+ * its own transaction and refuses (TierLedgerGenerationConflictError) when
+ * either changed, so an override replaced or cleared by another process in
+ * between never authorizes anything.
+ */
+export interface TierOwnerOverrideGuard {
+  generation: number;
+  override: ItemTierOverride | undefined;
+}
+
+/** What `queueOwnerRaise` did: hid copies and queued, only retargeted a move in flight, or nothing. */
+export type TierOwnerRaiseOutcome = 'hidden' | 'retargeted' | 'none';
 
 export interface TierLedgerOptions {
   dbPath: string;
@@ -315,7 +331,7 @@ export class TierLedger {
         outcome = 'held_moving';
         return;
       }
-      if (existing.decidedBy === 'override') {
+      if (existing.decidedBy === 'override' || this.getOverride(identity)?.kind === 'tier') {
         outcome = 'unchanged';
         return;
       }
@@ -383,7 +399,7 @@ export class TierLedger {
         outcome = 'held_moving';
         return;
       }
-      if (existing.decidedBy === 'override') {
+      if (existing.decidedBy === 'override' || this.getOverride(identity)?.kind === 'tier') {
         outcome = 'unchanged';
         return;
       }
@@ -469,6 +485,15 @@ export class TierLedger {
     options: { placementFor?: (decision: TierDecision) => TierPlacementPlan },
   ): SnifferVerdictOutcome {
     const base = question.decision;
+    if (this.getOverride(identity)?.kind === 'tier') {
+      // The owner decided the item after the question was asked: the answer
+      // no longer decides anything (a re-judge never lowers past the owner).
+      this.db.query(`
+        UPDATE tier_items SET rejudge_json = NULL
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity));
+      return 'unchanged';
+    }
     if (verdict.mapRevision !== undefined && verdict.mapRevision !== base.mapRevision) return 'stale_map';
     if (!options.placementFor) return 'needs_placement';
     const contentTier = maxTier(base.contentTier, verdict.tier);
@@ -1224,6 +1249,8 @@ export class TierLedger {
        * owner-approved migration (it becomes that migration's proposal).
        */
       queueWithoutHiding?: boolean;
+      /** An owner-override pass's read, re-checked in this transaction (see TierOwnerOverrideGuard). */
+      guard?: TierOwnerOverrideGuard;
     } = {},
   ): { outcome: TierRoutedOutcome; record: TierLedgerRecord; previousCopies: TierCopy[]; raise: boolean } {
     const decidedAt = this.now().toISOString();
@@ -1237,6 +1264,7 @@ export class TierLedger {
     let previousCopies: TierCopy[] = [];
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (options.guard) this.assertOverrideGuard(identity, existing, options.guard);
       previousCopies = this.copies(identity);
       const secrets = decision.contentTier === 'secrets';
       if (!existing) {
@@ -1372,28 +1400,197 @@ export class TierLedger {
       // keeps the row pending), never at its tiers' resting placement. Text
       // once read is never forgotten.
       raise = placementIsRaise(current, plan.copies);
-      this.db.query(`
-        UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
-          decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
-          content_read = MAX(content_read, ?), metadata_pending = ?, content_pending = ?,
-          metadata_forced = ?, metadata_flagged = ?, move_attempts = 0
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(
-        decision.metadataTier,
-        decision.contentTier,
-        decision.decidedBy,
-        reasonsJson,
-        decision.engineVersion,
-        decision.mapRevision,
-        decidedAt,
-        ...decisionFlags(decision),
-        ...idParams(identity),
-      );
-      this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, 'moving', decidedAt);
-      if (raise && options.queueWithoutHiding !== true) this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
+      this.queueMoveRow(identity, existing, decision, { hide: raise && options.queueWithoutHiding !== true, decidedAt });
       outcome = 'queued_move';
     })();
     return { outcome, record: this.getCurrent(identity)!, previousCopies, raise };
+  }
+
+  /**
+   * An owner per-item override that RAISES a routed item, applied at once by
+   * `olympus tier set` (a process that does not hold the item's tiered store
+   * set) and by the set's override pass. In ONE write:
+   *
+   * - Not moving: when any layer is served from a store less private than
+   *   `trustDomain` (the override tier's store), every current copy is hidden
+   *   and the move to the decision's tiers is queued, exactly as
+   *   `recordRoutedPlacement` queues a raise ('hidden').
+   * - Mid-move toward tiers less private than the owner's (a queued or
+   *   in-flight lower): that move is invalidated. The generation is bumped,
+   *   so its `stageMove`/`completeMove` (compare-and-swap on the generation)
+   *   can never publish; its staged destination copies are kept hidden; the
+   *   copies an earlier raise hid stay the sources of the new move; and any
+   *   current copy below `trustDomain` is hidden ('hidden'). The move is
+   *   retargeted to the decision's tiers ('retargeted' when nothing needed
+   *   hiding). A move toward Secrets, or toward tiers at least as private as
+   *   the owner's, is left alone.
+   *
+   * 'none': nothing written. The set plans and runs the move (tier-move.ts).
+   */
+  queueOwnerRaise(
+    identity: TierLedgerIdentity,
+    decision: TierDecision,
+    trustDomain: SourceTrustDomain,
+    options: { guard?: TierOwnerOverrideGuard } = {},
+  ): TierOwnerRaiseOutcome {
+    if (decision.decidedBy !== 'override') throw new Error('Only an owner override is queued this way.');
+    if (!(trustDomain in TRUST_DOMAIN_RANK)) throw new Error(`Unknown trust domain "${trustDomain}".`);
+    let result: TierOwnerRaiseOutcome = 'none';
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (options.guard) this.assertOverrideGuard(identity, existing, options.guard);
+      if (!existing || !existing.routed) return;
+      const decidedAt = this.now().toISOString();
+      const unsafe = this.copies(identity)
+        .some((copy) => copy.state === 'current' && trustDomainRank(copy.trustDomain) < trustDomainRank(trustDomain));
+      if (existing.state !== 'moving') {
+        if (!unsafe) return;
+        this.queueMoveRow(identity, existing, decision, { hide: true, decidedAt });
+        result = 'hidden';
+        return;
+      }
+      const targetMetadata = existing.targetMetadataTier;
+      const targetContent = existing.targetContentTier;
+      if (targetMetadata === null || targetContent === null) return;
+      if (targetMetadata === 'secrets' || targetContent === 'secrets'
+        || (tierRank(targetMetadata) >= tierRank(decision.metadataTier) && tierRank(targetContent) >= tierRank(decision.contentTier))) {
+        // The move in flight lands at least as private as the owner asks, but
+        // it may have been queued without hiding (a re-home, a re-judge on an
+        // install whose moves wait for the migration): its copies below the
+        // owner's tier are hidden now, as the move's own sources.
+        if (!unsafe) return;
+        this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
+        result = 'hidden';
+        return;
+      }
+      // The in-flight move flips at generation + 1; the retargeted one at + 2.
+      const staleFlip = existing.generation + 1;
+      const nextFlip = existing.generation + 2;
+      // Copies an earlier raise hid for the old move stay sources of the new one.
+      this.db.query(`
+        UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND copy_state = 'superseded' AND superseded_by_generation = ?
+      `).run(nextFlip, decidedAt, ...idParams(identity), staleFlip);
+      // The old move's destinations: kept, hidden, never a source.
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(staleFlip, decidedAt, ...idParams(identity));
+      this.db.query(`
+        UPDATE tier_items SET generation = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(staleFlip, ...idParams(identity));
+      this.queueMoveRow(identity, { ...existing, generation: staleFlip }, decision, { hide: unsafe, decidedAt });
+      result = unsafe ? 'hidden' : 'retargeted';
+    })();
+    return result;
+  }
+
+  /** Refuse a background write whose owner-override read is stale (see TierOwnerOverrideGuard). */
+  private assertOverrideGuard(
+    identity: TierLedgerIdentity,
+    existing: TierLedgerRecord | undefined,
+    guard: TierOwnerOverrideGuard,
+  ): void {
+    if (!existing || existing.generation !== guard.generation) throw new TierLedgerGenerationConflictError();
+    const current = this.getOverride(identity);
+    if (JSON.stringify(current ?? null) !== JSON.stringify(guard.override ?? null)) {
+      throw new TierLedgerGenerationConflictError('The owner override changed; re-read it before acting.');
+    }
+  }
+
+  /**
+   * Of the given items, the keys of ROUTED items with no copy row at all (a
+   * Secret whose copies were settled, or one the provider deleted). Such an
+   * item is never legacy: a visibility check must hide it, not pass it.
+   */
+  routedWithoutCopies(identities: readonly TierLedgerIdentity[]): Set<string> {
+    const result = new Set<string>();
+    if (identities.length === 0) return result;
+    const unique = new Map<string, TierLedgerIdentity>();
+    for (const identity of identities) unique.set(tierLedgerIdentityKey(identity), identity);
+    const list = [...unique.values()];
+    this.db.transaction(() => {
+      for (let offset = 0; offset < list.length; offset += 200) {
+        const batch = list.slice(offset, offset + 200);
+        const rows = this.db.query(`
+          SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
+          WHERE i.routed = 1
+            AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
+            AND NOT EXISTS (
+              SELECT 1 FROM tier_copies c
+              WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+                AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+            )
+        `).all(...batch.flatMap((identity) => [...idParams(identity)])) as Array<Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'>>;
+        for (const row of rows) result.add(tierLedgerIdentityKey(identityOfRow(row)));
+      }
+    })();
+    return result;
+  }
+
+  /**
+   * Routed items that carry a per-item owner override, with it, in key order.
+   * Overrides are set by hand, one item at a time, so the list is small; the
+   * override pass (tier-override-settle.ts) reads it whole.
+   */
+  listRoutedOverrides(): Array<{ record: TierLedgerRecord; override: ItemTierOverride }> {
+    const rows = this.db.query(`
+      SELECT i.*, o.override_json AS override_json FROM tier_items i
+      JOIN tier_overrides o
+        ON o.provider = i.provider AND o.account_scope = i.account_scope
+        AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+      WHERE i.routed = 1
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+    `).all() as Array<TierItemRow & { override_json: string }>;
+    const result: Array<{ record: TierLedgerRecord; override: ItemTierOverride }> = [];
+    for (const row of rows) {
+      let parsed: ItemTierOverride;
+      try {
+        parsed = JSON.parse(row.override_json) as ItemTierOverride;
+      } catch {
+        continue;
+      }
+      if (parsed.kind === 'tier' && !TIER_KEYS.includes(parsed.tier)) continue;
+      if (parsed.kind !== 'tier' && parsed.kind !== 'not_secret') continue;
+      result.push({ record: recordFromRow(row), override: parsed });
+    }
+    return result;
+  }
+
+  /**
+   * The queued-move write: the item goes `moving` with the decision's tiers
+   * as its target and the decision's flags; with `hide`, every current copy
+   * is superseded first (a raise hides before anything moves). The copy
+   * itself is the move primitive's job. Runs inside the caller's transaction.
+   */
+  private queueMoveRow(
+    identity: TierLedgerIdentity,
+    existing: TierLedgerRecord,
+    decision: TierDecision,
+    options: { hide: boolean; decidedAt: string },
+  ): void {
+    const reasonsJson = JSON.stringify(decision.reasons);
+    this.db.query(`
+      UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
+        decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
+        content_read = MAX(content_read, ?), metadata_pending = ?, content_pending = ?,
+        metadata_forced = ?, metadata_flagged = ?, move_attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(
+      decision.metadataTier,
+      decision.contentTier,
+      decision.decidedBy,
+      reasonsJson,
+      decision.engineVersion,
+      decision.mapRevision,
+      options.decidedAt,
+      ...decisionFlags(decision),
+      ...idParams(identity),
+    );
+    this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, 'moving', options.decidedAt);
+    if (options.hide) this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
   }
 
   /**
@@ -1683,6 +1880,25 @@ export class TierLedger {
       const generation = existing.generation + 1;
       const copies = this.copies(identity);
       const sources = this.moveSources(identity, generation);
+      // The owner's current word bounds every flip, whoever queued the move:
+      // - no layer lands below a current tier override (a re-judge or rule
+      //   queued before the owner raised the item never publishes it lower);
+      // - a move an override queued that LOWERS any layer (judged per layer:
+      //   hidden sources only prove some layer rises) lands only while that
+      //   override still asks for exactly these tiers.
+      const override = this.getOverride(identity);
+      const targetMetadataTier = existing.targetMetadataTier;
+      const targetContentTier = existing.targetContentTier;
+      if (override?.kind === 'tier'
+        && (tierRank(targetMetadataTier) < tierRank(override.tier) || tierRank(targetContentTier) < tierRank(override.tier))
+        && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+        throw new TierLedgerGenerationConflictError('The owner has since set this item more private; the move may not land below it.');
+      }
+      const lowersLayer = tierRank(targetMetadataTier) < tierRank(existing.metadataTier)
+        || tierRank(targetContentTier) < tierRank(existing.contentTier);
+      if (existing.decidedBy === 'override' && lowersLayer && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+        throw new TierLedgerGenerationConflictError('The owner override behind this move changed; re-read it before landing.');
+      }
       for (const planned of options.destination) {
         const row = copies.find((copy) => copy.corpusId === planned.corpusId);
         if (!row) throw new Error('A move completes only once every destination copy is staged or kept.');
@@ -2452,6 +2668,13 @@ export function copyServingLayer<T extends Pick<TierCopy, 'layers'>>(
   layer: TierSearchLayer,
 ): T | undefined {
   return copies.find((copy) => copy.layers === 'both' || copy.layers === layer);
+}
+
+/** Whether a per-item override still asks for these tiers (Public lifts to Personal on an install without Public). */
+function overrideAuthorizes(override: ItemTierOverride | undefined, metadataTier: TierKey, contentTier: TierKey): boolean {
+  if (override?.kind !== 'tier') return false;
+  const allowed = (tier: TierKey) => tier === override.tier || (override.tier === 'public' && tier === 'private');
+  return allowed(metadataTier) && allowed(contentTier);
 }
 
 function samePlan(current: readonly TierCopy[], planned: readonly TierCopyPlan[]): boolean {

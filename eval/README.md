@@ -254,3 +254,22 @@ fictional demo data in `chatgpt-plugin/demo-data`, graded with this eval's
 answer and citation rules, and reports tokens/s, time to first token, peak RAM
 and pass count. Results and the chosen defaults live in
 [`../docs/design/private-model-benchmark.md`](../docs/design/private-model-benchmark.md).
+
+
+## Cross-language keyword matching
+
+`fixtures/cross-language-blind.json` is an independently authored, frozen
+fictional set. Run `bun eval/cross-language-keywords.ts --record` through
+remote-build to obtain actual built-in Qwen 2B completions and return
+`eval/fixtures/cross-language-completions.json` plus
+`eval/cross-language-report.json` (set `OLYMPUS_KEYWORD_REPORT` to that path).
+`--replay` uses only those exact-request completions and no live model.
+`test/source-index-cross-language-blind.test.ts` runs that deterministic replay
+in CI. Missing recordings, loss of an existing hit, no aggregate improvement,
+or a dishonest gap response fail the gate. `--measure` keeps a diagnostic
+report even when the gate is not met; it is not a passing receipt.
+
+The six missing-fact cases may retrieve explicit absence evidence and are
+therefore graded for gap honesty. The unchanged-or-lower read budget applies
+to the historical off-topic negatives. Keep historical questions, stores and
+model output local; only aggregate replay counts belong in the PR.

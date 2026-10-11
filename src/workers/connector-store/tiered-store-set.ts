@@ -97,6 +97,7 @@ import { secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
+import { applyOwnerOverrides } from './tier-override-settle.ts';
 import { sweepImageContentToPrivate } from './tier-image-content-sweep.ts';
 import { applyMediaJudgments } from './tier-media-judgment-sweep.ts';
 
@@ -554,9 +555,15 @@ export class TieredStoreSet {
    * (tier-names-only-settle.ts). The sniffer's tick runs both too. Rows that
    * are Private by their own stored tier but sit in a Personal or Public
    * store are queued and moved to the Private store (tier-row-rehome.ts).
-   * Never fails the sync.
+   * Per-item owner overrides apply to items already stored in both
+   * directions (tier-override-settle.ts). Never fails the sync.
    */
   private async settleStoredItems(): Promise<void> {
+    try {
+      applyOwnerOverrides({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
     try {
       sweepOwnerRuleRaises({ set: this });
     } catch {

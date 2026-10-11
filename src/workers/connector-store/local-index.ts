@@ -1,3 +1,6 @@
+import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
+import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
+import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -9531,6 +9534,8 @@ export class LocalConnectorStore {
     });
   }
 
+  keywordLanguages(): readonly string[] { return storeKeywordLanguages(this.db); }
+
   // --- Read surfaces ----------------------------------------------------------
 
   // Keyword search over the FTS lane. Returns identity + citation-safe
@@ -10664,7 +10669,14 @@ export function createConnectorStoreCorpusAdapter(
       rawExposed: false,
     };
   };
-  return adapter;
+  const expanded: SourceIndexCorpusSearchAdapter = (request) => {
+    assertConnectorStoreCorpusRequest(store, request);
+    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request), store);
+  };
+  expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
+  expanded.hybridAvailability = adapter.hybridAvailability;
+  expanded.semanticNeighbours = adapter.semanticNeighbours;
+  return expanded;
 }
 
 // Chat-family stores get a recency candidate lane: the newest few messages
@@ -10782,8 +10794,10 @@ async function hybridConnectorStoreSearch(
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
   // fusion sees candidates beyond the final cut.
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
-  const keywordLane = connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false });
-  const keywordRows = keywordLane.rows;
+  let keywordLane = connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false });
+  const baselineKeywordLane = keywordAlternatives(request.query)?.size
+    ? withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}))
+    : undefined;
   const vectorLane = await store.vectorSearchLane(
     request.query,
     provider,
@@ -10804,6 +10818,19 @@ async function hybridConnectorStoreSearch(
   const vectorRows = gateArmed
     ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
     : scoredVectorRows;
+  if (baselineKeywordLane && gateArmed) {
+    const extra = keywordLane.allRows.filter(row => !baselineKeywordLane.matchedItemIds.has(row.sourceItem.localItemId)
+      && keywordLane.completeItemIds.has(row.sourceItem.localItemId));
+    const improved = new Map(keywordLane.allRows.map(row => [row.sourceItem.localItemId, row]));
+    const allRows = [...baselineKeywordLane.allRows.map(row => keywordLane.completeItemIds.has(row.sourceItem.localItemId)
+      ? improved.get(row.sourceItem.localItemId) ?? row : row), ...extra];
+    keywordLane = {...keywordLane,allRows,rows:allRows.slice(0,laneLimit),matchedItemIds:new Set(allRows.map(row=>row.sourceItem.localItemId)),matchCount:{
+      matchedItems:allRows.length,contentMatchedItems:allRows.filter(connectorStoreRowHasContent).length,
+      secureMatchedItems:allRows.filter(connectorStoreRowIsSecureTier).length,
+      saturated:keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated,
+    }};
+  }
+  const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
@@ -10964,6 +10991,7 @@ function connectorStoreKeywordLaneRows(
   matchCount: SourceIndexCorpusMatchCount;
   matchedItemIds: ReadonlySet<string>;
   completeItemIds: ReadonlySet<string>;
+  allRows: ConnectorStoreSearchRow[];
 } {
   const plain = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
   const rows = plain.rows;
@@ -10993,16 +11021,26 @@ function connectorStoreKeywordLaneRows(
     ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
     ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
   ];
+  const baseline = keywordExpansionDisabled() ? undefined : withKeywordExpansionDisabled(
+    () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions),
+  );
+  const enriched = new Map(ordered.map(row=>[row.sourceItem.localItemId,row]));
+  const allRows = baseline
+    ? [...baseline.allRows.map(row=>complete.has(row.sourceItem.localItemId) ? enriched.get(row.sourceItem.localItemId) ?? row : row),
+      ...ordered.filter(row=>!baseline.matchedItemIds.has(row.sourceItem.localItemId))]
+    : ordered;
+  const allIds = new Set(allRows.map(row=>row.sourceItem.localItemId));
   return {
-    rows: ordered.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
+    rows: allRows.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
+    allRows,
     matchCount: {
-      matchedItems: merged.length,
-      contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
-      saturated: plain.saturated || content.saturated,
-      secureMatchedItems: merged.filter(connectorStoreRowIsSecureTier).length,
+      matchedItems: allRows.length,
+      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
+      saturated: plain.saturated || content.saturated || (baseline?.matchCount.saturated ?? false),
+      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
     },
-    matchedItemIds: seen,
-    completeItemIds: complete,
+    matchedItemIds: allIds,
+    completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
   };
 }
 
@@ -11245,6 +11283,7 @@ export function createConnectorStoreContentProvider(
           + `refused a ${request.trustDomain} content request.`,
         );
       }
+      return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
       const contentInScope = options.contentAllowed !== false
@@ -11313,6 +11352,7 @@ export function createConnectorStoreContentProvider(
         ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),
         ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
       };
+      }, store);
     },
   };
 }
@@ -12264,7 +12304,12 @@ function selectEvidencePassages(
   if (maxChars === undefined || maxChars <= 0) return budgetChunks(chunks, maxChars);
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus) return budgetChunks(chunks, maxChars);
-  const termGroups = withoutNameTerms(focus.query ? sourceIndexChunkQueryTerms(focus.query) : [], context.title);
+  const expandedGroups = focus.query ? sourceIndexChunkQueryTerms(focus.query) : [];
+  const combined = [context.title ?? '', ...chunks].join('\n');
+  const complete = expandedGroups.every(group => sourceIndexChunkTermScore(combined, [group]) > 0);
+  const focusedGroups = complete || !focus.query ? expandedGroups
+    : withKeywordAlternatives(focus.query, new Map(), () => sourceIndexChunkQueryTerms(focus.query!));
+  const termGroups = withoutNameTerms(focusedGroups, context.title);
   const lexical = chunks.map((text) => (termGroups.length > 0 ? sourceIndexChunkTermScore(text, termGroups) : 0));
   const relevance = (index: number): number => context.relevance?.[index] ?? Number.NEGATIVE_INFINITY;
   const anchorIndex = focus.anchorChunkIndex !== undefined

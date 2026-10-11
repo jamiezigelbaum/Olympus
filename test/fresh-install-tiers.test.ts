@@ -571,7 +571,9 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     const install = addPrivateModel(before, runtime.source === 'built_in' ? runtime.lane : BUILT_IN_SNIFFER_LANE);
     const tick = await snifferFor(install, builtIn, { localEmbeddingsOnly: true }).runOnce();
     expect(tick).not.toHaveProperty('rejudged');
-    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'default' });
+    // The override itself is applied to the stored item (same store, so in
+    // place: tier-override-settle.ts); nothing re-judges it.
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'override' });
     expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
   });
 

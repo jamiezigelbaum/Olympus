@@ -118,6 +118,11 @@ export interface TierMoveOptions {
    * the move with a generation conflict instead of moving the newer record.
    */
   expectedGeneration?: number;
+  /**
+   * @internal Test hook: runs after the destinations are written, just
+   * before the flip (another process's ledger write landing in between).
+   */
+  beforeFlip?: () => void;
 }
 
 export interface TierMoveDestination {
@@ -171,6 +176,10 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   // read by its names only, so a move must not forget text that was read.
   // It keeps the open questions too: a queued move records its decision's
   // flags, so an item held for an unanswered sniffer question lands held.
+  // A move an owner override queued is placed as the override places it (a
+  // lane floor yields to the owner, and only to the owner); the flip
+  // re-checks that the override still asks for it (TierLedger.completeMove).
+  const ownerOverride = !decision && record.decidedBy === 'override';
   const placement = set.placementFor(decision ?? {
     metadataTier: target.metadataTier,
     contentTier: target.contentTier,
@@ -178,6 +187,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     metadataPending: record.metadataPending,
     contentPending: record.contentPending,
     contentRead: record.contentRead,
+    ...(ownerOverride ? { decidedBy: 'override' as const } : {}),
   });
   const moveGeneration = record.generation + 1;
   const sources = ledger.copies(identity).filter((copy) => copy.state === 'current'
@@ -273,11 +283,13 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   }
 
   // 3. Flip.
+  options.beforeFlip?.();
   const flipped = ledger.completeMove(identity, {
     expectedGeneration: record.generation,
     destination: placement.copies,
     embedHold: placement.embedHold === true,
     ...(decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {}),
+    ...(ownerOverride ? { decidedBy: 'override' as const, reasons: record.reasons } : {}),
   });
   const supersededCorpora = ledger.copies(identity)
     .filter((copy) => copy.state === 'superseded' && copy.supersededByGeneration === flipped.generation)

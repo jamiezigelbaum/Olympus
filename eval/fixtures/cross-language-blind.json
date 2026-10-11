@@ -1,0 +1,322 @@
+[
+  {
+    "query": "What deadline does the buyer have to deliver the deposit after accepting the offer?",
+    "documents": [
+      {"id":"es-deposit-01","title":"Borrador de oferta de compra","text":"La parte compradora deberá transferir el depósito acordado dentro de los tres días hábiles siguientes a la aceptación escrita de la oferta. La agencia enviará las instrucciones bancarias por separado."},
+      {"id":"es-distractor-01","title":"Lista de reparaciones","text":"La visita técnica recomienda revisar las juntas de las ventanas y sustituir dos enchufes antes de la entrega. Estas observaciones no cambian el precio indicado en la oferta."}
+    ],
+    "expectedIds":["es-deposit-01"],
+    "expectedPassageContains":["transferir el depósito acordado dentro de los tres días hábiles"],
+    "sourceLanguage":"es","targetLanguage":"en"
+  },
+  {
+    "query": "¿Qué escritura pública debe recoger la transferencia definitiva del apartamento?",
+    "documents": [
+      {"id":"en-deed-01","title":"Closing checklist","text":"The parties must sign the final transfer in a public deed before the notary. The deed will identify the property, the price, and the date on which possession passes to the buyer."},
+      {"id":"en-distractor-01","title":"Insurance notes","text":"The buyer should arrange building insurance before collecting the keys. The broker can provide a quote, but insurance is separate from the conveyancing instrument."}
+    ],
+    "expectedIds":["en-deed-01"],
+    "expectedPassageContains":["sign the final transfer in a public deed before the notary"],
+    "sourceLanguage":"en","targetLanguage":"es"
+  },
+  {
+    "query": "Where should the allocation of public deed costs be stated?",
+    "documents": [
+      {"id":"pt-notary-01","title":"Minuta de compromisso","text":"A minuta deve indicar expressamente a repartição das despesas da escritura pública, incluindo os emolumentos notariais e o registo. Na falta de acordo escrito, o solicitador pedirá instruções às partes."},
+      {"id":"pt-distractor-01","title":"Relatório do imóvel","text":"O relatório descreve a orientação solar, a área útil e o estado da pintura exterior. Não contém uma decisão sobre as despesas do negócio."}
+    ],
+    "expectedIds":["pt-notary-01"],
+    "expectedPassageContains":["indicar expressamente a repartição das despesas da escritura pública"],
+    "sourceLanguage":"pt","targetLanguage":"en"
+  },
+  {
+    "query": "Por quanto tempo o vendedor pode ficar com as chaves depois da conclusão?",
+    "documents": [
+      {"id":"en-keys-01","title":"Possession clause","text":"The seller may remain in the flat for up to fourteen calendar days after completion, while keeping the keys and paying utilities. A separate handover record must be signed when the buyer takes possession."},
+      {"id":"en-distractor-01","title":"Mortgage summary","text":"The lender will release funds after receiving the signed transfer documents and evidence of insurance. This timetable concerns financing and does not set the handover period."}
+    ],
+    "expectedIds":["en-keys-01"],
+    "expectedPassageContains":["remain in the flat for up to fourteen calendar days after completion"],
+    "sourceLanguage":"en","targetLanguage":"pt"
+  },
+  {
+    "query": "What formality must be completed before the keys are handed over?",
+    "documents": [
+      {"id":"fr-notary-01","title":"Instructions de signature","text":"Avant la remise des clés, les parties doivent signer l'acte authentique devant le notaire et présenter une pièce d'identité valide. Le procès-verbal de remise sera signé ensuite."},
+      {"id":"fr-distractor-01","title":"Devis de plomberie","text":"Le devis prévoit le remplacement d'un robinet et le contrôle du chauffe-eau. Ces travaux seront facturés séparément et ne constituent pas une formalité de signature."}
+    ],
+    "expectedIds":["fr-notary-01"],
+    "expectedPassageContains":["signer l'acte authentique devant le notaire"],
+    "sourceLanguage":"fr","targetLanguage":"en"
+  },
+  {
+    "query": "Who bears the cost of registering the ownership transfer?",
+    "documents": [
+      {"id":"de-costs-01","title":"Kaufvertragsentwurf","text":"Die Kosten der Eintragung des Eigentumswechsels im Grundbuch trägt der Käufer, sofern die Parteien im Vertrag nichts Abweichendes vereinbaren. Der Notar weist die Kosten in seiner Abrechnung aus."},
+      {"id":"de-distractor-01","title":"Übergabeprotokoll","text":"Das Protokoll erfasst Zählerstände, Schlüssel und sichtbare Schäden am Tag der Übergabe. Es regelt keine Gebühren des Grundbuchamts."}
+    ],
+    "expectedIds":["de-costs-01"],
+    "expectedPassageContains":["Die Kosten der Eintragung des Eigentumswechsels im Grundbuch trägt der Käufer"],
+    "sourceLanguage":"de","targetLanguage":"en"
+  },
+  {
+    "query": "Which document must be signed before the notary for the final transfer?",
+    "documents": [
+      {"id":"it-deed-01","title":"Promemoria per il rogito","text":"Per il trasferimento definitivo le parti devono firmare l'atto pubblico davanti al notaio. Il rogito conterrà il prezzo, i dati catastali e la dichiarazione sulla consegna dell'immobile."},
+      {"id":"it-distractor-01","title":"Preventivo trasloco","text":"Il preventivo comprende l'imballaggio dei mobili e il trasporto al nuovo indirizzo. Il servizio di trasloco non sostituisce l'atto necessario per il trasferimento."}
+    ],
+    "expectedIds":["it-deed-01"],
+    "expectedPassageContains":["firmare l'atto pubblico davanti al notaio"],
+    "sourceLanguage":"it","targetLanguage":"en"
+  },
+  {
+    "query": "¿Qué ocurre si el comprador no paga a tiempo el depósito acordado?",
+    "documents": [
+      {"id":"en-deposit-02","title":"Offer conditions","text":"If the buyer does not pay the agreed deposit within the stated period, the seller may withdraw from the offer and seek the remedy described in the reservation terms. The agent must record any cancellation in writing."},
+      {"id":"en-distractor-02","title":"Utility transfer","text":"Utility accounts can be transferred after completion by sending the meter readings to each provider. The utility process does not alter the deposit deadline."}
+    ],
+    "expectedIds":["en-deposit-02"],
+    "expectedPassageContains":["the seller may withdraw from the offer"],
+    "sourceLanguage":"en","targetLanguage":"es"
+  },
+  {
+    "query": "Who keeps the original of the public deed after signing?",
+    "documents": [
+      {"id":"es-deed-02","title":"Instrucciones notariales","text":"Después de la firma, el notario conserva el original de la escritura pública en su protocolo y entrega copias autorizadas a las partes. La copia del comprador se remitirá por correo electrónico."},
+      {"id":"es-distractor-02","title":"Inventario de muebles","text":"El inventario enumera una mesa, cuatro sillas y una lámpara que permanecerán en la vivienda. Debe adjuntarse al acta de entrega, no al protocolo notarial."}
+    ],
+    "expectedIds":["es-deed-02"],
+    "expectedPassageContains":["el notario conserva el original de la escritura pública en su protocolo"],
+    "sourceLanguage":"es","targetLanguage":"en"
+  },
+  {
+    "query": "Which administrative costs are excluded from the initial deposit?",
+    "documents": [
+      {"id":"pt-deposit-02","title":"Condições financeiras","text":"O depósito inicial serve apenas para reservar o imóvel e não inclui os custos administrativos, os honorários do notário ou o imposto de transmissão. Esses valores serão calculados antes da escritura."},
+      {"id":"pt-distractor-02","title":"Nota de manutenção","text":"A manutenção preventiva recomenda limpar os filtros do ar condicionado no início do verão. A recomendação não tem relação com pagamentos ou impostos."}
+    ],
+    "expectedIds":["pt-deposit-02"],
+    "expectedPassageContains":["O depósito inicial serve apenas para reservar o imóvel e não inclui os custos administrativos"],
+    "sourceLanguage":"pt","targetLanguage":"en"
+  },
+  {
+    "query": "Quelle partie doit organiser le rendez-vous chez le notaire pour l'acte authentique ?",
+    "documents": [
+      {"id":"en-notary-02","title":"Completion responsibilities","text":"The buyer's solicitor must arrange the notary appointment for the public deed and circulate the proposed signing date at least five working days in advance. Both parties may request a reasonable change."},
+      {"id":"en-distractor-02","title":"Moving schedule","text":"The removal company has reserved a van for the Saturday after completion and will confirm the arrival window the day before. This booking is independent of the notary appointment."}
+    ],
+    "expectedIds":["en-notary-02"],
+    "expectedPassageContains":["The buyer's solicitor must arrange the notary appointment for the public deed"],
+    "sourceLanguage":"en","targetLanguage":"fr"
+  },
+  {
+    "query": "On what date are condominium fees allocated between the parties?",
+    "documents": [
+      {"id":"fr-costs-02","title":"Répartition des charges","text":"Les frais de copropriété sont répartis entre les parties à la date de la signature de l'acte authentique. Le vendeur règle les sommes échues avant cette date et l'acheteur prend les périodes suivantes."},
+      {"id":"fr-distractor-02","title":"Plan de déménagement","text":"Le déménagement est prévu le lundi suivant la signature, sous réserve de la disponibilité de l'ascenseur. Cette organisation ne modifie pas la répartition des charges."}
+    ],
+    "expectedIds":["fr-costs-02"],
+    "expectedPassageContains":["à la date de la signature de l'acte authentique"],
+    "sourceLanguage":"fr","targetLanguage":"en"
+  },
+  {
+    "query": "What deadline applies to repayment of the reserved amount?",
+    "documents": [
+      {"id":"de-deposit-03","title":"Rückzahlung der Reservierung","text":"Wird der Kaufvertrag nicht geschlossen, muss der Vermittler den reservierten Betrag innerhalb von zehn Bankarbeitstagen zurückzahlen, sofern keine Vertragsverletzung des Käufers vorliegt. Die Rückzahlung erfolgt auf dasselbe Konto."},
+      {"id":"de-distractor-03","title":"Energieausweis","text":"Der Energieausweis wird dem Käufer zusammen mit den übrigen Objektunterlagen übergeben. Seine Gültigkeit betrifft die Immobilie und nicht die Frist für die Rückzahlung."}
+    ],
+    "expectedIds":["de-deposit-03"],
+    "expectedPassageContains":["innerhalb von zehn Bankarbeitstagen zurückzahlen"],
+    "sourceLanguage":"de","targetLanguage":"en"
+  },
+  {
+    "query": "Who pays the registration costs for the public deed?",
+    "documents": [
+      {"id":"it-costs-03","title":"Ripartizione delle spese","text":"Salvo diverso accordo scritto, l'acquirente paga le spese di registrazione dell'atto pubblico e le imposte collegate all'acquisto. Il venditore sostiene invece i costi necessari per cancellare eventuali gravami."},
+      {"id":"it-distractor-03","title":"Consegna delle chiavi","text":"La consegna delle chiavi avverrà dopo la conferma del bonifico e la lettura dei contatori. Il calendario della consegna non stabilisce chi paga le spese di registrazione."}
+    ],
+    "expectedIds":["it-costs-03"],
+    "expectedPassageContains":["l'acquirente paga le spese di registrazione dell'atto pubblico"],
+    "sourceLanguage":"it","targetLanguage":"en"
+  },
+  {
+    "query": "What must the notary do if valid identification is missing?",
+    "documents": [
+      {"id":"es-notary-03","title":"Control de identidad","text":"Si una parte no presenta una identificación válida, el notario debe aplazar la firma de la escritura pública hasta que se compruebe su identidad. La agencia no puede sustituir ese control con una copia informal."},
+      {"id":"es-distractor-03","title":"Seguro del hogar","text":"La póliza del hogar puede contratarse después de la firma, siempre que esté activa antes de la entrega de las llaves. El seguro no resuelve la falta de identificación."}
+    ],
+    "expectedIds":["es-notary-03"],
+    "expectedPassageContains":["el notario debe aplazar la firma de la escritura pública"],
+    "sourceLanguage":"es","targetLanguage":"en"
+  },
+  {
+    "query": "Wie werden Grundbuchgebühren behandelt, wenn der Vertrag dazu nichts sagt?",
+    "documents": [
+      {"id":"en-registry-03","title":"Registry fee note","text":"When the contract says nothing about registry fees, the buyer pays the charge for registering the ownership transfer under the applicable default rule. The solicitor should still check the local tariff before completion."},
+      {"id":"en-distractor-03","title":"Survey findings","text":"The survey recommends repairing a loose roof tile and improving ventilation in the bathroom. Those practical recommendations do not allocate registry fees."}
+    ],
+    "expectedIds":["en-registry-03"],
+    "expectedPassageContains":["the buyer pays the charge for registering the ownership transfer"],
+    "sourceLanguage":"en","targetLanguage":"de"
+  },
+  {
+    "query": "Which document proves that the keys were handed to the buyer?",
+    "documents": [
+      {"id":"pt-handover-03","title":"Auto de entrega","text":"O auto de entrega assinado pelas partes comprova a entrega das chaves ao comprador e regista a data, os contadores e quaisquer danos visíveis. Cada parte recebe uma cópia do documento."},
+      {"id":"pt-distractor-03","title":"Declaração fiscal","text":"A declaração fiscal confirma o pagamento do imposto devido na transmissão. Ela é necessária para o processo, mas não prova a entrega física das chaves."}
+    ],
+    "expectedIds":["pt-handover-03"],
+    "expectedPassageContains":["O auto de entrega assinado pelas partes comprova a entrega das chaves"],
+    "sourceLanguage":"pt","targetLanguage":"en"
+  },
+  {
+    "query": "Which party must pay the deposit before the public deed is prepared?",
+    "documents": [
+      {"id":"fr-deposit-04","title":"Acompte et préparation","text":"L'acheteur doit payer l'acompte prévu avant que le notaire ne prépare l'acte authentique. Le reçu du virement sera joint au dossier de signature avec les autres justificatifs."},
+      {"id":"fr-distractor-04","title":"État des lieux","text":"L'état des lieux décrit les murs, les sols et les équipements laissés dans le logement. Il peut être complété le jour de la remise des clés, après le paiement."}
+    ],
+    "expectedIds":["fr-deposit-04"],
+    "expectedPassageContains":["L'acheteur doit payer l'acompte prévu avant que le notaire ne prépare l'acte authentique"],
+    "sourceLanguage":"fr","targetLanguage":"en"
+  },
+  {
+    "query": "Which documents must the buyer send to the notary before the public deed?",
+    "documents": [
+      {"id":"de-docs-04","title":"Unterlagen vor der Beurkundung","text":"Vor dem öffentlichen Kaufvertrag muss der Käufer dem Notar eine Ausweiskopie, den Finanzierungsnachweis und die aktuelle Zustelladresse schicken. Fehlende Unterlagen können den Beurkundungstermin verzögern."},
+      {"id":"de-distractor-04","title":"Einrichtungsliste","text":"Die Einrichtungsliste beschreibt, welche Vorhänge und Lampen im Haus bleiben. Sie ist für die Übergabe nützlich, gehört aber nicht zu den Unterlagen für die Beurkundung."}
+    ],
+    "expectedIds":["de-docs-04"],
+    "expectedPassageContains":["eine Ausweiskopie, den Finanzierungsnachweis und die aktuelle Zustelladresse"],
+    "sourceLanguage":"de","targetLanguage":"en"
+  },
+  {
+    "query": "What is the deadline for disputing the costs shown by the notary?",
+    "documents": [
+      {"id":"it-notary-04","title":"Contestazione della parcella","text":"La parte che contesta le spese indicate dal notaio deve inviare una richiesta motivata entro quindici giorni dalla ricezione della parcella. Trascorso il termine, resta comunque possibile chiedere un chiarimento amministrativo."},
+      {"id":"it-distractor-04","title":"Lavori condominiali","text":"L'amministratore ha programmato la tinteggiatura delle scale per il mese prossimo e raccoglierà i preventivi dei fornitori. Il calendario dei lavori non riguarda la contestazione della parcella."}
+    ],
+    "expectedIds":["it-notary-04"],
+    "expectedPassageContains":["entro quindici giorni dalla ricezione della parcella"],
+    "sourceLanguage":"it","targetLanguage":"en"
+  },
+  {
+    "query": "Quali costi devono essere elencati prima della firma dell'atto pubblico italiano?",
+    "documents": [
+      {"id":"en-to-it-costs-01","title":"Synthetic completion instruction","text":"Before the Italian public deed is signed, the parties must list the notary fee, registration charge, and agreed allocation of transfer taxes in the completion statement. The final invoice may adjust the estimates."},
+      {"id":"en-to-it-distractor-01","title":"Inspection appointment","text":"The surveyor will inspect the roof and drainage on Tuesday morning and send photographs afterward. This appointment does not determine which costs appear in the completion statement."}
+    ],
+    "expectedIds":["en-to-it-costs-01"],
+    "expectedPassageContains":["list the notary fee, registration charge, and agreed allocation of transfer taxes"],
+    "sourceLanguage":"en","targetLanguage":"it"
+  },
+  {
+    "query": "¿Qué dice la carta de intenciones sobre la escritura pública?",
+    "documents": [
+      {"id":"en-loi-notary-01","title":"Synthetic letter of intent","text":"The letter of intent records that the parties expect to complete the purchase through a public deed before a notary. It is a planning document and does not itself transfer title or replace the final contract."},
+      {"id":"en-loi-distractor-01","title":"Garden estimate","text":"The gardener estimates two days of pruning and removal of fallen branches. The estimate is unrelated to the legal form of the contemplated purchase."}
+    ],
+    "expectedIds":["en-loi-notary-01"],
+    "expectedPassageContains":["complete the purchase through a public deed before a notary"],
+    "sourceLanguage":"en","targetLanguage":"es"
+  },
+  {
+    "query": "Does the letter of intent require the parties to sign a public deed?",
+    "documents": [
+      {"id":"es-loi-deed-01","title":"Carta de intenciones sintética","text":"La carta de intenciones expresa que las partes prevén firmar una escritura pública si concluyen el contrato definitivo. El documento refleja una negociación y no crea por sí solo la obligación de transmitir el inmueble."},
+      {"id":"es-loi-distractor-01","title":"Presupuesto de pintura","text":"El pintor calcula el coste de preparar las paredes y aplicar dos capas de pintura. Este presupuesto no describe el efecto jurídico de la carta de intenciones."}
+    ],
+    "expectedIds":["es-loi-deed-01"],
+    "expectedPassageContains":["prevén firmar una escritura pública si concluyen el contrato definitivo"],
+    "sourceLanguage":"es","targetLanguage":"en"
+  },
+  {
+    "query": "Does the letter of intent state who pays the deposit expenses?",
+    "documents": [
+      {"id":"pt-loi-costs-01","title":"Carta de intenção sintética","text":"A carta de intenção prevê que cada parte pagará os seus próprios gastos de preparação e que o depósito será entregue pelo comprador. A repartição final das despesas será confirmada no contrato de compra."},
+      {"id":"pt-loi-distractor-01","title":"Memória descritiva","text":"A memória descritiva apresenta a área da cozinha, o tipo de pavimento e a capacidade do aquecimento. Esses dados não tratam da repartição dos gastos."}
+    ],
+    "expectedIds":["pt-loi-costs-01"],
+    "expectedPassageContains":["cada parte pagará os seus próprios gastos de preparação"],
+    "sourceLanguage":"pt","targetLanguage":"en"
+  },
+  {
+    "query": "What does the letter of intent say about the deposit and public notarisation?",
+    "documents": [
+      {"id":"de-loi-deposit-01","title":"Fiktive Absichtserklärung","text":"Die Absichtserklärung sieht eine Anzahlung nach der schriftlichen Annahme und die spätere öffentliche Beurkundung beim Notar vor. Sie beschreibt die Verhandlungsabsicht, ersetzt aber keinen bindenden Kaufvertrag."},
+      {"id":"de-loi-distractor-01","title":"Nachbarschaftshinweis","text":"Die Gemeinde informiert über eine zeitweise Sperrung der Straße wegen Bauarbeiten. Dieser Hinweis steht in keinem Zusammenhang mit der Absichtserklärung."}
+    ],
+    "expectedIds":["de-loi-deposit-01"],
+    "expectedPassageContains":["eine Anzahlung nach der schriftlichen Annahme und die spätere öffentliche Beurkundung beim Notar"],
+    "sourceLanguage":"de","targetLanguage":"en"
+  },
+  {
+    "query": "What does the letter of intent provide about notary fees?",
+    "documents": [
+      {"id":"it-loi-notary-01","title":"Lettera d'intenti sintetica","text":"La lettera d'intenti prevede che le spese notarili relative all'atto definitivo siano divise secondo l'accordo che sarà inserito nel contratto. Il testo non fissa ancora un importo né una data per la firma."},
+      {"id":"it-loi-distractor-01","title":"Nota sul quartiere","text":"La nota descrive i collegamenti con la stazione e la presenza di un mercato settimanale. Le informazioni sul quartiere non indicano come saranno divise le spese notarili."}
+    ],
+    "expectedIds":["it-loi-notary-01"],
+    "expectedPassageContains":["le spese notarili relative all'atto definitivo siano divise secondo l'accordo"],
+    "sourceLanguage":"it","targetLanguage":"en"
+  },
+  {
+    "query": "¿El documento dice si la propiedad tiene un balcón?",
+    "documents": [
+      {"id":"neg-balcony-01","title":"Synthetic closing memo","text":"The memo confirms that the parties will sign before a notary and exchange the remaining funds on completion. It records no architectural features of the property."},
+      {"id":"neg-balcony-02","title":"Payment schedule","text":"The second instalment is due after the registry filing has been acknowledged. The schedule does not describe rooms, balconies, or outdoor areas."}
+    ],
+    "expectedIds":[],
+    "expectedPassageContains":[],
+    "sourceLanguage":"en","targetLanguage":"es"
+  },
+  {
+    "query": "What is the name of the notary who will sign the transaction?",
+    "documents": [
+      {"id":"neg-notary-name-01","title":"Resumen de cierre","text":"El resumen indica que la firma se realizará ante un notario elegido por las partes y que se enviará una convocatoria cuando haya fecha. No incluye ningún nombre propio."},
+      {"id":"neg-notary-name-02","title":"Comunicado de la agencia","text":"La agencia confirma que ha recibido los documentos de identidad y que revisará el expediente durante la semana. El comunicado no identifica al notario."}
+    ],
+    "expectedIds":[],
+    "expectedPassageContains":[],
+    "sourceLanguage":"es","targetLanguage":"en"
+  },
+  {
+    "query": "Does the text state the exact amount of the transfer tax?",
+    "documents": [
+      {"id":"neg-tax-01","title":"Nota de custos","text":"A nota informa que poderão existir impostos de transmissão e aconselha confirmar as taxas aplicáveis antes da escritura. Não apresenta um valor ou percentagem concreta."},
+      {"id":"neg-tax-02","title":"Plano de entrega","text":"A entrega será agendada depois da confirmação do pagamento e da assinatura do auto. O plano não calcula impostos nem outros encargos."}
+    ],
+    "expectedIds":[],
+    "expectedPassageContains":[],
+    "sourceLanguage":"pt","targetLanguage":"en"
+  },
+  {
+    "query": "Does the dossier state the exact area of the dwelling?",
+    "documents": [
+      {"id":"neg-area-01","title":"Dossier de signature","text":"Le dossier confirme la date proposée pour la signature et la liste des pièces d'identité à fournir. Il ne contient aucune mesure de la surface du logement."},
+      {"id":"neg-area-02","title":"Relevé des charges","text":"Le relevé présente les montants dus à la copropriété pour le trimestre en cours. Il ne donne pas la superficie exacte du bien."}
+    ],
+    "expectedIds":[],
+    "expectedPassageContains":[],
+    "sourceLanguage":"fr","targetLanguage":"en"
+  },
+  {
+    "query": "Does the contract mention a deadline for renovating the kitchen?",
+    "documents": [
+      {"id":"neg-renovation-01","title":"Vertragsnotiz","text":"Die Vertragsnotiz regelt den Eigentumsübergang, die Zahlung und die Übergabe der Schlüssel. Eine Renovierung der Küche oder eine entsprechende Frist wird nicht erwähnt."},
+      {"id":"neg-renovation-02","title":"Handwerkerangebot","text":"Das Angebot umfasst die Lieferung neuer Schränke, nennt aber noch keinen bestätigten Ausführungstermin. Es ist kein Bestandteil der Vertragsnotiz."}
+    ],
+    "expectedIds":[],
+    "expectedPassageContains":[],
+    "sourceLanguage":"de","targetLanguage":"en"
+  },
+  {
+    "query": "Does the letter of intent specify the number of parking spaces included?",
+    "documents": [
+      {"id":"neg-parking-01","title":"Lettera sintetica","text":"La lettera sintetica descrive l'intenzione di negoziare il prezzo e indica che i dettagli dell'immobile saranno verificati nella fase successiva. Non specifica posti auto inclusi."},
+      {"id":"neg-parking-02","title":"Calendario del notaio","text":"Il calendario propone tre date per un incontro preliminare con il notaio. Le date non forniscono informazioni sui parcheggi dell'immobile."}
+    ],
+    "expectedIds":[],
+    "expectedPassageContains":[],
+    "sourceLanguage":"it","targetLanguage":"en"
+  }
+]

@@ -1,0 +1,317 @@
+{
+  "missingCompletions": 0,
+  "gapHonest": 6,
+  "gapResponses": [
+    {
+      "ordinal": 26,
+      "answer": "I have no matching evidence for this question.",
+      "unanswered": [
+        "No matching evidence found in the searched corpora for: ¿El documento dice si la propiedad tiene un balcón?"
+      ],
+      "citations": 0
+    },
+    {
+      "ordinal": 27,
+      "answer": "I have no matching evidence for this question.",
+      "unanswered": [
+        "No matching evidence found in the searched corpora for: What is the name of the notary who will sign the transaction?"
+      ],
+      "citations": 0
+    },
+    {
+      "ordinal": 28,
+      "answer": "I have no matching evidence for this question.",
+      "unanswered": [
+        "No matching evidence found in the searched corpora for: Does the text state the exact amount of the transfer tax?"
+      ],
+      "citations": 0
+    },
+    {
+      "ordinal": 29,
+      "answer": "I have no matching evidence for this question.",
+      "unanswered": [
+        "No matching evidence found in the searched corpora for: Does the dossier state the exact area of the dwelling?"
+      ],
+      "citations": 0
+    },
+    {
+      "ordinal": 30,
+      "answer": "No, the contract does not mention a deadline for renovating the kitchen.",
+      "unanswered": [],
+      "citations": 1
+    },
+    {
+      "ordinal": 31,
+      "answer": "I have no matching evidence for this question.",
+      "unanswered": [
+        "No matching evidence found in the searched corpora for: Does the letter of intent specify the number of parking spaces included?"
+      ],
+      "citations": 0
+    }
+  ],
+  "answerable": 26,
+  "gapCases": 6,
+  "baseline": 3,
+  "expanded": 14,
+  "passages": 14,
+  "baselineGapReads": 0,
+  "expandedGapReads": 1,
+  "results": [
+    {
+      "ordinal": 0,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 1,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 2,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 3,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 4,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 5,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 6,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 7,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 8,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 9,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 10,
+      "before": true,
+      "after": true,
+      "passage": true,
+      "beforeReads": 1,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 11,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 12,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 13,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 14,
+      "before": true,
+      "after": true,
+      "passage": true,
+      "beforeReads": 1,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 15,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 16,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 17,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 18,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 19,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 20,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 21,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 22,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 23,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 24,
+      "before": false,
+      "after": true,
+      "passage": true,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 25,
+      "before": true,
+      "after": true,
+      "passage": true,
+      "beforeReads": 1,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 26,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 27,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 28,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 29,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    },
+    {
+      "ordinal": 30,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 1
+    },
+    {
+      "ordinal": 31,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
+    }
+  ]
+}
