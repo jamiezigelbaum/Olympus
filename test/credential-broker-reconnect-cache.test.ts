@@ -137,6 +137,8 @@ describe('minted access tokens are bound to the grant that minted them', () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let calls = 0;
+    let reached!: () => void;
+    const atProvider = new Promise<void>((resolve) => { reached = resolve; });
     const broker = createEnvCredentialBroker({
       env: {},
       handleRegistryPath: registryPath,
@@ -146,7 +148,10 @@ describe('minted access tokens are bound to the grant that minted them', () => {
       fetch: async (_url, init) => {
         calls += 1;
         const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
-        if (calls === 1) await gate;
+        if (calls === 1) {
+          reached();
+          await gate;
+        }
         return new Response(JSON.stringify({
           access_token: `access-for-${refreshToken}`,
           // A rotating provider hands back a new refresh token for the OLD grant.
@@ -157,7 +162,7 @@ describe('minted access tokens are bound to the grant that minted them', () => {
     });
 
     const inFlight = broker.issueSession(REQUEST).catch((reason: unknown) => reason);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await atProvider;
     await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
     writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
     release();
@@ -173,6 +178,10 @@ describe('minted access tokens are bound to the grant that minted them', () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let calls = 0;
+    // Resolved once the refresh is at the provider, i.e. past every pre-spend
+    // check: a fixed sleep raced it under CI load.
+    let reached!: () => void;
+    const atProvider = new Promise<void>((resolve) => { reached = resolve; });
     const broker = createEnvCredentialBroker({
       env: {},
       handleRegistryPath: registryPath,
@@ -182,11 +191,14 @@ describe('minted access tokens are bound to the grant that minted them', () => {
       fetch: async (_url, init) => {
         calls += 1;
         const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
-        if (calls === 1) await gate;
+        if (calls === 1) {
+          reached();
+          await gate;
+        }
         return answer(refreshToken);
       },
     });
-    return { broker, release };
+    return { broker, release, atProvider };
   }
 
   function grantFixture() {
@@ -203,7 +215,7 @@ describe('minted access tokens are bound to the grant that minted them', () => {
 
   test('the old grant refused mid-reconnect never marks the new grant for reauthorization (Codex round 2 #3)', async () => {
     const { registryPath, secretStore } = grantFixture();
-    const { broker, release } = gatedBroker(registryPath, secretStore, (refreshToken) => refreshToken === 'refresh-token-account-a'
+    const { broker, release, atProvider } = gatedBroker(registryPath, secretStore, (refreshToken) => refreshToken === 'refresh-token-account-a'
       ? new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400, headers: { 'Content-Type': 'application/json' } })
       : new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
           status: 200,
@@ -211,7 +223,7 @@ describe('minted access tokens are bound to the grant that minted them', () => {
         }));
 
     const inFlight = broker.issueSession(REQUEST).catch((reason: unknown) => reason);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await atProvider;
     await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
     writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
     release();
@@ -224,14 +236,14 @@ describe('minted access tokens are bound to the grant that minted them', () => {
 
   test('a reconnect that holds grant custody across the refresh outcome wins it (Codex round 2 #3)', async () => {
     const { registryPath, secretStore } = grantFixture();
-    const { broker, release } = gatedBroker(registryPath, secretStore, (refreshToken) => new Response(JSON.stringify({
+    const { broker, release, atProvider } = gatedBroker(registryPath, secretStore, (refreshToken) => new Response(JSON.stringify({
       access_token: `access-for-${refreshToken}`,
       refresh_token: `rotated-${refreshToken}`,
       expires_in: 14_400,
     }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
 
     const inFlight = broker.issueSession(REQUEST).catch((reason: unknown) => reason);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await atProvider;
     // Connect takes custody; the old refresh answers while it is held, and
     // the new grant is written only afterwards, as the slowest interleaving.
     await withConnectedHandleGrantCustody(registryPath, {}, async () => {
@@ -361,6 +373,10 @@ describe('minted access tokens are bound to the grant that minted them', () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let calls = 0;
+    // The refresh request reaching the provider means the write-ahead marker
+    // is already on file; a fixed sleep raced it under CI load.
+    let reached!: () => void;
+    const atProvider = new Promise<void>((resolve) => { reached = resolve; });
     const broker = createEnvCredentialBroker({
       env: {},
       handleRegistryPath: registryPath,
@@ -371,7 +387,10 @@ describe('minted access tokens are bound to the grant that minted them', () => {
       fetch: async (_url, init) => {
         calls += 1;
         const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
-        if (calls === 1) await gate;
+        if (calls === 1) {
+          reached();
+          await gate;
+        }
         return new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
@@ -380,7 +399,7 @@ describe('minted access tokens are bound to the grant that minted them', () => {
     });
 
     const inFlight = broker.issueSession(REQUEST).catch((reason: unknown) => reason);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await atProvider;
     expect((await stateStore.load('dropbox.personal'))?.pendingRefreshStartedAt).toBeDefined();
     await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
     writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
