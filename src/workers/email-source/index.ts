@@ -1,3 +1,4 @@
+import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
 import { CONSENT_PAGE_STYLE } from '../remote-oauth/consent-page.ts';
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { runWithAnalystAbortSignal } from '../../core/analyst.ts';
@@ -5528,7 +5529,7 @@ function assertDashboardAccountCardinality(
   source: DashboardOAuthSource | DashboardApiKeySource,
 ): void {
   const providers = new Set(dashboardProvidersForSource(source));
-  const handles = registry.handles.filter((handle) => providers.has(handle.provider));
+  const handles = registry.handles.filter((handle) => providers.has(handle.provider) && !isRetiredGoogleHandle(handle));
   try {
     assertOneConnectedAccountPerProvider({ version: 1, handles });
   } catch {

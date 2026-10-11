@@ -1,3 +1,4 @@
+import { isRetiredGoogleHandle } from './google-handle-compatibility.ts';
 import { modelEndpointFetch } from './model-transport.ts';
 import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
 import { Buffer } from 'node:buffer';
@@ -795,6 +796,12 @@ async function completeOAuthSourceConnection(
         }
       }
 
+      // Publish the new consented grants before removing unservable legacy metadata.
+      const replacedProviders = new Set(proposedHandles.map((handle) => handle.provider));
+      const retired = readConnectedHandleRegistry(prepared.registryPath).handles
+        .filter((handle) => replacedProviders.has(handle.provider) && isRetiredGoogleHandle(handle));
+      if (retired.length > 0) removeConnectedHandles(retired.map((handle) => handle.handle), prepared.registryPath);
+
       return {
         ok: true,
         source: prepared.options.source,
@@ -851,7 +858,7 @@ function assertOneConnectedAccountForProposedProviders(
 ): void {
   const providers = new Set(proposed.map((handle) => handle.provider));
   const handles = readConnectedHandleRegistry(registryPath).handles
-    .filter((handle) => providers.has(handle.provider));
+    .filter((handle) => providers.has(handle.provider) && !isRetiredGoogleHandle(handle));
   assertOneConnectedAccountPerProvider({ version: 1, handles }, proposed);
 }
 

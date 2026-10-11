@@ -14237,7 +14237,8 @@ var init_local_index = __esm(() => {
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
-    ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
+    ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
+    ["text-embedding-qwen3-8b", 0.43]
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
     [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
@@ -22995,6 +22996,9 @@ var init_unpaired_sources = __esm(() => {
   UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
 });
 
+// src/core/google-handle-compatibility.ts
+var init_google_handle_compatibility = () => {};
+
 // src/core/worker-service.ts
 var WORKER_LOG_TAIL_BYTES;
 var init_worker_service = __esm(() => {
@@ -23026,6 +23030,7 @@ var init_source_account_binding = __esm(() => {
 // src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
+  init_google_handle_compatibility();
   init_model_transport();
   init_zkapi_consult_settings();
   init_secret_store();
@@ -25753,6 +25758,7 @@ var init_public_source_capabilities = __esm(() => {
 // src/workers/source-dashboard.ts
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
+  init_google_handle_compatibility();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -32019,6 +32025,7 @@ init_local_model_policy();
 init_model_transport();
 
 // src/workers/email-source/index.ts
+init_google_handle_compatibility();
 init_consent_page();
 init_analyst();
 init_types();

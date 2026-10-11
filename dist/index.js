@@ -7258,6 +7258,9 @@ var init_connected_handles = __esm(() => {
   };
 });
 
+// src/core/google-handle-compatibility.ts
+var init_google_handle_compatibility = () => {};
+
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS;
 var init_privacy_language = __esm(() => {
@@ -9856,7 +9859,8 @@ var init_local_index = __esm(() => {
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
-    ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
+    ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
+    ["text-embedding-qwen3-8b", 0.43]
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
     [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
@@ -11546,6 +11550,7 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
 }
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
+  init_google_handle_compatibility();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -17804,6 +17809,7 @@ function unique(values) {
 init_connected_handles();
 
 // src/core/connect.ts
+init_google_handle_compatibility();
 init_model_transport();
 init_zkapi_consult_settings();
 import { mkdirSync as mkdirSync9, readFileSync as readFileSync15, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
