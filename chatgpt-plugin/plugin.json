@@ -64,9 +64,9 @@
             },
             {
               "description": "A question that matches Private items is answered only in the private panel.",
-              "prompt": "What did my blood test results say?",
+              "prompt": "What did my bank's overdraft notice say?",
               "tools_triggered": "olympus_search",
-              "expected_behavior": "ChatGPT's reply is short and says Olympus is answering privately on the Mac, in the panel. It contains no result values, no clinic or doctor name and no content from the Private items, and it does not ask the user to upload or paste anything. An Olympus panel titled \"Private answer from your Mac\", marked \"Not sent to ChatGPT\", appears under the reply and shows the answer from the lab results and clinic note. This can take up to a minute."
+              "expected_behavior": "ChatGPT's reply is short and says Olympus is answering privately on the computer, in the panel. It contains no amounts, no bank name and no content from the Private items, and it does not ask the user to upload or paste anything. An Olympus panel titled \"Private answer from your computer\", marked \"Not sent to ChatGPT\", appears under the reply and shows the answer from the bank notice: the account went overdrawn by $212.40 on 19 September and a $25.00 overdraft fee was charged. This can take up to a minute."
             },
             {
               "description": "The Olympus dashboard.",
