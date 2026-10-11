@@ -56,7 +56,9 @@ import {
   recordFileSourceConnect,
   recordFileSourceConnectIntent,
   sourceAccountBindingsPath,
+  updateSourceAccountBinding,
   type AccountBoundSourceId,
+  type SourceAccountBinding,
 } from './source-account-binding.ts';
 
 const DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
@@ -681,6 +683,18 @@ async function completeOAuthSourceConnection(
 
       // Before anything of the new grant is stored: from here on, a connect
       // that stops halfway leaves the worker a marker to re-verify against.
+      // A connect that FAILS (rather than dying) puts each entry back as it
+      // was below: the old grant is still in force, and a reconnect marker
+      // over a never-bound source's rows would otherwise strand it with
+      // deletion as the only way out (PR review on fac6c2eb).
+      const bindingsPath = sourceAccountBindingsPath(prepared.registryPath);
+      const bindingsBefore = readSourceAccountBindings(bindingsPath);
+      const intentSnapshots = new Map<AccountBoundSourceId, SourceAccountBinding | undefined>();
+      for (const handleDefinition of prepared.definition.handles) {
+        if (!isAccountBoundProvider(handleDefinition.provider)) continue;
+        const sourceId = accountBoundSourceIdForProvider(handleDefinition.provider)!;
+        if (bindingsBefore.kind === 'ok') intentSnapshots.set(sourceId, bindingsBefore.bindings.sources[sourceId]);
+      }
       for (const handleDefinition of prepared.definition.handles) {
         if (!isAccountBoundProvider(handleDefinition.provider)) continue;
         recordFileSourceConnectIntent({
@@ -738,46 +752,57 @@ async function completeOAuthSourceConnection(
       // state store and leave handles.json metadata-only. Both writes remain
       // inside the same grant-custody fence.
       const registryOwnsOAuth = prepared.options.source !== 'x' || !prepared.oauth2StateStore;
-      for (const handleDefinition of prepared.definition.handles) {
-        const handle = handleDefinition.handle(prepared.accountRole);
-        handles.push(handle);
-        const providerAccountId = xUserId
-          ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
-        await prepared.oauth2StateStore?.save(handle, {
-          refreshToken,
-          scopes: handleDefinition.scopes,
-          status: 'available',
-          updatedAt: connectedAt.toISOString(),
-          ...(providerAccountId ? { providerAccountId } : {}),
-        });
-        upsertConnectedHandle({
-          handle,
-          provider: handleDefinition.provider,
-          accountRole: prepared.accountRole,
-          ...(handleDefinition.trustDomain ? { trustDomain: handleDefinition.trustDomain } : {}),
-          allowedCapabilities: [handleDefinition.capability],
-          scopes: handleDefinition.scopes,
-          ...(registryOwnsOAuth ? {
-            oauth2Refresh: {
-              tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
-              clientIdSecretRef: `store:${clientIdKey}`,
-              ...(clientSecretRef ? { clientSecretSecretRef: clientSecretRef } : {}),
-              refreshTokenSecretRef: `store:${refreshKey}`,
-              scopes: handleDefinition.scopes,
-              // Provenance, not presence (same reasoning as `clientIdSource`
-              // above): a future rotation of `DEFAULT_GOOGLE_PUBLISHER_WEB_
-              // CLIENT_ID` must not strand an already-connected publisher
-              // credential on a client-id value-match that no longer holds.
-              // Written once, at connect time, from a fact about how THIS
-              // exchange actually happened.
-              ...(usesGooglePublisherExchange ? { exchangeVia: 'publisher_endpoint' as const } : {}),
-            },
-          } : {}),
-          connectedAt: connectedAt.toISOString(),
-          ...(providerAccountId ? { providerAccountId } : {}),
-        }, prepared.registryPath);
+      try {
+        for (const handleDefinition of prepared.definition.handles) {
+          const handle = handleDefinition.handle(prepared.accountRole);
+          handles.push(handle);
+          const providerAccountId = xUserId
+            ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
+          await prepared.oauth2StateStore?.save(handle, {
+            refreshToken,
+            scopes: handleDefinition.scopes,
+            status: 'available',
+            updatedAt: connectedAt.toISOString(),
+            ...(providerAccountId ? { providerAccountId } : {}),
+          });
+          upsertConnectedHandle({
+            handle,
+            provider: handleDefinition.provider,
+            accountRole: prepared.accountRole,
+            ...(handleDefinition.trustDomain ? { trustDomain: handleDefinition.trustDomain } : {}),
+            allowedCapabilities: [handleDefinition.capability],
+            scopes: handleDefinition.scopes,
+            ...(registryOwnsOAuth ? {
+              oauth2Refresh: {
+                tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+                clientIdSecretRef: `store:${clientIdKey}`,
+                ...(clientSecretRef ? { clientSecretSecretRef: clientSecretRef } : {}),
+                refreshTokenSecretRef: `store:${refreshKey}`,
+                scopes: handleDefinition.scopes,
+                // Provenance, not presence (same reasoning as `clientIdSource`
+                // above): a future rotation of `DEFAULT_GOOGLE_PUBLISHER_WEB_
+                // CLIENT_ID` must not strand an already-connected publisher
+                // credential on a client-id value-match that no longer holds.
+                // Written once, at connect time, from a fact about how THIS
+                // exchange actually happened.
+                ...(usesGooglePublisherExchange ? { exchangeVia: 'publisher_endpoint' as const } : {}),
+              },
+            } : {}),
+            connectedAt: connectedAt.toISOString(),
+            ...(providerAccountId ? { providerAccountId } : {}),
+          }, prepared.registryPath);
+        }
+        for (const [key, value] of secretWrites) await prepared.secretStore.set(key, value);
+      } catch (error) {
+        try {
+          for (const [sourceId, snapshot] of intentSnapshots) {
+            updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
+          }
+        } catch {
+          // The marker stays; the worker then fails closed, never mixes.
+        }
+        throw error;
       }
-      for (const [key, value] of secretWrites) await prepared.secretStore.set(key, value);
       // The new grant is in place: no token minted from the old one may be
       // handed out again by this process, whatever is left of its lifetime.
       for (const handle of handles) invalidateMintedCredentialSessions(handle);

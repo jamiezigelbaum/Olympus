@@ -6086,6 +6086,16 @@ async function completeOAuthSourceConnection(prepared, code) {
       provider: definition.provider
     }));
     assertOneConnectedAccountForProposedProviders(prepared.registryPath, proposedHandles);
+    const bindingsPath = sourceAccountBindingsPath(prepared.registryPath);
+    const bindingsBefore = readSourceAccountBindings(bindingsPath);
+    const intentSnapshots = new Map;
+    for (const handleDefinition of prepared.definition.handles) {
+      if (!isAccountBoundProvider(handleDefinition.provider))
+        continue;
+      const sourceId = accountBoundSourceIdForProvider(handleDefinition.provider);
+      if (bindingsBefore.kind === "ok")
+        intentSnapshots.set(sourceId, bindingsBefore.bindings.sources[sourceId]);
+    }
     for (const handleDefinition of prepared.definition.handles) {
       if (!isAccountBoundProvider(handleDefinition.provider))
         continue;
@@ -6117,40 +6127,49 @@ async function completeOAuthSourceConnection(prepared, code) {
     const handles = [];
     const connectedAt = prepared.now();
     const registryOwnsOAuth = prepared.options.source !== "x" || !prepared.oauth2StateStore;
-    for (const handleDefinition of prepared.definition.handles) {
-      const handle = handleDefinition.handle(prepared.accountRole);
-      handles.push(handle);
-      const providerAccountId = xUserId ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
-      await prepared.oauth2StateStore?.save(handle, {
-        refreshToken,
-        scopes: handleDefinition.scopes,
-        status: "available",
-        updatedAt: connectedAt.toISOString(),
-        ...providerAccountId ? { providerAccountId } : {}
-      });
-      upsertConnectedHandle({
-        handle,
-        provider: handleDefinition.provider,
-        accountRole: prepared.accountRole,
-        ...handleDefinition.trustDomain ? { trustDomain: handleDefinition.trustDomain } : {},
-        allowedCapabilities: [handleDefinition.capability],
-        scopes: handleDefinition.scopes,
-        ...registryOwnsOAuth ? {
-          oauth2Refresh: {
-            tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
-            clientIdSecretRef: `store:${clientIdKey}`,
-            ...clientSecretRef ? { clientSecretSecretRef: clientSecretRef } : {},
-            refreshTokenSecretRef: `store:${refreshKey}`,
-            scopes: handleDefinition.scopes,
-            ...usesGooglePublisherExchange ? { exchangeVia: "publisher_endpoint" } : {}
-          }
-        } : {},
-        connectedAt: connectedAt.toISOString(),
-        ...providerAccountId ? { providerAccountId } : {}
-      }, prepared.registryPath);
+    try {
+      for (const handleDefinition of prepared.definition.handles) {
+        const handle = handleDefinition.handle(prepared.accountRole);
+        handles.push(handle);
+        const providerAccountId = xUserId ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
+        await prepared.oauth2StateStore?.save(handle, {
+          refreshToken,
+          scopes: handleDefinition.scopes,
+          status: "available",
+          updatedAt: connectedAt.toISOString(),
+          ...providerAccountId ? { providerAccountId } : {}
+        });
+        upsertConnectedHandle({
+          handle,
+          provider: handleDefinition.provider,
+          accountRole: prepared.accountRole,
+          ...handleDefinition.trustDomain ? { trustDomain: handleDefinition.trustDomain } : {},
+          allowedCapabilities: [handleDefinition.capability],
+          scopes: handleDefinition.scopes,
+          ...registryOwnsOAuth ? {
+            oauth2Refresh: {
+              tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+              clientIdSecretRef: `store:${clientIdKey}`,
+              ...clientSecretRef ? { clientSecretSecretRef: clientSecretRef } : {},
+              refreshTokenSecretRef: `store:${refreshKey}`,
+              scopes: handleDefinition.scopes,
+              ...usesGooglePublisherExchange ? { exchangeVia: "publisher_endpoint" } : {}
+            }
+          } : {},
+          connectedAt: connectedAt.toISOString(),
+          ...providerAccountId ? { providerAccountId } : {}
+        }, prepared.registryPath);
+      }
+      for (const [key, value] of secretWrites)
+        await prepared.secretStore.set(key, value);
+    } catch (error) {
+      try {
+        for (const [sourceId, snapshot] of intentSnapshots) {
+          updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
+        }
+      } catch {}
+      throw error;
     }
-    for (const [key, value] of secretWrites)
-      await prepared.secretStore.set(key, value);
     for (const handle of handles)
       invalidateMintedCredentialSessions(handle);
     const sourceAccountPurgeRequired = [];
