@@ -127391,7 +127391,7 @@ function authorizationServerMetadata(urls) {
     issuer: urls.issuer,
     authorization_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.authorize}`,
     token_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.token}`,
-    ...urls.installId ? {} : { registration_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.register}` },
+    registration_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.register}`,
     revocation_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.revoke}`,
     response_types_supported: ["code"],
     response_modes_supported: ["query"],
