@@ -655,7 +655,8 @@ async function completeOAuthSourceConnection(
   const fileSourceAccountIds = new Map<AccountBoundProvider, string | undefined>();
   for (const definition of prepared.definition.handles) {
     if (!isAccountBoundProvider(definition.provider) || fileSourceAccountIds.has(definition.provider)) continue;
-    fileSourceAccountIds.set(definition.provider, token.providerAccountId ?? await lookupConnectedAccountId({
+    // X's user id was just read above (connect fails without it).
+    fileSourceAccountIds.set(definition.provider, definition.provider === 'x' ? xUserId : token.providerAccountId ?? await lookupConnectedAccountId({
       provider: definition.provider,
       tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
       accessToken: token.accessToken,
@@ -851,8 +852,14 @@ async function completeOAuthSourceConnection(
       // round 12). Rollback needs every route to stay where it was.
       const newRefreshRoute = registryOwnsOAuth ? `store:${refreshKey}` : undefined;
       let refreshRoutesUnchanged = false;
+      // The entries this connect replaces, put back with the markers when the
+      // previous grant still mints: left at the new account's grant over the
+      // old token, the worker would take the new account for the one the
+      // stores hold (PR #264 review).
+      let registryBefore: ConnectedCredentialHandle[] | undefined;
       try {
         const before = readConnectedHandleRegistry(prepared.registryPath).handles;
+        registryBefore = before;
         refreshRoutesUnchanged = handleNames.every((name) => {
           const entry = before.find((candidate) => candidate.handle === name);
           return entry !== undefined && entry.oauth2Refresh?.refreshTokenSecretRef === newRefreshRoute;
@@ -929,13 +936,20 @@ async function completeOAuthSourceConnection(
         tokenWritesAttempted += 1;
         await prepared.secretStore.set(refreshKey, refreshToken);
       } catch (error) {
-        if (await oldGrantStillMints()) {
+        if (registryBefore && await oldGrantStillMints()) {
           try {
+            const previous = registryBefore;
+            for (const name of handleNames) {
+              const entry = previous.find((candidate) => candidate.handle === name);
+              if (entry) upsertConnectedHandle(entry, prepared.registryPath);
+              else removeConnectedHandles([name], prepared.registryPath);
+            }
             for (const [sourceId, snapshot] of intentSnapshots) {
               updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
             }
           } catch {
-            // The marker stays; the worker then fails closed, never mixes.
+            // The marker stays (a registry restore that failed leaves it in
+            // place too); the worker then fails closed, never mixes.
           }
         }
         throw error;
@@ -2100,6 +2114,15 @@ async function identifyReplacedGrantAccount(options: {
   if (binding?.purge_required || binding?.reconnected_at) return undefined;
   const neverBound = !binding?.provider_account_id;
   if (!neverBound && hasImmutableAccountLabel(binding!.provider_account_id!)) return undefined;
+  // X: every X connect has recorded the grant's user id, and the bookmarks
+  // lane reads as that id, so it is the account the stored items came from.
+  // Its ids never change, so a bound X source needs nothing here. Never mint
+  // from the replaced grant: X rotates refresh tokens, and a mint in the
+  // connect process would revoke the worker's live session.
+  if (options.provider === 'x') {
+    const recorded = existing.providerAccountId?.trim();
+    return neverBound && recorded ? { grantConnectedAt: existing.connectedAt, recordedAccountId: recorded, adoptAccountId: recorded } : undefined;
+  }
 
   const identify = async (broker: CredentialBroker): Promise<{ id?: string; gone?: boolean }> => {
     let session: Awaited<ReturnType<CredentialBroker['issueSession']>>;
@@ -2164,7 +2187,9 @@ async function lookupConnectedAccountId(options: {
   timeoutMs: number;
 }): Promise<string | undefined> {
   const tokenOrigin = new URL(options.tokenUrl).origin;
-  const endpoints: ProviderIdentityEndpoints | undefined = options.provider === 'dropbox'
+  const endpoints: ProviderIdentityEndpoints | undefined = options.provider === 'x'
+    ? { x: new URL('/2/users/me', options.tokenUrl).toString() }
+    : options.provider === 'dropbox'
     ? { dropbox: new URL('/2/users/get_current_account', options.tokenUrl).toString() }
     : tokenOrigin === 'https://oauth2.googleapis.com'
       ? undefined

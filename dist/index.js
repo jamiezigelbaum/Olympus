@@ -7118,6 +7118,10 @@ function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHan
     return true;
   });
 }
+function connectedGrantGeneration(connectedAt, providerAccountId) {
+  return `${connectedAt}
+${providerAccountId ?? ""}`;
+}
 function deriveEnvCredentialHandlesFromRegistry(registry) {
   return registry.handles.map((handle) => {
     const definition = {
@@ -7127,8 +7131,7 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
       scopes: [...handle.scopes],
       tokenEnvNames: [],
       expiresInSeconds: 3600,
-      grantGeneration: `${handle.connectedAt}
-${handle.providerAccountId ?? ""}`
+      grantGeneration: connectedGrantGeneration(handle.connectedAt, handle.providerAccountId)
     };
     if (handle.sessionKind)
       definition.sessionKind = handle.sessionKind;
@@ -11058,6 +11061,7 @@ var init_connector2 = __esm(() => {
 // src/workers/x-bookmarks/grant-fence.ts
 var init_grant_fence = __esm(() => {
   init_credential_broker();
+  init_connected_handles();
 });
 
 // src/workers/x-bookmarks/live-control.ts
@@ -18018,6 +18022,7 @@ var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
   dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
   gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
   google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+  x: "https://api.x.com/2/users/me",
   google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
 };
 var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -18025,7 +18030,7 @@ var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 // src/core/source-account-binding.ts
 init_atomic_file();
 init_file_lease();
-var ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email"];
+var ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email", "x.bookmarks"];
 
 // src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;

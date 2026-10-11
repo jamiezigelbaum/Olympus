@@ -5095,6 +5095,15 @@ function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHan
     return true;
   });
 }
+function connectedGrantGeneration(connectedAt, providerAccountId) {
+  return `${connectedAt}
+${providerAccountId ?? ""}`;
+}
+function grantGenerationAccountId(generation) {
+  const newline = generation?.indexOf(`
+`) ?? -1;
+  return newline >= 0 ? generation.slice(newline + 1).trim() || undefined : undefined;
+}
 function deriveEnvCredentialHandlesFromRegistry(registry) {
   return registry.handles.map((handle) => {
     const definition = {
@@ -5104,8 +5113,7 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
       scopes: [...handle.scopes],
       tokenEnvNames: [],
       expiresInSeconds: 3600,
-      grantGeneration: `${handle.connectedAt}
-${handle.providerAccountId ?? ""}`
+      grantGeneration: connectedGrantGeneration(handle.connectedAt, handle.providerAccountId)
     };
     if (handle.sessionKind)
       definition.sessionKind = handle.sessionKind;
@@ -5648,11 +5656,17 @@ async function fetchProviderAccountId(options) {
   } catch {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} returned an unreadable account lookup.`);
   }
+  if (options.provider === "x") {
+    const id = xUserIdFromPayload(payload);
+    if (!id)
+      throw new ProviderAccountIdentityError("X did not name the connected account.");
+    return id;
+  }
   const labels = labelsFromIdentityPayload(options.provider, payload);
   if (!labels) {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not name the connected account.`);
   }
-  if (options.provider !== "dropbox") {
+  if (options.provider === "gmail" || options.provider === "google_drive") {
     const subject = await fetchGoogleSubject({
       accessToken: options.accessToken,
       endpoint: options.endpoints?.google_tokeninfo ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo,
@@ -5692,6 +5706,11 @@ async function fetchGoogleSubject(options) {
   }
   return;
 }
+function xUserIdFromPayload(payload) {
+  const data = payload.data;
+  const id = data && typeof data === "object" && !Array.isArray(data) ? data.id : undefined;
+  return typeof id === "string" && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
+}
 function labelsFromIdentityPayload(provider, payload) {
   if (provider === "dropbox") {
     const id = dropboxAccountIdFromTokenPayload(payload);
@@ -5709,7 +5728,7 @@ function labelsFromIdentityPayload(provider, payload) {
   return labels;
 }
 function providerLabel(provider) {
-  return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : "Google Drive";
+  return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : provider === "x" ? "X" : "Google Drive";
 }
 async function dropboxOwnsOneOfFolders(options) {
   const endpoint = options.endpoint ?? "https://api.dropboxapi.com/2/files/get_metadata";
@@ -5795,18 +5814,20 @@ async function dropboxOwnRootFolderIds(options) {
   }
   return found.length > 0 ? found : undefined;
 }
-var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, ProviderAccountIdentityError, IMMUTABLE_LABEL_KINDS, LABEL;
+var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, X_USER_ID, ProviderAccountIdentityError, IMMUTABLE_LABEL_KINDS, LABEL;
 var init_provider_account_identity = __esm(() => {
   init_http_timeout();
-  ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive"];
+  ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive", "x"];
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
     dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
     gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
     google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
     google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
   DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
+  X_USER_ID = /^\d{1,32}$/;
   ProviderAccountIdentityError = class ProviderAccountIdentityError extends Error {
     constructor(message) {
       super(message);
@@ -5830,6 +5851,8 @@ function accountBoundSourceIdForProvider(provider) {
     return "google_drive.docs";
   if (provider === "gmail")
     return "gmail.email";
+  if (provider === "x")
+    return "x.bookmarks";
   return;
 }
 function readSourceAccountBindings(path) {
@@ -6004,7 +6027,7 @@ var init_source_account_binding = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_provider_account_identity();
-  ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email"];
+  ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email", "x.bookmarks"];
   SourceAccountBindingsUnreadableError = class SourceAccountBindingsUnreadableError extends Error {
     constructor(path) {
       super(`The source account record at ${path} is unreadable; no file source syncs until it is repaired or removed.`);
@@ -6334,7 +6357,7 @@ async function completeOAuthSourceConnection(prepared, code) {
   for (const definition of prepared.definition.handles) {
     if (!isAccountBoundProvider(definition.provider) || fileSourceAccountIds.has(definition.provider))
       continue;
-    fileSourceAccountIds.set(definition.provider, token.providerAccountId ?? await lookupConnectedAccountId({
+    fileSourceAccountIds.set(definition.provider, definition.provider === "x" ? xUserId : token.providerAccountId ?? await lookupConnectedAccountId({
       provider: definition.provider,
       tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
       accessToken: token.accessToken,
@@ -6455,8 +6478,10 @@ async function completeOAuthSourceConnection(prepared, code) {
     }
     const newRefreshRoute = registryOwnsOAuth ? `store:${refreshKey}` : undefined;
     let refreshRoutesUnchanged = false;
+    let registryBefore;
     try {
       const before = readConnectedHandleRegistry(prepared.registryPath).handles;
+      registryBefore = before;
       refreshRoutesUnchanged = handleNames.every((name) => {
         const entry = before.find((candidate) => candidate.handle === name);
         return entry !== undefined && entry.oauth2Refresh?.refreshTokenSecretRef === newRefreshRoute;
@@ -6524,8 +6549,16 @@ async function completeOAuthSourceConnection(prepared, code) {
       tokenWritesAttempted += 1;
       await prepared.secretStore.set(refreshKey, refreshToken);
     } catch (error) {
-      if (await oldGrantStillMints()) {
+      if (registryBefore && await oldGrantStillMints()) {
         try {
+          const previous = registryBefore;
+          for (const name of handleNames) {
+            const entry = previous.find((candidate) => candidate.handle === name);
+            if (entry)
+              upsertConnectedHandle(entry, prepared.registryPath);
+            else
+              removeConnectedHandles([name], prepared.registryPath);
+          }
           for (const [sourceId, snapshot] of intentSnapshots) {
             updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
           }
@@ -7122,6 +7155,10 @@ async function identifyReplacedGrantAccount(options) {
   const neverBound = !binding?.provider_account_id;
   if (!neverBound && hasImmutableAccountLabel(binding.provider_account_id))
     return;
+  if (options.provider === "x") {
+    const recorded = existing.providerAccountId?.trim();
+    return neverBound && recorded ? { grantConnectedAt: existing.connectedAt, recordedAccountId: recorded, adoptAccountId: recorded } : undefined;
+  }
   const identify = async (broker) => {
     let session;
     try {
@@ -7173,7 +7210,7 @@ async function identifyReplacedGrantAccount(options) {
 }
 async function lookupConnectedAccountId(options) {
   const tokenOrigin = new URL(options.tokenUrl).origin;
-  const endpoints = options.provider === "dropbox" ? { dropbox: new URL("/2/users/get_current_account", options.tokenUrl).toString() } : tokenOrigin === "https://oauth2.googleapis.com" ? undefined : {
+  const endpoints = options.provider === "x" ? { x: new URL("/2/users/me", options.tokenUrl).toString() } : options.provider === "dropbox" ? { dropbox: new URL("/2/users/get_current_account", options.tokenUrl).toString() } : tokenOrigin === "https://oauth2.googleapis.com" ? undefined : {
     [options.provider]: (options.provider === "gmail" ? new URL("users/me/profile", new URL("/gmail/v1/", options.tokenUrl)) : new URL("/drive/v3/about?fields=user(emailAddress,permissionId)", options.tokenUrl)).toString(),
     google_tokeninfo: new URL("/tokeninfo", options.tokenUrl).toString()
   };
@@ -44346,9 +44383,14 @@ async function issueGrantFencedXSession(input) {
     trustDomain: "internal",
     purpose: input.purpose
   }), credentialHandle);
+  const grantAccount = grantGenerationAccountId(generation);
+  const readsAs = input.readsAsAccountId?.trim();
   const assertGrantCurrent = () => {
     if (broker.grantGeneration && broker.grantGeneration(credentialHandle) !== generation) {
       throw new XBookmarksGrantChangedError;
+    }
+    if (grantAccount && readsAs && grantAccount !== readsAs) {
+      throw new XBookmarksGrantChangedError("other_account");
     }
   };
   assertGrantCurrent();
@@ -44357,11 +44399,13 @@ async function issueGrantFencedXSession(input) {
 var XBookmarksGrantChangedError;
 var init_grant_fence = __esm(() => {
   init_credential_broker();
+  init_connected_handles();
   XBookmarksGrantChangedError = class XBookmarksGrantChangedError extends Error {
-    code = "x_bookmarks_grant_changed";
-    constructor() {
-      super("The X bookmarks credential was reconnected during this run; nothing from the previous grant was stored.");
+    code;
+    constructor(reason = "reconnected") {
+      super(reason === "other_account" ? "The connected X credential is for a different X account than this run reads; nothing was stored. The next run reads the connected account." : "The X bookmarks credential was reconnected during this run; nothing from the previous grant was stored.");
       this.name = "XBookmarksGrantChangedError";
+      this.code = reason === "other_account" ? "x_bookmarks_grant_account_mismatch" : "x_bookmarks_grant_changed";
     }
   };
 });
@@ -44477,6 +44521,9 @@ class LocalXBookmarksApiUsageStore {
   }
   close() {
     closeSqliteStore(this.db);
+  }
+  clearSyncState() {
+    return this.db.query("DELETE FROM x_bookmarks_live_state").run().changes;
   }
   headCheckpoint(account) {
     const row = this.db.query(`
@@ -47740,7 +47787,8 @@ function createXBookmarksApiSourceConnector(options) {
       const session = await issueGrantFencedXSession({
         broker,
         credentialHandle,
-        purpose: "Synchronize X bookmarks into the Olympus shared connector store."
+        purpose: "Synchronize X bookmarks into the Olympus shared connector store.",
+        readsAsAccountId: userId
       });
       assertGrantCurrent = session.assertGrantCurrent;
       client = grantFencedClient(new XApiClient({
@@ -48720,7 +48768,8 @@ async function diagnosticClient(options, env) {
   const session = await issueGrantFencedXSession({
     broker,
     credentialHandle,
-    purpose: "Run the bounded content-free X bookmarks window diagnostic."
+    purpose: "Run the bounded content-free X bookmarks window diagnostic.",
+    readsAsAccountId: userId
   });
   return {
     client: new XApiClient({
@@ -49393,10 +49442,10 @@ function createXBookmarksContentRecoveryHandler(options) {
             ...options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {},
             ...options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}
           }));
-      } catch {
+      } catch (error) {
         options.usageStore.cancelUndispatchedRequest({ reservation });
         counts.items_deferred += requestedCandidates.length;
-        return writeReceipt(receiptPath, buildReceipt("failed", counts));
+        return writeReceipt(receiptPath, buildReceipt(error instanceof XBookmarksGrantChangedError ? "deferred" : "failed", counts));
       }
       let lookup3;
       let dispatched = false;
@@ -49529,7 +49578,8 @@ async function authenticatedClient(input) {
   const session = await issueGrantFencedXSession({
     broker: input.broker,
     credentialHandle: input.credentialHandle,
-    purpose: "Recover missing content for already-indexed X bookmarks."
+    purpose: "Recover missing content for already-indexed X bookmarks.",
+    readsAsAccountId: input.userId
   });
   return {
     client: new XApiClient({
@@ -118626,6 +118676,19 @@ var init_gmail_scope_browser = __esm(() => {
 
 // src/workers/source-account-guard.ts
 import { createHash as createHash61 } from "node:crypto";
+function createExclusiveRunner() {
+  let tail = Promise.resolve();
+  return (task) => {
+    const run = tail.then(task, task);
+    tail = run.catch(() => {
+      return;
+    });
+    return run;
+  };
+}
+function runGuarded(guard, task) {
+  return guard.run ? guard.run(task) : guard.assertAccount().then(task);
+}
 function createSourceAccountGuard(options) {
   const broker = options.broker ?? createEnvCredentialBroker();
   const now = options.now ?? (() => new Date);
@@ -118652,6 +118715,9 @@ ${folderIds.join(",")}`).digest("hex");
   let evidenceRecordAttempted = false;
   const tokenAccountId = async () => {
     const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
+    if (options.readAccountId) {
+      return handle?.providerAccountId?.trim() ? options.readAccountId()?.trim() || undefined : undefined;
+    }
     const session = await broker.issueSession({
       handle: options.handle,
       provider: options.provider,
@@ -118682,7 +118748,14 @@ ${folderIds.join(",")}`).digest("hex");
       return;
     }
   };
-  return {
+  const guard = {
+    run(task) {
+      const checked = async () => {
+        await guard.assertAccount();
+        return task();
+      };
+      return options.exclusive ? options.exclusive(checked) : checked();
+    },
     async assertAccount() {
       const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
       if (!handle) {
@@ -118745,6 +118818,9 @@ ${folderIds.join(",")}`).digest("hex");
       }
       if (decision.action === "proceed")
         return;
+      if (decision.action === "refuse" && decision.reason === "token_account_mismatch" && options.readAccountId) {
+        throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: this source is set to read a different account than the connected credential's, so nothing was synced. This clears once the worker picks up a reconnect; if it stays, remove the account override from the worker's environment.`);
+      }
       if (decision.action === "refuse" && decision.reason === "token_account_mismatch") {
         invalidateMintedCredentialSessions(options.handle);
         verified.clear();
@@ -118756,6 +118832,7 @@ ${folderIds.join(",")}`).digest("hex");
       throw new SourceAccountChangedError("source_account_changed", `${options.sourceId} is now connected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the one its items came from"}, ` + "so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
     }
   };
+  return guard;
 }
 function guardAccountBoundLanes(sources, guards) {
   return sources.map((source) => {
@@ -118768,10 +118845,7 @@ function accountBoundSchedulerSource(input) {
     ...input.source,
     tasks: input.source.tasks.map((task) => ({
       ...task,
-      async run(context2) {
-        await input.guard.assertAccount();
-        return task.run(context2);
-      }
+      run: (context2) => runGuarded(input.guard, () => task.run(context2))
     }))
   };
 }
@@ -131342,7 +131416,8 @@ __export(exports_server2, {
   commaSeparatedEnv: () => commaSeparatedEnv,
   applyBuiltInPrivateAnalyst: () => applyBuiltInPrivateAnalyst,
   activeCredentialHandle: () => activeCredentialHandle,
-  accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
+  accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle,
+  accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
 import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync55 } from "node:fs";
@@ -132556,6 +132631,7 @@ async function main() {
   });
   const readwiseConnectorStore = refreshableReadwiseRuntime?.store;
   const xBookmarksConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
+  let xBookmarksTierStores = [];
   const refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
     enabled: xBookmarksConnectorStoreLane.enabled,
     ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
@@ -132563,14 +132639,16 @@ async function main() {
     env: process.env,
     tierSetFor: (store) => {
       const secrets = openTierSecretLocations(defaultXBookmarksSecureConnectorStoreDbPath(process.env), X_BOOKMARKS_SECURE_CORPUS_ID);
-      return existingStoreTierSet(createXBookmarksTierLane({
+      const lane = createXBookmarksTierLane({
         store,
         env: process.env,
         ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
         ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
         ...secrets ? { secretLocations: secrets } : {},
         onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
-      }), { store, ...secrets ? { secrets } : {} });
+      });
+      xBookmarksTierStores = Object.values(lane.newStores).filter((leg) => leg !== undefined);
+      return existingStoreTierSet(lane, { store, ...secrets ? { secrets } : {} });
     }
   });
   const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
@@ -133360,10 +133438,11 @@ async function main() {
       handles: readActiveConnectedHandles(process.env)
     });
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
-    if (runtime) {
-      connectorStoreAccountScopes.set(runtime.store.corpusId, sourceIndexAccount?.trim() || handle?.accountRole?.trim() || "personal");
-    }
-    return runtime;
+    if (!runtime)
+      return;
+    connectorStoreAccountScopes.set(runtime.store.corpusId, sourceIndexAccount?.trim() || handle?.accountRole?.trim() || "personal");
+    const guard = sourceAccountGuardFor(xBookmarksGuardLane(handle?.handle, runtime.providerUserId));
+    return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle) => {
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
@@ -133381,16 +133460,26 @@ async function main() {
     handles: readActiveConnectedHandles(process.env)
   }));
   const sourceAccountGuards = new Map;
+  const sourceExclusiveRunners = new Map;
+  const exclusiveRunnerFor = (sourceId) => {
+    let runner = sourceExclusiveRunners.get(sourceId);
+    if (!runner) {
+      runner = createExclusiveRunner();
+      sourceExclusiveRunners.set(sourceId, runner);
+    }
+    return runner;
+  };
   const laneGuards = new Map;
   const laneStores = (stores, onDemand) => ({
     laneHoldsItems: () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
     laneStoresStale: () => stores.some((store) => store?.fileReplacedOrRemoved() === true) || onDemand.some((leg) => leg?.current()?.fileReplacedOrRemoved() === true)
   });
-  const withSourceAccountGuard = (source, lane) => {
-    if (!source || !lane.handle || !connectedHandleRegistryPath)
-      return source;
+  const sourceAccountGuardFor = (lane) => {
+    if (!lane.handle || !connectedHandleRegistryPath)
+      return;
     const key2 = `${lane.sourceId}
-${lane.handle}`;
+${lane.handle}${lane.readsAs ? `
+${lane.readsAs.accountId ?? ""}` : ""}`;
     let guard = sourceAccountGuards.get(key2);
     if (!guard) {
       guard = createSourceAccountGuard({
@@ -133402,13 +133491,29 @@ ${lane.handle}`;
         laneHoldsItems: lane.laneHoldsItems,
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
-        ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}
+        ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {},
+        ...lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId, exclusive: exclusiveRunnerFor(lane.sourceId) } : {}
       });
       sourceAccountGuards.set(key2, guard);
     }
-    laneGuards.set(source.sourceId, guard);
+    return guard;
+  };
+  const withSourceAccountGuard = (source, lane) => {
+    if (!source)
+      return source;
+    const guard = sourceAccountGuardFor(lane);
+    if (guard)
+      laneGuards.set(source.sourceId, guard);
     return source;
   };
+  const xBookmarksGuardLane = (handle, readsAs) => ({
+    sourceId: "x.bookmarks",
+    provider: "x",
+    capability: "x.bookmarks.sync",
+    handle,
+    ...laneStores(refreshableXBookmarksRuntime ? [refreshableXBookmarksRuntime.store] : [], xBookmarksTierStores),
+    readsAs: { accountId: readsAs }
+  });
   const schedulerSourcesForHandles = (handles) => {
     const decisions = [];
     laneGuards.clear();
@@ -133569,10 +133674,10 @@ ${lane.handle}`;
         ...currentReadwiseConnectorStoreSync ? { liveSync: currentReadwiseConnectorStoreSync } : {},
         ...sourceIndexAccount ? { account: sourceIndexAccount } : currentReadwiseHandle?.accountRole ? { account: currentReadwiseHandle.accountRole } : {}
       })),
-      recordLane(SCHEDULER_SOURCE_IDS.xBookmarks, xBookmarksSkipReason, () => currentXBookmarksConnectorStoreRuntime ? createXBookmarksSchedulerSource({
+      recordLane(SCHEDULER_SOURCE_IDS.xBookmarks, xBookmarksSkipReason, () => withSourceAccountGuard(currentXBookmarksConnectorStoreRuntime ? createXBookmarksSchedulerSource({
         config: olympusConfig,
         liveSync: currentXBookmarksConnectorStoreRuntime.sync
-      }) : undefined),
+      }) : undefined, xBookmarksGuardLane(currentXBookmarksHandle?.handle, currentXBookmarksConnectorStoreRuntime?.providerUserId))),
       recordLane(SCHEDULER_SOURCE_IDS.telegram, !currentTelegramHandle ? "no_handle" : !telegramConnectorStoreSync ? "no_store_sync" : undefined, () => createTelegramSchedulerSource({
         config: olympusConfig,
         ...telegramConnectorStoreSync ? { sync: telegramConnectorStoreSync } : {},
@@ -134623,6 +134728,29 @@ function selectedSourceCredentialHandle(input) {
   }
   return selection.handle;
 }
+function accountCheckedXBookmarksRuntime(runtime, guard) {
+  const checked = (run) => runGuarded(guard, run).catch((error2) => {
+    if (error2 instanceof SourceAccountChangedError) {
+      throw new EmailSourceWorkerError(409, error2.code, error2.message);
+    }
+    throw error2;
+  });
+  const { sync, contentRecovery } = runtime;
+  return {
+    ...runtime,
+    sync: {
+      syncHead: (request) => checked(() => sync.syncHead(request)),
+      reconcile: (request) => checked(() => sync.reconcile(request)),
+      ...sync.diagnoseWindow ? { diagnoseWindow: sync.diagnoseWindow.bind(sync) } : {},
+      lastCompleteReconcileAt: () => sync.lastCompleteReconcileAt(),
+      completeReconcileWatermark: () => sync.completeReconcileWatermark(),
+      apiUsageStatus: () => sync.apiUsageStatus()
+    },
+    contentRecovery: {
+      recover: (request) => checked(() => contentRecovery.recover(request))
+    }
+  };
+}
 function createReadwiseConnectorStoreRuntime(options) {
   if (!options.enabled || !options.embeddingProvider)
     return;
@@ -134770,7 +134898,7 @@ function bindXBookmarksConnectorStoreRuntime(options) {
     ...env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL?.trim() ? { apiBaseUrl: env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL.trim() } : {},
     env
   });
-  return { store: options.store, sync, contentRecovery };
+  return { store: options.store, providerUserId: options.providerUserId, sync, contentRecovery };
 }
 function activeLaneHandles(handles, env) {
   const registryPath = handleRegistryPathFromEnv(env, true);
@@ -135790,6 +135918,8 @@ init_readwise();
 init_tier_set2();
 init_x_bookmarks();
 init_tier_set3();
+init_reconcile_state();
+init_live_control2();
 init_whatsapp();
 init_sovereignty();
 init_pairing_session_paths();
@@ -135882,7 +136012,28 @@ function lifecycleSourceSpecs() {
       connectorStorePaths: (context2) => [
         defaultXBookmarksConnectorStoreDbPath(envForContext(context2)),
         defaultXBookmarksSecureConnectorStoreDbPath(envForContext(context2))
-      ]
+      ],
+      resetAccountState: (context2, dryRun) => {
+        const usagePath = defaultXBookmarksApiUsageDbPath(envForContext(context2));
+        if (usagePath === ":memory:" || !existsSync28(usagePath))
+          return [];
+        if (!dryRun) {
+          const usage = new LocalXBookmarksApiUsageStore(usagePath);
+          try {
+            usage.clearSyncState();
+          } finally {
+            usage.close();
+          }
+        }
+        return [usagePath];
+      },
+      accountStateSqlite: (context2) => {
+        const env = envForContext(context2);
+        return [{
+          path: defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env)),
+          sqliteStoreId: X_BOOKMARKS_RECONCILE_STATE_STORE_ID
+        }];
+      }
     },
     {
       sourceId: "whatsapp.personal.messages",
@@ -135995,6 +136146,8 @@ function exportOlympusData(options) {
     }
     for (const statePath of source.rawStatePaths?.(options) ?? [])
       skipped.push(statePath);
+    for (const state of source.accountStateSqlite?.(options) ?? [])
+      skipped.push(state.path);
     for (const statePath of source.preservationOnlyPaths?.(options) ?? [])
       skipped.push(statePath);
   }
@@ -136069,6 +136222,7 @@ function deleteOlympusData(options) {
       assertDeleteTargetSafe(target);
   }
   const sourceMedia = selectedSource ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? []) : [];
+  const reset = selectedSource?.resetAccountState?.(options, options.dryRun === true) ?? [];
   for (const target of uniqueDeleteTargets) {
     if (!existsSync28(target.path)) {
       missing.push(target.path);
@@ -136086,7 +136240,8 @@ function deleteOlympusData(options) {
     ...selectedSource ? { sourceId: selectedSource.sourceId } : {},
     dryRun: options.dryRun === true,
     removed,
-    missing
+    missing,
+    ...reset.length > 0 ? { reset } : {}
   };
 }
 function deleteOlympusDataWithCustody(options) {
@@ -136265,6 +136420,7 @@ function sourceDeleteTargets(source, context2) {
       ...storePath === ":memory:" ? [] : sqliteDeleteTargets(secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID, context2),
       ...storePath === ":memory:" ? [] : sqliteDeleteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID, context2)
     ]),
+    ...(source.accountStateSqlite?.(context2) ?? []).flatMap((state) => state.path === ":memory:" ? [] : sqliteDeleteTargets(state.path, state.sqliteStoreId, context2)),
     ...(source.rawStatePaths?.(context2) ?? []).map((path) => ({
       path,
       kind: "source_state_path",

@@ -294,6 +294,7 @@ export function createXBookmarksApiSourceConnector(
         broker,
         credentialHandle,
         purpose: 'Synchronize X bookmarks into the Olympus shared connector store.',
+        readsAsAccountId: userId,
       });
       assertGrantCurrent = session.assertGrantCurrent;
       client = grantFencedClient(new XApiClient({

@@ -56,6 +56,14 @@ import { defaultReadwiseSecureConnectorStoreDbPath } from './workers/readwise/ti
 import { defaultXBookmarksConnectorStoreDbPath } from './workers/x-bookmarks/index.ts';
 import { defaultXBookmarksSecureConnectorStoreDbPath } from './workers/x-bookmarks/tier-set.ts';
 import {
+  defaultXBookmarksReconcileStateDbPath,
+  X_BOOKMARKS_RECONCILE_STATE_STORE_ID,
+} from './workers/x-bookmarks/reconcile-state.ts';
+import {
+  defaultXBookmarksApiUsageDbPath,
+  LocalXBookmarksApiUsageStore,
+} from './workers/x-bookmarks/live-control.ts';
+import {
   defaultWhatsAppConnectorStoreDbPath,
   defaultWhatsAppInternalConnectorStoreDbPath,
 } from './workers/whatsapp/index.ts';
@@ -127,6 +135,22 @@ export interface LifecycleSourceSpec {
    */
   rawStatePaths?(context?: LifecyclePathContext): string[];
   /**
+   * SQLite state a family keeps beside its store about the provider account
+   * the store was filled from, deleted with the source and never exported.
+   * X keeps its reconciliation snapshots per X user id: left behind, a
+   * per-source delete before connecting a different X account stranded the
+   * new account's reconcile on "explicit account migration or state reset is
+   * required" (PR #264 review).
+   */
+  accountStateSqlite?(context?: LifecyclePathContext): Array<{ path: string; sqliteStoreId: string }>;
+  /**
+   * Account-specific rows a family keeps inside a database that must itself
+   * survive the source (X's sync checkpoints beside its API usage ledger).
+   * Cleared by a per-source delete; returns the databases it cleared (or, in a
+   * dry run, would clear).
+   */
+  resetAccountState?(context: LifecyclePathContext, dryRun: boolean): string[];
+  /**
    * State that must be preserved before a source is stopped or removed, but
    * which the generic export intentionally does not copy. Unlike
    * `rawStatePaths`, these paths are inventory-only and are never added to a
@@ -180,6 +204,8 @@ export interface DataDeleteResult {
   dryRun: boolean;
   removed: string[];
   missing: string[];
+  /** Databases kept with the source's account-specific rows cleared from them. */
+  reset?: string[];
 }
 
 export interface DataDeleteCustody {
@@ -305,6 +331,28 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
         defaultXBookmarksConnectorStoreDbPath(envForContext(context)),
         defaultXBookmarksSecureConnectorStoreDbPath(envForContext(context)),
       ],
+      // The API usage store stays: it is the quota ledger. Its sync
+      // checkpoints are the previous account's and are cleared.
+      resetAccountState: (context, dryRun) => {
+        const usagePath = defaultXBookmarksApiUsageDbPath(envForContext(context));
+        if (usagePath === ':memory:' || !existsSync(usagePath)) return [];
+        if (!dryRun) {
+          const usage = new LocalXBookmarksApiUsageStore(usagePath);
+          try {
+            usage.clearSyncState();
+          } finally {
+            usage.close();
+          }
+        }
+        return [usagePath];
+      },
+      accountStateSqlite: (context) => {
+        const env = envForContext(context);
+        return [{
+          path: defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env)),
+          sqliteStoreId: X_BOOKMARKS_RECONCILE_STATE_STORE_ID,
+        }];
+      },
     },
     {
       // Connector-store only, like X: the WhatsApp corpus never had a legacy
@@ -515,6 +563,7 @@ export function exportOlympusData(options: {
     // manifest that omits them entirely is how the owner learns too late that
     // `delete --all` took something the export never had.
     for (const statePath of source.rawStatePaths?.(options) ?? []) skipped.push(statePath);
+    for (const state of source.accountStateSqlite?.(options) ?? []) skipped.push(state.path);
     for (const statePath of source.preservationOnlyPaths?.(options) ?? []) skipped.push(statePath);
   }
 
@@ -618,6 +667,9 @@ export function deleteOlympusData(options: {
   const sourceMedia = selectedSource
     ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? [])
     : [];
+  // Before anything is removed: a database that will not open fails the
+  // delete with every store still in place.
+  const reset = selectedSource?.resetAccountState?.(options, options.dryRun === true) ?? [];
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);
@@ -637,6 +689,7 @@ export function deleteOlympusData(options: {
     dryRun: options.dryRun === true,
     removed,
     missing,
+    ...(reset.length > 0 ? { reset } : {}),
   };
 }
 
@@ -975,6 +1028,9 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
         ? []
         : sqliteDeleteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID, context)),
     ]),
+    ...(source.accountStateSqlite?.(context) ?? []).flatMap((state) => state.path === ':memory:'
+      ? []
+      : sqliteDeleteTargets(state.path, state.sqliteStoreId, context)),
     ...(source.rawStatePaths?.(context) ?? []).map((path): DeleteTarget => ({
       path,
       kind: 'source_state_path',

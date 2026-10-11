@@ -28,9 +28,9 @@ import { fetchBoundedText, type TimeoutFetch } from './http-timeout.ts';
  *   when neither side carries an immutable label (a grant from before
  *   `openid`, or a delegated service-account token).
  */
-export type AccountBoundProvider = 'dropbox' | 'gmail' | 'google_drive';
+export type AccountBoundProvider = 'dropbox' | 'gmail' | 'google_drive' | 'x';
 
-export const ACCOUNT_BOUND_PROVIDERS: readonly AccountBoundProvider[] = ['dropbox', 'gmail', 'google_drive'];
+export const ACCOUNT_BOUND_PROVIDERS: readonly AccountBoundProvider[] = ['dropbox', 'gmail', 'google_drive', 'x'];
 
 export function isAccountBoundProvider(provider: string): provider is AccountBoundProvider {
   return (ACCOUNT_BOUND_PROVIDERS as readonly string[]).includes(provider);
@@ -41,6 +41,7 @@ export interface ProviderIdentityEndpoints {
   dropbox?: string;
   gmail?: string;
   google_drive?: string;
+  x?: string;
   /** Google's tokeninfo, asked alongside Gmail or Drive for the OpenID subject. */
   google_tokeninfo?: string;
 }
@@ -53,6 +54,8 @@ export const DEFAULT_PROVIDER_IDENTITY_ENDPOINTS: Required<ProviderIdentityEndpo
   // as a home directory to the release owner-identifier scan.
   gmail: new URL('users/me/profile', 'https://gmail.googleapis.com/gmail/v1/').toString(),
   google_drive: 'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)',
+  // X's own numeric user id, the same one connect records for the grant.
+  x: 'https://api.x.com/2/users/me',
   // POSTed with the token as a bearer header, as google-auth-library does, so
   // the token is never written into a URL.
   google_tokeninfo: 'https://oauth2.googleapis.com/tokeninfo',
@@ -60,6 +63,7 @@ export const DEFAULT_PROVIDER_IDENTITY_ENDPOINTS: Required<ProviderIdentityEndpo
 
 const IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 const DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
+const X_USER_ID = /^\d{1,32}$/;
 
 export class ProviderAccountIdentityError extends Error {
   constructor(message: string) {
@@ -236,11 +240,18 @@ export async function fetchProviderAccountId(options: {
   } catch {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} returned an unreadable account lookup.`);
   }
+  if (options.provider === 'x') {
+    // X's raw numeric id, as connect records it and the bookmarks lane reads
+    // as; it is not one of the Google or Dropbox labels and compares whole.
+    const id = xUserIdFromPayload(payload);
+    if (!id) throw new ProviderAccountIdentityError('X did not name the connected account.');
+    return id;
+  }
   const labels = labelsFromIdentityPayload(options.provider, payload);
   if (!labels) {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not name the connected account.`);
   }
-  if (options.provider !== 'dropbox') {
+  if (options.provider === 'gmail' || options.provider === 'google_drive') {
     // Asked every time, never skipped on failure: a Google answer without the
     // subject it could have carried would fall back to the renamable address.
     const subject = await fetchGoogleSubject({
@@ -296,6 +307,15 @@ async function fetchGoogleSubject(options: {
   return undefined;
 }
 
+/** X's numeric user id from `users/me`; X ids never change. */
+function xUserIdFromPayload(payload: Record<string, unknown>): string | undefined {
+  const data = payload.data;
+  const id = data && typeof data === 'object' && !Array.isArray(data)
+    ? (data as Record<string, unknown>).id
+    : undefined;
+  return typeof id === 'string' && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
+}
+
 function labelsFromIdentityPayload(provider: AccountBoundProvider, payload: Record<string, unknown>): string[] | undefined {
   if (provider === 'dropbox') {
     const id = dropboxAccountIdFromTokenPayload(payload);
@@ -315,7 +335,7 @@ function labelsFromIdentityPayload(provider: AccountBoundProvider, payload: Reco
 }
 
 function providerLabel(provider: AccountBoundProvider): string {
-  return provider === 'dropbox' ? 'Dropbox' : provider === 'gmail' ? 'Gmail' : 'Google Drive';
+  return provider === 'dropbox' ? 'Dropbox' : provider === 'gmail' ? 'Gmail' : provider === 'x' ? 'X' : 'Google Drive';
 }
 
 /**
