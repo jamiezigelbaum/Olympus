@@ -10343,6 +10343,13 @@ var init_tier_rules_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-override-settle.ts
+var init_tier_override_settle = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tier-image-content-sweep.ts
 var init_tier_image_content_sweep = __esm(() => {
   init_tier_classifier();
@@ -10365,6 +10372,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_row_rehome();
   init_tier_rules_sweep();
+  init_tier_override_settle();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
 });
