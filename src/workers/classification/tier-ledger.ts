@@ -183,6 +183,21 @@ export interface TierOwnerOverrideGuard {
 /** What `queueOwnerRaise` did: hid copies and queued, only retargeted a move in flight, or nothing. */
 export type TierOwnerRaiseOutcome = 'hidden' | 'retargeted' | 'none';
 
+/**
+ * What `settleRevokedOwnerMove` did with a move an owner override queued that
+ * the override no longer asks for: cancelled it (it hid nothing, the item
+ * stays where it is), replanned it from its hidden sources (they stay hidden
+ * until the replanned move lands), or nothing (no such move).
+ */
+type TierRevokedOwnerMoveOutcome = 'cancelled' | 'replanned' | 'none';
+
+/** What the queued-move write records of a decision (`queueMoveRow`). */
+type QueuedMoveDecision = Pick<
+  TierDecision,
+  'metadataTier' | 'contentTier' | 'reasons' | 'engineVersion' | 'mapRevision'
+  | 'contentRead' | 'metadataPending' | 'contentPending' | 'metadataForced' | 'metadataFlagged'
+> & { decidedBy: string };
+
 export interface TierLedgerOptions {
   dbPath: string;
   now?: () => Date;
@@ -1028,14 +1043,22 @@ export class TierLedger {
     }));
   }
 
+  /**
+   * Save the owner's per-item override. In the same write, a move an earlier
+   * override queued that this one no longer asks for is cancelled or
+   * replanned (`settleRevokedOwnerMove`).
+   */
   setOverride(identity: TierLedgerIdentity, override: ItemTierOverride): void {
     if (override.kind === 'tier') assertTier(override.tier);
-    this.db.query(`
-      INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
-      DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
-    `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
+    this.db.transaction(() => {
+      this.db.query(`
+        INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
+        DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
+      `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
+      this.settleRevokedOwnerMove(identity);
+    })();
   }
 
   getOverride(identity: TierLedgerIdentity): ItemTierOverride | undefined {
@@ -1117,10 +1140,137 @@ export class TierLedger {
       .join('\u0000')).join('\n');
   }
 
+  /**
+   * Remove the owner's per-item override. In the same write, a move it
+   * queued is cancelled or replanned (`settleRevokedOwnerMove`): it no longer
+   * has the owner's authority to land, and left as it is every retry would be
+   * refused while its hidden sources keep the item out of search.
+   */
   clearOverride(identity: TierLedgerIdentity): boolean {
-    return this.db.query(`
-      DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(...idParams(identity)).changes > 0;
+    let cleared = false;
+    this.db.transaction(() => {
+      cleared = this.db.query(`
+        DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity)).changes > 0;
+      this.settleRevokedOwnerMove(identity);
+    })();
+    return cleared;
+  }
+
+  /**
+   * Settle a move an owner override queued (the row is `moving`, decided by
+   * `override`) whose target that override no longer asks for: it was
+   * cleared or replaced. `completeMove` refuses to land such a move when it
+   * lowers any layer, and `abandonMove` refuses one that hid its sources, so
+   * left alone the item would stay mid-move, out of search, for good. In ONE
+   * write, and never lowering any layer without the owner's current word:
+   *
+   * - The move hid nothing: it is cancelled. The item stays where it is, at
+   *   its recorded tiers; the move's staged copies are kept hidden.
+   * - The move hid its sources (some layer rises): it is replanned from those
+   *   sources toward, per layer, the more private of the recorded tier and
+   *   the move's target. That lands no layer below either, so it needs no
+   *   owner authority; the sources stay hidden until it lands, and the old
+   *   move's staged copies are kept hidden, never a source.
+   *
+   * Either way the generation is bumped, so the revoked move's own
+   * `stageMove`/`completeMove` (compare-and-swap on the generation) can never
+   * land, and the row's decider and reasons go back to the newest decision
+   * recorded before the override, so the replanned move is placed by current
+   * policy (a lane floor yields to the owner only). A move toward Secrets, or
+   * one the current override still asks for, is left alone.
+   *
+   * Runs inside the caller's transaction: the write that clears or replaces
+   * the override.
+   */
+  private settleRevokedOwnerMove(identity: TierLedgerIdentity): TierRevokedOwnerMoveOutcome {
+    const existing = this.readRow(identity);
+    if (!existing || !existing.routed || existing.state !== 'moving' || existing.decidedBy !== 'override') return 'none';
+    const targetMetadata = existing.targetMetadataTier;
+    const targetContent = existing.targetContentTier;
+    if (targetMetadata === null || targetContent === null || targetMetadata === 'secrets' || targetContent === 'secrets') return 'none';
+    if (overrideAuthorizes(this.getOverride(identity), targetMetadata, targetContent)) return 'none';
+    const decidedAt = this.now().toISOString();
+    const prior = this.decisionBeforeOverride(identity, existing);
+    const staleFlip = existing.generation + 1;
+    const copies = this.copies(identity);
+    const hidden = copies.some((copy) => copy.state === 'superseded' && copy.supersededByGeneration === staleFlip);
+    if (!hidden) {
+      // The revoked move's destinations: kept, hidden. It may already have
+      // written the item's text into a less private store; a kept copy row
+      // keeps that store row hidden from its lane and counted for an approved
+      // purge. Tagged with the old generation, so a rollback at the new one
+      // never restores them and no later move takes them as a source.
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(existing.generation, decidedAt, ...idParams(identity));
+      const state: TierLedgerState = existing.metadataPending || existing.contentPending ? 'pending' : 'current';
+      const reasonsJson = JSON.stringify(prior.reasons);
+      this.db.query(`
+        UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL,
+          generation = ?, decided_by = ?, reasons_json = ?, decided_at = ?, move_attempts = 0
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(state, staleFlip, prior.decidedBy, reasonsJson, decidedAt, ...idParams(identity));
+      this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
+      return 'cancelled';
+    }
+    // The revoked move flips at generation + 1; the replanned one at + 2.
+    const nextFlip = existing.generation + 2;
+    // The copies the revoked move hid stay hidden, as the replanned move's sources.
+    this.db.query(`
+      UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND copy_state = 'superseded' AND superseded_by_generation = ?
+    `).run(nextFlip, decidedAt, ...idParams(identity), staleFlip);
+    // The revoked move's destinations: kept, hidden, never a source.
+    this.db.query(`
+      UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+    `).run(staleFlip, decidedAt, ...idParams(identity));
+    this.db.query(`
+      UPDATE tier_items SET generation = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(staleFlip, ...idParams(identity));
+    const replanned: QueuedMoveDecision = {
+      metadataTier: maxTier(existing.metadataTier, targetMetadata),
+      contentTier: maxTier(existing.contentTier, targetContent),
+      decidedBy: prior.decidedBy,
+      reasons: prior.reasons,
+      engineVersion: existing.engineVersion,
+      mapRevision: existing.mapRevision,
+      contentRead: existing.contentRead,
+      metadataPending: existing.metadataPending,
+      contentPending: existing.contentPending,
+      metadataForced: existing.metadataForced,
+      metadataFlagged: existing.metadataFlagged,
+    };
+    this.queueMoveRow(identity, { ...existing, generation: staleFlip }, replanned, { hide: false, decidedAt });
+    return 'replanned';
+  }
+
+  /**
+   * The decider and reasons of the newest decision recorded for the item
+   * before an owner override took it over (its history). None recorded: the
+   * row's own reasons without the override's.
+   */
+  private decisionBeforeOverride(identity: TierLedgerIdentity, existing: TierLedgerRecord): { decidedBy: string; reasons: string[] } {
+    const row = this.db.query(`
+      SELECT decided_by, reasons_json FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND decided_by <> 'override'
+      ORDER BY history_pk DESC LIMIT 1
+    `).get(...idParams(identity)) as { decided_by: string; reasons_json: string } | null;
+    if (row) {
+      try {
+        const reasons = JSON.parse(row.reasons_json) as unknown;
+        if (Array.isArray(reasons) && reasons.every((reason) => typeof reason === 'string')) {
+          return { decidedBy: row.decided_by, reasons };
+        }
+      } catch {
+        // Unreadable history: fall through.
+      }
+    }
+    return { decidedBy: 'move', reasons: existing.reasons.filter((reason) => !reason.startsWith('override:')) };
   }
 
   // ---- P1b: routed placement and store copies --------------------------------
@@ -1568,7 +1718,7 @@ export class TierLedger {
   private queueMoveRow(
     identity: TierLedgerIdentity,
     existing: TierLedgerRecord,
-    decision: TierDecision,
+    decision: QueuedMoveDecision,
     options: { hide: boolean; decidedAt: string },
   ): void {
     const reasonsJson = JSON.stringify(decision.reasons);
@@ -2863,7 +3013,9 @@ function effectiveRow(existing: TierLedgerRecord | undefined, decision: TierDeci
   return { ...fresh, contentTier: maxTier(existing.contentTier, decision.contentTier) };
 }
 
-function decisionFlags(decision: TierDecision): [number, number, number, number, number] {
+function decisionFlags(
+  decision: Pick<TierDecision, 'contentRead' | 'metadataPending' | 'contentPending' | 'metadataForced' | 'metadataFlagged'>,
+): [number, number, number, number, number] {
   return [
     decision.contentRead ? 1 : 0,
     decision.metadataPending ? 1 : 0,
