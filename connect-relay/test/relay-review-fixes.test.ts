@@ -315,6 +315,8 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     const csp = page.headers.get('content-security-policy')!;
     expect(csp).toContain('sandbox allow-forms allow-same-origin;');
     expect(csp).toContain("script-src 'none'");
+    // Under no-referrer a browser posts the form with `Origin: null`, which the engine refuses (2026-10-11).
+    expect(page.headers.get('referrer-policy')).toBe('same-origin');
     const posted = await fetch(`${relay.url}/connect/demo/authorize`, { method: 'POST', body: 'a=b', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
     expect(posted.status).toBe(303);
     expect(posted.headers.get('location')).toStartWith('https://chatgpt.com/');
