@@ -5585,11 +5585,11 @@ function parseProviderAccountId(id) {
   }
   return labels.size > 0 ? labels : undefined;
 }
-function sameProviderAccount(recorded, observed) {
+function compareProviderAccounts(recorded, observed) {
   const a = parseProviderAccountId(recorded);
   const b = parseProviderAccountId(observed);
   if (!a || !b)
-    return recorded.trim() === observed.trim();
+    return recorded.trim() === observed.trim() ? "same" : "different";
   let shared = false;
   for (const kind of IMMUTABLE_LABEL_KINDS) {
     const left = a.get(kind);
@@ -5597,13 +5597,22 @@ function sameProviderAccount(recorded, observed) {
     if (left === undefined || right === undefined)
       continue;
     if (left !== right)
-      return false;
+      return "different";
     shared = true;
   }
   if (shared)
-    return true;
+    return "same";
+  if (hasImmutableAccountLabel(recorded))
+    return "unproven";
   const address = a.get("google");
-  return address !== undefined && address === b.get("google");
+  return address !== undefined && address === b.get("google") ? "same" : "different";
+}
+function sameProviderAccount(recorded, observed) {
+  return compareProviderAccounts(recorded, observed) === "same";
+}
+function hasImmutableAccountLabel(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
 }
 function mergeProviderAccountIds(recorded, observed) {
   const a = parseProviderAccountId(recorded);
@@ -5878,11 +5887,14 @@ function recordFileSourceConnect(input) {
       return current;
     }
     if (current?.provider_account_id && input.providerAccountId) {
-      if (sameProviderAccount(current.provider_account_id, input.providerAccountId)) {
+      const match = compareProviderAccounts(current.provider_account_id, input.providerAccountId);
+      if (match === "same" || match === "different" && renamedSinceBound(current.provider_account_id, input)) {
         outcome = "same_account";
         const { reconnected_at: _settled, ...rest } = current;
         return { ...rest, provider_account_id: mergeProviderAccountIds(current.provider_account_id, input.providerAccountId) };
       }
+      if (match === "unproven")
+        return { ...current, reconnected_at: at };
       outcome = "purge_required";
       return { ...current, purge_required: { reason: "account_changed", detected_at: at } };
     }
@@ -5890,13 +5902,21 @@ function recordFileSourceConnect(input) {
   });
   return outcome;
 }
+function renamedSinceBound(bound, input) {
+  const recorded = input.replacedGrant?.recordedAccountId;
+  const current = input.replacedGrant?.currentAccountId;
+  return Boolean(input.providerAccountId && recorded && current && !hasImmutableAccountLabel(bound) && compareProviderAccounts(bound, recorded) === "same" && compareProviderAccounts(current, input.providerAccountId) === "same");
+}
 function decideSourceAccountAction(input) {
   const { binding, grantAccountId, tokenAccountId: token } = input;
-  const tokenIsBound = Boolean(binding?.provider_account_id && token && sameProviderAccount(binding.provider_account_id, token));
-  if (grantAccountId && token && !sameProviderAccount(grantAccountId, token)) {
+  const bindingMatch = binding?.provider_account_id && token ? compareProviderAccounts(binding.provider_account_id, token) : undefined;
+  const tokenIsBound = bindingMatch === "same";
+  const grantMatch = grantAccountId && token ? compareProviderAccounts(grantAccountId, token) : "same";
+  if (grantMatch !== "same") {
     const confirmedUnderThisGrant = tokenIsBound && !binding?.purge_required && input.grantConnectedAt !== undefined && binding?.bound_grant === input.grantConnectedAt;
-    if (!confirmedUnderThisGrant)
-      return { action: "refuse", reason: "token_account_mismatch" };
+    if (!confirmedUnderThisGrant) {
+      return { action: "refuse", reason: grantMatch === "different" ? "token_account_mismatch" : "account_unverified" };
+    }
   }
   const bindTo = (id) => ({
     action: "proceed",
@@ -5936,6 +5956,8 @@ function decideSourceAccountAction(input) {
   }
   if (!input.laneHoldsItems)
     return bindTo(token);
+  if (bindingMatch === "unproven")
+    return { action: "refuse", reason: "account_unverified" };
   return {
     action: "purge",
     reason: binding.provider_account_id ? "account_changed" : "previous_account_unknown"
@@ -6321,12 +6343,12 @@ async function completeOAuthSourceConnection(prepared, code) {
       timeoutMs: prepared.tokenExchangeTimeoutMs
     }));
   }
-  const previousFileSourceAccountIds = new Map;
+  const replacedGrants = new Map;
   for (const definition of prepared.definition.handles) {
     if (!isAccountBoundProvider(definition.provider))
       continue;
     const handle = definition.handle(prepared.accountRole);
-    previousFileSourceAccountIds.set(handle, await identifyReplacedGrantAccount({
+    replacedGrants.set(handle, await identifyReplacedGrantAccount({
       registryPath: prepared.registryPath,
       handle,
       provider: definition.provider,
@@ -6361,7 +6383,7 @@ async function completeOAuthSourceConnection(prepared, code) {
       recordFileSourceConnectIntent({
         registryPath: prepared.registryPath,
         provider: handleDefinition.provider,
-        previousAccountId: previousFileSourceAccountIds.get(handleDefinition.handle(prepared.accountRole)),
+        previousAccountId: replacedGrants.get(handleDefinition.handle(prepared.accountRole))?.adoptAccountId,
         now: prepared.now()
       });
     }
@@ -6483,10 +6505,12 @@ async function completeOAuthSourceConnection(prepared, code) {
     for (const handleDefinition of prepared.definition.handles) {
       if (!isAccountBoundProvider(handleDefinition.provider))
         continue;
+      const replaced = replacedGrants.get(handleDefinition.handle(prepared.accountRole));
       const outcome = recordFileSourceConnect({
         registryPath: prepared.registryPath,
         provider: handleDefinition.provider,
         providerAccountId: fileSourceAccountIds.get(handleDefinition.provider),
+        ...replaced?.recordedAccountId && replaced.ownAccountId ? { replacedGrant: { recordedAccountId: replaced.recordedAccountId, currentAccountId: replaced.ownAccountId } } : {},
         now: prepared.now()
       });
       if (outcome === "purge_required") {
@@ -7047,37 +7071,56 @@ async function exchangeAuthorizationCode(options) {
 }
 async function identifyReplacedGrantAccount(options) {
   try {
-    const existing = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
+    const registry = readConnectedHandleRegistry(options.registryPath);
+    const existing = registry.handles.find((entry) => entry.handle === options.handle);
     if (!existing)
       return;
     const read = readSourceAccountBindings(sourceAccountBindingsPath(options.registryPath));
     if (read.kind !== "ok")
       return;
     const binding = read.bindings.sources[accountBoundSourceIdForProvider(options.provider)];
-    if (binding?.provider_account_id || binding?.reconnected_at || binding?.purge_required)
+    if (binding?.purge_required || binding?.reconnected_at)
       return;
-    const broker = createEnvCredentialBroker({
-      handleRegistryPath: options.registryPath,
+    const neverBound = !binding?.provider_account_id;
+    if (!neverBound && hasImmutableAccountLabel(binding.provider_account_id))
+      return;
+    const identify = async (broker) => {
+      try {
+        const session = await broker.issueSession({
+          handle: options.handle,
+          provider: options.provider,
+          capability: options.capability,
+          ...options.trustDomain ? { trustDomain: options.trustDomain } : {},
+          purpose: "Identify the account of the grant being replaced, so a same-account reconnect keeps the source's items."
+        });
+        if (session.kind !== "bearer_token")
+          return;
+        return await lookupConnectedAccountId({
+          provider: options.provider,
+          tokenUrl: options.tokenUrl,
+          accessToken: session.token,
+          fetchImpl: options.fetchImpl,
+          timeoutMs: options.timeoutMs
+        });
+      } catch {
+        return;
+      }
+    };
+    const brokerOptions = {
       secretStore: options.secretStore,
       ...options.oauth2StateStore ? { oauth2StateStore: options.oauth2StateStore } : {},
       fetch: (url, init) => options.fetchImpl(url, init)
-    });
-    const session = await broker.issueSession({
-      handle: options.handle,
-      provider: options.provider,
-      capability: options.capability,
-      ...options.trustDomain ? { trustDomain: options.trustDomain } : {},
-      purpose: "Identify the account of the grant being replaced, so a same-account reconnect keeps the source's items."
-    });
-    if (session.kind !== "bearer_token")
-      return;
-    return await lookupConnectedAccountId({
-      provider: options.provider,
-      tokenUrl: options.tokenUrl,
-      accessToken: session.token,
-      fetchImpl: options.fetchImpl,
-      timeoutMs: options.timeoutMs
-    });
+    };
+    const ownAccountId = await identify(createEnvCredentialBroker({
+      ...brokerOptions,
+      handles: deriveEnvCredentialHandlesFromRegistry(registry).filter((entry) => entry.handle === options.handle)
+    }));
+    const adoptAccountId = neverBound ? ownAccountId ?? await identify(createEnvCredentialBroker({ ...brokerOptions, handleRegistryPath: options.registryPath })) : undefined;
+    return {
+      ...existing.providerAccountId ? { recordedAccountId: existing.providerAccountId } : {},
+      ...ownAccountId ? { ownAccountId } : {},
+      ...adoptAccountId ? { adoptAccountId } : {}
+    };
   } catch {
     return;
   }

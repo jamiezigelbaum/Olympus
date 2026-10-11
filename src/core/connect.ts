@@ -22,6 +22,7 @@ import { isGooglePublisherWebClientId } from './publisher-oauth-client.ts';
 import {
   assertOneConnectedAccountPerProvider,
   defaultHandleRegistryPath,
+  deriveEnvCredentialHandlesFromRegistry,
   readConnectedHandleGrantEpoch,
   readConnectedHandleRegistry,
   removeConnectedHandles,
@@ -40,6 +41,7 @@ import {
 } from '../workers/credential-broker/unpaired-sources.ts';
 import {
   createEnvCredentialBroker,
+  type CredentialBroker,
   credentialOAuth2StateStoreFromEnv,
   invalidateMintedCredentialSessions,
   type CredentialOAuth2StateStore,
@@ -47,6 +49,7 @@ import {
 import {
   dropboxAccountIdFromTokenPayload,
   fetchProviderAccountId,
+  hasImmutableAccountLabel,
   isAccountBoundProvider,
   type AccountBoundProvider,
   type ProviderIdentityEndpoints,
@@ -663,11 +666,11 @@ async function completeOAuthSourceConnection(
   // refresh under that same fence.
   // Each handle on its own: one Google connect can replace a Gmail grant and
   // a Drive grant that belonged to different accounts.
-  const previousFileSourceAccountIds = new Map<string, string | undefined>();
+  const replacedGrants = new Map<string, ReplacedGrantAccount | undefined>();
   for (const definition of prepared.definition.handles) {
     if (!isAccountBoundProvider(definition.provider)) continue;
     const handle = definition.handle(prepared.accountRole);
-    previousFileSourceAccountIds.set(handle, await identifyReplacedGrantAccount({
+    replacedGrants.set(handle, await identifyReplacedGrantAccount({
       registryPath: prepared.registryPath,
       handle,
       provider: definition.provider,
@@ -710,7 +713,7 @@ async function completeOAuthSourceConnection(
         recordFileSourceConnectIntent({
           registryPath: prepared.registryPath,
           provider: handleDefinition.provider,
-          previousAccountId: previousFileSourceAccountIds.get(handleDefinition.handle(prepared.accountRole)),
+          previousAccountId: replacedGrants.get(handleDefinition.handle(prepared.accountRole))?.adoptAccountId,
           now: prepared.now(),
         });
       }
@@ -898,10 +901,14 @@ async function completeOAuthSourceConnection(
       const sourceAccountPurgeRequired: AccountBoundSourceId[] = [];
       for (const handleDefinition of prepared.definition.handles) {
         if (!isAccountBoundProvider(handleDefinition.provider)) continue;
+        const replaced = replacedGrants.get(handleDefinition.handle(prepared.accountRole));
         const outcome = recordFileSourceConnect({
           registryPath: prepared.registryPath,
           provider: handleDefinition.provider,
           providerAccountId: fileSourceAccountIds.get(handleDefinition.provider),
+          ...(replaced?.recordedAccountId && replaced.ownAccountId
+            ? { replacedGrant: { recordedAccountId: replaced.recordedAccountId, currentAccountId: replaced.ownAccountId } }
+            : {}),
           now: prepared.now(),
         });
         if (outcome === 'purge_required') {
@@ -1978,11 +1985,27 @@ async function exchangeAuthorizationCode(options: {
  * on Google's API hosts for the real Google token endpoint; a token endpoint
  * on any other origin (a local mock, a self-hosted relay) answers it itself.
  */
+interface ReplacedGrantAccount {
+  /** The account the replaced grant's registry entry recorded at its connect. */
+  recordedAccountId?: string;
+  /**
+   * The account a token minted from the replaced grant's own registry entry
+   * (its stored refresh token, never an environment token) names now.
+   */
+  ownAccountId?: string;
+  /** For a never-bound source: the account to adopt (as ownAccountId, or any token the broker serves). */
+  adoptAccountId?: string;
+}
+
 /**
- * The account of the grant a connect is about to replace, for a file source
- * that has never been bound to one. Best effort and only then: a bound or
- * already-reconnected source has its own record, and an answer that cannot
- * be had leaves the worker to purge rather than guess.
+ * The account of the grant a connect is about to replace, asked only when it
+ * can matter. For a source never bound to an account, so a same-account
+ * reconnect keeps its items (adoption). For a source bound by a Google address
+ * alone, so a reconnect after that address was renamed is recognised by the
+ * replaced grant's own refresh token (independent review P2). A bound source
+ * with an immutable label, a reconnected one, or one awaiting removal needs
+ * neither. Best effort: an answer that cannot be had leaves the worker or the
+ * owner to decide, never a guess.
  */
 async function identifyReplacedGrantAccount(options: {
   registryPath: string;
@@ -1995,36 +2018,58 @@ async function identifyReplacedGrantAccount(options: {
   tokenUrl: string;
   fetchImpl: OAuthFetch;
   timeoutMs: number;
-}): Promise<string | undefined> {
+}): Promise<ReplacedGrantAccount | undefined> {
   try {
-    const existing = readConnectedHandleRegistry(options.registryPath).handles
-      .find((entry) => entry.handle === options.handle);
+    const registry = readConnectedHandleRegistry(options.registryPath);
+    const existing = registry.handles.find((entry) => entry.handle === options.handle);
     if (!existing) return undefined;
     const read = readSourceAccountBindings(sourceAccountBindingsPath(options.registryPath));
     if (read.kind !== 'ok') return undefined;
     const binding = read.bindings.sources[accountBoundSourceIdForProvider(options.provider)!];
-    if (binding?.provider_account_id || binding?.reconnected_at || binding?.purge_required) return undefined;
-    const broker = createEnvCredentialBroker({
-      handleRegistryPath: options.registryPath,
+    if (binding?.purge_required || binding?.reconnected_at) return undefined;
+    const neverBound = !binding?.provider_account_id;
+    if (!neverBound && hasImmutableAccountLabel(binding!.provider_account_id!)) return undefined;
+
+    const identify = async (broker: CredentialBroker): Promise<string | undefined> => {
+      try {
+        const session = await broker.issueSession({
+          handle: options.handle,
+          provider: options.provider,
+          capability: options.capability,
+          ...(options.trustDomain ? { trustDomain: options.trustDomain } : {}),
+          purpose: 'Identify the account of the grant being replaced, so a same-account reconnect keeps the source\'s items.',
+        });
+        if (session.kind !== 'bearer_token') return undefined;
+        return await lookupConnectedAccountId({
+          provider: options.provider,
+          tokenUrl: options.tokenUrl,
+          accessToken: session.token,
+          fetchImpl: options.fetchImpl,
+          timeoutMs: options.timeoutMs,
+        });
+      } catch {
+        return undefined;
+      }
+    };
+    const brokerOptions: Pick<NonNullable<Parameters<typeof createEnvCredentialBroker>[0]>, 'secretStore' | 'oauth2StateStore' | 'fetch'> = {
       secretStore: options.secretStore,
       ...(options.oauth2StateStore ? { oauth2StateStore: options.oauth2StateStore } : {}),
       fetch: (url, init) => options.fetchImpl(url, init),
-    });
-    const session = await broker.issueSession({
-      handle: options.handle,
-      provider: options.provider,
-      capability: options.capability,
-      ...(options.trustDomain ? { trustDomain: options.trustDomain } : {}),
-      purpose: 'Identify the account of the grant being replaced, so a same-account reconnect keeps the source\'s items.',
-    });
-    if (session.kind !== 'bearer_token') return undefined;
-    return await lookupConnectedAccountId({
-      provider: options.provider,
-      tokenUrl: options.tokenUrl,
-      accessToken: session.token,
-      fetchImpl: options.fetchImpl,
-      timeoutMs: options.timeoutMs,
-    });
+    };
+    // Only the registry entry's own credential: an environment token would
+    // take precedence in the ordinary broker, and it may be another account.
+    const ownAccountId = await identify(createEnvCredentialBroker({
+      ...brokerOptions,
+      handles: deriveEnvCredentialHandlesFromRegistry(registry).filter((entry) => entry.handle === options.handle),
+    }));
+    const adoptAccountId = neverBound
+      ? ownAccountId ?? await identify(createEnvCredentialBroker({ ...brokerOptions, handleRegistryPath: options.registryPath }))
+      : undefined;
+    return {
+      ...(existing.providerAccountId ? { recordedAccountId: existing.providerAccountId } : {}),
+      ...(ownAccountId ? { ownAccountId } : {}),
+      ...(adoptAccountId ? { adoptAccountId } : {}),
+    };
   } catch {
     return undefined;
   }

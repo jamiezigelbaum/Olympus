@@ -124,32 +124,51 @@ function parseProviderAccountId(id: string): Map<string, string> | undefined {
   return labels.size > 0 ? labels : undefined;
 }
 
+export type ProviderAccountMatch = 'same' | 'different' | 'unproven';
+
 /**
- * Whether two recorded or observed account ids name the same account.
+ * Whether an observed account id names the account a record names.
  *
- * When both carry an immutable label of the same kind, those decide alone:
- * a renamed address is the same account, and an address now held by another
- * account is not. Only when they share no immutable kind does the address
- * decide, as it did before immutable labels existed: that is the transition
- * for bindings and grants recorded from an address alone, which then take on
- * the immutable labels of the first token that matches them
- * (mergeProviderAccountIds).
+ * - Both carry an immutable label of the same kind: those decide alone. A
+ *   renamed address is the same account; an address now held by another
+ *   account is not.
+ * - The record carries an immutable label and the observation shares none
+ *   (a token without `openid`, an environment token): `unproven`, never
+ *   decided by the address. The address may have passed to another account
+ *   since the record learned who it was (independent review P1).
+ * - The record is an address alone (recorded before immutable labels, or
+ *   from tokens that never had one): the address decides, as it always did.
+ *   That is the transition; such a record takes on the immutable labels of
+ *   the first token that matches it (mergeProviderAccountIds).
+ *
+ * Ids that are not made of known labels compare whole.
  */
-export function sameProviderAccount(recorded: string, observed: string): boolean {
+export function compareProviderAccounts(recorded: string, observed: string): ProviderAccountMatch {
   const a = parseProviderAccountId(recorded);
   const b = parseProviderAccountId(observed);
-  if (!a || !b) return recorded.trim() === observed.trim();
+  if (!a || !b) return recorded.trim() === observed.trim() ? 'same' : 'different';
   let shared = false;
   for (const kind of IMMUTABLE_LABEL_KINDS) {
     const left = a.get(kind);
     const right = b.get(kind);
     if (left === undefined || right === undefined) continue;
-    if (left !== right) return false;
+    if (left !== right) return 'different';
     shared = true;
   }
-  if (shared) return true;
+  if (shared) return 'same';
+  if (hasImmutableAccountLabel(recorded)) return 'unproven';
   const address = a.get('google');
-  return address !== undefined && address === b.get('google');
+  return address !== undefined && address === b.get('google') ? 'same' : 'different';
+}
+
+export function sameProviderAccount(recorded: string, observed: string): boolean {
+  return compareProviderAccounts(recorded, observed) === 'same';
+}
+
+/** Whether `id` names its account by something no rename changes. */
+export function hasImmutableAccountLabel(id: string): boolean {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
 }
 
 /**

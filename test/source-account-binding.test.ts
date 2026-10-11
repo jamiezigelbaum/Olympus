@@ -22,6 +22,7 @@ import {
   googlePermissionLabel,
   googleSubjectLabel,
   mergeProviderAccountIds,
+  compareProviderAccounts,
   sameProviderAccount,
 } from '../src/core/provider-account-identity.ts';
 
@@ -360,6 +361,11 @@ describe('Google accounts survive an address rename (immutable labels)', () => {
     expect(sameProviderAccount(OLD, `${SUB}.${RENAMED}`)).toBe(false);
     // Drive's permission id carries a rename too.
     expect(sameProviderAccount(`${PERM}.${OLD}`, `${SUB}.${PERM}.${RENAMED}`)).toBe(true);
+    // A record that knows its subject is never matched by the address alone:
+    // the address may now be another account's (independent review P1).
+    expect(compareProviderAccounts(`${SUB}.${OLD}`, OLD)).toBe('unproven');
+    expect(compareProviderAccounts(`${PERM}.${OLD}`, `${SUB}.${OLD}`)).toBe('unproven');
+    expect(compareProviderAccounts(OLD, RENAMED)).toBe('different');
     // Dropbox and anything unparsed compare whole.
     expect(sameProviderAccount('dbid:a', 'dbid:a')).toBe(true);
     expect(sameProviderAccount('dbid:a', 'dbid:b')).toBe(false);
@@ -392,6 +398,15 @@ describe('Google accounts survive an address rename (immutable labels)', () => {
       .toEqual({ action: 'purge', reason: 'account_changed' });
   });
 
+  test('a subject-bound source waits, never purges or binds, on a token without a subject (independent review P1)', () => {
+    const binding: SourceAccountBinding = { provider_account_id: `${SUB}.${OLD}`, bound_grant: GRANTED };
+    expect(decide({ binding, grant: `${SUB}.${OLD}`, grantConnectedAt: GRANTED, token: OLD }))
+      .toEqual({ action: 'refuse', reason: 'account_unverified' });
+    // A legacy grant whose address matches does not let it through either.
+    expect(decide({ binding, grant: OLD, grantConnectedAt: GRANTED, token: OLD }))
+      .toEqual({ action: 'refuse', reason: 'account_unverified' });
+  });
+
   test('a binding that already names the account and grant proceeds without writing', () => {
     expect(decide({
       binding: { provider_account_id: `${SUB}.${OLD}`, bound_at: GRANTED, bound_grant: GRANTED },
@@ -401,19 +416,65 @@ describe('Google accounts survive an address rename (immutable labels)', () => {
     })).toEqual({ action: 'proceed' });
   });
 
-  test('a reconnect after a rename keeps a migrated source; an unmigrated one still fails closed', () => {
+  test('a reconnect after a rename keeps a migrated source by its label', () => {
     const path = registryPath();
     const bindingsPath = sourceAccountBindingsPath(path);
     updateSourceAccountBinding(bindingsPath, 'google_drive.docs', () => ({ provider_account_id: `${PERM}.${OLD}`, bound_at: GRANTED }));
-    updateSourceAccountBinding(bindingsPath, 'gmail.email', () => ({ provider_account_id: OLD, bound_at: GRANTED }));
     expect(recordFileSourceConnect({ registryPath: path, provider: 'google_drive', providerAccountId: `${SUB}.${PERM}.${RENAMED}`, now: NOW }))
       .toBe('same_account');
-    expect(recordFileSourceConnect({ registryPath: path, provider: 'gmail', providerAccountId: `${SUB}.${RENAMED}`, now: NOW }))
-      .toBe('purge_required');
     const read = readSourceAccountBindings(bindingsPath);
-    const sources = read.kind === 'ok' ? read.bindings.sources : {};
-    expect(sources['google_drive.docs']?.provider_account_id).toBe(`${SUB}.${PERM}.${RENAMED}`);
-    expect(sources['gmail.email']?.purge_required?.reason).toBe('account_changed');
+    expect(read.kind === 'ok' ? read.bindings.sources['google_drive.docs']?.provider_account_id : undefined)
+      .toBe(`${SUB}.${PERM}.${RENAMED}`);
+  });
+
+  test('an address-only source renamed before it migrated is kept when the replaced grant\'s own token proves continuity (independent review P2)', () => {
+    const path = registryPath();
+    const bindingsPath = sourceAccountBindingsPath(path);
+    updateSourceAccountBinding(bindingsPath, 'gmail.email', () => ({ provider_account_id: OLD, bound_at: GRANTED }));
+    // The replaced grant recorded OLD; its own refresh token now reads RENAMED,
+    // the address the new grant (same subject) carries.
+    expect(recordFileSourceConnect({
+      registryPath: path,
+      provider: 'gmail',
+      providerAccountId: `${SUB}.${RENAMED}`,
+      replacedGrant: { recordedAccountId: OLD, currentAccountId: RENAMED },
+      now: NOW,
+    })).toBe('same_account');
+    const read = readSourceAccountBindings(bindingsPath);
+    expect(read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined)
+      .toEqual({ provider_account_id: `${SUB}.${RENAMED}`, bound_at: GRANTED });
+  });
+
+  test('without that proof, or when the replaced grant names another account, the change still fails closed', () => {
+    for (const replacedGrant of [
+      undefined,
+      // The replaced grant's token now reads another address than the new grant.
+      { recordedAccountId: OLD, currentAccountId: googleAccountIdFromAddress('someone-else@example.test') },
+      // The replaced grant was not the one the source was bound under.
+      { recordedAccountId: googleAccountIdFromAddress('other@example.test'), currentAccountId: RENAMED },
+    ]) {
+      const path = registryPath();
+      const bindingsPath = sourceAccountBindingsPath(path);
+      updateSourceAccountBinding(bindingsPath, 'gmail.email', () => ({ provider_account_id: OLD, bound_at: GRANTED }));
+      expect(recordFileSourceConnect({
+        registryPath: path,
+        provider: 'gmail',
+        providerAccountId: `${SUB}.${RENAMED}`,
+        ...(replacedGrant ? { replacedGrant } : {}),
+        now: NOW,
+      })).toBe('purge_required');
+    }
+    // A binding that knows its subject is never carried by the chain: the
+    // label decides.
+    const path = registryPath();
+    updateSourceAccountBinding(sourceAccountBindingsPath(path), 'gmail.email', () => ({ provider_account_id: `${OTHER_SUB}.${OLD}` }));
+    expect(recordFileSourceConnect({
+      registryPath: path,
+      provider: 'gmail',
+      providerAccountId: `${SUB}.${RENAMED}`,
+      replacedGrant: { recordedAccountId: `${OTHER_SUB}.${OLD}`, currentAccountId: `${SUB}.${RENAMED}` },
+      now: NOW,
+    })).toBe('purge_required');
   });
 
   test('bound_grant survives a read', () => {

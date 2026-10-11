@@ -21,6 +21,11 @@ import {
 } from '../src/workers/source-account-guard.ts';
 import { withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { readFileSync } from 'node:fs';
+import {
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS,
+  googleAccountIdFromAddress,
+  googleSubjectLabel,
+} from '../src/core/provider-account-identity.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -369,3 +374,91 @@ function lane(onRun: () => void): SourceSchedulerSource {
     }],
   };
 }
+
+describe('the account guard for a Google source known by its subject (independent review P1)', () => {
+  const SUB = googleSubjectLabel('109876543210987654321');
+  const OLD = googleAccountIdFromAddress('owner@example.test');
+  const RENAMED = googleAccountIdFromAddress('renamed@example.test');
+  const GRANTED = '2026-10-10T22:42:00.000Z';
+
+  function gmailGuard(registryPath: string, token: { address: string; sub?: string }) {
+    upsertConnectedHandle({
+      handle: 'gmail.personal',
+      provider: 'gmail',
+      accountRole: 'personal',
+      trustDomain: 'secure_local',
+      allowedCapabilities: ['gmail.email.sync'],
+      scopes: ['https://www.googleapis.com/auth/gmail.readonly', 'openid'],
+      connectedAt: GRANTED,
+      providerAccountId: `${SUB}.${OLD}`,
+    }, registryPath);
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'gmail.email', () => ({
+      provider_account_id: `${SUB}.${OLD}`,
+      bound_grant: GRANTED,
+    }));
+    const broker: CredentialBroker = {
+      async issueSession(request) {
+        return {
+          kind: 'bearer_token',
+          handle: request.handle,
+          provider: 'gmail',
+          capability: request.capability,
+          token: 'gmail-access-token-fixture',
+          audit: {
+            handle: request.handle,
+            provider: 'gmail',
+            capability: request.capability,
+            scopes: [],
+            outcome: 'issued',
+            issuedAt: GRANTED,
+            rawCredentialExposed: false,
+          },
+        };
+      },
+    };
+    return createSourceAccountGuard({
+      sourceId: 'gmail.email',
+      provider: 'gmail',
+      handle: 'gmail.personal',
+      capability: 'gmail.email.sync',
+      registryPath,
+      laneHoldsItems: () => true,
+      broker,
+      fetch: async (url) => {
+        if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo) {
+          return new Response(JSON.stringify(token.sub
+            ? { sub: token.sub, scope: 'openid https://www.googleapis.com/auth/gmail.readonly' }
+            : { scope: 'https://www.googleapis.com/auth/gmail.readonly' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ emailAddress: token.address }), { status: 200 });
+      },
+      now: () => new Date('2026-10-11T00:00:00.000Z'),
+    });
+  }
+
+  function gmailBinding(registryPath: string) {
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(registryPath));
+    return read.kind === 'ok' ? read.bindings.sources['gmail.email'] : 'malformed';
+  }
+
+  test('a token without a subject at the old address (now another account\'s) syncs nothing and marks nothing', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    const guard = gmailGuard(registryPath, { address: 'owner@example.test' });
+    let ran = 0;
+    const error = await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run()
+      .catch((reason: unknown) => reason);
+    expect(ran).toBe(0);
+    expect(error).toBeInstanceOf(SourceAccountChangedError);
+    expect((error as SourceAccountChangedError).code).toBe('source_account_unverified');
+    expect(gmailBinding(registryPath)).toEqual({ provider_account_id: `${SUB}.${OLD}`, bound_grant: GRANTED });
+  });
+
+  test('the same subject under a renamed address syncs and the binding follows the address', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    const guard = gmailGuard(registryPath, { address: 'renamed@example.test', sub: '109876543210987654321' });
+    let ran = 0;
+    await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run();
+    expect(ran).toBe(1);
+    expect(gmailBinding(registryPath)).toEqual({ provider_account_id: `${SUB}.${RENAMED}`, bound_grant: GRANTED });
+  });
+});

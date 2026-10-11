@@ -3,6 +3,8 @@ import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
 import {
+  compareProviderAccounts,
+  hasImmutableAccountLabel,
   mergeProviderAccountIds,
   sameProviderAccount,
   type AccountBoundProvider,
@@ -164,6 +166,13 @@ export function recordFileSourceConnect(input: {
   registryPath: string;
   provider: AccountBoundProvider;
   providerAccountId: string | undefined;
+  /**
+   * The grant this connect replaced: the account its registry entry recorded,
+   * and the account a token minted from its own refresh token names now.
+   * Together they carry a source bound by an address alone across a rename
+   * that happened before it learned an immutable label (independent review P2).
+   */
+  replacedGrant?: { recordedAccountId?: string; currentAccountId?: string };
   now: Date;
 }): FileSourceConnectOutcome {
   const sourceId = accountBoundSourceIdForProvider(input.provider)!;
@@ -183,17 +192,41 @@ export function recordFileSourceConnect(input: {
       return current;
     }
     if (current?.provider_account_id && input.providerAccountId) {
-      if (sameProviderAccount(current.provider_account_id, input.providerAccountId)) {
+      const match = compareProviderAccounts(current.provider_account_id, input.providerAccountId);
+      if (match === 'same' || (match === 'different' && renamedSinceBound(current.provider_account_id, input))) {
         outcome = 'same_account';
         const { reconnected_at: _settled, ...rest } = current;
         return { ...rest, provider_account_id: mergeProviderAccountIds(current.provider_account_id, input.providerAccountId) };
       }
+      // Neither proven nor disproven (the new token carried no immutable
+      // label this record has): the worker settles it against the token.
+      if (match === 'unproven') return { ...current, reconnected_at: at };
       outcome = 'purge_required';
       return { ...current, purge_required: { reason: 'account_changed', detected_at: at } };
     }
     return { ...current, reconnected_at: at };
   });
   return outcome;
+}
+
+/**
+ * An address-only binding whose address no longer matches the new grant is
+ * still the same account when the grant it was filled under says so: that
+ * grant's record names the binding's account, and a token minted now from
+ * that grant's own refresh token (a refresh token belongs to one account for
+ * good) names the same account as the new grant. Never applied to a binding
+ * that carries an immutable label: those decide by the label alone.
+ */
+function renamedSinceBound(
+  bound: string,
+  input: { providerAccountId: string | undefined; replacedGrant?: { recordedAccountId?: string; currentAccountId?: string } | undefined },
+): boolean {
+  const recorded = input.replacedGrant?.recordedAccountId;
+  const current = input.replacedGrant?.currentAccountId;
+  return Boolean(input.providerAccountId && recorded && current
+    && !hasImmutableAccountLabel(bound)
+    && compareProviderAccounts(bound, recorded) === 'same'
+    && compareProviderAccounts(current, input.providerAccountId) === 'same');
 }
 
 export type SourceAccountDecision =
@@ -208,7 +241,7 @@ export type SourceAccountDecision =
  * (written at connect) and `grantConnectedAt` that grant's `connectedAt`;
  * `tokenAccountId` is what the provider says about the access token this run
  * would use, or undefined when it could not be asked. Ids are compared with
- * sameProviderAccount, never as strings. `write` is the entry to store (null
+ * compareProviderAccounts, never as strings. `write` is the entry to store (null
  * removes it; absent leaves it).
  */
 export function decideSourceAccountAction(input: {
@@ -220,17 +253,22 @@ export function decideSourceAccountAction(input: {
   now: Date;
 }): SourceAccountDecision {
   const { binding, grantAccountId, tokenAccountId: token } = input;
-  const tokenIsBound = Boolean(binding?.provider_account_id && token
-    && sameProviderAccount(binding.provider_account_id, token));
+  const bindingMatch = binding?.provider_account_id && token
+    ? compareProviderAccounts(binding.provider_account_id, token)
+    : undefined;
+  const tokenIsBound = bindingMatch === 'same';
   // The incident's own shape: a token minted for one account serving a grant
   // that belongs to another. Never read with it. Unless this same grant's
   // tokens already confirmed the binding, and the token names that account:
   // the grant was recorded by an address the account has since been renamed
   // from (the token's own labels say which account it is).
-  if (grantAccountId && token && !sameProviderAccount(grantAccountId, token)) {
+  const grantMatch = grantAccountId && token ? compareProviderAccounts(grantAccountId, token) : 'same';
+  if (grantMatch !== 'same') {
     const confirmedUnderThisGrant = tokenIsBound && !binding?.purge_required
       && input.grantConnectedAt !== undefined && binding?.bound_grant === input.grantConnectedAt;
-    if (!confirmedUnderThisGrant) return { action: 'refuse', reason: 'token_account_mismatch' };
+    if (!confirmedUnderThisGrant) {
+      return { action: 'refuse', reason: grantMatch === 'different' ? 'token_account_mismatch' : 'account_unverified' };
+    }
   }
   const bindTo = (id: string | undefined): SourceAccountDecision => ({
     action: 'proceed',
@@ -283,6 +321,9 @@ export function decideSourceAccountAction(input: {
     };
   }
   if (!input.laneHoldsItems) return bindTo(token);
+  // The binding knows its account by an immutable label and this token has
+  // none of its kinds: not proof of a change, so wait rather than purge.
+  if (bindingMatch === 'unproven') return { action: 'refuse', reason: 'account_unverified' };
   return {
     action: 'purge',
     reason: binding.provider_account_id ? 'account_changed' : 'previous_account_unknown',

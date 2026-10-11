@@ -716,4 +716,75 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     expect(sources['gmail.email']).toEqual({ provider_account_id: `${sub}.${googleAccountIdFromAddress('renamed@example.test')}` });
     expect(sources['google_drive.docs']).toEqual({ provider_account_id: `${sub}.${perm}.${googleAccountIdFromAddress('renamed@example.test')}` });
   }, 30_000);
+
+  test('a Gmail source bound by its address before openid, renamed before it migrated, reconnects as the same account through the replaced grant\'s own token (independent review P2)', async () => {
+    const install = installDir();
+    const handle = 'gmail.personal';
+    await install.secretStore.set(`${handle}.oauth.client_id`, 'google-test-client');
+    await install.secretStore.set(`${handle}.oauth.client_secret`, 'google-test-secret');
+    await install.secretStore.set(`${handle}.oauth.refresh_token`, 'gmail-old-refresh');
+    upsertConnectedHandle({
+      handle,
+      provider: 'gmail',
+      accountRole: 'personal',
+      trustDomain: 'secure_local',
+      allowedCapabilities: ['gmail.email.sync'],
+      scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+      oauth2Refresh: {
+        tokenUrl: 'https://oauth2.googleapis.com/token',
+        clientIdSecretRef: `store:${handle}.oauth.client_id`,
+        clientSecretSecretRef: `store:${handle}.oauth.client_secret`,
+        refreshTokenSecretRef: `store:${handle}.oauth.refresh_token`,
+      },
+      connectedAt: '2026-09-01T00:00:00.000Z',
+      providerAccountId: googleAccountIdFromAddress('owner@example.test'),
+    }, install.registryPath);
+    updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'gmail.email', () => ({
+      provider_account_id: googleAccountIdFromAddress('owner@example.test'),
+    }));
+    // The admin renamed the address: both the old grant's token and the new
+    // grant's read the new address; only the new grant was given openid.
+    const bearer = (init: RequestInit | undefined) =>
+      String(new Headers(init?.headers).get('authorization') ?? '').replace(/^Bearer /, '');
+    const fetchMock = async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail) {
+        return new Response(JSON.stringify({ emailAddress: 'renamed@example.test' }), { status: 200 });
+      }
+      if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo) {
+        return new Response(JSON.stringify(bearer(init) === 'new-access'
+          ? { sub: '109876543210987654321', scope: 'openid https://www.googleapis.com/auth/gmail.readonly' }
+          : { scope: 'https://www.googleapis.com/auth/gmail.readonly' }), { status: 200 });
+      }
+      const refresh = new URLSearchParams(String(init?.body ?? '')).get('refresh_token');
+      return new Response(JSON.stringify(refresh
+        ? { access_token: 'gmail-old-access', expires_in: 3600 }
+        : { access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+    const result = await connectOAuthSource({
+      source: 'gmail',
+      clientId: 'google-test-client',
+      clientSecret: 'google-test-secret',
+      registryPath: install.registryPath,
+      oauth2StateStore: new JsonCredentialOAuth2StateStore(install.statePath),
+      secretStore: install.secretStore,
+      openBrowser: false,
+      fetch: fetchMock,
+      onAuthorizationUrl: async (url) => {
+        const consent = new URL(url);
+        const callback = new URL(consent.searchParams.get('redirect_uri')!);
+        callback.searchParams.set('state', consent.searchParams.get('state')!);
+        callback.searchParams.set('code', 'fixture-code');
+        await fetch(callback);
+      },
+    });
+    expect(result.sourceAccountPurgeRequired).toBeUndefined();
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+    expect(read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined).toEqual({
+      provider_account_id: `${googleSubjectLabel('109876543210987654321')}.${googleAccountIdFromAddress('renamed@example.test')}`,
+    });
+  }, 30_000);
 });
