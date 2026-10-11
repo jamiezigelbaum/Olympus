@@ -607,6 +607,22 @@ describe('demo installs: reviewer sign-in through the relay', () => {
     }
   });
 
+  test('the page lets the browser send its real Origin, and an opaque Origin is still refused (2026-10-11)', async () => {
+    // Under `no-referrer` Chromium posts the page's own form with `Origin: null`,
+    // which demoPost refused: reviewers could not sign in. The page must not say no-referrer.
+    const page = await openDemo();
+    expect(page.response.headers.get('referrer-policy')).toBe('same-origin');
+    expect(page.html).toContain('<meta name="referrer" content="same-origin">');
+    expect(page.html).not.toContain('no-referrer');
+    // Re-rendered after a wrong sign-in, it keeps the policy.
+    const wrong = await signIn(page, { action: 'approve', username: 'reviewer', password: 'guess' });
+    expect(wrong.status).toBe(400);
+    expect(wrong.headers.get('referrer-policy')).toBe('same-origin');
+    // The check itself is unchanged: an opaque origin is not the relay origin.
+    expect((await signIn(page, { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD }, { 'x-olympus-relay': 'per-boot', Origin: 'null' })).status).toBe(403);
+    expect((await signIn(page, { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD })).status).toBe(303);
+  });
+
   test('wrong credentials, a foreign origin, a wrong token or an owner page are refused; five wrong end the page', async () => {
     const page = await openDemo();
     expect((await signIn(page, { action: 'approve', username: 'reviewer', password: DEMO_PASSWORD }, { Origin: 'https://evil.example' })).status).toBe(403);

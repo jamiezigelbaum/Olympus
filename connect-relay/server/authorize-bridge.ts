@@ -12,8 +12,9 @@
  * The page tries to reach the engine first and continues automatically when
  * something answers; otherwise it keeps the link and offers to install
  * Olympus. Browsers that refuse a public page talking to loopback simply show
- * both choices. A relay configured with a demo install also links reviewers
- * to its sign-in (`/connect/demo/authorize`, same query).
+ * both choices. A relay configured with a demo install also offers reviewers
+ * its sign-in (`/connect/demo/authorize`, same query) as a full-width button
+ * of its own, so a reviewer cannot miss it.
  */
 import { randomBytes } from 'node:crypto';
 
@@ -55,7 +56,10 @@ export function authorizeBridge(url: URL, options: BridgeOptions): Response {
   h1 { font-size: 1.5rem; margin: 0 0 .5rem; }
   p { color: var(--muted); }
   a.button { display: inline-block; margin-top: 1rem; padding: .7rem 1.2rem; border-radius: .6rem; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
-  #missing { display: none; margin-top: 2rem; }
+  #missing { display: none; margin-top: 2rem; }${options.demo ? `
+  .demo { margin-top: 2rem; padding: 1rem; border: 2px solid var(--accent); border-radius: .8rem; }
+  .demo p { margin: 0 0 .75rem; }
+  a.button.demo-button { display: block; margin: 0; text-align: center; font-size: 1.05rem; }` : ''}
 </style>
 </head>
 <body>
@@ -63,7 +67,10 @@ export function authorizeBridge(url: URL, options: BridgeOptions): Response {
   <h1>Approve ChatGPT on your Mac</h1>
   <p>Olympus asks for approval on the Mac where it runs, so only you can connect it.</p>
   <a class="button" id="continue" href="${escapeHtml(target)}">Continue on this Mac</a>
-  ${options.demo ? `<p><a href="${escapeHtml(`/connect/demo/authorize${query}`)}">Reviewing Olympus? Sign in to the demo</a></p>` : ''}
+  ${options.demo ? `<section class="demo">
+    <p>Reviewing Olympus for a directory? Use the demo, with made-up sample data.</p>
+    <a class="button demo-button" id="demo" href="${escapeHtml(`/connect/demo/authorize${query}`)}">Reviewing Olympus? Sign in to the demo</a>
+  </section>` : ''}
   <section id="missing">
     <h2>Olympus did not answer on this computer</h2>
     <p>Open this page on the Mac where Olympus runs, or install Olympus first.</p>

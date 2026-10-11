@@ -100591,7 +100591,7 @@ function hostnameOf(host) {
 function escapeHtml(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-function consentSecurityHeaders(nonce, redirectOrigin) {
+function consentSecurityHeaders(nonce, redirectOrigin, referrerPolicy = "no-referrer") {
   const formAction = redirectOrigin ? `'self' ${redirectOrigin}` : "'self'";
   return {
     "Content-Type": "text/html; charset=utf-8",
@@ -100604,7 +100604,7 @@ function consentSecurityHeaders(nonce, redirectOrigin) {
     ].join("; "),
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
+    "Referrer-Policy": referrerPolicy,
     "Cache-Control": "no-store",
     "Cross-Origin-Opener-Policy": "same-origin"
   };
@@ -100702,7 +100702,7 @@ function renderDemoSignInPage(input) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="${DEMO_REFERRER_POLICY}">
 <title>Olympus demo sign-in</title>
 <style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
 </head>
@@ -100730,7 +100730,7 @@ ${error2}
 </main>
 </body>
 </html>`;
-  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin, DEMO_REFERRER_POLICY) };
 }
 function renderConsentErrorPage(message) {
   const nonce = randomBytes16(16).toString("base64");
@@ -100783,7 +100783,7 @@ button { flex: 1; font: 600 1rem/1 system-ui, sans-serif; padding: .85rem 1rem; 
 .approve { background: var(--accent); color: #fff; border: 0; }
 .deny { background: transparent; color: var(--fg); border: 1px solid var(--line); }
 p.small { color: var(--muted); font-size: .85rem; margin-top: 1.25rem; }
-`;
+`, DEMO_REFERRER_POLICY = "same-origin";
 var init_consent_page = () => {};
 
 // src/core/google-pilot-client.ts
