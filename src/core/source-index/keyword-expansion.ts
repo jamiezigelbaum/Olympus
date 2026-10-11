@@ -1,11 +1,10 @@
 import { stemmer } from 'stemmer';
 import equivalents from './keyword-equivalents.json';
-import { keywordQueryLanguage } from './keyword-stopwords.ts';
 // Only the registered built-in model can expand questions. No corpus text is
 // passed to it, and no configured/cloud analyst is consulted, even on failure.
 import { registeredBuiltInPrivateModel } from '../../workers/classification/built-in-sniffer.ts';
 import type { AnalystModel } from '../analyst.ts';
-import { sourceIndexFtsTermGroups } from './fts.ts';
+import { sourceIndexFtsTermGroups, sourceIndexQueryLanguage } from './fts.ts';
 import { withKeywordAlternatives, requestKeywordAlternatives, pinKeywordAlternatives, keywordExpansionDisabled, type KeywordExpansionMap } from './keyword-context.ts';
 
 const caches = new WeakMap<AnalystModel, Map<string, {pending: Promise<KeywordExpansionMap>; expires: number}>>();
@@ -36,7 +35,7 @@ async function expandCachedSourceIndexKeywords(query: string, profile: readonly 
   const keyOf = (word: string) => stemmer(word.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase());
   const concepts = sources.map(source => Object.values(vocabulary).find(row => Object.values(row).some(words => words.some(word => !word.includes(' ') && keyOf(word) === keyOf(source)))));
   if (!builtIn?.available() && !concepts.some(Boolean)) return EMPTY;
-  const detectedLanguage = keywordQueryLanguage(query);
+  const detectedLanguage = sourceIndexQueryLanguage(query);
   const knownLanguages = concepts.every(Boolean) && concepts.length > 0
     ? Object.keys(concepts[0]!).filter(language => concepts.every((row,index) => row?.[language]?.some(word => !word.includes(' ') && keyOf(word) === keyOf(sources[index]!))))
     : [];

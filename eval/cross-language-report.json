@@ -220,18 +220,18 @@
     {
       "ordinal": 20,
       "before": false,
-      "after": false,
-      "passage": false,
-      "beforeReads": 0,
-      "afterReads": 0
-    },
-    {
-      "ordinal": 21,
-      "before": false,
       "after": true,
       "passage": true,
       "beforeReads": 0,
       "afterReads": 1
+    },
+    {
+      "ordinal": 21,
+      "before": false,
+      "after": false,
+      "passage": false,
+      "beforeReads": 0,
+      "afterReads": 0
     },
     {
       "ordinal": 22,

@@ -1,4 +1,4 @@
-import { foreignQueryStopwords } from './keyword-stopwords.ts';
+import { foreignQueryStopwords, keywordQueryLanguage } from './keyword-stopwords.ts';
 import { stemmer } from 'stemmer';
 import type { Database } from 'bun:sqlite';
 import { keywordAlternatives } from './keyword-context.ts';
@@ -90,6 +90,8 @@ export interface SourceIndexFtsTermGroupOptions {
   groupLimit?: number;
   expandedTermLimit?: number | 'unbounded';
 }
+
+export function sourceIndexQueryLanguage(query: string): string { return keywordQueryLanguage(query,30,FTS_QUERY_STOPWORDS); }
 
 export function sourceIndexFtsQuery(
   query: string,

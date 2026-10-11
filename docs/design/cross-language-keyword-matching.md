@@ -112,7 +112,8 @@ The implementation differs from the proposal in these bounded ways:
   cold or fails. Other content words use only the registered built-in Qwen.
   The question, content-word IDs and target language names are its entire
   prompt; it receives no document content. No configured cloud model is used.
-- Query language detection also checks local function-word data. This prevents
+- Query language detection also checks comprehensive local function-word data,
+  including short natural questions and accented interrogatives. This prevents
   short English questions misidentified by the character detector from being
   expanded into English synonyms. Foreign function words are excluded from
   topic groups; the existing English product vocabulary stays in place.

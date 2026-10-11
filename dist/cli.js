@@ -17657,14931 +17657,6 @@ var init_keyword_equivalents = __esm(() => {
   };
 });
 
-// node_modules/stopword/dist/stopword.cjs.js
-var require_stopword_cjs = __commonJS((exports) => {
-  Object.defineProperty(exports, "__esModule", { value: true });
-  var num123 = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
-  var numFas = ["۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹", "۰"];
-  var numKor = ["０", "１", "２", "３", "４", "５", "６", "７", "８", "９"];
-  var numMya = ["၀", "၁", "၂", "၃", "၄", "၅", "၆", "၇", "၈", "၉"];
-  var numTel = ["౦", "౧", "౨", "౩", "౪", "౫", "౬", "౭", "౮", "౯"];
-  var _123 = [...num123, ...numFas, ...numKor, ...numMya, ...numTel];
-  var afr = [
-    "die",
-    "het",
-    "en",
-    "sy",
-    "nie",
-    "was",
-    "hy",
-    "te",
-    "is",
-    "ek",
-    "om",
-    "hulle",
-    "in",
-    "my",
-    "'n",
-    "vir",
-    "toe",
-    "haar",
-    "van",
-    "dit",
-    "op",
-    "se",
-    "wat",
-    "met",
-    "gaan",
-    "baie",
-    "ons",
-    "jy",
-    "na",
-    "maar",
-    "hom",
-    "so",
-    "n",
-    "huis",
-    "kan",
-    "aan",
-    "dat",
-    "daar",
-    "sal",
-    "jou",
-    "gesê",
-    "by",
-    "kom",
-    "een",
-    "ma",
-    "as",
-    "son",
-    "groot",
-    "begin",
-    "al"
-  ];
-  var ara = [
-    "،",
-    "ّآض",
-    "آمينَ",
-    "آه",
-    "آهاً",
-    "آي",
-    "أ",
-    "أب",
-    "أجل",
-    "أجمع",
-    "أخ",
-    "أخذ",
-    "أصبح",
-    "أضحى",
-    "أقبل",
-    "أقل",
-    "أكثر",
-    "ألا",
-    "أم",
-    "أما",
-    "أمامك",
-    "أمامكَ",
-    "أمسى",
-    "أمّا",
-    "أن",
-    "أنا",
-    "أنت",
-    "أنتم",
-    "أنتما",
-    "أنتن",
-    "أنتِ",
-    "أنشأ",
-    "أنّى",
-    "أو",
-    "أوشك",
-    "أولئك",
-    "أولئكم",
-    "أولاء",
-    "أولالك",
-    "أوّهْ",
-    "أي",
-    "أيا",
-    "أين",
-    "أينما",
-    "أيّ",
-    "أَنَّ",
-    "أََيُّ",
-    "أُفٍّ",
-    "إذ",
-    "إذا",
-    "إذاً",
-    "إذما",
-    "إذن",
-    "إلى",
-    "إليكم",
-    "إليكما",
-    "إليكنّ",
-    "إليكَ",
-    "إلَيْكَ",
-    "إلّا",
-    "إمّا",
-    "إن",
-    "إنّما",
-    "إي",
-    "إياك",
-    "إياكم",
-    "إياكما",
-    "إياكن",
-    "إيانا",
-    "إياه",
-    "إياها",
-    "إياهم",
-    "إياهما",
-    "إياهن",
-    "إياي",
-    "إيهٍ",
-    "إِنَّ",
-    "ا",
-    "ابتدأ",
-    "اثر",
-    "اجل",
-    "احد",
-    "اخرى",
-    "اخلولق",
-    "اذا",
-    "اربعة",
-    "ارتدّ",
-    "استحال",
-    "اطار",
-    "اعادة",
-    "اعلنت",
-    "اف",
-    "اكثر",
-    "اكد",
-    "الألاء",
-    "الألى",
-    "الا",
-    "الاخيرة",
-    "الان",
-    "الاول",
-    "الاولى",
-    "التى",
-    "التي",
-    "الثاني",
-    "الثانية",
-    "الذاتي",
-    "الذى",
-    "الذي",
-    "الذين",
-    "السابق",
-    "الف",
-    "اللائي",
-    "اللاتي",
-    "اللتان",
-    "اللتيا",
-    "اللتين",
-    "اللذان",
-    "اللذين",
-    "اللواتي",
-    "الماضي",
-    "المقبل",
-    "الوقت",
-    "الى",
-    "اليوم",
-    "اما",
-    "امام",
-    "امس",
-    "ان",
-    "انبرى",
-    "انقلب",
-    "انه",
-    "انها",
-    "او",
-    "اول",
-    "اي",
-    "ايار",
-    "ايام",
-    "ايضا",
-    "ب",
-    "بات",
-    "باسم",
-    "بان",
-    "بخٍ",
-    "برس",
-    "بسبب",
-    "بسّ",
-    "بشكل",
-    "بضع",
-    "بطآن",
-    "بعد",
-    "بعض",
-    "بك",
-    "بكم",
-    "بكما",
-    "بكن",
-    "بل",
-    "بلى",
-    "بما",
-    "بماذا",
-    "بمن",
-    "بن",
-    "بنا",
-    "به",
-    "بها",
-    "بي",
-    "بيد",
-    "بين",
-    "بَسْ",
-    "بَلْهَ",
-    "بِئْسَ",
-    "تانِ",
-    "تانِك",
-    "تبدّل",
-    "تجاه",
-    "تحوّل",
-    "تلقاء",
-    "تلك",
-    "تلكم",
-    "تلكما",
-    "تم",
-    "تينك",
-    "تَيْنِ",
-    "تِه",
-    "تِي",
-    "ثلاثة",
-    "ثم",
-    "ثمّ",
-    "ثمّة",
-    "ثُمَّ",
-    "جعل",
-    "جلل",
-    "جميع",
-    "جير",
-    "حار",
-    "حاشا",
-    "حاليا",
-    "حاي",
-    "حتى",
-    "حرى",
-    "حسب",
-    "حم",
-    "حوالى",
-    "حول",
-    "حيث",
-    "حيثما",
-    "حين",
-    "حيَّ",
-    "حَبَّذَا",
-    "حَتَّى",
-    "حَذارِ",
-    "خلا",
-    "خلال",
-    "دون",
-    "دونك",
-    "ذا",
-    "ذات",
-    "ذاك",
-    "ذانك",
-    "ذانِ",
-    "ذلك",
-    "ذلكم",
-    "ذلكما",
-    "ذلكن",
-    "ذو",
-    "ذوا",
-    "ذواتا",
-    "ذواتي",
-    "ذيت",
-    "ذينك",
-    "ذَيْنِ",
-    "ذِه",
-    "ذِي",
-    "راح",
-    "رجع",
-    "رويدك",
-    "ريث",
-    "رُبَّ",
-    "زيارة",
-    "سبحان",
-    "سرعان",
-    "سنة",
-    "سنوات",
-    "سوف",
-    "سوى",
-    "سَاءَ",
-    "سَاءَمَا",
-    "شبه",
-    "شخصا",
-    "شرع",
-    "شَتَّانَ",
-    "صار",
-    "صباح",
-    "صفر",
-    "صهٍ",
-    "صهْ",
-    "ضد",
-    "ضمن",
-    "طاق",
-    "طالما",
-    "طفق",
-    "طَق",
-    "ظلّ",
-    "عاد",
-    "عام",
-    "عاما",
-    "عامة",
-    "عدا",
-    "عدة",
-    "عدد",
-    "عدم",
-    "عسى",
-    "عشر",
-    "عشرة",
-    "علق",
-    "على",
-    "عليك",
-    "عليه",
-    "عليها",
-    "علًّ",
-    "عن",
-    "عند",
-    "عندما",
-    "عوض",
-    "عين",
-    "عَدَسْ",
-    "عَمَّا",
-    "غدا",
-    "غير",
-    "ـ",
-    "ف",
-    "فان",
-    "فلان",
-    "فو",
-    "فى",
-    "في",
-    "فيم",
-    "فيما",
-    "فيه",
-    "فيها",
-    "قال",
-    "قام",
-    "قبل",
-    "قد",
-    "قطّ",
-    "قلما",
-    "قوة",
-    "كأنّما",
-    "كأين",
-    "كأيّ",
-    "كأيّن",
-    "كاد",
-    "كان",
-    "كانت",
-    "كذا",
-    "كذلك",
-    "كرب",
-    "كل",
-    "كلا",
-    "كلاهما",
-    "كلتا",
-    "كلم",
-    "كليكما",
-    "كليهما",
-    "كلّما",
-    "كلَّا",
-    "كم",
-    "كما",
-    "كي",
-    "كيت",
-    "كيف",
-    "كيفما",
-    "كَأَنَّ",
-    "كِخ",
-    "لئن",
-    "لا",
-    "لات",
-    "لاسيما",
-    "لدن",
-    "لدى",
-    "لعمر",
-    "لقاء",
-    "لك",
-    "لكم",
-    "لكما",
-    "لكن",
-    "لكنَّما",
-    "لكي",
-    "لكيلا",
-    "للامم",
-    "لم",
-    "لما",
-    "لمّا",
-    "لن",
-    "لنا",
-    "له",
-    "لها",
-    "لو",
-    "لوكالة",
-    "لولا",
-    "لوما",
-    "لي",
-    "لَسْتَ",
-    "لَسْتُ",
-    "لَسْتُم",
-    "لَسْتُمَا",
-    "لَسْتُنَّ",
-    "لَسْتِ",
-    "لَسْنَ",
-    "لَعَلَّ",
-    "لَكِنَّ",
-    "لَيْتَ",
-    "لَيْسَ",
-    "لَيْسَا",
-    "لَيْسَتَا",
-    "لَيْسَتْ",
-    "لَيْسُوا",
-    "لَِسْنَا",
-    "ما",
-    "ماانفك",
-    "مابرح",
-    "مادام",
-    "ماذا",
-    "مازال",
-    "مافتئ",
-    "مايو",
-    "متى",
-    "مثل",
-    "مذ",
-    "مساء",
-    "مع",
-    "معاذ",
-    "مقابل",
-    "مكانكم",
-    "مكانكما",
-    "مكانكنّ",
-    "مكانَك",
-    "مليار",
-    "مليون",
-    "مما",
-    "ممن",
-    "من",
-    "منذ",
-    "منها",
-    "مه",
-    "مهما",
-    "مَنْ",
-    "مِن",
-    "نحن",
-    "نحو",
-    "نعم",
-    "نفس",
-    "نفسه",
-    "نهاية",
-    "نَخْ",
-    "نِعِمّا",
-    "نِعْمَ",
-    "ها",
-    "هاؤم",
-    "هاكَ",
-    "هاهنا",
-    "هبّ",
-    "هذا",
-    "هذه",
-    "هكذا",
-    "هل",
-    "هلمَّ",
-    "هلّا",
-    "هم",
-    "هما",
-    "هن",
-    "هنا",
-    "هناك",
-    "هنالك",
-    "هو",
-    "هي",
-    "هيا",
-    "هيت",
-    "هيّا",
-    "هَؤلاء",
-    "هَاتانِ",
-    "هَاتَيْنِ",
-    "هَاتِه",
-    "هَاتِي",
-    "هَجْ",
-    "هَذا",
-    "هَذانِ",
-    "هَذَيْنِ",
-    "هَذِه",
-    "هَذِي",
-    "هَيْهَاتَ",
-    "و",
-    "وا",
-    "واحد",
-    "واضاف",
-    "واضافت",
-    "واكد",
-    "وان",
-    "واهاً",
-    "واوضح",
-    "وراءَك",
-    "وفي",
-    "وقال",
-    "وقالت",
-    "وقد",
-    "وقف",
-    "وكان",
-    "وكانت",
-    "ولا",
-    "ولم",
-    "ومن",
-    "وهو",
-    "وهي",
-    "ويكأنّ",
-    "وَيْ",
-    "وُشْكَانََ",
-    "يكون",
-    "يمكن",
-    "يوم",
-    "ّأيّان"
-  ];
-  var hye = [
-    "այդ",
-    "այլ",
-    "այն",
-    "այս",
-    "դու",
-    "դուք",
-    "եմ",
-    "են",
-    "ենք",
-    "ես",
-    "եք",
-    "է",
-    "էի",
-    "էին",
-    "էինք",
-    "էիր",
-    "էիք",
-    "էր",
-    "ըստ",
-    "թ",
-    "ի",
-    "ին",
-    "իսկ",
-    "իր",
-    "կամ",
-    "համար",
-    "հետ",
-    "հետո",
-    "մենք",
-    "մեջ",
-    "մի",
-    "ն",
-    "նա",
-    "նաև",
-    "նրա",
-    "նրանք",
-    "որ",
-    "որը",
-    "որոնք",
-    "որպես",
-    "ու",
-    "ում",
-    "պիտի",
-    "վրա",
-    "և"
-  ];
-  var eus = [
-    "al",
-    "anitz",
-    "arabera",
-    "asko",
-    "baina",
-    "bat",
-    "batean",
-    "batek",
-    "bati",
-    "batzuei",
-    "batzuek",
-    "batzuetan",
-    "batzuk",
-    "bera",
-    "beraiek",
-    "berau",
-    "berauek",
-    "bere",
-    "berori",
-    "beroriek",
-    "beste",
-    "bezala",
-    "da",
-    "dago",
-    "dira",
-    "ditu",
-    "du",
-    "dute",
-    "edo",
-    "egin",
-    "ere",
-    "eta",
-    "eurak",
-    "ez",
-    "gainera",
-    "gu",
-    "gutxi",
-    "guzti",
-    "haiei",
-    "haiek",
-    "haietan",
-    "hainbeste",
-    "hala",
-    "han",
-    "handik",
-    "hango",
-    "hara",
-    "hari",
-    "hark",
-    "hartan",
-    "hau",
-    "hauei",
-    "hauek",
-    "hauetan",
-    "hemen",
-    "hemendik",
-    "hemengo",
-    "hi",
-    "hona",
-    "honek",
-    "honela",
-    "honetan",
-    "honi",
-    "hor",
-    "hori",
-    "horiei",
-    "horiek",
-    "horietan",
-    "horko",
-    "horra",
-    "horrek",
-    "horrela",
-    "horretan",
-    "horri",
-    "hortik",
-    "hura",
-    "izan",
-    "ni",
-    "noiz",
-    "nola",
-    "non",
-    "nondik",
-    "nongo",
-    "nor",
-    "nora",
-    "ze",
-    "zein",
-    "zen",
-    "zenbait",
-    "zenbat",
-    "zer",
-    "zergatik",
-    "ziren",
-    "zituen",
-    "zu",
-    "zuek",
-    "zuen",
-    "zuten"
-  ];
-  var ben = [
-    "অতএব",
-    "অথচ",
-    "অথবা",
-    "অনুযায়ী",
-    "অনেক",
-    "অনেকে",
-    "অনেকেই",
-    "অন্তত",
-    "অন্য",
-    "অবধি",
-    "অবশ্য",
-    "অর্থাত",
-    "আই",
-    "আগামী",
-    "আগে",
-    "আগেই",
-    "আছে",
-    "আজ",
-    "আদ্যভাগে",
-    "আপনার",
-    "আপনি",
-    "আবার",
-    "আমরা",
-    "আমাকে",
-    "আমাদের",
-    "আমার",
-    "আমি",
-    "আর",
-    "আরও",
-    "ই",
-    "ইত্যাদি",
-    "ইহা",
-    "উচিত",
-    "উত্তর",
-    "উনি",
-    "উপর",
-    "উপরে",
-    "এ",
-    "এঁদের",
-    "এঁরা",
-    "এই",
-    "একই",
-    "একটি",
-    "একবার",
-    "একে",
-    "এক্",
-    "এখন",
-    "এখনও",
-    "এখানে",
-    "এখানেই",
-    "এটা",
-    "এটাই",
-    "এটি",
-    "এত",
-    "এতটাই",
-    "এতে",
-    "এদের",
-    "এব",
-    "এবং",
-    "এবার",
-    "এমন",
-    "এমনকী",
-    "এমনি",
-    "এর",
-    "এরা",
-    "এল",
-    "এস",
-    "এসে",
-    "ঐ",
-    "ও",
-    "ওঁদের",
-    "ওঁর",
-    "ওঁরা",
-    "ওই",
-    "ওকে",
-    "ওখানে",
-    "ওদের",
-    "ওর",
-    "ওরা",
-    "কখনও",
-    "কত",
-    "কবে",
-    "কমনে",
-    "কয়েক",
-    "কয়েকটি",
-    "করছে",
-    "করছেন",
-    "করতে",
-    "করবে",
-    "করবেন",
-    "করলে",
-    "করলেন",
-    "করা",
-    "করাই",
-    "করায়",
-    "করার",
-    "করি",
-    "করিতে",
-    "করিয়া",
-    "করিয়ে",
-    "করে",
-    "করেই",
-    "করেছিলেন",
-    "করেছে",
-    "করেছেন",
-    "করেন",
-    "কাউকে",
-    "কাছ",
-    "কাছে",
-    "কাজ",
-    "কাজে",
-    "কারও",
-    "কারণ",
-    "কি",
-    "কিংবা",
-    "কিছু",
-    "কিছুই",
-    "কিন্তু",
-    "কী",
-    "কে",
-    "কেউ",
-    "কেউই",
-    "কেখা",
-    "কেন",
-    "কোটি",
-    "কোন",
-    "কোনও",
-    "কোনো",
-    "ক্ষেত্রে",
-    "কয়েক",
-    "খুব",
-    "গিয়ে",
-    "গিয়েছে",
-    "গিয়ে",
-    "গুলি",
-    "গেছে",
-    "গেল",
-    "গেলে",
-    "গোটা",
-    "চলে",
-    "চান",
-    "চায়",
-    "চার",
-    "চালু",
-    "চেয়ে",
-    "চেষ্টা",
-    "ছাড়া",
-    "ছাড়াও",
-    "ছিল",
-    "ছিলেন",
-    "জন",
-    "জনকে",
-    "জনের",
-    "জন্য",
-    "জন্যওজে",
-    "জানতে",
-    "জানা",
-    "জানানো",
-    "জানায়",
-    "জানিয়ে",
-    "জানিয়েছে",
-    "জে",
-    "জ্নজন",
-    "টি",
-    "ঠিক",
-    "তখন",
-    "তত",
-    "তথা",
-    "তবু",
-    "তবে",
-    "তা",
-    "তাঁকে",
-    "তাঁদের",
-    "তাঁর",
-    "তাঁরা",
-    "তাঁাহারা",
-    "তাই",
-    "তাও",
-    "তাকে",
-    "তাতে",
-    "তাদের",
-    "তার",
-    "তারপর",
-    "তারা",
-    "তারৈ",
-    "তাহলে",
-    "তাহা",
-    "তাহাতে",
-    "তাহার",
-    "তিনঐ",
-    "তিনি",
-    "তিনিও",
-    "তুমি",
-    "তুলে",
-    "তেমন",
-    "তো",
-    "তোমার",
-    "থাকবে",
-    "থাকবেন",
-    "থাকা",
-    "থাকায়",
-    "থাকে",
-    "থাকেন",
-    "থেকে",
-    "থেকেই",
-    "থেকেও",
-    "দিকে",
-    "দিতে",
-    "দিন",
-    "দিয়ে",
-    "দিয়েছে",
-    "দিয়েছেন",
-    "দিলেন",
-    "দু",
-    "দুই",
-    "দুটি",
-    "দুটো",
-    "দেওয়া",
-    "দেওয়ার",
-    "দেওয়া",
-    "দেখতে",
-    "দেখা",
-    "দেখে",
-    "দেন",
-    "দেয়",
-    "দ্বারা",
-    "ধরা",
-    "ধরে",
-    "ধামার",
-    "নতুন",
-    "নয়",
-    "না",
-    "নাই",
-    "নাকি",
-    "নাগাদ",
-    "নানা",
-    "নিজে",
-    "নিজেই",
-    "নিজেদের",
-    "নিজের",
-    "নিতে",
-    "নিয়ে",
-    "নিয়ে",
-    "নেই",
-    "নেওয়া",
-    "নেওয়ার",
-    "নেওয়া",
-    "নয়",
-    "পক্ষে",
-    "পর",
-    "পরে",
-    "পরেই",
-    "পরেও",
-    "পর্যন্ত",
-    "পাওয়া",
-    "পাচ",
-    "পারি",
-    "পারে",
-    "পারেন",
-    "পি",
-    "পেয়ে",
-    "পেয়্র্",
-    "প্রতি",
-    "প্রথম",
-    "প্রভৃতি",
-    "প্রযন্ত",
-    "প্রাথমিক",
-    "প্রায়",
-    "প্রায়",
-    "ফলে",
-    "ফিরে",
-    "ফের",
-    "বক্তব্য",
-    "বদলে",
-    "বন",
-    "বরং",
-    "বলতে",
-    "বলল",
-    "বললেন",
-    "বলা",
-    "বলে",
-    "বলেছেন",
-    "বলেন",
-    "বসে",
-    "বহু",
-    "বা",
-    "বাদে",
-    "বার",
-    "বি",
-    "বিনা",
-    "বিভিন্ন",
-    "বিশেষ",
-    "বিষয়টি",
-    "বেশ",
-    "বেশি",
-    "ব্যবহার",
-    "ব্যাপারে",
-    "ভাবে",
-    "ভাবেই",
-    "মতো",
-    "মতোই",
-    "মধ্যভাগে",
-    "মধ্যে",
-    "মধ্যেই",
-    "মধ্যেও",
-    "মনে",
-    "মাত্র",
-    "মাধ্যমে",
-    "মোট",
-    "মোটেই",
-    "যখন",
-    "যত",
-    "যতটা",
-    "যথেষ্ট",
-    "যদি",
-    "যদিও",
-    "যা",
-    "যাঁর",
-    "যাঁরা",
-    "যাওয়া",
-    "যাওয়ার",
-    "যাওয়া",
-    "যাকে",
-    "যাচ্ছে",
-    "যাতে",
-    "যাদের",
-    "যান",
-    "যাবে",
-    "যায়",
-    "যার",
-    "যারা",
-    "যিনি",
-    "যে",
-    "যেখানে",
-    "যেতে",
-    "যেন",
-    "যেমন",
-    "র",
-    "রকম",
-    "রয়েছে",
-    "রাখা",
-    "রেখে",
-    "লক্ষ",
-    "শুধু",
-    "শুরু",
-    "সঙ্গে",
-    "সঙ্গেও",
-    "সব",
-    "সবার",
-    "সমস্ত",
-    "সম্প্রতি",
-    "সহ",
-    "সহিত",
-    "সাধারণ",
-    "সামনে",
-    "সি",
-    "সুতরাং",
-    "সে",
-    "সেই",
-    "সেখান",
-    "সেখানে",
-    "সেটা",
-    "সেটাই",
-    "সেটাও",
-    "সেটি",
-    "স্পষ্ট",
-    "স্বয়ং",
-    "হইতে",
-    "হইবে",
-    "হইয়া",
-    "হওয়া",
-    "হওয়ায়",
-    "হওয়ার",
-    "হচ্ছে",
-    "হত",
-    "হতে",
-    "হতেই",
-    "হন",
-    "হবে",
-    "হবেন",
-    "হয়",
-    "হয়তো",
-    "হয়নি",
-    "হয়ে",
-    "হয়েই",
-    "হয়েছিল",
-    "হয়েছে",
-    "হয়েছেন",
-    "হল",
-    "হলে",
-    "হলেই",
-    "হলেও",
-    "হলো",
-    "হাজার",
-    "হিসাবে",
-    "হৈলে",
-    "হোক",
-    "হয়"
-  ];
-  var bre = [
-    "'blam",
-    "'d",
-    "'m",
-    "'r",
-    "'ta",
-    "'vat",
-    "'z",
-    "'zo",
-    "a",
-    "a:",
-    "aba",
-    "abalamour",
-    "abaoe",
-    "ac'hane",
-    "ac'hanoc'h",
-    "ac'hanomp",
-    "ac'hanon",
-    "ac'hanout",
-    "adal",
-    "adalek",
-    "adarre",
-    "ae",
-    "aec'h",
-    "aed",
-    "aemp",
-    "aen",
-    "aent",
-    "aes",
-    "afe",
-    "afec'h",
-    "afed",
-    "afemp",
-    "afen",
-    "afent",
-    "afes",
-    "ag",
-    "ah",
-    "aimp",
-    "aint",
-    "aio",
-    "aiou",
-    "aje",
-    "ajec'h",
-    "ajed",
-    "ajemp",
-    "ajen",
-    "ajent",
-    "ajes",
-    "al",
-    "alato",
-    "alies",
-    "aliesañ",
-    "alkent",
-    "all",
-    "allas",
-    "allo",
-    "allô",
-    "am",
-    "amañ",
-    "amzer",
-    "an",
-    "anezhañ",
-    "anezhe",
-    "anezhi",
-    "anezho",
-    "anvet",
-    "aon",
-    "aotren",
-    "ar",
-    "arall",
-    "araok",
-    "araoki",
-    "araozañ",
-    "araozo",
-    "araozoc'h",
-    "araozomp",
-    "araozon",
-    "araozor",
-    "araozout",
-    "arbenn",
-    "arre",
-    "atalek",
-    "atav",
-    "az",
-    "azalek",
-    "azirazañ",
-    "azirazi",
-    "azirazo",
-    "azirazoc'h",
-    "azirazomp",
-    "azirazon",
-    "azirazor",
-    "azirazout",
-    "b:",
-    "ba",
-    "ba'l",
-    "ba'n",
-    "ba'r",
-    "bad",
-    "bah",
-    "bal",
-    "ban",
-    "bar",
-    "bastañ",
-    "befe",
-    "bell",
-    "benaos",
-    "benn",
-    "bennag",
-    "bennak",
-    "bennozh",
-    "bep",
-    "bepred",
-    "berr",
-    "berzh",
-    "bet",
-    "betek",
-    "betra",
-    "bev",
-    "bevet",
-    "bez",
-    "bezañ",
-    "beze",
-    "bezent",
-    "bezet",
-    "bezh",
-    "bezit",
-    "bezomp",
-    "bihan",
-    "bije",
-    "biou",
-    "biskoazh",
-    "blam",
-    "bo",
-    "boa",
-    "bominapl",
-    "boudoudom",
-    "bouez",
-    "boull",
-    "boum",
-    "bout",
-    "bras",
-    "brasañ",
-    "brav",
-    "bravo",
-    "bremañ",
-    "bres",
-    "brokenn",
-    "bronn",
-    "brrr",
-    "brutal",
-    "buhezek",
-    "c'h:",
-    "c'haout",
-    "c'he",
-    "c'hem",
-    "c'herz",
-    "c'heñver",
-    "c'hichen",
-    "c'hiz",
-    "c'hoazh",
-    "c'horre",
-    "c'houde",
-    "c'houst",
-    "c'hreiz",
-    "c'hwec'h",
-    "c'hwec'hvet",
-    "c'hwezek",
-    "c'hwi",
-    "ch:",
-    "chaous",
-    "chik",
-    "chit",
-    "chom",
-    "chut",
-    "d'",
-    "d'al",
-    "d'an",
-    "d'ar",
-    "d'az",
-    "d'e",
-    "d'he",
-    "d'ho",
-    "d'hol",
-    "d'hon",
-    "d'hor",
-    "d'o",
-    "d'ober",
-    "d'ul",
-    "d'un",
-    "d'ur",
-    "d:",
-    "da",
-    "dak",
-    "daka",
-    "dal",
-    "dalbezh",
-    "dalc'hmat",
-    "dalit",
-    "damdost",
-    "damheñvel",
-    "damm",
-    "dan",
-    "danvez",
-    "dao",
-    "daol",
-    "daonet",
-    "daou",
-    "daoust",
-    "daouzek",
-    "daouzekvet",
-    "darn",
-    "dastrewiñ",
-    "dav",
-    "davedoc'h",
-    "davedomp",
-    "davedon",
-    "davedor",
-    "davedout",
-    "davet",
-    "davetañ",
-    "davete",
-    "daveti",
-    "daveto",
-    "defe",
-    "dehou",
-    "dek",
-    "dekvet",
-    "den",
-    "deoc'h",
-    "deomp",
-    "deor",
-    "derc'hel",
-    "deus",
-    "dez",
-    "deze",
-    "dezhañ",
-    "dezhe",
-    "dezhi",
-    "dezho",
-    "di",
-    "diabarzh",
-    "diagent",
-    "diar",
-    "diaraok",
-    "diavaez",
-    "dibaoe",
-    "dibaot",
-    "dibar",
-    "dic'halañ",
-    "didiac'h",
-    "dienn",
-    "difer",
-    "diganeoc'h",
-    "diganeomp",
-    "diganeor",
-    "diganimp",
-    "diganin",
-    "diganit",
-    "digant",
-    "digantañ",
-    "digante",
-    "diganti",
-    "diganto",
-    "digemmesk",
-    "diget",
-    "digor",
-    "digoret",
-    "dija",
-    "dije",
-    "dimp",
-    "din",
-    "dinaou",
-    "dindan",
-    "dindanañ",
-    "dindani",
-    "dindano",
-    "dindanoc'h",
-    "dindanomp",
-    "dindanon",
-    "dindanor",
-    "dindanout",
-    "dioutañ",
-    "dioute",
-    "diouti",
-    "diouto",
-    "diouzh",
-    "diouzhin",
-    "diouzhit",
-    "diouzhoc'h",
-    "diouzhomp",
-    "diouzhor",
-    "dirak",
-    "dirazañ",
-    "dirazi",
-    "dirazo",
-    "dirazoc'h",
-    "dirazomp",
-    "dirazon",
-    "dirazor",
-    "dirazout",
-    "disheñvel",
-    "dispar",
-    "distank",
-    "dister",
-    "disterañ",
-    "disterig",
-    "distro",
-    "dit",
-    "divaez",
-    "diwar",
-    "diwezhat",
-    "diwezhañ",
-    "do",
-    "doa",
-    "doare",
-    "dont",
-    "dost",
-    "doue",
-    "douetus",
-    "douez",
-    "doug",
-    "draou",
-    "draoñ",
-    "dre",
-    "drede",
-    "dreist",
-    "dreistañ",
-    "dreisti",
-    "dreisto",
-    "dreistoc'h",
-    "dreistomp",
-    "dreiston",
-    "dreistor",
-    "dreistout",
-    "drek",
-    "dreñv",
-    "dring",
-    "dro",
-    "du",
-    "e",
-    "e:",
-    "eas",
-    "ebet",
-    "ec'h",
-    "edo",
-    "edoc'h",
-    "edod",
-    "edomp",
-    "edon",
-    "edont",
-    "edos",
-    "eer",
-    "eeun",
-    "efed",
-    "egedoc'h",
-    "egedomp",
-    "egedon",
-    "egedor",
-    "egedout",
-    "eget",
-    "egetañ",
-    "egete",
-    "egeti",
-    "egeto",
-    "eh",
-    "eil",
-    "eilvet",
-    "eizh",
-    "eizhvet",
-    "ejoc'h",
-    "ejod",
-    "ejomp",
-    "ejont",
-    "ejout",
-    "el",
-    "em",
-    "emaint",
-    "emaoc'h",
-    "emaomp",
-    "emaon",
-    "emaout",
-    "emañ",
-    "eme",
-    "emeur",
-    "emezañ",
-    "emezi",
-    "emezo",
-    "emezoc'h",
-    "emezomp",
-    "emezon",
-    "emezout",
-    "emporzhiañ",
-    "en",
-    "end",
-    "endan",
-    "endra",
-    "enep",
-    "ennañ",
-    "enni",
-    "enno",
-    "ennoc'h",
-    "ennomp",
-    "ennon",
-    "ennor",
-    "ennout",
-    "enta",
-    "eo",
-    "eomp",
-    "eont",
-    "eor",
-    "eot",
-    "er",
-    "erbet",
-    "erfin",
-    "esa",
-    "esae",
-    "espar",
-    "estlamm",
-    "estrañj",
-    "eta",
-    "etre",
-    "etreoc'h",
-    "etrezo",
-    "etrezoc'h",
-    "etrezomp",
-    "etrezor",
-    "euh",
-    "eur",
-    "eus",
-    "evel",
-    "evelato",
-    "eveldoc'h",
-    "eveldomp",
-    "eveldon",
-    "eveldor",
-    "eveldout",
-    "evelkent",
-    "eveltañ",
-    "evelte",
-    "evelti",
-    "evelto",
-    "evidoc'h",
-    "evidomp",
-    "evidon",
-    "evidor",
-    "evidout",
-    "evit",
-    "evitañ",
-    "evite",
-    "eviti",
-    "evito",
-    "ez",
-    "eñ",
-    "f:",
-    "fac'h",
-    "fall",
-    "fed",
-    "feiz",
-    "fenn",
-    "fezh",
-    "fin",
-    "finsalvet",
-    "foei",
-    "fouilhezañ",
-    "g:",
-    "gallout",
-    "ganeoc'h",
-    "ganeomp",
-    "ganin",
-    "ganit",
-    "gant",
-    "gantañ",
-    "ganti",
-    "ganto",
-    "gaout",
-    "gast",
-    "gein",
-    "gellout",
-    "genndost",
-    "gentañ",
-    "ger",
-    "gerz",
-    "get",
-    "geñver",
-    "gichen",
-    "gin",
-    "giz",
-    "glan",
-    "gloev",
-    "goll",
-    "gorre",
-    "goude",
-    "gouez",
-    "gouezit",
-    "gouezomp",
-    "goulz",
-    "gounnar",
-    "gour",
-    "goust",
-    "gouze",
-    "gouzout",
-    "gra",
-    "grak",
-    "grec'h",
-    "greiz",
-    "grenn",
-    "greomp",
-    "grit",
-    "groñs",
-    "gutez",
-    "gwall",
-    "gwashoc'h",
-    "gwazh",
-    "gwech",
-    "gwechall",
-    "gwechoù",
-    "gwell",
-    "gwezh",
-    "gwezhall",
-    "gwezharall",
-    "gwezhoù",
-    "gwig",
-    "gwirionez",
-    "gwitibunan",
-    "gêr",
-    "h:",
-    "ha",
-    "hag",
-    "han",
-    "hanter",
-    "hanterc'hantad",
-    "hanterkantved",
-    "harz",
-    "hañ",
-    "hañval",
-    "he",
-    "hebioù",
-    "hec'h",
-    "hei",
-    "hein",
-    "hem",
-    "hemañ",
-    "hen",
-    "hend",
-    "henhont",
-    "henn",
-    "hennezh",
-    "hent",
-    "hep",
-    "hervez",
-    "hervezañ",
-    "hervezi",
-    "hervezo",
-    "hervezoc'h",
-    "hervezomp",
-    "hervezon",
-    "hervezor",
-    "hervezout",
-    "heul",
-    "heuliañ",
-    "hevelep",
-    "heverk",
-    "heñvel",
-    "heñvelat",
-    "heñvelañ",
-    "heñveliñ",
-    "heñveloc'h",
-    "heñvelout",
-    "hi",
-    "hilh",
-    "hini",
-    "hirie",
-    "hirio",
-    "hiziv",
-    "hiziviken",
-    "ho",
-    "hoaliñ",
-    "hoc'h",
-    "hogen",
-    "hogos",
-    "hogozik",
-    "hol",
-    "holl",
-    "holà",
-    "homañ",
-    "hon",
-    "honhont",
-    "honnezh",
-    "hont",
-    "hop",
-    "hopala",
-    "hor",
-    "hou",
-    "houp",
-    "hudu",
-    "hue",
-    "hui",
-    "hum",
-    "hurrah",
-    "i",
-    "i:",
-    "in",
-    "int",
-    "is",
-    "ispisial",
-    "isurzhiet",
-    "it",
-    "ivez",
-    "izelañ",
-    "j:",
-    "just",
-    "k:",
-    "kae",
-    "kaer",
-    "kalon",
-    "kalz",
-    "kant",
-    "kaout",
-    "kar",
-    "kazi",
-    "keid",
-    "kein",
-    "keit",
-    "kel",
-    "kellies",
-    "keloù",
-    "kement",
-    "ken",
-    "kenkent",
-    "kenkoulz",
-    "kenment",
-    "kent",
-    "kentañ",
-    "kentizh",
-    "kentoc'h",
-    "kentre",
-    "ker",
-    "kerkent",
-    "kerz",
-    "kerzh",
-    "ket",
-    "keta",
-    "keñver",
-    "keñverel",
-    "keñverius",
-    "kichen",
-    "kichenik",
-    "kit",
-    "kiz",
-    "klak",
-    "klek",
-    "klik",
-    "komprenet",
-    "komz",
-    "kont",
-    "korf",
-    "korre",
-    "koulskoude",
-    "koulz",
-    "koust",
-    "krak",
-    "krampouezh",
-    "krec'h",
-    "kreiz",
-    "kuit",
-    "kwir",
-    "l:",
-    "la",
-    "laez",
-    "laoskel",
-    "laouen",
-    "lavar",
-    "lavaret",
-    "lavarout",
-    "lec'h",
-    "lein",
-    "leizh",
-    "lerc'h",
-    "leun",
-    "leuskel",
-    "lew",
-    "lies",
-    "liesañ",
-    "lod",
-    "lusk",
-    "lâr",
-    "lârout",
-    "m:",
-    "ma",
-    "ma'z",
-    "mac'h",
-    "mac'hat",
-    "mac'hañ",
-    "mac'hoc'h",
-    "mad",
-    "maez",
-    "maksimal",
-    "mann",
-    "mar",
-    "mard",
-    "marg",
-    "marzh",
-    "mat",
-    "mañ",
-    "me",
-    "memes",
-    "memestra",
-    "merkapl",
-    "mersi",
-    "mes",
-    "mesk",
-    "met",
-    "meur",
-    "mil",
-    "minimal",
-    "moan",
-    "moaniaat",
-    "mod",
-    "mont",
-    "mout",
-    "mui",
-    "muiañ",
-    "muioc'h",
-    "n",
-    "n'",
-    "n:",
-    "na",
-    "nag",
-    "naontek",
-    "naturel",
-    "nav",
-    "navet",
-    "ne",
-    "nebeudig",
-    "nebeut",
-    "nebeutañ",
-    "nebeutoc'h",
-    "neketa",
-    "nemedoc'h",
-    "nemedomp",
-    "nemedon",
-    "nemedor",
-    "nemedout",
-    "nemet",
-    "nemetañ",
-    "nemete",
-    "nemeti",
-    "nemeto",
-    "nemeur",
-    "neoac'h",
-    "nepell",
-    "nerzh",
-    "nes",
-    "neseser",
-    "netra",
-    "neubeudoù",
-    "neuhe",
-    "neuze",
-    "nevez",
-    "newazh",
-    "nez",
-    "ni",
-    "nikun",
-    "niverus",
-    "nul",
-    "o",
-    "o:",
-    "oa",
-    "oac'h",
-    "oad",
-    "oamp",
-    "oan",
-    "oant",
-    "oar",
-    "oas",
-    "ober",
-    "oc'h",
-    "oc'ho",
-    "oc'hola",
-    "oc'hpenn",
-    "oh",
-    "ohe",
-    "ollé",
-    "olole",
-    "olé",
-    "omp",
-    "on",
-    "ordin",
-    "ordinal",
-    "ouejoc'h",
-    "ouejod",
-    "ouejomp",
-    "ouejont",
-    "ouejout",
-    "ouek",
-    "ouezas",
-    "ouezi",
-    "ouezimp",
-    "ouezin",
-    "ouezint",
-    "ouezis",
-    "ouezo",
-    "ouezoc'h",
-    "ouezor",
-    "ouf",
-    "oufe",
-    "oufec'h",
-    "oufed",
-    "oufemp",
-    "oufen",
-    "oufent",
-    "oufes",
-    "ouie",
-    "ouiec'h",
-    "ouied",
-    "ouiemp",
-    "ouien",
-    "ouient",
-    "ouies",
-    "ouije",
-    "ouijec'h",
-    "ouijed",
-    "ouijemp",
-    "ouijen",
-    "ouijent",
-    "ouijes",
-    "out",
-    "outañ",
-    "outi",
-    "outo",
-    "ouzer",
-    "ouzh",
-    "ouzhin",
-    "ouzhit",
-    "ouzhoc'h",
-    "ouzhomp",
-    "ouzhor",
-    "ouzhpenn",
-    "ouzhpennik",
-    "ouzoc'h",
-    "ouzomp",
-    "ouzon",
-    "ouzont",
-    "ouzout",
-    "p'",
-    "p:",
-    "pa",
-    "pad",
-    "padal",
-    "paf",
-    "pan",
-    "panevedeoc'h",
-    "panevedo",
-    "panevedomp",
-    "panevedon",
-    "panevedout",
-    "panevet",
-    "panevetañ",
-    "paneveti",
-    "pas",
-    "paseet",
-    "pe",
-    "peadra",
-    "peder",
-    "pedervet",
-    "pedervetvet",
-    "pefe",
-    "pegeit",
-    "pegement",
-    "pegen",
-    "pegiz",
-    "pegoulz",
-    "pehini",
-    "pelec'h",
-    "pell",
-    "pemod",
-    "pemp",
-    "pempved",
-    "pemzek",
-    "penaos",
-    "penn",
-    "peogwir",
-    "peotramant",
-    "pep",
-    "perak",
-    "perc'hennañ",
-    "pergen",
-    "permetiñ",
-    "peseurt",
-    "pet",
-    "petiaoul",
-    "petoare",
-    "petra",
-    "peur",
-    "peurgetket",
-    "peurheñvel",
-    "peurliesañ",
-    "peurvuiañ",
-    "peus",
-    "peustost",
-    "peuz",
-    "pevar",
-    "pevare",
-    "pevarevet",
-    "pevarzek",
-    "pez",
-    "peze",
-    "pezh",
-    "pff",
-    "pfft",
-    "pfut",
-    "picher",
-    "pif",
-    "pife",
-    "pign",
-    "pije",
-    "pikol",
-    "pitiaoul",
-    "piv",
-    "plaouf",
-    "plok",
-    "plouf",
-    "po",
-    "poa",
-    "poelladus",
-    "pof",
-    "pok",
-    "posupl",
-    "pouah",
-    "pourc'henn",
-    "prest",
-    "prestik",
-    "prim",
-    "prin",
-    "provostapl",
-    "pst",
-    "pu",
-    "pur",
-    "r:",
-    "ra",
-    "rae",
-    "raec'h",
-    "raed",
-    "raemp",
-    "raen",
-    "raent",
-    "raes",
-    "rafe",
-    "rafec'h",
-    "rafed",
-    "rafemp",
-    "rafen",
-    "rafent",
-    "rafes",
-    "rag",
-    "raimp",
-    "raint",
-    "raio",
-    "raje",
-    "rajec'h",
-    "rajed",
-    "rajemp",
-    "rajen",
-    "rajent",
-    "rajes",
-    "rak",
-    "ral",
-    "ran",
-    "rankout",
-    "raok",
-    "razh",
-    "re",
-    "reas",
-    "reer",
-    "regennoù",
-    "reiñ",
-    "rejoc'h",
-    "rejod",
-    "rejomp",
-    "rejont",
-    "rejout",
-    "rener",
-    "rentañ",
-    "reoc'h",
-    "reomp",
-    "reont",
-    "reor",
-    "reot",
-    "resis",
-    "ret",
-    "reve",
-    "rez",
-    "ri",
-    "rik",
-    "rin",
-    "ris",
-    "rit",
-    "rouez",
-    "s:",
-    "sac'h",
-    "sant",
-    "sav",
-    "sañset",
-    "se",
-    "sed",
-    "seitek",
-    "seizh",
-    "seizhvet",
-    "sell",
-    "sellit",
-    "ser",
-    "setu",
-    "seul",
-    "seurt",
-    "siwazh",
-    "skignañ",
-    "skoaz",
-    "skouer",
-    "sort",
-    "souden",
-    "souvitañ",
-    "soñj",
-    "speriañ",
-    "spririñ",
-    "stad",
-    "stlabezañ",
-    "stop",
-    "stranañ",
-    "strewiñ",
-    "strishaat",
-    "stumm",
-    "sujed",
-    "surtoud",
-    "t:",
-    "ta",
-    "taer",
-    "tailh",
-    "tak",
-    "tal",
-    "talvoudegezh",
-    "tamm",
-    "tanav",
-    "taol",
-    "te",
-    "techet",
-    "teir",
-    "teirvet",
-    "telt",
-    "teltenn",
-    "teus",
-    "teut",
-    "teuteu",
-    "ti",
-    "tik",
-    "toa",
-    "tok",
-    "tost",
-    "tostig",
-    "toud",
-    "touesk",
-    "touez",
-    "toull",
-    "tra",
-    "trantenn",
-    "traoñ",
-    "trawalc'h",
-    "tre",
-    "trede",
-    "tregont",
-    "tremenet",
-    "tri",
-    "trivet",
-    "triwec'h",
-    "trizek",
-    "tro",
-    "trugarez",
-    "trumm",
-    "tsoin",
-    "tsouin",
-    "tu",
-    "tud",
-    "u:",
-    "ugent",
-    "uhel",
-    "uhelañ",
-    "ul",
-    "un",
-    "unan",
-    "unanez",
-    "unanig",
-    "unnek",
-    "unnekvet",
-    "ur",
-    "urzh",
-    "us",
-    "v:",
-    "va",
-    "vale",
-    "van",
-    "vare",
-    "vat",
-    "vefe",
-    "vefec'h",
-    "vefed",
-    "vefemp",
-    "vefen",
-    "vefent",
-    "vefes",
-    "vesk",
-    "vete",
-    "vez",
-    "vezan",
-    "vezañ",
-    "veze",
-    "vezec'h",
-    "vezed",
-    "vezemp",
-    "vezen",
-    "vezent",
-    "vezer",
-    "vezes",
-    "vezez",
-    "vezit",
-    "vezomp",
-    "vezont",
-    "vi",
-    "vihan",
-    "vihanañ",
-    "vije",
-    "vijec'h",
-    "vijed",
-    "vijemp",
-    "vijen",
-    "vijent",
-    "vijes",
-    "viken",
-    "vimp",
-    "vin",
-    "vint",
-    "vior",
-    "viot",
-    "virviken",
-    "viskoazh",
-    "vlan",
-    "vlaou",
-    "vo",
-    "vod",
-    "voe",
-    "voec'h",
-    "voed",
-    "voemp",
-    "voen",
-    "voent",
-    "voes",
-    "vont",
-    "vostapl",
-    "vrac'h",
-    "vrasañ",
-    "vremañ",
-    "w:",
-    "walc'h",
-    "war",
-    "warnañ",
-    "warni",
-    "warno",
-    "warnoc'h",
-    "warnomp",
-    "warnon",
-    "warnor",
-    "warnout",
-    "wazh",
-    "wech",
-    "wechoù",
-    "well",
-    "y:",
-    "you",
-    "youadenn",
-    "youc'hadenn",
-    "youc'hou",
-    "z:",
-    "za",
-    "zan",
-    "zaw",
-    "zeu",
-    "zi",
-    "ziar",
-    "zigarez",
-    "ziget",
-    "zindan",
-    "zioc'h",
-    "ziouzh",
-    "zirak",
-    "zivout",
-    "ziwar",
-    "ziwezhañ",
-    "zo",
-    "zoken",
-    "zokenoc'h",
-    "zouesk",
-    "zouez",
-    "zro",
-    "zu"
-  ];
-  var bul = [
-    "а",
-    "автентичен",
-    "аз",
-    "ако",
-    "ала",
-    "бе",
-    "без",
-    "беше",
-    "би",
-    "бивш",
-    "бивша",
-    "бившо",
-    "бил",
-    "била",
-    "били",
-    "било",
-    "благодаря",
-    "близо",
-    "бъдат",
-    "бъде",
-    "бяха",
-    "в",
-    "вас",
-    "ваш",
-    "ваша",
-    "вероятно",
-    "вече",
-    "взема",
-    "ви",
-    "вие",
-    "винаги",
-    "внимава",
-    "време",
-    "все",
-    "всеки",
-    "всички",
-    "всичко",
-    "всяка",
-    "във",
-    "въпреки",
-    "върху",
-    "г",
-    "ги",
-    "главен",
-    "главна",
-    "главно",
-    "глас",
-    "го",
-    "година",
-    "години",
-    "годишен",
-    "д",
-    "да",
-    "дали",
-    "два",
-    "двама",
-    "двамата",
-    "две",
-    "двете",
-    "ден",
-    "днес",
-    "дни",
-    "до",
-    "добра",
-    "добре",
-    "добро",
-    "добър",
-    "докато",
-    "докога",
-    "дори",
-    "досега",
-    "доста",
-    "друг",
-    "друга",
-    "други",
-    "е",
-    "евтин",
-    "едва",
-    "един",
-    "една",
-    "еднаква",
-    "еднакви",
-    "еднакъв",
-    "едно",
-    "екип",
-    "ето",
-    "живот",
-    "за",
-    "забавям",
-    "зад",
-    "заедно",
-    "заради",
-    "засега",
-    "заспал",
-    "затова",
-    "защо",
-    "защото",
-    "и",
-    "из",
-    "или",
-    "им",
-    "има",
-    "имат",
-    "иска",
-    "й",
-    "каза",
-    "как",
-    "каква",
-    "какво",
-    "както",
-    "какъв",
-    "като",
-    "кога",
-    "когато",
-    "което",
-    "които",
-    "кой",
-    "който",
-    "колко",
-    "която",
-    "къде",
-    "където",
-    "към",
-    "лесен",
-    "лесно",
-    "ли",
-    "лош",
-    "м",
-    "май",
-    "малко",
-    "ме",
-    "между",
-    "мек",
-    "мен",
-    "месец",
-    "ми",
-    "много",
-    "мнозина",
-    "мога",
-    "могат",
-    "може",
-    "мокър",
-    "моля",
-    "момента",
-    "му",
-    "н",
-    "на",
-    "над",
-    "назад",
-    "най",
-    "направи",
-    "напред",
-    "например",
-    "нас",
-    "не",
-    "него",
-    "нещо",
-    "нея",
-    "ни",
-    "ние",
-    "никой",
-    "нито",
-    "нищо",
-    "но",
-    "нов",
-    "нова",
-    "нови",
-    "новина",
-    "някои",
-    "някой",
-    "няколко",
-    "няма",
-    "обаче",
-    "около",
-    "освен",
-    "особено",
-    "от",
-    "отгоре",
-    "отново",
-    "още",
-    "пак",
-    "по",
-    "повече",
-    "повечето",
-    "под",
-    "поне",
-    "поради",
-    "после",
-    "почти",
-    "прави",
-    "пред",
-    "преди",
-    "през",
-    "при",
-    "пък",
-    "първата",
-    "първи",
-    "първо",
-    "пъти",
-    "равен",
-    "равна",
-    "с",
-    "са",
-    "сам",
-    "само",
-    "се",
-    "сега",
-    "си",
-    "син",
-    "скоро",
-    "след",
-    "следващ",
-    "сме",
-    "смях",
-    "според",
-    "сред",
-    "срещу",
-    "сте",
-    "съм",
-    "със",
-    "също",
-    "т",
-    "т.н.",
-    "тази",
-    "така",
-    "такива",
-    "такъв",
-    "там",
-    "твой",
-    "те",
-    "тези",
-    "ти",
-    "то",
-    "това",
-    "тогава",
-    "този",
-    "той",
-    "толкова",
-    "точно",
-    "три",
-    "трябва",
-    "тук",
-    "тъй",
-    "тя",
-    "тях",
-    "у",
-    "утре",
-    "харесва",
-    "хиляди",
-    "ч",
-    "часа",
-    "че",
-    "често",
-    "чрез",
-    "ще",
-    "щом",
-    "юмрук",
-    "я",
-    "як"
-  ];
-  var cat = [
-    "a",
-    "abans",
-    "ací",
-    "ah",
-    "així",
-    "això",
-    "al",
-    "aleshores",
-    "algun",
-    "alguna",
-    "algunes",
-    "alguns",
-    "alhora",
-    "allà",
-    "allí",
-    "allò",
-    "als",
-    "altra",
-    "altre",
-    "altres",
-    "amb",
-    "ambdues",
-    "ambdós",
-    "apa",
-    "aquell",
-    "aquella",
-    "aquelles",
-    "aquells",
-    "aquest",
-    "aquesta",
-    "aquestes",
-    "aquests",
-    "aquí",
-    "baix",
-    "cada",
-    "cadascuna",
-    "cadascunes",
-    "cadascuns",
-    "cadascú",
-    "com",
-    "contra",
-    "d'un",
-    "d'una",
-    "d'unes",
-    "d'uns",
-    "dalt",
-    "de",
-    "del",
-    "dels",
-    "des",
-    "després",
-    "dins",
-    "dintre",
-    "donat",
-    "doncs",
-    "durant",
-    "e",
-    "eh",
-    "el",
-    "els",
-    "em",
-    "en",
-    "encara",
-    "ens",
-    "entre",
-    "eren",
-    "es",
-    "esta",
-    "estaven",
-    "esteu",
-    "està",
-    "estàvem",
-    "estàveu",
-    "et",
-    "etc",
-    "ets",
-    "fins",
-    "fora",
-    "gairebé",
-    "ha",
-    "han",
-    "has",
-    "havia",
-    "he",
-    "hem",
-    "heu",
-    "hi",
-    "ho",
-    "i",
-    "igual",
-    "iguals",
-    "ja",
-    "l'hi",
-    "la",
-    "les",
-    "li",
-    "li'n",
-    "llavors",
-    "m'he",
-    "ma",
-    "mal",
-    "malgrat",
-    "mateix",
-    "mateixa",
-    "mateixes",
-    "mateixos",
-    "me",
-    "mentre",
-    "meu",
-    "meus",
-    "meva",
-    "meves",
-    "molt",
-    "molta",
-    "moltes",
-    "molts",
-    "mon",
-    "mons",
-    "més",
-    "n'he",
-    "n'hi",
-    "ne",
-    "ni",
-    "no",
-    "nogensmenys",
-    "només",
-    "nosaltres",
-    "nostra",
-    "nostre",
-    "nostres",
-    "o",
-    "oh",
-    "oi",
-    "on",
-    "pas",
-    "pel",
-    "pels",
-    "per",
-    "perquè",
-    "però",
-    "poc",
-    "poca",
-    "pocs",
-    "poques",
-    "potser",
-    "propi",
-    "qual",
-    "quals",
-    "quan",
-    "quant",
-    "que",
-    "quelcom",
-    "qui",
-    "quin",
-    "quina",
-    "quines",
-    "quins",
-    "què",
-    "s'ha",
-    "s'han",
-    "sa",
-    "semblant",
-    "semblants",
-    "ses",
-    "seu",
-    "seus",
-    "seva",
-    "seves",
-    "si",
-    "sobre",
-    "sobretot",
-    "solament",
-    "sols",
-    "son",
-    "sons",
-    "sota",
-    "sou",
-    "sóc",
-    "són",
-    "t'ha",
-    "t'han",
-    "t'he",
-    "ta",
-    "tal",
-    "també",
-    "tampoc",
-    "tan",
-    "tant",
-    "tanta",
-    "tantes",
-    "teu",
-    "teus",
-    "teva",
-    "teves",
-    "ton",
-    "tons",
-    "tot",
-    "tota",
-    "totes",
-    "tots",
-    "un",
-    "una",
-    "unes",
-    "uns",
-    "us",
-    "va",
-    "vaig",
-    "vam",
-    "van",
-    "vas",
-    "veu",
-    "vosaltres",
-    "vostra",
-    "vostre",
-    "vostres",
-    "érem",
-    "éreu",
-    "és"
-  ];
-  var zho = [
-    "的",
-    "地",
-    "得",
-    "和",
-    "跟",
-    "与",
-    "及",
-    "向",
-    "并",
-    "等",
-    "更",
-    "已",
-    "含",
-    "做",
-    "我",
-    "你",
-    "他",
-    "她",
-    "们",
-    "某",
-    "该",
-    "各",
-    "每",
-    "这",
-    "那",
-    "哪",
-    "什",
-    "么",
-    "谁",
-    "年",
-    "月",
-    "日",
-    "时",
-    "分",
-    "秒",
-    "几",
-    "多",
-    "来",
-    "在",
-    "就",
-    "又",
-    "很",
-    "呢",
-    "吧",
-    "吗",
-    "了",
-    "嘛",
-    "哇",
-    "儿",
-    "哼",
-    "啊",
-    "嗯",
-    "是",
-    "着",
-    "都",
-    "不",
-    "说",
-    "也",
-    "看",
-    "把",
-    "还",
-    "个",
-    "有",
-    "小",
-    "到",
-    "一",
-    "为",
-    "中",
-    "于",
-    "对",
-    "会",
-    "之",
-    "第",
-    "此",
-    "或",
-    "共",
-    "按",
-    "请"
-  ];
-  var hrv = [
-    "a",
-    "ako",
-    "ali",
-    "bi",
-    "bih",
-    "bila",
-    "bili",
-    "bilo",
-    "bio",
-    "bismo",
-    "biste",
-    "biti",
-    "bumo",
-    "da",
-    "do",
-    "duž",
-    "ga",
-    "hoće",
-    "hoćemo",
-    "hoćete",
-    "hoćeš",
-    "hoću",
-    "i",
-    "iako",
-    "ih",
-    "ili",
-    "iz",
-    "ja",
-    "je",
-    "jedna",
-    "jedne",
-    "jedno",
-    "jer",
-    "jesam",
-    "jesi",
-    "jesmo",
-    "jest",
-    "jeste",
-    "jesu",
-    "jim",
-    "joj",
-    "još",
-    "ju",
-    "kada",
-    "kako",
-    "kao",
-    "koja",
-    "koje",
-    "koji",
-    "kojima",
-    "koju",
-    "kroz",
-    "li",
-    "me",
-    "mene",
-    "meni",
-    "mi",
-    "mimo",
-    "moj",
-    "moja",
-    "moje",
-    "mu",
-    "na",
-    "nad",
-    "nakon",
-    "nam",
-    "nama",
-    "nas",
-    "naš",
-    "naša",
-    "naše",
-    "našeg",
-    "ne",
-    "nego",
-    "neka",
-    "neki",
-    "nekog",
-    "neku",
-    "nema",
-    "netko",
-    "neće",
-    "nećemo",
-    "nećete",
-    "nećeš",
-    "neću",
-    "nešto",
-    "ni",
-    "nije",
-    "nikoga",
-    "nikoje",
-    "nikoju",
-    "nisam",
-    "nisi",
-    "nismo",
-    "niste",
-    "nisu",
-    "njega",
-    "njegov",
-    "njegova",
-    "njegovo",
-    "njemu",
-    "njezin",
-    "njezina",
-    "njezino",
-    "njih",
-    "njihov",
-    "njihova",
-    "njihovo",
-    "njim",
-    "njima",
-    "njoj",
-    "nju",
-    "no",
-    "o",
-    "od",
-    "odmah",
-    "on",
-    "ona",
-    "oni",
-    "ono",
-    "ova",
-    "pa",
-    "pak",
-    "po",
-    "pod",
-    "pored",
-    "prije",
-    "s",
-    "sa",
-    "sam",
-    "samo",
-    "se",
-    "sebe",
-    "sebi",
-    "si",
-    "smo",
-    "ste",
-    "su",
-    "sve",
-    "svi",
-    "svog",
-    "svoj",
-    "svoja",
-    "svoje",
-    "svom",
-    "ta",
-    "tada",
-    "taj",
-    "tako",
-    "te",
-    "tebe",
-    "tebi",
-    "ti",
-    "to",
-    "toj",
-    "tome",
-    "tu",
-    "tvoj",
-    "tvoja",
-    "tvoje",
-    "u",
-    "uz",
-    "vam",
-    "vama",
-    "vas",
-    "vaš",
-    "vaša",
-    "vaše",
-    "već",
-    "vi",
-    "vrlo",
-    "za",
-    "zar",
-    "će",
-    "ćemo",
-    "ćete",
-    "ćeš",
-    "ću",
-    "što"
-  ];
-  var ces = [
-    "a",
-    "aby",
-    "ahoj",
-    "aj",
-    "ale",
-    "anebo",
-    "ani",
-    "ano",
-    "asi",
-    "aspoň",
-    "atd",
-    "atp",
-    "ačkoli",
-    "až",
-    "bez",
-    "beze",
-    "blízko",
-    "bohužel",
-    "brzo",
-    "bude",
-    "budem",
-    "budeme",
-    "budete",
-    "budeš",
-    "budou",
-    "budu",
-    "by",
-    "byl",
-    "byla",
-    "byli",
-    "bylo",
-    "byly",
-    "bys",
-    "být",
-    "během",
-    "chce",
-    "chceme",
-    "chcete",
-    "chceš",
-    "chci",
-    "chtít",
-    "chtějí",
-    "chut'",
-    "chuti",
-    "co",
-    "což",
-    "cz",
-    "daleko",
-    "další",
-    "den",
-    "deset",
-    "devatenáct",
-    "devět",
-    "dnes",
-    "do",
-    "dobrý",
-    "docela",
-    "dva",
-    "dvacet",
-    "dvanáct",
-    "dvě",
-    "dál",
-    "dále",
-    "děkovat",
-    "děkujeme",
-    "děkuji",
-    "ho",
-    "hodně",
-    "i",
-    "jak",
-    "jakmile",
-    "jako",
-    "jakož",
-    "jde",
-    "je",
-    "jeden",
-    "jedenáct",
-    "jedna",
-    "jedno",
-    "jednou",
-    "jedou",
-    "jeho",
-    "jehož",
-    "jej",
-    "jejich",
-    "její",
-    "jelikož",
-    "jemu",
-    "jen",
-    "jenom",
-    "jestli",
-    "jestliže",
-    "ještě",
-    "jež",
-    "ji",
-    "jich",
-    "jimi",
-    "jinak",
-    "jiné",
-    "již",
-    "jsem",
-    "jseš",
-    "jsi",
-    "jsme",
-    "jsou",
-    "jste",
-    "já",
-    "jí",
-    "jím",
-    "jíž",
-    "k",
-    "kam",
-    "kde",
-    "kdo",
-    "kdy",
-    "když",
-    "ke",
-    "kolik",
-    "kromě",
-    "kterou",
-    "která",
-    "které",
-    "který",
-    "kteří",
-    "kvůli",
-    "mají",
-    "mezi",
-    "mi",
-    "mne",
-    "mnou",
-    "mně",
-    "moc",
-    "mohl",
-    "mohou",
-    "moje",
-    "moji",
-    "možná",
-    "musí",
-    "my",
-    "má",
-    "málo",
-    "mám",
-    "máme",
-    "máte",
-    "máš",
-    "mé",
-    "mí",
-    "mít",
-    "mě",
-    "můj",
-    "může",
-    "na",
-    "nad",
-    "nade",
-    "napište",
-    "naproti",
-    "načež",
-    "naše",
-    "naši",
-    "ne",
-    "nebo",
-    "nebyl",
-    "nebyla",
-    "nebyli",
-    "nebyly",
-    "nedělají",
-    "nedělá",
-    "nedělám",
-    "neděláme",
-    "neděláte",
-    "neděláš",
-    "neg",
-    "nejsi",
-    "nejsou",
-    "nemají",
-    "nemáme",
-    "nemáte",
-    "neměl",
-    "není",
-    "nestačí",
-    "nevadí",
-    "než",
-    "nic",
-    "nich",
-    "nimi",
-    "nové",
-    "nový",
-    "nula",
-    "nám",
-    "námi",
-    "nás",
-    "náš",
-    "ním",
-    "ně",
-    "něco",
-    "nějak",
-    "někde",
-    "někdo",
-    "němu",
-    "němuž",
-    "o",
-    "od",
-    "ode",
-    "on",
-    "ona",
-    "oni",
-    "ono",
-    "ony",
-    "osm",
-    "osmnáct",
-    "pak",
-    "patnáct",
-    "po",
-    "pod",
-    "podle",
-    "pokud",
-    "potom",
-    "pouze",
-    "pozdě",
-    "pořád",
-    "pravé",
-    "pro",
-    "prostě",
-    "prosím",
-    "proti",
-    "proto",
-    "protože",
-    "proč",
-    "první",
-    "pta",
-    "pět",
-    "před",
-    "přes",
-    "přese",
-    "při",
-    "přičemž",
-    "re",
-    "rovně",
-    "s",
-    "se",
-    "sedm",
-    "sedmnáct",
-    "si",
-    "skoro",
-    "smí",
-    "smějí",
-    "snad",
-    "spolu",
-    "sta",
-    "sto",
-    "strana",
-    "sté",
-    "své",
-    "svých",
-    "svým",
-    "svými",
-    "ta",
-    "tady",
-    "tak",
-    "takhle",
-    "taky",
-    "také",
-    "takže",
-    "tam",
-    "tamhle",
-    "tamhleto",
-    "tamto",
-    "tato",
-    "tebe",
-    "tebou",
-    "ted'",
-    "tedy",
-    "ten",
-    "tento",
-    "teto",
-    "ti",
-    "tipy",
-    "tisíc",
-    "tisíce",
-    "to",
-    "tobě",
-    "tohle",
-    "toho",
-    "tohoto",
-    "tom",
-    "tomto",
-    "tomu",
-    "tomuto",
-    "toto",
-    "trošku",
-    "tu",
-    "tuto",
-    "tvoje",
-    "tvá",
-    "tvé",
-    "tvůj",
-    "ty",
-    "tyto",
-    "téma",
-    "tím",
-    "tímto",
-    "tě",
-    "těm",
-    "těmu",
-    "třeba",
-    "tři",
-    "třináct",
-    "u",
-    "určitě",
-    "už",
-    "v",
-    "vaše",
-    "vaši",
-    "ve",
-    "vedle",
-    "večer",
-    "vlastně",
-    "vy",
-    "vám",
-    "vámi",
-    "vás",
-    "váš",
-    "více",
-    "však",
-    "všechno",
-    "všichni",
-    "vůbec",
-    "vždy",
-    "z",
-    "za",
-    "zatímco",
-    "zač",
-    "zda",
-    "zde",
-    "ze",
-    "zprávy",
-    "zpět",
-    "čau",
-    "či",
-    "článku",
-    "články",
-    "čtrnáct",
-    "čtyři",
-    "šest",
-    "šestnáct",
-    "že"
-  ];
-  var dan = [
-    "ad",
-    "af",
-    "aldrig",
-    "alle",
-    "alt",
-    "anden",
-    "andet",
-    "andre",
-    "at",
-    "bare",
-    "begge",
-    "blev",
-    "blive",
-    "bliver",
-    "da",
-    "de",
-    "dem",
-    "den",
-    "denne",
-    "der",
-    "deres",
-    "det",
-    "dette",
-    "dig",
-    "din",
-    "dine",
-    "disse",
-    "dit",
-    "dog",
-    "du",
-    "efter",
-    "ej",
-    "eller",
-    "en",
-    "end",
-    "ene",
-    "eneste",
-    "enhver",
-    "er",
-    "et",
-    "far",
-    "fem",
-    "fik",
-    "fire",
-    "flere",
-    "fleste",
-    "for",
-    "fordi",
-    "forrige",
-    "fra",
-    "få",
-    "får",
-    "før",
-    "god",
-    "godt",
-    "ham",
-    "han",
-    "hans",
-    "har",
-    "havde",
-    "have",
-    "hej",
-    "helt",
-    "hende",
-    "hendes",
-    "her",
-    "hos",
-    "hun",
-    "hvad",
-    "hvem",
-    "hver",
-    "hvilken",
-    "hvis",
-    "hvor",
-    "hvordan",
-    "hvorfor",
-    "hvornår",
-    "i",
-    "ikke",
-    "ind",
-    "ingen",
-    "intet",
-    "ja",
-    "jeg",
-    "jer",
-    "jeres",
-    "jo",
-    "kan",
-    "kom",
-    "komme",
-    "kommer",
-    "kun",
-    "kunne",
-    "lad",
-    "lav",
-    "lidt",
-    "lige",
-    "lille",
-    "man",
-    "mand",
-    "mange",
-    "med",
-    "meget",
-    "men",
-    "mens",
-    "mere",
-    "mig",
-    "min",
-    "mine",
-    "mit",
-    "mod",
-    "må",
-    "ned",
-    "nej",
-    "ni",
-    "nogen",
-    "noget",
-    "nogle",
-    "nu",
-    "ny",
-    "nyt",
-    "når",
-    "nær",
-    "næste",
-    "næsten",
-    "og",
-    "også",
-    "okay",
-    "om",
-    "op",
-    "os",
-    "otte",
-    "over",
-    "på",
-    "se",
-    "seks",
-    "selv",
-    "ser",
-    "ses",
-    "sig",
-    "sige",
-    "sin",
-    "sine",
-    "sit",
-    "skal",
-    "skulle",
-    "som",
-    "stor",
-    "store",
-    "syv",
-    "så",
-    "sådan",
-    "tag",
-    "tage",
-    "thi",
-    "ti",
-    "til",
-    "to",
-    "tre",
-    "ud",
-    "under",
-    "var",
-    "ved",
-    "vi",
-    "vil",
-    "ville",
-    "vor",
-    "vores",
-    "være",
-    "været"
-  ];
-  var nld = [
-    "aan",
-    "af",
-    "al",
-    "alles",
-    "als",
-    "altijd",
-    "andere",
-    "ben",
-    "bij",
-    "daar",
-    "dan",
-    "dat",
-    "de",
-    "der",
-    "deze",
-    "die",
-    "dit",
-    "doch",
-    "doen",
-    "door",
-    "dus",
-    "een",
-    "eens",
-    "en",
-    "er",
-    "ge",
-    "geen",
-    "geweest",
-    "haar",
-    "had",
-    "heb",
-    "hebben",
-    "heeft",
-    "hem",
-    "het",
-    "hier",
-    "hij",
-    "hoe",
-    "hun",
-    "iemand",
-    "iets",
-    "ik",
-    "in",
-    "is",
-    "ja",
-    "je",
-    "kan",
-    "kon",
-    "kunnen",
-    "maar",
-    "me",
-    "meer",
-    "men",
-    "met",
-    "mij",
-    "mijn",
-    "moet",
-    "na",
-    "naar",
-    "niet",
-    "niets",
-    "nog",
-    "nu",
-    "of",
-    "om",
-    "omdat",
-    "ons",
-    "ook",
-    "op",
-    "over",
-    "reeds",
-    "te",
-    "tegen",
-    "toch",
-    "toen",
-    "tot",
-    "u",
-    "uit",
-    "uw",
-    "van",
-    "veel",
-    "voor",
-    "want",
-    "waren",
-    "was",
-    "wat",
-    "we",
-    "wel",
-    "werd",
-    "wezen",
-    "wie",
-    "wij",
-    "wil",
-    "worden",
-    "zal",
-    "ze",
-    "zei",
-    "zelf",
-    "zich",
-    "zij",
-    "zijn",
-    "zo",
-    "zonder",
-    "zou"
-  ];
-  var eng = [
-    "about",
-    "after",
-    "all",
-    "also",
-    "am",
-    "an",
-    "and",
-    "another",
-    "any",
-    "are",
-    "as",
-    "at",
-    "be",
-    "because",
-    "been",
-    "before",
-    "being",
-    "between",
-    "both",
-    "but",
-    "by",
-    "came",
-    "can",
-    "come",
-    "could",
-    "did",
-    "do",
-    "each",
-    "for",
-    "from",
-    "get",
-    "got",
-    "has",
-    "had",
-    "he",
-    "have",
-    "her",
-    "here",
-    "him",
-    "himself",
-    "his",
-    "how",
-    "if",
-    "in",
-    "into",
-    "is",
-    "it",
-    "like",
-    "make",
-    "many",
-    "me",
-    "might",
-    "more",
-    "most",
-    "much",
-    "must",
-    "my",
-    "never",
-    "now",
-    "of",
-    "on",
-    "only",
-    "or",
-    "other",
-    "our",
-    "out",
-    "over",
-    "said",
-    "same",
-    "should",
-    "since",
-    "some",
-    "still",
-    "such",
-    "take",
-    "than",
-    "that",
-    "the",
-    "their",
-    "them",
-    "then",
-    "there",
-    "these",
-    "they",
-    "this",
-    "those",
-    "through",
-    "to",
-    "too",
-    "under",
-    "up",
-    "very",
-    "was",
-    "way",
-    "we",
-    "well",
-    "were",
-    "what",
-    "where",
-    "which",
-    "while",
-    "who",
-    "with",
-    "would",
-    "you",
-    "your",
-    "a",
-    "i"
-  ];
-  var epo = [
-    "adiaŭ",
-    "ajn",
-    "al",
-    "ankoraŭ",
-    "antaŭ",
-    "aŭ",
-    "bonan",
-    "bonvole",
-    "bonvolu",
-    "bv",
-    "ci",
-    "cia",
-    "cian",
-    "cin",
-    "d-ro",
-    "da",
-    "de",
-    "dek",
-    "deka",
-    "do",
-    "doktor'",
-    "doktoro",
-    "du",
-    "dua",
-    "dum",
-    "eble",
-    "ekz",
-    "ekzemple",
-    "en",
-    "estas",
-    "estis",
-    "estos",
-    "estu",
-    "estus",
-    "eĉ",
-    "f-no",
-    "feliĉan",
-    "for",
-    "fraŭlino",
-    "ha",
-    "havas",
-    "havis",
-    "havos",
-    "havu",
-    "havus",
-    "he",
-    "ho",
-    "hu",
-    "ili",
-    "ilia",
-    "ilian",
-    "ilin",
-    "inter",
-    "io",
-    "ion",
-    "iu",
-    "iujn",
-    "iun",
-    "ja",
-    "jam",
-    "je",
-    "jes",
-    "k",
-    "kaj",
-    "ke",
-    "kio",
-    "kion",
-    "kiu",
-    "kiujn",
-    "kiun",
-    "kvankam",
-    "kvar",
-    "kvara",
-    "kvazaŭ",
-    "kvin",
-    "kvina",
-    "la",
-    "li",
-    "lia",
-    "lian",
-    "lin",
-    "malantaŭ",
-    "male",
-    "malgraŭ",
-    "mem",
-    "mi",
-    "mia",
-    "mian",
-    "min",
-    "minus",
-    "naŭ",
-    "naŭa",
-    "ne",
-    "nek",
-    "nenio",
-    "nenion",
-    "neniu",
-    "neniun",
-    "nepre",
-    "ni",
-    "nia",
-    "nian",
-    "nin",
-    "nu",
-    "nun",
-    "nur",
-    "ok",
-    "oka",
-    "oni",
-    "onia",
-    "onian",
-    "onin",
-    "plej",
-    "pli",
-    "plu",
-    "plus",
-    "por",
-    "post",
-    "preter",
-    "s-no",
-    "s-ro",
-    "se",
-    "sed",
-    "sep",
-    "sepa",
-    "ses",
-    "sesa",
-    "si",
-    "sia",
-    "sian",
-    "sin",
-    "sinjor'",
-    "sinjorino",
-    "sinjoro",
-    "sub",
-    "super",
-    "supren",
-    "sur",
-    "tamen",
-    "tio",
-    "tion",
-    "tiu",
-    "tiujn",
-    "tiun",
-    "tra",
-    "tri",
-    "tria",
-    "tuj",
-    "tute",
-    "unu",
-    "unua",
-    "ve",
-    "verŝajne",
-    "vi",
-    "via",
-    "vian",
-    "vin",
-    "ĉi",
-    "ĉio",
-    "ĉion",
-    "ĉiu",
-    "ĉiujn",
-    "ĉiun",
-    "ĉu",
-    "ĝi",
-    "ĝia",
-    "ĝian",
-    "ĝin",
-    "ĝis",
-    "ĵus",
-    "ŝi",
-    "ŝia",
-    "ŝin"
-  ];
-  var est = [
-    "aga",
-    "ei",
-    "et",
-    "ja",
-    "jah",
-    "kas",
-    "kui",
-    "kõik",
-    "ma",
-    "me",
-    "mida",
-    "midagi",
-    "mind",
-    "minu",
-    "mis",
-    "mu",
-    "mul",
-    "mulle",
-    "nad",
-    "nii",
-    "oled",
-    "olen",
-    "oli",
-    "oma",
-    "on",
-    "pole",
-    "sa",
-    "seda",
-    "see",
-    "selle",
-    "siin",
-    "siis",
-    "ta",
-    "te",
-    "ära"
-  ];
-  var fin = [
-    "ja",
-    "on",
-    "oli",
-    "hän",
-    "vuonna",
-    "myös",
-    "joka",
-    "se",
-    "sekä",
-    "sen",
-    "mutta",
-    "ei",
-    "ovat",
-    "hänen",
-    "n",
-    "kanssa",
-    "vuoden",
-    "jälkeen",
-    "että",
-    "s",
-    "tai",
-    "jonka",
-    "jossa",
-    "mukaan",
-    "kun",
-    "muun",
-    "muassa",
-    "hänet",
-    "olivat",
-    "kuitenkin",
-    "noin",
-    "vuosina",
-    "aikana",
-    "lisäksi",
-    "kaksi",
-    "kuin",
-    "ollut",
-    "the",
-    "myöhemmin",
-    "eli",
-    "vain",
-    "teki",
-    "mm",
-    "jotka",
-    "ennen",
-    "ensimmäinen",
-    "a",
-    "9",
-    "jo",
-    "kuten",
-    "yksi",
-    "ensimmäisen",
-    "vastaan",
-    "tämän",
-    "vuodesta",
-    "sitä",
-    "voi",
-    "luvun",
-    "luvulla",
-    "of",
-    "ole",
-    "kauden",
-    "osa",
-    "esimerkiksi",
-    "jolloin",
-    "yli",
-    "de",
-    "kaudella",
-    "eri",
-    "sillä",
-    "kolme",
-    "he",
-    "vuotta"
-  ];
-  var fra = [
-    "être",
-    "avoir",
-    "faire",
-    "a",
-    "au",
-    "aux",
-    "avec",
-    "ce",
-    "ces",
-    "dans",
-    "de",
-    "des",
-    "du",
-    "elle",
-    "en",
-    "et",
-    "eux",
-    "il",
-    "je",
-    "la",
-    "le",
-    "leur",
-    "lui",
-    "ma",
-    "mais",
-    "me",
-    "même",
-    "mes",
-    "moi",
-    "mon",
-    "ne",
-    "nos",
-    "notre",
-    "nous",
-    "on",
-    "ou",
-    "où",
-    "par",
-    "pas",
-    "pour",
-    "qu",
-    "que",
-    "qui",
-    "sa",
-    "se",
-    "ses",
-    "son",
-    "sur",
-    "ta",
-    "te",
-    "tes",
-    "toi",
-    "ton",
-    "tu",
-    "un",
-    "une",
-    "vos",
-    "votre",
-    "vous",
-    "c",
-    "d",
-    "j",
-    "l",
-    "à",
-    "m",
-    "n",
-    "s",
-    "t",
-    "y",
-    "été",
-    "étée",
-    "étées",
-    "étés",
-    "étant",
-    "suis",
-    "es",
-    "est",
-    "sommes",
-    "êtes",
-    "sont",
-    "serai",
-    "seras",
-    "sera",
-    "serons",
-    "serez",
-    "seront",
-    "serais",
-    "serait",
-    "serions",
-    "seriez",
-    "seraient",
-    "étais",
-    "était",
-    "étions",
-    "étiez",
-    "étaient",
-    "fus",
-    "fut",
-    "fûmes",
-    "fûtes",
-    "furent",
-    "sois",
-    "soit",
-    "soyons",
-    "soyez",
-    "soient",
-    "fusse",
-    "fusses",
-    "fût",
-    "fussions",
-    "fussiez",
-    "fussent",
-    "ayant",
-    "eu",
-    "eue",
-    "eues",
-    "eus",
-    "ai",
-    "as",
-    "avons",
-    "avez",
-    "ont",
-    "aurai",
-    "auras",
-    "aura",
-    "aurons",
-    "aurez",
-    "auront",
-    "aurais",
-    "aurait",
-    "aurions",
-    "auriez",
-    "auraient",
-    "avais",
-    "avait",
-    "avions",
-    "aviez",
-    "avaient",
-    "eut",
-    "eûmes",
-    "eûtes",
-    "eurent",
-    "aie",
-    "aies",
-    "ait",
-    "ayons",
-    "ayez",
-    "aient",
-    "eusse",
-    "eusses",
-    "eût",
-    "eussions",
-    "eussiez",
-    "eussent",
-    "ceci",
-    "cela",
-    "cet",
-    "cette",
-    "ici",
-    "ils",
-    "les",
-    "leurs",
-    "quel",
-    "quels",
-    "quelle",
-    "quelles",
-    "sans",
-    "soi"
-  ];
-  var glg = [
-    "a",
-    "alí",
-    "ao",
-    "aos",
-    "aquel",
-    "aquela",
-    "aquelas",
-    "aqueles",
-    "aquilo",
-    "aquí",
-    "as",
-    "así",
-    "aínda",
-    "ben",
-    "cando",
-    "che",
-    "co",
-    "coa",
-    "coas",
-    "comigo",
-    "con",
-    "connosco",
-    "contigo",
-    "convosco",
-    "cos",
-    "cun",
-    "cunha",
-    "cunhas",
-    "cuns",
-    "da",
-    "dalgunha",
-    "dalgunhas",
-    "dalgún",
-    "dalgúns",
-    "das",
-    "de",
-    "del",
-    "dela",
-    "delas",
-    "deles",
-    "desde",
-    "deste",
-    "do",
-    "dos",
-    "dun",
-    "dunha",
-    "dunhas",
-    "duns",
-    "e",
-    "el",
-    "ela",
-    "elas",
-    "eles",
-    "en",
-    "era",
-    "eran",
-    "esa",
-    "esas",
-    "ese",
-    "eses",
-    "esta",
-    "estaba",
-    "estar",
-    "este",
-    "estes",
-    "estiven",
-    "estou",
-    "está",
-    "están",
-    "eu",
-    "facer",
-    "foi",
-    "foron",
-    "fun",
-    "había",
-    "hai",
-    "iso",
-    "isto",
-    "la",
-    "las",
-    "lle",
-    "lles",
-    "lo",
-    "los",
-    "mais",
-    "me",
-    "meu",
-    "meus",
-    "min",
-    "miña",
-    "miñas",
-    "moi",
-    "na",
-    "nas",
-    "neste",
-    "nin",
-    "no",
-    "non",
-    "nos",
-    "nosa",
-    "nosas",
-    "noso",
-    "nosos",
-    "nun",
-    "nunha",
-    "nunhas",
-    "nuns",
-    "nós",
-    "o",
-    "os",
-    "ou",
-    "para",
-    "pero",
-    "pode",
-    "pois",
-    "pola",
-    "polas",
-    "polo",
-    "polos",
-    "por",
-    "que",
-    "se",
-    "senón",
-    "ser",
-    "seu",
-    "seus",
-    "sexa",
-    "sido",
-    "sobre",
-    "súa",
-    "súas",
-    "tamén",
-    "tan",
-    "te",
-    "ten",
-    "ter",
-    "teu",
-    "teus",
-    "teñen",
-    "teño",
-    "ti",
-    "tido",
-    "tiven",
-    "tiña",
-    "túa",
-    "túas",
-    "un",
-    "unha",
-    "unhas",
-    "uns",
-    "vos",
-    "vosa",
-    "vosas",
-    "voso",
-    "vosos",
-    "vós",
-    "á",
-    "é",
-    "ó",
-    "ós"
-  ];
-  var deu = [
-    "a",
-    "ab",
-    "aber",
-    "ach",
-    "acht",
-    "achte",
-    "achten",
-    "achter",
-    "achtes",
-    "ag",
-    "alle",
-    "allein",
-    "allem",
-    "allen",
-    "aller",
-    "allerdings",
-    "alles",
-    "allgemeinen",
-    "als",
-    "also",
-    "am",
-    "an",
-    "ander",
-    "andere",
-    "anderem",
-    "anderen",
-    "anderer",
-    "anderes",
-    "anderm",
-    "andern",
-    "anderr",
-    "anders",
-    "au",
-    "auch",
-    "auf",
-    "aus",
-    "ausser",
-    "ausserdem",
-    "außer",
-    "außerdem",
-    "b",
-    "bald",
-    "bei",
-    "beide",
-    "beiden",
-    "beim",
-    "beispiel",
-    "bekannt",
-    "bereits",
-    "besonders",
-    "besser",
-    "besten",
-    "bin",
-    "bis",
-    "bisher",
-    "bist",
-    "c",
-    "d",
-    "d.h",
-    "da",
-    "dabei",
-    "dadurch",
-    "dafür",
-    "dagegen",
-    "daher",
-    "dahin",
-    "dahinter",
-    "damals",
-    "damit",
-    "danach",
-    "daneben",
-    "dank",
-    "dann",
-    "daran",
-    "darauf",
-    "daraus",
-    "darf",
-    "darfst",
-    "darin",
-    "darum",
-    "darunter",
-    "darüber",
-    "das",
-    "dasein",
-    "daselbst",
-    "dass",
-    "dasselbe",
-    "davon",
-    "davor",
-    "dazu",
-    "dazwischen",
-    "daß",
-    "dein",
-    "deine",
-    "deinem",
-    "deinen",
-    "deiner",
-    "deines",
-    "dem",
-    "dementsprechend",
-    "demgegenüber",
-    "demgemäss",
-    "demgemäß",
-    "demselben",
-    "demzufolge",
-    "den",
-    "denen",
-    "denn",
-    "denselben",
-    "der",
-    "deren",
-    "derer",
-    "derjenige",
-    "derjenigen",
-    "dermassen",
-    "dermaßen",
-    "derselbe",
-    "derselben",
-    "des",
-    "deshalb",
-    "desselben",
-    "dessen",
-    "deswegen",
-    "dich",
-    "die",
-    "diejenige",
-    "diejenigen",
-    "dies",
-    "diese",
-    "dieselbe",
-    "dieselben",
-    "diesem",
-    "diesen",
-    "dieser",
-    "dieses",
-    "dir",
-    "doch",
-    "dort",
-    "drei",
-    "drin",
-    "dritte",
-    "dritten",
-    "dritter",
-    "drittes",
-    "du",
-    "durch",
-    "durchaus",
-    "durfte",
-    "durften",
-    "dürfen",
-    "dürft",
-    "e",
-    "eben",
-    "ebenso",
-    "ehrlich",
-    "ei",
-    "ei, ",
-    "eigen",
-    "eigene",
-    "eigenen",
-    "eigener",
-    "eigenes",
-    "ein",
-    "einander",
-    "eine",
-    "einem",
-    "einen",
-    "einer",
-    "eines",
-    "einig",
-    "einige",
-    "einigem",
-    "einigen",
-    "einiger",
-    "einiges",
-    "einmal",
-    "eins",
-    "elf",
-    "en",
-    "ende",
-    "endlich",
-    "entweder",
-    "er",
-    "ernst",
-    "erst",
-    "erste",
-    "ersten",
-    "erster",
-    "erstes",
-    "es",
-    "etwa",
-    "etwas",
-    "euch",
-    "euer",
-    "eure",
-    "eurem",
-    "euren",
-    "eurer",
-    "eures",
-    "f",
-    "folgende",
-    "früher",
-    "fünf",
-    "fünfte",
-    "fünften",
-    "fünfter",
-    "fünftes",
-    "für",
-    "g",
-    "gab",
-    "ganz",
-    "ganze",
-    "ganzen",
-    "ganzer",
-    "ganzes",
-    "gar",
-    "gedurft",
-    "gegen",
-    "gegenüber",
-    "gehabt",
-    "gehen",
-    "geht",
-    "gekannt",
-    "gekonnt",
-    "gemacht",
-    "gemocht",
-    "gemusst",
-    "genug",
-    "gerade",
-    "gern",
-    "gesagt",
-    "geschweige",
-    "gewesen",
-    "gewollt",
-    "geworden",
-    "gibt",
-    "ging",
-    "gleich",
-    "gott",
-    "gross",
-    "grosse",
-    "grossen",
-    "grosser",
-    "grosses",
-    "groß",
-    "große",
-    "großen",
-    "großer",
-    "großes",
-    "gut",
-    "gute",
-    "guter",
-    "gutes",
-    "h",
-    "hab",
-    "habe",
-    "haben",
-    "habt",
-    "hast",
-    "hat",
-    "hatte",
-    "hatten",
-    "hattest",
-    "hattet",
-    "heisst",
-    "her",
-    "heute",
-    "hier",
-    "hin",
-    "hinter",
-    "hoch",
-    "hätte",
-    "hätten",
-    "i",
-    "ich",
-    "ihm",
-    "ihn",
-    "ihnen",
-    "ihr",
-    "ihre",
-    "ihrem",
-    "ihren",
-    "ihrer",
-    "ihres",
-    "im",
-    "immer",
-    "in",
-    "indem",
-    "infolgedessen",
-    "ins",
-    "irgend",
-    "ist",
-    "j",
-    "ja",
-    "jahr",
-    "jahre",
-    "jahren",
-    "je",
-    "jede",
-    "jedem",
-    "jeden",
-    "jeder",
-    "jedermann",
-    "jedermanns",
-    "jedes",
-    "jedoch",
-    "jemand",
-    "jemandem",
-    "jemanden",
-    "jene",
-    "jenem",
-    "jenen",
-    "jener",
-    "jenes",
-    "jetzt",
-    "k",
-    "kam",
-    "kann",
-    "kannst",
-    "kaum",
-    "kein",
-    "keine",
-    "keinem",
-    "keinen",
-    "keiner",
-    "keines",
-    "kleine",
-    "kleinen",
-    "kleiner",
-    "kleines",
-    "kommen",
-    "kommt",
-    "konnte",
-    "konnten",
-    "kurz",
-    "können",
-    "könnt",
-    "könnte",
-    "l",
-    "lang",
-    "lange",
-    "leicht",
-    "leide",
-    "lieber",
-    "los",
-    "m",
-    "machen",
-    "macht",
-    "machte",
-    "mag",
-    "magst",
-    "mahn",
-    "mal",
-    "man",
-    "manche",
-    "manchem",
-    "manchen",
-    "mancher",
-    "manches",
-    "mann",
-    "mehr",
-    "mein",
-    "meine",
-    "meinem",
-    "meinen",
-    "meiner",
-    "meines",
-    "mensch",
-    "menschen",
-    "mich",
-    "mir",
-    "mit",
-    "mittel",
-    "mochte",
-    "mochten",
-    "morgen",
-    "muss",
-    "musst",
-    "musste",
-    "mussten",
-    "muß",
-    "mußt",
-    "möchte",
-    "mögen",
-    "möglich",
-    "mögt",
-    "müssen",
-    "müsst",
-    "müßt",
-    "n",
-    "na",
-    "nach",
-    "nachdem",
-    "nahm",
-    "natürlich",
-    "neben",
-    "nein",
-    "neue",
-    "neuen",
-    "neun",
-    "neunte",
-    "neunten",
-    "neunter",
-    "neuntes",
-    "nicht",
-    "nichts",
-    "nie",
-    "niemand",
-    "niemandem",
-    "niemanden",
-    "noch",
-    "nun",
-    "nur",
-    "o",
-    "ob",
-    "oben",
-    "oder",
-    "offen",
-    "oft",
-    "ohne",
-    "ordnung",
-    "p",
-    "q",
-    "r",
-    "recht",
-    "rechte",
-    "rechten",
-    "rechter",
-    "rechtes",
-    "richtig",
-    "rund",
-    "s",
-    "sa",
-    "sache",
-    "sagt",
-    "sagte",
-    "sah",
-    "satt",
-    "schlecht",
-    "schluss",
-    "schon",
-    "sechs",
-    "sechste",
-    "sechsten",
-    "sechster",
-    "sechstes",
-    "sehr",
-    "sei",
-    "seid",
-    "seien",
-    "sein",
-    "seine",
-    "seinem",
-    "seinen",
-    "seiner",
-    "seines",
-    "seit",
-    "seitdem",
-    "selbst",
-    "sich",
-    "sie",
-    "sieben",
-    "siebente",
-    "siebenten",
-    "siebenter",
-    "siebentes",
-    "sind",
-    "so",
-    "solang",
-    "solche",
-    "solchem",
-    "solchen",
-    "solcher",
-    "solches",
-    "soll",
-    "sollen",
-    "sollst",
-    "sollt",
-    "sollte",
-    "sollten",
-    "sondern",
-    "sonst",
-    "soweit",
-    "sowie",
-    "später",
-    "startseite",
-    "statt",
-    "steht",
-    "suche",
-    "t",
-    "tag",
-    "tage",
-    "tagen",
-    "tat",
-    "teil",
-    "tel",
-    "tritt",
-    "trotzdem",
-    "tun",
-    "u",
-    "uhr",
-    "um",
-    "und",
-    "und?",
-    "uns",
-    "unse",
-    "unsem",
-    "unsen",
-    "unser",
-    "unsere",
-    "unserer",
-    "unses",
-    "unter",
-    "v",
-    "vergangenen",
-    "viel",
-    "viele",
-    "vielem",
-    "vielen",
-    "vielleicht",
-    "vier",
-    "vierte",
-    "vierten",
-    "vierter",
-    "viertes",
-    "vom",
-    "von",
-    "vor",
-    "w",
-    "wahr?",
-    "wann",
-    "war",
-    "waren",
-    "warst",
-    "wart",
-    "warum",
-    "was",
-    "weg",
-    "wegen",
-    "weil",
-    "weit",
-    "weiter",
-    "weitere",
-    "weiteren",
-    "weiteres",
-    "welche",
-    "welchem",
-    "welchen",
-    "welcher",
-    "welches",
-    "wem",
-    "wen",
-    "wenig",
-    "wenige",
-    "weniger",
-    "weniges",
-    "wenigstens",
-    "wenn",
-    "wer",
-    "werde",
-    "werden",
-    "werdet",
-    "weshalb",
-    "wessen",
-    "wie",
-    "wieder",
-    "wieso",
-    "will",
-    "willst",
-    "wir",
-    "wird",
-    "wirklich",
-    "wirst",
-    "wissen",
-    "wo",
-    "woher",
-    "wohin",
-    "wohl",
-    "wollen",
-    "wollt",
-    "wollte",
-    "wollten",
-    "worden",
-    "wurde",
-    "wurden",
-    "während",
-    "währenddem",
-    "währenddessen",
-    "wäre",
-    "würde",
-    "würden",
-    "x",
-    "y",
-    "z",
-    "z.b",
-    "zehn",
-    "zehnte",
-    "zehnten",
-    "zehnter",
-    "zehntes",
-    "zeit",
-    "zu",
-    "zuerst",
-    "zugleich",
-    "zum",
-    "zunächst",
-    "zur",
-    "zurück",
-    "zusammen",
-    "zwanzig",
-    "zwar",
-    "zwei",
-    "zweite",
-    "zweiten",
-    "zweiter",
-    "zweites",
-    "zwischen",
-    "zwölf",
-    "über",
-    "überhaupt",
-    "übrigens"
-  ];
-  var ell = [
-    "αλλα",
-    "αν",
-    "αντι",
-    "απο",
-    "αυτα",
-    "αυτεσ",
-    "αυτη",
-    "αυτο",
-    "αυτοι",
-    "αυτοσ",
-    "αυτουσ",
-    "αυτων",
-    "για",
-    "δε",
-    "δεν",
-    "εαν",
-    "ειμαι",
-    "ειμαστε",
-    "ειναι",
-    "εισαι",
-    "ειστε",
-    "εκεινα",
-    "εκεινεσ",
-    "εκεινη",
-    "εκεινο",
-    "εκεινοι",
-    "εκεινοσ",
-    "εκεινουσ",
-    "εκεινων",
-    "ενω",
-    "επι",
-    "η",
-    "θα",
-    "ισωσ",
-    "κ",
-    "και",
-    "κατα",
-    "κι",
-    "μα",
-    "με",
-    "μετα",
-    "μη",
-    "μην",
-    "να",
-    "ο",
-    "οι",
-    "ομωσ",
-    "οπωσ",
-    "οσο",
-    "οτι",
-    "παρα",
-    "ποια",
-    "ποιεσ",
-    "ποιο",
-    "ποιοι",
-    "ποιοσ",
-    "ποιουσ",
-    "ποιων",
-    "που",
-    "προσ",
-    "πωσ",
-    "σε",
-    "στη",
-    "στην",
-    "στο",
-    "στον",
-    "τα",
-    "την",
-    "τησ",
-    "το",
-    "τον",
-    "τοτε",
-    "του",
-    "των",
-    "ωσ"
-  ];
-  var guj = [
-    "અંગે",
-    "અંદર",
-    "અથવા",
-    "અને",
-    "અમને",
-    "અમારું",
-    "અમે",
-    "અહીં",
-    "આ",
-    "આગળ",
-    "આથી",
-    "આનું",
-    "આને",
-    "આપણને",
-    "આપણું",
-    "આપણે",
-    "આપી",
-    "આર",
-    "આવી",
-    "આવે",
-    "ઉપર",
-    "ઉભા",
-    "ઊંચે",
-    "ઊભું",
-    "એ",
-    "એક",
-    "એન",
-    "એના",
-    "એનાં",
-    "એની",
-    "એનું",
-    "એને",
-    "એનો",
-    "એમ",
-    "એવા",
-    "એવાં",
-    "એવી",
-    "એવું",
-    "એવો",
-    "ઓછું",
-    "કંઈક",
-    "કઈ",
-    "કયું",
-    "કયો",
-    "કરતાં",
-    "કરવું",
-    "કરી",
-    "કરીએ",
-    "કરું",
-    "કરે",
-    "કરેલું",
-    "કર્યા",
-    "કર્યાં",
-    "કર્યું",
-    "કર્યો",
-    "કાંઈ",
-    "કે",
-    "કેટલું",
-    "કેમ",
-    "કેવી",
-    "કેવું",
-    "કોઈ",
-    "કોઈક",
-    "કોણ",
-    "કોણે",
-    "કોને",
-    "ક્યાં",
-    "ક્યારે",
-    "ખૂબ",
-    "ગઈ",
-    "ગયા",
-    "ગયાં",
-    "ગયું",
-    "ગયો",
-    "ઘણું",
-    "છ",
-    "છતાં",
-    "છીએ",
-    "છું",
-    "છે",
-    "છેક",
-    "છો",
-    "જ",
-    "જાય",
-    "જી",
-    "જે",
-    "જેટલું",
-    "જેને",
-    "જેમ",
-    "જેવી",
-    "જેવું",
-    "જેવો",
-    "જો",
-    "જોઈએ",
-    "જ્યાં",
-    "જ્યારે",
-    "ઝાઝું",
-    "તને",
-    "તમને",
-    "તમારું",
-    "તમે",
-    "તા",
-    "તારાથી",
-    "તારામાં",
-    "તારું",
-    "તું",
-    "તે",
-    "તેં",
-    "તેઓ",
-    "તેણે",
-    "તેથી",
-    "તેના",
-    "તેની",
-    "તેનું",
-    "તેને",
-    "તેમ",
-    "તેમનું",
-    "તેમને",
-    "તેવી",
-    "તેવું",
-    "તો",
-    "ત્યાં",
-    "ત્યારે",
-    "થઇ",
-    "થઈ",
-    "થઈએ",
-    "થતા",
-    "થતાં",
-    "થતી",
-    "થતું",
-    "થતો",
-    "થયા",
-    "થયાં",
-    "થયું",
-    "થયેલું",
-    "થયો",
-    "થવું",
-    "થાઉં",
-    "થાઓ",
-    "થાય",
-    "થી",
-    "થોડું",
-    "દરેક",
-    "ન",
-    "નં",
-    "નં.",
-    "નથી",
-    "નહિ",
-    "નહી",
-    "નહીં",
-    "ના",
-    "ની",
-    "નીચે",
-    "નું",
-    "ને",
-    "નો",
-    "પછી",
-    "પણ",
-    "પર",
-    "પરંતુ",
-    "પહેલાં",
-    "પાછળ",
-    "પાસે",
-    "પોતાનું",
-    "પ્રત્યેક",
-    "ફક્ત",
-    "ફરી",
-    "ફરીથી",
-    "બંને",
-    "બધા",
-    "બધું",
-    "બની",
-    "બહાર",
-    "બહુ",
-    "બાદ",
-    "બે",
-    "મને",
-    "મા",
-    "માં",
-    "માટે",
-    "માત્ર",
-    "મારું",
-    "મી",
-    "મૂકવું",
-    "મૂકી",
-    "મૂક્યા",
-    "મૂક્યાં",
-    "મૂક્યું",
-    "મેં",
-    "રહી",
-    "રહે",
-    "રહેવું",
-    "રહ્યા",
-    "રહ્યાં",
-    "રહ્યો",
-    "રીતે",
-    "રૂ.",
-    "રૂા",
-    "લેતા",
-    "લેતું",
-    "લેવા",
-    "વગેરે",
-    "વધુ",
-    "શકે",
-    "શા",
-    "શું",
-    "સરખું",
-    "સામે",
-    "સુધી",
-    "હતા",
-    "હતાં",
-    "હતી",
-    "હતું",
-    "હવે",
-    "હશે",
-    "હશો",
-    "હા",
-    "હું",
-    "હો",
-    "હોઈ",
-    "હોઈશ",
-    "હોઈશું",
-    "હોય",
-    "હોવા"
-  ];
-  var hau = [
-    "ta",
-    "da",
-    "ya",
-    "sai",
-    "ba",
-    "yi",
-    "na",
-    "kuma",
-    "ma",
-    "ji",
-    "cikin",
-    "in",
-    "ni",
-    "wata",
-    "wani",
-    "ce",
-    "tana",
-    "don",
-    "za",
-    "sun",
-    "amma",
-    "ga",
-    "ina",
-    "ne",
-    "tselane",
-    "mai",
-    "suka",
-    "wannan",
-    "a",
-    "ko",
-    "lokacin",
-    "su",
-    "take",
-    "kaka",
-    "shi",
-    "yake",
-    "yana",
-    "mulongo",
-    "mata",
-    "ka",
-    "ban",
-    "ita",
-    "tafi",
-    "shanshani",
-    "kai",
-    "daɗi",
-    "mi",
-    "ƙato",
-    "fara",
-    "rana"
-  ];
-  var heb = [
-    "אבל",
-    "או",
-    "אולי",
-    "אותה",
-    "אותו",
-    "אותי",
-    "אותך",
-    "אותם",
-    "אותן",
-    "אותנו",
-    "אז",
-    "אחר",
-    "אחרות",
-    "אחרי",
-    "אחריכן",
-    "אחרים",
-    "אחרת",
-    "אי",
-    "איזה",
-    "איך",
-    "אין",
-    "איפה",
-    "איתה",
-    "איתו",
-    "איתי",
-    "איתך",
-    "איתכם",
-    "איתכן",
-    "איתם",
-    "איתן",
-    "איתנו",
-    "אך",
-    "אל",
-    "אלה",
-    "אלו",
-    "אם",
-    "אנחנו",
-    "אני",
-    "אס",
-    "אף",
-    "אצל",
-    "אשר",
-    "את",
-    "אתה",
-    "אתכם",
-    "אתכן",
-    "אתם",
-    "אתן",
-    "באיזומידה",
-    "באמצע",
-    "באמצעות",
-    "בגלל",
-    "בין",
-    "בלי",
-    "במידה",
-    "במקוםשבו",
-    "ברם",
-    "בשביל",
-    "בשעהש",
-    "בתוך",
-    "גם",
-    "דרך",
-    "הוא",
-    "היא",
-    "היה",
-    "היכן",
-    "היתה",
-    "היתי",
-    "הם",
-    "הן",
-    "הנה",
-    "הסיבהשבגללה",
-    "הרי",
-    "ואילו",
-    "ואת",
-    "זאת",
-    "זה",
-    "זות",
-    "יהיה",
-    "יוכל",
-    "יוכלו",
-    "יותרמדי",
-    "יכול",
-    "יכולה",
-    "יכולות",
-    "יכולים",
-    "יכל",
-    "יכלה",
-    "יכלו",
-    "יש",
-    "כאן",
-    "כאשר",
-    "כולם",
-    "כולן",
-    "כזה",
-    "כי",
-    "כיצד",
-    "כך",
-    "ככה",
-    "כל",
-    "כלל",
-    "כמו",
-    "כן",
-    "כפי",
-    "כש",
-    "לא",
-    "לאו",
-    "לאיזותכלית",
-    "לאן",
-    "לבין",
-    "לה",
-    "להיות",
-    "להם",
-    "להן",
-    "לו",
-    "לי",
-    "לכם",
-    "לכן",
-    "למה",
-    "למטה",
-    "למעלה",
-    "למקוםשבו",
-    "למרות",
-    "לנו",
-    "לעבר",
-    "לעיכן",
-    "לפיכך",
-    "לפני",
-    "מאד",
-    "מאחורי",
-    "מאיזוסיבה",
-    "מאין",
-    "מאיפה",
-    "מבלי",
-    "מבעד",
-    "מדוע",
-    "מה",
-    "מהיכן",
-    "מול",
-    "מחוץ",
-    "מי",
-    "מכאן",
-    "מכיוון",
-    "מלבד",
-    "מן",
-    "מנין",
-    "מסוגל",
-    "מעט",
-    "מעטים",
-    "מעל",
-    "מצד",
-    "מקוםבו",
-    "מתחת",
-    "מתי",
-    "נגד",
-    "נגר",
-    "נו",
-    "עד",
-    "עז",
-    "על",
-    "עלי",
-    "עליה",
-    "עליהם",
-    "עליהן",
-    "עליו",
-    "עליך",
-    "עליכם",
-    "עלינו",
-    "עם",
-    "עצמה",
-    "עצמהם",
-    "עצמהן",
-    "עצמו",
-    "עצמי",
-    "עצמם",
-    "עצמן",
-    "עצמנו",
-    "פה",
-    "רק",
-    "שוב",
-    "של",
-    "שלה",
-    "שלהם",
-    "שלהן",
-    "שלו",
-    "שלי",
-    "שלך",
-    "שלכה",
-    "שלכם",
-    "שלכן",
-    "שלנו",
-    "שם",
-    "תהיה",
-    "תחת"
-  ];
-  var hin = [
-    "अंदर",
-    "अत",
-    "अदि",
-    "अप",
-    "अपना",
-    "अपनि",
-    "अपनी",
-    "अपने",
-    "अभि",
-    "अभी",
-    "आदि",
-    "आप",
-    "इंहिं",
-    "इंहें",
-    "इंहों",
-    "इतयादि",
-    "इत्यादि",
-    "इन",
-    "इनका",
-    "इन्हीं",
-    "इन्हें",
-    "इन्हों",
-    "इस",
-    "इसका",
-    "इसकि",
-    "इसकी",
-    "इसके",
-    "इसमें",
-    "इसि",
-    "इसी",
-    "इसे",
-    "उंहिं",
-    "उंहें",
-    "उंहों",
-    "उन",
-    "उनका",
-    "उनकि",
-    "उनकी",
-    "उनके",
-    "उनको",
-    "उन्हीं",
-    "उन्हें",
-    "उन्हों",
-    "उस",
-    "उसके",
-    "उसि",
-    "उसी",
-    "उसे",
-    "एक",
-    "एवं",
-    "एस",
-    "एसे",
-    "ऐसे",
-    "ओर",
-    "और",
-    "कइ",
-    "कई",
-    "कर",
-    "करता",
-    "करते",
-    "करना",
-    "करने",
-    "करें",
-    "कहते",
-    "कहा",
-    "का",
-    "काफि",
-    "काफ़ी",
-    "कि",
-    "किंहें",
-    "किंहों",
-    "कितना",
-    "किन्हें",
-    "किन्हों",
-    "किया",
-    "किर",
-    "किस",
-    "किसि",
-    "किसी",
-    "किसे",
-    "की",
-    "कुछ",
-    "कुल",
-    "के",
-    "को",
-    "कोइ",
-    "कोई",
-    "कोन",
-    "कोनसा",
-    "कौन",
-    "कौनसा",
-    "गया",
-    "घर",
-    "जब",
-    "जहाँ",
-    "जहां",
-    "जा",
-    "जिंहें",
-    "जिंहों",
-    "जितना",
-    "जिधर",
-    "जिन",
-    "जिन्हें",
-    "जिन्हों",
-    "जिस",
-    "जिसे",
-    "जीधर",
-    "जेसा",
-    "जेसे",
-    "जैसा",
-    "जैसे",
-    "जो",
-    "तक",
-    "तब",
-    "तरह",
-    "तिंहें",
-    "तिंहों",
-    "तिन",
-    "तिन्हें",
-    "तिन्हों",
-    "तिस",
-    "तिसे",
-    "तो",
-    "था",
-    "थि",
-    "थी",
-    "थे",
-    "दबारा",
-    "दवारा",
-    "दिया",
-    "दुसरा",
-    "दुसरे",
-    "दूसरे",
-    "दो",
-    "द्वारा",
-    "न",
-    "नहिं",
-    "नहीं",
-    "ना",
-    "निचे",
-    "निहायत",
-    "नीचे",
-    "ने",
-    "पर",
-    "पहले",
-    "पुरा",
-    "पूरा",
-    "पे",
-    "फिर",
-    "बनि",
-    "बनी",
-    "बहि",
-    "बही",
-    "बहुत",
-    "बाद",
-    "बाला",
-    "बिलकुल",
-    "भि",
-    "भितर",
-    "भी",
-    "भीतर",
-    "मगर",
-    "मानो",
-    "मे",
-    "में",
-    "यदि",
-    "यह",
-    "यहाँ",
-    "यहां",
-    "यहि",
-    "यही",
-    "या",
-    "यिह",
-    "ये",
-    "रखें",
-    "रवासा",
-    "रहा",
-    "रहे",
-    "ऱ्वासा",
-    "लिए",
-    "लिये",
-    "लेकिन",
-    "व",
-    "वगेरह",
-    "वरग",
-    "वर्ग",
-    "वह",
-    "वहाँ",
-    "वहां",
-    "वहिं",
-    "वहीं",
-    "वाले",
-    "वुह",
-    "वे",
-    "वग़ैरह",
-    "संग",
-    "सकता",
-    "सकते",
-    "सबसे",
-    "सभि",
-    "सभी",
-    "साथ",
-    "साबुत",
-    "साभ",
-    "सारा",
-    "से",
-    "सो",
-    "हि",
-    "ही",
-    "हुअ",
-    "हुआ",
-    "हुइ",
-    "हुई",
-    "हुए",
-    "हे",
-    "हें",
-    "है",
-    "हैं",
-    "हो",
-    "होता",
-    "होति",
-    "होती",
-    "होते",
-    "होना",
-    "होने"
-  ];
-  var gle = [
-    "a",
-    "ach",
-    "ag",
-    "agus",
-    "an",
-    "aon",
-    "ar",
-    "arna",
-    "as",
-    "b'",
-    "ba",
-    "beirt",
-    "bhúr",
-    "caoga",
-    "ceathair",
-    "ceathrar",
-    "chomh",
-    "chtó",
-    "chuig",
-    "chun",
-    "cois",
-    "céad",
-    "cúig",
-    "cúigear",
-    "d'",
-    "daichead",
-    "dar",
-    "de",
-    "deich",
-    "deichniúr",
-    "den",
-    "dhá",
-    "do",
-    "don",
-    "dtí",
-    "dá",
-    "dár",
-    "dó",
-    "faoi",
-    "faoin",
-    "faoina",
-    "faoinár",
-    "fara",
-    "fiche",
-    "gach",
-    "gan",
-    "go",
-    "gur",
-    "haon",
-    "hocht",
-    "i",
-    "iad",
-    "idir",
-    "in",
-    "ina",
-    "ins",
-    "inár",
-    "is",
-    "le",
-    "leis",
-    "lena",
-    "lenár",
-    "m'",
-    "mar",
-    "mo",
-    "mé",
-    "na",
-    "nach",
-    "naoi",
-    "naonúr",
-    "ná",
-    "ní",
-    "níor",
-    "nó",
-    "nócha",
-    "ocht",
-    "ochtar",
-    "os",
-    "roimh",
-    "sa",
-    "seacht",
-    "seachtar",
-    "seachtó",
-    "seasca",
-    "seisear",
-    "siad",
-    "sibh",
-    "sinn",
-    "sna",
-    "sé",
-    "sí",
-    "tar",
-    "thar",
-    "thú",
-    "triúr",
-    "trí",
-    "trína",
-    "trínár",
-    "tríocha",
-    "tú",
-    "um",
-    "ár",
-    "é",
-    "éis",
-    "í",
-    "ó",
-    "ón",
-    "óna",
-    "ónár"
-  ];
-  var hun = [
-    "a",
-    "abba",
-    "abban",
-    "abból",
-    "addig",
-    "ahhoz",
-    "ahogy",
-    "ahol",
-    "aki",
-    "akik",
-    "akkor",
-    "akár",
-    "alapján",
-    "alatt",
-    "alatta",
-    "alattad",
-    "alattam",
-    "alattatok",
-    "alattuk",
-    "alattunk",
-    "alá",
-    "alád",
-    "alájuk",
-    "alám",
-    "alánk",
-    "alátok",
-    "alól",
-    "alóla",
-    "alólad",
-    "alólam",
-    "alólatok",
-    "alóluk",
-    "alólunk",
-    "amely",
-    "amelyből",
-    "amelyek",
-    "amelyekben",
-    "amelyeket",
-    "amelyet",
-    "amelyik",
-    "amelynek",
-    "ami",
-    "amikor",
-    "amit",
-    "amolyan",
-    "amott",
-    "amíg",
-    "annak",
-    "annál",
-    "arra",
-    "arról",
-    "attól",
-    "az",
-    "aznap",
-    "azok",
-    "azokat",
-    "azokba",
-    "azokban",
-    "azokból",
-    "azokhoz",
-    "azokig",
-    "azokkal",
-    "azokká",
-    "azoknak",
-    "azoknál",
-    "azokon",
-    "azokra",
-    "azokról",
-    "azoktól",
-    "azokért",
-    "azon",
-    "azonban",
-    "azonnal",
-    "azt",
-    "aztán",
-    "azután",
-    "azzal",
-    "azzá",
-    "azért",
-    "bal",
-    "balra",
-    "ban",
-    "be",
-    "belé",
-    "beléd",
-    "beléjük",
-    "belém",
-    "belénk",
-    "belétek",
-    "belül",
-    "belőle",
-    "belőled",
-    "belőlem",
-    "belőletek",
-    "belőlük",
-    "belőlünk",
-    "ben",
-    "benne",
-    "benned",
-    "bennem",
-    "bennetek",
-    "bennük",
-    "bennünk",
-    "bár",
-    "bárcsak",
-    "bármilyen",
-    "búcsú",
-    "cikk",
-    "cikkek",
-    "cikkeket",
-    "csak",
-    "csakhogy",
-    "csupán",
-    "de",
-    "dehogy",
-    "e",
-    "ebbe",
-    "ebben",
-    "ebből",
-    "eddig",
-    "egy",
-    "egyebek",
-    "egyebet",
-    "egyedül",
-    "egyelőre",
-    "egyes",
-    "egyet",
-    "egyetlen",
-    "egyik",
-    "egymás",
-    "egyre",
-    "egyszerre",
-    "egyéb",
-    "együtt",
-    "egész",
-    "egészen",
-    "ehhez",
-    "ekkor",
-    "el",
-    "eleinte",
-    "ellen",
-    "ellenes",
-    "elleni",
-    "ellenére",
-    "elmondta",
-    "első",
-    "elsők",
-    "elsősorban",
-    "elsőt",
-    "elé",
-    "eléd",
-    "elég",
-    "eléjük",
-    "elém",
-    "elénk",
-    "elétek",
-    "elő",
-    "előbb",
-    "elől",
-    "előle",
-    "előled",
-    "előlem",
-    "előletek",
-    "előlük",
-    "előlünk",
-    "először",
-    "előtt",
-    "előtte",
-    "előtted",
-    "előttem",
-    "előttetek",
-    "előttük",
-    "előttünk",
-    "előző",
-    "emilyen",
-    "engem",
-    "ennek",
-    "ennyi",
-    "ennél",
-    "enyém",
-    "erre",
-    "erről",
-    "esetben",
-    "ettől",
-    "ez",
-    "ezek",
-    "ezekbe",
-    "ezekben",
-    "ezekből",
-    "ezeken",
-    "ezeket",
-    "ezekhez",
-    "ezekig",
-    "ezekkel",
-    "ezekké",
-    "ezeknek",
-    "ezeknél",
-    "ezekre",
-    "ezekről",
-    "ezektől",
-    "ezekért",
-    "ezen",
-    "ezentúl",
-    "ezer",
-    "ezret",
-    "ezt",
-    "ezután",
-    "ezzel",
-    "ezzé",
-    "ezért",
-    "fel",
-    "fele",
-    "felek",
-    "felet",
-    "felett",
-    "felé",
-    "fent",
-    "fenti",
-    "fél",
-    "fölé",
-    "gyakran",
-    "ha",
-    "halló",
-    "hamar",
-    "hanem",
-    "harmadik",
-    "harmadikat",
-    "harminc",
-    "hat",
-    "hatodik",
-    "hatodikat",
-    "hatot",
-    "hatvan",
-    "helyett",
-    "hetedik",
-    "hetediket",
-    "hetet",
-    "hetven",
-    "hirtelen",
-    "hiszen",
-    "hiába",
-    "hogy",
-    "hogyan",
-    "hol",
-    "holnap",
-    "holnapot",
-    "honnan",
-    "hova",
-    "hozzá",
-    "hozzád",
-    "hozzájuk",
-    "hozzám",
-    "hozzánk",
-    "hozzátok",
-    "hurrá",
-    "huszadik",
-    "hány",
-    "hányszor",
-    "hármat",
-    "három",
-    "hát",
-    "hátha",
-    "hátulsó",
-    "hét",
-    "húsz",
-    "ide",
-    "ide-оda",
-    "idén",
-    "igazán",
-    "igen",
-    "ill",
-    "illetve",
-    "ilyen",
-    "ilyenkor",
-    "immár",
-    "inkább",
-    "is",
-    "ismét",
-    "ison",
-    "itt",
-    "jelenleg",
-    "jobban",
-    "jobbra",
-    "jó",
-    "jól",
-    "jólesik",
-    "jóval",
-    "jövőre",
-    "kell",
-    "kellene",
-    "kellett",
-    "kelljen",
-    "keressünk",
-    "keresztül",
-    "ketten",
-    "kettő",
-    "kettőt",
-    "kevés",
-    "ki",
-    "kiben",
-    "kiből",
-    "kicsit",
-    "kicsoda",
-    "kihez",
-    "kik",
-    "kikbe",
-    "kikben",
-    "kikből",
-    "kiken",
-    "kiket",
-    "kikhez",
-    "kikkel",
-    "kikké",
-    "kiknek",
-    "kiknél",
-    "kikre",
-    "kikről",
-    "kiktől",
-    "kikért",
-    "kilenc",
-    "kilencedik",
-    "kilencediket",
-    "kilencet",
-    "kilencven",
-    "kin",
-    "kinek",
-    "kinél",
-    "kire",
-    "kiről",
-    "kit",
-    "kitől",
-    "kivel",
-    "kivé",
-    "kié",
-    "kiért",
-    "korábban",
-    "képest",
-    "kérem",
-    "kérlek",
-    "kész",
-    "késő",
-    "később",
-    "későn",
-    "két",
-    "kétszer",
-    "kívül",
-    "körül",
-    "köszönhetően",
-    "köszönöm",
-    "közben",
-    "közel",
-    "közepesen",
-    "közepén",
-    "közé",
-    "között",
-    "közül",
-    "külön",
-    "különben",
-    "különböző",
-    "különbözőbb",
-    "különbözőek",
-    "lassan",
-    "le",
-    "legalább",
-    "legyen",
-    "lehet",
-    "lehetetlen",
-    "lehetett",
-    "lehetőleg",
-    "lehetőség",
-    "lenne",
-    "lenni",
-    "lennék",
-    "lennének",
-    "lesz",
-    "leszek",
-    "lesznek",
-    "leszünk",
-    "lett",
-    "lettek",
-    "lettem",
-    "lettünk",
-    "lévő",
-    "ma",
-    "maga",
-    "magad",
-    "magam",
-    "magatokat",
-    "magukat",
-    "magunkat",
-    "magát",
-    "mai",
-    "majd",
-    "majdnem",
-    "manapság",
-    "meg",
-    "megcsinál",
-    "megcsinálnak",
-    "megint",
-    "megvan",
-    "mellett",
-    "mellette",
-    "melletted",
-    "mellettem",
-    "mellettetek",
-    "mellettük",
-    "mellettünk",
-    "mellé",
-    "melléd",
-    "melléjük",
-    "mellém",
-    "mellénk",
-    "mellétek",
-    "mellől",
-    "mellőle",
-    "mellőled",
-    "mellőlem",
-    "mellőletek",
-    "mellőlük",
-    "mellőlünk",
-    "mely",
-    "melyek",
-    "melyik",
-    "mennyi",
-    "mert",
-    "mi",
-    "miatt",
-    "miatta",
-    "miattad",
-    "miattam",
-    "miattatok",
-    "miattuk",
-    "miattunk",
-    "mibe",
-    "miben",
-    "miből",
-    "mihez",
-    "mik",
-    "mikbe",
-    "mikben",
-    "mikből",
-    "miken",
-    "miket",
-    "mikhez",
-    "mikkel",
-    "mikké",
-    "miknek",
-    "miknél",
-    "mikor",
-    "mikre",
-    "mikről",
-    "miktől",
-    "mikért",
-    "milyen",
-    "min",
-    "mind",
-    "mindegyik",
-    "mindegyiket",
-    "minden",
-    "mindenesetre",
-    "mindenki",
-    "mindent",
-    "mindenütt",
-    "mindig",
-    "mindketten",
-    "minek",
-    "minket",
-    "mint",
-    "mintha",
-    "minél",
-    "mire",
-    "miről",
-    "mit",
-    "mitől",
-    "mivel",
-    "mivé",
-    "miért",
-    "mondta",
-    "most",
-    "mostanáig",
-    "már",
-    "más",
-    "másik",
-    "másikat",
-    "másnap",
-    "második",
-    "másodszor",
-    "mások",
-    "másokat",
-    "mást",
-    "még",
-    "mégis",
-    "míg",
-    "mögé",
-    "mögéd",
-    "mögéjük",
-    "mögém",
-    "mögénk",
-    "mögétek",
-    "mögött",
-    "mögötte",
-    "mögötted",
-    "mögöttem",
-    "mögöttetek",
-    "mögöttük",
-    "mögöttünk",
-    "mögül",
-    "mögüle",
-    "mögüled",
-    "mögülem",
-    "mögületek",
-    "mögülük",
-    "mögülünk",
-    "múltkor",
-    "múlva",
-    "na",
-    "nagy",
-    "nagyobb",
-    "nagyon",
-    "naponta",
-    "napot",
-    "ne",
-    "negyedik",
-    "negyediket",
-    "negyven",
-    "neked",
-    "nekem",
-    "neki",
-    "nekik",
-    "nektek",
-    "nekünk",
-    "nem",
-    "nemcsak",
-    "nemrég",
-    "nincs",
-    "nyolc",
-    "nyolcadik",
-    "nyolcadikat",
-    "nyolcat",
-    "nyolcvan",
-    "nála",
-    "nálad",
-    "nálam",
-    "nálatok",
-    "náluk",
-    "nálunk",
-    "négy",
-    "négyet",
-    "néha",
-    "néhány",
-    "nélkül",
-    "o",
-    "oda",
-    "ok",
-    "olyan",
-    "onnan",
-    "ott",
-    "pedig",
-    "persze",
-    "pár",
-    "például",
-    "rajta",
-    "rajtad",
-    "rajtam",
-    "rajtatok",
-    "rajtuk",
-    "rajtunk",
-    "rendben",
-    "rosszul",
-    "rá",
-    "rád",
-    "rájuk",
-    "rám",
-    "ránk",
-    "rátok",
-    "régen",
-    "régóta",
-    "részére",
-    "róla",
-    "rólad",
-    "rólam",
-    "rólatok",
-    "róluk",
-    "rólunk",
-    "rögtön",
-    "s",
-    "saját",
-    "se",
-    "sem",
-    "semmi",
-    "semmilyen",
-    "semmiség",
-    "senki",
-    "soha",
-    "sok",
-    "sokan",
-    "sokat",
-    "sokkal",
-    "sokszor",
-    "sokáig",
-    "során",
-    "stb.",
-    "szemben",
-    "szerbusz",
-    "szerint",
-    "szerinte",
-    "szerinted",
-    "szerintem",
-    "szerintetek",
-    "szerintük",
-    "szerintünk",
-    "szervusz",
-    "szinte",
-    "számára",
-    "száz",
-    "századik",
-    "százat",
-    "szépen",
-    "szét",
-    "szíves",
-    "szívesen",
-    "szíveskedjék",
-    "sőt",
-    "talán",
-    "tavaly",
-    "te",
-    "tegnap",
-    "tegnapelőtt",
-    "tehát",
-    "tele",
-    "teljes",
-    "tessék",
-    "ti",
-    "tied",
-    "titeket",
-    "tizedik",
-    "tizediket",
-    "tizenegy",
-    "tizenegyedik",
-    "tizenhat",
-    "tizenhárom",
-    "tizenhét",
-    "tizenkettedik",
-    "tizenkettő",
-    "tizenkilenc",
-    "tizenkét",
-    "tizennyolc",
-    "tizennégy",
-    "tizenöt",
-    "tizet",
-    "tovább",
-    "további",
-    "továbbá",
-    "távol",
-    "téged",
-    "tényleg",
-    "tíz",
-    "több",
-    "többi",
-    "többször",
-    "túl",
-    "tőle",
-    "tőled",
-    "tőlem",
-    "tőletek",
-    "tőlük",
-    "tőlünk",
-    "ugyanakkor",
-    "ugyanez",
-    "ugyanis",
-    "ugye",
-    "urak",
-    "uram",
-    "urat",
-    "utoljára",
-    "utolsó",
-    "után",
-    "utána",
-    "vagy",
-    "vagyis",
-    "vagyok",
-    "vagytok",
-    "vagyunk",
-    "vajon",
-    "valahol",
-    "valaki",
-    "valakit",
-    "valamelyik",
-    "valami",
-    "valamint",
-    "való",
-    "van",
-    "vannak",
-    "vele",
-    "veled",
-    "velem",
-    "veletek",
-    "velük",
-    "velünk",
-    "vissza",
-    "viszlát",
-    "viszont",
-    "viszontlátásra",
-    "volna",
-    "volnának",
-    "volnék",
-    "volt",
-    "voltak",
-    "voltam",
-    "voltunk",
-    "végre",
-    "végén",
-    "végül",
-    "által",
-    "általában",
-    "ám",
-    "át",
-    "éljen",
-    "én",
-    "éppen",
-    "érte",
-    "érted",
-    "értem",
-    "értetek",
-    "értük",
-    "értünk",
-    "és",
-    "év",
-    "évben",
-    "éve",
-    "évek",
-    "éves",
-    "évi",
-    "évvel",
-    "így",
-    "óta",
-    "ön",
-    "önbe",
-    "önben",
-    "önből",
-    "önhöz",
-    "önnek",
-    "önnel",
-    "önnél",
-    "önre",
-    "önről",
-    "önt",
-    "öntől",
-    "önért",
-    "önök",
-    "önökbe",
-    "önökben",
-    "önökből",
-    "önöket",
-    "önökhöz",
-    "önökkel",
-    "önöknek",
-    "önöknél",
-    "önökre",
-    "önökről",
-    "önöktől",
-    "önökért",
-    "önökön",
-    "önön",
-    "össze",
-    "öt",
-    "ötven",
-    "ötödik",
-    "ötödiket",
-    "ötöt",
-    "úgy",
-    "úgyis",
-    "úgynevezett",
-    "új",
-    "újabb",
-    "újra",
-    "úr",
-    "ő",
-    "ők",
-    "őket",
-    "őt"
-  ];
-  var ind = [
-    "ada",
-    "adalah",
-    "adanya",
-    "adapun",
-    "agak",
-    "agaknya",
-    "agar",
-    "akan",
-    "akankah",
-    "akhir",
-    "akhiri",
-    "akhirnya",
-    "aku",
-    "akulah",
-    "amat",
-    "amatlah",
-    "anda",
-    "andalah",
-    "antar",
-    "antara",
-    "antaranya",
-    "apa",
-    "apaan",
-    "apabila",
-    "apakah",
-    "apalagi",
-    "apatah",
-    "artinya",
-    "asal",
-    "asalkan",
-    "atas",
-    "atau",
-    "ataukah",
-    "ataupun",
-    "awal",
-    "awalnya",
-    "bagai",
-    "bagaikan",
-    "bagaimana",
-    "bagaimanakah",
-    "bagaimanapun",
-    "bagi",
-    "bagian",
-    "bahkan",
-    "bahwa",
-    "bahwasanya",
-    "bakal",
-    "bakalan",
-    "balik",
-    "banyak",
-    "bapak",
-    "baru",
-    "bawah",
-    "beberapa",
-    "begini",
-    "beginian",
-    "beginikah",
-    "beginilah",
-    "begitu",
-    "begitukah",
-    "begitulah",
-    "begitupun",
-    "bekerja",
-    "belakang",
-    "belakangan",
-    "belum",
-    "belumlah",
-    "benar",
-    "benarkah",
-    "benarlah",
-    "berada",
-    "berakhir",
-    "berakhirlah",
-    "berakhirnya",
-    "berapa",
-    "berapakah",
-    "berapalah",
-    "berapapun",
-    "berarti",
-    "berawal",
-    "berbagai",
-    "berdatangan",
-    "beri",
-    "berikan",
-    "berikut",
-    "berikutnya",
-    "berjumlah",
-    "berkali-kali",
-    "berkata",
-    "berkehendak",
-    "berkeinginan",
-    "berkenaan",
-    "berlainan",
-    "berlalu",
-    "berlangsung",
-    "berlebihan",
-    "bermacam",
-    "bermacam-macam",
-    "bermaksud",
-    "bermula",
-    "bersama",
-    "bersama-sama",
-    "bersiap",
-    "bersiap-siap",
-    "bertanya",
-    "bertanya-tanya",
-    "berturut",
-    "berturut-turut",
-    "bertutur",
-    "berujar",
-    "berupa",
-    "besar",
-    "betul",
-    "betulkah",
-    "biasa",
-    "biasanya",
-    "bila",
-    "bilakah",
-    "bisa",
-    "bisakah",
-    "boleh",
-    "bolehkah",
-    "bolehlah",
-    "buat",
-    "bukan",
-    "bukankah",
-    "bukanlah",
-    "bukannya",
-    "bulan",
-    "bung",
-    "cara",
-    "caranya",
-    "cukup",
-    "cukupkah",
-    "cukuplah",
-    "cuma",
-    "dahulu",
-    "dalam",
-    "dan",
-    "dapat",
-    "dari",
-    "daripada",
-    "datang",
-    "dekat",
-    "demi",
-    "demikian",
-    "demikianlah",
-    "dengan",
-    "depan",
-    "di",
-    "dia",
-    "diakhiri",
-    "diakhirinya",
-    "dialah",
-    "diantara",
-    "diantaranya",
-    "diberi",
-    "diberikan",
-    "diberikannya",
-    "dibuat",
-    "dibuatnya",
-    "didapat",
-    "didatangkan",
-    "digunakan",
-    "diibaratkan",
-    "diibaratkannya",
-    "diingat",
-    "diingatkan",
-    "diinginkan",
-    "dijawab",
-    "dijelaskan",
-    "dijelaskannya",
-    "dikarenakan",
-    "dikatakan",
-    "dikatakannya",
-    "dikerjakan",
-    "diketahui",
-    "diketahuinya",
-    "dikira",
-    "dilakukan",
-    "dilalui",
-    "dilihat",
-    "dimaksud",
-    "dimaksudkan",
-    "dimaksudkannya",
-    "dimaksudnya",
-    "diminta",
-    "dimintai",
-    "dimisalkan",
-    "dimulai",
-    "dimulailah",
-    "dimulainya",
-    "dimungkinkan",
-    "dini",
-    "dipastikan",
-    "diperbuat",
-    "diperbuatnya",
-    "dipergunakan",
-    "diperkirakan",
-    "diperlihatkan",
-    "diperlukan",
-    "diperlukannya",
-    "dipersoalkan",
-    "dipertanyakan",
-    "dipunyai",
-    "diri",
-    "dirinya",
-    "disampaikan",
-    "disebut",
-    "disebutkan",
-    "disebutkannya",
-    "disini",
-    "disinilah",
-    "ditambahkan",
-    "ditandaskan",
-    "ditanya",
-    "ditanyai",
-    "ditanyakan",
-    "ditegaskan",
-    "ditujukan",
-    "ditunjuk",
-    "ditunjuki",
-    "ditunjukkan",
-    "ditunjukkannya",
-    "ditunjuknya",
-    "dituturkan",
-    "dituturkannya",
-    "diucapkan",
-    "diucapkannya",
-    "diungkapkan",
-    "dong",
-    "dulu",
-    "empat",
-    "enggak",
-    "enggaknya",
-    "entah",
-    "entahlah",
-    "guna",
-    "gunakan",
-    "hal",
-    "hampir",
-    "hanya",
-    "hanyalah",
-    "harus",
-    "haruslah",
-    "harusnya",
-    "hendak",
-    "hendaklah",
-    "hendaknya",
-    "hingga",
-    "ia",
-    "ialah",
-    "ibarat",
-    "ibaratkan",
-    "ibaratnya",
-    "ikut",
-    "ingat",
-    "ingat-ingat",
-    "ingin",
-    "inginkah",
-    "inginkan",
-    "ini",
-    "inikah",
-    "inilah",
-    "itu",
-    "itukah",
-    "itulah",
-    "jadi",
-    "jadilah",
-    "jadinya",
-    "jangan",
-    "jangankan",
-    "janganlah",
-    "jauh",
-    "jawab",
-    "jawaban",
-    "jawabnya",
-    "jelas",
-    "jelaskan",
-    "jelaslah",
-    "jelasnya",
-    "jika",
-    "jikalau",
-    "juga",
-    "jumlah",
-    "jumlahnya",
-    "justru",
-    "kala",
-    "kalau",
-    "kalaulah",
-    "kalaupun",
-    "kalian",
-    "kami",
-    "kamilah",
-    "kamu",
-    "kamulah",
-    "kan",
-    "kapan",
-    "kapankah",
-    "kapanpun",
-    "karena",
-    "karenanya",
-    "kasus",
-    "kata",
-    "katakan",
-    "katakanlah",
-    "katanya",
-    "ke",
-    "keadaan",
-    "kebetulan",
-    "kecil",
-    "kedua",
-    "keduanya",
-    "keinginan",
-    "kelamaan",
-    "kelihatan",
-    "kelihatannya",
-    "kelima",
-    "keluar",
-    "kembali",
-    "kemudian",
-    "kemungkinan",
-    "kemungkinannya",
-    "kenapa",
-    "kepada",
-    "kepadanya",
-    "kesampaian",
-    "keseluruhan",
-    "keseluruhannya",
-    "keterlaluan",
-    "ketika",
-    "khususnya",
-    "kini",
-    "kinilah",
-    "kira",
-    "kira-kira",
-    "kiranya",
-    "kita",
-    "kitalah",
-    "kok",
-    "kurang",
-    "lagi",
-    "lagian",
-    "lah",
-    "lain",
-    "lainnya",
-    "lalu",
-    "lama",
-    "lamanya",
-    "lanjut",
-    "lanjutnya",
-    "lebih",
-    "lewat",
-    "lima",
-    "luar",
-    "macam",
-    "maka",
-    "makanya",
-    "makin",
-    "malah",
-    "malahan",
-    "mampu",
-    "mampukah",
-    "mana",
-    "manakala",
-    "manalagi",
-    "masa",
-    "masalah",
-    "masalahnya",
-    "masih",
-    "masihkah",
-    "masing",
-    "masing-masing",
-    "mau",
-    "maupun",
-    "melainkan",
-    "melakukan",
-    "melalui",
-    "melihat",
-    "melihatnya",
-    "memang",
-    "memastikan",
-    "memberi",
-    "memberikan",
-    "membuat",
-    "memerlukan",
-    "memihak",
-    "meminta",
-    "memintakan",
-    "memisalkan",
-    "memperbuat",
-    "mempergunakan",
-    "memperkirakan",
-    "memperlihatkan",
-    "mempersiapkan",
-    "mempersoalkan",
-    "mempertanyakan",
-    "mempunyai",
-    "memulai",
-    "memungkinkan",
-    "menaiki",
-    "menambahkan",
-    "menandaskan",
-    "menanti",
-    "menanti-nanti",
-    "menantikan",
-    "menanya",
-    "menanyai",
-    "menanyakan",
-    "mendapat",
-    "mendapatkan",
-    "mendatang",
-    "mendatangi",
-    "mendatangkan",
-    "menegaskan",
-    "mengakhiri",
-    "mengapa",
-    "mengatakan",
-    "mengatakannya",
-    "mengenai",
-    "mengerjakan",
-    "mengetahui",
-    "menggunakan",
-    "menghendaki",
-    "mengibaratkan",
-    "mengibaratkannya",
-    "mengingat",
-    "mengingatkan",
-    "menginginkan",
-    "mengira",
-    "mengucapkan",
-    "mengucapkannya",
-    "mengungkapkan",
-    "menjadi",
-    "menjawab",
-    "menjelaskan",
-    "menuju",
-    "menunjuk",
-    "menunjuki",
-    "menunjukkan",
-    "menunjuknya",
-    "menurut",
-    "menuturkan",
-    "menyampaikan",
-    "menyangkut",
-    "menyatakan",
-    "menyebutkan",
-    "menyeluruh",
-    "menyiapkan",
-    "merasa",
-    "mereka",
-    "merekalah",
-    "merupakan",
-    "meski",
-    "meskipun",
-    "meyakini",
-    "meyakinkan",
-    "minta",
-    "mirip",
-    "misal",
-    "misalkan",
-    "misalnya",
-    "mula",
-    "mulai",
-    "mulailah",
-    "mulanya",
-    "mungkin",
-    "mungkinkah",
-    "nah",
-    "naik",
-    "namun",
-    "nanti",
-    "nantinya",
-    "nyaris",
-    "nyatanya",
-    "oleh",
-    "olehnya",
-    "pada",
-    "padahal",
-    "padanya",
-    "paling",
-    "panjang",
-    "pantas",
-    "para",
-    "pasti",
-    "pastilah",
-    "penting",
-    "pentingnya",
-    "per",
-    "percuma",
-    "perlu",
-    "perlukah",
-    "perlunya",
-    "pernah",
-    "persoalan",
-    "pertama",
-    "pertama-tama",
-    "pertanyaan",
-    "pertanyakan",
-    "pihak",
-    "pihaknya",
-    "pukul",
-    "pula",
-    "pun",
-    "punya",
-    "rasa",
-    "rasanya",
-    "rata",
-    "rupanya",
-    "saat",
-    "saatnya",
-    "saja",
-    "sajalah",
-    "saling",
-    "sama",
-    "sama-sama",
-    "sambil",
-    "sampai",
-    "sampai-sampai",
-    "sampaikan",
-    "sana",
-    "sangat",
-    "sangatlah",
-    "satu",
-    "saya",
-    "sayalah",
-    "se",
-    "sebab",
-    "sebabnya",
-    "sebagai",
-    "sebagaimana",
-    "sebagainya",
-    "sebagian",
-    "sebaik",
-    "sebaik-baiknya",
-    "sebaiknya",
-    "sebaliknya",
-    "sebanyak",
-    "sebegini",
-    "sebegitu",
-    "sebelum",
-    "sebelumnya",
-    "sebenarnya",
-    "seberapa",
-    "sebesar",
-    "sebetulnya",
-    "sebisanya",
-    "sebuah",
-    "sebut",
-    "sebutlah",
-    "sebutnya",
-    "secara",
-    "secukupnya",
-    "sedang",
-    "sedangkan",
-    "sedemikian",
-    "sedikit",
-    "sedikitnya",
-    "seenaknya",
-    "segala",
-    "segalanya",
-    "segera",
-    "seharusnya",
-    "sehingga",
-    "seingat",
-    "sejak",
-    "sejauh",
-    "sejenak",
-    "sejumlah",
-    "sekadar",
-    "sekadarnya",
-    "sekali",
-    "sekali-kali",
-    "sekalian",
-    "sekaligus",
-    "sekalipun",
-    "sekarang",
-    "sekarang",
-    "sekecil",
-    "seketika",
-    "sekiranya",
-    "sekitar",
-    "sekitarnya",
-    "sekurang-kurangnya",
-    "sekurangnya",
-    "sela",
-    "selain",
-    "selaku",
-    "selalu",
-    "selama",
-    "selama-lamanya",
-    "selamanya",
-    "selanjutnya",
-    "seluruh",
-    "seluruhnya",
-    "semacam",
-    "semakin",
-    "semampu",
-    "semampunya",
-    "semasa",
-    "semasih",
-    "semata",
-    "semata-mata",
-    "semaunya",
-    "sementara",
-    "semisal",
-    "semisalnya",
-    "sempat",
-    "semua",
-    "semuanya",
-    "semula",
-    "sendiri",
-    "sendirian",
-    "sendirinya",
-    "seolah",
-    "seolah-olah",
-    "seorang",
-    "sepanjang",
-    "sepantasnya",
-    "sepantasnyalah",
-    "seperlunya",
-    "seperti",
-    "sepertinya",
-    "sepihak",
-    "sering",
-    "seringnya",
-    "serta",
-    "serupa",
-    "sesaat",
-    "sesama",
-    "sesampai",
-    "sesegera",
-    "sesekali",
-    "seseorang",
-    "sesuatu",
-    "sesuatunya",
-    "sesudah",
-    "sesudahnya",
-    "setelah",
-    "setempat",
-    "setengah",
-    "seterusnya",
-    "setiap",
-    "setiba",
-    "setibanya",
-    "setidak-tidaknya",
-    "setidaknya",
-    "setinggi",
-    "seusai",
-    "sewaktu",
-    "siap",
-    "siapa",
-    "siapakah",
-    "siapapun",
-    "sini",
-    "sinilah",
-    "soal",
-    "soalnya",
-    "suatu",
-    "sudah",
-    "sudahkah",
-    "sudahlah",
-    "supaya",
-    "tadi",
-    "tadinya",
-    "tahu",
-    "tahun",
-    "tak",
-    "tambah",
-    "tambahnya",
-    "tampak",
-    "tampaknya",
-    "tandas",
-    "tandasnya",
-    "tanpa",
-    "tanya",
-    "tanyakan",
-    "tanyanya",
-    "tapi",
-    "tegas",
-    "tegasnya",
-    "telah",
-    "tempat",
-    "tengah",
-    "tentang",
-    "tentu",
-    "tentulah",
-    "tentunya",
-    "tepat",
-    "terakhir",
-    "terasa",
-    "terbanyak",
-    "terdahulu",
-    "terdapat",
-    "terdiri",
-    "terhadap",
-    "terhadapnya",
-    "teringat",
-    "teringat-ingat",
-    "terjadi",
-    "terjadilah",
-    "terjadinya",
-    "terkira",
-    "terlalu",
-    "terlebih",
-    "terlihat",
-    "termasuk",
-    "ternyata",
-    "tersampaikan",
-    "tersebut",
-    "tersebutlah",
-    "tertentu",
-    "tertuju",
-    "terus",
-    "terutama",
-    "tetap",
-    "tetapi",
-    "tiap",
-    "tiba",
-    "tiba-tiba",
-    "tidak",
-    "tidakkah",
-    "tidaklah",
-    "tiga",
-    "tinggi",
-    "toh",
-    "tunjuk",
-    "turut",
-    "tutur",
-    "tuturnya",
-    "ucap",
-    "ucapnya",
-    "ujar",
-    "ujarnya",
-    "umum",
-    "umumnya",
-    "ungkap",
-    "ungkapnya",
-    "untuk",
-    "usah",
-    "usai",
-    "waduh",
-    "wah",
-    "wahai",
-    "waktu",
-    "waktunya",
-    "walau",
-    "walaupun",
-    "wong",
-    "yaitu",
-    "yakin",
-    "yakni",
-    "yang"
-  ];
-  var ita = [
-    "ad",
-    "al",
-    "allo",
-    "ai",
-    "agli",
-    "all",
-    "agl",
-    "alla",
-    "alle",
-    "con",
-    "col",
-    "coi",
-    "da",
-    "dal",
-    "dallo",
-    "dai",
-    "dagli",
-    "dall",
-    "dagl",
-    "dalla",
-    "dalle",
-    "di",
-    "del",
-    "dello",
-    "dei",
-    "degli",
-    "dell",
-    "degl",
-    "della",
-    "delle",
-    "in",
-    "nel",
-    "nello",
-    "nei",
-    "negli",
-    "nell",
-    "negl",
-    "nella",
-    "nelle",
-    "su",
-    "sul",
-    "sullo",
-    "sui",
-    "sugli",
-    "sull",
-    "sugl",
-    "sulla",
-    "sulle",
-    "per",
-    "tra",
-    "contro",
-    "io",
-    "tu",
-    "lui",
-    "lei",
-    "noi",
-    "voi",
-    "loro",
-    "mio",
-    "mia",
-    "miei",
-    "mie",
-    "tuo",
-    "tua",
-    "tuoi",
-    "tue",
-    "suo",
-    "sua",
-    "suoi",
-    "sue",
-    "nostro",
-    "nostra",
-    "nostri",
-    "nostre",
-    "vostro",
-    "vostra",
-    "vostri",
-    "vostre",
-    "mi",
-    "ti",
-    "ci",
-    "vi",
-    "lo",
-    "la",
-    "li",
-    "le",
-    "gli",
-    "ne",
-    "il",
-    "un",
-    "uno",
-    "una",
-    "ma",
-    "ed",
-    "se",
-    "perché",
-    "anche",
-    "come",
-    "dov",
-    "dove",
-    "che",
-    "chi",
-    "cui",
-    "non",
-    "più",
-    "quale",
-    "quanto",
-    "quanti",
-    "quanta",
-    "quante",
-    "quello",
-    "quelli",
-    "quella",
-    "quelle",
-    "questo",
-    "questi",
-    "questa",
-    "queste",
-    "si",
-    "tutto",
-    "tutti",
-    "a",
-    "c",
-    "e",
-    "i",
-    "l",
-    "o",
-    "ho",
-    "hai",
-    "ha",
-    "abbiamo",
-    "avete",
-    "hanno",
-    "abbia",
-    "abbiate",
-    "abbiano",
-    "avrò",
-    "avrai",
-    "avrà",
-    "avremo",
-    "avrete",
-    "avranno",
-    "avrei",
-    "avresti",
-    "avrebbe",
-    "avremmo",
-    "avreste",
-    "avrebbero",
-    "avevo",
-    "avevi",
-    "aveva",
-    "avevamo",
-    "avevate",
-    "avevano",
-    "ebbi",
-    "avesti",
-    "ebbe",
-    "avemmo",
-    "aveste",
-    "ebbero",
-    "avessi",
-    "avesse",
-    "avessimo",
-    "avessero",
-    "avendo",
-    "avuto",
-    "avuta",
-    "avuti",
-    "avute",
-    "sono",
-    "sei",
-    "è",
-    "siamo",
-    "siete",
-    "sia",
-    "siate",
-    "siano",
-    "sarò",
-    "sarai",
-    "sarà",
-    "saremo",
-    "sarete",
-    "saranno",
-    "sarei",
-    "saresti",
-    "sarebbe",
-    "saremmo",
-    "sareste",
-    "sarebbero",
-    "ero",
-    "eri",
-    "era",
-    "eravamo",
-    "eravate",
-    "erano",
-    "fui",
-    "fosti",
-    "fu",
-    "fummo",
-    "foste",
-    "furono",
-    "fossi",
-    "fosse",
-    "fossimo",
-    "fossero",
-    "essendo",
-    "faccio",
-    "fai",
-    "facciamo",
-    "fanno",
-    "faccia",
-    "facciate",
-    "facciano",
-    "farò",
-    "farai",
-    "farà",
-    "faremo",
-    "farete",
-    "faranno",
-    "farei",
-    "faresti",
-    "farebbe",
-    "faremmo",
-    "fareste",
-    "farebbero",
-    "facevo",
-    "facevi",
-    "faceva",
-    "facevamo",
-    "facevate",
-    "facevano",
-    "feci",
-    "facesti",
-    "fece",
-    "facemmo",
-    "faceste",
-    "fecero",
-    "facessi",
-    "facesse",
-    "facessimo",
-    "facessero",
-    "facendo",
-    "sto",
-    "stai",
-    "sta",
-    "stiamo",
-    "stanno",
-    "stia",
-    "stiate",
-    "stiano",
-    "starò",
-    "starai",
-    "starà",
-    "staremo",
-    "starete",
-    "staranno",
-    "starei",
-    "staresti",
-    "starebbe",
-    "staremmo",
-    "stareste",
-    "starebbero",
-    "stavo",
-    "stavi",
-    "stava",
-    "stavamo",
-    "stavate",
-    "stavano",
-    "stetti",
-    "stesti",
-    "stette",
-    "stemmo",
-    "steste",
-    "stettero",
-    "stessi",
-    "stesse",
-    "stessimo",
-    "stessero",
-    "stando"
-  ];
-  var jpn = [
-    "の",
-    "に",
-    "は",
-    "を",
-    "た",
-    "が",
-    "で",
-    "て",
-    "と",
-    "し",
-    "れ",
-    "さ",
-    "ある",
-    "いる",
-    "も",
-    "する",
-    "から",
-    "な",
-    "こと",
-    "として",
-    "い",
-    "や",
-    "れる",
-    "など",
-    "なっ",
-    "ない",
-    "この",
-    "ため",
-    "その",
-    "あっ",
-    "よう",
-    "また",
-    "もの",
-    "という",
-    "あり",
-    "まで",
-    "られ",
-    "なる",
-    "へ",
-    "か",
-    "だ",
-    "これ",
-    "によって",
-    "により",
-    "おり",
-    "より",
-    "による",
-    "ず",
-    "なり",
-    "られる",
-    "において",
-    "ば",
-    "なかっ",
-    "なく",
-    "しかし",
-    "について",
-    "せ",
-    "だっ",
-    "その後",
-    "できる",
-    "それ",
-    "う",
-    "ので",
-    "なお",
-    "のみ",
-    "でき",
-    "き",
-    "つ",
-    "における",
-    "および",
-    "いう",
-    "さらに",
-    "でも",
-    "ら",
-    "たり",
-    "その他",
-    "に関する",
-    "たち",
-    "ます",
-    "ん",
-    "なら",
-    "に対して",
-    "特に",
-    "せる",
-    "及び",
-    "これら",
-    "とき",
-    "では",
-    "にて",
-    "ほか",
-    "ながら",
-    "うち",
-    "そして",
-    "とともに",
-    "ただし",
-    "かつて",
-    "それぞれ",
-    "または",
-    "お",
-    "ほど",
-    "ものの",
-    "に対する",
-    "ほとんど",
-    "と共に",
-    "といった",
-    "です",
-    "とも",
-    "ところ",
-    "ここ"
-  ];
-  var kor = [
-    "가",
-    "가까스로",
-    "가령",
-    "각",
-    "각각",
-    "각자",
-    "각종",
-    "갖고말하자면",
-    "같다",
-    "같이",
-    "개의치않고",
-    "거니와",
-    "거바",
-    "거의",
-    "것",
-    "것과 같이",
-    "것들",
-    "게다가",
-    "게우다",
-    "겨우",
-    "견지에서",
-    "결과에 이르다",
-    "결국",
-    "결론을 낼 수 있다",
-    "겸사겸사",
-    "고려하면",
-    "고로",
-    "곧",
-    "공동으로",
-    "과",
-    "과연",
-    "관계가 있다",
-    "관계없이",
-    "관련이 있다",
-    "관하여",
-    "관한",
-    "관해서는",
-    "구",
-    "구체적으로",
-    "구토하다",
-    "그",
-    "그들",
-    "그때",
-    "그래",
-    "그래도",
-    "그래서",
-    "그러나",
-    "그러니",
-    "그러니까",
-    "그러면",
-    "그러므로",
-    "그러한즉",
-    "그런 까닭에",
-    "그런데",
-    "그런즉",
-    "그럼",
-    "그럼에도 불구하고",
-    "그렇게 함으로써",
-    "그렇지",
-    "그렇지 않다면",
-    "그렇지 않으면",
-    "그렇지만",
-    "그렇지않으면",
-    "그리고",
-    "그리하여",
-    "그만이다",
-    "그에 따르는",
-    "그위에",
-    "그저",
-    "그중에서",
-    "그치지 않다",
-    "근거로",
-    "근거하여",
-    "기대여",
-    "기점으로",
-    "기준으로",
-    "기타",
-    "까닭으로",
-    "까악",
-    "까지",
-    "까지 미치다",
-    "까지도",
-    "꽈당",
-    "끙끙",
-    "끼익",
-    "나",
-    "나머지는",
-    "남들",
-    "남짓",
-    "너",
-    "너희",
-    "너희들",
-    "네",
-    "넷",
-    "년",
-    "논하지 않다",
-    "놀라다",
-    "누가 알겠는가",
-    "누구",
-    "다른",
-    "다른 방면으로",
-    "다만",
-    "다섯",
-    "다소",
-    "다수",
-    "다시 말하자면",
-    "다시말하면",
-    "다음",
-    "다음에",
-    "다음으로",
-    "단지",
-    "답다",
-    "당신",
-    "당장",
-    "대로 하다",
-    "대하면",
-    "대하여",
-    "대해 말하자면",
-    "대해서",
-    "댕그",
-    "더구나",
-    "더군다나",
-    "더라도",
-    "더불어",
-    "더욱더",
-    "더욱이는",
-    "도달하다",
-    "도착하다",
-    "동시에",
-    "동안",
-    "된바에야",
-    "된이상",
-    "두번째로",
-    "둘",
-    "둥둥",
-    "뒤따라",
-    "뒤이어",
-    "든간에",
-    "들",
-    "등",
-    "등등",
-    "딩동",
-    "따라",
-    "따라서",
-    "따위",
-    "따지지 않다",
-    "딱",
-    "때",
-    "때가 되어",
-    "때문에",
-    "또",
-    "또한",
-    "뚝뚝",
-    "라 해도",
-    "령",
-    "로",
-    "로 인하여",
-    "로부터",
-    "로써",
-    "륙",
-    "를",
-    "마음대로",
-    "마저",
-    "마저도",
-    "마치",
-    "막론하고",
-    "만 못하다",
-    "만약",
-    "만약에",
-    "만은 아니다",
-    "만이 아니다",
-    "만일",
-    "만큼",
-    "말하자면",
-    "말할것도 없고",
-    "매",
-    "매번",
-    "메쓰겁다",
-    "몇",
-    "모",
-    "모두",
-    "무렵",
-    "무릎쓰고",
-    "무슨",
-    "무엇",
-    "무엇때문에",
-    "물론",
-    "및",
-    "바꾸어말하면",
-    "바꾸어말하자면",
-    "바꾸어서 말하면",
-    "바꾸어서 한다면",
-    "바꿔 말하면",
-    "바로",
-    "바와같이",
-    "밖에 안된다",
-    "반대로",
-    "반대로 말하자면",
-    "반드시",
-    "버금",
-    "보는데서",
-    "보다더",
-    "보드득",
-    "본대로",
-    "봐",
-    "봐라",
-    "부류의 사람들",
-    "부터",
-    "불구하고",
-    "불문하고",
-    "붕붕",
-    "비걱거리다",
-    "비교적",
-    "비길수 없다",
-    "비로소",
-    "비록",
-    "비슷하다",
-    "비추어 보아",
-    "비하면",
-    "뿐만 아니라",
-    "뿐만아니라",
-    "뿐이다",
-    "삐걱",
-    "삐걱거리다",
-    "사",
-    "삼",
-    "상대적으로 말하자면",
-    "생각한대로",
-    "설령",
-    "설마",
-    "설사",
-    "셋",
-    "소생",
-    "소인",
-    "솨",
-    "쉿",
-    "습니까",
-    "습니다",
-    "시각",
-    "시간",
-    "시작하여",
-    "시초에",
-    "시키다",
-    "실로",
-    "심지어",
-    "아",
-    "아니",
-    "아니나다를가",
-    "아니라면",
-    "아니면",
-    "아니었다면",
-    "아래윗",
-    "아무거나",
-    "아무도",
-    "아야",
-    "아울러",
-    "아이",
-    "아이고",
-    "아이구",
-    "아이야",
-    "아이쿠",
-    "아하",
-    "아홉",
-    "안 그러면",
-    "않기 위하여",
-    "않기 위해서",
-    "알 수 있다",
-    "알았어",
-    "앗",
-    "앞에서",
-    "앞의것",
-    "야",
-    "약간",
-    "양자",
-    "어",
-    "어기여차",
-    "어느",
-    "어느 년도",
-    "어느것",
-    "어느곳",
-    "어느때",
-    "어느쪽",
-    "어느해",
-    "어디",
-    "어때",
-    "어떠한",
-    "어떤",
-    "어떤것",
-    "어떤것들",
-    "어떻게",
-    "어떻해",
-    "어이",
-    "어째서",
-    "어쨋든",
-    "어쩔수 없다",
-    "어찌",
-    "어찌됏든",
-    "어찌됏어",
-    "어찌하든지",
-    "어찌하여",
-    "언제",
-    "언젠가",
-    "얼마",
-    "얼마 안 되는 것",
-    "얼마간",
-    "얼마나",
-    "얼마든지",
-    "얼마만큼",
-    "얼마큼",
-    "엉엉",
-    "에",
-    "에 가서",
-    "에 달려 있다",
-    "에 대해",
-    "에 있다",
-    "에 한하다",
-    "에게",
-    "에서",
-    "여",
-    "여기",
-    "여덟",
-    "여러분",
-    "여보시오",
-    "여부",
-    "여섯",
-    "여전히",
-    "여차",
-    "연관되다",
-    "연이서",
-    "영",
-    "영차",
-    "옆사람",
-    "예",
-    "예를 들면",
-    "예를 들자면",
-    "예컨대",
-    "예하면",
-    "오",
-    "오로지",
-    "오르다",
-    "오자마자",
-    "오직",
-    "오호",
-    "오히려",
-    "와",
-    "와 같은 사람들",
-    "와르르",
-    "와아",
-    "왜",
-    "왜냐하면",
-    "외에도",
-    "요만큼",
-    "요만한 것",
-    "요만한걸",
-    "요컨대",
-    "우르르",
-    "우리",
-    "우리들",
-    "우선",
-    "우에 종합한것과같이",
-    "운운",
-    "월",
-    "위에서 서술한바와같이",
-    "위하여",
-    "위해서",
-    "윙윙",
-    "육",
-    "으로",
-    "으로 인하여",
-    "으로서",
-    "으로써",
-    "을",
-    "응",
-    "응당",
-    "의",
-    "의거하여",
-    "의지하여",
-    "의해",
-    "의해되다",
-    "의해서",
-    "이",
-    "이 되다",
-    "이 때문에",
-    "이 밖에",
-    "이 외에",
-    "이 정도의",
-    "이것",
-    "이곳",
-    "이때",
-    "이라면",
-    "이래",
-    "이러이러하다",
-    "이러한",
-    "이런",
-    "이럴정도로",
-    "이렇게 많은 것",
-    "이렇게되면",
-    "이렇게말하자면",
-    "이렇구나",
-    "이로 인하여",
-    "이르기까지",
-    "이리하여",
-    "이만큼",
-    "이번",
-    "이봐",
-    "이상",
-    "이어서",
-    "이었다",
-    "이와 같다",
-    "이와 같은",
-    "이와 반대로",
-    "이와같다면",
-    "이외에도",
-    "이용하여",
-    "이유만으로",
-    "이젠",
-    "이지만",
-    "이쪽",
-    "이천구",
-    "이천육",
-    "이천칠",
-    "이천팔",
-    "인 듯하다",
-    "인젠",
-    "일",
-    "일것이다",
-    "일곱",
-    "일단",
-    "일때",
-    "일반적으로",
-    "일지라도",
-    "임에 틀림없다",
-    "입각하여",
-    "입장에서",
-    "잇따라",
-    "있다",
-    "자",
-    "자기",
-    "자기집",
-    "자마자",
-    "자신",
-    "잠깐",
-    "잠시",
-    "저",
-    "저것",
-    "저것만큼",
-    "저기",
-    "저쪽",
-    "저희",
-    "전부",
-    "전자",
-    "전후",
-    "점에서 보아",
-    "정도에 이르다",
-    "제",
-    "제각기",
-    "제외하고",
-    "조금",
-    "조차",
-    "조차도",
-    "졸졸",
-    "좀",
-    "좋아",
-    "좍좍",
-    "주룩주룩",
-    "주저하지 않고",
-    "줄은 몰랏다",
-    "줄은모른다",
-    "중에서",
-    "중의하나",
-    "즈음하여",
-    "즉",
-    "즉시",
-    "지든지",
-    "지만",
-    "지말고",
-    "진짜로",
-    "쪽으로",
-    "차라리",
-    "참",
-    "참나",
-    "첫번째로",
-    "쳇",
-    "총적으로",
-    "총적으로 말하면",
-    "총적으로 보면",
-    "칠",
-    "콸콸",
-    "쾅쾅",
-    "쿵",
-    "타다",
-    "타인",
-    "탕탕",
-    "토하다",
-    "통하여",
-    "툭",
-    "퉤",
-    "틈타",
-    "팍",
-    "팔",
-    "퍽",
-    "펄렁",
-    "하",
-    "하게될것이다",
-    "하게하다",
-    "하겠는가",
-    "하고 있다",
-    "하고있었다",
-    "하곤하였다",
-    "하구나",
-    "하기 때문에",
-    "하기 위하여",
-    "하기는한데",
-    "하기만 하면",
-    "하기보다는",
-    "하기에",
-    "하나",
-    "하느니",
-    "하는 김에",
-    "하는 편이 낫다",
-    "하는것도",
-    "하는것만 못하다",
-    "하는것이 낫다",
-    "하는바",
-    "하더라도",
-    "하도다",
-    "하도록시키다",
-    "하도록하다",
-    "하든지",
-    "하려고하다",
-    "하마터면",
-    "하면 할수록",
-    "하면된다",
-    "하면서",
-    "하물며",
-    "하여금",
-    "하여야",
-    "하자마자",
-    "하지 않는다면",
-    "하지 않도록",
-    "하지마",
-    "하지마라",
-    "하지만",
-    "하하",
-    "한 까닭에",
-    "한 이유는",
-    "한 후",
-    "한다면",
-    "한다면 몰라도",
-    "한데",
-    "한마디",
-    "한적이있다",
-    "한켠으로는",
-    "한항목",
-    "할 따름이다",
-    "할 생각이다",
-    "할 줄 안다",
-    "할 지경이다",
-    "할 힘이 있다",
-    "할때",
-    "할만하다",
-    "할망정",
-    "할뿐",
-    "할수있다",
-    "할수있어",
-    "할줄알다",
-    "할지라도",
-    "할지언정",
-    "함께",
-    "해도된다",
-    "해도좋다",
-    "해봐요",
-    "해서는 안된다",
-    "해야한다",
-    "해요",
-    "했어요",
-    "향하다",
-    "향하여",
-    "향해서",
-    "허",
-    "허걱",
-    "허허",
-    "헉",
-    "헉헉",
-    "헐떡헐떡",
-    "형식으로 쓰여",
-    "혹시",
-    "혹은",
-    "혼자",
-    "훨씬",
-    "휘익",
-    "휴",
-    "흐흐",
-    "흥",
-    "힘입어",
-    "︿",
-    "～",
-    "￥"
-  ];
-  var kur = [
-    "ئێمە",
-    "ئێوە",
-    "ئەم",
-    "ئەو",
-    "ئەوان",
-    "ئەوەی",
-    "بۆ",
-    "بێ",
-    "بێجگە",
-    "بە",
-    "بەبێ",
-    "بەدەم",
-    "بەردەم",
-    "بەرلە",
-    "بەرەوی",
-    "بەرەوە",
-    "بەلای",
-    "بەپێی",
-    "تۆ",
-    "تێ",
-    "جگە",
-    "دوای",
-    "دوو",
-    "دە",
-    "دەکات",
-    "دەگەڵ",
-    "سەر",
-    "لێ",
-    "لە",
-    "لەبابەت",
-    "لەباتی",
-    "لەبارەی",
-    "لەبرێتی",
-    "لەبن",
-    "لەبەر",
-    "لەبەینی",
-    "لەدەم",
-    "لەرێ",
-    "لەرێگا",
-    "لەرەوی",
-    "لەسەر",
-    "لەلایەن",
-    "لەناو",
-    "لەنێو",
-    "لەو",
-    "لەپێناوی",
-    "لەژێر",
-    "لەگەڵ",
-    "من",
-    "ناو",
-    "نێوان",
-    "هەر",
-    "هەروەها",
-    "و",
-    "وەک",
-    "پاش",
-    "پێ",
-    "پێش",
-    "چەند",
-    "کرد",
-    "کە",
-    "ی"
-  ];
-  var lat = [
-    "a",
-    "ab",
-    "ac",
-    "ad",
-    "at",
-    "atque",
-    "aut",
-    "autem",
-    "cum",
-    "de",
-    "dum",
-    "e",
-    "erant",
-    "erat",
-    "est",
-    "et",
-    "etiam",
-    "ex",
-    "haec",
-    "hic",
-    "hoc",
-    "in",
-    "ita",
-    "me",
-    "nec",
-    "neque",
-    "non",
-    "per",
-    "qua",
-    "quae",
-    "quam",
-    "qui",
-    "quibus",
-    "quidem",
-    "quo",
-    "quod",
-    "re",
-    "rebus",
-    "rem",
-    "res",
-    "sed",
-    "si",
-    "sic",
-    "sunt",
-    "tamen",
-    "tandem",
-    "te",
-    "ut",
-    "vel"
-  ];
-  var lav = [
-    "aiz",
-    "ap",
-    "apakš",
-    "apakšpus",
-    "ar",
-    "arī",
-    "augšpus",
-    "bet",
-    "bez",
-    "bija",
-    "biji",
-    "biju",
-    "bijām",
-    "bijāt",
-    "būs",
-    "būsi",
-    "būsiet",
-    "būsim",
-    "būt",
-    "būšu",
-    "caur",
-    "diemžēl",
-    "diezin",
-    "droši",
-    "dēļ",
-    "esam",
-    "esat",
-    "esi",
-    "esmu",
-    "gan",
-    "gar",
-    "iekam",
-    "iekams",
-    "iekām",
-    "iekāms",
-    "iekš",
-    "iekšpus",
-    "ik",
-    "ir",
-    "it",
-    "itin",
-    "iz",
-    "ja",
-    "jau",
-    "jeb",
-    "jebšu",
-    "jel",
-    "jo",
-    "jā",
-    "ka",
-    "kamēr",
-    "kaut",
-    "kolīdz",
-    "kopš",
-    "kā",
-    "kļuva",
-    "kļuvi",
-    "kļuvu",
-    "kļuvām",
-    "kļuvāt",
-    "kļūs",
-    "kļūsi",
-    "kļūsiet",
-    "kļūsim",
-    "kļūst",
-    "kļūstam",
-    "kļūstat",
-    "kļūsti",
-    "kļūstu",
-    "kļūt",
-    "kļūšu",
-    "labad",
-    "lai",
-    "lejpus",
-    "līdz",
-    "līdzko",
-    "ne",
-    "nebūt",
-    "nedz",
-    "nekā",
-    "nevis",
-    "nezin",
-    "no",
-    "nu",
-    "nē",
-    "otrpus",
-    "pa",
-    "par",
-    "pat",
-    "pie",
-    "pirms",
-    "pret",
-    "priekš",
-    "pār",
-    "pēc",
-    "starp",
-    "tad",
-    "tak",
-    "tapi",
-    "taps",
-    "tapsi",
-    "tapsiet",
-    "tapsim",
-    "tapt",
-    "tapāt",
-    "tapšu",
-    "taču",
-    "te",
-    "tiec",
-    "tiek",
-    "tiekam",
-    "tiekat",
-    "tieku",
-    "tik",
-    "tika",
-    "tikai",
-    "tiki",
-    "tikko",
-    "tiklab",
-    "tiklīdz",
-    "tiks",
-    "tiksiet",
-    "tiksim",
-    "tikt",
-    "tiku",
-    "tikvien",
-    "tikām",
-    "tikāt",
-    "tikšu",
-    "tomēr",
-    "topat",
-    "turpretim",
-    "turpretī",
-    "tā",
-    "tādēļ",
-    "tālab",
-    "tāpēc",
-    "un",
-    "uz",
-    "vai",
-    "var",
-    "varat",
-    "varēja",
-    "varēji",
-    "varēju",
-    "varējām",
-    "varējāt",
-    "varēs",
-    "varēsi",
-    "varēsiet",
-    "varēsim",
-    "varēt",
-    "varēšu",
-    "vien",
-    "virs",
-    "virspus",
-    "vis",
-    "viņpus",
-    "zem",
-    "ārpus",
-    "šaipus"
-  ];
-  var lit = [
-    "abi",
-    "abidvi",
-    "abiejose",
-    "abiejuose",
-    "abiejø",
-    "abiem",
-    "abigaliai",
-    "abipus",
-    "abu",
-    "abudu",
-    "ai",
-    "ana",
-    "anaiptol",
-    "anaisiais",
-    "anajai",
-    "anajam",
-    "anajame",
-    "anapus",
-    "anas",
-    "anasai",
-    "anasis",
-    "anei",
-    "aniedvi",
-    "anieji",
-    "aniesiems",
-    "anoji",
-    "anojo",
-    "anojoje",
-    "anokia",
-    "anoks",
-    "anosiomis",
-    "anosioms",
-    "anosios",
-    "anosiose",
-    "anot",
-    "ant",
-    "antai",
-    "anuodu",
-    "anuoju",
-    "anuosiuose",
-    "anuosius",
-    "anàja",
-    "anàjà",
-    "anàjá",
-    "anàsias",
-    "anøjø",
-    "apie",
-    "aplink",
-    "ar",
-    "arba",
-    "argi",
-    "arti",
-    "aukðèiau",
-    "að",
-    "be",
-    "bei",
-    "beje",
-    "bemaþ",
-    "bent",
-    "bet",
-    "betgi",
-    "beveik",
-    "dar",
-    "dargi",
-    "daugmaþ",
-    "deja",
-    "dëka",
-    "dël",
-    "dëlei",
-    "dëlto",
-    "ech",
-    "et",
-    "gal",
-    "galbût",
-    "galgi",
-    "gan",
-    "gana",
-    "gi",
-    "greta",
-    "idant",
-    "iki",
-    "ir",
-    "irgi",
-    "it",
-    "itin",
-    "ið",
-    "iðilgai",
-    "iðvis",
-    "jaisiais",
-    "jajai",
-    "jajam",
-    "jajame",
-    "jei",
-    "jeigu",
-    "ji",
-    "jiedu",
-    "jiedvi",
-    "jieji",
-    "jiesiems",
-    "jinai",
-    "jis",
-    "jisai",
-    "jog",
-    "joji",
-    "jojo",
-    "jojoje",
-    "jokia",
-    "joks",
-    "josiomis",
-    "josioms",
-    "josios",
-    "josiose",
-    "judu",
-    "judvi",
-    "juk",
-    "jumis",
-    "jums",
-    "jumyse",
-    "juodu",
-    "juoju",
-    "juosiuose",
-    "juosius",
-    "jus",
-    "jàja",
-    "jàjà",
-    "jàsias",
-    "jájá",
-    "jøjø",
-    "jûs",
-    "jûsiðkis",
-    "jûsiðkë",
-    "jûsø",
-    "kad",
-    "kada",
-    "kadangi",
-    "kai",
-    "kaip",
-    "kaipgi",
-    "kas",
-    "katra",
-    "katras",
-    "katriedvi",
-    "katruodu",
-    "kaþin",
-    "kaþkas",
-    "kaþkatra",
-    "kaþkatras",
-    "kaþkokia",
-    "kaþkoks",
-    "kaþkuri",
-    "kaþkuris",
-    "kiaurai",
-    "kiek",
-    "kiekvienas",
-    "kieno",
-    "kita",
-    "kitas",
-    "kitokia",
-    "kitoks",
-    "kodël",
-    "kokia",
-    "koks",
-    "kol",
-    "kolei",
-    "kone",
-    "kuomet",
-    "kur",
-    "kurgi",
-    "kuri",
-    "kuriedvi",
-    "kuris",
-    "kuriuodu",
-    "lai",
-    "lig",
-    "ligi",
-    "link",
-    "lyg",
-    "man",
-    "manaisiais",
-    "manajai",
-    "manajam",
-    "manajame",
-    "manas",
-    "manasai",
-    "manasis",
-    "mane",
-    "manieji",
-    "maniesiems",
-    "manim",
-    "manimi",
-    "maniðkis",
-    "maniðkë",
-    "mano",
-    "manoji",
-    "manojo",
-    "manojoje",
-    "manosiomis",
-    "manosioms",
-    "manosios",
-    "manosiose",
-    "manuoju",
-    "manuosiuose",
-    "manuosius",
-    "manyje",
-    "manàja",
-    "manàjà",
-    "manàjá",
-    "manàsias",
-    "manæs",
-    "manøjø",
-    "mat",
-    "maþdaug",
-    "maþne",
-    "mes",
-    "mudu",
-    "mudvi",
-    "mumis",
-    "mums",
-    "mumyse",
-    "mus",
-    "mûsiðkis",
-    "mûsiðkë",
-    "mûsø",
-    "na",
-    "nagi",
-    "ne",
-    "nebe",
-    "nebent",
-    "negi",
-    "negu",
-    "nei",
-    "nejau",
-    "nejaugi",
-    "nekaip",
-    "nelyginant",
-    "nes",
-    "net",
-    "netgi",
-    "netoli",
-    "neva",
-    "nors",
-    "nuo",
-    "në",
-    "o",
-    "ogi",
-    "oi",
-    "paeiliui",
-    "pagal",
-    "pakeliui",
-    "palaipsniui",
-    "palei",
-    "pas",
-    "pasak",
-    "paskos",
-    "paskui",
-    "paskum",
-    "pat",
-    "pati",
-    "patiems",
-    "paties",
-    "pats",
-    "patys",
-    "patá",
-    "paèiais",
-    "paèiam",
-    "paèiame",
-    "paèiu",
-    "paèiuose",
-    "paèius",
-    "paèiø",
-    "per",
-    "pernelyg",
-    "pirm",
-    "pirma",
-    "pirmiau",
-    "po",
-    "prie",
-    "prieð",
-    "prieðais",
-    "pro",
-    "pusiau",
-    "rasi",
-    "rodos",
-    "sau",
-    "savaisiais",
-    "savajai",
-    "savajam",
-    "savajame",
-    "savas",
-    "savasai",
-    "savasis",
-    "save",
-    "savieji",
-    "saviesiems",
-    "savimi",
-    "saviðkis",
-    "saviðkë",
-    "savo",
-    "savoji",
-    "savojo",
-    "savojoje",
-    "savosiomis",
-    "savosioms",
-    "savosios",
-    "savosiose",
-    "savuoju",
-    "savuosiuose",
-    "savuosius",
-    "savyje",
-    "savàja",
-    "savàjà",
-    "savàjá",
-    "savàsias",
-    "savæs",
-    "savøjø",
-    "skersai",
-    "skradþiai",
-    "staèiai",
-    "su",
-    "sulig",
-    "ta",
-    "tad",
-    "tai",
-    "taigi",
-    "taip",
-    "taipogi",
-    "taisiais",
-    "tajai",
-    "tajam",
-    "tajame",
-    "tamsta",
-    "tarp",
-    "tarsi",
-    "tartum",
-    "tarytum",
-    "tas",
-    "tasai",
-    "tau",
-    "tavaisiais",
-    "tavajai",
-    "tavajam",
-    "tavajame",
-    "tavas",
-    "tavasai",
-    "tavasis",
-    "tave",
-    "tavieji",
-    "taviesiems",
-    "tavimi",
-    "taviðkis",
-    "taviðkë",
-    "tavo",
-    "tavoji",
-    "tavojo",
-    "tavojoje",
-    "tavosiomis",
-    "tavosioms",
-    "tavosios",
-    "tavosiose",
-    "tavuoju",
-    "tavuosiuose",
-    "tavuosius",
-    "tavyje",
-    "tavàja",
-    "tavàjà",
-    "tavàjá",
-    "tavàsias",
-    "tavæs",
-    "tavøjø",
-    "taèiau",
-    "te",
-    "tegu",
-    "tegul",
-    "tiedvi",
-    "tieji",
-    "ties",
-    "tiesiems",
-    "tiesiog",
-    "tik",
-    "tikriausiai",
-    "tiktai",
-    "toji",
-    "tojo",
-    "tojoje",
-    "tokia",
-    "toks",
-    "tol",
-    "tolei",
-    "toliau",
-    "tosiomis",
-    "tosioms",
-    "tosios",
-    "tosiose",
-    "tu",
-    "tuodu",
-    "tuoju",
-    "tuosiuose",
-    "tuosius",
-    "turbût",
-    "tàja",
-    "tàjà",
-    "tàjá",
-    "tàsias",
-    "tøjø",
-    "tûlas",
-    "uþ",
-    "uþtat",
-    "uþvis",
-    "va",
-    "vai",
-    "viduj",
-    "vidury",
-    "vien",
-    "vienas",
-    "vienokia",
-    "vienoks",
-    "vietoj",
-    "virð",
-    "virðuj",
-    "virðum",
-    "vis",
-    "vis dëlto",
-    "visa",
-    "visas",
-    "visgi",
-    "visokia",
-    "visoks",
-    "vos",
-    "vël",
-    "vëlgi",
-    "ypaè",
-    "á",
-    "ákypai",
-    "ástriþai",
-    "ðalia",
-    "ðe",
-    "ði",
-    "ðiaisiais",
-    "ðiajai",
-    "ðiajam",
-    "ðiajame",
-    "ðiapus",
-    "ðiedvi",
-    "ðieji",
-    "ðiesiems",
-    "ðioji",
-    "ðiojo",
-    "ðiojoje",
-    "ðiokia",
-    "ðioks",
-    "ðiosiomis",
-    "ðiosioms",
-    "ðiosios",
-    "ðiosiose",
-    "ðis",
-    "ðisai",
-    "ðit",
-    "ðita",
-    "ðitas",
-    "ðitiedvi",
-    "ðitokia",
-    "ðitoks",
-    "ðituodu",
-    "ðiuodu",
-    "ðiuoju",
-    "ðiuosiuose",
-    "ðiuosius",
-    "ðiàja",
-    "ðiàjà",
-    "ðiàsias",
-    "ðiøjø",
-    "ðtai",
-    "ðájá",
-    "þemiau"
-  ];
-  var lgg = [
-    "́",
-    "̀",
-    "nɨ",
-    "mà",
-    "rɨ",
-    "dɨ",
-    "ɨ",
-    "́nɨ",
-    "èrɨ",
-    "́á'",
-    "sɨ",
-    "àzɨ",
-    "yɨ",
-    "rá",
-    "vɨ",
-    "nga",
-    "be",
-    "mɨ",
-    "à",
-    "dà",
-    "kʉ",
-    "bá",
-    " ́lé",
-    "má",
-    "e",
-    "yo",
-    "̀yɨ",
-    "ma",
-    "kɨ",
-    "àlʉ",
-    "́mà",
-    "rʉ́",
-    "drɨ",
-    "patí",
-    "a",
-    "è",
-    "yó",
-    "te",
-    "̀á",
-    "mà",
-    "mâ",
-    "dálé",
-    "yí",
-    "̌",
-    "pɨ",
-    "e'yó",
-    "ndráa",
-    "bo",
-    "di",
-    "drìá"
-  ];
-  var lggNd = [
-    "ma",
-    "ni",
-    "ri",
-    "eri",
-    "di",
-    "yi",
-    "si",
-    "ba",
-    "nga",
-    "i",
-    "ra",
-    "ku",
-    "be",
-    "yo",
-    "da",
-    "azini",
-    "dria",
-    "ru",
-    "azi",
-    "mu",
-    "te",
-    "ndra",
-    "diyi",
-    "ima",
-    "mi",
-    "alu",
-    "nde",
-    "alia",
-    "le",
-    "vile",
-    "dri",
-    "pati",
-    "aria",
-    "bo",
-    "e'yo",
-    "tu",
-    "kini",
-    "dii",
-    "ama",
-    "eyi",
-    "dika",
-    "pi",
-    "e",
-    "angu",
-    "e'do",
-    "pie",
-    "ka",
-    "ti",
-    "o'du",
-    "du"
-  ];
-  var msa = [
-    "abdul",
-    "abdullah",
-    "acara",
-    "ada",
-    "adalah",
-    "ahmad",
-    "air",
-    "akan",
-    "akhbar",
-    "akhir",
-    "aktiviti",
-    "alam",
-    "amat",
-    "amerika",
-    "anak",
-    "anggota",
-    "antara",
-    "antarabangsa",
-    "apa",
-    "apabila",
-    "april",
-    "as",
-    "asas",
-    "asean",
-    "asia",
-    "asing",
-    "atas",
-    "atau",
-    "australia",
-    "awal",
-    "awam",
-    "bagaimanapun",
-    "bagi",
-    "bahagian",
-    "bahan",
-    "baharu",
-    "bahawa",
-    "baik",
-    "bandar",
-    "bank",
-    "banyak",
-    "barangan",
-    "baru",
-    "baru-baru",
-    "bawah",
-    "beberapa",
-    "bekas",
-    "beliau",
-    "belum",
-    "berada",
-    "berakhir",
-    "berbanding",
-    "berdasarkan",
-    "berharap",
-    "berikutan",
-    "berjaya",
-    "berjumlah",
-    "berkaitan",
-    "berkata",
-    "berkenaan",
-    "berlaku",
-    "bermula",
-    "bernama",
-    "bernilai",
-    "bersama",
-    "berubah",
-    "besar",
-    "bhd",
-    "bidang",
-    "bilion",
-    "bn",
-    "boleh",
-    "bukan",
-    "bulan",
-    "bursa",
-    "cadangan",
-    "china",
-    "dagangan",
-    "dalam",
-    "dan",
-    "dana",
-    "dapat",
-    "dari",
-    "daripada",
-    "dasar",
-    "datang",
-    "datuk",
-    "demikian",
-    "dengan",
-    "depan",
-    "derivatives",
-    "dewan",
-    "di",
-    "diadakan",
-    "dibuka",
-    "dicatatkan",
-    "dijangka",
-    "diniagakan",
-    "dis",
-    "disember",
-    "ditutup",
-    "dolar",
-    "dr",
-    "dua",
-    "dunia",
-    "ekonomi",
-    "eksekutif",
-    "eksport",
-    "empat",
-    "enam",
-    "faedah",
-    "feb",
-    "global",
-    "hadapan",
-    "hanya",
-    "harga",
-    "hari",
-    "hasil",
-    "hingga",
-    "hubungan",
-    "ia",
-    "iaitu",
-    "ialah",
-    "indeks",
-    "india",
-    "indonesia",
-    "industri",
-    "ini",
-    "islam",
-    "isnin",
-    "isu",
-    "itu",
-    "jabatan",
-    "jalan",
-    "jan",
-    "jawatan",
-    "jawatankuasa",
-    "jepun",
-    "jika",
-    "jualan",
-    "juga",
-    "julai",
-    "jumaat",
-    "jumlah",
-    "jun",
-    "juta",
-    "kadar",
-    "kalangan",
-    "kali",
-    "kami",
-    "kata",
-    "katanya",
-    "kaunter",
-    "kawasan",
-    "ke",
-    "keadaan",
-    "kecil",
-    "kedua",
-    "kedua-dua",
-    "kedudukan",
-    "kekal",
-    "kementerian",
-    "kemudahan",
-    "kenaikan",
-    "kenyataan",
-    "kepada",
-    "kepentingan",
-    "keputusan",
-    "kerajaan",
-    "kerana",
-    "kereta",
-    "kerja",
-    "kerjasama",
-    "kes",
-    "keselamatan",
-    "keseluruhan",
-    "kesihatan",
-    "ketika",
-    "ketua",
-    "keuntungan",
-    "kewangan",
-    "khamis",
-    "kini",
-    "kira-kira",
-    "kita",
-    "klci",
-    "klibor",
-    "komposit",
-    "kontrak",
-    "kos",
-    "kuala",
-    "kuasa",
-    "kukuh",
-    "kumpulan",
-    "lagi",
-    "lain",
-    "langkah",
-    "laporan",
-    "lebih",
-    "lepas",
-    "lima",
-    "lot",
-    "luar",
-    "lumpur",
-    "mac",
-    "mahkamah",
-    "mahu",
-    "majlis",
-    "makanan",
-    "maklumat",
-    "malam",
-    "malaysia",
-    "mana",
-    "manakala",
-    "masa",
-    "masalah",
-    "masih",
-    "masing-masing",
-    "masyarakat",
-    "mata",
-    "media",
-    "mei",
-    "melalui",
-    "melihat",
-    "memandangkan",
-    "memastikan",
-    "membantu",
-    "membawa",
-    "memberi",
-    "memberikan",
-    "membolehkan",
-    "membuat",
-    "mempunyai",
-    "menambah",
-    "menarik",
-    "menawarkan",
-    "mencapai",
-    "mencatatkan",
-    "mendapat",
-    "mendapatkan",
-    "menerima",
-    "menerusi",
-    "mengadakan",
-    "mengambil",
-    "mengenai",
-    "menggalakkan",
-    "menggunakan",
-    "mengikut",
-    "mengumumkan",
-    "mengurangkan",
-    "meningkat",
-    "meningkatkan",
-    "menjadi",
-    "menjelang",
-    "menokok",
-    "menteri",
-    "menunjukkan",
-    "menurut",
-    "menyaksikan",
-    "menyediakan",
-    "mereka",
-    "merosot",
-    "merupakan",
-    "mesyuarat",
-    "minat",
-    "minggu",
-    "minyak",
-    "modal",
-    "mohd",
-    "mudah",
-    "mungkin",
-    "naik",
-    "najib",
-    "nasional",
-    "negara",
-    "negara-negara",
-    "negeri",
-    "niaga",
-    "nilai",
-    "nov",
-    "ogos",
-    "okt",
-    "oleh",
-    "operasi",
-    "orang",
-    "pada",
-    "pagi",
-    "paling",
-    "pameran",
-    "papan",
-    "para",
-    "paras",
-    "parlimen",
-    "parti",
-    "pasaran",
-    "pasukan",
-    "pegawai",
-    "pejabat",
-    "pekerja",
-    "pelabur",
-    "pelaburan",
-    "pelancongan",
-    "pelanggan",
-    "pelbagai",
-    "peluang",
-    "pembangunan",
-    "pemberita",
-    "pembinaan",
-    "pemimpin",
-    "pendapatan",
-    "pendidikan",
-    "penduduk",
-    "penerbangan",
-    "pengarah",
-    "pengeluaran",
-    "pengerusi",
-    "pengguna",
-    "pengurusan",
-    "peniaga",
-    "peningkatan",
-    "penting",
-    "peratus",
-    "perdagangan",
-    "perdana",
-    "peringkat",
-    "perjanjian",
-    "perkara",
-    "perkhidmatan",
-    "perladangan",
-    "perlu",
-    "permintaan",
-    "perniagaan",
-    "persekutuan",
-    "persidangan",
-    "pertama",
-    "pertubuhan",
-    "pertumbuhan",
-    "perusahaan",
-    "peserta",
-    "petang",
-    "pihak",
-    "pilihan",
-    "pinjaman",
-    "polis",
-    "politik",
-    "presiden",
-    "prestasi",
-    "produk",
-    "program",
-    "projek",
-    "proses",
-    "proton",
-    "pukul",
-    "pula",
-    "pusat",
-    "rabu",
-    "rakan",
-    "rakyat",
-    "ramai",
-    "rantau",
-    "raya",
-    "rendah",
-    "ringgit",
-    "rumah",
-    "sabah",
-    "sahaja",
-    "saham",
-    "sama",
-    "sarawak",
-    "satu",
-    "sawit",
-    "saya",
-    "sdn",
-    "sebagai",
-    "sebahagian",
-    "sebanyak",
-    "sebarang",
-    "sebelum",
-    "sebelumnya",
-    "sebuah",
-    "secara",
-    "sedang",
-    "segi",
-    "sehingga",
-    "sejak",
-    "sekarang",
-    "sektor",
-    "sekuriti",
-    "selain",
-    "selama",
-    "selasa",
-    "selatan",
-    "selepas",
-    "seluruh",
-    "semakin",
-    "semalam",
-    "semasa",
-    "sementara",
-    "semua",
-    "semula",
-    "sen",
-    "sendiri",
-    "seorang",
-    "sepanjang",
-    "seperti",
-    "sept",
-    "september",
-    "serantau",
-    "seri",
-    "serta",
-    "sesi",
-    "setiap",
-    "setiausaha",
-    "sidang",
-    "singapura",
-    "sini",
-    "sistem",
-    "sokongan",
-    "sri",
-    "sudah",
-    "sukan",
-    "suku",
-    "sumber",
-    "supaya",
-    "susut",
-    "syarikat",
-    "syed",
-    "tahap",
-    "tahun",
-    "tan",
-    "tanah",
-    "tanpa",
-    "tawaran",
-    "teknologi",
-    "telah",
-    "tempat",
-    "tempatan",
-    "tempoh",
-    "tenaga",
-    "tengah",
-    "tentang",
-    "terbaik",
-    "terbang",
-    "terbesar",
-    "terbuka",
-    "terdapat",
-    "terhadap",
-    "termasuk",
-    "tersebut",
-    "terus",
-    "tetapi",
-    "thailand",
-    "tiada",
-    "tidak",
-    "tiga",
-    "timbalan",
-    "timur",
-    "tindakan",
-    "tinggi",
-    "tun",
-    "tunai",
-    "turun",
-    "turut",
-    "umno",
-    "unit",
-    "untuk",
-    "untung",
-    "urus",
-    "usaha",
-    "utama",
-    "walaupun",
-    "wang",
-    "wanita",
-    "wilayah",
-    "yang"
-  ];
-  var mar = [
-    "अधिक",
-    "अनेक",
-    "अशी",
-    "असलयाचे",
-    "असलेल्या",
-    "असा",
-    "असून",
-    "असे",
-    "आज",
-    "आणि",
-    "आता",
-    "आपल्या",
-    "आला",
-    "आली",
-    "आले",
-    "आहे",
-    "आहेत",
-    "एक",
-    "एका",
-    "कमी",
-    "करणयात",
-    "करून",
-    "का",
-    "काम",
-    "काय",
-    "काही",
-    "किवा",
-    "की",
-    "केला",
-    "केली",
-    "केले",
-    "कोटी",
-    "गेल्या",
-    "घेऊन",
-    "जात",
-    "झाला",
-    "झाली",
-    "झाले",
-    "झालेल्या",
-    "टा",
-    "डॉ",
-    "तर",
-    "तरी",
-    "तसेच",
-    "ता",
-    "ती",
-    "तीन",
-    "ते",
-    "तो",
-    "त्या",
-    "त्याचा",
-    "त्याची",
-    "त्याच्या",
-    "त्याना",
-    "त्यानी",
-    "त्यामुळे",
-    "त्री",
-    "दिली",
-    "दोन",
-    "न",
-    "नाही",
-    "निर्ण्य",
-    "पण",
-    "पम",
-    "परयतन",
-    "पाटील",
-    "म",
-    "मात्र",
-    "माहिती",
-    "मी",
-    "मुबी",
-    "म्हणजे",
-    "म्हणाले",
-    "म्हणून",
-    "या",
-    "याचा",
-    "याची",
-    "याच्या",
-    "याना",
-    "यानी",
-    "येणार",
-    "येत",
-    "येथील",
-    "येथे",
-    "लाख",
-    "व",
-    "व्यकत",
-    "सर्व",
-    "सागित्ले",
-    "सुरू",
-    "हजार",
-    "हा",
-    "ही",
-    "हे",
-    "होणार",
-    "होत",
-    "होता",
-    "होती",
-    "होते"
-  ];
-  var mya = [
-    "အပေါ်",
-    "အနက်",
-    "အမြဲတမ်း",
-    "အတွင်းတွင်",
-    "မကြာမီ",
-    "မတိုင်မီ",
-    "ဒါ့အပြင်",
-    "အောက်မှာ",
-    "အထဲမှာ",
-    "ဘယ်တော့မျှ",
-    "မကြာခဏ",
-    "တော်တော်လေး",
-    "စဉ်တွင်",
-    "နှင့်အတူ",
-    "နှင့်",
-    "နှင့်တကွ",
-    "ကျွန်တော်",
-    "ကျွန်မ",
-    "ငါ",
-    "ကျုပ်",
-    "ကျွနု်ပ်",
-    "ကျနော်",
-    "ကျမ",
-    "သူ",
-    "သူမ",
-    "ထိုဟာ",
-    "ထိုအရာ",
-    "ဤအရာ",
-    "ထို",
-    "၄င်း",
-    "ကျွန်တော်တို့",
-    "ကျွန်မတို့",
-    "ငါတို့",
-    "ကျုပ်တို့",
-    "ကျွနု်ပ်တို့",
-    "ကျနော်တို့",
-    "ကျမတို့",
-    "သင်",
-    "သင်တို့",
-    "နင်တို့",
-    "မင်း",
-    "မင်းတို့",
-    "သူတို့",
-    "ကျွန်တော်အား",
-    "ကျွန်တော်ကို",
-    "ကျွန်မကို",
-    "ငါကို",
-    "ကျုပ်ကို",
-    "ကျွနု်ပ်ကို",
-    "သူ့ကို",
-    "သူမကို",
-    "ထိုအရာကို",
-    "သင့်ကို",
-    "သင်တို့ကို",
-    "နင်တို့ကို",
-    "မင်းကို",
-    "မင်းတို့ကို",
-    "ငါတို့ကို",
-    "ကျုပ်တို့ကို",
-    "ကျွနု်ပ်တို့ကို",
-    "မိမိကိုယ်တိုင်",
-    "မိမိဘာသာ",
-    "မင်းကိုယ်တိုင်",
-    "မင်းဘာသာ",
-    "မင်းတို့ကိုယ်တိုင်",
-    "မင်းတို့ဘာသာ",
-    "သူကိုယ်တိုင်",
-    "ကိုယ်တိုင်",
-    "သူမကိုယ်တိုင်",
-    "သူ့ဘာသာ",
-    "သူ့ကိုယ်ကို",
-    "ကိုယ့်ကိုယ်ကို",
-    "မိမိကိုယ်ကို",
-    "၄င်းပင်",
-    "ထိုအရာပင်",
-    "သည့်",
-    "မည့်",
-    "တဲ့",
-    "ကျွနု်ပ်၏",
-    "ကျွန်တော်၏",
-    "ကျွန်မ၏",
-    "ကျနော်၏",
-    "ကျမ၏",
-    "သူ၏",
-    "သူမ၏",
-    "ထိုအရာ၏",
-    "ထိုဟာ၏",
-    "ကျွနု်ပ်တို့၏",
-    "ငါတို့၏",
-    "ကျွန်တော်တို့၏",
-    "ကျွန်မတို့၏",
-    "ကျနော်တို့၏",
-    "ကျမတို့၏",
-    "သင်၏",
-    "သင်တို့၏",
-    "မင်း၏",
-    "မင်းတို့၏",
-    "သူတို့၏",
-    "ကျွန်တော့်ဟာ",
-    "ကျွန်မဟာ",
-    "ကျနော်၏ဟာ",
-    "ကျမ၏ဟာ",
-    "ကျမဟာ",
-    "ကျနော်ဟာ",
-    "သူဟာ",
-    "သူမဟာ",
-    "သူ့ဟာ",
-    "ကျွနု်ပ်တို့ဟာ",
-    "ကျွန်တော်တို့ဟာ",
-    "ကျွန်မတို့ဟာ",
-    "သင်တို့ဟာ",
-    "မင်းတို့ဟာ",
-    "သူတို့ဟာ",
-    "သူမတို့ဟာ",
-    "ဤအရာ",
-    "ဟောဒါ",
-    "ဟောဒီ",
-    "ဟောဒီဟာ",
-    "ဒီဟာ",
-    "ဒါ",
-    "ထိုအရာ",
-    "၄င်းအရာ",
-    "ယင်းအရာ",
-    "အဲဒါ",
-    "ဟိုဟာ",
-    "အချို့",
-    "တစ်ခုခု",
-    "အဘယ်မဆို",
-    "ဘယ်အရာမဆို",
-    "အဘယ်မည်သော",
-    "အကြင်",
-    "အရာရာတိုင်း",
-    "စိုးစဉ်မျှ",
-    "စိုးစဉ်းမျှ",
-    "ဘယ်လောက်မဆို",
-    "တစ်စုံတစ်ရာ",
-    "တစုံတရာ",
-    "အလျဉ်းမဟုတ်",
-    "မည်သည့်နည်းနှင့်မျှမဟုတ်",
-    "အလျဉ်းမရှိသော",
-    "အခြားဖြစ်သော",
-    "အခြားသော",
-    "အခြားတစ်ခု",
-    "အခြားတစ်ယောက်",
-    "အားလုံး",
-    "အရာရာတိုင်း",
-    "အကုန်လုံး",
-    "အလုံးစုံ",
-    "အရာခပ်သိမ်း",
-    "တစ်ခုစီ",
-    "အသီးသီး",
-    "တစ်ဦးဦး",
-    "တစ်ခုခု",
-    "ကိုယ်စီကိုယ်ငှ",
-    "ကိုယ်စီ",
-    "တစ်ဦးစီ",
-    "တစ်ယောက်စီ",
-    "တစ်ခုစီ",
-    "အကုန်",
-    "အပြည့်အစုံ",
-    "လုံးလုံး",
-    "နှစ်ခုလုံး",
-    "နှစ်ယောက်လုံး",
-    "နှစ်ဘက်လုံး",
-    "တစ်စုံတစ်ရာ",
-    "တစ်စုံတစ်ခု",
-    "တစုံတခု",
-    "တစ်စုံတစ်ယောက်",
-    "တစုံတယောက်",
-    "တစ်ယောက်ယောက်",
-    "မည်သူမဆို",
-    "ဘာမျှမရှိ",
-    "ဘာမှမရှိ",
-    "အဘယ်အရာမျှမရှိ",
-    "လူတိုင်း",
-    "လူတကာ",
-    "နှင့်",
-    "ပြီးလျှင်",
-    "၄င်းနောက်",
-    "သို့မဟုတ်",
-    "သို့တည်းမဟုတ်",
-    "သို့မဟုတ်လျှင်",
-    "ဒါမှမဟုတ်",
-    "ဖြစ်စေ",
-    "သို့စေကာမူ",
-    "ဒါပေမယ့်",
-    "ဒါပေမဲ့",
-    "မှတစ်ပါး",
-    "မှလွဲလျှင်",
-    "အဘယ်ကြောင့်ဆိုသော်",
-    "သောကြောင့်",
-    "သဖြင့်",
-    "၍",
-    "သည့်အတွက်ကြောင့်",
-    "လျှင်",
-    "ပါက",
-    "အကယ်၍",
-    "သော်ငြားလည်း",
-    "စေကာမူ",
-    "နည်းတူ",
-    "ပေမယ့်",
-    "ပေမဲ့",
-    "ထိုနည်းတူစွာ",
-    "ထိုနည်းတူ",
-    "ကဲ့သို့",
-    "သကဲ့သို့",
-    "ယင်းကဲ့သို့",
-    "ထိုကဲ့သို့",
-    "နှင့်စပ်လျဉ်း၍",
-    "ဤမျှ",
-    "ဤမျှလောက်",
-    "ဤကဲ့သို့",
-    "အခုလောက်ထိ",
-    "ဒါကတော့",
-    "အဘယ်ကဲ့သလို့",
-    "မည်ကဲ့သို့",
-    "မည်သည့်နည်းနှင့်",
-    "မည်သည့်နည်းဖြင့်",
-    "မည်သည့်နည့်နှင့်မဆို",
-    "မည်သည့်နည်းဖြင့်မဆို",
-    "မည်သို့",
-    "ဘယ်လိုလဲ",
-    "သို့ပေတည့်",
-    "သို့ပေမည့်",
-    "ဘယ်နည်းနှင့်",
-    "မည်ရွေ့မည်မျှ",
-    "အဘယ်မျှလောက်",
-    "ဘယ်လောက်",
-    "မည်သူ",
-    "ဘယ်သူ",
-    "မည်သည့်အကြောင်းကြောင့်",
-    "ဘာအတွက်ကြောင့်",
-    "အဘယ်ကြောင့်",
-    "မည်သည့်အတွက်ကြောင့်",
-    "ဘာကြောင့်",
-    "ဘာအတွက်နဲ့လဲ",
-    "မည်သည်",
-    "ဘာလဲ",
-    "အဘယ်အရာနည်း",
-    "မည်သည့်အရပ်မှာ",
-    "ဘယ်နေရာတွင်",
-    "မည်သည့်နေရာတွင်",
-    "မည်သည့်နေရာသို့",
-    "ဘယ်နေရာသို့",
-    "ဘယ်နေရာမှာ",
-    "ဘယ်သူ၏",
-    "မည်သည့်အရာ၏",
-    "မည်သည့်အခါ",
-    "ဘယ်အချိန်",
-    "ဘယ်အခါ",
-    "မည်သည့်အချိန်",
-    "ဘယ်တော့",
-    "မည်သူကို",
-    "မည်သူက",
-    "ဘယ်သူ့ကို",
-    "မည်သူမည်ဝါ",
-    "မည်သည့်အရာ",
-    "ဘယ်အရာ",
-    "မည်သို့ပင်ဖြစ်စေ",
-    "ဘယ်လိုပဲဖြစ်ဖြစ်",
-    "မည်ရွေ့မည်မျှဖြစ်စေ",
-    "မည်သည့်နည်းနှင့်မဆို",
-    "ဘယ်နည်းနဲ့ဖြစ်ဖြစ်",
-    "မည်သူမဆို",
-    "ဘယ်သူမဆို",
-    "အဘယ်သူမဆို",
-    "မည်သည့်အရာမဆို",
-    "ဘာဖြစ်ဖြစ်",
-    "မည်သည့်အရာဖြစ်ဖြစ်",
-    "မည်သည့်အရပ်၌မဆို",
-    "မည်သည့်နေရာမဆို",
-    "ဘယ်အခါမဆို",
-    "ဘယ်အချိန်မဆို",
-    "ဘယ်အခါဖြစ်ဖြစ်",
-    "အချိန်အခါမရွေး"
-  ];
-  var nob = [
-    "og",
-    "i",
-    "jeg",
-    "det",
-    "at",
-    "en",
-    "et",
-    "den",
-    "til",
-    "er",
-    "som",
-    "på",
-    "de",
-    "med",
-    "han",
-    "av",
-    "ikke",
-    "der",
-    "så",
-    "var",
-    "meg",
-    "seg",
-    "men",
-    "ett",
-    "har",
-    "om",
-    "vi",
-    "min",
-    "mitt",
-    "ha",
-    "hadde",
-    "hun",
-    "nå",
-    "over",
-    "da",
-    "ved",
-    "fra",
-    "du",
-    "ut",
-    "sin",
-    "dem",
-    "oss",
-    "opp",
-    "man",
-    "kan",
-    "hans",
-    "hvor",
-    "eller",
-    "hva",
-    "skal",
-    "selv",
-    "sjøl",
-    "her",
-    "alle",
-    "vil",
-    "bli",
-    "ble",
-    "blitt",
-    "kunne",
-    "inn",
-    "når",
-    "kom",
-    "noen",
-    "noe",
-    "ville",
-    "dere",
-    "som",
-    "deres",
-    "kun",
-    "ja",
-    "etter",
-    "ned",
-    "skulle",
-    "denne",
-    "for",
-    "deg",
-    "si",
-    "sine",
-    "sitt",
-    "mot",
-    "å",
-    "meget",
-    "hvorfor",
-    "dette",
-    "disse",
-    "uten",
-    "hvordan",
-    "ingen",
-    "din",
-    "ditt",
-    "blir",
-    "samme",
-    "hvilken",
-    "hvilke",
-    "sånn",
-    "inni",
-    "mellom",
-    "vår",
-    "hver",
-    "hvem",
-    "vors",
-    "hvis",
-    "både",
-    "bare",
-    "enn",
-    "fordi",
-    "før",
-    "mange",
-    "også",
-    "slik",
-    "vært",
-    "være",
-    "begge",
-    "siden",
-    "henne",
-    "hennar",
-    "hennes"
-  ];
-  var panGu = [
-    "ਦੇ",
-    "ਵਿੱਚ",
-    "ਦਾ",
-    "ਅਤੇ",
-    "ਦੀ",
-    "ਇੱਕ",
-    "ਨੂੰ",
-    "ਹੈ",
-    "ਤੋਂ",
-    "ਇਸ",
-    "ਇਹ",
-    "ਨੇ",
-    "ਤੇ",
-    "ਨਾਲ",
-    "ਲਈ",
-    "ਵੀ",
-    "ਸੀ",
-    "ਵਿਚ",
-    "ਕਿ",
-    "ਜੋ",
-    "ਉਹ",
-    "ਉਸ",
-    "ਹਨ",
-    "ਜਾਂਦਾ",
-    "ਕੀਤਾ",
-    "ਗਿਆ",
-    "ਹੀ",
-    "ਕੇ",
-    "ਜਾਂ",
-    "ਦੀਆਂ",
-    "ਜਿਸ",
-    "ਕਰਨ",
-    "ਹੋ",
-    "ਕਰ",
-    "ਆਪਣੇ",
-    "ਕੀਤੀ",
-    "ਤੌਰ",
-    "ਬਾਅਦ",
-    "ਨਹੀਂ",
-    "ਭਾਰਤੀ",
-    "ਪਿੰਡ",
-    "ਸਿੰਘ",
-    "ਉੱਤੇ",
-    "ਸਾਲ",
-    "।",
-    "ਪੰਜਾਬ",
-    "ਸਭ",
-    "ਭਾਰਤ",
-    "ਉਨ੍ਹਾਂ",
-    "ਹੁੰਦਾ",
-    "ਤੱਕ",
-    "ਇਕ",
-    "ਹੋਇਆ",
-    "ਜਨਮ",
-    "ਬਹੁਤ",
-    "ਪਰ",
-    "ਦੁਆਰਾ",
-    "ਰੂਪ",
-    "ਹੋਰ",
-    "ਕੰਮ",
-    "ਆਪਣੀ",
-    "ਤਾਂ",
-    "ਸਮੇਂ",
-    "ਪੰਜਾਬੀ",
-    "ਗਈ",
-    "ਦਿੱਤਾ",
-    "ਦੋ",
-    "ਕਿਸੇ",
-    "ਕਈ",
-    "ਜਾ",
-    "ਵਾਲੇ",
-    "ਸ਼ੁਰੂ",
-    "ਉਸਨੇ",
-    "ਕਿਹਾ",
-    "ਹੋਣ",
-    "ਲੋਕ",
-    "ਜਾਂਦੀ",
-    "ਵਿੱਚੋਂ",
-    "ਨਾਮ",
-    "ਜਦੋਂ",
-    "ਪਹਿਲਾਂ",
-    "ਕਰਦਾ",
-    "ਹੁੰਦੀ",
-    "ਹੋਏ",
-    "ਸਨ",
-    "ਵਜੋਂ",
-    "ਰਾਜ",
-    "ਮੁੱਖ",
-    "ਕਰਦੇ",
-    "ਕੁਝ",
-    "ਸਾਰੇ",
-    "ਹੁੰਦੇ",
-    "ਸ਼ਹਿਰ",
-    "ਭਾਸ਼ਾ",
-    "ਹੋਈ",
-    "ਅਨੁਸਾਰ",
-    "ਸਕਦਾ",
-    "ਆਮ",
-    "ਵੱਖ",
-    "ਕੋਈ",
-    "ਵਾਰ",
-    "ਗਏ",
-    "ਖੇਤਰ",
-    "ਜੀ",
-    "ਕਾਰਨ",
-    "ਕਰਕੇ",
-    "ਜਿਵੇਂ",
-    "ਜ਼ਿਲ੍ਹੇ",
-    "ਲੋਕਾਂ",
-    "ਚ",
-    "ਸਾਹਿਤ",
-    "ਸਦੀ",
-    "ਬਾਰੇ",
-    "ਜਾਂਦੇ",
-    "ਵਾਲਾ",
-    "ਜਾਣ",
-    "ਪਹਿਲੀ",
-    "ਪ੍ਰਾਪਤ",
-    "ਰਿਹਾ",
-    "ਵਾਲੀ",
-    "ਨਾਂ",
-    "ਦੌਰਾਨ",
-    "ਤਰ੍ਹਾਂ",
-    "ਯੂਨੀਵਰਸਿਟੀ",
-    "ਨਾ",
-    "ਏ",
-    "ਤਿੰਨ",
-    "ਇਨ੍ਹਾਂ",
-    "ਗੁਰੂ",
-    "ਇਸਨੂੰ",
-    "ਇਹਨਾਂ",
-    "ਪਿਤਾ",
-    "ਲਿਆ",
-    "ਸ਼ਾਮਲ",
-    "ਸ਼ਬਦ",
-    "ਅੰਗਰੇਜ਼ੀ",
-    "ਉਸਨੂੰ",
-    "ਉਹਨਾਂ",
-    "ਸਥਿਤ",
-    "ਫਿਰ",
-    "ਜੀਵਨ",
-    "ਸਕੂਲ",
-    "ਹੁਣ",
-    "ਦਿਨ",
-    "ਕੀਤੇ",
-    "ਆਦਿ",
-    "ਵੱਧ",
-    "ਲੈ",
-    "ਘਰ",
-    "ਵੱਲ",
-    "ਦੇਸ਼",
-    "ਵਲੋਂ",
-    "ਬਣ",
-    "ਵੀਂ",
-    "ਫਿਲਮ",
-    "ਉਮਰ",
-    "ਬਲਾਕ",
-    "ਰਹੇ",
-    "ਸਾਹਿਬ",
-    "ਕਰਦੀ",
-    "ਹਰ",
-    "ਪੈਦਾ",
-    "ਘੱਟ",
-    "ਲੇਖਕ",
-    "ਹਿੱਸਾ",
-    "ਫ਼ਿਲਮ",
-    "ਮੌਤ",
-    "ਜਿੱਥੇ",
-    "ਵੱਡਾ",
-    "ਵਿਖੇ",
-    "ਆਪਣਾ",
-    "ਪਹਿਲਾ",
-    "ਵਰਤੋਂ",
-    "ਆਪ",
-    "ਕਰਨਾ",
-    "ਵਿਆਹ",
-    "ਰਹੀ",
-    "ਰਾਹੀਂ",
-    "ਦਿੱਤੀ",
-    "ਉਸਦੇ",
-    "ਪਰਿਵਾਰ",
-    "ਆ",
-    "ਦੂਜੇ",
-    "ਅਮਰੀਕਾ",
-    "ਮੰਨਿਆ",
-    "ਇਸਦੇ",
-    "ਈ",
-    "ਕਾਲਜ",
-    "ਸਰਕਾਰ",
-    "ਇੱਥੇ",
-    "ਪਾਕਿਸਤਾਨ",
-    "ਸ਼ਾਮਿਲ",
-    "ਵਿਗਿਆਨ",
-    "ਉਸਦੀ",
-    "ਪੇਸ਼",
-    "ਕਿਉਂਕਿ",
-    "ਪਹਿਲੇ",
-    "ਧਰਮ",
-    "ਮਸ਼ਹੂਰ",
-    "ਅੰਦਰ",
-    "ਵਿਚੋਂ",
-    "ਜਿਨ੍ਹਾਂ",
-    "ਜਾਣਿਆ",
-    "ਪਾਣੀ",
-    "ਇਲਾਵਾ",
-    "ਅਰਥ",
-    "ਚਾਰ",
-    "ਪ੍ਰਸਿੱਧ",
-    "ਨਾਵਲ",
-    "ਵੱਡੇ",
-    "ਵੱਲੋਂ",
-    "ਕਹਾਣੀ",
-    "ਵਿਸ਼ਵ",
-    "ਮੂਲ",
-    "ਅਮਰੀਕੀ",
-    "ਸਥਾਨ",
-    "ਇਤਿਹਾਸ",
-    "ਕੁੱਝ",
-    "ਵਿਕਾਸ",
-    "ਉੱਤਰ",
-    "ਸਿੱਖਿਆ",
-    "ਹਿੰਦੀ",
-    "ਪ੍ਰਮੁੱਖ",
-    "ਰਚਨਾ",
-    "ਬਣਾਇਆ",
-    "ਵਿਸ਼ੇਸ਼",
-    "ਡਾ",
-    "ਉੱਪਰ",
-    "ਪੱਛਮੀ",
-    "ਦੇਣ",
-    "ਇਸਦਾ",
-    "ਸਕਦੇ",
-    "ਰੱਖਿਆ",
-    "ਕਵੀ",
-    "ਦਿੱਲੀ",
-    "ਵੱਡੀ",
-    "ਭੂਮਿਕਾ",
-    "ਸਮਾਜ",
-    "ਕਾਵਿ",
-    "ਕੀ",
-    "ਕੋਲ",
-    "ਦ",
-    "ਗੱਲ",
-    "ਸੰਸਾਰ",
-    "ਭਾਗ",
-    "ਆਈ",
-    "ਦੱਖਣ",
-    "ਅੱਜ",
-    "ਸਿੱਖ",
-    "ਕਹਿੰਦੇ",
-    "ਸੰਗੀਤ",
-    "ਕਿਲੋਮੀਟਰ",
-    "ਜਿਹਨਾਂ",
-    "ਸਭਾ",
-    "ਜਿਸਦਾ",
-    "ਜਨਵਰੀ",
-    "ਕਵਿਤਾ",
-    "ਮੈਂਬਰ",
-    "ਲਿਖਿਆ",
-    "ਮਾਂ",
-    "ਕਲਾ",
-    "ਪੰਜ",
-    "ਥਾਂ",
-    "ਹੇਠ",
-    "ਜਿਆਦਾ",
-    "ਵਰਤਿਆ",
-    "ਮਾਰਚ",
-    "ਡੀ",
-    "ਅਕਤੂਬਰ",
-    "ਤਕ",
-    "ਨਾਟਕ",
-    "ਬੀ",
-    "ਖਾਸ",
-    "ਇਸੇ",
-    "ਆਧੁਨਿਕ",
-    "ਅਗਸਤ",
-    "ਤਿਆਰ",
-    "ਮਾਤਾ",
-    "ਬਣਾਉਣ",
-    "ਨਵੰਬਰ",
-    "ਵਿਅਕਤੀ",
-    "ਦੱਖਣੀ",
-    "ਦਸੰਬਰ",
-    "ਆਫ",
-    "ਗੀਤ",
-    "ਗਿਣਤੀ",
-    "ਕਾਲ",
-    "ਖੋਜ",
-    "ਸਾਲਾਂ",
-    "ਪੂਰੀ",
-    "ਸਮਾਂ",
-    "ਜ਼ਿਆਦਾ",
-    "ਇਸਦੀ",
-    "ਸਕਦੀ",
-    "ਵਿਚਕਾਰ",
-    "ਰਾਜਧਾਨੀ",
-    "ਉਸਦਾ",
-    "ਜੁਲਾਈ",
-    "ਜੂਨ",
-    "ਅਧੀਨ",
-    "ਸਥਾਪਨਾ",
-    "ਸੇਵਾ",
-    "ਭਾਵ",
-    "ਵਰਗ",
-    "ਛੋਟੇ",
-    "ਦਿੰਦਾ",
-    "ਸਮਾਜਿਕ",
-    "ਹੁੰਦੀਆਂ",
-    "ਟੀਮ",
-    "ਔਰਤਾਂ",
-    "ਅਕਸਰ",
-    "ਪ੍ਰਕਾਸ਼ਿਤ",
-    "ਉਰਦੂ",
-    "ਰੰਗ",
-    "ਪਾਰਟੀ",
-    "ਬਣਾ",
-    "ਪ੍ਰਭਾਵ",
-    "ਸ਼ੁਰੂਆਤ",
-    "ਲਗਭਗ",
-    "ਮਈ",
-    "ਸਿਰਫ",
-    "ਨੇੜੇ",
-    "ਜਿਸਨੂੰ",
-    "ਹਾਲਾਂਕਿ",
-    "ਦੂਰ",
-    "ਸਤੰਬਰ",
-    "ਕਿਤਾਬ",
-    "ਕਦੇ",
-    "ਉੱਤਰੀ",
-    "ਪ੍ਰਕਾਰ",
-    "ਇਸਨੇ",
-    "ਪ੍ਰਦੇਸ਼",
-    "ਅੱਗੇ",
-    "ਸੰਯੁਕਤ",
-    "ਪੜ੍ਹਾਈ",
-    "ਵਧੇਰੇ",
-    "ਨਾਲ਼",
-    "ਮਨੁੱਖ",
-    "ਬਾਕੀ",
-    "ਪ੍ਰਧਾਨ",
-    "ਦੂਜੀ",
-    "ਕੁੱਲ",
-    "ਆਫ਼",
-    "ਅਧਿਐਨ",
-    "ਰਾਸ਼ਟਰੀ",
-    "ਪੁੱਤਰ",
-    "ਅੰਤਰਰਾਸ਼ਟਰੀ",
-    "ਧਰਤੀ",
-    "ਕੇਂਦਰ",
-    "ਦੇਸ਼ਾਂ",
-    "ਮੱਧ",
-    "ਜ਼ਿਲ੍ਹਾ",
-    "ਸਾਰੀਆਂ",
-    "ਪੱਧਰ",
-    "ਹੋਵੇ",
-    "ਜੇ",
-    "ਭਾਈ",
-    "ਰਹਿਣ",
-    "ਪੁਰਸਕਾਰ",
-    "ਸਭਿਆਚਾਰ",
-    "ਪਤਾ",
-    "ਪਾਸੇ",
-    "ਨਵੇਂ",
-    "ਕੰਪਨੀ",
-    "ਬਾਹਰ",
-    "ਵੇਲੇ",
-    "ਸੰਨ",
-    "ਪੂਰਬੀ",
-    "ਵਿਚਾਰ",
-    "ਕਾਰਜ",
-    "ਪੀ",
-    "ਮਹੱਤਵਪੂਰਨ",
-    "ਦੁਨੀਆਂ",
-    "ਧਾਰਮਿਕ",
-    "ਮਨੁੱਖੀ",
-    "ਸਮੂਹ",
-    "ਅਜਿਹੇ",
-    "ਲਾਲ",
-    "ਦੂਜਾ",
-    "ਭਰਾ",
-    "ਸ੍ਰੀ",
-    "ਅੰਤ",
-    "ਜਾਂਦੀਆਂ",
-    "ਸ਼ਾਹ",
-    "ਰਹਿੰਦੇ",
-    "ਮਹਾਨ",
-    "ਚੀਨ",
-    "ਮੀਟਰ",
-    "ਵਰਗੇ",
-    "ਨਾਲੋਂ",
-    "ਹਾਸਲ",
-    "ਕਿਸਮ",
-    "ਅਜਿਹਾ",
-    "ਬਣਿਆ",
-    "ਭਰ",
-    "ਛੱਡ",
-    "ਲੈਣ",
-    "ਹਿੱਸੇ",
-    "ਟੀ",
-    "ਲਿਖੇ",
-    "ਮਿਲ",
-    "ਮੌਜੂਦ",
-    "ਦਿੱਤੇ",
-    "ਵਾਸਤੇ",
-    "ਵਾਲੀਆਂ",
-    "ਵਧੀਆ",
-    "ਰੂਸੀ",
-    "ਜਾਰੀ",
-    "ਸਰਕਾਰੀ",
-    "ਡਿਗਰੀ",
-    "ਪੱਛਮ",
-    "ਲੜਾਈ",
-    "ਭਾਸ਼ਾਵਾਂ",
-    "ਰਾਜਾ",
-    "ਜਲੰਧਰ",
-    "ਹਿੰਦੂ",
-    "ਔਰਤ",
-    "ਜੰਗ",
-    "ਬਾਬਾ",
-    "ਬੱਚਿਆਂ",
-    "ਮੰਤਰੀ",
-    "ਪਟਿਆਲਾ",
-    "ਵਾਂਗ",
-    "ਆਉਣ",
-    "ਭਾਵੇਂ",
-    "ਕੇਵਲ",
-    "ਐਸ",
-    "ਪ੍ਰਾਚੀਨ",
-    "ਰਹਿੰਦਾ",
-    "ਬੋਲੀ",
-    "ਅਵਾਰਡ",
-    "ਨਗਰ",
-    "ਖੇਡਾਂ",
-    "ਫਿਲਮਾਂ",
-    "ਬੱਚੇ",
-    "ਕੌਰ",
-    "ਤੋ",
-    "ਪ੍ਰਤੀ",
-    "ਕੁਆਂਟਮ",
-    "ਅਬਾਦੀ",
-    "ਪੁਸਤਕ",
-    "ਐਮ",
-    "ਰਾਮ",
-    "ਖੇਤਰਾਂ",
-    "ਫਰਵਰੀ",
-    "ਕ੍ਰਿਕਟ",
-    "ਪੈਂਦਾ",
-    "ਇਤਿਹਾਸਕ",
-    "ਲੱਗ",
-    "ਬ੍ਰਿਟਿਸ਼",
-    "ਆਇਆ",
-    "ਮਿਲਦਾ"
-  ];
-  var fas = [
-    "از",
-    "با",
-    "به",
-    "برای",
-    "و",
-    "باید",
-    "شاید",
-    "اکنون",
-    "اگر",
-    "اگرچه",
-    "الا",
-    "اما",
-    "اندر",
-    "اینکه",
-    "باری",
-    "بالعکس",
-    "بدون",
-    "بر",
-    "بلکه",
-    "بنابراین",
-    "بی",
-    "پس",
-    "تا",
-    "جز",
-    "چنانچه",
-    "چه",
-    "چون",
-    "در",
-    "را",
-    "روی",
-    "زیرا",
-    "سپس",
-    "غیر",
-    "که",
-    "لیکن",
-    "مانند",
-    "مثل",
-    "مگر",
-    "نه",
-    "نیز",
-    "هرچند",
-    "هم",
-    "همان",
-    "وانگهی",
-    "ولی",
-    "ولو",
-    "همانند",
-    "همچو"
-  ];
-  var pol = [
-    "a",
-    "aby",
-    "ach",
-    "acz",
-    "aczkolwiek",
-    "aj",
-    "albo",
-    "ale",
-    "ależ",
-    "ani",
-    "aż",
-    "bardziej",
-    "bardzo",
-    "bo",
-    "bowiem",
-    "by",
-    "byli",
-    "bynajmniej",
-    "być",
-    "był",
-    "była",
-    "było",
-    "były",
-    "będzie",
-    "będą",
-    "cali",
-    "cała",
-    "cały",
-    "ci",
-    "cię",
-    "ciebie",
-    "co",
-    "cokolwiek",
-    "coś",
-    "czasami",
-    "czasem",
-    "czemu",
-    "czy",
-    "czyli",
-    "daleko",
-    "dla",
-    "dlaczego",
-    "dlatego",
-    "do",
-    "dobrze",
-    "dokąd",
-    "dość",
-    "dużo",
-    "dwa",
-    "dwaj",
-    "dwie",
-    "dwoje",
-    "dziś",
-    "dzisiaj",
-    "gdy",
-    "gdyby",
-    "gdyż",
-    "gdzie",
-    "gdziekolwiek",
-    "gdzieś",
-    "i",
-    "ich",
-    "ile",
-    "im",
-    "inna",
-    "inne",
-    "inny",
-    "innych",
-    "iż",
-    "ja",
-    "ją",
-    "jak",
-    "jakaś",
-    "jakby",
-    "jaki",
-    "jakichś",
-    "jakie",
-    "jakiś",
-    "jakiż",
-    "jakkolwiek",
-    "jako",
-    "jakoś",
-    "je",
-    "jeden",
-    "jedna",
-    "jedno",
-    "jednak",
-    "jednakże",
-    "jego",
-    "jej",
-    "jemu",
-    "jest",
-    "jestem",
-    "jeszcze",
-    "jeśli",
-    "jeżeli",
-    "już",
-    "ją",
-    "każdy",
-    "kiedy",
-    "kilka",
-    "kimś",
-    "kto",
-    "ktokolwiek",
-    "ktoś",
-    "która",
-    "które",
-    "którego",
-    "której",
-    "który",
-    "których",
-    "którym",
-    "którzy",
-    "ku",
-    "lat",
-    "lecz",
-    "lub",
-    "ma",
-    "mają",
-    "mało",
-    "mam",
-    "mi",
-    "mimo",
-    "między",
-    "mną",
-    "mnie",
-    "mogą",
-    "moi",
-    "moim",
-    "moja",
-    "moje",
-    "może",
-    "możliwe",
-    "można",
-    "mój",
-    "mu",
-    "musi",
-    "my",
-    "na",
-    "nad",
-    "nam",
-    "nami",
-    "nas",
-    "nasi",
-    "nasz",
-    "nasza",
-    "nasze",
-    "naszego",
-    "naszych",
-    "natomiast",
-    "natychmiast",
-    "nawet",
-    "nią",
-    "nic",
-    "nich",
-    "nie",
-    "niech",
-    "niego",
-    "niej",
-    "niemu",
-    "nigdy",
-    "nim",
-    "nimi",
-    "niż",
-    "no",
-    "o",
-    "obok",
-    "od",
-    "około",
-    "on",
-    "ona",
-    "one",
-    "oni",
-    "ono",
-    "oraz",
-    "oto",
-    "owszem",
-    "pan",
-    "pana",
-    "pani",
-    "po",
-    "pod",
-    "podczas",
-    "pomimo",
-    "ponad",
-    "ponieważ",
-    "powinien",
-    "powinna",
-    "powinni",
-    "powinno",
-    "poza",
-    "prawie",
-    "przecież",
-    "przed",
-    "przede",
-    "przedtem",
-    "przez",
-    "przy",
-    "roku",
-    "również",
-    "sam",
-    "sama",
-    "są",
-    "się",
-    "skąd",
-    "sobie",
-    "sobą",
-    "sposób",
-    "swoje",
-    "ta",
-    "tak",
-    "taka",
-    "taki",
-    "takie",
-    "także",
-    "tam",
-    "te",
-    "tego",
-    "tej",
-    "temu",
-    "ten",
-    "teraz",
-    "też",
-    "to",
-    "tobą",
-    "tobie",
-    "toteż",
-    "trzeba",
-    "tu",
-    "tutaj",
-    "twoi",
-    "twoim",
-    "twoja",
-    "twoje",
-    "twym",
-    "twój",
-    "ty",
-    "tych",
-    "tylko",
-    "tym",
-    "u",
-    "w",
-    "wam",
-    "wami",
-    "was",
-    "wasz",
-    "zaś",
-    "wasza",
-    "wasze",
-    "we",
-    "według",
-    "wiele",
-    "wielu",
-    "więc",
-    "więcej",
-    "tę",
-    "wszyscy",
-    "wszystkich",
-    "wszystkie",
-    "wszystkim",
-    "wszystko",
-    "wtedy",
-    "wy",
-    "właśnie",
-    "z",
-    "za",
-    "zapewne",
-    "zawsze",
-    "ze",
-    "zł",
-    "znowu",
-    "znów",
-    "został",
-    "żaden",
-    "żadna",
-    "żadne",
-    "żadnych",
-    "że",
-    "żeby"
-  ];
-  var por = [
-    "a",
-    "à",
-    "ao",
-    "aos",
-    "aquela",
-    "aquelas",
-    "aquele",
-    "aqueles",
-    "aquilo",
-    "as",
-    "às",
-    "até",
-    "com",
-    "como",
-    "da",
-    "das",
-    "de",
-    "dela",
-    "delas",
-    "dele",
-    "deles",
-    "depois",
-    "do",
-    "dos",
-    "e",
-    "ela",
-    "elas",
-    "ele",
-    "eles",
-    "em",
-    "entre",
-    "essa",
-    "essas",
-    "esse",
-    "esses",
-    "esta",
-    "estas",
-    "este",
-    "estes",
-    "eu",
-    "isso",
-    "isto",
-    "já",
-    "lhe",
-    "lhes",
-    "mais",
-    "mas",
-    "me",
-    "mesmo",
-    "meu",
-    "meus",
-    "minha",
-    "minhas",
-    "muito",
-    "muitos",
-    "na",
-    "não",
-    "nas",
-    "nem",
-    "no",
-    "nos",
-    "nós",
-    "nossa",
-    "nossas",
-    "nosso",
-    "nossos",
-    "num",
-    "nuns",
-    "numa",
-    "numas",
-    "o",
-    "os",
-    "ou",
-    "para",
-    "pela",
-    "pelas",
-    "pelo",
-    "pelos",
-    "por",
-    "quais",
-    "qual",
-    "quando",
-    "que",
-    "quem",
-    "se",
-    "sem",
-    "seu",
-    "seus",
-    "só",
-    "sua",
-    "suas",
-    "também",
-    "te",
-    "teu",
-    "teus",
-    "tu",
-    "tua",
-    "tuas",
-    "um",
-    "uma",
-    "umas",
-    "você",
-    "vocês",
-    "vos",
-    "vosso",
-    "vossos"
-  ];
-  var porBr = [
-    "a",
-    "à",
-    "adeus",
-    "agora",
-    "aí",
-    "ainda",
-    "além",
-    "algo",
-    "alguém",
-    "algum",
-    "alguma",
-    "algumas",
-    "alguns",
-    "ali",
-    "ampla",
-    "amplas",
-    "amplo",
-    "amplos",
-    "ano",
-    "anos",
-    "ante",
-    "antes",
-    "ao",
-    "aos",
-    "apenas",
-    "apoio",
-    "após",
-    "aquela",
-    "aquelas",
-    "aquele",
-    "aqueles",
-    "aqui",
-    "aquilo",
-    "área",
-    "as",
-    "às",
-    "assim",
-    "até",
-    "atrás",
-    "através",
-    "baixo",
-    "bastante",
-    "bem",
-    "boa",
-    "boas",
-    "bom",
-    "bons",
-    "breve",
-    "cá",
-    "cada",
-    "catorze",
-    "cedo",
-    "cento",
-    "certamente",
-    "certeza",
-    "cima",
-    "cinco",
-    "coisa",
-    "coisas",
-    "com",
-    "como",
-    "conselho",
-    "contra",
-    "contudo",
-    "custa",
-    "da",
-    "dá",
-    "dão",
-    "daquela",
-    "daquelas",
-    "daquele",
-    "daqueles",
-    "dar",
-    "das",
-    "de",
-    "debaixo",
-    "dela",
-    "delas",
-    "dele",
-    "deles",
-    "demais",
-    "dentro",
-    "depois",
-    "desde",
-    "dessa",
-    "dessas",
-    "desse",
-    "desses",
-    "desta",
-    "destas",
-    "deste",
-    "destes",
-    "deve",
-    "devem",
-    "devendo",
-    "dever",
-    "deverá",
-    "deverão",
-    "deveria",
-    "deveriam",
-    "devia",
-    "deviam",
-    "dez",
-    "dezenove",
-    "dezesseis",
-    "dezessete",
-    "dezoito",
-    "dia",
-    "diante",
-    "disse",
-    "disso",
-    "disto",
-    "dito",
-    "diz",
-    "dizem",
-    "dizer",
-    "do",
-    "dois",
-    "dos",
-    "doze",
-    "duas",
-    "dúvida",
-    "e",
-    "é",
-    "ela",
-    "elas",
-    "ele",
-    "eles",
-    "em",
-    "embora",
-    "enquanto",
-    "entre",
-    "era",
-    "eram",
-    "éramos",
-    "és",
-    "essa",
-    "essas",
-    "esse",
-    "esses",
-    "esta",
-    "está",
-    "estamos",
-    "estão",
-    "estar",
-    "estas",
-    "estás",
-    "estava",
-    "estavam",
-    "estávamos",
-    "este",
-    "esteja",
-    "estejam",
-    "estejamos",
-    "estes",
-    "esteve",
-    "estive",
-    "estivemos",
-    "estiver",
-    "estivera",
-    "estiveram",
-    "estivéramos",
-    "estiverem",
-    "estivermos",
-    "estivesse",
-    "estivessem",
-    "estivéssemos",
-    "estiveste",
-    "estivestes",
-    "estou",
-    "etc",
-    "eu",
-    "exemplo",
-    "faço",
-    "falta",
-    "favor",
-    "faz",
-    "fazeis",
-    "fazem",
-    "fazemos",
-    "fazendo",
-    "fazer",
-    "fazes",
-    "feita",
-    "feitas",
-    "feito",
-    "feitos",
-    "fez",
-    "fim",
-    "final",
-    "foi",
-    "fomos",
-    "for",
-    "fora",
-    "foram",
-    "fôramos",
-    "forem",
-    "forma",
-    "formos",
-    "fosse",
-    "fossem",
-    "fôssemos",
-    "foste",
-    "fostes",
-    "fui",
-    "geral",
-    "grande",
-    "grandes",
-    "grupo",
-    "há",
-    "haja",
-    "hajam",
-    "hajamos",
-    "hão",
-    "havemos",
-    "havia",
-    "hei",
-    "hoje",
-    "hora",
-    "horas",
-    "houve",
-    "houvemos",
-    "houver",
-    "houvera",
-    "houverá",
-    "houveram",
-    "houvéramos",
-    "houverão",
-    "houverei",
-    "houverem",
-    "houveremos",
-    "houveria",
-    "houveriam",
-    "houveríamos",
-    "houvermos",
-    "houvesse",
-    "houvessem",
-    "houvéssemos",
-    "isso",
-    "isto",
-    "já",
-    "la",
-    "lá",
-    "lado",
-    "lhe",
-    "lhes",
-    "lo",
-    "local",
-    "logo",
-    "longe",
-    "lugar",
-    "maior",
-    "maioria",
-    "mais",
-    "mal",
-    "mas",
-    "máximo",
-    "me",
-    "meio",
-    "menor",
-    "menos",
-    "mês",
-    "meses",
-    "mesma",
-    "mesmas",
-    "mesmo",
-    "mesmos",
-    "meu",
-    "meus",
-    "mil",
-    "minha",
-    "minhas",
-    "momento",
-    "muita",
-    "muitas",
-    "muito",
-    "muitos",
-    "na",
-    "nada",
-    "não",
-    "naquela",
-    "naquelas",
-    "naquele",
-    "naqueles",
-    "nas",
-    "nem",
-    "nenhum",
-    "nenhuma",
-    "nessa",
-    "nessas",
-    "nesse",
-    "nesses",
-    "nesta",
-    "nestas",
-    "neste",
-    "nestes",
-    "ninguém",
-    "nível",
-    "no",
-    "noite",
-    "nome",
-    "nos",
-    "nós",
-    "nossa",
-    "nossas",
-    "nosso",
-    "nossos",
-    "nova",
-    "novas",
-    "nove",
-    "novo",
-    "novos",
-    "num",
-    "numa",
-    "número",
-    "nunca",
-    "o",
-    "obra",
-    "obrigada",
-    "obrigado",
-    "oitava",
-    "oitavo",
-    "oito",
-    "onde",
-    "ontem",
-    "onze",
-    "os",
-    "ou",
-    "outra",
-    "outras",
-    "outro",
-    "outros",
-    "para",
-    "parece",
-    "parte",
-    "partir",
-    "paucas",
-    "pela",
-    "pelas",
-    "pelo",
-    "pelos",
-    "pequena",
-    "pequenas",
-    "pequeno",
-    "pequenos",
-    "per",
-    "perante",
-    "perto",
-    "pode",
-    "pude",
-    "pôde",
-    "podem",
-    "podendo",
-    "poder",
-    "poderia",
-    "poderiam",
-    "podia",
-    "podiam",
-    "põe",
-    "põem",
-    "pois",
-    "ponto",
-    "pontos",
-    "por",
-    "porém",
-    "porque",
-    "porquê",
-    "posição",
-    "possível",
-    "possivelmente",
-    "posso",
-    "pouca",
-    "poucas",
-    "pouco",
-    "poucos",
-    "primeira",
-    "primeiras",
-    "primeiro",
-    "primeiros",
-    "própria",
-    "próprias",
-    "próprio",
-    "próprios",
-    "próxima",
-    "próximas",
-    "próximo",
-    "próximos",
-    "pude",
-    "puderam",
-    "quais",
-    "quáis",
-    "qual",
-    "quando",
-    "quanto",
-    "quantos",
-    "quarta",
-    "quarto",
-    "quatro",
-    "que",
-    "quê",
-    "quem",
-    "quer",
-    "quereis",
-    "querem",
-    "queremas",
-    "queres",
-    "quero",
-    "questão",
-    "quinta",
-    "quinto",
-    "quinze",
-    "relação",
-    "sabe",
-    "sabem",
-    "são",
-    "se",
-    "segunda",
-    "segundo",
-    "sei",
-    "seis",
-    "seja",
-    "sejam",
-    "sejamos",
-    "sem",
-    "sempre",
-    "sendo",
-    "ser",
-    "será",
-    "serão",
-    "serei",
-    "seremos",
-    "seria",
-    "seriam",
-    "seríamos",
-    "sete",
-    "sétima",
-    "sétimo",
-    "seu",
-    "seus",
-    "sexta",
-    "sexto",
-    "si",
-    "sido",
-    "sim",
-    "sistema",
-    "só",
-    "sob",
-    "sobre",
-    "sois",
-    "somos",
-    "sou",
-    "sua",
-    "suas",
-    "tal",
-    "talvez",
-    "também",
-    "tampouco",
-    "tanta",
-    "tantas",
-    "tanto",
-    "tão",
-    "tarde",
-    "te",
-    "tem",
-    "tém",
-    "têm",
-    "temos",
-    "tendes",
-    "tendo",
-    "tenha",
-    "tenham",
-    "tenhamos",
-    "tenho",
-    "tens",
-    "ter",
-    "terá",
-    "terão",
-    "terceira",
-    "terceiro",
-    "terei",
-    "teremos",
-    "teria",
-    "teriam",
-    "teríamos",
-    "teu",
-    "teus",
-    "teve",
-    "ti",
-    "tido",
-    "tinha",
-    "tinham",
-    "tínhamos",
-    "tive",
-    "tivemos",
-    "tiver",
-    "tivera",
-    "tiveram",
-    "tivéramos",
-    "tiverem",
-    "tivermos",
-    "tivesse",
-    "tivessem",
-    "tivéssemos",
-    "tiveste",
-    "tivestes",
-    "toda",
-    "todas",
-    "todavia",
-    "todo",
-    "todos",
-    "trabalho",
-    "três",
-    "treze",
-    "tu",
-    "tua",
-    "tuas",
-    "tudo",
-    "última",
-    "últimas",
-    "último",
-    "últimos",
-    "um",
-    "uma",
-    "umas",
-    "uns",
-    "vai",
-    "vais",
-    "vão",
-    "vários",
-    "vem",
-    "vêm",
-    "vendo",
-    "vens",
-    "ver",
-    "vez",
-    "vezes",
-    "viagem",
-    "vindo",
-    "vinte",
-    "vir",
-    "você",
-    "vocês",
-    "vos",
-    "vós",
-    "vossa",
-    "vossas",
-    "vosso",
-    "vossos",
-    "zero"
-  ];
-  var ron = [
-    "acea",
-    "aceasta",
-    "această",
-    "aceea",
-    "acei",
-    "aceia",
-    "acel",
-    "acela",
-    "acele",
-    "acelea",
-    "acest",
-    "acesta",
-    "aceste",
-    "acestea",
-    "aceşti",
-    "aceştia",
-    "acolo",
-    "acord",
-    "acum",
-    "ai",
-    "aia",
-    "aibă",
-    "aici",
-    "al",
-    "ale",
-    "alea",
-    "altceva",
-    "altcineva",
-    "am",
-    "ar",
-    "are",
-    "asemenea",
-    "asta",
-    "astea",
-    "astăzi",
-    "asupra",
-    "au",
-    "avea",
-    "avem",
-    "aveţi",
-    "azi",
-    "aş",
-    "aşadar",
-    "aţi",
-    "bine",
-    "bucur",
-    "bună",
-    "ca",
-    "care",
-    "caut",
-    "ce",
-    "cel",
-    "ceva",
-    "chiar",
-    "cinci",
-    "cine",
-    "cineva",
-    "contra",
-    "cu",
-    "cum",
-    "cumva",
-    "curând",
-    "curînd",
-    "când",
-    "cât",
-    "câte",
-    "câtva",
-    "câţi",
-    "cînd",
-    "cît",
-    "cîte",
-    "cîtva",
-    "cîţi",
-    "că",
-    "căci",
-    "cărei",
-    "căror",
-    "cărui",
-    "către",
-    "da",
-    "dacă",
-    "dar",
-    "datorită",
-    "dată",
-    "dau",
-    "de",
-    "deci",
-    "deja",
-    "deoarece",
-    "departe",
-    "deşi",
-    "din",
-    "dinaintea",
-    "dintr-",
-    "dintre",
-    "doi",
-    "doilea",
-    "două",
-    "drept",
-    "după",
-    "dă",
-    "ea",
-    "ei",
-    "el",
-    "ele",
-    "eram",
-    "este",
-    "eu",
-    "eşti",
-    "face",
-    "fata",
-    "fi",
-    "fie",
-    "fiecare",
-    "fii",
-    "fim",
-    "fiu",
-    "fiţi",
-    "frumos",
-    "fără",
-    "graţie",
-    "halbă",
-    "iar",
-    "ieri",
-    "la",
-    "le",
-    "li",
-    "lor",
-    "lui",
-    "lângă",
-    "lîngă",
-    "mai",
-    "mea",
-    "mei",
-    "mele",
-    "mereu",
-    "meu",
-    "mi",
-    "mie",
-    "mine",
-    "mult",
-    "multă",
-    "mulţi",
-    "mulţumesc",
-    "mâine",
-    "mîine",
-    "mă",
-    "ne",
-    "nevoie",
-    "nici",
-    "nicăieri",
-    "nimeni",
-    "nimeri",
-    "nimic",
-    "nişte",
-    "noastre",
-    "noastră",
-    "noi",
-    "noroc",
-    "nostru",
-    "nouă",
-    "noştri",
-    "nu",
-    "opt",
-    "ori",
-    "oricare",
-    "orice",
-    "oricine",
-    "oricum",
-    "oricând",
-    "oricât",
-    "oricînd",
-    "oricît",
-    "oriunde",
-    "patra",
-    "patru",
-    "patrulea",
-    "pe",
-    "pentru",
-    "peste",
-    "pic",
-    "poate",
-    "pot",
-    "prea",
-    "prima",
-    "primul",
-    "prin",
-    "printr-",
-    "puţin",
-    "puţina",
-    "puţină",
-    "până",
-    "pînă",
-    "rog",
-    "sa",
-    "sale",
-    "sau",
-    "se",
-    "spate",
-    "spre",
-    "sub",
-    "sunt",
-    "suntem",
-    "sunteţi",
-    "sută",
-    "sînt",
-    "sîntem",
-    "sînteţi",
-    "să",
-    "săi",
-    "său",
-    "ta",
-    "tale",
-    "te",
-    "timp",
-    "tine",
-    "toate",
-    "toată",
-    "tot",
-    "totuşi",
-    "toţi",
-    "trei",
-    "treia",
-    "treilea",
-    "tu",
-    "tăi",
-    "tău",
-    "un",
-    "una",
-    "unde",
-    "undeva",
-    "unei",
-    "uneia",
-    "unele",
-    "uneori",
-    "unii",
-    "unor",
-    "unora",
-    "unu",
-    "unui",
-    "unuia",
-    "unul",
-    "vi",
-    "voastre",
-    "voastră",
-    "voi",
-    "vostru",
-    "vouă",
-    "voştri",
-    "vreme",
-    "vreo",
-    "vreun",
-    "vă",
-    "zece",
-    "zero",
-    "zi",
-    "zice",
-    "îi",
-    "îl",
-    "îmi",
-    "împotriva",
-    "în",
-    "înainte",
-    "înaintea",
-    "încotro",
-    "încât",
-    "încît",
-    "între",
-    "întrucât",
-    "întrucît",
-    "îţi",
-    "ăla",
-    "ălea",
-    "ăsta",
-    "ăstea",
-    "ăştia",
-    "şapte",
-    "şase",
-    "şi",
-    "ştiu",
-    "ţi",
-    "ţie"
-  ];
-  var rus = [
-    "и",
-    "в",
-    "во",
-    "не",
-    "что",
-    "он",
-    "на",
-    "я",
-    "с",
-    "со",
-    "как",
-    "а",
-    "то",
-    "все",
-    "она",
-    "так",
-    "его",
-    "но",
-    "да",
-    "ты",
-    "к",
-    "у",
-    "же",
-    "вы",
-    "за",
-    "бы",
-    "по",
-    "только",
-    "ее",
-    "мне",
-    "было",
-    "вот",
-    "от",
-    "меня",
-    "еще",
-    "нет",
-    "о",
-    "из",
-    "ему",
-    "теперь",
-    "когда",
-    "даже",
-    "ну",
-    "ли",
-    "если",
-    "уже",
-    "или",
-    "ни",
-    "быть",
-    "был",
-    "него",
-    "до",
-    "вас",
-    "нибудь",
-    "уж",
-    "вам",
-    "сказал",
-    "ведь",
-    "там",
-    "потом",
-    "себя",
-    "ничего",
-    "ей",
-    "может",
-    "они",
-    "тут",
-    "где",
-    "есть",
-    "надо",
-    "ней",
-    "для",
-    "мы",
-    "тебя",
-    "их",
-    "чем",
-    "была",
-    "сам",
-    "чтоб",
-    "без",
-    "будто",
-    "чего",
-    "раз",
-    "тоже",
-    "себе",
-    "под",
-    "будет",
-    "ж",
-    "тогда",
-    "кто",
-    "этот",
-    "того",
-    "потому",
-    "этого",
-    "какой",
-    "совсем",
-    "ним",
-    "этом",
-    "почти",
-    "мой",
-    "тем",
-    "чтобы",
-    "нее",
-    "были",
-    "куда",
-    "всех",
-    "никогда",
-    "сегодня",
-    "можно",
-    "при",
-    "об",
-    "другой",
-    "хоть",
-    "после",
-    "над",
-    "больше",
-    "тот",
-    "через",
-    "эти",
-    "нас",
-    "про",
-    "всего",
-    "них",
-    "какая",
-    "много",
-    "разве",
-    "эту",
-    "моя",
-    "свою",
-    "этой",
-    "перед",
-    "иногда",
-    "лучше",
-    "чуть",
-    "том",
-    "нельзя",
-    "такой",
-    "им",
-    "более",
-    "всегда",
-    "конечно",
-    "всю",
-    "между",
-    "это",
-    "лишь"
-  ];
-  var slk = [
-    "a",
-    "aby",
-    "aj",
-    "ako",
-    "aký",
-    "ale",
-    "alebo",
-    "ani",
-    "avšak",
-    "ba",
-    "bez",
-    "buï",
-    "cez",
-    "do",
-    "ho",
-    "hoci",
-    "i",
-    "ich",
-    "im",
-    "ja",
-    "jeho",
-    "jej",
-    "jemu",
-    "ju",
-    "k",
-    "kam",
-    "kde",
-    "kedže",
-    "keï",
-    "kto",
-    "ktorý",
-    "ku",
-    "lebo",
-    "ma",
-    "mi",
-    "mne",
-    "mnou",
-    "mu",
-    "my",
-    "mòa",
-    "môj",
-    "na",
-    "nad",
-    "nami",
-    "neho",
-    "nej",
-    "nemu",
-    "nich",
-    "nielen",
-    "nim",
-    "no",
-    "nám",
-    "nás",
-    "náš",
-    "ním",
-    "o",
-    "od",
-    "on",
-    "ona",
-    "oni",
-    "ono",
-    "ony",
-    "po",
-    "pod",
-    "pre",
-    "pred",
-    "pri",
-    "s",
-    "sa",
-    "seba",
-    "sem",
-    "so",
-    "svoj",
-    "taký",
-    "tam",
-    "teba",
-    "tebe",
-    "tebou",
-    "tej",
-    "ten",
-    "ti",
-    "tie",
-    "to",
-    "toho",
-    "tomu",
-    "tou",
-    "tvoj",
-    "ty",
-    "tá",
-    "tým",
-    "v",
-    "vami",
-    "veï",
-    "vo",
-    "vy",
-    "vám",
-    "vás",
-    "váš",
-    "však",
-    "z",
-    "za",
-    "zo",
-    "a",
-    "èi",
-    "èo",
-    "èí",
-    "òom",
-    "òou",
-    "òu",
-    "že"
-  ];
-  var slv = [
-    "a",
-    "ali",
-    "april",
-    "avgust",
-    "b",
-    "bi",
-    "bil",
-    "bila",
-    "bile",
-    "bili",
-    "bilo",
-    "biti",
-    "blizu",
-    "bo",
-    "bodo",
-    "bojo",
-    "bolj",
-    "bom",
-    "bomo",
-    "boste",
-    "bova",
-    "boš",
-    "brez",
-    "c",
-    "cel",
-    "cela",
-    "celi",
-    "celo",
-    "d",
-    "da",
-    "daleč",
-    "dan",
-    "danes",
-    "datum",
-    "december",
-    "deset",
-    "deseta",
-    "deseti",
-    "deseto",
-    "devet",
-    "deveta",
-    "deveti",
-    "deveto",
-    "do",
-    "dober",
-    "dobra",
-    "dobri",
-    "dobro",
-    "dokler",
-    "dol",
-    "dolg",
-    "dolga",
-    "dolgi",
-    "dovolj",
-    "drug",
-    "druga",
-    "drugi",
-    "drugo",
-    "dva",
-    "dve",
-    "e",
-    "eden",
-    "en",
-    "ena",
-    "ene",
-    "eni",
-    "enkrat",
-    "eno",
-    "etc.",
-    "f",
-    "februar",
-    "g",
-    "g.",
-    "ga",
-    "ga.",
-    "gor",
-    "gospa",
-    "gospod",
-    "h",
-    "halo",
-    "i",
-    "idr.",
-    "ii",
-    "iii",
-    "in",
-    "iv",
-    "ix",
-    "iz",
-    "j",
-    "januar",
-    "jaz",
-    "je",
-    "ji",
-    "jih",
-    "jim",
-    "jo",
-    "julij",
-    "junij",
-    "jutri",
-    "k",
-    "kadarkoli",
-    "kaj",
-    "kajti",
-    "kako",
-    "kakor",
-    "kamor",
-    "kamorkoli",
-    "kar",
-    "karkoli",
-    "katerikoli",
-    "kdaj",
-    "kdo",
-    "kdorkoli",
-    "ker",
-    "ki",
-    "kje",
-    "kjer",
-    "kjerkoli",
-    "ko",
-    "koder",
-    "koderkoli",
-    "koga",
-    "komu",
-    "kot",
-    "kratek",
-    "kratka",
-    "kratke",
-    "kratki",
-    "l",
-    "lahka",
-    "lahke",
-    "lahki",
-    "lahko",
-    "le",
-    "lep",
-    "lepa",
-    "lepe",
-    "lepi",
-    "lepo",
-    "leto",
-    "m",
-    "maj",
-    "majhen",
-    "majhna",
-    "majhni",
-    "malce",
-    "malo",
-    "manj",
-    "marec",
-    "me",
-    "med",
-    "medtem",
-    "mene",
-    "mesec",
-    "mi",
-    "midva",
-    "midve",
-    "mnogo",
-    "moj",
-    "moja",
-    "moje",
-    "mora",
-    "morajo",
-    "moram",
-    "moramo",
-    "morate",
-    "moraš",
-    "morem",
-    "mu",
-    "n",
-    "na",
-    "nad",
-    "naj",
-    "najina",
-    "najino",
-    "najmanj",
-    "naju",
-    "največ",
-    "nam",
-    "narobe",
-    "nas",
-    "nato",
-    "nazaj",
-    "naš",
-    "naša",
-    "naše",
-    "ne",
-    "nedavno",
-    "nedelja",
-    "nek",
-    "neka",
-    "nekaj",
-    "nekatere",
-    "nekateri",
-    "nekatero",
-    "nekdo",
-    "neke",
-    "nekega",
-    "neki",
-    "nekje",
-    "neko",
-    "nekoga",
-    "nekoč",
-    "ni",
-    "nikamor",
-    "nikdar",
-    "nikjer",
-    "nikoli",
-    "nič",
-    "nje",
-    "njega",
-    "njegov",
-    "njegova",
-    "njegovo",
-    "njej",
-    "njemu",
-    "njen",
-    "njena",
-    "njeno",
-    "nji",
-    "njih",
-    "njihov",
-    "njihova",
-    "njihovo",
-    "njiju",
-    "njim",
-    "njo",
-    "njun",
-    "njuna",
-    "njuno",
-    "no",
-    "nocoj",
-    "november",
-    "npr.",
-    "o",
-    "ob",
-    "oba",
-    "obe",
-    "oboje",
-    "od",
-    "odprt",
-    "odprta",
-    "odprti",
-    "okoli",
-    "oktober",
-    "on",
-    "onadva",
-    "one",
-    "oni",
-    "onidve",
-    "osem",
-    "osma",
-    "osmi",
-    "osmo",
-    "oz.",
-    "p",
-    "pa",
-    "pet",
-    "peta",
-    "petek",
-    "peti",
-    "peto",
-    "po",
-    "pod",
-    "pogosto",
-    "poleg",
-    "poln",
-    "polna",
-    "polni",
-    "polno",
-    "ponavadi",
-    "ponedeljek",
-    "ponovno",
-    "potem",
-    "povsod",
-    "pozdravljen",
-    "pozdravljeni",
-    "prav",
-    "prava",
-    "prave",
-    "pravi",
-    "pravo",
-    "prazen",
-    "prazna",
-    "prazno",
-    "prbl.",
-    "precej",
-    "pred",
-    "prej",
-    "preko",
-    "pri",
-    "pribl.",
-    "približno",
-    "primer",
-    "pripravljen",
-    "pripravljena",
-    "pripravljeni",
-    "proti",
-    "prva",
-    "prvi",
-    "prvo",
-    "r",
-    "ravno",
-    "redko",
-    "res",
-    "reč",
-    "s",
-    "saj",
-    "sam",
-    "sama",
-    "same",
-    "sami",
-    "samo",
-    "se",
-    "sebe",
-    "sebi",
-    "sedaj",
-    "sedem",
-    "sedma",
-    "sedmi",
-    "sedmo",
-    "sem",
-    "september",
-    "seveda",
-    "si",
-    "sicer",
-    "skoraj",
-    "skozi",
-    "slab",
-    "smo",
-    "so",
-    "sobota",
-    "spet",
-    "sreda",
-    "srednja",
-    "srednji",
-    "sta",
-    "ste",
-    "stran",
-    "stvar",
-    "sva",
-    "t",
-    "ta",
-    "tak",
-    "taka",
-    "take",
-    "taki",
-    "tako",
-    "takoj",
-    "tam",
-    "te",
-    "tebe",
-    "tebi",
-    "tega",
-    "težak",
-    "težka",
-    "težki",
-    "težko",
-    "ti",
-    "tista",
-    "tiste",
-    "tisti",
-    "tisto",
-    "tj.",
-    "tja",
-    "to",
-    "toda",
-    "torek",
-    "tretja",
-    "tretje",
-    "tretji",
-    "tri",
-    "tu",
-    "tudi",
-    "tukaj",
-    "tvoj",
-    "tvoja",
-    "tvoje",
-    "u",
-    "v",
-    "vaju",
-    "vam",
-    "vas",
-    "vaš",
-    "vaša",
-    "vaše",
-    "ve",
-    "vedno",
-    "velik",
-    "velika",
-    "veliki",
-    "veliko",
-    "vendar",
-    "ves",
-    "več",
-    "vi",
-    "vidva",
-    "vii",
-    "viii",
-    "visok",
-    "visoka",
-    "visoke",
-    "visoki",
-    "vsa",
-    "vsaj",
-    "vsak",
-    "vsaka",
-    "vsakdo",
-    "vsake",
-    "vsaki",
-    "vsakomur",
-    "vse",
-    "vsega",
-    "vsi",
-    "vso",
-    "včasih",
-    "včeraj",
-    "x",
-    "z",
-    "za",
-    "zadaj",
-    "zadnji",
-    "zakaj",
-    "zaprta",
-    "zaprti",
-    "zaprto",
-    "zdaj",
-    "zelo",
-    "zunaj",
-    "č",
-    "če",
-    "često",
-    "četrta",
-    "četrtek",
-    "četrti",
-    "četrto",
-    "čez",
-    "čigav",
-    "š",
-    "šest",
-    "šesta",
-    "šesti",
-    "šesto",
-    "štiri",
-    "ž",
-    "že"
-  ];
-  var som = [
-    "oo",
-    "atabo",
-    "ay",
-    "ku",
-    "waxeey",
-    "uu",
-    "lakin",
-    "si",
-    "ayuu",
-    "soo",
-    "waa",
-    "ka",
-    "kasoo",
-    "kale",
-    "waxuu",
-    "ayee",
-    "ayaa",
-    "kuu",
-    "isku",
-    "ugu",
-    "jiray",
-    "dhan",
-    "dambeestii",
-    "inuu",
-    "in",
-    "jirtay",
-    "uheestay",
-    "aad",
-    "uga",
-    "hadana",
-    "timaado",
-    "timaaday"
-  ];
-  var sot = [
-    "a",
-    "le",
-    "o",
-    "ba",
-    "ho",
-    "oa",
-    "ea",
-    "ka",
-    "hae",
-    "tselane",
-    "eaba",
-    "ke",
-    "hore",
-    "ha",
-    "e",
-    "ne",
-    "re",
-    "bona",
-    "me",
-    "limo",
-    "tsa",
-    "haholo",
-    "la",
-    "empa",
-    "ngoanake",
-    "se",
-    "moo",
-    "m'e",
-    "bane",
-    "mo",
-    "tse",
-    "sa",
-    "li",
-    "ena",
-    "bina",
-    "pina",
-    "hape"
-  ];
-  var spa = [
-    "a",
-    "un",
-    "el",
-    "ella",
-    "y",
-    "sobre",
-    "de",
-    "la",
-    "que",
-    "en",
-    "los",
-    "del",
-    "se",
-    "las",
-    "por",
-    "un",
-    "para",
-    "con",
-    "no",
-    "una",
-    "su",
-    "al",
-    "lo",
-    "como",
-    "más",
-    "pero",
-    "sus",
-    "le",
-    "ya",
-    "o",
-    "porque",
-    "cuando",
-    "muy",
-    "sin",
-    "sobre",
-    "también",
-    "me",
-    "hasta",
-    "donde",
-    "quien",
-    "desde",
-    "nos",
-    "durante",
-    "uno",
-    "ni",
-    "contra",
-    "ese",
-    "eso",
-    "mí",
-    "qué",
-    "otro",
-    "él",
-    "cual",
-    "poco",
-    "mi",
-    "tú",
-    "te",
-    "ti",
-    "sí"
-  ];
-  var swa = [
-    "na",
-    "ya",
-    "wa",
-    "kwa",
-    "ni",
-    "za",
-    "katika",
-    "la",
-    "kuwa",
-    "kama",
-    "kwamba",
-    "cha",
-    "hiyo",
-    "lakini",
-    "yake",
-    "hata",
-    "wakati",
-    "hivyo",
-    "sasa",
-    "wake",
-    "au",
-    "watu",
-    "hii",
-    "zaidi",
-    "vya",
-    "huo",
-    "tu",
-    "kwenye",
-    "si",
-    "pia",
-    "ili",
-    "moja",
-    "kila",
-    "baada",
-    "ambao",
-    "ambayo",
-    "yao",
-    "wao",
-    "kuna",
-    "hilo",
-    "kutoka",
-    "kubwa",
-    "pamoja",
-    "bila",
-    "huu",
-    "hayo",
-    "sana",
-    "ndani",
-    "mkuu",
-    "hizo",
-    "kufanya",
-    "wengi",
-    "hadi",
-    "mmoja",
-    "hili",
-    "juu",
-    "kwanza",
-    "wetu",
-    "kuhusu",
-    "baadhi",
-    "wote",
-    "yetu",
-    "hivi",
-    "kweli",
-    "mara",
-    "wengine",
-    "nini",
-    "ndiyo",
-    "zao",
-    "kati",
-    "hao",
-    "hapa",
-    "kutokana",
-    "muda",
-    "habari",
-    "ambaye",
-    "wenye",
-    "nyingine",
-    "hakuna",
-    "tena",
-    "hatua",
-    "bado",
-    "nafasi",
-    "basi",
-    "kabisa",
-    "hicho",
-    "nje",
-    "huyo",
-    "vile",
-    "yote",
-    "mkubwa",
-    "alikuwa",
-    "zote",
-    "leo",
-    "haya",
-    "huko",
-    "kutoa",
-    "mwa",
-    "kiasi",
-    "hasa",
-    "nyingi",
-    "kabla",
-    "wale",
-    "chini",
-    "gani",
-    "hapo",
-    "lazima",
-    "mwingine",
-    "bali",
-    "huku",
-    "zake",
-    "ilikuwa",
-    "tofauti",
-    "kupata",
-    "mbalimbali",
-    "pale",
-    "kusema",
-    "badala",
-    "wazi",
-    "yeye",
-    "alisema",
-    "hawa",
-    "ndio",
-    "hizi",
-    "tayari",
-    "wala",
-    "muhimu",
-    "ile",
-    "mpya",
-    "ambazo",
-    "dhidi",
-    "kwenda",
-    "sisi",
-    "kwani",
-    "jinsi",
-    "binafsi",
-    "kutumia",
-    "mbili",
-    "mbali",
-    "kuu",
-    "mengine",
-    "mbele",
-    "namna",
-    "mengi",
-    "upande"
-  ];
-  var swe = [
-    "aderton",
-    "adertonde",
-    "adjö",
-    "aldrig",
-    "alla",
-    "allas",
-    "allt",
-    "alltid",
-    "alltså",
-    "andra",
-    "andras",
-    "annan",
-    "annat",
-    "artonde",
-    "artonn",
-    "att",
-    "av",
-    "bakom",
-    "bara",
-    "behöva",
-    "behövas",
-    "behövde",
-    "behövt",
-    "beslut",
-    "beslutat",
-    "beslutit",
-    "bland",
-    "blev",
-    "bli",
-    "blir",
-    "blivit",
-    "bort",
-    "borta",
-    "bra",
-    "bäst",
-    "bättre",
-    "båda",
-    "bådas",
-    "dag",
-    "dagar",
-    "dagarna",
-    "dagen",
-    "de",
-    "del",
-    "delen",
-    "dem",
-    "den",
-    "denna",
-    "deras",
-    "dess",
-    "dessa",
-    "det",
-    "detta",
-    "dig",
-    "din",
-    "dina",
-    "dit",
-    "ditt",
-    "dock",
-    "dom",
-    "du",
-    "där",
-    "därför",
-    "då",
-    "e",
-    "efter",
-    "eftersom",
-    "ej",
-    "elfte",
-    "eller",
-    "elva",
-    "emot",
-    "en",
-    "enkel",
-    "enkelt",
-    "enkla",
-    "enligt",
-    "ens",
-    "er",
-    "era",
-    "ers",
-    "ert",
-    "ett",
-    "ettusen",
-    "fanns",
-    "fem",
-    "femte",
-    "femtio",
-    "femtionde",
-    "femton",
-    "femtonde",
-    "fick",
-    "fin",
-    "finnas",
-    "finns",
-    "fjorton",
-    "fjortonde",
-    "fjärde",
-    "fler",
-    "flera",
-    "flesta",
-    "fram",
-    "framför",
-    "från",
-    "fyra",
-    "fyrtio",
-    "fyrtionde",
-    "få",
-    "får",
-    "fått",
-    "följande",
-    "för",
-    "före",
-    "förlåt",
-    "förra",
-    "första",
-    "genast",
-    "genom",
-    "gick",
-    "gjorde",
-    "gjort",
-    "god",
-    "goda",
-    "godare",
-    "godast",
-    "gott",
-    "gälla",
-    "gäller",
-    "gällt",
-    "gärna",
-    "gå",
-    "går",
-    "gått",
-    "gör",
-    "göra",
-    "ha",
-    "hade",
-    "haft",
-    "han",
-    "hans",
-    "har",
-    "heller",
-    "hellre",
-    "helst",
-    "helt",
-    "henne",
-    "hennes",
-    "hit",
-    "hon",
-    "honom",
-    "hundra",
-    "hundraen",
-    "hundraett",
-    "hur",
-    "här",
-    "hög",
-    "höger",
-    "högre",
-    "högst",
-    "i",
-    "ibland",
-    "icke",
-    "idag",
-    "igen",
-    "igår",
-    "imorgon",
-    "in",
-    "inför",
-    "inga",
-    "ingen",
-    "ingenting",
-    "inget",
-    "innan",
-    "inne",
-    "inom",
-    "inte",
-    "inuti",
-    "ja",
-    "jag",
-    "jo",
-    "ju",
-    "just",
-    "jämfört",
-    "kan",
-    "kanske",
-    "knappast",
-    "kom",
-    "komma",
-    "kommer",
-    "kommit",
-    "kr",
-    "kunde",
-    "kunna",
-    "kunnat",
-    "kvar",
-    "legat",
-    "ligga",
-    "ligger",
-    "lika",
-    "likställd",
-    "likställda",
-    "lilla",
-    "lite",
-    "liten",
-    "litet",
-    "länge",
-    "längre",
-    "längst",
-    "lätt",
-    "lättare",
-    "lättast",
-    "långsam",
-    "långsammare",
-    "långsammast",
-    "långsamt",
-    "långt",
-    "låt",
-    "man",
-    "med",
-    "mej",
-    "mellan",
-    "men",
-    "mer",
-    "mera",
-    "mest",
-    "mig",
-    "min",
-    "mina",
-    "mindre",
-    "minst",
-    "mitt",
-    "mittemot",
-    "mot",
-    "mycket",
-    "många",
-    "måste",
-    "möjlig",
-    "möjligen",
-    "möjligt",
-    "möjligtvis",
-    "ned",
-    "nederst",
-    "nedersta",
-    "nedre",
-    "nej",
-    "ner",
-    "ni",
-    "nio",
-    "nionde",
-    "nittio",
-    "nittionde",
-    "nitton",
-    "nittonde",
-    "nog",
-    "noll",
-    "nr",
-    "nu",
-    "nummer",
-    "när",
-    "nästa",
-    "någon",
-    "någonting",
-    "något",
-    "några",
-    "nån",
-    "nånting",
-    "nåt",
-    "nödvändig",
-    "nödvändiga",
-    "nödvändigt",
-    "nödvändigtvis",
-    "och",
-    "också",
-    "ofta",
-    "oftast",
-    "olika",
-    "olikt",
-    "om",
-    "oss",
-    "på",
-    "rakt",
-    "redan",
-    "rätt",
-    "sa",
-    "sade",
-    "sagt",
-    "samma",
-    "sedan",
-    "senare",
-    "senast",
-    "sent",
-    "sex",
-    "sextio",
-    "sextionde",
-    "sexton",
-    "sextonde",
-    "sig",
-    "sin",
-    "sina",
-    "sist",
-    "sista",
-    "siste",
-    "sitt",
-    "sitta",
-    "sju",
-    "sjunde",
-    "sjuttio",
-    "sjuttionde",
-    "sjutton",
-    "sjuttonde",
-    "själv",
-    "sjätte",
-    "ska",
-    "skall",
-    "skulle",
-    "slutligen",
-    "små",
-    "smått",
-    "snart",
-    "som",
-    "stor",
-    "stora",
-    "stort",
-    "större",
-    "störst",
-    "säga",
-    "säger",
-    "sämre",
-    "sämst",
-    "så",
-    "sådan",
-    "sådana",
-    "sådant",
-    "ta",
-    "tack",
-    "tar",
-    "tidig",
-    "tidigare",
-    "tidigast",
-    "tidigt",
-    "till",
-    "tills",
-    "tillsammans",
-    "tio",
-    "tionde",
-    "tjugo",
-    "tjugoen",
-    "tjugoett",
-    "tjugonde",
-    "tjugotre",
-    "tjugotvå",
-    "tjungo",
-    "tolfte",
-    "tolv",
-    "tre",
-    "tredje",
-    "trettio",
-    "trettionde",
-    "tretton",
-    "trettonde",
-    "två",
-    "tvåhundra",
-    "under",
-    "upp",
-    "ur",
-    "ursäkt",
-    "ut",
-    "utan",
-    "utanför",
-    "ute",
-    "va",
-    "vad",
-    "var",
-    "vara",
-    "varför",
-    "varifrån",
-    "varit",
-    "varje",
-    "varken",
-    "vars",
-    "varsågod",
-    "vart",
-    "vem",
-    "vems",
-    "verkligen",
-    "vi",
-    "vid",
-    "vidare",
-    "viktig",
-    "viktigare",
-    "viktigast",
-    "viktigt",
-    "vilka",
-    "vilkas",
-    "vilken",
-    "vilket",
-    "vill",
-    "väl",
-    "vänster",
-    "vänstra",
-    "värre",
-    "vår",
-    "våra",
-    "vårt",
-    "än",
-    "ännu",
-    "är",
-    "även",
-    "åt",
-    "åtminstone",
-    "åtta",
-    "åttio",
-    "åttionde",
-    "åttonde",
-    "över",
-    "övermorgon",
-    "överst",
-    "övre"
-  ];
-  var tha = [
-    "กล่าว",
-    "กว่า",
-    "กัน",
-    "กับ",
-    "การ",
-    "ก็",
-    "ก่อน",
-    "ขณะ",
-    "ขอ",
-    "ของ",
-    "ขึ้น",
-    "คง",
-    "ครั้ง",
-    "ความ",
-    "คือ",
-    "จะ",
-    "จัด",
-    "จาก",
-    "จึง",
-    "ช่วง",
-    "ซึ่ง",
-    "ดัง",
-    "ด้วย",
-    "ด้าน",
-    "ตั้ง",
-    "ตั้งแต่",
-    "ตาม",
-    "ต่อ",
-    "ต่าง",
-    "ต่างๆ",
-    "ต้อง",
-    "ถึง",
-    "ถูก",
-    "ถ้า",
-    "ทั้ง",
-    "ทั้งนี้",
-    "ทาง",
-    "ที่",
-    "ที่สุด",
-    "ทุก",
-    "ทํา",
-    "ทําให้",
-    "นอกจาก",
-    "นัก",
-    "นั้น",
-    "นี้",
-    "น่า",
-    "นํา",
-    "บาง",
-    "ผล",
-    "ผ่าน",
-    "พบ",
-    "พร้อม",
-    "มา",
-    "มาก",
-    "มี",
-    "ยัง",
-    "รวม",
-    "ระหว่าง",
-    "รับ",
-    "ราย",
-    "ร่วม",
-    "ลง",
-    "วัน",
-    "ว่า",
-    "สุด",
-    "ส่ง",
-    "ส่วน",
-    "สําหรับ",
-    "หนึ่ง",
-    "หรือ",
-    "หลัง",
-    "หลังจาก",
-    "หลาย",
-    "หาก",
-    "อยาก",
-    "อยู่",
-    "อย่าง",
-    "ออก",
-    "อะไร",
-    "อาจ",
-    "อีก",
-    "เขา",
-    "เข้า",
-    "เคย",
-    "เฉพาะ",
-    "เช่น",
-    "เดียว",
-    "เดียวกัน",
-    "เนื่องจาก",
-    "เปิด",
-    "เปิดเผย",
-    "เป็น",
-    "เป็นการ",
-    "เพราะ",
-    "เพื่อ",
-    "เมื่อ",
-    "เรา",
-    "เริ่ม",
-    "เลย",
-    "เห็น",
-    "เอง",
-    "แต่",
-    "แบบ",
-    "แรก",
-    "และ",
-    "แล้ว",
-    "แห่ง",
-    "โดย",
-    "ใน",
-    "ให้",
-    "ได้",
-    "ไป",
-    "ไม่",
-    "ไว้"
-  ];
-  var tgl = [
-    "akin",
-    "aking",
-    "ako",
-    "alin",
-    "am",
-    "amin",
-    "aming",
-    "ang",
-    "ano",
-    "anumang",
-    "apat",
-    "at",
-    "atin",
-    "ating",
-    "ay",
-    "bababa",
-    "bago",
-    "bakit",
-    "bawat",
-    "bilang",
-    "dahil",
-    "dalawa",
-    "dapat",
-    "din",
-    "dito",
-    "doon",
-    "gagawin",
-    "gayunman",
-    "ginagawa",
-    "ginawa",
-    "ginawang",
-    "gumawa",
-    "gusto",
-    "habang",
-    "hanggang",
-    "hindi",
-    "huwag",
-    "iba",
-    "ibaba",
-    "ibabaw",
-    "ibig",
-    "ikaw",
-    "ilagay",
-    "ilalim",
-    "ilan",
-    "inyong",
-    "isa",
-    "isang",
-    "itaas",
-    "ito",
-    "iyo",
-    "iyon",
-    "iyong",
-    "ka",
-    "kahit",
-    "kailangan",
-    "kailanman",
-    "kami",
-    "kanila",
-    "kanilang",
-    "kanino",
-    "kanya",
-    "kanyang",
-    "kapag",
-    "kapwa",
-    "karamihan",
-    "katiyakan",
-    "katulad",
-    "kaya",
-    "kaysa",
-    "ko",
-    "kong",
-    "kulang",
-    "kumuha",
-    "kung",
-    "laban",
-    "lahat",
-    "lamang",
-    "likod",
-    "lima",
-    "maaari",
-    "maaaring",
-    "maging",
-    "mahusay",
-    "makita",
-    "marami",
-    "marapat",
-    "masyado",
-    "may",
-    "mayroon",
-    "mga",
-    "minsan",
-    "mismo",
-    "mula",
-    "muli",
-    "na",
-    "nabanggit",
-    "naging",
-    "nagkaroon",
-    "nais",
-    "nakita",
-    "namin",
-    "napaka",
-    "narito",
-    "nasaan",
-    "ng",
-    "ngayon",
-    "ni",
-    "nila",
-    "nilang",
-    "nito",
-    "niya",
-    "niyang",
-    "noon",
-    "o",
-    "pa",
-    "paano",
-    "pababa",
-    "paggawa",
-    "pagitan",
-    "pagkakaroon",
-    "pagkatapos",
-    "palabas",
-    "pamamagitan",
-    "panahon",
-    "pangalawa",
-    "para",
-    "paraan",
-    "pareho",
-    "pataas",
-    "pero",
-    "pumunta",
-    "pumupunta",
-    "sa",
-    "saan",
-    "sabi",
-    "sabihin",
-    "sarili",
-    "sila",
-    "sino",
-    "siya",
-    "tatlo",
-    "tayo",
-    "tulad",
-    "tungkol",
-    "una",
-    "walang"
-  ];
-  var tur = [
-    "acaba",
-    "acep",
-    "adeta",
-    "altmış",
-    "altmış",
-    "altı",
-    "altı",
-    "ama",
-    "ancak",
-    "arada",
-    "artık",
-    "aslında",
-    "aynen",
-    "ayrıca",
-    "az",
-    "bana",
-    "bari",
-    "bazen",
-    "bazı",
-    "bazı",
-    "başka",
-    "belki",
-    "ben",
-    "benden",
-    "beni",
-    "benim",
-    "beri",
-    "beş",
-    "beş",
-    "beş",
-    "bile",
-    "bin",
-    "bir",
-    "biraz",
-    "biri",
-    "birkaç",
-    "birkez",
-    "birçok",
-    "birşey",
-    "birşeyi",
-    "birşey",
-    "birşeyi",
-    "birşey",
-    "biz",
-    "bizden",
-    "bize",
-    "bizi",
-    "bizim",
-    "bu",
-    "buna",
-    "bunda",
-    "bundan",
-    "bunlar",
-    "bunları",
-    "bunların",
-    "bunu",
-    "bunun",
-    "burada",
-    "böyle",
-    "böylece",
-    "bütün",
-    "da",
-    "daha",
-    "dahi",
-    "dahil",
-    "daima",
-    "dair",
-    "dayanarak",
-    "de",
-    "defa",
-    "deđil",
-    "değil",
-    "diye",
-    "diđer",
-    "diğer",
-    "doksan",
-    "dokuz",
-    "dolayı",
-    "dolayısıyla",
-    "dört",
-    "edecek",
-    "eden",
-    "ederek",
-    "edilecek",
-    "ediliyor",
-    "edilmesi",
-    "ediyor",
-    "elli",
-    "en",
-    "etmesi",
-    "etti",
-    "ettiği",
-    "ettiğini",
-    "eđer",
-    "eğer",
-    "fakat",
-    "gibi",
-    "göre",
-    "halbuki",
-    "halen",
-    "hangi",
-    "hani",
-    "hariç",
-    "hatta",
-    "hele",
-    "hem",
-    "henüz",
-    "hep",
-    "hepsi",
-    "her",
-    "herhangi",
-    "herkes",
-    "herkesin",
-    "hiç",
-    "hiçbir",
-    "iken",
-    "iki",
-    "ila",
-    "ile",
-    "ilgili",
-    "ilk",
-    "illa",
-    "ise",
-    "itibaren",
-    "itibariyle",
-    "iyi",
-    "iyice",
-    "için",
-    "işte",
-    "işte",
-    "kadar",
-    "kanımca",
-    "karşın",
-    "katrilyon",
-    "kendi",
-    "kendilerine",
-    "kendini",
-    "kendisi",
-    "kendisine",
-    "kendisini",
-    "kere",
-    "kez",
-    "keşke",
-    "ki",
-    "kim",
-    "kimden",
-    "kime",
-    "kimi",
-    "kimse",
-    "kırk",
-    "kısaca",
-    "kırk",
-    "lakin",
-    "madem",
-    "međer",
-    "milyar",
-    "milyon",
-    "mu",
-    "mü",
-    "mı",
-    "mı",
-    "nasıl",
-    "nasıl",
-    "ne",
-    "neden",
-    "nedenle",
-    "nerde",
-    "nere",
-    "nerede",
-    "nereye",
-    "nitekim",
-    "niye",
-    "niçin",
-    "o",
-    "olan",
-    "olarak",
-    "oldu",
-    "olduklarını",
-    "olduğu",
-    "olduğunu",
-    "olmadı",
-    "olmadığı",
-    "olmak",
-    "olması",
-    "olmayan",
-    "olmaz",
-    "olsa",
-    "olsun",
-    "olup",
-    "olur",
-    "olursa",
-    "oluyor",
-    "on",
-    "ona",
-    "ondan",
-    "onlar",
-    "onlardan",
-    "onlari",
-    "onların",
-    "onları",
-    "onların",
-    "onu",
-    "onun",
-    "otuz",
-    "oysa",
-    "pek",
-    "rağmen",
-    "sadece",
-    "sanki",
-    "sekiz",
-    "seksen",
-    "sen",
-    "senden",
-    "seni",
-    "senin",
-    "siz",
-    "sizden",
-    "sizi",
-    "sizin",
-    "sonra",
-    "tarafından",
-    "trilyon",
-    "tüm",
-    "var",
-    "vardı",
-    "ve",
-    "veya",
-    "veyahut",
-    "ya",
-    "yahut",
-    "yani",
-    "yapacak",
-    "yapmak",
-    "yaptı",
-    "yaptıkları",
-    "yaptığı",
-    "yaptığını",
-    "yapılan",
-    "yapılması",
-    "yapıyor",
-    "yedi",
-    "yerine",
-    "yetmiş",
-    "yetmiş",
-    "yetmiş",
-    "yine",
-    "yirmi",
-    "yoksa",
-    "yüz",
-    "zaten",
-    "çok",
-    "çünkü",
-    "öyle",
-    "üzere",
-    "üç",
-    "şey",
-    "şeyden",
-    "şeyi",
-    "şeyler",
-    "şu",
-    "şuna",
-    "şunda",
-    "şundan",
-    "şunu",
-    "şey",
-    "şeyden",
-    "şeyi",
-    "şeyler",
-    "şu",
-    "şuna",
-    "şunda",
-    "şundan",
-    "şunları",
-    "şunu",
-    "şöyle",
-    "şayet",
-    "şimdi",
-    "şu",
-    "şöyle"
-  ];
-  var ukr = [
-    "а",
-    "або",
-    "авжеж",
-    "адже",
-    "аж",
-    "але",
-    "ані",
-    "б",
-    "без",
-    "би",
-    "бо",
-    "був",
-    "була",
-    "були",
-    "було",
-    "бути",
-    "більш",
-    "в",
-    "вам",
-    "вами",
-    "вас",
-    "весь",
-    "вже",
-    "вздовж",
-    "ви",
-    "від",
-    "вниз",
-    "внизу",
-    "вона",
-    "вони",
-    "воно",
-    "все",
-    "всередині",
-    "всіх",
-    "вся",
-    "від",
-    "він",
-    "да",
-    "давай",
-    "давати",
-    "де",
-    "десь",
-    "дещо",
-    "для",
-    "до",
-    "є",
-    "ж",
-    "же",
-    "з",
-    "за",
-    "завжди",
-    "замість",
-    "зі",
-    "і",
-    "із",
-    "інших",
-    "її",
-    "їй",
-    "їм",
-    "їх",
-    "й",
-    "його",
-    "йому",
-    "коли",
-    "ледве",
-    "лиш",
-    "майже",
-    "мене",
-    "мені",
-    "ми",
-    "між",
-    "мій",
-    "мною",
-    "мов",
-    "мого",
-    "моєї",
-    "моє",
-    "може",
-    "мої",
-    "моїх",
-    "моя",
-    "на",
-    "над",
-    "навколо",
-    "навіть",
-    "нам",
-    "нами",
-    "нас",
-    "наче",
-    "наш",
-    "не",
-    "нє",
-    "неї",
-    "нема",
-    "немов",
-    "неначе",
-    "нею",
-    "ним",
-    "ними",
-    "них",
-    "ні",
-    "ніби",
-    "ніщо",
-    "нього",
-    "о",
-    "ось",
-    "от",
-    "отже",
-    "отож",
-    "під",
-    "по",
-    "поза",
-    "про",
-    "під",
-    "сам",
-    "сама",
-    "свій",
-    "свої",
-    "своя",
-    "свою",
-    "себе",
-    "собі",
-    "та",
-    "там",
-    "так",
-    "така",
-    "такий",
-    "також",
-    "твій",
-    "твого",
-    "твоєї",
-    "твої",
-    "твоя",
-    "те",
-    "тебе",
-    "ти",
-    "ті",
-    "тільки",
-    "то",
-    "тобі",
-    "тобою",
-    "тобто",
-    "тоді",
-    "тож",
-    "той",
-    "тощо",
-    "тут",
-    "у",
-    "хіба",
-    "хоч",
-    "хоча",
-    "це",
-    "цей",
-    "ці",
-    "ця",
-    "чи",
-    "чого",
-    "ще",
-    "що",
-    "щоб",
-    "щось",
-    "я",
-    "як",
-    "яка",
-    "який",
-    "якої"
-  ];
-  var urd = [
-    "آئی",
-    "آئے",
-    "آج",
-    "آخر",
-    "آخرکبر",
-    "آدهی",
-    "آًب",
-    "آٹھ",
-    "آیب",
-    "اة",
-    "اخبزت",
-    "اختتبم",
-    "ادھر",
-    "ارد",
-    "اردگرد",
-    "ارکبى",
-    "اش",
-    "اضتعوبل",
-    "اضتعوبلات",
-    "اضطرذ",
-    "اضکب",
-    "اضکی",
-    "اضکے",
-    "اطراف",
-    "اغیب",
-    "افراد",
-    "الگ",
-    "اور",
-    "اوًچب",
-    "اوًچبئی",
-    "اوًچی",
-    "اوًچے",
-    "اى",
-    "اً",
-    "اًذر",
-    "اًہیں",
-    "اٹھبًب",
-    "اپٌب",
-    "اپٌے",
-    "اچھب",
-    "اچھی",
-    "اچھے",
-    "اکثر",
-    "اکٹھب",
-    "اکٹھی",
-    "اکٹھے",
-    "اکیلا",
-    "اکیلی",
-    "اکیلے",
-    "اگرچہ",
-    "اہن",
-    "ایطے",
-    "ایک",
-    "ب",
-    "ت",
-    "تبزٍ",
-    "تت",
-    "تر",
-    "ترتیت",
-    "تریي",
-    "تعذاد",
-    "تن",
-    "تو",
-    "توبم",
-    "توہی",
-    "توہیں",
-    "تٌہب",
-    "تک",
-    "تھب",
-    "تھوڑا",
-    "تھوڑی",
-    "تھوڑے",
-    "تھی",
-    "تھے",
-    "تیي",
-    "ثب",
-    "ثبئیں",
-    "ثبترتیت",
-    "ثبری",
-    "ثبرے",
-    "ثبعث",
-    "ثبلا",
-    "ثبلترتیت",
-    "ثبہر",
-    "ثدبئے",
-    "ثرآں",
-    "ثراں",
-    "ثرش",
-    "ثعذ",
-    "ثغیر",
-    "ثلٌذ",
-    "ثلٌذوثبلا",
-    "ثلکہ",
-    "ثي",
-    "ثٌب",
-    "ثٌبرہب",
-    "ثٌبرہی",
-    "ثٌبرہے",
-    "ثٌبًب",
-    "ثٌذ",
-    "ثٌذکرو",
-    "ثٌذکرًب",
-    "ثٌذی",
-    "ثڑا",
-    "ثڑوں",
-    "ثڑی",
-    "ثڑے",
-    "ثھر",
-    "ثھرا",
-    "ثھراہوا",
-    "ثھرپور",
-    "ثھی",
-    "ثہت",
-    "ثہتر",
-    "ثہتری",
-    "ثہتریي",
-    "ثیچ",
-    "ج",
-    "خب",
-    "خبرہب",
-    "خبرہی",
-    "خبرہے",
-    "خبهوظ",
-    "خبًب",
-    "خبًتب",
-    "خبًتی",
-    "خبًتے",
-    "خبًٌب",
-    "خت",
-    "ختن",
-    "خجکہ",
-    "خص",
-    "خططرذ",
-    "خلذی",
-    "خو",
-    "خواى",
-    "خوًہی",
-    "خوکہ",
-    "خٌبة",
-    "خگہ",
-    "خگہوں",
-    "خگہیں",
-    "خیطب",
-    "خیطبکہ",
-    "در",
-    "درخبت",
-    "درخہ",
-    "درخے",
-    "درزقیقت",
-    "درضت",
-    "دش",
-    "دفعہ",
-    "دلچطپ",
-    "دلچطپی",
-    "دلچطپیبں",
-    "دو",
-    "دور",
-    "دوراى",
-    "دوضرا",
-    "دوضروں",
-    "دوضری",
-    "دوضرے",
-    "دوًوں",
-    "دکھبئیں",
-    "دکھبتب",
-    "دکھبتی",
-    "دکھبتے",
-    "دکھبو",
-    "دکھبًب",
-    "دکھبیب",
-    "دی",
-    "دیب",
-    "دیتب",
-    "دیتی",
-    "دیتے",
-    "دیر",
-    "دیٌب",
-    "دیکھو",
-    "دیکھٌب",
-    "دیکھی",
-    "دیکھیں",
-    "دے",
-    "ر",
-    "راضتوں",
-    "راضتہ",
-    "راضتے",
-    "رریعہ",
-    "رریعے",
-    "رکي",
-    "رکھ",
-    "رکھب",
-    "رکھتب",
-    "رکھتبہوں",
-    "رکھتی",
-    "رکھتے",
-    "رکھی",
-    "رکھے",
-    "رہب",
-    "رہی",
-    "رہے",
-    "ز",
-    "زبصل",
-    "زبضر",
-    "زبل",
-    "زبلات",
-    "زبلیہ",
-    "زصوں",
-    "زصہ",
-    "زصے",
-    "زقبئق",
-    "زقیتیں",
-    "زقیقت",
-    "زکن",
-    "زکویہ",
-    "زیبدٍ",
-    "صبف",
-    "صسیر",
-    "صفر",
-    "صورت",
-    "صورتسبل",
-    "صورتوں",
-    "صورتیں",
-    "ض",
-    "ضبت",
-    "ضبتھ",
-    "ضبدٍ",
-    "ضبرا",
-    "ضبرے",
-    "ضبل",
-    "ضبلوں",
-    "ضت",
-    "ضرور",
-    "ضرورت",
-    "ضروری",
-    "ضلطلہ",
-    "ضوچ",
-    "ضوچب",
-    "ضوچتب",
-    "ضوچتی",
-    "ضوچتے",
-    "ضوچو",
-    "ضوچٌب",
-    "ضوچی",
-    "ضوچیں",
-    "ضکب",
-    "ضکتب",
-    "ضکتی",
-    "ضکتے",
-    "ضکٌب",
-    "ضکی",
-    "ضکے",
-    "ضیذھب",
-    "ضیذھی",
-    "ضیذھے",
-    "ضیکٌڈ",
-    "ضے",
-    "طرف",
-    "طریق",
-    "طریقوں",
-    "طریقہ",
-    "طریقے",
-    "طور",
-    "طورپر",
-    "ظبہر",
-    "ع",
-    "عذد",
-    "عظین",
-    "علاقوں",
-    "علاقہ",
-    "علاقے",
-    "علاوٍ",
-    "عووهی",
-    "غبیذ",
-    "غخص",
-    "غذ",
-    "غروع",
-    "غروعبت",
-    "غے",
-    "فرد",
-    "فی",
-    "ق",
-    "قجل",
-    "قجیلہ",
-    "قطن",
-    "لئے",
-    "لا",
-    "لازهی",
-    "لو",
-    "لوجب",
-    "لوجی",
-    "لوجے",
-    "لوسبت",
-    "لوسہ",
-    "لوگ",
-    "لوگوں",
-    "لڑکپي",
-    "لگتب",
-    "لگتی",
-    "لگتے",
-    "لگٌب",
-    "لگی",
-    "لگیں",
-    "لگے",
-    "لی",
-    "لیب",
-    "لیٌب",
-    "لیں",
-    "لے",
-    "ه",
-    "هتعلق",
-    "هختلف",
-    "هسترم",
-    "هسترهہ",
-    "هسطوش",
-    "هسیذ",
-    "هطئلہ",
-    "هطئلے",
-    "هطبئل",
-    "هطتعول",
-    "هطلق",
-    "هعلوم",
-    "هػتول",
-    "هلا",
-    "هوکي",
-    "هوکٌبت",
-    "هوکٌہ",
-    "هٌبضت",
-    "هڑا",
-    "هڑًب",
-    "هڑے",
-    "هکول",
-    "هگر",
-    "هہرثبى",
-    "هیرا",
-    "هیری",
-    "هیرے",
-    "هیں",
-    "و",
-    "وار",
-    "والے",
-    "وٍ",
-    "ًئی",
-    "ًئے",
-    "ًب",
-    "ًبپطٌذ",
-    "ًبگسیر",
-    "ًطجت",
-    "ًقطہ",
-    "ًو",
-    "ًوخواى",
-    "ًکبلٌب",
-    "ًکتہ",
-    "ًہ",
-    "ًہیں",
-    "ًیب",
-    "ًے",
-    "ٓ آش",
-    "ٹھیک",
-    "پبئے",
-    "پبش",
-    "پبًب",
-    "پبًچ",
-    "پر",
-    "پراًب",
-    "پطٌذ",
-    "پل",
-    "پورا",
-    "پوچھب",
-    "پوچھتب",
-    "پوچھتی",
-    "پوچھتے",
-    "پوچھو",
-    "پوچھوں",
-    "پوچھٌب",
-    "پوچھیں",
-    "پچھلا",
-    "پھر",
-    "پہلا",
-    "پہلی",
-    "پہلےضی",
-    "پہلےضے",
-    "پہلےضےہی",
-    "پیع",
-    "چبر",
-    "چبہب",
-    "چبہٌب",
-    "چبہے",
-    "چلا",
-    "چلو",
-    "چلیں",
-    "چلے",
-    "چکب",
-    "چکی",
-    "چکیں",
-    "چکے",
-    "چھوٹب",
-    "چھوٹوں",
-    "چھوٹی",
-    "چھوٹے",
-    "چھہ",
-    "چیسیں",
-    "ڈھوًڈا",
-    "ڈھوًڈلیب",
-    "ڈھوًڈو",
-    "ڈھوًڈًب",
-    "ڈھوًڈی",
-    "ڈھوًڈیں",
-    "ک",
-    "کئی",
-    "کئے",
-    "کب",
-    "کبفی",
-    "کبم",
-    "کت",
-    "کجھی",
-    "کرا",
-    "کرتب",
-    "کرتبہوں",
-    "کرتی",
-    "کرتے",
-    "کرتےہو",
-    "کررہب",
-    "کررہی",
-    "کررہے",
-    "کرو",
-    "کرًب",
-    "کریں",
-    "کرے",
-    "کطی",
-    "کل",
-    "کن",
-    "کوئی",
-    "کوتر",
-    "کورا",
-    "کوروں",
-    "کورٍ",
-    "کورے",
-    "کوطي",
-    "کوى",
-    "کوًطب",
-    "کوًطی",
-    "کوًطے",
-    "کھولا",
-    "کھولو",
-    "کھولٌب",
-    "کھولی",
-    "کھولیں",
-    "کھولے",
-    "کہ",
-    "کہب",
-    "کہتب",
-    "کہتی",
-    "کہتے",
-    "کہو",
-    "کہوں",
-    "کہٌب",
-    "کہی",
-    "کہیں",
-    "کہے",
-    "کی",
-    "کیب",
-    "کیطب",
-    "کیطرف",
-    "کیطے",
-    "کیلئے",
-    "کیوًکہ",
-    "کیوں",
-    "کیے",
-    "کے",
-    "کےثعذ",
-    "کےرریعے",
-    "گئی",
-    "گئے",
-    "گب",
-    "گرد",
-    "گروٍ",
-    "گروپ",
-    "گروہوں",
-    "گٌتی",
-    "گی",
-    "گیب",
-    "گے",
-    "ہر",
-    "ہن",
-    "ہو",
-    "ہوئی",
-    "ہوئے",
-    "ہوا",
-    "ہوبرا",
-    "ہوبری",
-    "ہوبرے",
-    "ہوتب",
-    "ہوتی",
-    "ہوتے",
-    "ہورہب",
-    "ہورہی",
-    "ہورہے",
-    "ہوضکتب",
-    "ہوضکتی",
-    "ہوضکتے",
-    "ہوًب",
-    "ہوًی",
-    "ہوًے",
-    "ہوچکب",
-    "ہوچکی",
-    "ہوچکے",
-    "ہوگئی",
-    "ہوگئے",
-    "ہوگیب",
-    "ہوں",
-    "ہی",
-    "ہیں",
-    "ہے",
-    "ی",
-    "یقیٌی",
-    "یہ",
-    "یہبں"
-  ];
-  var vie = [
-    "bị",
-    "bởi",
-    "cả",
-    "các",
-    "cái",
-    "cần",
-    "càng",
-    "chỉ",
-    "chiếc",
-    "cho",
-    "chứ",
-    "chưa",
-    "chuyện",
-    "có",
-    "có thể",
-    "cứ",
-    "của",
-    "cùng",
-    "cũng",
-    "đã",
-    "đang",
-    "để",
-    "đến nỗi",
-    "đều",
-    "điều",
-    "do",
-    "đó",
-    "được",
-    "dưới",
-    "gì",
-    "khi",
-    "không",
-    "là",
-    "lại",
-    "lên",
-    "lúc",
-    "mà",
-    "mỗi",
-    "một cách",
-    "này",
-    "nên",
-    "nếu",
-    "ngay",
-    "nhiều",
-    "như",
-    "nhưng",
-    "những",
-    "nơi",
-    "nữa",
-    "phải",
-    "qua",
-    "ra",
-    "rằng",
-    "rất",
-    "rồi",
-    "sau",
-    "sẽ",
-    "so",
-    "sự",
-    "tại",
-    "theo",
-    "thì",
-    "trên",
-    "trước",
-    "từ",
-    "từng",
-    "và",
-    "vẫn",
-    "vào",
-    "vậy",
-    "vì",
-    "việc",
-    "với",
-    "vừa",
-    "vâng",
-    "à",
-    "ừ",
-    "từ"
-  ];
-  var yor = [
-    "ó",
-    "ní",
-    "ìjàpá",
-    "ṣe",
-    "rẹ̀",
-    "tí",
-    "àwọn",
-    "sí",
-    "ni",
-    "náà",
-    "anansi",
-    "láti",
-    "kan",
-    "ti",
-    "ń",
-    "lọ",
-    "o",
-    "bí",
-    "padà",
-    "sì",
-    "wá",
-    "wangari",
-    "lè",
-    "wà",
-    "kí",
-    "púpọ̀",
-    "odò",
-    "mi",
-    "wọ́n",
-    "pẹ̀lú",
-    "a",
-    "ṣùgbọ́n",
-    "fún",
-    "jẹ́",
-    "fẹ́",
-    "oúnjẹ",
-    "rí",
-    "igi",
-    "kò",
-    "ilé",
-    "jù",
-    "olóńgbò",
-    "pé",
-    "é",
-    "gbogbo",
-    "iṣu",
-    "inú",
-    "bẹ̀rẹ̀",
-    "jẹ",
-    "fi",
-    "dúró",
-    "alẹ́",
-    "ọjọ́",
-    "nítorí",
-    "nǹkan",
-    "ọ̀rẹ́",
-    "àkókò",
-    "sínú",
-    "ṣ",
-    "yìí"
-  ];
-  var zul = [
-    "ukuthi",
-    "kodwa",
-    "futhi",
-    "kakhulu",
-    "wakhe",
-    "kusho",
-    "uma",
-    "wathi",
-    "umama",
-    "kanye",
-    "phansi",
-    "ngesikhathi",
-    "lapho",
-    "u",
-    "zakhe",
-    "khona",
-    "ukuba",
-    "nje",
-    "phezulu",
-    "yakhe",
-    "kungani",
-    "wase",
-    "la",
-    "mina",
-    "wami",
-    "ukuze",
-    "unonkungu",
-    "wabona",
-    "wahamba",
-    "lakhe",
-    "yami",
-    "kanjani",
-    "kwakukhona",
-    "ngelinye"
-  ];
-  var removeStopwords = (tokens, stopwords = eng) => {
-    if (!Array.isArray(tokens) || !Array.isArray(stopwords)) {
-      throw new Error("expected Arrays try: removeStopwords(Array[, Array])");
-    }
-    return tokens.filter((x) => !stopwords.includes(x.toLowerCase()));
-  };
-  exports._123 = _123;
-  exports.afr = afr;
-  exports.ara = ara;
-  exports.ben = ben;
-  exports.bre = bre;
-  exports.bul = bul;
-  exports.cat = cat;
-  exports.ces = ces;
-  exports.dan = dan;
-  exports.deu = deu;
-  exports.ell = ell;
-  exports.eng = eng;
-  exports.epo = epo;
-  exports.est = est;
-  exports.eus = eus;
-  exports.fas = fas;
-  exports.fin = fin;
-  exports.fra = fra;
-  exports.gle = gle;
-  exports.glg = glg;
-  exports.guj = guj;
-  exports.hau = hau;
-  exports.heb = heb;
-  exports.hin = hin;
-  exports.hrv = hrv;
-  exports.hun = hun;
-  exports.hye = hye;
-  exports.ind = ind;
-  exports.ita = ita;
-  exports.jpn = jpn;
-  exports.kor = kor;
-  exports.kur = kur;
-  exports.lat = lat;
-  exports.lav = lav;
-  exports.lgg = lgg;
-  exports.lggNd = lggNd;
-  exports.lit = lit;
-  exports.mar = mar;
-  exports.msa = msa;
-  exports.mya = mya;
-  exports.nld = nld;
-  exports.nob = nob;
-  exports.panGu = panGu;
-  exports.pol = pol;
-  exports.por = por;
-  exports.porBr = porBr;
-  exports.removeStopwords = removeStopwords;
-  exports.ron = ron;
-  exports.rus = rus;
-  exports.slk = slk;
-  exports.slv = slv;
-  exports.som = som;
-  exports.sot = sot;
-  exports.spa = spa;
-  exports.swa = swa;
-  exports.swe = swe;
-  exports.tgl = tgl;
-  exports.tha = tha;
-  exports.tur = tur;
-  exports.ukr = ukr;
-  exports.urd = urd;
-  exports.vie = vie;
-  exports.yor = yor;
-  exports.zho = zho;
-  exports.zul = zul;
-});
-
-// src/core/source-index/keyword-stopwords.ts
-function keywordQueryLanguage(query, minLength = 30) {
-  const language = franc(query, { minLength });
-  if (language === DEFAULT_QUERY_LANGUAGE)
-    return language;
-  const tokens = query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
-  const words = lexicons;
-  const english = tokens.filter((token) => words.eng?.includes(token)).length;
-  const foreign = tokens.filter((token) => words[language]?.includes(token)).length;
-  return english > foreign && (language !== "und" || english >= 2) ? DEFAULT_QUERY_LANGUAGE : language;
-}
-function foreignQueryStopwords(query, defaultStopwords) {
-  if (keywordExpansionDisabled())
-    return EMPTY;
-  const language = keywordQueryLanguage(query, 20);
-  if (language === DEFAULT_QUERY_LANGUAGE || language === "und")
-    return EMPTY;
-  const existing = cached.get(language);
-  if (existing)
-    return choose(existing);
-  const words = lexicons[language];
-  const stopwords = Array.isArray(words) ? new Set(words.map((word) => String(word).normalize("NFC").toLowerCase())) : EMPTY;
-  cached.set(language, stopwords);
-  return choose(stopwords);
-  function choose(candidate) {
-    const tokens = query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
-    const defaultSignals = tokens.filter((token) => defaultStopwords.has(token)).length;
-    const foreignSignals = tokens.filter((token) => candidate.has(token)).length;
-    return defaultSignals > foreignSignals ? EMPTY : candidate;
-  }
-}
-var lexicons, EMPTY, cached, DEFAULT_QUERY_LANGUAGE = "eng";
-var init_keyword_stopwords = __esm(() => {
-  init_franc_min();
-  init_keyword_context();
-  lexicons = __toESM(require_stopword_cjs(), 1);
-  EMPTY = new Set;
-  cached = new Map;
-});
-
 // src/core/source-model-policy.ts
 function assertModelTrustTierAllowed(trustTier) {
   if (trustTier === "S5") {
@@ -33735,7 +18810,127 @@ var init_built_in_sniffer = __esm(() => {
   });
 });
 
+// node_modules/stopwords-iso/stopwords-iso.json
+var stopwords_iso_default;
+var init_stopwords_iso = __esm(() => {
+  stopwords_iso_default = {
+    af: ["'n", "aan", "af", "al", "as", "baie", "by", "daar", "dag", "dat", "die", "dit", "een", "ek", "en", "gaan", "gesê", "haar", "het", "hom", "hulle", "hy", "in", "is", "jou", "jy", "kan", "kom", "ma", "maar", "met", "my", "na", "nie", "om", "ons", "op", "saam", "sal", "se", "sien", "so", "sy", "te", "toe", "uit", "van", "vir", "was", "wat", "ŉ"],
+    ar: ["،", "آض", "آمينَ", "آه", "آهاً", "آي", "أ", "أب", "أجل", "أجمع", "أخ", "أخذ", "أصبح", "أضحى", "أقبل", "أقل", "أكثر", "ألا", "أم", "أما", "أمامك", "أمامكَ", "أمسى", "أمّا", "أن", "أنا", "أنت", "أنتم", "أنتما", "أنتن", "أنتِ", "أنشأ", "أنّى", "أو", "أوشك", "أولئك", "أولئكم", "أولاء", "أولالك", "أوّهْ", "أي", "أيا", "أين", "أينما", "أيّ", "أَنَّ", "أََيُّ", "أُفٍّ", "إذ", "إذا", "إذاً", "إذما", "إذن", "إلى", "إليكم", "إليكما", "إليكنّ", "إليكَ", "إلَيْكَ", "إلّا", "إمّا", "إن", "إنّما", "إي", "إياك", "إياكم", "إياكما", "إياكن", "إيانا", "إياه", "إياها", "إياهم", "إياهما", "إياهن", "إياي", "إيهٍ", "إِنَّ", "ا", "ابتدأ", "اثر", "اجل", "احد", "اخرى", "اخلولق", "اذا", "اربعة", "ارتدّ", "استحال", "اطار", "اعادة", "اعلنت", "اف", "اكثر", "اكد", "الألاء", "الألى", "الا", "الاخيرة", "الان", "الاول", "الاولى", "التى", "التي", "الثاني", "الثانية", "الذاتي", "الذى", "الذي", "الذين", "السابق", "الف", "اللائي", "اللاتي", "اللتان", "اللتيا", "اللتين", "اللذان", "اللذين", "اللواتي", "الماضي", "المقبل", "الوقت", "الى", "اليوم", "اما", "امام", "امس", "ان", "انبرى", "انقلب", "انه", "انها", "او", "اول", "اي", "ايار", "ايام", "ايضا", "ب", "بات", "باسم", "بان", "بخٍ", "برس", "بسبب", "بسّ", "بشكل", "بضع", "بطآن", "بعد", "بعض", "بك", "بكم", "بكما", "بكن", "بل", "بلى", "بما", "بماذا", "بمن", "بن", "بنا", "به", "بها", "بي", "بيد", "بين", "بَسْ", "بَلْهَ", "بِئْسَ", "تانِ", "تانِك", "تبدّل", "تجاه", "تحوّل", "تلقاء", "تلك", "تلكم", "تلكما", "تم", "تينك", "تَيْنِ", "تِه", "تِي", "ثلاثة", "ثم", "ثمّ", "ثمّة", "ثُمَّ", "جعل", "جلل", "جميع", "جير", "حار", "حاشا", "حاليا", "حاي", "حتى", "حرى", "حسب", "حم", "حوالى", "حول", "حيث", "حيثما", "حين", "حيَّ", "حَبَّذَا", "حَتَّى", "حَذارِ", "خلا", "خلال", "دون", "دونك", "ذا", "ذات", "ذاك", "ذانك", "ذانِ", "ذلك", "ذلكم", "ذلكما", "ذلكن", "ذو", "ذوا", "ذواتا", "ذواتي", "ذيت", "ذينك", "ذَيْنِ", "ذِه", "ذِي", "راح", "رجع", "رويدك", "ريث", "رُبَّ", "زيارة", "سبحان", "سرعان", "سنة", "سنوات", "سوف", "سوى", "سَاءَ", "سَاءَمَا", "شبه", "شخصا", "شرع", "شَتَّانَ", "صار", "صباح", "صفر", "صهٍ", "صهْ", "ضد", "ضمن", "طاق", "طالما", "طفق", "طَق", "ظلّ", "عاد", "عام", "عاما", "عامة", "عدا", "عدة", "عدد", "عدم", "عسى", "عشر", "عشرة", "علق", "على", "عليك", "عليه", "عليها", "علًّ", "عن", "عند", "عندما", "عوض", "عين", "عَدَسْ", "عَمَّا", "غدا", "غير", "ـ", "ف", "فان", "فلان", "فو", "فى", "في", "فيم", "فيما", "فيه", "فيها", "قال", "قام", "قبل", "قد", "قطّ", "قلما", "قوة", "كأنّما", "كأين", "كأيّ", "كأيّن", "كاد", "كان", "كانت", "كذا", "كذلك", "كرب", "كل", "كلا", "كلاهما", "كلتا", "كلم", "كليكما", "كليهما", "كلّما", "كلَّا", "كم", "كما", "كي", "كيت", "كيف", "كيفما", "كَأَنَّ", "كِخ", "لئن", "لا", "لات", "لاسيما", "لدن", "لدى", "لعمر", "لقاء", "لك", "لكم", "لكما", "لكن", "لكنَّما", "لكي", "لكيلا", "للامم", "لم", "لما", "لمّا", "لن", "لنا", "له", "لها", "لو", "لوكالة", "لولا", "لوما", "لي", "لَسْتَ", "لَسْتُ", "لَسْتُم", "لَسْتُمَا", "لَسْتُنَّ", "لَسْتِ", "لَسْنَ", "لَعَلَّ", "لَكِنَّ", "لَيْتَ", "لَيْسَ", "لَيْسَا", "لَيْسَتَا", "لَيْسَتْ", "لَيْسُوا", "لَِسْنَا", "ما", "ماانفك", "مابرح", "مادام", "ماذا", "مازال", "مافتئ", "مايو", "متى", "مثل", "مذ", "مساء", "مع", "معاذ", "مقابل", "مكانكم", "مكانكما", "مكانكنّ", "مكانَك", "مليار", "مليون", "مما", "ممن", "من", "منذ", "منها", "مه", "مهما", "مَنْ", "مِن", "نحن", "نحو", "نعم", "نفس", "نفسه", "نهاية", "نَخْ", "نِعِمّا", "نِعْمَ", "ها", "هاؤم", "هاكَ", "هاهنا", "هبّ", "هذا", "هذه", "هكذا", "هل", "هلمَّ", "هلّا", "هم", "هما", "هن", "هنا", "هناك", "هنالك", "هو", "هي", "هيا", "هيت", "هيّا", "هَؤلاء", "هَاتانِ", "هَاتَيْنِ", "هَاتِه", "هَاتِي", "هَجْ", "هَذا", "هَذانِ", "هَذَيْنِ", "هَذِه", "هَذِي", "هَيْهَاتَ", "و", "و6", "وا", "واحد", "واضاف", "واضافت", "واكد", "وان", "واهاً", "واوضح", "وراءَك", "وفي", "وقال", "وقالت", "وقد", "وقف", "وكان", "وكانت", "ولا", "ولم", "ومن", "وهو", "وهي", "ويكأنّ", "وَيْ", "وُشْكَانََ", "يكون", "يمكن", "يوم", "ّأيّان"],
+    hy: ["այդ", "այլ", "այն", "այս", "դու", "դուք", "եմ", "են", "ենք", "ես", "եք", "է", "էի", "էին", "էինք", "էիր", "էիք", "էր", "ըստ", "թ", "ի", "ին", "իսկ", "իր", "կամ", "համար", "հետ", "հետո", "մենք", "մեջ", "մի", "ն", "նա", "նաև", "նրա", "նրանք", "որ", "որը", "որոնք", "որպես", "ու", "ում", "պիտի", "վրա", "և"],
+    eu: ["al", "anitz", "arabera", "asko", "baina", "bat", "batean", "batek", "bati", "batzuei", "batzuek", "batzuetan", "batzuk", "bera", "beraiek", "berau", "berauek", "bere", "berori", "beroriek", "beste", "bezala", "da", "dago", "dira", "ditu", "du", "dute", "edo", "egin", "ere", "eta", "eurak", "ez", "gainera", "gu", "gutxi", "guzti", "haiei", "haiek", "haietan", "hainbeste", "hala", "han", "handik", "hango", "hara", "hari", "hark", "hartan", "hau", "hauei", "hauek", "hauetan", "hemen", "hemendik", "hemengo", "hi", "hona", "honek", "honela", "honetan", "honi", "hor", "hori", "horiei", "horiek", "horietan", "horko", "horra", "horrek", "horrela", "horretan", "horri", "hortik", "hura", "izan", "ni", "noiz", "nola", "non", "nondik", "nongo", "nor", "nora", "ze", "zein", "zen", "zenbait", "zenbat", "zer", "zergatik", "ziren", "zituen", "zu", "zuek", "zuen", "zuten"],
+    bn: ["অতএব", "অথচ", "অথবা", "অনুযায়ী", "অনেক", "অনেকে", "অনেকেই", "অন্তত", "অন্য", "অবধি", "অবশ্য", "অর্থাত", "আই", "আগামী", "আগে", "আগেই", "আছে", "আজ", "আদ্যভাগে", "আপনার", "আপনি", "আবার", "আমরা", "আমাকে", "আমাদের", "আমার", "আমি", "আর", "আরও", "ই", "ইত্যাদি", "ইহা", "উচিত", "উত্তর", "উনি", "উপর", "উপরে", "এ", "এঁদের", "এঁরা", "এই", "একই", "একটি", "একবার", "একে", "এক্", "এখন", "এখনও", "এখানে", "এখানেই", "এটা", "এটাই", "এটি", "এত", "এতটাই", "এতে", "এদের", "এব", "এবং", "এবার", "এমন", "এমনকী", "এমনি", "এর", "এরা", "এল", "এস", "এসে", "ঐ", "ও", "ওঁদের", "ওঁর", "ওঁরা", "ওই", "ওকে", "ওখানে", "ওদের", "ওর", "ওরা", "কখনও", "কত", "কবে", "কমনে", "কয়েক", "কয়েকটি", "করছে", "করছেন", "করতে", "করবে", "করবেন", "করলে", "করলেন", "করা", "করাই", "করায়", "করার", "করি", "করিতে", "করিয়া", "করিয়ে", "করে", "করেই", "করেছিলেন", "করেছে", "করেছেন", "করেন", "কাউকে", "কাছ", "কাছে", "কাজ", "কাজে", "কারও", "কারণ", "কি", "কিংবা", "কিছু", "কিছুই", "কিন্তু", "কী", "কে", "কেউ", "কেউই", "কেখা", "কেন", "কোটি", "কোন", "কোনও", "কোনো", "ক্ষেত্রে", "কয়েক", "খুব", "গিয়ে", "গিয়েছে", "গিয়ে", "গুলি", "গেছে", "গেল", "গেলে", "গোটা", "চলে", "চান", "চায়", "চার", "চালু", "চেয়ে", "চেষ্টা", "ছাড়া", "ছাড়াও", "ছিল", "ছিলেন", "জন", "জনকে", "জনের", "জন্য", "জন্যওজে", "জানতে", "জানা", "জানানো", "জানায়", "জানিয়ে", "জানিয়েছে", "জে", "জ্নজন", "টি", "ঠিক", "তখন", "তত", "তথা", "তবু", "তবে", "তা", "তাঁকে", "তাঁদের", "তাঁর", "তাঁরা", "তাঁাহারা", "তাই", "তাও", "তাকে", "তাতে", "তাদের", "তার", "তারপর", "তারা", "তারৈ", "তাহলে", "তাহা", "তাহাতে", "তাহার", "তিনঐ", "তিনি", "তিনিও", "তুমি", "তুলে", "তেমন", "তো", "তোমার", "থাকবে", "থাকবেন", "থাকা", "থাকায়", "থাকে", "থাকেন", "থেকে", "থেকেই", "থেকেও", "দিকে", "দিতে", "দিন", "দিয়ে", "দিয়েছে", "দিয়েছেন", "দিলেন", "দু", "দুই", "দুটি", "দুটো", "দেওয়া", "দেওয়ার", "দেওয়া", "দেখতে", "দেখা", "দেখে", "দেন", "দেয়", "দ্বারা", "ধরা", "ধরে", "ধামার", "নতুন", "নয়", "না", "নাই", "নাকি", "নাগাদ", "নানা", "নিজে", "নিজেই", "নিজেদের", "নিজের", "নিতে", "নিয়ে", "নিয়ে", "নেই", "নেওয়া", "নেওয়ার", "নেওয়া", "নয়", "পক্ষে", "পর", "পরে", "পরেই", "পরেও", "পর্যন্ত", "পাওয়া", "পাচ", "পারি", "পারে", "পারেন", "পি", "পেয়ে", "পেয়্র্", "প্রতি", "প্রথম", "প্রভৃতি", "প্রযন্ত", "প্রাথমিক", "প্রায়", "প্রায়", "ফলে", "ফিরে", "ফের", "বক্তব্য", "বদলে", "বন", "বরং", "বলতে", "বলল", "বললেন", "বলা", "বলে", "বলেছেন", "বলেন", "বসে", "বহু", "বা", "বাদে", "বার", "বি", "বিনা", "বিভিন্ন", "বিশেষ", "বিষয়টি", "বেশ", "বেশি", "ব্যবহার", "ব্যাপারে", "ভাবে", "ভাবেই", "মতো", "মতোই", "মধ্যভাগে", "মধ্যে", "মধ্যেই", "মধ্যেও", "মনে", "মাত্র", "মাধ্যমে", "মোট", "মোটেই", "যখন", "যত", "যতটা", "যথেষ্ট", "যদি", "যদিও", "যা", "যাঁর", "যাঁরা", "যাওয়া", "যাওয়ার", "যাওয়া", "যাকে", "যাচ্ছে", "যাতে", "যাদের", "যান", "যাবে", "যায়", "যার", "যারা", "যিনি", "যে", "যেখানে", "যেতে", "যেন", "যেমন", "র", "রকম", "রয়েছে", "রাখা", "রেখে", "লক্ষ", "শুধু", "শুরু", "সঙ্গে", "সঙ্গেও", "সব", "সবার", "সমস্ত", "সম্প্রতি", "সহ", "সহিত", "সাধারণ", "সামনে", "সি", "সুতরাং", "সে", "সেই", "সেখান", "সেখানে", "সেটা", "সেটাই", "সেটাও", "সেটি", "স্পষ্ট", "স্বয়ং", "হইতে", "হইবে", "হইয়া", "হওয়া", "হওয়ায়", "হওয়ার", "হচ্ছে", "হত", "হতে", "হতেই", "হন", "হবে", "হবেন", "হয়", "হয়তো", "হয়নি", "হয়ে", "হয়েই", "হয়েছিল", "হয়েছে", "হয়েছেন", "হল", "হলে", "হলেই", "হলেও", "হলো", "হাজার", "হিসাবে", "হৈলে", "হোক", "হয়"],
+    br: ["'blam", "'d", "'m", "'r", "'ta", "'vat", "'z", "'zo", "a", "a:", "aba", "abalamour", "abaoe", "ac'hane", "ac'hanoc'h", "ac'hanomp", "ac'hanon", "ac'hanout", "adal", "adalek", "adarre", "ae", "aec'h", "aed", "aemp", "aen", "aent", "aes", "afe", "afec'h", "afed", "afemp", "afen", "afent", "afes", "ag", "ah", "aimp", "aint", "aio", "aiou", "aje", "ajec'h", "ajed", "ajemp", "ajen", "ajent", "ajes", "al", "alato", "alies", "aliesañ", "alkent", "all", "allas", "allo", "allô", "am", "amañ", "amzer", "an", "anezhañ", "anezhe", "anezhi", "anezho", "anvet", "aon", "aotren", "ar", "arall", "araok", "araoki", "araozañ", "araozo", "araozoc'h", "araozomp", "araozon", "araozor", "araozout", "arbenn", "arre", "atalek", "atav", "az", "azalek", "azirazañ", "azirazi", "azirazo", "azirazoc'h", "azirazomp", "azirazon", "azirazor", "azirazout", "b:", "ba", "ba'l", "ba'n", "ba'r", "bad", "bah", "bal", "ban", "bar", "bastañ", "befe", "bell", "benaos", "benn", "bennag", "bennak", "bennozh", "bep", "bepred", "berr", "berzh", "bet", "betek", "betra", "bev", "bevet", "bez", "bezañ", "beze", "bezent", "bezet", "bezh", "bezit", "bezomp", "bihan", "bije", "biou", "biskoazh", "blam", "bo", "boa", "bominapl", "boudoudom", "bouez", "boull", "boum", "bout", "bras", "brasañ", "brav", "bravo", "bremañ", "bres", "brokenn", "bronn", "brrr", "brutal", "buhezek", "c'h:", "c'haout", "c'he", "c'hem", "c'herz", "c'heñver", "c'hichen", "c'hiz", "c'hoazh", "c'horre", "c'houde", "c'houst", "c'hreiz", "c'hwec'h", "c'hwec'hvet", "c'hwezek", "c'hwi", "ch:", "chaous", "chik", "chit", "chom", "chut", "d'", "d'al", "d'an", "d'ar", "d'az", "d'e", "d'he", "d'ho", "d'hol", "d'hon", "d'hor", "d'o", "d'ober", "d'ul", "d'un", "d'ur", "d:", "da", "dak", "daka", "dal", "dalbezh", "dalc'hmat", "dalit", "damdost", "damheñvel", "damm", "dan", "danvez", "dao", "daol", "daonet", "daou", "daoust", "daouzek", "daouzekvet", "darn", "dastrewiñ", "dav", "davedoc'h", "davedomp", "davedon", "davedor", "davedout", "davet", "davetañ", "davete", "daveti", "daveto", "defe", "dehou", "dek", "dekvet", "den", "deoc'h", "deomp", "deor", "derc'hel", "deus", "dez", "deze", "dezhañ", "dezhe", "dezhi", "dezho", "di", "diabarzh", "diagent", "diar", "diaraok", "diavaez", "dibaoe", "dibaot", "dibar", "dic'halañ", "didiac'h", "dienn", "difer", "diganeoc'h", "diganeomp", "diganeor", "diganimp", "diganin", "diganit", "digant", "digantañ", "digante", "diganti", "diganto", "digemmesk", "diget", "digor", "digoret", "dija", "dije", "dimp", "din", "dinaou", "dindan", "dindanañ", "dindani", "dindano", "dindanoc'h", "dindanomp", "dindanon", "dindanor", "dindanout", "dioutañ", "dioute", "diouti", "diouto", "diouzh", "diouzhin", "diouzhit", "diouzhoc'h", "diouzhomp", "diouzhor", "dirak", "dirazañ", "dirazi", "dirazo", "dirazoc'h", "dirazomp", "dirazon", "dirazor", "dirazout", "disheñvel", "dispar", "distank", "dister", "disterañ", "disterig", "distro", "dit", "divaez", "diwar", "diwezhat", "diwezhañ", "do", "doa", "doare", "dont", "dost", "doue", "douetus", "douez", "doug", "draou", "draoñ", "dre", "drede", "dreist", "dreistañ", "dreisti", "dreisto", "dreistoc'h", "dreistomp", "dreiston", "dreistor", "dreistout", "drek", "dreñv", "dring", "dro", "du", "e", "e:", "eas", "ebet", "ec'h", "edo", "edoc'h", "edod", "edomp", "edon", "edont", "edos", "eer", "eeun", "efed", "egedoc'h", "egedomp", "egedon", "egedor", "egedout", "eget", "egetañ", "egete", "egeti", "egeto", "eh", "eil", "eilvet", "eizh", "eizhvet", "ejoc'h", "ejod", "ejomp", "ejont", "ejout", "el", "em", "emaint", "emaoc'h", "emaomp", "emaon", "emaout", "emañ", "eme", "emeur", "emezañ", "emezi", "emezo", "emezoc'h", "emezomp", "emezon", "emezout", "emporzhiañ", "en", "end", "endan", "endra", "enep", "ennañ", "enni", "enno", "ennoc'h", "ennomp", "ennon", "ennor", "ennout", "enta", "eo", "eomp", "eont", "eor", "eot", "er", "erbet", "erfin", "esa", "esae", "espar", "estlamm", "estrañj", "eta", "etre", "etreoc'h", "etrezo", "etrezoc'h", "etrezomp", "etrezor", "euh", "eur", "eus", "evel", "evelato", "eveldoc'h", "eveldomp", "eveldon", "eveldor", "eveldout", "evelkent", "eveltañ", "evelte", "evelti", "evelto", "evidoc'h", "evidomp", "evidon", "evidor", "evidout", "evit", "evitañ", "evite", "eviti", "evito", "ez", "eñ", "f:", "fac'h", "fall", "fed", "feiz", "fenn", "fezh", "fin", "finsalvet", "foei", "fouilhezañ", "g:", "gallout", "ganeoc'h", "ganeomp", "ganin", "ganit", "gant", "gantañ", "ganti", "ganto", "gaout", "gast", "gein", "gellout", "genndost", "gentañ", "ger", "gerz", "get", "geñver", "gichen", "gin", "giz", "glan", "gloev", "goll", "gorre", "goude", "gouez", "gouezit", "gouezomp", "goulz", "gounnar", "gour", "goust", "gouze", "gouzout", "gra", "grak", "grec'h", "greiz", "grenn", "greomp", "grit", "groñs", "gutez", "gwall", "gwashoc'h", "gwazh", "gwech", "gwechall", "gwechoù", "gwell", "gwezh", "gwezhall", "gwezharall", "gwezhoù", "gwig", "gwirionez", "gwitibunan", "gêr", "h:", "ha", "hag", "han", "hanter", "hanterc'hantad", "hanterkantved", "harz", "hañ", "hañval", "he", "hebioù", "hec'h", "hei", "hein", "hem", "hemañ", "hen", "hend", "henhont", "henn", "hennezh", "hent", "hep", "hervez", "hervezañ", "hervezi", "hervezo", "hervezoc'h", "hervezomp", "hervezon", "hervezor", "hervezout", "heul", "heuliañ", "hevelep", "heverk", "heñvel", "heñvelat", "heñvelañ", "heñveliñ", "heñveloc'h", "heñvelout", "hi", "hilh", "hini", "hirie", "hirio", "hiziv", "hiziviken", "ho", "hoaliñ", "hoc'h", "hogen", "hogos", "hogozik", "hol", "holl", "holà", "homañ", "hon", "honhont", "honnezh", "hont", "hop", "hopala", "hor", "hou", "houp", "hudu", "hue", "hui", "hum", "hurrah", "i", "i:", "in", "int", "is", "ispisial", "isurzhiet", "it", "ivez", "izelañ", "j:", "just", "k:", "kae", "kaer", "kalon", "kalz", "kant", "kaout", "kar", "kazi", "keid", "kein", "keit", "kel", "kellies", "keloù", "kement", "ken", "kenkent", "kenkoulz", "kenment", "kent", "kentañ", "kentizh", "kentoc'h", "kentre", "ker", "kerkent", "kerz", "kerzh", "ket", "keta", "keñver", "keñverel", "keñverius", "kichen", "kichenik", "kit", "kiz", "klak", "klek", "klik", "komprenet", "komz", "kont", "korf", "korre", "koulskoude", "koulz", "koust", "krak", "krampouezh", "krec'h", "kreiz", "kuit", "kwir", "l:", "la", "laez", "laoskel", "laouen", "lavar", "lavaret", "lavarout", "lec'h", "lein", "leizh", "lerc'h", "leun", "leuskel", "lew", "lies", "liesañ", "lod", "lusk", "lâr", "lârout", "m:", "ma", "ma'z", "mac'h", "mac'hat", "mac'hañ", "mac'hoc'h", "mad", "maez", "maksimal", "mann", "mar", "mard", "marg", "marzh", "mat", "mañ", "me", "memes", "memestra", "merkapl", "mersi", "mes", "mesk", "met", "meur", "mil", "minimal", "moan", "moaniaat", "mod", "mont", "mout", "mui", "muiañ", "muioc'h", "n", "n'", "n:", "na", "nag", "naontek", "naturel", "nav", "navet", "ne", "nebeudig", "nebeut", "nebeutañ", "nebeutoc'h", "neketa", "nemedoc'h", "nemedomp", "nemedon", "nemedor", "nemedout", "nemet", "nemetañ", "nemete", "nemeti", "nemeto", "nemeur", "neoac'h", "nepell", "nerzh", "nes", "neseser", "netra", "neubeudoù", "neuhe", "neuze", "nevez", "newazh", "nez", "ni", "nikun", "niverus", "nul", "o", "o:", "oa", "oac'h", "oad", "oamp", "oan", "oant", "oar", "oas", "ober", "oc'h", "oc'ho", "oc'hola", "oc'hpenn", "oh", "ohe", "ollé", "olole", "olé", "omp", "on", "ordin", "ordinal", "ouejoc'h", "ouejod", "ouejomp", "ouejont", "ouejout", "ouek", "ouezas", "ouezi", "ouezimp", "ouezin", "ouezint", "ouezis", "ouezo", "ouezoc'h", "ouezor", "ouf", "oufe", "oufec'h", "oufed", "oufemp", "oufen", "oufent", "oufes", "ouie", "ouiec'h", "ouied", "ouiemp", "ouien", "ouient", "ouies", "ouije", "ouijec'h", "ouijed", "ouijemp", "ouijen", "ouijent", "ouijes", "out", "outañ", "outi", "outo", "ouzer", "ouzh", "ouzhin", "ouzhit", "ouzhoc'h", "ouzhomp", "ouzhor", "ouzhpenn", "ouzhpennik", "ouzoc'h", "ouzomp", "ouzon", "ouzont", "ouzout", "p'", "p:", "pa", "pad", "padal", "paf", "pan", "panevedeoc'h", "panevedo", "panevedomp", "panevedon", "panevedout", "panevet", "panevetañ", "paneveti", "pas", "paseet", "pe", "peadra", "peder", "pedervet", "pedervetvet", "pefe", "pegeit", "pegement", "pegen", "pegiz", "pegoulz", "pehini", "pelec'h", "pell", "pemod", "pemp", "pempved", "pemzek", "penaos", "penn", "peogwir", "peotramant", "pep", "perak", "perc'hennañ", "pergen", "permetiñ", "peseurt", "pet", "petiaoul", "petoare", "petra", "peur", "peurgetket", "peurheñvel", "peurliesañ", "peurvuiañ", "peus", "peustost", "peuz", "pevar", "pevare", "pevarevet", "pevarzek", "pez", "peze", "pezh", "pff", "pfft", "pfut", "picher", "pif", "pife", "pign", "pije", "pikol", "pitiaoul", "piv", "plaouf", "plok", "plouf", "po", "poa", "poelladus", "pof", "pok", "posupl", "pouah", "pourc'henn", "prest", "prestik", "prim", "prin", "provostapl", "pst", "pu", "pur", "r:", "ra", "rae", "raec'h", "raed", "raemp", "raen", "raent", "raes", "rafe", "rafec'h", "rafed", "rafemp", "rafen", "rafent", "rafes", "rag", "raimp", "raint", "raio", "raje", "rajec'h", "rajed", "rajemp", "rajen", "rajent", "rajes", "rak", "ral", "ran", "rankout", "raok", "razh", "re", "reas", "reer", "regennoù", "reiñ", "rejoc'h", "rejod", "rejomp", "rejont", "rejout", "rener", "rentañ", "reoc'h", "reomp", "reont", "reor", "reot", "resis", "ret", "reve", "rez", "ri", "rik", "rin", "ris", "rit", "rouez", "s:", "sac'h", "sant", "sav", "sañset", "se", "sed", "seitek", "seizh", "seizhvet", "sell", "sellit", "ser", "setu", "seul", "seurt", "siwazh", "skignañ", "skoaz", "skouer", "sort", "souden", "souvitañ", "soñj", "speriañ", "spririñ", "stad", "stlabezañ", "stop", "stranañ", "strewiñ", "strishaat", "stumm", "sujed", "surtoud", "t:", "ta", "taer", "tailh", "tak", "tal", "talvoudegezh", "tamm", "tanav", "taol", "te", "techet", "teir", "teirvet", "telt", "teltenn", "teus", "teut", "teuteu", "ti", "tik", "toa", "tok", "tost", "tostig", "toud", "touesk", "touez", "toull", "tra", "trantenn", "traoñ", "trawalc'h", "tre", "trede", "tregont", "tremenet", "tri", "trivet", "triwec'h", "trizek", "tro", "trugarez", "trumm", "tsoin", "tsouin", "tu", "tud", "u:", "ugent", "uhel", "uhelañ", "ul", "un", "unan", "unanez", "unanig", "unnek", "unnekvet", "ur", "urzh", "us", "v:", "va", "vale", "van", "vare", "vat", "vefe", "vefec'h", "vefed", "vefemp", "vefen", "vefent", "vefes", "vesk", "vete", "vez", "vezan", "vezañ", "veze", "vezec'h", "vezed", "vezemp", "vezen", "vezent", "vezer", "vezes", "vezez", "vezit", "vezomp", "vezont", "vi", "vihan", "vihanañ", "vije", "vijec'h", "vijed", "vijemp", "vijen", "vijent", "vijes", "viken", "vimp", "vin", "vint", "vior", "viot", "virviken", "viskoazh", "vlan", "vlaou", "vo", "vod", "voe", "voec'h", "voed", "voemp", "voen", "voent", "voes", "vont", "vostapl", "vrac'h", "vrasañ", "vremañ", "w:", "walc'h", "war", "warnañ", "warni", "warno", "warnoc'h", "warnomp", "warnon", "warnor", "warnout", "wazh", "wech", "wechoù", "well", "y:", "you", "youadenn", "youc'hadenn", "youc'hou", "z:", "za", "zan", "zaw", "zeu", "zi", "ziar", "zigarez", "ziget", "zindan", "zioc'h", "ziouzh", "zirak", "zivout", "ziwar", "ziwezhañ", "zo", "zoken", "zokenoc'h", "zouesk", "zouez", "zro", "zu"],
+    bg: ["а", "автентичен", "аз", "ако", "ала", "бе", "без", "беше", "би", "бивш", "бивша", "бившо", "бил", "била", "били", "било", "благодаря", "близо", "бъдат", "бъде", "бяха", "в", "вас", "ваш", "ваша", "вероятно", "вече", "взема", "ви", "вие", "винаги", "внимава", "време", "все", "всеки", "всички", "всичко", "всяка", "във", "въпреки", "върху", "г", "ги", "главен", "главна", "главно", "глас", "го", "година", "години", "годишен", "д", "да", "дали", "два", "двама", "двамата", "две", "двете", "ден", "днес", "дни", "до", "добра", "добре", "добро", "добър", "докато", "докога", "дори", "досега", "доста", "друг", "друга", "други", "е", "евтин", "едва", "един", "една", "еднаква", "еднакви", "еднакъв", "едно", "екип", "ето", "живот", "за", "забавям", "зад", "заедно", "заради", "засега", "заспал", "затова", "защо", "защото", "и", "из", "или", "им", "има", "имат", "иска", "й", "каза", "как", "каква", "какво", "както", "какъв", "като", "кога", "когато", "което", "които", "кой", "който", "колко", "която", "къде", "където", "към", "лесен", "лесно", "ли", "лош", "м", "май", "малко", "ме", "между", "мек", "мен", "месец", "ми", "много", "мнозина", "мога", "могат", "може", "мокър", "моля", "момента", "му", "н", "на", "над", "назад", "най", "направи", "напред", "например", "нас", "не", "него", "нещо", "нея", "ни", "ние", "никой", "нито", "нищо", "но", "нов", "нова", "нови", "новина", "някои", "някой", "няколко", "няма", "обаче", "около", "освен", "особено", "от", "отгоре", "отново", "още", "пак", "по", "повече", "повечето", "под", "поне", "поради", "после", "почти", "прави", "пред", "преди", "през", "при", "пък", "първата", "първи", "първо", "пъти", "равен", "равна", "с", "са", "сам", "само", "се", "сега", "си", "син", "скоро", "след", "следващ", "сме", "смях", "според", "сред", "срещу", "сте", "съм", "със", "също", "т", "т.н.", "тази", "така", "такива", "такъв", "там", "твой", "те", "тези", "ти", "то", "това", "тогава", "този", "той", "толкова", "точно", "три", "трябва", "тук", "тъй", "тя", "тях", "у", "утре", "харесва", "хиляди", "ч", "часа", "че", "често", "чрез", "ще", "щом", "юмрук", "я", "як"],
+    ca: ["a", "abans", "ací", "ah", "així", "això", "al", "aleshores", "algun", "alguna", "algunes", "alguns", "alhora", "allà", "allí", "allò", "als", "altra", "altre", "altres", "amb", "ambdues", "ambdós", "anar", "ans", "apa", "aquell", "aquella", "aquelles", "aquells", "aquest", "aquesta", "aquestes", "aquests", "aquí", "baix", "bastant", "bé", "cada", "cadascuna", "cadascunes", "cadascuns", "cadascú", "com", "consegueixo", "conseguim", "conseguir", "consigueix", "consigueixen", "consigueixes", "contra", "d'un", "d'una", "d'unes", "d'uns", "dalt", "de", "del", "dels", "des", "des de", "després", "dins", "dintre", "donat", "doncs", "durant", "e", "eh", "el", "elles", "ells", "els", "em", "en", "encara", "ens", "entre", "era", "erem", "eren", "eres", "es", "esta", "estan", "estat", "estava", "estaven", "estem", "esteu", "estic", "està", "estàvem", "estàveu", "et", "etc", "ets", "fa", "faig", "fan", "fas", "fem", "fer", "feu", "fi", "fins", "fora", "gairebé", "ha", "han", "has", "haver", "havia", "he", "hem", "heu", "hi", "ho", "i", "igual", "iguals", "inclòs", "ja", "jo", "l'hi", "la", "les", "li", "li'n", "llarg", "llavors", "m'he", "ma", "mal", "malgrat", "mateix", "mateixa", "mateixes", "mateixos", "me", "mentre", "meu", "meus", "meva", "meves", "mode", "molt", "molta", "moltes", "molts", "mon", "mons", "més", "n'he", "n'hi", "ne", "ni", "no", "nogensmenys", "només", "nosaltres", "nostra", "nostre", "nostres", "o", "oh", "oi", "on", "pas", "pel", "pels", "per", "per que", "perquè", "però", "poc", "poca", "pocs", "podem", "poden", "poder", "podeu", "poques", "potser", "primer", "propi", "puc", "qual", "quals", "quan", "quant", "que", "quelcom", "qui", "quin", "quina", "quines", "quins", "què", "s'ha", "s'han", "sa", "sabem", "saben", "saber", "sabeu", "sap", "saps", "semblant", "semblants", "sense", "ser", "ses", "seu", "seus", "seva", "seves", "si", "sobre", "sobretot", "soc", "solament", "sols", "som", "son", "sons", "sota", "sou", "sóc", "són", "t'ha", "t'han", "t'he", "ta", "tal", "també", "tampoc", "tan", "tant", "tanta", "tantes", "te", "tene", "tenim", "tenir", "teniu", "teu", "teus", "teva", "teves", "tinc", "ton", "tons", "tot", "tota", "totes", "tots", "un", "una", "unes", "uns", "us", "va", "vaig", "vam", "van", "vas", "veu", "vosaltres", "vostra", "vostre", "vostres", "érem", "éreu", "és", "éssent", "últim", "ús"],
+    zh: ["、", "。", "〈", "〉", "《", "》", "一", "一个", "一些", "一何", "一切", "一则", "一方面", "一旦", "一来", "一样", "一种", "一般", "一转眼", "七", "万一", "三", "上", "上下", "下", "不", "不仅", "不但", "不光", "不单", "不只", "不外乎", "不如", "不妨", "不尽", "不尽然", "不得", "不怕", "不惟", "不成", "不拘", "不料", "不是", "不比", "不然", "不特", "不独", "不管", "不至于", "不若", "不论", "不过", "不问", "与", "与其", "与其说", "与否", "与此同时", "且", "且不说", "且说", "两者", "个", "个别", "中", "临", "为", "为了", "为什么", "为何", "为止", "为此", "为着", "乃", "乃至", "乃至于", "么", "之", "之一", "之所以", "之类", "乌乎", "乎", "乘", "九", "也", "也好", "也罢", "了", "二", "二来", "于", "于是", "于是乎", "云云", "云尔", "五", "些", "亦", "人", "人们", "人家", "什", "什么", "什么样", "今", "介于", "仍", "仍旧", "从", "从此", "从而", "他", "他人", "他们", "他们们", "以", "以上", "以为", "以便", "以免", "以及", "以故", "以期", "以来", "以至", "以至于", "以致", "们", "任", "任何", "任凭", "会", "似的", "但", "但凡", "但是", "何", "何以", "何况", "何处", "何时", "余外", "作为", "你", "你们", "使", "使得", "例如", "依", "依据", "依照", "便于", "俺", "俺们", "倘", "倘使", "倘或", "倘然", "倘若", "借", "借傥然", "假使", "假如", "假若", "做", "像", "儿", "先不先", "光", "光是", "全体", "全部", "八", "六", "兮", "共", "关于", "关于具体地说", "其", "其一", "其中", "其二", "其他", "其余", "其它", "其次", "具体地说", "具体说来", "兼之", "内", "再", "再其次", "再则", "再有", "再者", "再者说", "再说", "冒", "冲", "况且", "几", "几时", "凡", "凡是", "凭", "凭借", "出于", "出来", "分", "分别", "则", "则甚", "别", "别人", "别处", "别是", "别的", "别管", "别说", "到", "前后", "前此", "前者", "加之", "加以", "区", "即", "即令", "即使", "即便", "即如", "即或", "即若", "却", "去", "又", "又及", "及", "及其", "及至", "反之", "反而", "反过来", "反过来说", "受到", "另", "另一方面", "另外", "另悉", "只", "只当", "只怕", "只是", "只有", "只消", "只要", "只限", "叫", "叮咚", "可", "可以", "可是", "可见", "各", "各个", "各位", "各种", "各自", "同", "同时", "后", "后者", "向", "向使", "向着", "吓", "吗", "否则", "吧", "吧哒", "含", "吱", "呀", "呃", "呕", "呗", "呜", "呜呼", "呢", "呵", "呵呵", "呸", "呼哧", "咋", "和", "咚", "咦", "咧", "咱", "咱们", "咳", "哇", "哈", "哈哈", "哉", "哎", "哎呀", "哎哟", "哗", "哟", "哦", "哩", "哪", "哪个", "哪些", "哪儿", "哪天", "哪年", "哪怕", "哪样", "哪边", "哪里", "哼", "哼唷", "唉", "唯有", "啊", "啐", "啥", "啦", "啪达", "啷当", "喂", "喏", "喔唷", "喽", "嗡", "嗡嗡", "嗬", "嗯", "嗳", "嘎", "嘎登", "嘘", "嘛", "嘻", "嘿", "嘿嘿", "四", "因", "因为", "因了", "因此", "因着", "因而", "固然", "在", "在下", "在于", "地", "基于", "处在", "多", "多么", "多少", "大", "大家", "她", "她们", "好", "如", "如上", "如上所述", "如下", "如何", "如其", "如同", "如是", "如果", "如此", "如若", "始而", "孰料", "孰知", "宁", "宁可", "宁愿", "宁肯", "它", "它们", "对", "对于", "对待", "对方", "对比", "将", "小", "尔", "尔后", "尔尔", "尚且", "就", "就是", "就是了", "就是说", "就算", "就要", "尽", "尽管", "尽管如此", "岂但", "己", "已", "已矣", "巴", "巴巴", "年", "并", "并且", "庶乎", "庶几", "开外", "开始", "归", "归齐", "当", "当地", "当然", "当着", "彼", "彼时", "彼此", "往", "待", "很", "得", "得了", "怎", "怎么", "怎么办", "怎么样", "怎奈", "怎样", "总之", "总的来看", "总的来说", "总的说来", "总而言之", "恰恰相反", "您", "惟其", "慢说", "我", "我们", "或", "或则", "或是", "或曰", "或者", "截至", "所", "所以", "所在", "所幸", "所有", "才", "才能", "打", "打从", "把", "抑或", "拿", "按", "按照", "换句话说", "换言之", "据", "据此", "接着", "故", "故此", "故而", "旁人", "无", "无宁", "无论", "既", "既往", "既是", "既然", "日", "时", "时候", "是", "是以", "是的", "更", "曾", "替", "替代", "最", "月", "有", "有些", "有关", "有及", "有时", "有的", "望", "朝", "朝着", "本", "本人", "本地", "本着", "本身", "来", "来着", "来自", "来说", "极了", "果然", "果真", "某", "某个", "某些", "某某", "根据", "欤", "正值", "正如", "正巧", "正是", "此", "此地", "此处", "此外", "此时", "此次", "此间", "毋宁", "每", "每当", "比", "比及", "比如", "比方", "没奈何", "沿", "沿着", "漫说", "点", "焉", "然则", "然后", "然而", "照", "照着", "犹且", "犹自", "甚且", "甚么", "甚或", "甚而", "甚至", "甚至于", "用", "用来", "由", "由于", "由是", "由此", "由此可见", "的", "的确", "的话", "直到", "相对而言", "省得", "看", "眨眼", "着", "着呢", "矣", "矣乎", "矣哉", "离", "秒", "称", "竟而", "第", "等", "等到", "等等", "简言之", "管", "类如", "紧接着", "纵", "纵令", "纵使", "纵然", "经", "经过", "结果", "给", "继之", "继后", "继而", "综上所述", "罢了", "者", "而", "而且", "而况", "而后", "而外", "而已", "而是", "而言", "能", "能否", "腾", "自", "自个儿", "自从", "自各儿", "自后", "自家", "自己", "自打", "自身", "至", "至于", "至今", "至若", "致", "般的", "若", "若夫", "若是", "若果", "若非", "莫不然", "莫如", "莫若", "虽", "虽则", "虽然", "虽说", "被", "要", "要不", "要不是", "要不然", "要么", "要是", "譬喻", "譬如", "让", "许多", "论", "设使", "设或", "设若", "诚如", "诚然", "该", "说", "说来", "请", "诸", "诸位", "诸如", "谁", "谁人", "谁料", "谁知", "贼死", "赖以", "赶", "起", "起见", "趁", "趁着", "越是", "距", "跟", "较", "较之", "边", "过", "还", "还是", "还有", "还要", "这", "这一来", "这个", "这么", "这么些", "这么样", "这么点儿", "这些", "这会儿", "这儿", "这就是说", "这时", "这样", "这次", "这般", "这边", "这里", "进而", "连", "连同", "逐步", "通过", "遵循", "遵照", "那", "那个", "那么", "那么些", "那么样", "那些", "那会儿", "那儿", "那时", "那样", "那般", "那边", "那里", "都", "鄙人", "鉴于", "针对", "阿", "除", "除了", "除外", "除开", "除此之外", "除非", "随", "随后", "随时", "随着", "难道说", "零", "非", "非但", "非徒", "非特", "非独", "靠", "顺", "顺着", "首先", "︿", "！", "＃", "＄", "％", "＆", "（", "）", "＊", "＋", "，", "０", "１", "２", "３", "４", "５", "６", "７", "８", "９", "：", "；", "＜", "＞", "？", "＠", "［", "］", "｛", "｜", "｝", "～", "￥"],
+    hr: ["a", "ako", "ali", "bi", "bih", "bila", "bili", "bilo", "bio", "bismo", "biste", "biti", "bumo", "da", "do", "duž", "ga", "hoće", "hoćemo", "hoćete", "hoćeš", "hoću", "i", "iako", "ih", "ili", "iz", "ja", "je", "jedna", "jedne", "jedno", "jer", "jesam", "jesi", "jesmo", "jest", "jeste", "jesu", "jim", "joj", "još", "ju", "kada", "kako", "kao", "koja", "koje", "koji", "kojima", "koju", "kroz", "li", "me", "mene", "meni", "mi", "mimo", "moj", "moja", "moje", "mu", "na", "nad", "nakon", "nam", "nama", "nas", "naš", "naša", "naše", "našeg", "ne", "nego", "neka", "neki", "nekog", "neku", "nema", "netko", "neće", "nećemo", "nećete", "nećeš", "neću", "nešto", "ni", "nije", "nikoga", "nikoje", "nikoju", "nisam", "nisi", "nismo", "niste", "nisu", "njega", "njegov", "njegova", "njegovo", "njemu", "njezin", "njezina", "njezino", "njih", "njihov", "njihova", "njihovo", "njim", "njima", "njoj", "nju", "no", "o", "od", "odmah", "on", "ona", "oni", "ono", "ova", "pa", "pak", "po", "pod", "pored", "prije", "s", "sa", "sam", "samo", "se", "sebe", "sebi", "si", "smo", "ste", "su", "sve", "svi", "svog", "svoj", "svoja", "svoje", "svom", "ta", "tada", "taj", "tako", "te", "tebe", "tebi", "ti", "to", "toj", "tome", "tu", "tvoj", "tvoja", "tvoje", "u", "uz", "vam", "vama", "vas", "vaš", "vaša", "vaše", "već", "vi", "vrlo", "za", "zar", "će", "ćemo", "ćete", "ćeš", "ću", "što"],
+    cs: ["a", "aby", "ahoj", "aj", "ale", "anebo", "ani", "aniž", "ano", "asi", "aspoň", "atd", "atp", "az", "ačkoli", "až", "bez", "beze", "blízko", "bohužel", "brzo", "bude", "budem", "budeme", "budes", "budete", "budeš", "budou", "budu", "by", "byl", "byla", "byli", "bylo", "byly", "bys", "byt", "být", "během", "chce", "chceme", "chcete", "chceš", "chci", "chtít", "chtějí", "chut'", "chuti", "ci", "clanek", "clanku", "clanky", "co", "coz", "což", "cz", "daleko", "dalsi", "další", "den", "deset", "design", "devatenáct", "devět", "dnes", "do", "dobrý", "docela", "dva", "dvacet", "dvanáct", "dvě", "dál", "dále", "děkovat", "děkujeme", "děkuji", "email", "ho", "hodně", "i", "jak", "jakmile", "jako", "jakož", "jde", "je", "jeden", "jedenáct", "jedna", "jedno", "jednou", "jedou", "jeho", "jehož", "jej", "jeji", "jejich", "její", "jelikož", "jemu", "jen", "jenom", "jenž", "jeste", "jestli", "jestliže", "ještě", "jež", "ji", "jich", "jimi", "jinak", "jine", "jiné", "jiz", "již", "jsem", "jses", "jseš", "jsi", "jsme", "jsou", "jste", "já", "jí", "jím", "jíž", "jšte", "k", "kam", "každý", "kde", "kdo", "kdy", "kdyz", "když", "ke", "kolik", "kromě", "ktera", "ktere", "kteri", "kterou", "ktery", "která", "které", "který", "kteři", "kteří", "ku", "kvůli", "ma", "mají", "mate", "me", "mezi", "mi", "mit", "mne", "mnou", "mně", "moc", "mohl", "mohou", "moje", "moji", "možná", "muj", "musí", "muze", "my", "má", "málo", "mám", "máme", "máte", "máš", "mé", "mí", "mít", "mě", "můj", "může", "na", "nad", "nade", "nam", "napiste", "napište", "naproti", "nas", "nasi", "načež", "naše", "naši", "ne", "nebo", "nebyl", "nebyla", "nebyli", "nebyly", "nechť", "nedělají", "nedělá", "nedělám", "neděláme", "neděláte", "neděláš", "neg", "nejsi", "nejsou", "nemají", "nemáme", "nemáte", "neměl", "neni", "není", "nestačí", "nevadí", "nez", "než", "nic", "nich", "nimi", "nove", "novy", "nové", "nový", "nula", "ná", "nám", "námi", "nás", "náš", "ní", "ním", "ně", "něco", "nějak", "někde", "někdo", "němu", "němuž", "o", "od", "ode", "on", "ona", "oni", "ono", "ony", "osm", "osmnáct", "pak", "patnáct", "po", "pod", "podle", "pokud", "potom", "pouze", "pozdě", "pořád", "prave", "pravé", "pred", "pres", "pri", "pro", "proc", "prostě", "prosím", "proti", "proto", "protoze", "protože", "proč", "prvni", "první", "práve", "pta", "pět", "před", "přede", "přes", "přese", "při", "přičemž", "re", "rovně", "s", "se", "sedm", "sedmnáct", "si", "sice", "skoro", "smí", "smějí", "snad", "spolu", "sta", "sto", "strana", "sté", "sve", "svych", "svym", "svymi", "své", "svých", "svým", "svými", "svůj", "ta", "tady", "tak", "take", "takhle", "taky", "takze", "také", "takže", "tam", "tamhle", "tamhleto", "tamto", "tato", "te", "tebe", "tebou", "ted'", "tedy", "tema", "ten", "tento", "teto", "ti", "tim", "timto", "tipy", "tisíc", "tisíce", "to", "tobě", "tohle", "toho", "tohoto", "tom", "tomto", "tomu", "tomuto", "toto", "trošku", "tu", "tuto", "tvoje", "tvá", "tvé", "tvůj", "ty", "tyto", "téma", "této", "tím", "tímto", "tě", "těm", "těma", "těmu", "třeba", "tři", "třináct", "u", "určitě", "uz", "už", "v", "vam", "vas", "vase", "vaše", "vaši", "ve", "vedle", "večer", "vice", "vlastně", "vsak", "vy", "vám", "vámi", "vás", "váš", "více", "však", "všechen", "všechno", "všichni", "vůbec", "vždy", "z", "za", "zatímco", "zač", "zda", "zde", "ze", "zpet", "zpravy", "zprávy", "zpět", "čau", "či", "článek", "článku", "články", "čtrnáct", "čtyři", "šest", "šestnáct", "že"],
+    da: ["ad", "af", "aldrig", "alle", "alt", "anden", "andet", "andre", "at", "bare", "begge", "blev", "blive", "bliver", "da", "de", "dem", "den", "denne", "der", "deres", "det", "dette", "dig", "din", "dine", "disse", "dit", "dog", "du", "efter", "ej", "eller", "en", "end", "ene", "eneste", "enhver", "er", "et", "far", "fem", "fik", "fire", "flere", "fleste", "for", "fordi", "forrige", "fra", "få", "får", "før", "god", "godt", "ham", "han", "hans", "har", "havde", "have", "hej", "helt", "hende", "hendes", "her", "hos", "hun", "hvad", "hvem", "hver", "hvilken", "hvis", "hvor", "hvordan", "hvorfor", "hvornår", "i", "ikke", "ind", "ingen", "intet", "ja", "jeg", "jer", "jeres", "jo", "kan", "kom", "komme", "kommer", "kun", "kunne", "lad", "lav", "lidt", "lige", "lille", "man", "mand", "mange", "med", "meget", "men", "mens", "mere", "mig", "min", "mine", "mit", "mod", "må", "ned", "nej", "ni", "nogen", "noget", "nogle", "nu", "ny", "nyt", "når", "nær", "næste", "næsten", "og", "også", "okay", "om", "op", "os", "otte", "over", "på", "se", "seks", "selv", "ser", "ses", "sig", "sige", "sin", "sine", "sit", "skal", "skulle", "som", "stor", "store", "syv", "så", "sådan", "tag", "tage", "thi", "ti", "til", "to", "tre", "ud", "under", "var", "ved", "vi", "vil", "ville", "vor", "vores", "være", "været"],
+    nl: ["aan", "aangaande", "aangezien", "achte", "achter", "achterna", "af", "afgelopen", "al", "aldaar", "aldus", "alhoewel", "alias", "alle", "allebei", "alleen", "alles", "als", "alsnog", "altijd", "altoos", "ander", "andere", "anders", "anderszins", "beetje", "behalve", "behoudens", "beide", "beiden", "ben", "beneden", "bent", "bepaald", "betreffende", "bij", "bijna", "bijv", "binnen", "binnenin", "blijkbaar", "blijken", "boven", "bovenal", "bovendien", "bovengenoemd", "bovenstaand", "bovenvermeld", "buiten", "bv", "daar", "daardoor", "daarheen", "daarin", "daarna", "daarnet", "daarom", "daarop", "daaruit", "daarvanlangs", "dan", "dat", "de", "deden", "deed", "der", "derde", "derhalve", "dertig", "deze", "dhr", "die", "dikwijls", "dit", "doch", "doe", "doen", "doet", "door", "doorgaand", "drie", "duizend", "dus", "echter", "een", "eens", "eer", "eerdat", "eerder", "eerlang", "eerst", "eerste", "eigen", "eigenlijk", "elk", "elke", "en", "enig", "enige", "enigszins", "enkel", "er", "erdoor", "erg", "ergens", "etc", "etcetera", "even", "eveneens", "evenwel", "gauw", "ge", "gedurende", "geen", "gehad", "gekund", "geleden", "gelijk", "gemoeten", "gemogen", "genoeg", "geweest", "gewoon", "gewoonweg", "haar", "haarzelf", "had", "hadden", "hare", "heb", "hebben", "hebt", "hedden", "heeft", "heel", "hem", "hemzelf", "hen", "het", "hetzelfde", "hier", "hierbeneden", "hierboven", "hierin", "hierna", "hierom", "hij", "hijzelf", "hoe", "hoewel", "honderd", "hun", "hunne", "ieder", "iedere", "iedereen", "iemand", "iets", "ik", "ikzelf", "in", "inderdaad", "inmiddels", "intussen", "inzake", "is", "ja", "je", "jezelf", "jij", "jijzelf", "jou", "jouw", "jouwe", "juist", "jullie", "kan", "klaar", "kon", "konden", "krachtens", "kun", "kunnen", "kunt", "laatst", "later", "liever", "lijken", "lijkt", "maak", "maakt", "maakte", "maakten", "maar", "mag", "maken", "me", "meer", "meest", "meestal", "men", "met", "mevr", "mezelf", "mij", "mijn", "mijnent", "mijner", "mijzelf", "minder", "miss", "misschien", "missen", "mits", "mocht", "mochten", "moest", "moesten", "moet", "moeten", "mogen", "mr", "mrs", "mw", "na", "naar", "nadat", "nam", "namelijk", "nee", "neem", "negen", "nemen", "nergens", "net", "niemand", "niet", "niets", "niks", "noch", "nochtans", "nog", "nogal", "nooit", "nu", "nv", "of", "ofschoon", "om", "omdat", "omhoog", "omlaag", "omstreeks", "omtrent", "omver", "ondanks", "onder", "ondertussen", "ongeveer", "ons", "onszelf", "onze", "onzeker", "ooit", "ook", "op", "opnieuw", "opzij", "over", "overal", "overeind", "overige", "overigens", "paar", "pas", "per", "precies", "recent", "redelijk", "reeds", "rond", "rondom", "samen", "sedert", "sinds", "sindsdien", "slechts", "sommige", "spoedig", "steeds", "tamelijk", "te", "tegen", "tegenover", "tenzij", "terwijl", "thans", "tien", "tiende", "tijdens", "tja", "toch", "toe", "toen", "toenmaals", "toenmalig", "tot", "totdat", "tussen", "twee", "tweede", "u", "uit", "uitgezonderd", "uw", "vaak", "vaakwat", "van", "vanaf", "vandaan", "vanuit", "vanwege", "veel", "veeleer", "veertig", "verder", "verscheidene", "verschillende", "vervolgens", "via", "vier", "vierde", "vijf", "vijfde", "vijftig", "vol", "volgend", "volgens", "voor", "vooraf", "vooral", "vooralsnog", "voorbij", "voordat", "voordezen", "voordien", "voorheen", "voorop", "voorts", "vooruit", "vrij", "vroeg", "waar", "waarom", "waarschijnlijk", "wanneer", "want", "waren", "was", "wat", "we", "wederom", "weer", "weg", "wegens", "weinig", "wel", "weldra", "welk", "welke", "werd", "werden", "werder", "wezen", "whatever", "wie", "wiens", "wier", "wij", "wijzelf", "wil", "wilden", "willen", "word", "worden", "wordt", "zal", "ze", "zei", "zeker", "zelf", "zelfde", "zelfs", "zes", "zeven", "zich", "zichzelf", "zij", "zijn", "zijne", "zijzelf", "zo", "zoals", "zodat", "zodra", "zonder", "zou", "zouden", "zowat", "zulk", "zulke", "zullen", "zult"],
+    en: ["'ll", "'tis", "'twas", "'ve", "10", "39", "a", "a's", "able", "ableabout", "about", "above", "abroad", "abst", "accordance", "according", "accordingly", "across", "act", "actually", "ad", "added", "adj", "adopted", "ae", "af", "affected", "affecting", "affects", "after", "afterwards", "ag", "again", "against", "ago", "ah", "ahead", "ai", "ain't", "aint", "al", "all", "allow", "allows", "almost", "alone", "along", "alongside", "already", "also", "although", "always", "am", "amid", "amidst", "among", "amongst", "amoungst", "amount", "an", "and", "announce", "another", "any", "anybody", "anyhow", "anymore", "anyone", "anything", "anyway", "anyways", "anywhere", "ao", "apart", "apparently", "appear", "appreciate", "appropriate", "approximately", "aq", "ar", "are", "area", "areas", "aren", "aren't", "arent", "arise", "around", "arpa", "as", "aside", "ask", "asked", "asking", "asks", "associated", "at", "au", "auth", "available", "aw", "away", "awfully", "az", "b", "ba", "back", "backed", "backing", "backs", "backward", "backwards", "bb", "bd", "be", "became", "because", "become", "becomes", "becoming", "been", "before", "beforehand", "began", "begin", "beginning", "beginnings", "begins", "behind", "being", "beings", "believe", "below", "beside", "besides", "best", "better", "between", "beyond", "bf", "bg", "bh", "bi", "big", "bill", "billion", "biol", "bj", "bm", "bn", "bo", "both", "bottom", "br", "brief", "briefly", "bs", "bt", "but", "buy", "bv", "bw", "by", "bz", "c", "c'mon", "c's", "ca", "call", "came", "can", "can't", "cannot", "cant", "caption", "case", "cases", "cause", "causes", "cc", "cd", "certain", "certainly", "cf", "cg", "ch", "changes", "ci", "ck", "cl", "clear", "clearly", "click", "cm", "cmon", "cn", "co", "co.", "com", "come", "comes", "computer", "con", "concerning", "consequently", "consider", "considering", "contain", "containing", "contains", "copy", "corresponding", "could", "could've", "couldn", "couldn't", "couldnt", "course", "cr", "cry", "cs", "cu", "currently", "cv", "cx", "cy", "cz", "d", "dare", "daren't", "darent", "date", "de", "dear", "definitely", "describe", "described", "despite", "detail", "did", "didn", "didn't", "didnt", "differ", "different", "differently", "directly", "dj", "dk", "dm", "do", "does", "doesn", "doesn't", "doesnt", "doing", "don", "don't", "done", "dont", "doubtful", "down", "downed", "downing", "downs", "downwards", "due", "during", "dz", "e", "each", "early", "ec", "ed", "edu", "ee", "effect", "eg", "eh", "eight", "eighty", "either", "eleven", "else", "elsewhere", "empty", "end", "ended", "ending", "ends", "enough", "entirely", "er", "es", "especially", "et", "et-al", "etc", "even", "evenly", "ever", "evermore", "every", "everybody", "everyone", "everything", "everywhere", "ex", "exactly", "example", "except", "f", "face", "faces", "fact", "facts", "fairly", "far", "farther", "felt", "few", "fewer", "ff", "fi", "fifteen", "fifth", "fifty", "fify", "fill", "find", "finds", "fire", "first", "five", "fix", "fj", "fk", "fm", "fo", "followed", "following", "follows", "for", "forever", "former", "formerly", "forth", "forty", "forward", "found", "four", "fr", "free", "from", "front", "full", "fully", "further", "furthered", "furthering", "furthermore", "furthers", "fx", "g", "ga", "gave", "gb", "gd", "ge", "general", "generally", "get", "gets", "getting", "gf", "gg", "gh", "gi", "give", "given", "gives", "giving", "gl", "gm", "gmt", "gn", "go", "goes", "going", "gone", "good", "goods", "got", "gotten", "gov", "gp", "gq", "gr", "great", "greater", "greatest", "greetings", "group", "grouped", "grouping", "groups", "gs", "gt", "gu", "gw", "gy", "h", "had", "hadn't", "hadnt", "half", "happens", "hardly", "has", "hasn", "hasn't", "hasnt", "have", "haven", "haven't", "havent", "having", "he", "he'd", "he'll", "he's", "hed", "hell", "hello", "help", "hence", "her", "here", "here's", "hereafter", "hereby", "herein", "heres", "hereupon", "hers", "herself", "herse”", "hes", "hi", "hid", "high", "higher", "highest", "him", "himself", "himse”", "his", "hither", "hk", "hm", "hn", "home", "homepage", "hopefully", "how", "how'd", "how'll", "how's", "howbeit", "however", "hr", "ht", "htm", "html", "http", "hu", "hundred", "i", "i'd", "i'll", "i'm", "i've", "i.e.", "id", "ie", "if", "ignored", "ii", "il", "ill", "im", "immediate", "immediately", "importance", "important", "in", "inasmuch", "inc", "inc.", "indeed", "index", "indicate", "indicated", "indicates", "information", "inner", "inside", "insofar", "instead", "int", "interest", "interested", "interesting", "interests", "into", "invention", "inward", "io", "iq", "ir", "is", "isn", "isn't", "isnt", "it", "it'd", "it'll", "it's", "itd", "itll", "its", "itself", "itse”", "ive", "j", "je", "jm", "jo", "join", "jp", "just", "k", "ke", "keep", "keeps", "kept", "keys", "kg", "kh", "ki", "kind", "km", "kn", "knew", "know", "known", "knows", "kp", "kr", "kw", "ky", "kz", "l", "la", "large", "largely", "last", "lately", "later", "latest", "latter", "latterly", "lb", "lc", "least", "length", "less", "lest", "let", "let's", "lets", "li", "like", "liked", "likely", "likewise", "line", "little", "lk", "ll", "long", "longer", "longest", "look", "looking", "looks", "low", "lower", "lr", "ls", "lt", "ltd", "lu", "lv", "ly", "m", "ma", "made", "mainly", "make", "makes", "making", "man", "many", "may", "maybe", "mayn't", "maynt", "mc", "md", "me", "mean", "means", "meantime", "meanwhile", "member", "members", "men", "merely", "mg", "mh", "microsoft", "might", "might've", "mightn't", "mightnt", "mil", "mill", "million", "mine", "minus", "miss", "mk", "ml", "mm", "mn", "mo", "more", "moreover", "most", "mostly", "move", "mp", "mq", "mr", "mrs", "ms", "msie", "mt", "mu", "much", "mug", "must", "must've", "mustn't", "mustnt", "mv", "mw", "mx", "my", "myself", "myse”", "mz", "n", "na", "name", "namely", "nay", "nc", "nd", "ne", "near", "nearly", "necessarily", "necessary", "need", "needed", "needing", "needn't", "neednt", "needs", "neither", "net", "netscape", "never", "neverf", "neverless", "nevertheless", "new", "newer", "newest", "next", "nf", "ng", "ni", "nine", "ninety", "nl", "no", "no-one", "nobody", "non", "none", "nonetheless", "noone", "nor", "normally", "nos", "not", "noted", "nothing", "notwithstanding", "novel", "now", "nowhere", "np", "nr", "nu", "null", "number", "numbers", "nz", "o", "obtain", "obtained", "obviously", "of", "off", "often", "oh", "ok", "okay", "old", "older", "oldest", "om", "omitted", "on", "once", "one", "one's", "ones", "only", "onto", "open", "opened", "opening", "opens", "opposite", "or", "ord", "order", "ordered", "ordering", "orders", "org", "other", "others", "otherwise", "ought", "oughtn't", "oughtnt", "our", "ours", "ourselves", "out", "outside", "over", "overall", "owing", "own", "p", "pa", "page", "pages", "part", "parted", "particular", "particularly", "parting", "parts", "past", "pe", "per", "perhaps", "pf", "pg", "ph", "pk", "pl", "place", "placed", "places", "please", "plus", "pm", "pmid", "pn", "point", "pointed", "pointing", "points", "poorly", "possible", "possibly", "potentially", "pp", "pr", "predominantly", "present", "presented", "presenting", "presents", "presumably", "previously", "primarily", "probably", "problem", "problems", "promptly", "proud", "provided", "provides", "pt", "put", "puts", "pw", "py", "q", "qa", "que", "quickly", "quite", "qv", "r", "ran", "rather", "rd", "re", "readily", "really", "reasonably", "recent", "recently", "ref", "refs", "regarding", "regardless", "regards", "related", "relatively", "research", "reserved", "respectively", "resulted", "resulting", "results", "right", "ring", "ro", "room", "rooms", "round", "ru", "run", "rw", "s", "sa", "said", "same", "saw", "say", "saying", "says", "sb", "sc", "sd", "se", "sec", "second", "secondly", "seconds", "section", "see", "seeing", "seem", "seemed", "seeming", "seems", "seen", "sees", "self", "selves", "sensible", "sent", "serious", "seriously", "seven", "seventy", "several", "sg", "sh", "shall", "shan't", "shant", "she", "she'd", "she'll", "she's", "shed", "shell", "shes", "should", "should've", "shouldn", "shouldn't", "shouldnt", "show", "showed", "showing", "shown", "showns", "shows", "si", "side", "sides", "significant", "significantly", "similar", "similarly", "since", "sincere", "site", "six", "sixty", "sj", "sk", "sl", "slightly", "sm", "small", "smaller", "smallest", "sn", "so", "some", "somebody", "someday", "somehow", "someone", "somethan", "something", "sometime", "sometimes", "somewhat", "somewhere", "soon", "sorry", "specifically", "specified", "specify", "specifying", "sr", "st", "state", "states", "still", "stop", "strongly", "su", "sub", "substantially", "successfully", "such", "sufficiently", "suggest", "sup", "sure", "sv", "sy", "system", "sz", "t", "t's", "take", "taken", "taking", "tc", "td", "tell", "ten", "tends", "test", "text", "tf", "tg", "th", "than", "thank", "thanks", "thanx", "that", "that'll", "that's", "that've", "thatll", "thats", "thatve", "the", "their", "theirs", "them", "themselves", "then", "thence", "there", "there'd", "there'll", "there're", "there's", "there've", "thereafter", "thereby", "thered", "therefore", "therein", "therell", "thereof", "therere", "theres", "thereto", "thereupon", "thereve", "these", "they", "they'd", "they'll", "they're", "they've", "theyd", "theyll", "theyre", "theyve", "thick", "thin", "thing", "things", "think", "thinks", "third", "thirty", "this", "thorough", "thoroughly", "those", "thou", "though", "thoughh", "thought", "thoughts", "thousand", "three", "throug", "through", "throughout", "thru", "thus", "til", "till", "tip", "tis", "tj", "tk", "tm", "tn", "to", "today", "together", "too", "took", "top", "toward", "towards", "tp", "tr", "tried", "tries", "trillion", "truly", "try", "trying", "ts", "tt", "turn", "turned", "turning", "turns", "tv", "tw", "twas", "twelve", "twenty", "twice", "two", "tz", "u", "ua", "ug", "uk", "um", "un", "under", "underneath", "undoing", "unfortunately", "unless", "unlike", "unlikely", "until", "unto", "up", "upon", "ups", "upwards", "us", "use", "used", "useful", "usefully", "usefulness", "uses", "using", "usually", "uucp", "uy", "uz", "v", "va", "value", "various", "vc", "ve", "versus", "very", "vg", "vi", "via", "viz", "vn", "vol", "vols", "vs", "vu", "w", "want", "wanted", "wanting", "wants", "was", "wasn", "wasn't", "wasnt", "way", "ways", "we", "we'd", "we'll", "we're", "we've", "web", "webpage", "website", "wed", "welcome", "well", "wells", "went", "were", "weren", "weren't", "werent", "weve", "wf", "what", "what'd", "what'll", "what's", "what've", "whatever", "whatll", "whats", "whatve", "when", "when'd", "when'll", "when's", "whence", "whenever", "where", "where'd", "where'll", "where's", "whereafter", "whereas", "whereby", "wherein", "wheres", "whereupon", "wherever", "whether", "which", "whichever", "while", "whilst", "whim", "whither", "who", "who'd", "who'll", "who's", "whod", "whoever", "whole", "wholl", "whom", "whomever", "whos", "whose", "why", "why'd", "why'll", "why's", "widely", "width", "will", "willing", "wish", "with", "within", "without", "won", "won't", "wonder", "wont", "words", "work", "worked", "working", "works", "world", "would", "would've", "wouldn", "wouldn't", "wouldnt", "ws", "www", "x", "y", "ye", "year", "years", "yes", "yet", "you", "you'd", "you'll", "you're", "you've", "youd", "youll", "young", "younger", "youngest", "your", "youre", "yours", "yourself", "yourselves", "youve", "yt", "yu", "z", "za", "zero", "zm", "zr"],
+    eo: ["adiaŭ", "ajn", "al", "ankoraŭ", "antaŭ", "aŭ", "bonan", "bonvole", "bonvolu", "bv", "ci", "cia", "cian", "cin", "d-ro", "da", "de", "dek", "deka", "do", "doktor'", "doktoro", "du", "dua", "dum", "eble", "ekz", "ekzemple", "en", "estas", "estis", "estos", "estu", "estus", "eĉ", "f-no", "feliĉan", "for", "fraŭlino", "ha", "havas", "havis", "havos", "havu", "havus", "he", "ho", "hu", "ili", "ilia", "ilian", "ilin", "inter", "io", "ion", "iu", "iujn", "iun", "ja", "jam", "je", "jes", "k", "kaj", "ke", "kio", "kion", "kiu", "kiujn", "kiun", "kvankam", "kvar", "kvara", "kvazaŭ", "kvin", "kvina", "la", "li", "lia", "lian", "lin", "malantaŭ", "male", "malgraŭ", "mem", "mi", "mia", "mian", "min", "minus", "naŭ", "naŭa", "ne", "nek", "nenio", "nenion", "neniu", "neniun", "nepre", "ni", "nia", "nian", "nin", "nu", "nun", "nur", "ok", "oka", "oni", "onia", "onian", "onin", "plej", "pli", "plu", "plus", "por", "post", "preter", "s-no", "s-ro", "se", "sed", "sep", "sepa", "ses", "sesa", "si", "sia", "sian", "sin", "sinjor'", "sinjorino", "sinjoro", "sub", "super", "supren", "sur", "tamen", "tio", "tion", "tiu", "tiujn", "tiun", "tra", "tri", "tria", "tuj", "tute", "unu", "unua", "ve", "verŝajne", "vi", "via", "vian", "vin", "ĉi", "ĉio", "ĉion", "ĉiu", "ĉiujn", "ĉiun", "ĉu", "ĝi", "ĝia", "ĝian", "ĝin", "ĝis", "ĵus", "ŝi", "ŝia", "ŝin"],
+    et: ["aga", "ei", "et", "ja", "jah", "kas", "kui", "kõik", "ma", "me", "mida", "midagi", "mind", "minu", "mis", "mu", "mul", "mulle", "nad", "nii", "oled", "olen", "oli", "oma", "on", "pole", "sa", "seda", "see", "selle", "siin", "siis", "ta", "te", "ära"],
+    fi: ["aiemmin", "aika", "aikaa", "aikaan", "aikaisemmin", "aikaisin", "aikajen", "aikana", "aikoina", "aikoo", "aikovat", "aina", "ainakaan", "ainakin", "ainoa", "ainoat", "aiomme", "aion", "aiotte", "aist", "aivan", "ajan", "alas", "alemmas", "alkuisin", "alkuun", "alla", "alle", "aloitamme", "aloitan", "aloitat", "aloitatte", "aloitattivat", "aloitettava", "aloitettevaksi", "aloitettu", "aloitimme", "aloitin", "aloitit", "aloititte", "aloittaa", "aloittamatta", "aloitti", "aloittivat", "alta", "aluksi", "alussa", "alusta", "annettavaksi", "annetteva", "annettu", "ansiosta", "antaa", "antamatta", "antoi", "aoua", "apu", "asia", "asiaa", "asian", "asiasta", "asiat", "asioiden", "asioihin", "asioita", "asti", "avuksi", "avulla", "avun", "avutta", "edelle", "edelleen", "edellä", "edeltä", "edemmäs", "edes", "edessä", "edestä", "ehkä", "ei", "eikä", "eilen", "eivät", "eli", "ellei", "elleivät", "ellemme", "ellen", "ellet", "ellette", "emme", "en", "enemmän", "eniten", "ennen", "ensi", "ensimmäinen", "ensimmäiseksi", "ensimmäisen", "ensimmäisenä", "ensimmäiset", "ensimmäisiksi", "ensimmäisinä", "ensimmäisiä", "ensimmäistä", "ensin", "entinen", "entisen", "entisiä", "entisten", "entistä", "enää", "eri", "erittäin", "erityisesti", "eräiden", "eräs", "eräät", "esi", "esiin", "esillä", "esimerkiksi", "et", "eteen", "etenkin", "etessa", "ette", "ettei", "että", "haikki", "halua", "haluaa", "haluamatta", "haluamme", "haluan", "haluat", "haluatte", "haluavat", "halunnut", "halusi", "halusimme", "halusin", "halusit", "halusitte", "halusivat", "halutessa", "haluton", "he", "hei", "heidän", "heidät", "heihin", "heille", "heillä", "heiltä", "heissä", "heistä", "heitä", "helposti", "heti", "hetkellä", "hieman", "hitaasti", "hoikein", "huolimatta", "huomenna", "hyvien", "hyviin", "hyviksi", "hyville", "hyviltä", "hyvin", "hyvinä", "hyvissä", "hyvistä", "hyviä", "hyvä", "hyvät", "hyvää", "hän", "häneen", "hänelle", "hänellä", "häneltä", "hänen", "hänessä", "hänestä", "hänet", "häntä", "ihan", "ilman", "ilmeisesti", "itse", "itsensä", "itseään", "ja", "jo", "johon", "joiden", "joihin", "joiksi", "joilla", "joille", "joilta", "joina", "joissa", "joista", "joita", "joka", "jokainen", "jokin", "joko", "joksi", "joku", "jolla", "jolle", "jolloin", "jolta", "jompikumpi", "jona", "jonka", "jonkin", "jonne", "joo", "jopa", "jos", "joskus", "jossa", "josta", "jota", "jotain", "joten", "jotenkin", "jotenkuten", "jotka", "jotta", "jouduimme", "jouduin", "jouduit", "jouduitte", "joudumme", "joudun", "joudutte", "joukkoon", "joukossa", "joukosta", "joutua", "joutui", "joutuivat", "joutumaan", "joutuu", "joutuvat", "juuri", "jälkeen", "jälleen", "jää", "kahdeksan", "kahdeksannen", "kahdella", "kahdelle", "kahdelta", "kahden", "kahdessa", "kahdesta", "kahta", "kahteen", "kai", "kaiken", "kaikille", "kaikilta", "kaikkea", "kaikki", "kaikkia", "kaikkiaan", "kaikkialla", "kaikkialle", "kaikkialta", "kaikkien", "kaikkin", "kaksi", "kannalta", "kannattaa", "kanssa", "kanssaan", "kanssamme", "kanssani", "kanssanne", "kanssasi", "kauan", "kauemmas", "kaukana", "kautta", "kehen", "keiden", "keihin", "keiksi", "keille", "keillä", "keiltä", "keinä", "keissä", "keistä", "keitten", "keittä", "keitä", "keneen", "keneksi", "kenelle", "kenellä", "keneltä", "kenen", "kenenä", "kenessä", "kenestä", "kenet", "kenettä", "kennessästä", "kenties", "kerran", "kerta", "kertaa", "keskellä", "kesken", "keskimäärin", "ketkä", "ketä", "kiitos", "kohti", "koko", "kokonaan", "kolmas", "kolme", "kolmen", "kolmesti", "koska", "koskaan", "kovin", "kuin", "kuinka", "kuinkan", "kuitenkaan", "kuitenkin", "kuka", "kukaan", "kukin", "kukka", "kumpainen", "kumpainenkaan", "kumpi", "kumpikaan", "kumpikin", "kun", "kuten", "kuuden", "kuusi", "kuutta", "kylliksi", "kyllä", "kymmenen", "kyse", "liian", "liki", "lisäksi", "lisää", "lla", "luo", "luona", "lähekkäin", "lähelle", "lähellä", "läheltä", "lähemmäs", "lähes", "lähinnä", "lähtien", "läpi", "mahdollisimman", "mahdollista", "me", "meidän", "meidät", "meihin", "meille", "meillä", "meiltä", "meissä", "meistä", "meitä", "melkein", "melko", "menee", "meneet", "menemme", "menen", "menet", "menette", "menevät", "meni", "menimme", "menin", "menit", "menivät", "mennessä", "mennyt", "menossa", "mihin", "mikin", "miksi", "mikä", "mikäli", "mikään", "mille", "milloin", "milloinkan", "millä", "miltä", "minkä", "minne", "minua", "minulla", "minulle", "minulta", "minun", "minussa", "minusta", "minut", "minuun", "minä", "missä", "mistä", "miten", "mitkä", "mitä", "mitään", "moi", "molemmat", "mones", "monesti", "monet", "moni", "moniaalla", "moniaalle", "moniaalta", "monta", "muassa", "muiden", "muita", "muka", "mukaan", "mukaansa", "mukana", "mutta", "muu", "muualla", "muualle", "muualta", "muuanne", "muulloin", "muun", "muut", "muuta", "muutama", "muutaman", "muuten", "myöhemmin", "myös", "myöskin", "myöskään", "myötä", "ne", "neljä", "neljän", "neljää", "niiden", "niihin", "niiksi", "niille", "niillä", "niiltä", "niin", "niinä", "niissä", "niistä", "niitä", "noiden", "noihin", "noiksi", "noilla", "noille", "noilta", "noin", "noina", "noissa", "noista", "noita", "nopeammin", "nopeasti", "nopeiten", "nro", "nuo", "nyt", "näiden", "näihin", "näiksi", "näille", "näillä", "näiltä", "näin", "näinä", "näissä", "näissähin", "näissälle", "näissältä", "näissästä", "näistä", "näitä", "nämä", "ohi", "oikea", "oikealla", "oikein", "ole", "olemme", "olen", "olet", "olette", "oleva", "olevan", "olevat", "oli", "olimme", "olin", "olisi", "olisimme", "olisin", "olisit", "olisitte", "olisivat", "olit", "olitte", "olivat", "olla", "olleet", "olli", "ollut", "oma", "omaa", "omaan", "omaksi", "omalle", "omalta", "oman", "omassa", "omat", "omia", "omien", "omiin", "omiksi", "omille", "omilta", "omissa", "omista", "on", "onkin", "onko", "ovat", "paikoittain", "paitsi", "pakosti", "paljon", "paremmin", "parempi", "parhaillaan", "parhaiten", "perusteella", "peräti", "pian", "pieneen", "pieneksi", "pienelle", "pienellä", "pieneltä", "pienempi", "pienestä", "pieni", "pienin", "poikki", "puolesta", "puolestaan", "päälle", "runsaasti", "saakka", "sadam", "sama", "samaa", "samaan", "samalla", "samallalta", "samallassa", "samallasta", "saman", "samat", "samoin", "sata", "sataa", "satojen", "se", "seitsemän", "sekä", "sen", "seuraavat", "siellä", "sieltä", "siihen", "siinä", "siis", "siitä", "sijaan", "siksi", "sille", "silloin", "sillä", "silti", "siltä", "sinne", "sinua", "sinulla", "sinulle", "sinulta", "sinun", "sinussa", "sinusta", "sinut", "sinuun", "sinä", "sisäkkäin", "sisällä", "siten", "sitten", "sitä", "ssa", "sta", "suoraan", "suuntaan", "suuren", "suuret", "suuri", "suuria", "suurin", "suurten", "taa", "taas", "taemmas", "tahansa", "tai", "takaa", "takaisin", "takana", "takia", "tallä", "tapauksessa", "tarpeeksi", "tavalla", "tavoitteena", "te", "teidän", "teidät", "teihin", "teille", "teillä", "teiltä", "teissä", "teistä", "teitä", "tietysti", "todella", "toinen", "toisaalla", "toisaalle", "toisaalta", "toiseen", "toiseksi", "toisella", "toiselle", "toiselta", "toisemme", "toisen", "toisensa", "toisessa", "toisesta", "toista", "toistaiseksi", "toki", "tosin", "tuhannen", "tuhat", "tule", "tulee", "tulemme", "tulen", "tulet", "tulette", "tulevat", "tulimme", "tulin", "tulisi", "tulisimme", "tulisin", "tulisit", "tulisitte", "tulisivat", "tulit", "tulitte", "tulivat", "tulla", "tulleet", "tullut", "tuntuu", "tuo", "tuohon", "tuoksi", "tuolla", "tuolle", "tuolloin", "tuolta", "tuon", "tuona", "tuonne", "tuossa", "tuosta", "tuota", "tuotä", "tuskin", "tykö", "tähän", "täksi", "tälle", "tällä", "tällöin", "tältä", "tämä", "tämän", "tänne", "tänä", "tänään", "tässä", "tästä", "täten", "tätä", "täysin", "täytyvät", "täytyy", "täällä", "täältä", "ulkopuolella", "usea", "useasti", "useimmiten", "usein", "useita", "uudeksi", "uudelleen", "uuden", "uudet", "uusi", "uusia", "uusien", "uusinta", "uuteen", "uutta", "vaan", "vahemmän", "vai", "vaiheessa", "vaikea", "vaikean", "vaikeat", "vaikeilla", "vaikeille", "vaikeilta", "vaikeissa", "vaikeista", "vaikka", "vain", "varmasti", "varsin", "varsinkin", "varten", "vasen", "vasenmalla", "vasta", "vastaan", "vastakkain", "vastan", "verran", "vielä", "vierekkäin", "vieressä", "vieri", "viiden", "viime", "viimeinen", "viimeisen", "viimeksi", "viisi", "voi", "voidaan", "voimme", "voin", "voisi", "voit", "voitte", "voivat", "vuoden", "vuoksi", "vuosi", "vuosien", "vuosina", "vuotta", "vähemmän", "vähintään", "vähiten", "vähän", "välillä", "yhdeksän", "yhden", "yhdessä", "yhteen", "yhteensä", "yhteydessä", "yhteyteen", "yhtä", "yhtäälle", "yhtäällä", "yhtäältä", "yhtään", "yhä", "yksi", "yksin", "yksittäin", "yleensä", "ylemmäs", "yli", "ylös", "ympäri", "älköön", "älä"],
+    fr: ["a", "abord", "absolument", "afin", "ah", "ai", "aie", "aient", "aies", "ailleurs", "ainsi", "ait", "allaient", "allo", "allons", "allô", "alors", "anterieur", "anterieure", "anterieures", "apres", "après", "as", "assez", "attendu", "au", "aucun", "aucune", "aucuns", "aujourd", "aujourd'hui", "aupres", "auquel", "aura", "aurai", "auraient", "aurais", "aurait", "auras", "aurez", "auriez", "aurions", "aurons", "auront", "aussi", "autant", "autre", "autrefois", "autrement", "autres", "autrui", "aux", "auxquelles", "auxquels", "avaient", "avais", "avait", "avant", "avec", "avez", "aviez", "avions", "avoir", "avons", "ayant", "ayez", "ayons", "b", "bah", "bas", "basee", "bat", "beau", "beaucoup", "bien", "bigre", "bon", "boum", "bravo", "brrr", "c", "car", "ce", "ceci", "cela", "celle", "celle-ci", "celle-là", "celles", "celles-ci", "celles-là", "celui", "celui-ci", "celui-là", "celà", "cent", "cependant", "certain", "certaine", "certaines", "certains", "certes", "ces", "cet", "cette", "ceux", "ceux-ci", "ceux-là", "chacun", "chacune", "chaque", "cher", "chers", "chez", "chiche", "chut", "chère", "chères", "ci", "cinq", "cinquantaine", "cinquante", "cinquantième", "cinquième", "clac", "clic", "combien", "comme", "comment", "comparable", "comparables", "compris", "concernant", "contre", "couic", "crac", "d", "da", "dans", "de", "debout", "dedans", "dehors", "deja", "delà", "depuis", "dernier", "derniere", "derriere", "derrière", "des", "desormais", "desquelles", "desquels", "dessous", "dessus", "deux", "deuxième", "deuxièmement", "devant", "devers", "devra", "devrait", "different", "differentes", "differents", "différent", "différente", "différentes", "différents", "dire", "directe", "directement", "dit", "dite", "dits", "divers", "diverse", "diverses", "dix", "dix-huit", "dix-neuf", "dix-sept", "dixième", "doit", "doivent", "donc", "dont", "dos", "douze", "douzième", "dring", "droite", "du", "duquel", "durant", "dès", "début", "désormais", "e", "effet", "egale", "egalement", "egales", "eh", "elle", "elle-même", "elles", "elles-mêmes", "en", "encore", "enfin", "entre", "envers", "environ", "es", "essai", "est", "et", "etant", "etc", "etre", "eu", "eue", "eues", "euh", "eurent", "eus", "eusse", "eussent", "eusses", "eussiez", "eussions", "eut", "eux", "eux-mêmes", "exactement", "excepté", "extenso", "exterieur", "eûmes", "eût", "eûtes", "f", "fais", "faisaient", "faisant", "fait", "faites", "façon", "feront", "fi", "flac", "floc", "fois", "font", "force", "furent", "fus", "fusse", "fussent", "fusses", "fussiez", "fussions", "fut", "fûmes", "fût", "fûtes", "g", "gens", "h", "ha", "haut", "hein", "hem", "hep", "hi", "ho", "holà", "hop", "hormis", "hors", "hou", "houp", "hue", "hui", "huit", "huitième", "hum", "hurrah", "hé", "hélas", "i", "ici", "il", "ils", "importe", "j", "je", "jusqu", "jusque", "juste", "k", "l", "la", "laisser", "laquelle", "las", "le", "lequel", "les", "lesquelles", "lesquels", "leur", "leurs", "longtemps", "lors", "lorsque", "lui", "lui-meme", "lui-même", "là", "lès", "m", "ma", "maint", "maintenant", "mais", "malgre", "malgré", "maximale", "me", "meme", "memes", "merci", "mes", "mien", "mienne", "miennes", "miens", "mille", "mince", "mine", "minimale", "moi", "moi-meme", "moi-même", "moindres", "moins", "mon", "mot", "moyennant", "multiple", "multiples", "même", "mêmes", "n", "na", "naturel", "naturelle", "naturelles", "ne", "neanmoins", "necessaire", "necessairement", "neuf", "neuvième", "ni", "nombreuses", "nombreux", "nommés", "non", "nos", "notamment", "notre", "nous", "nous-mêmes", "nouveau", "nouveaux", "nul", "néanmoins", "nôtre", "nôtres", "o", "oh", "ohé", "ollé", "olé", "on", "ont", "onze", "onzième", "ore", "ou", "ouf", "ouias", "oust", "ouste", "outre", "ouvert", "ouverte", "ouverts", "o|", "où", "p", "paf", "pan", "par", "parce", "parfois", "parle", "parlent", "parler", "parmi", "parole", "parseme", "partant", "particulier", "particulière", "particulièrement", "pas", "passé", "pendant", "pense", "permet", "personne", "personnes", "peu", "peut", "peuvent", "peux", "pff", "pfft", "pfut", "pif", "pire", "pièce", "plein", "plouf", "plupart", "plus", "plusieurs", "plutôt", "possessif", "possessifs", "possible", "possibles", "pouah", "pour", "pourquoi", "pourrais", "pourrait", "pouvait", "prealable", "precisement", "premier", "première", "premièrement", "pres", "probable", "probante", "procedant", "proche", "près", "psitt", "pu", "puis", "puisque", "pur", "pure", "q", "qu", "quand", "quant", "quant-à-soi", "quanta", "quarante", "quatorze", "quatre", "quatre-vingt", "quatrième", "quatrièmement", "que", "quel", "quelconque", "quelle", "quelles", "quelqu'un", "quelque", "quelques", "quels", "qui", "quiconque", "quinze", "quoi", "quoique", "r", "rare", "rarement", "rares", "relative", "relativement", "remarquable", "rend", "rendre", "restant", "reste", "restent", "restrictif", "retour", "revoici", "revoilà", "rien", "s", "sa", "sacrebleu", "sait", "sans", "sapristi", "sauf", "se", "sein", "seize", "selon", "semblable", "semblaient", "semble", "semblent", "sent", "sept", "septième", "sera", "serai", "seraient", "serais", "serait", "seras", "serez", "seriez", "serions", "serons", "seront", "ses", "seul", "seule", "seulement", "si", "sien", "sienne", "siennes", "siens", "sinon", "six", "sixième", "soi", "soi-même", "soient", "sois", "soit", "soixante", "sommes", "son", "sont", "sous", "souvent", "soyez", "soyons", "specifique", "specifiques", "speculatif", "stop", "strictement", "subtiles", "suffisant", "suffisante", "suffit", "suis", "suit", "suivant", "suivante", "suivantes", "suivants", "suivre", "sujet", "superpose", "sur", "surtout", "t", "ta", "tac", "tandis", "tant", "tardive", "te", "tel", "telle", "tellement", "telles", "tels", "tenant", "tend", "tenir", "tente", "tes", "tic", "tien", "tienne", "tiennes", "tiens", "toc", "toi", "toi-même", "ton", "touchant", "toujours", "tous", "tout", "toute", "toutefois", "toutes", "treize", "trente", "tres", "trois", "troisième", "troisièmement", "trop", "très", "tsoin", "tsouin", "tu", "té", "u", "un", "une", "unes", "uniformement", "unique", "uniques", "uns", "v", "va", "vais", "valeur", "vas", "vers", "via", "vif", "vifs", "vingt", "vivat", "vive", "vives", "vlan", "voici", "voie", "voient", "voilà", "voire", "vont", "vos", "votre", "vous", "vous-mêmes", "vu", "vé", "vôtre", "vôtres", "w", "x", "y", "z", "zut", "à", "â", "ça", "ès", "étaient", "étais", "était", "étant", "état", "étiez", "étions", "été", "étée", "étées", "étés", "êtes", "être", "ô"],
+    gl: ["a", "alí", "ao", "aos", "aquel", "aquela", "aquelas", "aqueles", "aquilo", "aquí", "as", "así", "aínda", "ben", "cando", "che", "co", "coa", "coas", "comigo", "con", "connosco", "contigo", "convosco", "cos", "cun", "cunha", "cunhas", "cuns", "da", "dalgunha", "dalgunhas", "dalgún", "dalgúns", "das", "de", "del", "dela", "delas", "deles", "desde", "deste", "do", "dos", "dun", "dunha", "dunhas", "duns", "e", "el", "ela", "elas", "eles", "en", "era", "eran", "esa", "esas", "ese", "eses", "esta", "estaba", "estar", "este", "estes", "estiven", "estou", "está", "están", "eu", "facer", "foi", "foron", "fun", "había", "hai", "iso", "isto", "la", "las", "lle", "lles", "lo", "los", "mais", "me", "meu", "meus", "min", "miña", "miñas", "moi", "na", "nas", "neste", "nin", "no", "non", "nos", "nosa", "nosas", "noso", "nosos", "nun", "nunha", "nunhas", "nuns", "nós", "o", "os", "ou", "para", "pero", "pode", "pois", "pola", "polas", "polo", "polos", "por", "que", "se", "senón", "ser", "seu", "seus", "sexa", "sido", "sobre", "súa", "súas", "tamén", "tan", "te", "ten", "ter", "teu", "teus", "teñen", "teño", "ti", "tido", "tiven", "tiña", "túa", "túas", "un", "unha", "unhas", "uns", "vos", "vosa", "vosas", "voso", "vosos", "vós", "á", "é", "ó", "ós"],
+    de: ["a", "ab", "aber", "ach", "acht", "achte", "achten", "achter", "achtes", "ag", "alle", "allein", "allem", "allen", "aller", "allerdings", "alles", "allgemeinen", "als", "also", "am", "an", "ander", "andere", "anderem", "anderen", "anderer", "anderes", "anderm", "andern", "anderr", "anders", "au", "auch", "auf", "aus", "ausser", "ausserdem", "außer", "außerdem", "b", "bald", "bei", "beide", "beiden", "beim", "beispiel", "bekannt", "bereits", "besonders", "besser", "besten", "bin", "bis", "bisher", "bist", "c", "d", "d.h", "da", "dabei", "dadurch", "dafür", "dagegen", "daher", "dahin", "dahinter", "damals", "damit", "danach", "daneben", "dank", "dann", "daran", "darauf", "daraus", "darf", "darfst", "darin", "darum", "darunter", "darüber", "das", "dasein", "daselbst", "dass", "dasselbe", "davon", "davor", "dazu", "dazwischen", "daß", "dein", "deine", "deinem", "deinen", "deiner", "deines", "dem", "dementsprechend", "demgegenüber", "demgemäss", "demgemäß", "demselben", "demzufolge", "den", "denen", "denn", "denselben", "der", "deren", "derer", "derjenige", "derjenigen", "dermassen", "dermaßen", "derselbe", "derselben", "des", "deshalb", "desselben", "dessen", "deswegen", "dich", "die", "diejenige", "diejenigen", "dies", "diese", "dieselbe", "dieselben", "diesem", "diesen", "dieser", "dieses", "dir", "doch", "dort", "drei", "drin", "dritte", "dritten", "dritter", "drittes", "du", "durch", "durchaus", "durfte", "durften", "dürfen", "dürft", "e", "eben", "ebenso", "ehrlich", "ei", "ei,", "eigen", "eigene", "eigenen", "eigener", "eigenes", "ein", "einander", "eine", "einem", "einen", "einer", "eines", "einig", "einige", "einigem", "einigen", "einiger", "einiges", "einmal", "eins", "elf", "en", "ende", "endlich", "entweder", "er", "ernst", "erst", "erste", "ersten", "erster", "erstes", "es", "etwa", "etwas", "euch", "euer", "eure", "eurem", "euren", "eurer", "eures", "f", "folgende", "früher", "fünf", "fünfte", "fünften", "fünfter", "fünftes", "für", "g", "gab", "ganz", "ganze", "ganzen", "ganzer", "ganzes", "gar", "gedurft", "gegen", "gegenüber", "gehabt", "gehen", "geht", "gekannt", "gekonnt", "gemacht", "gemocht", "gemusst", "genug", "gerade", "gern", "gesagt", "geschweige", "gewesen", "gewollt", "geworden", "gibt", "ging", "gleich", "gott", "gross", "grosse", "grossen", "grosser", "grosses", "groß", "große", "großen", "großer", "großes", "gut", "gute", "guter", "gutes", "h", "hab", "habe", "haben", "habt", "hast", "hat", "hatte", "hatten", "hattest", "hattet", "heisst", "her", "heute", "hier", "hin", "hinter", "hoch", "hätte", "hätten", "i", "ich", "ihm", "ihn", "ihnen", "ihr", "ihre", "ihrem", "ihren", "ihrer", "ihres", "im", "immer", "in", "indem", "infolgedessen", "ins", "irgend", "ist", "j", "ja", "jahr", "jahre", "jahren", "je", "jede", "jedem", "jeden", "jeder", "jedermann", "jedermanns", "jedes", "jedoch", "jemand", "jemandem", "jemanden", "jene", "jenem", "jenen", "jener", "jenes", "jetzt", "k", "kam", "kann", "kannst", "kaum", "kein", "keine", "keinem", "keinen", "keiner", "keines", "kleine", "kleinen", "kleiner", "kleines", "kommen", "kommt", "konnte", "konnten", "kurz", "können", "könnt", "könnte", "l", "lang", "lange", "leicht", "leide", "lieber", "los", "m", "machen", "macht", "machte", "mag", "magst", "mahn", "mal", "man", "manche", "manchem", "manchen", "mancher", "manches", "mann", "mehr", "mein", "meine", "meinem", "meinen", "meiner", "meines", "mensch", "menschen", "mich", "mir", "mit", "mittel", "mochte", "mochten", "morgen", "muss", "musst", "musste", "mussten", "muß", "mußt", "möchte", "mögen", "möglich", "mögt", "müssen", "müsst", "müßt", "n", "na", "nach", "nachdem", "nahm", "natürlich", "neben", "nein", "neue", "neuen", "neun", "neunte", "neunten", "neunter", "neuntes", "nicht", "nichts", "nie", "niemand", "niemandem", "niemanden", "noch", "nun", "nur", "o", "ob", "oben", "oder", "offen", "oft", "ohne", "ordnung", "p", "q", "r", "recht", "rechte", "rechten", "rechter", "rechtes", "richtig", "rund", "s", "sa", "sache", "sagt", "sagte", "sah", "satt", "schlecht", "schluss", "schon", "sechs", "sechste", "sechsten", "sechster", "sechstes", "sehr", "sei", "seid", "seien", "sein", "seine", "seinem", "seinen", "seiner", "seines", "seit", "seitdem", "selbst", "sich", "sie", "sieben", "siebente", "siebenten", "siebenter", "siebentes", "sind", "so", "solang", "solche", "solchem", "solchen", "solcher", "solches", "soll", "sollen", "sollst", "sollt", "sollte", "sollten", "sondern", "sonst", "soweit", "sowie", "später", "startseite", "statt", "steht", "suche", "t", "tag", "tage", "tagen", "tat", "teil", "tel", "tritt", "trotzdem", "tun", "u", "uhr", "um", "und", "uns", "unse", "unsem", "unsen", "unser", "unsere", "unserer", "unses", "unter", "v", "vergangenen", "viel", "viele", "vielem", "vielen", "vielleicht", "vier", "vierte", "vierten", "vierter", "viertes", "vom", "von", "vor", "w", "wahr", "wann", "war", "waren", "warst", "wart", "warum", "was", "weg", "wegen", "weil", "weit", "weiter", "weitere", "weiteren", "weiteres", "welche", "welchem", "welchen", "welcher", "welches", "wem", "wen", "wenig", "wenige", "weniger", "weniges", "wenigstens", "wenn", "wer", "werde", "werden", "werdet", "weshalb", "wessen", "wie", "wieder", "wieso", "will", "willst", "wir", "wird", "wirklich", "wirst", "wissen", "wo", "woher", "wohin", "wohl", "wollen", "wollt", "wollte", "wollten", "worden", "wurde", "wurden", "während", "währenddem", "währenddessen", "wäre", "würde", "würden", "x", "y", "z", "z.b", "zehn", "zehnte", "zehnten", "zehnter", "zehntes", "zeit", "zu", "zuerst", "zugleich", "zum", "zunächst", "zur", "zurück", "zusammen", "zwanzig", "zwar", "zwei", "zweite", "zweiten", "zweiter", "zweites", "zwischen", "zwölf", "über", "überhaupt", "übrigens"],
+    el: ["ένα", "έναν", "ένας", "αι", "ακομα", "ακομη", "ακριβως", "αληθεια", "αληθινα", "αλλα", "αλλαχου", "αλλες", "αλλη", "αλλην", "αλλης", "αλλιως", "αλλιωτικα", "αλλο", "αλλοι", "αλλοιως", "αλλοιωτικα", "αλλον", "αλλος", "αλλοτε", "αλλου", "αλλους", "αλλων", "αμα", "αμεσα", "αμεσως", "αν", "ανα", "αναμεσα", "αναμεταξυ", "ανευ", "αντι", "αντιπερα", "αντις", "ανω", "ανωτερω", "αξαφνα", "απ", "απεναντι", "απο", "αποψε", "από", "αρα", "αραγε", "αργα", "αργοτερο", "αριστερα", "αρκετα", "αρχικα", "ας", "αυριο", "αυτα", "αυτες", "αυτεσ", "αυτη", "αυτην", "αυτης", "αυτο", "αυτοι", "αυτον", "αυτος", "αυτοσ", "αυτου", "αυτους", "αυτουσ", "αυτων", "αφοτου", "αφου", "αἱ", "αἳ", "αἵ", "αὐτόσ", "αὐτὸς", "αὖ", "α∆ιακοπα", "βεβαια", "βεβαιοτατα", "γάρ", "γα", "γα^", "γε", "γι", "για", "γοῦν", "γρηγορα", "γυρω", "γὰρ", "δ'", "δέ", "δή", "δαί", "δαίσ", "δαὶ", "δαὶς", "δε", "δεν", "δι", "δι'", "διά", "δια", "διὰ", "δὲ", "δὴ", "δ’", "εαν", "εαυτο", "εαυτον", "εαυτου", "εαυτους", "εαυτων", "εγκαιρα", "εγκαιρως", "εγω", "ειθε", "ειμαι", "ειμαστε", "ειναι", "εις", "εισαι", "εισαστε", "ειστε", "ειτε", "ειχα", "ειχαμε", "ειχαν", "ειχατε", "ειχε", "ειχες", "ει∆εμη", "εκ", "εκαστα", "εκαστες", "εκαστη", "εκαστην", "εκαστης", "εκαστο", "εκαστοι", "εκαστον", "εκαστος", "εκαστου", "εκαστους", "εκαστων", "εκει", "εκεινα", "εκεινες", "εκεινεσ", "εκεινη", "εκεινην", "εκεινης", "εκεινο", "εκεινοι", "εκεινον", "εκεινος", "εκεινοσ", "εκεινου", "εκεινους", "εκεινουσ", "εκεινων", "εκτος", "εμας", "εμεις", "εμενα", "εμπρος", "εν", "ενα", "εναν", "ενας", "ενος", "εντελως", "εντος", "εντωμεταξυ", "ενω", "ενός", "εξ", "εξαφνα", "εξης", "εξισου", "εξω", "επ", "επί", "επανω", "επειτα", "επει∆η", "επι", "επισης", "επομενως", "εσας", "εσεις", "εσενα", "εστω", "εσυ", "ετερα", "ετεραι", "ετερας", "ετερες", "ετερη", "ετερης", "ετερο", "ετεροι", "ετερον", "ετερος", "ετερου", "ετερους", "ετερων", "ετουτα", "ετουτες", "ετουτη", "ετουτην", "ετουτης", "ετουτο", "ετουτοι", "ετουτον", "ετουτος", "ετουτου", "ετουτους", "ετουτων", "ετσι", "ευγε", "ευθυς", "ευτυχως", "εφεξης", "εχει", "εχεις", "εχετε", "εχθες", "εχομε", "εχουμε", "εχουν", "εχτες", "εχω", "εως", "εἰ", "εἰμί", "εἰμὶ", "εἰς", "εἰσ", "εἴ", "εἴμι", "εἴτε", "ε∆ω", "η", "ημασταν", "ημαστε", "ημουν", "ησασταν", "ησαστε", "ησουν", "ηταν", "ητανε", "ητοι", "ηττον", "η∆η", "θα", "ι", "ιι", "ιιι", "ισαμε", "ισια", "ισως", "ισωσ", "ι∆ια", "ι∆ιαν", "ι∆ιας", "ι∆ιες", "ι∆ιο", "ι∆ιοι", "ι∆ιον", "ι∆ιος", "ι∆ιου", "ι∆ιους", "ι∆ιων", "ι∆ιως", "κ", "καί", "καίτοι", "καθ", "καθε", "καθεμια", "καθεμιας", "καθενα", "καθενας", "καθενος", "καθετι", "καθολου", "καθως", "και", "κακα", "κακως", "καλα", "καλως", "καμια", "καμιαν", "καμιας", "καμποσα", "καμποσες", "καμποση", "καμποσην", "καμποσης", "καμποσο", "καμποσοι", "καμποσον", "καμποσος", "καμποσου", "καμποσους", "καμποσων", "κανεις", "κανεν", "κανενα", "κανεναν", "κανενας", "κανενος", "καποια", "καποιαν", "καποιας", "καποιες", "καποιο", "καποιοι", "καποιον", "καποιος", "καποιου", "καποιους", "καποιων", "καποτε", "καπου", "καπως", "κατ", "κατά", "κατα", "κατι", "κατιτι", "κατοπιν", "κατω", "κατὰ", "καὶ", "κι", "κιολας", "κλπ", "κοντα", "κτλ", "κυριως", "κἀν", "κἂν", "λιγακι", "λιγο", "λιγωτερο", "λογω", "λοιπα", "λοιπον", "μέν", "μέσα", "μή", "μήτε", "μία", "μα", "μαζι", "μακαρι", "μακρυα", "μαλιστα", "μαλλον", "μας", "με", "μεθ", "μεθαυριο", "μειον", "μελει", "μελλεται", "μεμιας", "μεν", "μερικα", "μερικες", "μερικοι", "μερικους", "μερικων", "μεσα", "μετ", "μετά", "μετα", "μεταξυ", "μετὰ", "μεχρι", "μη", "μην", "μηπως", "μητε", "μη∆ε", "μιά", "μια", "μιαν", "μιας", "μολις", "μολονοτι", "μοναχα", "μονες", "μονη", "μονην", "μονης", "μονο", "μονοι", "μονομιας", "μονος", "μονου", "μονους", "μονων", "μου", "μπορει", "μπορουν", "μπραβο", "μπρος", "μἐν", "μὲν", "μὴ", "μὴν", "να", "ναι", "νωρις", "ξανα", "ξαφνικα", "ο", "οι", "ολα", "ολες", "ολη", "ολην", "ολης", "ολο", "ολογυρα", "ολοι", "ολον", "ολονεν", "ολος", "ολοτελα", "ολου", "ολους", "ολων", "ολως", "ολως∆ιολου", "ομως", "ομωσ", "οποια", "οποιαν", "οποιαν∆ηποτε", "οποιας", "οποιας∆ηποτε", "οποια∆ηποτε", "οποιες", "οποιες∆ηποτε", "οποιο", "οποιοι", "οποιον", "οποιον∆ηποτε", "οποιος", "οποιος∆ηποτε", "οποιου", "οποιους", "οποιους∆ηποτε", "οποιου∆ηποτε", "οποιο∆ηποτε", "οποιων", "οποιων∆ηποτε", "οποι∆ηποτε", "οποτε", "οποτε∆ηποτε", "οπου", "οπου∆ηποτε", "οπως", "οπωσ", "ορισμενα", "ορισμενες", "ορισμενων", "ορισμενως", "οσα", "οσα∆ηποτε", "οσες", "οσες∆ηποτε", "οση", "οσην", "οσην∆ηποτε", "οσης", "οσης∆ηποτε", "οση∆ηποτε", "οσο", "οσοι", "οσοι∆ηποτε", "οσον", "οσον∆ηποτε", "οσος", "οσος∆ηποτε", "οσου", "οσους", "οσους∆ηποτε", "οσου∆ηποτε", "οσο∆ηποτε", "οσων", "οσων∆ηποτε", "οταν", "οτι", "οτι∆ηποτε", "οτου", "ου", "ουτε", "ου∆ε", "οχι", "οἱ", "οἳ", "οἷς", "οὐ", "οὐδ", "οὐδέ", "οὐδείσ", "οὐδεὶς", "οὐδὲ", "οὐδὲν", "οὐκ", "οὐχ", "οὐχὶ", "οὓς", "οὔτε", "οὕτω", "οὕτως", "οὕτωσ", "οὖν", "οὗ", "οὗτος", "οὗτοσ", "παλι", "παντοτε", "παντου", "παντως", "παρ", "παρά", "παρα", "παρὰ", "περί", "περα", "περι", "περιπου", "περισσοτερο", "περσι", "περυσι", "περὶ", "πια", "πιθανον", "πιο", "πισω", "πλαι", "πλεον", "πλην", "ποια", "ποιαν", "ποιας", "ποιες", "ποιεσ", "ποιο", "ποιοι", "ποιον", "ποιος", "ποιοσ", "ποιου", "ποιους", "ποιουσ", "ποιων", "πολυ", "ποσες", "ποση", "ποσην", "ποσης", "ποσοι", "ποσος", "ποσους", "ποτε", "που", "πουθε", "πουθενα", "ποῦ", "πρεπει", "πριν", "προ", "προκειμενου", "προκειται", "προπερσι", "προς", "προσ", "προτου", "προχθες", "προχτες", "πρωτυτερα", "πρόσ", "πρὸ", "πρὸς", "πως", "πωσ", "σαν", "σας", "σε", "σεις", "σημερα", "σιγα", "σου", "στα", "στη", "στην", "στης", "στις", "στο", "στον", "στου", "στους", "στων", "συγχρονως", "συν", "συναμα", "συνεπως", "συνηθως", "συχνα", "συχνας", "συχνες", "συχνη", "συχνην", "συχνης", "συχνο", "συχνοι", "συχνον", "συχνος", "συχνου", "συχνους", "συχνων", "συχνως", "σχε∆ον", "σωστα", "σόσ", "σύ", "σύν", "σὸς", "σὺ", "σὺν", "τά", "τήν", "τί", "τίς", "τίσ", "τα", "ταυτα", "ταυτες", "ταυτη", "ταυτην", "ταυτης", "ταυτο,ταυτον", "ταυτος", "ταυτου", "ταυτων", "ταχα", "ταχατε", "ταῖς", "τα∆ε", "τε", "τελικα", "τελικως", "τες", "τετοια", "τετοιαν", "τετοιας", "τετοιες", "τετοιο", "τετοιοι", "τετοιον", "τετοιος", "τετοιου", "τετοιους", "τετοιων", "τη", "την", "της", "τησ", "τι", "τινα", "τιποτα", "τιποτε", "τις", "τισ", "το", "τοί", "τοι", "τοιοῦτος", "τοιοῦτοσ", "τον", "τος", "τοσα", "τοσες", "τοση", "τοσην", "τοσης", "τοσο", "τοσοι", "τοσον", "τοσος", "τοσου", "τοσους", "τοσων", "τοτε", "του", "τουλαχιστο", "τουλαχιστον", "τους", "τουτα", "τουτες", "τουτη", "τουτην", "τουτης", "τουτο", "τουτοι", "τουτοις", "τουτον", "τουτος", "τουτου", "τουτους", "τουτων", "τούσ", "τοὺς", "τοῖς", "τοῦ", "τυχον", "των", "τωρα", "τό", "τόν", "τότε", "τὰ", "τὰς", "τὴν", "τὸ", "τὸν", "τῆς", "τῆσ", "τῇ", "τῶν", "τῷ", "υπ", "υπερ", "υπο", "υποψη", "υποψιν", "υπό", "υστερα", "φετος", "χαμηλα", "χθες", "χτες", "χωρις", "χωριστα", "ψηλα", "ω", "ωραια", "ως", "ωσ", "ωσαν", "ωσοτου", "ωσπου", "ωστε", "ωστοσο", "ωχ", "ἀλλ'", "ἀλλά", "ἀλλὰ", "ἀλλ’", "ἀπ", "ἀπό", "ἀπὸ", "ἀφ", "ἂν", "ἃ", "ἄλλος", "ἄλλοσ", "ἄν", "ἄρα", "ἅμα", "ἐάν", "ἐγώ", "ἐγὼ", "ἐκ", "ἐμόσ", "ἐμὸς", "ἐν", "ἐξ", "ἐπί", "ἐπεὶ", "ἐπὶ", "ἐστι", "ἐφ", "ἐὰν", "ἑαυτοῦ", "ἔτι", "ἡ", "ἢ", "ἣ", "ἤ", "ἥ", "ἧς", "ἵνα", "ὁ", "ὃ", "ὃν", "ὃς", "ὅ", "ὅδε", "ὅθεν", "ὅπερ", "ὅς", "ὅσ", "ὅστις", "ὅστισ", "ὅτε", "ὅτι", "ὑμόσ", "ὑπ", "ὑπέρ", "ὑπό", "ὑπὲρ", "ὑπὸ", "ὡς", "ὡσ", "ὥς", "ὥστε", "ὦ", "ᾧ", "∆α", "∆ε", "∆εινα", "∆εν", "∆εξια", "∆ηθεν", "∆ηλα∆η", "∆ι", "∆ια", "∆ιαρκως", "∆ικα", "∆ικο", "∆ικοι", "∆ικος", "∆ικου", "∆ικους", "∆ιολου", "∆ιπλα", "∆ιχως"],
+    gu: ["અંગે", "અંદર", "અથવા", "અને", "અમને", "અમારું", "અમે", "અહીં", "આ", "આગળ", "આથી", "આનું", "આને", "આપણને", "આપણું", "આપણે", "આપી", "આર", "આવી", "આવે", "ઉપર", "ઉભા", "ઊંચે", "ઊભું", "એ", "એક", "એન", "એના", "એનાં", "એની", "એનું", "એને", "એનો", "એમ", "એવા", "એવાં", "એવી", "એવું", "એવો", "ઓછું", "કંઈક", "કઈ", "કયું", "કયો", "કરતાં", "કરવું", "કરી", "કરીએ", "કરું", "કરે", "કરેલું", "કર્યા", "કર્યાં", "કર્યું", "કર્યો", "કાંઈ", "કે", "કેટલું", "કેમ", "કેવી", "કેવું", "કોઈ", "કોઈક", "કોણ", "કોણે", "કોને", "ક્યાં", "ક્યારે", "ખૂબ", "ગઈ", "ગયા", "ગયાં", "ગયું", "ગયો", "ઘણું", "છ", "છતાં", "છીએ", "છું", "છે", "છેક", "છો", "જ", "જાય", "જી", "જે", "જેટલું", "જેને", "જેમ", "જેવી", "જેવું", "જેવો", "જો", "જોઈએ", "જ્યાં", "જ્યારે", "ઝાઝું", "તને", "તમને", "તમારું", "તમે", "તા", "તારાથી", "તારામાં", "તારું", "તું", "તે", "તેં", "તેઓ", "તેણે", "તેથી", "તેના", "તેની", "તેનું", "તેને", "તેમ", "તેમનું", "તેમને", "તેવી", "તેવું", "તો", "ત્યાં", "ત્યારે", "થઇ", "થઈ", "થઈએ", "થતા", "થતાં", "થતી", "થતું", "થતો", "થયા", "થયાં", "થયું", "થયેલું", "થયો", "થવું", "થાઉં", "થાઓ", "થાય", "થી", "થોડું", "દરેક", "ન", "નં", "નં.", "નથી", "નહિ", "નહી", "નહીં", "ના", "ની", "નીચે", "નું", "ને", "નો", "પછી", "પણ", "પર", "પરંતુ", "પહેલાં", "પાછળ", "પાસે", "પોતાનું", "પ્રત્યેક", "ફક્ત", "ફરી", "ફરીથી", "બંને", "બધા", "બધું", "બની", "બહાર", "બહુ", "બાદ", "બે", "મને", "મા", "માં", "માટે", "માત્ર", "મારું", "મી", "મૂકવું", "મૂકી", "મૂક્યા", "મૂક્યાં", "મૂક્યું", "મેં", "રહી", "રહે", "રહેવું", "રહ્યા", "રહ્યાં", "રહ્યો", "રીતે", "રૂ.", "રૂા", "લેતા", "લેતું", "લેવા", "વગેરે", "વધુ", "શકે", "શા", "શું", "સરખું", "સામે", "સુધી", "હતા", "હતાં", "હતી", "હતું", "હવે", "હશે", "હશો", "હા", "હું", "હો", "હોઈ", "હોઈશ", "હોઈશું", "હોય", "હોવા"],
+    ha: ["a", "amma", "ba", "ban", "ce", "cikin", "da", "don", "ga", "in", "ina", "ita", "ji", "ka", "ko", "kuma", "lokacin", "ma", "mai", "na", "ne", "ni", "sai", "shi", "su", "suka", "sun", "ta", "tafi", "take", "tana", "wani", "wannan", "wata", "ya", "yake", "yana", "yi", "za"],
+    he: ["אבל", "או", "אולי", "אותה", "אותו", "אותי", "אותך", "אותם", "אותן", "אותנו", "אז", "אחר", "אחרות", "אחרי", "אחריכן", "אחרים", "אחרת", "אי", "איזה", "איך", "אין", "איפה", "איתה", "איתו", "איתי", "איתך", "איתכם", "איתכן", "איתם", "איתן", "איתנו", "אך", "אל", "אלה", "אלו", "אם", "אנחנו", "אני", "אס", "אף", "אצל", "אשר", "את", "אתה", "אתכם", "אתכן", "אתם", "אתן", "באיזומידה", "באמצע", "באמצעות", "בגלל", "בין", "בלי", "במידה", "במקוםשבו", "ברם", "בשביל", "בשעהש", "בתוך", "גם", "דרך", "הוא", "היא", "היה", "היכן", "היתה", "היתי", "הם", "הן", "הנה", "הסיבהשבגללה", "הרי", "ואילו", "ואת", "זאת", "זה", "זות", "יהיה", "יוכל", "יוכלו", "יותרמדי", "יכול", "יכולה", "יכולות", "יכולים", "יכל", "יכלה", "יכלו", "יש", "כאן", "כאשר", "כולם", "כולן", "כזה", "כי", "כיצד", "כך", "ככה", "כל", "כלל", "כמו", "כן", "כפי", "כש", "לא", "לאו", "לאיזותכלית", "לאן", "לבין", "לה", "להיות", "להם", "להן", "לו", "לי", "לכם", "לכן", "למה", "למטה", "למעלה", "למקוםשבו", "למרות", "לנו", "לעבר", "לעיכן", "לפיכך", "לפני", "מאד", "מאחורי", "מאיזוסיבה", "מאין", "מאיפה", "מבלי", "מבעד", "מדוע", "מה", "מהיכן", "מול", "מחוץ", "מי", "מכאן", "מכיוון", "מלבד", "מן", "מנין", "מסוגל", "מעט", "מעטים", "מעל", "מצד", "מקוםבו", "מתחת", "מתי", "נגד", "נגר", "נו", "עד", "עז", "על", "עלי", "עליה", "עליהם", "עליהן", "עליו", "עליך", "עליכם", "עלינו", "עם", "עצמה", "עצמהם", "עצמהן", "עצמו", "עצמי", "עצמם", "עצמן", "עצמנו", "פה", "רק", "שוב", "של", "שלה", "שלהם", "שלהן", "שלו", "שלי", "שלך", "שלכה", "שלכם", "שלכן", "שלנו", "שם", "תהיה", "תחת"],
+    hi: ["अंदर", "अत", "अदि", "अप", "अपना", "अपनि", "अपनी", "अपने", "अभि", "अभी", "आदि", "आप", "इंहिं", "इंहें", "इंहों", "इतयादि", "इत्यादि", "इन", "इनका", "इन्हीं", "इन्हें", "इन्हों", "इस", "इसका", "इसकि", "इसकी", "इसके", "इसमें", "इसि", "इसी", "इसे", "उंहिं", "उंहें", "उंहों", "उन", "उनका", "उनकि", "उनकी", "उनके", "उनको", "उन्हीं", "उन्हें", "उन्हों", "उस", "उसके", "उसि", "उसी", "उसे", "एक", "एवं", "एस", "एसे", "ऐसे", "ओर", "और", "कइ", "कई", "कर", "करता", "करते", "करना", "करने", "करें", "कहते", "कहा", "का", "काफि", "काफ़ी", "कि", "किंहें", "किंहों", "कितना", "किन्हें", "किन्हों", "किया", "किर", "किस", "किसि", "किसी", "किसे", "की", "कुछ", "कुल", "के", "को", "कोइ", "कोई", "कोन", "कोनसा", "कौन", "कौनसा", "गया", "घर", "जब", "जहाँ", "जहां", "जा", "जिंहें", "जिंहों", "जितना", "जिधर", "जिन", "जिन्हें", "जिन्हों", "जिस", "जिसे", "जीधर", "जेसा", "जेसे", "जैसा", "जैसे", "जो", "तक", "तब", "तरह", "तिंहें", "तिंहों", "तिन", "तिन्हें", "तिन्हों", "तिस", "तिसे", "तो", "था", "थि", "थी", "थे", "दबारा", "दवारा", "दिया", "दुसरा", "दुसरे", "दूसरे", "दो", "द्वारा", "न", "नहिं", "नहीं", "ना", "निचे", "निहायत", "नीचे", "ने", "पर", "पहले", "पुरा", "पूरा", "पे", "फिर", "बनि", "बनी", "बहि", "बही", "बहुत", "बाद", "बाला", "बिलकुल", "भि", "भितर", "भी", "भीतर", "मगर", "मानो", "मे", "में", "यदि", "यह", "यहाँ", "यहां", "यहि", "यही", "या", "यिह", "ये", "रखें", "रवासा", "रहा", "रहे", "ऱ्वासा", "लिए", "लिये", "लेकिन", "व", "वगेरह", "वरग", "वर्ग", "वह", "वहाँ", "वहां", "वहिं", "वहीं", "वाले", "वुह", "वे", "वग़ैरह", "संग", "सकता", "सकते", "सबसे", "सभि", "सभी", "साथ", "साबुत", "साभ", "सारा", "से", "सो", "हि", "ही", "हुअ", "हुआ", "हुइ", "हुई", "हुए", "हे", "हें", "है", "हैं", "हो", "होता", "होति", "होती", "होते", "होना", "होने"],
+    hu: ["a", "abba", "abban", "abból", "addig", "ahhoz", "ahogy", "ahol", "aki", "akik", "akkor", "akár", "alapján", "alatt", "alatta", "alattad", "alattam", "alattatok", "alattuk", "alattunk", "alá", "alád", "alájuk", "alám", "alánk", "alátok", "alól", "alóla", "alólad", "alólam", "alólatok", "alóluk", "alólunk", "amely", "amelybol", "amelyek", "amelyekben", "amelyeket", "amelyet", "amelyik", "amelynek", "ami", "amikor", "amit", "amolyan", "amott", "amíg", "annak", "annál", "arra", "arról", "attól", "az", "aznap", "azok", "azokat", "azokba", "azokban", "azokból", "azokhoz", "azokig", "azokkal", "azokká", "azoknak", "azoknál", "azokon", "azokra", "azokról", "azoktól", "azokért", "azon", "azonban", "azonnal", "azt", "aztán", "azután", "azzal", "azzá", "azért", "bal", "balra", "ban", "be", "belé", "beléd", "beléjük", "belém", "belénk", "belétek", "belül", "belőle", "belőled", "belőlem", "belőletek", "belőlük", "belőlünk", "ben", "benne", "benned", "bennem", "bennetek", "bennük", "bennünk", "bár", "bárcsak", "bármilyen", "búcsú", "cikk", "cikkek", "cikkeket", "csak", "csakhogy", "csupán", "de", "dehogy", "e", "ebbe", "ebben", "ebből", "eddig", "egy", "egyebek", "egyebet", "egyedül", "egyelőre", "egyes", "egyet", "egyetlen", "egyik", "egymás", "egyre", "egyszerre", "egyéb", "együtt", "egész", "egészen", "ehhez", "ekkor", "el", "eleinte", "ellen", "ellenes", "elleni", "ellenére", "elmondta", "elsõ", "első", "elsők", "elsősorban", "elsőt", "elé", "eléd", "elég", "eléjük", "elém", "elénk", "elétek", "elõ", "elõször", "elõtt", "elő", "előbb", "elől", "előle", "előled", "előlem", "előletek", "előlük", "előlünk", "először", "előtt", "előtte", "előtted", "előttem", "előttetek", "előttük", "előttünk", "előző", "emilyen", "engem", "ennek", "ennyi", "ennél", "enyém", "erre", "erről", "esetben", "ettől", "ez", "ezek", "ezekbe", "ezekben", "ezekből", "ezeken", "ezeket", "ezekhez", "ezekig", "ezekkel", "ezekké", "ezeknek", "ezeknél", "ezekre", "ezekről", "ezektől", "ezekért", "ezen", "ezentúl", "ezer", "ezret", "ezt", "ezután", "ezzel", "ezzé", "ezért", "fel", "fele", "felek", "felet", "felett", "felé", "fent", "fenti", "fél", "fölé", "gyakran", "ha", "halló", "hamar", "hanem", "harmadik", "harmadikat", "harminc", "hat", "hatodik", "hatodikat", "hatot", "hatvan", "helyett", "hetedik", "hetediket", "hetet", "hetven", "hirtelen", "hiszen", "hiába", "hogy", "hogyan", "hol", "holnap", "holnapot", "honnan", "hova", "hozzá", "hozzád", "hozzájuk", "hozzám", "hozzánk", "hozzátok", "hurrá", "huszadik", "hány", "hányszor", "hármat", "három", "hát", "hátha", "hátulsó", "hét", "húsz", "ide", "ide-оda", "idén", "igazán", "igen", "ill", "ill.", "illetve", "ilyen", "ilyenkor", "immár", "inkább", "is", "ismét", "ison", "itt", "jelenleg", "jobban", "jobbra", "jó", "jól", "jólesik", "jóval", "jövőre", "kell", "kellene", "kellett", "kelljen", "keressünk", "keresztül", "ketten", "kettő", "kettőt", "kevés", "ki", "kiben", "kiből", "kicsit", "kicsoda", "kihez", "kik", "kikbe", "kikben", "kikből", "kiken", "kiket", "kikhez", "kikkel", "kikké", "kiknek", "kiknél", "kikre", "kikről", "kiktől", "kikért", "kilenc", "kilencedik", "kilencediket", "kilencet", "kilencven", "kin", "kinek", "kinél", "kire", "kiről", "kit", "kitől", "kivel", "kivé", "kié", "kiért", "korábban", "képest", "kérem", "kérlek", "kész", "késő", "később", "későn", "két", "kétszer", "kívül", "körül", "köszönhetően", "köszönöm", "közben", "közel", "közepesen", "közepén", "közé", "között", "közül", "külön", "különben", "különböző", "különbözőbb", "különbözőek", "lassan", "le", "legalább", "legyen", "lehet", "lehetetlen", "lehetett", "lehetőleg", "lehetőség", "lenne", "lenni", "lennék", "lennének", "lesz", "leszek", "lesznek", "leszünk", "lett", "lettek", "lettem", "lettünk", "lévő", "ma", "maga", "magad", "magam", "magatokat", "magukat", "magunkat", "magát", "mai", "majd", "majdnem", "manapság", "meg", "megcsinál", "megcsinálnak", "megint", "megvan", "mellett", "mellette", "melletted", "mellettem", "mellettetek", "mellettük", "mellettünk", "mellé", "melléd", "melléjük", "mellém", "mellénk", "mellétek", "mellől", "mellőle", "mellőled", "mellőlem", "mellőletek", "mellőlük", "mellőlünk", "mely", "melyek", "melyik", "mennyi", "mert", "mi", "miatt", "miatta", "miattad", "miattam", "miattatok", "miattuk", "miattunk", "mibe", "miben", "miből", "mihez", "mik", "mikbe", "mikben", "mikből", "miken", "miket", "mikhez", "mikkel", "mikké", "miknek", "miknél", "mikor", "mikre", "mikről", "miktől", "mikért", "milyen", "min", "mind", "mindegyik", "mindegyiket", "minden", "mindenesetre", "mindenki", "mindent", "mindenütt", "mindig", "mindketten", "minek", "minket", "mint", "mintha", "minél", "mire", "miről", "mit", "mitől", "mivel", "mivé", "miért", "mondta", "most", "mostanáig", "már", "más", "másik", "másikat", "másnap", "második", "másodszor", "mások", "másokat", "mást", "még", "mégis", "míg", "mögé", "mögéd", "mögéjük", "mögém", "mögénk", "mögétek", "mögött", "mögötte", "mögötted", "mögöttem", "mögöttetek", "mögöttük", "mögöttünk", "mögül", "mögüle", "mögüled", "mögülem", "mögületek", "mögülük", "mögülünk", "múltkor", "múlva", "na", "nagy", "nagyobb", "nagyon", "naponta", "napot", "ne", "negyedik", "negyediket", "negyven", "neked", "nekem", "neki", "nekik", "nektek", "nekünk", "nem", "nemcsak", "nemrég", "nincs", "nyolc", "nyolcadik", "nyolcadikat", "nyolcat", "nyolcvan", "nála", "nálad", "nálam", "nálatok", "náluk", "nálunk", "négy", "négyet", "néha", "néhány", "nélkül", "o", "oda", "ok", "olyan", "onnan", "ott", "pedig", "persze", "pár", "például", "rajta", "rajtad", "rajtam", "rajtatok", "rajtuk", "rajtunk", "rendben", "rosszul", "rá", "rád", "rájuk", "rám", "ránk", "rátok", "régen", "régóta", "részére", "róla", "rólad", "rólam", "rólatok", "róluk", "rólunk", "rögtön", "s", "saját", "se", "sem", "semmi", "semmilyen", "semmiség", "senki", "soha", "sok", "sokan", "sokat", "sokkal", "sokszor", "sokáig", "során", "stb.", "szemben", "szerbusz", "szerint", "szerinte", "szerinted", "szerintem", "szerintetek", "szerintük", "szerintünk", "szervusz", "szinte", "számára", "száz", "századik", "százat", "szépen", "szét", "szíves", "szívesen", "szíveskedjék", "sőt", "talán", "tavaly", "te", "tegnap", "tegnapelőtt", "tehát", "tele", "teljes", "tessék", "ti", "tied", "titeket", "tizedik", "tizediket", "tizenegy", "tizenegyedik", "tizenhat", "tizenhárom", "tizenhét", "tizenkettedik", "tizenkettő", "tizenkilenc", "tizenkét", "tizennyolc", "tizennégy", "tizenöt", "tizet", "tovább", "további", "továbbá", "távol", "téged", "tényleg", "tíz", "több", "többi", "többször", "túl", "tőle", "tőled", "tőlem", "tőletek", "tőlük", "tőlünk", "ugyanakkor", "ugyanez", "ugyanis", "ugye", "urak", "uram", "urat", "utoljára", "utolsó", "után", "utána", "vagy", "vagyis", "vagyok", "vagytok", "vagyunk", "vajon", "valahol", "valaki", "valakit", "valamelyik", "valami", "valamint", "való", "van", "vannak", "vele", "veled", "velem", "veletek", "velük", "velünk", "vissza", "viszlát", "viszont", "viszontlátásra", "volna", "volnának", "volnék", "volt", "voltak", "voltam", "voltunk", "végre", "végén", "végül", "által", "általában", "ám", "át", "éljen", "én", "éppen", "érte", "érted", "értem", "értetek", "értük", "értünk", "és", "év", "évben", "éve", "évek", "éves", "évi", "évvel", "így", "óta", "õ", "õk", "õket", "ön", "önbe", "önben", "önből", "önhöz", "önnek", "önnel", "önnél", "önre", "önről", "önt", "öntől", "önért", "önök", "önökbe", "önökben", "önökből", "önöket", "önökhöz", "önökkel", "önöknek", "önöknél", "önökre", "önökről", "önöktől", "önökért", "önökön", "önön", "össze", "öt", "ötven", "ötödik", "ötödiket", "ötöt", "úgy", "úgyis", "úgynevezett", "új", "újabb", "újra", "úr", "ő", "ők", "őket", "őt"],
+    id: ["ada", "adalah", "adanya", "adapun", "agak", "agaknya", "agar", "akan", "akankah", "akhir", "akhiri", "akhirnya", "aku", "akulah", "amat", "amatlah", "anda", "andalah", "antar", "antara", "antaranya", "apa", "apaan", "apabila", "apakah", "apalagi", "apatah", "artinya", "asal", "asalkan", "atas", "atau", "ataukah", "ataupun", "awal", "awalnya", "bagai", "bagaikan", "bagaimana", "bagaimanakah", "bagaimanapun", "bagi", "bagian", "bahkan", "bahwa", "bahwasanya", "baik", "bakal", "bakalan", "balik", "banyak", "bapak", "baru", "bawah", "beberapa", "begini", "beginian", "beginikah", "beginilah", "begitu", "begitukah", "begitulah", "begitupun", "bekerja", "belakang", "belakangan", "belum", "belumlah", "benar", "benarkah", "benarlah", "berada", "berakhir", "berakhirlah", "berakhirnya", "berapa", "berapakah", "berapalah", "berapapun", "berarti", "berawal", "berbagai", "berdatangan", "beri", "berikan", "berikut", "berikutnya", "berjumlah", "berkali-kali", "berkata", "berkehendak", "berkeinginan", "berkenaan", "berlainan", "berlalu", "berlangsung", "berlebihan", "bermacam", "bermacam-macam", "bermaksud", "bermula", "bersama", "bersama-sama", "bersiap", "bersiap-siap", "bertanya", "bertanya-tanya", "berturut", "berturut-turut", "bertutur", "berujar", "berupa", "besar", "betul", "betulkah", "biasa", "biasanya", "bila", "bilakah", "bisa", "bisakah", "boleh", "bolehkah", "bolehlah", "buat", "bukan", "bukankah", "bukanlah", "bukannya", "bulan", "bung", "cara", "caranya", "cukup", "cukupkah", "cukuplah", "cuma", "dahulu", "dalam", "dan", "dapat", "dari", "daripada", "datang", "dekat", "demi", "demikian", "demikianlah", "dengan", "depan", "di", "dia", "diakhiri", "diakhirinya", "dialah", "diantara", "diantaranya", "diberi", "diberikan", "diberikannya", "dibuat", "dibuatnya", "didapat", "didatangkan", "digunakan", "diibaratkan", "diibaratkannya", "diingat", "diingatkan", "diinginkan", "dijawab", "dijelaskan", "dijelaskannya", "dikarenakan", "dikatakan", "dikatakannya", "dikerjakan", "diketahui", "diketahuinya", "dikira", "dilakukan", "dilalui", "dilihat", "dimaksud", "dimaksudkan", "dimaksudkannya", "dimaksudnya", "diminta", "dimintai", "dimisalkan", "dimulai", "dimulailah", "dimulainya", "dimungkinkan", "dini", "dipastikan", "diperbuat", "diperbuatnya", "dipergunakan", "diperkirakan", "diperlihatkan", "diperlukan", "diperlukannya", "dipersoalkan", "dipertanyakan", "dipunyai", "diri", "dirinya", "disampaikan", "disebut", "disebutkan", "disebutkannya", "disini", "disinilah", "ditambahkan", "ditandaskan", "ditanya", "ditanyai", "ditanyakan", "ditegaskan", "ditujukan", "ditunjuk", "ditunjuki", "ditunjukkan", "ditunjukkannya", "ditunjuknya", "dituturkan", "dituturkannya", "diucapkan", "diucapkannya", "diungkapkan", "dong", "dua", "dulu", "empat", "enggak", "enggaknya", "entah", "entahlah", "guna", "gunakan", "hal", "hampir", "hanya", "hanyalah", "hari", "harus", "haruslah", "harusnya", "hendak", "hendaklah", "hendaknya", "hingga", "ia", "ialah", "ibarat", "ibaratkan", "ibaratnya", "ibu", "ikut", "ingat", "ingat-ingat", "ingin", "inginkah", "inginkan", "ini", "inikah", "inilah", "itu", "itukah", "itulah", "jadi", "jadilah", "jadinya", "jangan", "jangankan", "janganlah", "jauh", "jawab", "jawaban", "jawabnya", "jelas", "jelaskan", "jelaslah", "jelasnya", "jika", "jikalau", "juga", "jumlah", "jumlahnya", "justru", "kala", "kalau", "kalaulah", "kalaupun", "kalian", "kami", "kamilah", "kamu", "kamulah", "kan", "kapan", "kapankah", "kapanpun", "karena", "karenanya", "kasus", "kata", "katakan", "katakanlah", "katanya", "ke", "keadaan", "kebetulan", "kecil", "kedua", "keduanya", "keinginan", "kelamaan", "kelihatan", "kelihatannya", "kelima", "keluar", "kembali", "kemudian", "kemungkinan", "kemungkinannya", "kenapa", "kepada", "kepadanya", "kesampaian", "keseluruhan", "keseluruhannya", "keterlaluan", "ketika", "khususnya", "kini", "kinilah", "kira", "kira-kira", "kiranya", "kita", "kitalah", "kok", "kurang", "lagi", "lagian", "lah", "lain", "lainnya", "lalu", "lama", "lamanya", "lanjut", "lanjutnya", "lebih", "lewat", "lima", "luar", "macam", "maka", "makanya", "makin", "malah", "malahan", "mampu", "mampukah", "mana", "manakala", "manalagi", "masa", "masalah", "masalahnya", "masih", "masihkah", "masing", "masing-masing", "mau", "maupun", "melainkan", "melakukan", "melalui", "melihat", "melihatnya", "memang", "memastikan", "memberi", "memberikan", "membuat", "memerlukan", "memihak", "meminta", "memintakan", "memisalkan", "memperbuat", "mempergunakan", "memperkirakan", "memperlihatkan", "mempersiapkan", "mempersoalkan", "mempertanyakan", "mempunyai", "memulai", "memungkinkan", "menaiki", "menambahkan", "menandaskan", "menanti", "menanti-nanti", "menantikan", "menanya", "menanyai", "menanyakan", "mendapat", "mendapatkan", "mendatang", "mendatangi", "mendatangkan", "menegaskan", "mengakhiri", "mengapa", "mengatakan", "mengatakannya", "mengenai", "mengerjakan", "mengetahui", "menggunakan", "menghendaki", "mengibaratkan", "mengibaratkannya", "mengingat", "mengingatkan", "menginginkan", "mengira", "mengucapkan", "mengucapkannya", "mengungkapkan", "menjadi", "menjawab", "menjelaskan", "menuju", "menunjuk", "menunjuki", "menunjukkan", "menunjuknya", "menurut", "menuturkan", "menyampaikan", "menyangkut", "menyatakan", "menyebutkan", "menyeluruh", "menyiapkan", "merasa", "mereka", "merekalah", "merupakan", "meski", "meskipun", "meyakini", "meyakinkan", "minta", "mirip", "misal", "misalkan", "misalnya", "mula", "mulai", "mulailah", "mulanya", "mungkin", "mungkinkah", "nah", "naik", "namun", "nanti", "nantinya", "nyaris", "nyatanya", "oleh", "olehnya", "pada", "padahal", "padanya", "pak", "paling", "panjang", "pantas", "para", "pasti", "pastilah", "penting", "pentingnya", "per", "percuma", "perlu", "perlukah", "perlunya", "pernah", "persoalan", "pertama", "pertama-tama", "pertanyaan", "pertanyakan", "pihak", "pihaknya", "pukul", "pula", "pun", "punya", "rasa", "rasanya", "rata", "rupanya", "saat", "saatnya", "saja", "sajalah", "saling", "sama", "sama-sama", "sambil", "sampai", "sampai-sampai", "sampaikan", "sana", "sangat", "sangatlah", "satu", "saya", "sayalah", "se", "sebab", "sebabnya", "sebagai", "sebagaimana", "sebagainya", "sebagian", "sebaik", "sebaik-baiknya", "sebaiknya", "sebaliknya", "sebanyak", "sebegini", "sebegitu", "sebelum", "sebelumnya", "sebenarnya", "seberapa", "sebesar", "sebetulnya", "sebisanya", "sebuah", "sebut", "sebutlah", "sebutnya", "secara", "secukupnya", "sedang", "sedangkan", "sedemikian", "sedikit", "sedikitnya", "seenaknya", "segala", "segalanya", "segera", "seharusnya", "sehingga", "seingat", "sejak", "sejauh", "sejenak", "sejumlah", "sekadar", "sekadarnya", "sekali", "sekali-kali", "sekalian", "sekaligus", "sekalipun", "sekarang", "sekecil", "seketika", "sekiranya", "sekitar", "sekitarnya", "sekurang-kurangnya", "sekurangnya", "sela", "selagi", "selain", "selaku", "selalu", "selama", "selama-lamanya", "selamanya", "selanjutnya", "seluruh", "seluruhnya", "semacam", "semakin", "semampu", "semampunya", "semasa", "semasih", "semata", "semata-mata", "semaunya", "sementara", "semisal", "semisalnya", "sempat", "semua", "semuanya", "semula", "sendiri", "sendirian", "sendirinya", "seolah", "seolah-olah", "seorang", "sepanjang", "sepantasnya", "sepantasnyalah", "seperlunya", "seperti", "sepertinya", "sepihak", "sering", "seringnya", "serta", "serupa", "sesaat", "sesama", "sesampai", "sesegera", "sesekali", "seseorang", "sesuatu", "sesuatunya", "sesudah", "sesudahnya", "setelah", "setempat", "setengah", "seterusnya", "setiap", "setiba", "setibanya", "setidak-tidaknya", "setidaknya", "setinggi", "seusai", "sewaktu", "siap", "siapa", "siapakah", "siapapun", "sini", "sinilah", "soal", "soalnya", "suatu", "sudah", "sudahkah", "sudahlah", "supaya", "tadi", "tadinya", "tahu", "tahun", "tak", "tambah", "tambahnya", "tampak", "tampaknya", "tandas", "tandasnya", "tanpa", "tanya", "tanyakan", "tanyanya", "tapi", "tegas", "tegasnya", "telah", "tempat", "tengah", "tentang", "tentu", "tentulah", "tentunya", "tepat", "terakhir", "terasa", "terbanyak", "terdahulu", "terdapat", "terdiri", "terhadap", "terhadapnya", "teringat", "teringat-ingat", "terjadi", "terjadilah", "terjadinya", "terkira", "terlalu", "terlebih", "terlihat", "termasuk", "ternyata", "tersampaikan", "tersebut", "tersebutlah", "tertentu", "tertuju", "terus", "terutama", "tetap", "tetapi", "tiap", "tiba", "tiba-tiba", "tidak", "tidakkah", "tidaklah", "tiga", "tinggi", "toh", "tunjuk", "turut", "tutur", "tuturnya", "ucap", "ucapnya", "ujar", "ujarnya", "umum", "umumnya", "ungkap", "ungkapnya", "untuk", "usah", "usai", "waduh", "wah", "wahai", "waktu", "waktunya", "walau", "walaupun", "wong", "yaitu", "yakin", "yakni", "yang"],
+    ga: ["a", "ach", "ag", "agus", "an", "aon", "ar", "arna", "as", "b'", "ba", "beirt", "bhúr", "caoga", "ceathair", "ceathrar", "chomh", "chtó", "chuig", "chun", "cois", "céad", "cúig", "cúigear", "d'", "daichead", "dar", "de", "deich", "deichniúr", "den", "dhá", "do", "don", "dtí", "dá", "dár", "dó", "faoi", "faoin", "faoina", "faoinár", "fara", "fiche", "gach", "gan", "go", "gur", "haon", "hocht", "i", "iad", "idir", "in", "ina", "ins", "inár", "is", "le", "leis", "lena", "lenár", "m'", "mar", "mo", "mé", "na", "nach", "naoi", "naonúr", "ná", "ní", "níor", "nó", "nócha", "ocht", "ochtar", "os", "roimh", "sa", "seacht", "seachtar", "seachtó", "seasca", "seisear", "siad", "sibh", "sinn", "sna", "sé", "sí", "tar", "thar", "thú", "triúr", "trí", "trína", "trínár", "tríocha", "tú", "um", "ár", "é", "éis", "í", "ó", "ón", "óna", "ónár"],
+    it: ["a", "abbastanza", "abbia", "abbiamo", "abbiano", "abbiate", "accidenti", "ad", "adesso", "affinché", "agl", "agli", "ahime", "ahimè", "ai", "al", "alcuna", "alcuni", "alcuno", "all", "alla", "alle", "allo", "allora", "altre", "altri", "altrimenti", "altro", "altrove", "altrui", "anche", "ancora", "anni", "anno", "ansa", "anticipo", "assai", "attesa", "attraverso", "avanti", "avemmo", "avendo", "avente", "aver", "avere", "averlo", "avesse", "avessero", "avessi", "avessimo", "aveste", "avesti", "avete", "aveva", "avevamo", "avevano", "avevate", "avevi", "avevo", "avrai", "avranno", "avrebbe", "avrebbero", "avrei", "avremmo", "avremo", "avreste", "avresti", "avrete", "avrà", "avrò", "avuta", "avute", "avuti", "avuto", "basta", "ben", "bene", "benissimo", "brava", "bravo", "buono", "c", "caso", "cento", "certa", "certe", "certi", "certo", "che", "chi", "chicchessia", "chiunque", "ci", "ciascuna", "ciascuno", "cima", "cinque", "cio", "cioe", "cioè", "circa", "citta", "città", "ciò", "co", "codesta", "codesti", "codesto", "cogli", "coi", "col", "colei", "coll", "coloro", "colui", "come", "cominci", "comprare", "comunque", "con", "concernente", "conclusione", "consecutivi", "consecutivo", "consiglio", "contro", "cortesia", "cos", "cosa", "cosi", "così", "cui", "d", "da", "dagl", "dagli", "dai", "dal", "dall", "dalla", "dalle", "dallo", "dappertutto", "davanti", "degl", "degli", "dei", "del", "dell", "della", "delle", "dello", "dentro", "detto", "deve", "devo", "di", "dice", "dietro", "dire", "dirimpetto", "diventa", "diventare", "diventato", "dopo", "doppio", "dov", "dove", "dovra", "dovrà", "dovunque", "due", "dunque", "durante", "e", "ebbe", "ebbero", "ebbi", "ecc", "ecco", "ed", "effettivamente", "egli", "ella", "entrambi", "eppure", "era", "erano", "eravamo", "eravate", "eri", "ero", "esempio", "esse", "essendo", "esser", "essere", "essi", "ex", "fa", "faccia", "facciamo", "facciano", "facciate", "faccio", "facemmo", "facendo", "facesse", "facessero", "facessi", "facessimo", "faceste", "facesti", "faceva", "facevamo", "facevano", "facevate", "facevi", "facevo", "fai", "fanno", "farai", "faranno", "fare", "farebbe", "farebbero", "farei", "faremmo", "faremo", "fareste", "faresti", "farete", "farà", "farò", "fatto", "favore", "fece", "fecero", "feci", "fin", "finalmente", "finche", "fine", "fino", "forse", "forza", "fosse", "fossero", "fossi", "fossimo", "foste", "fosti", "fra", "frattempo", "fu", "fui", "fummo", "fuori", "furono", "futuro", "generale", "gente", "gia", "giacche", "giorni", "giorno", "giu", "già", "gli", "gliela", "gliele", "glieli", "glielo", "gliene", "grande", "grazie", "gruppo", "ha", "haha", "hai", "hanno", "ho", "i", "ie", "ieri", "il", "improvviso", "in", "inc", "indietro", "infatti", "inoltre", "insieme", "intanto", "intorno", "invece", "io", "l", "la", "lasciato", "lato", "le", "lei", "li", "lo", "lontano", "loro", "lui", "lungo", "luogo", "là", "ma", "macche", "magari", "maggior", "mai", "male", "malgrado", "malissimo", "me", "medesimo", "mediante", "meglio", "meno", "mentre", "mesi", "mezzo", "mi", "mia", "mie", "miei", "mila", "miliardi", "milioni", "minimi", "mio", "modo", "molta", "molti", "moltissimo", "molto", "momento", "mondo", "ne", "negl", "negli", "nei", "nel", "nell", "nella", "nelle", "nello", "nemmeno", "neppure", "nessun", "nessuna", "nessuno", "niente", "no", "noi", "nome", "non", "nondimeno", "nonostante", "nonsia", "nostra", "nostre", "nostri", "nostro", "novanta", "nove", "nulla", "nuovi", "nuovo", "o", "od", "oggi", "ogni", "ognuna", "ognuno", "oltre", "oppure", "ora", "ore", "osi", "ossia", "ottanta", "otto", "paese", "parecchi", "parecchie", "parecchio", "parte", "partendo", "peccato", "peggio", "per", "perche", "perchè", "perché", "percio", "perciò", "perfino", "pero", "persino", "persone", "però", "piedi", "pieno", "piglia", "piu", "piuttosto", "più", "po", "pochissimo", "poco", "poi", "poiche", "possa", "possedere", "posteriore", "posto", "potrebbe", "preferibilmente", "presa", "press", "prima", "primo", "principalmente", "probabilmente", "promesso", "proprio", "puo", "pure", "purtroppo", "può", "qua", "qualche", "qualcosa", "qualcuna", "qualcuno", "quale", "quali", "qualunque", "quando", "quanta", "quante", "quanti", "quanto", "quantunque", "quarto", "quasi", "quattro", "quel", "quella", "quelle", "quelli", "quello", "quest", "questa", "queste", "questi", "questo", "qui", "quindi", "quinto", "realmente", "recente", "recentemente", "registrazione", "relativo", "riecco", "rispetto", "salvo", "sara", "sarai", "saranno", "sarebbe", "sarebbero", "sarei", "saremmo", "saremo", "sareste", "saresti", "sarete", "sarà", "sarò", "scola", "scopo", "scorso", "se", "secondo", "seguente", "seguito", "sei", "sembra", "sembrare", "sembrato", "sembrava", "sembri", "sempre", "senza", "sette", "si", "sia", "siamo", "siano", "siate", "siete", "sig", "solito", "solo", "soltanto", "sono", "sopra", "soprattutto", "sotto", "spesso", "sta", "stai", "stando", "stanno", "starai", "staranno", "starebbe", "starebbero", "starei", "staremmo", "staremo", "stareste", "staresti", "starete", "starà", "starò", "stata", "state", "stati", "stato", "stava", "stavamo", "stavano", "stavate", "stavi", "stavo", "stemmo", "stessa", "stesse", "stessero", "stessi", "stessimo", "stesso", "steste", "stesti", "stette", "stettero", "stetti", "stia", "stiamo", "stiano", "stiate", "sto", "su", "sua", "subito", "successivamente", "successivo", "sue", "sugl", "sugli", "sui", "sul", "sull", "sulla", "sulle", "sullo", "suo", "suoi", "tale", "tali", "talvolta", "tanto", "te", "tempo", "terzo", "th", "ti", "titolo", "tra", "tranne", "tre", "trenta", "triplo", "troppo", "trovato", "tu", "tua", "tue", "tuo", "tuoi", "tutta", "tuttavia", "tutte", "tutti", "tutto", "uguali", "ulteriore", "ultimo", "un", "una", "uno", "uomo", "va", "vai", "vale", "vari", "varia", "varie", "vario", "verso", "vi", "vicino", "visto", "vita", "voi", "volta", "volte", "vostra", "vostre", "vostri", "vostro", "è"],
+    ja: ["あそこ", "あっ", "あの", "あのかた", "あの人", "あり", "あります", "ある", "あれ", "い", "いう", "います", "いる", "う", "うち", "え", "お", "および", "おり", "おります", "か", "かつて", "から", "が", "き", "ここ", "こちら", "こと", "この", "これ", "これら", "さ", "さらに", "し", "しかし", "する", "ず", "せ", "せる", "そこ", "そして", "その", "その他", "その後", "それ", "それぞれ", "それで", "た", "ただし", "たち", "ため", "たり", "だ", "だっ", "だれ", "つ", "て", "で", "でき", "できる", "です", "では", "でも", "と", "という", "といった", "とき", "ところ", "として", "とともに", "とも", "と共に", "どこ", "どの", "な", "ない", "なお", "なかっ", "ながら", "なく", "なっ", "など", "なに", "なら", "なり", "なる", "なん", "に", "において", "における", "について", "にて", "によって", "により", "による", "に対して", "に対する", "に関する", "の", "ので", "のみ", "は", "ば", "へ", "ほか", "ほとんど", "ほど", "ます", "また", "または", "まで", "も", "もの", "ものの", "や", "よう", "より", "ら", "られ", "られる", "れ", "れる", "を", "ん", "何", "及び", "彼", "彼女", "我々", "特に", "私", "私達", "貴方", "貴方方"],
+    ko: ["!", '"', "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "...", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ";", "<", "=", ">", "?", "@", "\\", "^", "_", "`", "|", "~", "·", "—", "——", "‘", "’", "“", "”", "…", "、", "。", "〈", "〉", "《", "》", "가", "가까스로", "가령", "각", "각각", "각자", "각종", "갖고말하자면", "같다", "같이", "개의치않고", "거니와", "거바", "거의", "것", "것과 같이", "것들", "게다가", "게우다", "겨우", "견지에서", "결과에 이르다", "결국", "결론을 낼 수 있다", "겸사겸사", "고려하면", "고로", "곧", "공동으로", "과", "과연", "관계가 있다", "관계없이", "관련이 있다", "관하여", "관한", "관해서는", "구", "구체적으로", "구토하다", "그", "그들", "그때", "그래", "그래도", "그래서", "그러나", "그러니", "그러니까", "그러면", "그러므로", "그러한즉", "그런 까닭에", "그런데", "그런즉", "그럼", "그럼에도 불구하고", "그렇게 함으로써", "그렇지", "그렇지 않다면", "그렇지 않으면", "그렇지만", "그렇지않으면", "그리고", "그리하여", "그만이다", "그에 따르는", "그위에", "그저", "그중에서", "그치지 않다", "근거로", "근거하여", "기대여", "기점으로", "기준으로", "기타", "까닭으로", "까악", "까지", "까지 미치다", "까지도", "꽈당", "끙끙", "끼익", "나", "나머지는", "남들", "남짓", "너", "너희", "너희들", "네", "넷", "년", "논하지 않다", "놀라다", "누가 알겠는가", "누구", "다른", "다른 방면으로", "다만", "다섯", "다소", "다수", "다시 말하자면", "다시말하면", "다음", "다음에", "다음으로", "단지", "답다", "당신", "당장", "대로 하다", "대하면", "대하여", "대해 말하자면", "대해서", "댕그", "더구나", "더군다나", "더라도", "더불어", "더욱더", "더욱이는", "도달하다", "도착하다", "동시에", "동안", "된바에야", "된이상", "두번째로", "둘", "둥둥", "뒤따라", "뒤이어", "든간에", "들", "등", "등등", "딩동", "따라", "따라서", "따위", "따지지 않다", "딱", "때", "때가 되어", "때문에", "또", "또한", "뚝뚝", "라 해도", "령", "로", "로 인하여", "로부터", "로써", "륙", "를", "마음대로", "마저", "마저도", "마치", "막론하고", "만 못하다", "만약", "만약에", "만은 아니다", "만이 아니다", "만일", "만큼", "말하자면", "말할것도 없고", "매", "매번", "메쓰겁다", "몇", "모", "모두", "무렵", "무릎쓰고", "무슨", "무엇", "무엇때문에", "물론", "및", "바꾸어말하면", "바꾸어말하자면", "바꾸어서 말하면", "바꾸어서 한다면", "바꿔 말하면", "바로", "바와같이", "밖에 안된다", "반대로", "반대로 말하자면", "반드시", "버금", "보는데서", "보다더", "보드득", "본대로", "봐", "봐라", "부류의 사람들", "부터", "불구하고", "불문하고", "붕붕", "비걱거리다", "비교적", "비길수 없다", "비로소", "비록", "비슷하다", "비추어 보아", "비하면", "뿐만 아니라", "뿐만아니라", "뿐이다", "삐걱", "삐걱거리다", "사", "삼", "상대적으로 말하자면", "생각한대로", "설령", "설마", "설사", "셋", "소생", "소인", "솨", "쉿", "습니까", "습니다", "시각", "시간", "시작하여", "시초에", "시키다", "실로", "심지어", "아", "아니", "아니나다를가", "아니라면", "아니면", "아니었다면", "아래윗", "아무거나", "아무도", "아야", "아울러", "아이", "아이고", "아이구", "아이야", "아이쿠", "아하", "아홉", "안 그러면", "않기 위하여", "않기 위해서", "알 수 있다", "알았어", "앗", "앞에서", "앞의것", "야", "약간", "양자", "어", "어기여차", "어느", "어느 년도", "어느것", "어느곳", "어느때", "어느쪽", "어느해", "어디", "어때", "어떠한", "어떤", "어떤것", "어떤것들", "어떻게", "어떻해", "어이", "어째서", "어쨋든", "어쩔수 없다", "어찌", "어찌됏든", "어찌됏어", "어찌하든지", "어찌하여", "언제", "언젠가", "얼마", "얼마 안 되는 것", "얼마간", "얼마나", "얼마든지", "얼마만큼", "얼마큼", "엉엉", "에", "에 가서", "에 달려 있다", "에 대해", "에 있다", "에 한하다", "에게", "에서", "여", "여기", "여덟", "여러분", "여보시오", "여부", "여섯", "여전히", "여차", "연관되다", "연이서", "영", "영차", "옆사람", "예", "예를 들면", "예를 들자면", "예컨대", "예하면", "오", "오로지", "오르다", "오자마자", "오직", "오호", "오히려", "와", "와 같은 사람들", "와르르", "와아", "왜", "왜냐하면", "외에도", "요만큼", "요만한 것", "요만한걸", "요컨대", "우르르", "우리", "우리들", "우선", "우에 종합한것과같이", "운운", "월", "위에서 서술한바와같이", "위하여", "위해서", "윙윙", "육", "으로", "으로 인하여", "으로서", "으로써", "을", "응", "응당", "의", "의거하여", "의지하여", "의해", "의해되다", "의해서", "이", "이 되다", "이 때문에", "이 밖에", "이 외에", "이 정도의", "이것", "이곳", "이때", "이라면", "이래", "이러이러하다", "이러한", "이런", "이럴정도로", "이렇게 많은 것", "이렇게되면", "이렇게말하자면", "이렇구나", "이로 인하여", "이르기까지", "이리하여", "이만큼", "이번", "이봐", "이상", "이어서", "이었다", "이와 같다", "이와 같은", "이와 반대로", "이와같다면", "이외에도", "이용하여", "이유만으로", "이젠", "이지만", "이쪽", "이천구", "이천육", "이천칠", "이천팔", "인 듯하다", "인젠", "일", "일것이다", "일곱", "일단", "일때", "일반적으로", "일지라도", "임에 틀림없다", "입각하여", "입장에서", "잇따라", "있다", "자", "자기", "자기집", "자마자", "자신", "잠깐", "잠시", "저", "저것", "저것만큼", "저기", "저쪽", "저희", "전부", "전자", "전후", "점에서 보아", "정도에 이르다", "제", "제각기", "제외하고", "조금", "조차", "조차도", "졸졸", "좀", "좋아", "좍좍", "주룩주룩", "주저하지 않고", "줄은 몰랏다", "줄은모른다", "중에서", "중의하나", "즈음하여", "즉", "즉시", "지든지", "지만", "지말고", "진짜로", "쪽으로", "차라리", "참", "참나", "첫번째로", "쳇", "총적으로", "총적으로 말하면", "총적으로 보면", "칠", "콸콸", "쾅쾅", "쿵", "타다", "타인", "탕탕", "토하다", "통하여", "툭", "퉤", "틈타", "팍", "팔", "퍽", "펄렁", "하", "하게될것이다", "하게하다", "하겠는가", "하고 있다", "하고있었다", "하곤하였다", "하구나", "하기 때문에", "하기 위하여", "하기는한데", "하기만 하면", "하기보다는", "하기에", "하나", "하느니", "하는 김에", "하는 편이 낫다", "하는것도", "하는것만 못하다", "하는것이 낫다", "하는바", "하더라도", "하도다", "하도록시키다", "하도록하다", "하든지", "하려고하다", "하마터면", "하면 할수록", "하면된다", "하면서", "하물며", "하여금", "하여야", "하자마자", "하지 않는다면", "하지 않도록", "하지마", "하지마라", "하지만", "하하", "한 까닭에", "한 이유는", "한 후", "한다면", "한다면 몰라도", "한데", "한마디", "한적이있다", "한켠으로는", "한항목", "할 따름이다", "할 생각이다", "할 줄 안다", "할 지경이다", "할 힘이 있다", "할때", "할만하다", "할망정", "할뿐", "할수있다", "할수있어", "할줄알다", "할지라도", "할지언정", "함께", "해도된다", "해도좋다", "해봐요", "해서는 안된다", "해야한다", "해요", "했어요", "향하다", "향하여", "향해서", "허", "허걱", "허허", "헉", "헉헉", "헐떡헐떡", "형식으로 쓰여", "혹시", "혹은", "혼자", "훨씬", "휘익", "휴", "흐흐", "흥", "힘입어", "︿", "！", "＃", "＄", "％", "＆", "（", "）", "＊", "＋", "，", "０", "１", "２", "３", "４", "５", "６", "７", "８", "９", "：", "；", "＜", "＞", "？", "＠", "［", "］", "｛", "｜", "｝", "～", "￥"],
+    ku: ["ئێمە", "ئێوە", "ئەم", "ئەو", "ئەوان", "ئەوەی", "بۆ", "بێ", "بێجگە", "بە", "بەبێ", "بەدەم", "بەردەم", "بەرلە", "بەرەوی", "بەرەوە", "بەلای", "بەپێی", "تۆ", "تێ", "جگە", "دوای", "دوو", "دە", "دەکات", "دەگەڵ", "سەر", "لێ", "لە", "لەبابەت", "لەباتی", "لەبارەی", "لەبرێتی", "لەبن", "لەبەر", "لەبەینی", "لەدەم", "لەرێ", "لەرێگا", "لەرەوی", "لەسەر", "لەلایەن", "لەناو", "لەنێو", "لەو", "لەپێناوی", "لەژێر", "لەگەڵ", "من", "ناو", "نێوان", "هەر", "هەروەها", "و", "وەک", "پاش", "پێ", "پێش", "چەند", "کرد", "کە", "ی"],
+    la: ["a", "ab", "ac", "ad", "at", "atque", "aut", "autem", "cum", "de", "dum", "e", "erant", "erat", "est", "et", "etiam", "ex", "haec", "hic", "hoc", "in", "ita", "me", "nec", "neque", "non", "per", "qua", "quae", "quam", "qui", "quibus", "quidem", "quo", "quod", "re", "rebus", "rem", "res", "sed", "si", "sic", "sunt", "tamen", "tandem", "te", "ut", "vel"],
+    lt: ["abi", "abidvi", "abiejose", "abiejuose", "abiejø", "abiem", "abigaliai", "abipus", "abu", "abudu", "ai", "ana", "anaiptol", "anaisiais", "anajai", "anajam", "anajame", "anapus", "anas", "anasai", "anasis", "anei", "aniedvi", "anieji", "aniesiems", "anoji", "anojo", "anojoje", "anokia", "anoks", "anosiomis", "anosioms", "anosios", "anosiose", "anot", "ant", "antai", "anuodu", "anuoju", "anuosiuose", "anuosius", "anàja", "anàjà", "anàjá", "anàsias", "anøjø", "apie", "aplink", "ar", "arba", "argi", "arti", "aukðèiau", "að", "be", "bei", "beje", "bemaþ", "bent", "bet", "betgi", "beveik", "dar", "dargi", "daugmaþ", "deja", "dëka", "dël", "dëlei", "dëlto", "ech", "et", "gal", "galbût", "galgi", "gan", "gana", "gi", "greta", "idant", "iki", "ir", "irgi", "it", "itin", "ið", "iðilgai", "iðvis", "jaisiais", "jajai", "jajam", "jajame", "jei", "jeigu", "ji", "jiedu", "jiedvi", "jieji", "jiesiems", "jinai", "jis", "jisai", "jog", "joji", "jojo", "jojoje", "jokia", "joks", "josiomis", "josioms", "josios", "josiose", "judu", "judvi", "juk", "jumis", "jums", "jumyse", "juodu", "juoju", "juosiuose", "juosius", "jus", "jàja", "jàjà", "jàsias", "jájá", "jøjø", "jûs", "jûsiðkis", "jûsiðkë", "jûsø", "kad", "kada", "kadangi", "kai", "kaip", "kaipgi", "kas", "katra", "katras", "katriedvi", "katruodu", "kaþin", "kaþkas", "kaþkatra", "kaþkatras", "kaþkokia", "kaþkoks", "kaþkuri", "kaþkuris", "kiaurai", "kiek", "kiekvienas", "kieno", "kita", "kitas", "kitokia", "kitoks", "kodël", "kokia", "koks", "kol", "kolei", "kone", "kuomet", "kur", "kurgi", "kuri", "kuriedvi", "kuris", "kuriuodu", "lai", "lig", "ligi", "link", "lyg", "man", "manaisiais", "manajai", "manajam", "manajame", "manas", "manasai", "manasis", "mane", "manieji", "maniesiems", "manim", "manimi", "maniðkis", "maniðkë", "mano", "manoji", "manojo", "manojoje", "manosiomis", "manosioms", "manosios", "manosiose", "manuoju", "manuosiuose", "manuosius", "manyje", "manàja", "manàjà", "manàjá", "manàsias", "manæs", "manøjø", "mat", "maþdaug", "maþne", "mes", "mudu", "mudvi", "mumis", "mums", "mumyse", "mus", "mûsiðkis", "mûsiðkë", "mûsø", "na", "nagi", "ne", "nebe", "nebent", "negi", "negu", "nei", "nejau", "nejaugi", "nekaip", "nelyginant", "nes", "net", "netgi", "netoli", "neva", "nors", "nuo", "në", "o", "ogi", "oi", "paeiliui", "pagal", "pakeliui", "palaipsniui", "palei", "pas", "pasak", "paskos", "paskui", "paskum", "pat", "pati", "patiems", "paties", "pats", "patys", "patá", "paèiais", "paèiam", "paèiame", "paèiu", "paèiuose", "paèius", "paèiø", "per", "pernelyg", "pirm", "pirma", "pirmiau", "po", "prie", "prieð", "prieðais", "pro", "pusiau", "rasi", "rodos", "sau", "savaisiais", "savajai", "savajam", "savajame", "savas", "savasai", "savasis", "save", "savieji", "saviesiems", "savimi", "saviðkis", "saviðkë", "savo", "savoji", "savojo", "savojoje", "savosiomis", "savosioms", "savosios", "savosiose", "savuoju", "savuosiuose", "savuosius", "savyje", "savàja", "savàjà", "savàjá", "savàsias", "savæs", "savøjø", "skersai", "skradþiai", "staèiai", "su", "sulig", "ta", "tad", "tai", "taigi", "taip", "taipogi", "taisiais", "tajai", "tajam", "tajame", "tamsta", "tarp", "tarsi", "tartum", "tarytum", "tas", "tasai", "tau", "tavaisiais", "tavajai", "tavajam", "tavajame", "tavas", "tavasai", "tavasis", "tave", "tavieji", "taviesiems", "tavimi", "taviðkis", "taviðkë", "tavo", "tavoji", "tavojo", "tavojoje", "tavosiomis", "tavosioms", "tavosios", "tavosiose", "tavuoju", "tavuosiuose", "tavuosius", "tavyje", "tavàja", "tavàjà", "tavàjá", "tavàsias", "tavæs", "tavøjø", "taèiau", "te", "tegu", "tegul", "tiedvi", "tieji", "ties", "tiesiems", "tiesiog", "tik", "tikriausiai", "tiktai", "toji", "tojo", "tojoje", "tokia", "toks", "tol", "tolei", "toliau", "tosiomis", "tosioms", "tosios", "tosiose", "tu", "tuodu", "tuoju", "tuosiuose", "tuosius", "turbût", "tàja", "tàjà", "tàjá", "tàsias", "tøjø", "tûlas", "uþ", "uþtat", "uþvis", "va", "vai", "viduj", "vidury", "vien", "vienas", "vienokia", "vienoks", "vietoj", "virð", "virðuj", "virðum", "vis", "vis dëlto", "visa", "visas", "visgi", "visokia", "visoks", "vos", "vël", "vëlgi", "ypaè", "á", "ákypai", "ástriþai", "ðalia", "ðe", "ði", "ðiaisiais", "ðiajai", "ðiajam", "ðiajame", "ðiapus", "ðiedvi", "ðieji", "ðiesiems", "ðioji", "ðiojo", "ðiojoje", "ðiokia", "ðioks", "ðiosiomis", "ðiosioms", "ðiosios", "ðiosiose", "ðis", "ðisai", "ðit", "ðita", "ðitas", "ðitiedvi", "ðitokia", "ðitoks", "ðituodu", "ðiuodu", "ðiuoju", "ðiuosiuose", "ðiuosius", "ðiàja", "ðiàjà", "ðiàsias", "ðiøjø", "ðtai", "ðájá", "þemiau"],
+    lv: ["aiz", "ap", "apakš", "apakšpus", "ar", "arī", "augšpus", "bet", "bez", "bija", "biji", "biju", "bijām", "bijāt", "būs", "būsi", "būsiet", "būsim", "būt", "būšu", "caur", "diemžēl", "diezin", "droši", "dēļ", "esam", "esat", "esi", "esmu", "gan", "gar", "iekam", "iekams", "iekām", "iekāms", "iekš", "iekšpus", "ik", "ir", "it", "itin", "iz", "ja", "jau", "jeb", "jebšu", "jel", "jo", "jā", "ka", "kamēr", "kaut", "kolīdz", "kopš", "kā", "kļuva", "kļuvi", "kļuvu", "kļuvām", "kļuvāt", "kļūs", "kļūsi", "kļūsiet", "kļūsim", "kļūst", "kļūstam", "kļūstat", "kļūsti", "kļūstu", "kļūt", "kļūšu", "labad", "lai", "lejpus", "līdz", "līdzko", "ne", "nebūt", "nedz", "nekā", "nevis", "nezin", "no", "nu", "nē", "otrpus", "pa", "par", "pat", "pie", "pirms", "pret", "priekš", "pār", "pēc", "starp", "tad", "tak", "tapi", "taps", "tapsi", "tapsiet", "tapsim", "tapt", "tapāt", "tapšu", "taču", "te", "tiec", "tiek", "tiekam", "tiekat", "tieku", "tik", "tika", "tikai", "tiki", "tikko", "tiklab", "tiklīdz", "tiks", "tiksiet", "tiksim", "tikt", "tiku", "tikvien", "tikām", "tikāt", "tikšu", "tomēr", "topat", "turpretim", "turpretī", "tā", "tādēļ", "tālab", "tāpēc", "un", "uz", "vai", "var", "varat", "varēja", "varēji", "varēju", "varējām", "varējāt", "varēs", "varēsi", "varēsiet", "varēsim", "varēt", "varēšu", "vien", "virs", "virspus", "vis", "viņpus", "zem", "ārpus", "šaipus"],
+    ms: ["abdul", "abdullah", "acara", "ada", "adalah", "ahmad", "air", "akan", "akhbar", "akhir", "aktiviti", "alam", "amat", "amerika", "anak", "anggota", "antara", "antarabangsa", "apa", "apabila", "april", "as", "asas", "asean", "asia", "asing", "atas", "atau", "australia", "awal", "awam", "bagaimanapun", "bagi", "bahagian", "bahan", "baharu", "bahawa", "baik", "bandar", "bank", "banyak", "barangan", "baru", "baru-baru", "bawah", "beberapa", "bekas", "beliau", "belum", "berada", "berakhir", "berbanding", "berdasarkan", "berharap", "berikutan", "berjaya", "berjumlah", "berkaitan", "berkata", "berkenaan", "berlaku", "bermula", "bernama", "bernilai", "bersama", "berubah", "besar", "bhd", "bidang", "bilion", "bn", "boleh", "bukan", "bulan", "bursa", "cadangan", "china", "dagangan", "dalam", "dan", "dana", "dapat", "dari", "daripada", "dasar", "datang", "datuk", "demikian", "dengan", "depan", "derivatives", "dewan", "di", "diadakan", "dibuka", "dicatatkan", "dijangka", "diniagakan", "dis", "disember", "ditutup", "dolar", "dr", "dua", "dunia", "ekonomi", "eksekutif", "eksport", "empat", "enam", "faedah", "feb", "global", "hadapan", "hanya", "harga", "hari", "hasil", "hingga", "hubungan", "ia", "iaitu", "ialah", "indeks", "india", "indonesia", "industri", "ini", "islam", "isnin", "isu", "itu", "jabatan", "jalan", "jan", "jawatan", "jawatankuasa", "jepun", "jika", "jualan", "juga", "julai", "jumaat", "jumlah", "jun", "juta", "kadar", "kalangan", "kali", "kami", "kata", "katanya", "kaunter", "kawasan", "ke", "keadaan", "kecil", "kedua", "kedua-dua", "kedudukan", "kekal", "kementerian", "kemudahan", "kenaikan", "kenyataan", "kepada", "kepentingan", "keputusan", "kerajaan", "kerana", "kereta", "kerja", "kerjasama", "kes", "keselamatan", "keseluruhan", "kesihatan", "ketika", "ketua", "keuntungan", "kewangan", "khamis", "kini", "kira-kira", "kita", "klci", "klibor", "komposit", "kontrak", "kos", "kuala", "kuasa", "kukuh", "kumpulan", "lagi", "lain", "langkah", "laporan", "lebih", "lepas", "lima", "lot", "luar", "lumpur", "mac", "mahkamah", "mahu", "majlis", "makanan", "maklumat", "malam", "malaysia", "mana", "manakala", "masa", "masalah", "masih", "masing-masing", "masyarakat", "mata", "media", "mei", "melalui", "melihat", "memandangkan", "memastikan", "membantu", "membawa", "memberi", "memberikan", "membolehkan", "membuat", "mempunyai", "menambah", "menarik", "menawarkan", "mencapai", "mencatatkan", "mendapat", "mendapatkan", "menerima", "menerusi", "mengadakan", "mengambil", "mengenai", "menggalakkan", "menggunakan", "mengikut", "mengumumkan", "mengurangkan", "meningkat", "meningkatkan", "menjadi", "menjelang", "menokok", "menteri", "menunjukkan", "menurut", "menyaksikan", "menyediakan", "mereka", "merosot", "merupakan", "mesyuarat", "minat", "minggu", "minyak", "modal", "mohd", "mudah", "mungkin", "naik", "najib", "nasional", "negara", "negara-negara", "negeri", "niaga", "nilai", "nov", "ogos", "okt", "oleh", "operasi", "orang", "pada", "pagi", "paling", "pameran", "papan", "para", "paras", "parlimen", "parti", "pasaran", "pasukan", "pegawai", "pejabat", "pekerja", "pelabur", "pelaburan", "pelancongan", "pelanggan", "pelbagai", "peluang", "pembangunan", "pemberita", "pembinaan", "pemimpin", "pendapatan", "pendidikan", "penduduk", "penerbangan", "pengarah", "pengeluaran", "pengerusi", "pengguna", "pengurusan", "peniaga", "peningkatan", "penting", "peratus", "perdagangan", "perdana", "peringkat", "perjanjian", "perkara", "perkhidmatan", "perladangan", "perlu", "permintaan", "perniagaan", "persekutuan", "persidangan", "pertama", "pertubuhan", "pertumbuhan", "perusahaan", "peserta", "petang", "pihak", "pilihan", "pinjaman", "polis", "politik", "presiden", "prestasi", "produk", "program", "projek", "proses", "proton", "pukul", "pula", "pusat", "rabu", "rakan", "rakyat", "ramai", "rantau", "raya", "rendah", "ringgit", "rumah", "sabah", "sahaja", "saham", "sama", "sarawak", "satu", "sawit", "saya", "sdn", "sebagai", "sebahagian", "sebanyak", "sebarang", "sebelum", "sebelumnya", "sebuah", "secara", "sedang", "segi", "sehingga", "sejak", "sekarang", "sektor", "sekuriti", "selain", "selama", "selasa", "selatan", "selepas", "seluruh", "semakin", "semalam", "semasa", "sementara", "semua", "semula", "sen", "sendiri", "seorang", "sepanjang", "seperti", "sept", "september", "serantau", "seri", "serta", "sesi", "setiap", "setiausaha", "sidang", "singapura", "sini", "sistem", "sokongan", "sri", "sudah", "sukan", "suku", "sumber", "supaya", "susut", "syarikat", "syed", "tahap", "tahun", "tan", "tanah", "tanpa", "tawaran", "teknologi", "telah", "tempat", "tempatan", "tempoh", "tenaga", "tengah", "tentang", "terbaik", "terbang", "terbesar", "terbuka", "terdapat", "terhadap", "termasuk", "tersebut", "terus", "tetapi", "thailand", "tiada", "tidak", "tiga", "timbalan", "timur", "tindakan", "tinggi", "tun", "tunai", "turun", "turut", "umno", "unit", "untuk", "untung", "urus", "usaha", "utama", "walaupun", "wang", "wanita", "wilayah", "yang"],
+    mr: ["अधिक", "अनेक", "अशी", "असलयाचे", "असलेल्या", "असा", "असून", "असे", "आज", "आणि", "आता", "आपल्या", "आला", "आली", "आले", "आहे", "आहेत", "एक", "एका", "कमी", "करणयात", "करून", "का", "काम", "काय", "काही", "किवा", "की", "केला", "केली", "केले", "कोटी", "गेल्या", "घेऊन", "जात", "झाला", "झाली", "झाले", "झालेल्या", "टा", "डॉ", "तर", "तरी", "तसेच", "ता", "ती", "तीन", "ते", "तो", "त्या", "त्याचा", "त्याची", "त्याच्या", "त्याना", "त्यानी", "त्यामुळे", "त्री", "दिली", "दोन", "न", "नाही", "निर्ण्य", "पण", "पम", "परयतन", "पाटील", "म", "मात्र", "माहिती", "मी", "मुबी", "म्हणजे", "म्हणाले", "म्हणून", "या", "याचा", "याची", "याच्या", "याना", "यानी", "येणार", "येत", "येथील", "येथे", "लाख", "व", "व्यकत", "सर्व", "सागित्ले", "सुरू", "हजार", "हा", "ही", "हे", "होणार", "होत", "होता", "होती", "होते"],
+    no: ["alle", "andre", "arbeid", "at", "av", "bare", "begge", "ble", "blei", "bli", "blir", "blitt", "bort", "bra", "bruke", "både", "båe", "da", "de", "deg", "dei", "deim", "deira", "deires", "dem", "den", "denne", "der", "dere", "deres", "det", "dette", "di", "din", "disse", "ditt", "du", "dykk", "dykkar", "då", "eg", "ein", "eit", "eitt", "eller", "elles", "en", "ene", "eneste", "enhver", "enn", "er", "et", "ett", "etter", "folk", "for", "fordi", "forsûke", "fra", "få", "før", "fûr", "fûrst", "gjorde", "gjûre", "god", "gå", "ha", "hadde", "han", "hans", "har", "hennar", "henne", "hennes", "her", "hjå", "ho", "hoe", "honom", "hoss", "hossen", "hun", "hva", "hvem", "hver", "hvilke", "hvilken", "hvis", "hvor", "hvordan", "hvorfor", "i", "ikke", "ikkje", "ingen", "ingi", "inkje", "inn", "innen", "inni", "ja", "jeg", "kan", "kom", "korleis", "korso", "kun", "kunne", "kva", "kvar", "kvarhelst", "kven", "kvi", "kvifor", "lage", "lang", "lik", "like", "makt", "man", "mange", "me", "med", "medan", "meg", "meget", "mellom", "men", "mens", "mer", "mest", "mi", "min", "mine", "mitt", "mot", "mye", "mykje", "må", "måte", "navn", "ned", "nei", "no", "noe", "noen", "noka", "noko", "nokon", "nokor", "nokre", "ny", "nå", "når", "og", "også", "om", "opp", "oss", "over", "part", "punkt", "på", "rett", "riktig", "samme", "sant", "seg", "selv", "si", "sia", "sidan", "siden", "sin", "sine", "sist", "sitt", "sjøl", "skal", "skulle", "slik", "slutt", "so", "som", "somme", "somt", "start", "stille", "så", "sånn", "tid", "til", "tilbake", "tilstand", "um", "under", "upp", "ut", "uten", "var", "vart", "varte", "ved", "verdi", "vere", "verte", "vi", "vil", "ville", "vite", "vore", "vors", "vort", "vår", "være", "vært", "vöre", "vört", "å"],
+    fa: ["!", ",", ".", ":", ";", "،", "؛", "؟", "آباد", "آره", "آری", "آمد", "آمده", "آن", "آنان", "آنجا", "آنطور", "آنقدر", "آنكه", "آنها", "آنچه", "آنکه", "آورد", "آورده", "آيد", "آی", "آیا", "آیند", "اتفاقا", "اثرِ", "احتراما", "احتمالا", "اخیر", "اری", "از", "ازجمله", "اساسا", "است", "استفاد", "استفاده", "اش", "اشکارا", "اصلا", "اصولا", "اعلام", "اغلب", "اكنون", "الان", "البته", "البتّه", "ام", "اما", "امروز", "امروزه", "امسال", "امشب", "امور", "ان", "انجام", "اند", "انشاالله", "انصافا", "انطور", "انقدر", "انها", "انچنان", "انکه", "انگار", "او", "اول", "اولا", "اي", "ايشان", "ايم", "اين", "اينكه", "اکثرا", "اکنون", "اگر", "ای", "ایا", "اید", "ایشان", "ایم", "این", "اینجا", "ایند", "اینطور", "اینقدر", "اینها", "اینچنین", "اینک", "اینکه", "اینگونه", "با", "بار", "بارة", "باره", "بارها", "باز", "بازهم", "باش", "باشد", "باشم", "باشند", "باشيم", "باشی", "باشید", "باشیم", "بالا", "بالاخره", "بالایِ", "بالطبع", "بايد", "باید", "بتوان", "بتواند", "بتوانی", "بتوانیم", "بخش", "بخشی", "بخواه", "بخواهد", "بخواهم", "بخواهند", "بخواهی", "بخواهید", "بخواهیم", "بد", "بدون", "بر", "برابر", "برابرِ", "براحتی", "براساس", "براستی", "براي", "برای", "برایِ", "برخوردار", "برخي", "برخی", "برداري", "برعکس", "بروز", "بزرگ", "بزودی", "بسا", "بسيار", "بسياري", "بسیار", "بسیاری", "بطور", "بعد", "بعدا", "بعدها", "بعری", "بعضا", "بعضي", "بلافاصله", "بلكه", "بله", "بلکه", "بلی", "بنابراين", "بنابراین", "بندي", "به", "بهتر", "بهترين", "بود", "بودم", "بودن", "بودند", "بوده", "بودی", "بودید", "بودیم", "بویژه", "بي", "بيست", "بيش", "بيشتر", "بيشتري", "بين", "بکن", "بکند", "بکنم", "بکنند", "بکنی", "بکنید", "بکنیم", "بگو", "بگوید", "بگویم", "بگویند", "بگویی", "بگویید", "بگوییم", "بگیر", "بگیرد", "بگیرم", "بگیرند", "بگیری", "بگیرید", "بگیریم", "بی", "بیا", "بیاب", "بیابد", "بیابم", "بیابند", "بیابی", "بیابید", "بیابیم", "بیاور", "بیاورد", "بیاورم", "بیاورند", "بیاوری", "بیاورید", "بیاوریم", "بیاید", "بیایم", "بیایند", "بیایی", "بیایید", "بیاییم", "بیرون", "بیرونِ", "بیش", "بیشتر", "بیشتری", "بین", "ت", "تا", "تازه", "تاكنون", "تان", "تاکنون", "تحت", "تر", "تر  براساس", "ترين", "تقریبا", "تلویحا", "تمام", "تماما", "تمامي", "تنها", "تو", "تواند", "توانست", "توانستم", "توانستن", "توانستند", "توانسته", "توانستی", "توانستیم", "توانم", "توانند", "توانی", "توانید", "توانیم", "توسط", "تولِ", "تویِ", "ثانیا", "جا", "جاي", "جايي", "جای", "جدا", "جديد", "جدید", "جريان", "جریان", "جز", "جلوگيري", "جلویِ", "جمعا", "جناح", "جهت", "حاضر", "حال", "حالا", "حتما", "حتي", "حتی", "حداکثر", "حدودا", "حدودِ", "حق", "خارجِ", "خب", "خدمات", "خصوصا", "خلاصه", "خواست", "خواستم", "خواستن", "خواستند", "خواسته", "خواستی", "خواستید", "خواستیم", "خواهد", "خواهم", "خواهند", "خواهيم", "خواهی", "خواهید", "خواهیم", "خوب", "خود", "خودت", "خودتان", "خودش", "خودشان", "خودم", "خودمان", "خوشبختانه", "خويش", "خویش", "خویشتن", "خیاه", "خیر", "خیلی", "داد", "دادم", "دادن", "دادند", "داده", "دادی", "دادید", "دادیم", "دار", "دارد", "دارم", "دارند", "داريم", "داری", "دارید", "داریم", "داشت", "داشتم", "داشتن", "داشتند", "داشته", "داشتی", "داشتید", "داشتیم", "دانست", "دانند", "دایم", "دایما", "در", "درباره", "درمجموع", "درون", "دریغ", "دقیقا", "دنبالِ", "ده", "دهد", "دهم", "دهند", "دهی", "دهید", "دهیم", "دو", "دوباره", "دوم", "ديده", "ديروز", "ديگر", "ديگران", "ديگري", "دیر", "دیروز", "دیگر", "دیگران", "دیگری", "را", "راحت", "راسا", "راستی", "راه", "رسما", "رسید", "رفت", "رفته", "رو", "روب", "روز", "روزانه", "روزهاي", "روي", "روی", "رویِ", "ريزي", "زمان", "زمانی", "زمینه", "زود", "زياد", "زير", "زيرا", "زیر", "زیرِ", "سابق", "ساخته", "سازي", "سالانه", "سالیانه", "سایر", "سراسر", "سرانجام", "سریعا", "سریِ", "سعي", "سمتِ", "سوم", "سوي", "سوی", "سویِ", "سپس", "شان", "شايد", "شاید", "شخصا", "شد", "شدم", "شدن", "شدند", "شده", "شدی", "شدید", "شدیدا", "شدیم", "شش", "شش  نداشته", "شما", "شناسي", "شود", "شوم", "شوند", "شونده", "شوی", "شوید", "شویم", "صرفا", "صورت", "ضدِّ", "ضدِّ", "ضمن", "طبعا", "طبقِ", "طبیعتا", "طرف", "طريق", "طریق", "طور", "طي", "طی", "ظاهرا", "عدم", "عقبِ", "علّتِ", "علیه", "عمدا", "عمدتا", "عمل", "عملا", "عنوان", "عنوانِ", "غالبا", "غير", "غیر", "فردا", "فعلا", "فقط", "فكر", "فوق", "قابل", "قبل", "قبلا", "قدری", "قصدِ", "قطعا", "كرد", "كردم", "كردن", "كردند", "كرده", "كسي", "كل", "كمتر", "كند", "كنم", "كنند", "كنيد", "كنيم", "كه", "لااقل", "لطفا", "لطفاً", "ما", "مان", "مانند", "مانندِ", "مبادا", "متاسفانه", "متعاقبا", "مثل", "مثلا", "مثلِ", "مجانی", "مجددا", "مجموعا", "مختلف", "مدام", "مدت", "مدّتی", "مردم", "مرسی", "مستقیما", "مسلما", "مطمینا", "معمولا", "مقابل", "ممکن", "من", "موارد", "مورد", "موقتا", "مي", "ميليارد", "ميليون", "مگر", "می", "می شود", "میان", "می‌رسد", "می‌رود", "می‌شود", "می‌کنیم", "ناشي", "نام", "ناگاه", "ناگهان", "ناگهانی", "نبايد", "نباید", "نبود", "نخست", "نخستين", "نخواهد", "نخواهم", "نخواهند", "نخواهی", "نخواهید", "نخواهیم", "ندارد", "ندارم", "ندارند", "نداری", "ندارید", "نداریم", "نداشت", "نداشتم", "نداشتند", "نداشته", "نداشتی", "نداشتید", "نداشتیم", "نزديك", "نزدِ", "نزدیکِ", "نسبتا", "نشان", "نشده", "نظير", "نظیر", "نكرده", "نمايد", "نمي", "نمی", "نمی‌شود", "نه", "نهایتا", "نوع", "نوعي", "نوعی", "نيز", "نيست", "نگاه", "نیز", "نیست", "ها", "هاي", "هايي", "های", "هایی", "هبچ", "هر", "هرچه", "هرگز", "هزار", "هست", "هستم", "هستند", "هستيم", "هستی", "هستید", "هستیم", "هفت", "هم", "همان", "همه", "همواره", "همين", "همچنان", "همچنين", "همچنین", "همچون", "همیشه", "همین", "هنوز", "هنگام", "هنگامِ", "هنگامی", "هيچ", "هیچ", "هیچگاه", "و", "واقعا", "واقعی", "وجود", "وسطِ", "وضع", "وقتي", "وقتی", "وقتیکه", "ولی", "وي", "وگو", "وی", "ویژه", "يا", "يابد", "يك", "يكديگر", "يكي", "ّه", "٪", "پارسال", "پاعینِ", "پس", "پنج", "پيش", "پیدا", "پیش", "پیشاپیش", "پیشتر", "پیشِ", "چرا", "چطور", "چقدر", "چنان", "چنانچه", "چنانکه", "چند", "چندین", "چنين", "چنین", "چه", "چهار", "چو", "چون", "چيزي", "چگونه", "چیز", "چیزی", "چیست", "کاش", "کامل", "کاملا", "کتبا", "کجا", "کجاست", "کدام", "کرد", "کردم", "کردن", "کردند", "کرده", "کردی", "کردید", "کردیم", "کس", "کسانی", "کسی", "کل", "کلا", "کم", "کماکان", "کمتر", "کمتری", "کمی", "کن", "کنار", "کنارِ", "کند", "کنم", "کنند", "کننده", "کنون", "کنونی", "کنی", "کنید", "کنیم", "که", "کو", "کَی", "کی", "گاه", "گاهی", "گذاري", "گذاشته", "گذشته", "گردد", "گرفت", "گرفتم", "گرفتن", "گرفتند", "گرفته", "گرفتی", "گرفتید", "گرفتیم", "گروهي", "گفت", "گفتم", "گفتن", "گفتند", "گفته", "گفتی", "گفتید", "گفتیم", "گه", "گهگاه", "گو", "گويد", "گويند", "گویا", "گوید", "گویم", "گویند", "گویی", "گویید", "گوییم", "گيرد", "گيري", "گیرد", "گیرم", "گیرند", "گیری", "گیرید", "گیریم", "ی", "یا", "یابد", "یابم", "یابند", "یابی", "یابید", "یابیم", "یافت", "یافتم", "یافتن", "یافته", "یافتی", "یافتید", "یافتیم", "یعنی", "یقینا", "یه", "یک", "یکی", "۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹"],
+    pl: ["a", "aby", "ach", "acz", "aczkolwiek", "aj", "albo", "ale", "ależ", "ani", "aż", "bardziej", "bardzo", "bez", "bo", "bowiem", "by", "byli", "bym", "bynajmniej", "być", "był", "była", "było", "były", "będzie", "będą", "cali", "cała", "cały", "chce", "choć", "ci", "ciebie", "cię", "co", "cokolwiek", "coraz", "coś", "czasami", "czasem", "czemu", "czy", "czyli", "często", "daleko", "dla", "dlaczego", "dlatego", "do", "dobrze", "dokąd", "dość", "dr", "dużo", "dwa", "dwaj", "dwie", "dwoje", "dzisiaj", "dziś", "gdy", "gdyby", "gdyż", "gdzie", "gdziekolwiek", "gdzieś", "go", "godz", "hab", "i", "ich", "ii", "iii", "ile", "im", "inna", "inne", "inny", "innych", "inż", "iv", "ix", "iż", "ja", "jak", "jakaś", "jakby", "jaki", "jakichś", "jakie", "jakiś", "jakiż", "jakkolwiek", "jako", "jakoś", "je", "jeden", "jedna", "jednak", "jednakże", "jedno", "jednym", "jedynie", "jego", "jej", "jemu", "jest", "jestem", "jeszcze", "jeśli", "jeżeli", "już", "ją", "każdy", "kiedy", "kierunku", "kilka", "kilku", "kimś", "kto", "ktokolwiek", "ktoś", "która", "które", "którego", "której", "który", "których", "którym", "którzy", "ku", "lat", "lecz", "lub", "ma", "mają", "mam", "mamy", "mało", "mgr", "mi", "miał", "mimo", "między", "mnie", "mną", "mogą", "moi", "moim", "moja", "moje", "może", "możliwe", "można", "mu", "musi", "my", "mój", "na", "nad", "nam", "nami", "nas", "nasi", "nasz", "nasza", "nasze", "naszego", "naszych", "natomiast", "natychmiast", "nawet", "nic", "nich", "nie", "niech", "niego", "niej", "niemu", "nigdy", "nim", "nimi", "nią", "niż", "no", "nowe", "np", "nr", "o", "o.o.", "obok", "od", "ok", "około", "on", "ona", "one", "oni", "ono", "oraz", "oto", "owszem", "pan", "pana", "pani", "pl", "po", "pod", "podczas", "pomimo", "ponad", "ponieważ", "powinien", "powinna", "powinni", "powinno", "poza", "prawie", "prof", "przecież", "przed", "przede", "przedtem", "przez", "przy", "raz", "razie", "roku", "również", "sam", "sama", "się", "skąd", "sobie", "sobą", "sposób", "swoje", "są", "ta", "tak", "taka", "taki", "takich", "takie", "także", "tam", "te", "tego", "tej", "tel", "temu", "ten", "teraz", "też", "to", "tobie", "tobą", "toteż", "totobą", "trzeba", "tu", "tutaj", "twoi", "twoim", "twoja", "twoje", "twym", "twój", "ty", "tych", "tylko", "tym", "tys", "tzw", "tę", "u", "ul", "vi", "vii", "viii", "vol", "w", "wam", "wami", "was", "wasi", "wasz", "wasza", "wasze", "we", "według", "wie", "wiele", "wielu", "więc", "więcej", "wszyscy", "wszystkich", "wszystkie", "wszystkim", "wszystko", "wtedy", "www", "wy", "właśnie", "wśród", "xi", "xii", "xiii", "xiv", "xv", "z", "za", "zapewne", "zawsze", "zaś", "ze", "zeznowu", "znowu", "znów", "został", "zł", "żaden", "żadna", "żadne", "żadnych", "że", "żeby"],
+    pt: ["a", "acerca", "adeus", "agora", "ainda", "alem", "algmas", "algo", "algumas", "alguns", "ali", "além", "ambas", "ambos", "ano", "anos", "antes", "ao", "aonde", "aos", "apenas", "apoio", "apontar", "apos", "após", "aquela", "aquelas", "aquele", "aqueles", "aqui", "aquilo", "as", "assim", "através", "atrás", "até", "aí", "baixo", "bastante", "bem", "boa", "boas", "bom", "bons", "breve", "cada", "caminho", "catorze", "cedo", "cento", "certamente", "certeza", "cima", "cinco", "coisa", "com", "como", "comprido", "conhecido", "conselho", "contra", "contudo", "corrente", "cuja", "cujas", "cujo", "cujos", "custa", "cá", "da", "daquela", "daquelas", "daquele", "daqueles", "dar", "das", "de", "debaixo", "dela", "delas", "dele", "deles", "demais", "dentro", "depois", "desde", "desligado", "dessa", "dessas", "desse", "desses", "desta", "destas", "deste", "destes", "deve", "devem", "deverá", "dez", "dezanove", "dezasseis", "dezassete", "dezoito", "dia", "diante", "direita", "dispoe", "dispoem", "diversa", "diversas", "diversos", "diz", "dizem", "dizer", "do", "dois", "dos", "doze", "duas", "durante", "dá", "dão", "dúvida", "e", "ela", "elas", "ele", "eles", "em", "embora", "enquanto", "entao", "entre", "então", "era", "eram", "essa", "essas", "esse", "esses", "esta", "estado", "estamos", "estar", "estará", "estas", "estava", "estavam", "este", "esteja", "estejam", "estejamos", "estes", "esteve", "estive", "estivemos", "estiver", "estivera", "estiveram", "estiverem", "estivermos", "estivesse", "estivessem", "estiveste", "estivestes", "estivéramos", "estivéssemos", "estou", "está", "estás", "estávamos", "estão", "eu", "exemplo", "falta", "fará", "favor", "faz", "fazeis", "fazem", "fazemos", "fazer", "fazes", "fazia", "faço", "fez", "fim", "final", "foi", "fomos", "for", "fora", "foram", "forem", "forma", "formos", "fosse", "fossem", "foste", "fostes", "fui", "fôramos", "fôssemos", "geral", "grande", "grandes", "grupo", "ha", "haja", "hajam", "hajamos", "havemos", "havia", "hei", "hoje", "hora", "horas", "houve", "houvemos", "houver", "houvera", "houveram", "houverei", "houverem", "houveremos", "houveria", "houveriam", "houvermos", "houverá", "houverão", "houveríamos", "houvesse", "houvessem", "houvéramos", "houvéssemos", "há", "hão", "iniciar", "inicio", "ir", "irá", "isso", "ista", "iste", "isto", "já", "lado", "lhe", "lhes", "ligado", "local", "logo", "longe", "lugar", "lá", "maior", "maioria", "maiorias", "mais", "mal", "mas", "me", "mediante", "meio", "menor", "menos", "meses", "mesma", "mesmas", "mesmo", "mesmos", "meu", "meus", "mil", "minha", "minhas", "momento", "muito", "muitos", "máximo", "mês", "na", "nada", "nao", "naquela", "naquelas", "naquele", "naqueles", "nas", "nem", "nenhuma", "nessa", "nessas", "nesse", "nesses", "nesta", "nestas", "neste", "nestes", "no", "noite", "nome", "nos", "nossa", "nossas", "nosso", "nossos", "nova", "novas", "nove", "novo", "novos", "num", "numa", "numas", "nunca", "nuns", "não", "nível", "nós", "número", "o", "obra", "obrigada", "obrigado", "oitava", "oitavo", "oito", "onde", "ontem", "onze", "os", "ou", "outra", "outras", "outro", "outros", "para", "parece", "parte", "partir", "paucas", "pegar", "pela", "pelas", "pelo", "pelos", "perante", "perto", "pessoas", "pode", "podem", "poder", "poderá", "podia", "pois", "ponto", "pontos", "por", "porque", "porquê", "portanto", "posição", "possivelmente", "posso", "possível", "pouca", "pouco", "poucos", "povo", "primeira", "primeiras", "primeiro", "primeiros", "promeiro", "propios", "proprio", "própria", "próprias", "próprio", "próprios", "próxima", "próximas", "próximo", "próximos", "puderam", "pôde", "põe", "põem", "quais", "qual", "qualquer", "quando", "quanto", "quarta", "quarto", "quatro", "que", "quem", "quer", "quereis", "querem", "queremas", "queres", "quero", "questão", "quieto", "quinta", "quinto", "quinze", "quáis", "quê", "relação", "sabe", "sabem", "saber", "se", "segunda", "segundo", "sei", "seis", "seja", "sejam", "sejamos", "sem", "sempre", "sendo", "ser", "serei", "seremos", "seria", "seriam", "será", "serão", "seríamos", "sete", "seu", "seus", "sexta", "sexto", "sim", "sistema", "sob", "sobre", "sois", "somente", "somos", "sou", "sua", "suas", "são", "sétima", "sétimo", "só", "tal", "talvez", "tambem", "também", "tanta", "tantas", "tanto", "tarde", "te", "tem", "temos", "tempo", "tendes", "tenha", "tenham", "tenhamos", "tenho", "tens", "tentar", "tentaram", "tente", "tentei", "ter", "terceira", "terceiro", "terei", "teremos", "teria", "teriam", "terá", "terão", "teríamos", "teu", "teus", "teve", "tinha", "tinham", "tipo", "tive", "tivemos", "tiver", "tivera", "tiveram", "tiverem", "tivermos", "tivesse", "tivessem", "tiveste", "tivestes", "tivéramos", "tivéssemos", "toda", "todas", "todo", "todos", "trabalhar", "trabalho", "treze", "três", "tu", "tua", "tuas", "tudo", "tão", "tém", "têm", "tínhamos", "um", "uma", "umas", "uns", "usa", "usar", "vai", "vais", "valor", "veja", "vem", "vens", "ver", "verdade", "verdadeiro", "vez", "vezes", "viagem", "vindo", "vinte", "você", "vocês", "vos", "vossa", "vossas", "vosso", "vossos", "vários", "vão", "vêm", "vós", "zero", "à", "às", "área", "é", "éramos", "és", "último"],
+    ro: ["a", "abia", "acea", "aceasta", "această", "aceea", "aceeasi", "acei", "aceia", "acel", "acela", "acelasi", "acele", "acelea", "acest", "acesta", "aceste", "acestea", "acestei", "acestia", "acestui", "aceşti", "aceştia", "acolo", "acord", "acum", "adica", "ai", "aia", "aibă", "aici", "aiurea", "al", "ala", "alaturi", "ale", "alea", "alt", "alta", "altceva", "altcineva", "alte", "altfel", "alti", "altii", "altul", "am", "anume", "apoi", "ar", "are", "as", "asa", "asemenea", "asta", "astazi", "astea", "astfel", "astăzi", "asupra", "atare", "atat", "atata", "atatea", "atatia", "ati", "atit", "atita", "atitea", "atitia", "atunci", "au", "avea", "avem", "aveţi", "avut", "azi", "aş", "aşadar", "aţi", "b", "ba", "bine", "bucur", "bună", "c", "ca", "cam", "cand", "capat", "care", "careia", "carora", "caruia", "cat", "catre", "caut", "ce", "cea", "ceea", "cei", "ceilalti", "cel", "cele", "celor", "ceva", "chiar", "ci", "cinci", "cind", "cine", "cineva", "cit", "cita", "cite", "citeva", "citi", "citiva", "conform", "contra", "cu", "cui", "cum", "cumva", "curând", "curînd", "când", "cât", "câte", "câtva", "câţi", "cînd", "cît", "cîte", "cîtva", "cîţi", "că", "căci", "cărei", "căror", "cărui", "către", "d", "da", "daca", "dacă", "dar", "dat", "datorită", "dată", "dau", "de", "deasupra", "deci", "decit", "degraba", "deja", "deoarece", "departe", "desi", "despre", "deşi", "din", "dinaintea", "dintr", "dintr-", "dintre", "doar", "doi", "doilea", "două", "drept", "dupa", "după", "dă", "e", "ea", "ei", "el", "ele", "era", "eram", "este", "eu", "exact", "eşti", "f", "face", "fara", "fata", "fel", "fi", "fie", "fiecare", "fii", "fim", "fiu", "fiţi", "foarte", "fost", "frumos", "fără", "g", "geaba", "graţie", "h", "halbă", "i", "ia", "iar", "ieri", "ii", "il", "imi", "in", "inainte", "inapoi", "inca", "incit", "insa", "intr", "intre", "isi", "iti", "j", "k", "l", "la", "le", "li", "lor", "lui", "lângă", "lîngă", "m", "ma", "mai", "mare", "mea", "mei", "mele", "mereu", "meu", "mi", "mie", "mine", "mod", "mult", "multa", "multe", "multi", "multă", "mulţi", "mulţumesc", "mâine", "mîine", "mă", "n", "ne", "nevoie", "ni", "nici", "niciodata", "nicăieri", "nimeni", "nimeri", "nimic", "niste", "nişte", "noastre", "noastră", "noi", "noroc", "nostri", "nostru", "nou", "noua", "nouă", "noştri", "nu", "numai", "o", "opt", "or", "ori", "oricare", "orice", "oricine", "oricum", "oricând", "oricât", "oricînd", "oricît", "oriunde", "p", "pai", "parca", "patra", "patru", "patrulea", "pe", "pentru", "peste", "pic", "pina", "plus", "poate", "pot", "prea", "prima", "primul", "prin", "printr-", "putini", "puţin", "puţina", "puţină", "până", "pînă", "r", "rog", "s", "sa", "sa-mi", "sa-ti", "sai", "sale", "sau", "se", "si", "sint", "sintem", "spate", "spre", "sub", "sunt", "suntem", "sunteţi", "sus", "sută", "sînt", "sîntem", "sînteţi", "să", "săi", "său", "t", "ta", "tale", "te", "ti", "timp", "tine", "toata", "toate", "toată", "tocmai", "tot", "toti", "totul", "totusi", "totuşi", "toţi", "trei", "treia", "treilea", "tu", "tuturor", "tăi", "tău", "u", "ul", "ului", "un", "una", "unde", "undeva", "unei", "uneia", "unele", "uneori", "unii", "unor", "unora", "unu", "unui", "unuia", "unul", "v", "va", "vi", "voastre", "voastră", "voi", "vom", "vor", "vostru", "vouă", "voştri", "vreme", "vreo", "vreun", "vă", "x", "z", "zece", "zero", "zi", "zice", "îi", "îl", "îmi", "împotriva", "în", "înainte", "înaintea", "încotro", "încât", "încît", "între", "întrucât", "întrucît", "îţi", "ăla", "ălea", "ăsta", "ăstea", "ăştia", "şapte", "şase", "şi", "ştiu", "ţi", "ţie"],
+    ru: ["c", "а", "алло", "без", "белый", "близко", "более", "больше", "большой", "будем", "будет", "будете", "будешь", "будто", "буду", "будут", "будь", "бы", "бывает", "бывь", "был", "была", "были", "было", "быть", "в", "важная", "важное", "важные", "важный", "вам", "вами", "вас", "ваш", "ваша", "ваше", "ваши", "вверх", "вдали", "вдруг", "ведь", "везде", "вернуться", "весь", "вечер", "взгляд", "взять", "вид", "видел", "видеть", "вместе", "вне", "вниз", "внизу", "во", "вода", "война", "вокруг", "вон", "вообще", "вопрос", "восемнадцатый", "восемнадцать", "восемь", "восьмой", "вот", "впрочем", "времени", "время", "все", "все еще", "всегда", "всего", "всем", "всеми", "всему", "всех", "всею", "всю", "всюду", "вся", "всё", "второй", "вы", "выйти", "г", "где", "главный", "глаз", "говорил", "говорит", "говорить", "год", "года", "году", "голова", "голос", "город", "да", "давать", "давно", "даже", "далекий", "далеко", "дальше", "даром", "дать", "два", "двадцатый", "двадцать", "две", "двенадцатый", "двенадцать", "дверь", "двух", "девятнадцатый", "девятнадцать", "девятый", "девять", "действительно", "дел", "делал", "делать", "делаю", "дело", "день", "деньги", "десятый", "десять", "для", "до", "довольно", "долго", "должен", "должно", "должный", "дом", "дорога", "друг", "другая", "другие", "других", "друго", "другое", "другой", "думать", "душа", "е", "его", "ее", "ей", "ему", "если", "есть", "еще", "ещё", "ею", "её", "ж", "ждать", "же", "жена", "женщина", "жизнь", "жить", "за", "занят", "занята", "занято", "заняты", "затем", "зато", "зачем", "здесь", "земля", "знать", "значит", "значить", "и", "иди", "идти", "из", "или", "им", "имеет", "имел", "именно", "иметь", "ими", "имя", "иногда", "их", "к", "каждая", "каждое", "каждые", "каждый", "кажется", "казаться", "как", "какая", "какой", "кем", "книга", "когда", "кого", "ком", "комната", "кому", "конец", "конечно", "которая", "которого", "которой", "которые", "который", "которых", "кроме", "кругом", "кто", "куда", "лежать", "лет", "ли", "лицо", "лишь", "лучше", "любить", "люди", "м", "маленький", "мало", "мать", "машина", "между", "меля", "менее", "меньше", "меня", "место", "миллионов", "мимо", "минута", "мир", "мира", "мне", "много", "многочисленная", "многочисленное", "многочисленные", "многочисленный", "мной", "мною", "мог", "могу", "могут", "мож", "может", "может быть", "можно", "можхо", "мои", "мой", "мор", "москва", "мочь", "моя", "моё", "мы", "на", "наверху", "над", "надо", "назад", "наиболее", "найти", "наконец", "нам", "нами", "народ", "нас", "начала", "начать", "наш", "наша", "наше", "наши", "не", "него", "недавно", "недалеко", "нее", "ней", "некоторый", "нельзя", "нем", "немного", "нему", "непрерывно", "нередко", "несколько", "нет", "нею", "неё", "ни", "нибудь", "ниже", "низко", "никакой", "никогда", "никто", "никуда", "ним", "ними", "них", "ничего", "ничто", "но", "новый", "нога", "ночь", "ну", "нужно", "нужный", "нх", "о", "об", "оба", "обычно", "один", "одиннадцатый", "одиннадцать", "однажды", "однако", "одного", "одной", "оказаться", "окно", "около", "он", "она", "они", "оно", "опять", "особенно", "остаться", "от", "ответить", "отец", "откуда", "отовсюду", "отсюда", "очень", "первый", "перед", "писать", "плечо", "по", "под", "подойди", "подумать", "пожалуйста", "позже", "пойти", "пока", "пол", "получить", "помнить", "понимать", "понять", "пор", "пора", "после", "последний", "посмотреть", "посреди", "потом", "потому", "почему", "почти", "правда", "прекрасно", "при", "про", "просто", "против", "процентов", "путь", "пятнадцатый", "пятнадцать", "пятый", "пять", "работа", "работать", "раз", "разве", "рано", "раньше", "ребенок", "решить", "россия", "рука", "русский", "ряд", "рядом", "с", "с кем", "сам", "сама", "сами", "самим", "самими", "самих", "само", "самого", "самой", "самом", "самому", "саму", "самый", "свет", "свое", "своего", "своей", "свои", "своих", "свой", "свою", "сделать", "сеаой", "себе", "себя", "сегодня", "седьмой", "сейчас", "семнадцатый", "семнадцать", "семь", "сидеть", "сила", "сих", "сказал", "сказала", "сказать", "сколько", "слишком", "слово", "случай", "смотреть", "сначала", "снова", "со", "собой", "собою", "советский", "совсем", "спасибо", "спросить", "сразу", "стал", "старый", "стать", "стол", "сторона", "стоять", "страна", "суть", "считать", "т", "та", "так", "такая", "также", "таки", "такие", "такое", "такой", "там", "твои", "твой", "твоя", "твоё", "те", "тебе", "тебя", "тем", "теми", "теперь", "тех", "то", "тобой", "тобою", "товарищ", "тогда", "того", "тоже", "только", "том", "тому", "тот", "тою", "третий", "три", "тринадцатый", "тринадцать", "ту", "туда", "тут", "ты", "тысяч", "у", "увидеть", "уж", "уже", "улица", "уметь", "утро", "хороший", "хорошо", "хотел бы", "хотеть", "хоть", "хотя", "хочешь", "час", "часто", "часть", "чаще", "чего", "человек", "чем", "чему", "через", "четвертый", "четыре", "четырнадцатый", "четырнадцать", "что", "чтоб", "чтобы", "чуть", "шестнадцатый", "шестнадцать", "шестой", "шесть", "эта", "эти", "этим", "этими", "этих", "это", "этого", "этой", "этом", "этому", "этот", "эту", "я", "являюсь"],
+    sk: ["a", "aby", "aj", "ak", "akej", "akejže", "ako", "akom", "akomže", "akou", "akouže", "akože", "aká", "akáže", "aké", "akého", "akéhože", "akému", "akémuže", "akéže", "akú", "akúže", "aký", "akých", "akýchže", "akým", "akými", "akýmiže", "akýmže", "akýže", "ale", "alebo", "ani", "asi", "avšak", "až", "ba", "bez", "bezo", "bol", "bola", "boli", "bolo", "bude", "budem", "budeme", "budete", "budeš", "budú", "buď", "by", "byť", "cez", "cezo", "dnes", "do", "ešte", "ho", "hoci", "i", "iba", "ich", "im", "inej", "inom", "iná", "iné", "iného", "inému", "iní", "inú", "iný", "iných", "iným", "inými", "ja", "je", "jeho", "jej", "jemu", "ju", "k", "kam", "kamže", "každou", "každá", "každé", "každého", "každému", "každí", "každú", "každý", "každých", "každým", "každými", "kde", "kej", "kejže", "keď", "keďže", "kie", "kieho", "kiehože", "kiemu", "kiemuže", "kieže", "koho", "kom", "komu", "kou", "kouže", "kto", "ktorej", "ktorou", "ktorá", "ktoré", "ktorí", "ktorú", "ktorý", "ktorých", "ktorým", "ktorými", "ku", "ká", "káže", "ké", "kéže", "kú", "kúže", "ký", "kýho", "kýhože", "kým", "kýmu", "kýmuže", "kýže", "lebo", "leda", "ledaže", "len", "ma", "majú", "mal", "mala", "mali", "mať", "medzi", "mi", "mne", "mnou", "moja", "moje", "mojej", "mojich", "mojim", "mojimi", "mojou", "moju", "možno", "mu", "musia", "musieť", "musí", "musím", "musíme", "musíte", "musíš", "my", "má", "mám", "máme", "máte", "máš", "môcť", "môj", "môjho", "môže", "môžem", "môžeme", "môžete", "môžeš", "môžu", "mňa", "na", "nad", "nado", "najmä", "nami", "naša", "naše", "našej", "naši", "našich", "našim", "našimi", "našou", "ne", "nech", "neho", "nej", "nejakej", "nejakom", "nejakou", "nejaká", "nejaké", "nejakého", "nejakému", "nejakú", "nejaký", "nejakých", "nejakým", "nejakými", "nemu", "než", "nich", "nie", "niektorej", "niektorom", "niektorou", "niektorá", "niektoré", "niektorého", "niektorému", "niektorú", "niektorý", "niektorých", "niektorým", "niektorými", "nielen", "niečo", "nim", "nimi", "nič", "ničoho", "ničom", "ničomu", "ničím", "no", "nám", "nás", "náš", "nášho", "ním", "o", "od", "odo", "on", "ona", "oni", "ono", "ony", "oň", "oňho", "po", "pod", "podo", "podľa", "pokiaľ", "popod", "popri", "potom", "poza", "pre", "pred", "predo", "preto", "pretože", "prečo", "pri", "práve", "s", "sa", "seba", "sebe", "sebou", "sem", "si", "sme", "so", "som", "ste", "svoj", "svoja", "svoje", "svojho", "svojich", "svojim", "svojimi", "svojou", "svoju", "svojím", "sú", "ta", "tak", "takej", "takejto", "taká", "takáto", "také", "takého", "takéhoto", "takému", "takémuto", "takéto", "takí", "takú", "takúto", "taký", "takýto", "takže", "tam", "teba", "tebe", "tebou", "teda", "tej", "tejto", "ten", "tento", "ti", "tie", "tieto", "tiež", "to", "toho", "tohoto", "tohto", "tom", "tomto", "tomu", "tomuto", "toto", "tou", "touto", "tu", "tvoj", "tvoja", "tvoje", "tvojej", "tvojho", "tvoji", "tvojich", "tvojim", "tvojimi", "tvojím", "ty", "tá", "táto", "tí", "títo", "tú", "túto", "tých", "tým", "tými", "týmto", "u", "už", "v", "vami", "vaša", "vaše", "vašej", "vaši", "vašich", "vašim", "vaším", "veď", "viac", "vo", "vy", "vám", "vás", "váš", "vášho", "však", "všetci", "všetka", "všetko", "všetky", "všetok", "z", "za", "začo", "začože", "zo", "áno", "čej", "či", "čia", "čie", "čieho", "čiemu", "čiu", "čo", "čoho", "čom", "čomu", "čou", "čože", "čí", "čím", "čími", "ďalšia", "ďalšie", "ďalšieho", "ďalšiemu", "ďalšiu", "ďalšom", "ďalšou", "ďalší", "ďalších", "ďalším", "ďalšími", "ňom", "ňou", "ňu", "že"],
+    sl: ["a", "ali", "april", "avgust", "b", "bi", "bil", "bila", "bile", "bili", "bilo", "biti", "blizu", "bo", "bodo", "bojo", "bolj", "bom", "bomo", "boste", "bova", "boš", "brez", "c", "cel", "cela", "celi", "celo", "d", "da", "daleč", "dan", "danes", "datum", "december", "deset", "deseta", "deseti", "deseto", "devet", "deveta", "deveti", "deveto", "do", "dober", "dobra", "dobri", "dobro", "dokler", "dol", "dolg", "dolga", "dolgi", "dovolj", "drug", "druga", "drugi", "drugo", "dva", "dve", "e", "eden", "en", "ena", "ene", "eni", "enkrat", "eno", "etc.", "f", "februar", "g", "g.", "ga", "ga.", "gor", "gospa", "gospod", "h", "halo", "i", "idr.", "ii", "iii", "in", "iv", "ix", "iz", "j", "januar", "jaz", "je", "ji", "jih", "jim", "jo", "julij", "junij", "jutri", "k", "kadarkoli", "kaj", "kajti", "kako", "kakor", "kamor", "kamorkoli", "kar", "karkoli", "katerikoli", "kdaj", "kdo", "kdorkoli", "ker", "ki", "kje", "kjer", "kjerkoli", "ko", "koder", "koderkoli", "koga", "komu", "kot", "kratek", "kratka", "kratke", "kratki", "l", "lahka", "lahke", "lahki", "lahko", "le", "lep", "lepa", "lepe", "lepi", "lepo", "leto", "m", "maj", "majhen", "majhna", "majhni", "malce", "malo", "manj", "marec", "me", "med", "medtem", "mene", "mesec", "mi", "midva", "midve", "mnogo", "moj", "moja", "moje", "mora", "morajo", "moram", "moramo", "morate", "moraš", "morem", "mu", "n", "na", "nad", "naj", "najina", "najino", "najmanj", "naju", "največ", "nam", "narobe", "nas", "nato", "nazaj", "naš", "naša", "naše", "ne", "nedavno", "nedelja", "nek", "neka", "nekaj", "nekatere", "nekateri", "nekatero", "nekdo", "neke", "nekega", "neki", "nekje", "neko", "nekoga", "nekoč", "ni", "nikamor", "nikdar", "nikjer", "nikoli", "nič", "nje", "njega", "njegov", "njegova", "njegovo", "njej", "njemu", "njen", "njena", "njeno", "nji", "njih", "njihov", "njihova", "njihovo", "njiju", "njim", "njo", "njun", "njuna", "njuno", "no", "nocoj", "november", "npr.", "o", "ob", "oba", "obe", "oboje", "od", "odprt", "odprta", "odprti", "okoli", "oktober", "on", "onadva", "one", "oni", "onidve", "osem", "osma", "osmi", "osmo", "oz.", "p", "pa", "pet", "peta", "petek", "peti", "peto", "po", "pod", "pogosto", "poleg", "poln", "polna", "polni", "polno", "ponavadi", "ponedeljek", "ponovno", "potem", "povsod", "pozdravljen", "pozdravljeni", "prav", "prava", "prave", "pravi", "pravo", "prazen", "prazna", "prazno", "prbl.", "precej", "pred", "prej", "preko", "pri", "pribl.", "približno", "primer", "pripravljen", "pripravljena", "pripravljeni", "proti", "prva", "prvi", "prvo", "r", "ravno", "redko", "res", "reč", "s", "saj", "sam", "sama", "same", "sami", "samo", "se", "sebe", "sebi", "sedaj", "sedem", "sedma", "sedmi", "sedmo", "sem", "september", "seveda", "si", "sicer", "skoraj", "skozi", "slab", "smo", "so", "sobota", "spet", "sreda", "srednja", "srednji", "sta", "ste", "stran", "stvar", "sva", "t", "ta", "tak", "taka", "take", "taki", "tako", "takoj", "tam", "te", "tebe", "tebi", "tega", "težak", "težka", "težki", "težko", "ti", "tista", "tiste", "tisti", "tisto", "tj.", "tja", "to", "toda", "torek", "tretja", "tretje", "tretji", "tri", "tu", "tudi", "tukaj", "tvoj", "tvoja", "tvoje", "u", "v", "vaju", "vam", "vas", "vaš", "vaša", "vaše", "ve", "vedno", "velik", "velika", "veliki", "veliko", "vendar", "ves", "več", "vi", "vidva", "vii", "viii", "visok", "visoka", "visoke", "visoki", "vsa", "vsaj", "vsak", "vsaka", "vsakdo", "vsake", "vsaki", "vsakomur", "vse", "vsega", "vsi", "vso", "včasih", "včeraj", "x", "z", "za", "zadaj", "zadnji", "zakaj", "zaprta", "zaprti", "zaprto", "zdaj", "zelo", "zunaj", "č", "če", "često", "četrta", "četrtek", "četrti", "četrto", "čez", "čigav", "š", "šest", "šesta", "šesti", "šesto", "štiri", "ž", "že"],
+    so: ["aad", "albaabkii", "atabo", "ay", "ayaa", "ayee", "ayuu", "dhan", "hadana", "in", "inuu", "isku", "jiray", "jirtay", "ka", "kale", "kasoo", "ku", "kuu", "lakin", "markii", "oo", "si", "soo", "uga", "ugu", "uu", "waa", "waxa", "waxuu"],
+    st: ["a", "ba", "bane", "bona", "e", "ea", "eaba", "empa", "ena", "ha", "hae", "hape", "ho", "hore", "ka", "ke", "la", "le", "li", "me", "mo", "moo", "ne", "o", "oa", "re", "sa", "se", "tloha", "tsa", "tse"],
+    es: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "_", "a", "actualmente", "acuerdo", "adelante", "ademas", "además", "adrede", "afirmó", "agregó", "ahi", "ahora", "ahí", "al", "algo", "alguna", "algunas", "alguno", "algunos", "algún", "alli", "allí", "alrededor", "ambos", "ampleamos", "antano", "antaño", "ante", "anterior", "antes", "apenas", "aproximadamente", "aquel", "aquella", "aquellas", "aquello", "aquellos", "aqui", "aquél", "aquélla", "aquéllas", "aquéllos", "aquí", "arriba", "arribaabajo", "aseguró", "asi", "así", "atras", "aun", "aunque", "ayer", "añadió", "aún", "b", "bajo", "bastante", "bien", "breve", "buen", "buena", "buenas", "bueno", "buenos", "c", "cada", "casi", "cerca", "cierta", "ciertas", "cierto", "ciertos", "cinco", "claro", "comentó", "como", "con", "conmigo", "conocer", "conseguimos", "conseguir", "considera", "consideró", "consigo", "consigue", "consiguen", "consigues", "contigo", "contra", "cosas", "creo", "cual", "cuales", "cualquier", "cuando", "cuanta", "cuantas", "cuanto", "cuantos", "cuatro", "cuenta", "cuál", "cuáles", "cuándo", "cuánta", "cuántas", "cuánto", "cuántos", "cómo", "d", "da", "dado", "dan", "dar", "de", "debajo", "debe", "deben", "debido", "decir", "dejó", "del", "delante", "demasiado", "demás", "dentro", "deprisa", "desde", "despacio", "despues", "después", "detras", "detrás", "dia", "dias", "dice", "dicen", "dicho", "dieron", "diferente", "diferentes", "dijeron", "dijo", "dio", "donde", "dos", "durante", "día", "días", "dónde", "e", "ejemplo", "el", "ella", "ellas", "ello", "ellos", "embargo", "empleais", "emplean", "emplear", "empleas", "empleo", "en", "encima", "encuentra", "enfrente", "enseguida", "entonces", "entre", "era", "erais", "eramos", "eran", "eras", "eres", "es", "esa", "esas", "ese", "eso", "esos", "esta", "estaba", "estabais", "estaban", "estabas", "estad", "estada", "estadas", "estado", "estados", "estais", "estamos", "estan", "estando", "estar", "estaremos", "estará", "estarán", "estarás", "estaré", "estaréis", "estaría", "estaríais", "estaríamos", "estarían", "estarías", "estas", "este", "estemos", "esto", "estos", "estoy", "estuve", "estuviera", "estuvierais", "estuvieran", "estuvieras", "estuvieron", "estuviese", "estuvieseis", "estuviesen", "estuvieses", "estuvimos", "estuviste", "estuvisteis", "estuviéramos", "estuviésemos", "estuvo", "está", "estábamos", "estáis", "están", "estás", "esté", "estéis", "estén", "estés", "ex", "excepto", "existe", "existen", "explicó", "expresó", "f", "fin", "final", "fue", "fuera", "fuerais", "fueran", "fueras", "fueron", "fuese", "fueseis", "fuesen", "fueses", "fui", "fuimos", "fuiste", "fuisteis", "fuéramos", "fuésemos", "g", "general", "gran", "grandes", "gueno", "h", "ha", "haber", "habia", "habida", "habidas", "habido", "habidos", "habiendo", "habla", "hablan", "habremos", "habrá", "habrán", "habrás", "habré", "habréis", "habría", "habríais", "habríamos", "habrían", "habrías", "habéis", "había", "habíais", "habíamos", "habían", "habías", "hace", "haceis", "hacemos", "hacen", "hacer", "hacerlo", "haces", "hacia", "haciendo", "hago", "han", "has", "hasta", "hay", "haya", "hayamos", "hayan", "hayas", "hayáis", "he", "hecho", "hemos", "hicieron", "hizo", "horas", "hoy", "hube", "hubiera", "hubierais", "hubieran", "hubieras", "hubieron", "hubiese", "hubieseis", "hubiesen", "hubieses", "hubimos", "hubiste", "hubisteis", "hubiéramos", "hubiésemos", "hubo", "i", "igual", "incluso", "indicó", "informo", "informó", "intenta", "intentais", "intentamos", "intentan", "intentar", "intentas", "intento", "ir", "j", "junto", "k", "l", "la", "lado", "largo", "las", "le", "lejos", "les", "llegó", "lleva", "llevar", "lo", "los", "luego", "lugar", "m", "mal", "manera", "manifestó", "mas", "mayor", "me", "mediante", "medio", "mejor", "mencionó", "menos", "menudo", "mi", "mia", "mias", "mientras", "mio", "mios", "mis", "misma", "mismas", "mismo", "mismos", "modo", "momento", "mucha", "muchas", "mucho", "muchos", "muy", "más", "mí", "mía", "mías", "mío", "míos", "n", "nada", "nadie", "ni", "ninguna", "ningunas", "ninguno", "ningunos", "ningún", "no", "nos", "nosotras", "nosotros", "nuestra", "nuestras", "nuestro", "nuestros", "nueva", "nuevas", "nuevo", "nuevos", "nunca", "o", "ocho", "os", "otra", "otras", "otro", "otros", "p", "pais", "para", "parece", "parte", "partir", "pasada", "pasado", "paìs", "peor", "pero", "pesar", "poca", "pocas", "poco", "pocos", "podeis", "podemos", "poder", "podria", "podriais", "podriamos", "podrian", "podrias", "podrá", "podrán", "podría", "podrían", "poner", "por", "por qué", "porque", "posible", "primer", "primera", "primero", "primeros", "principalmente", "pronto", "propia", "propias", "propio", "propios", "proximo", "próximo", "próximos", "pudo", "pueda", "puede", "pueden", "puedo", "pues", "q", "qeu", "que", "quedó", "queremos", "quien", "quienes", "quiere", "quiza", "quizas", "quizá", "quizás", "quién", "quiénes", "qué", "r", "raras", "realizado", "realizar", "realizó", "repente", "respecto", "s", "sabe", "sabeis", "sabemos", "saben", "saber", "sabes", "sal", "salvo", "se", "sea", "seamos", "sean", "seas", "segun", "segunda", "segundo", "según", "seis", "ser", "sera", "seremos", "será", "serán", "serás", "seré", "seréis", "sería", "seríais", "seríamos", "serían", "serías", "seáis", "señaló", "si", "sido", "siempre", "siendo", "siete", "sigue", "siguiente", "sin", "sino", "sobre", "sois", "sola", "solamente", "solas", "solo", "solos", "somos", "son", "soy", "soyos", "su", "supuesto", "sus", "suya", "suyas", "suyo", "suyos", "sé", "sí", "sólo", "t", "tal", "tambien", "también", "tampoco", "tan", "tanto", "tarde", "te", "temprano", "tendremos", "tendrá", "tendrán", "tendrás", "tendré", "tendréis", "tendría", "tendríais", "tendríamos", "tendrían", "tendrías", "tened", "teneis", "tenemos", "tener", "tenga", "tengamos", "tengan", "tengas", "tengo", "tengáis", "tenida", "tenidas", "tenido", "tenidos", "teniendo", "tenéis", "tenía", "teníais", "teníamos", "tenían", "tenías", "tercera", "ti", "tiempo", "tiene", "tienen", "tienes", "toda", "todas", "todavia", "todavía", "todo", "todos", "total", "trabaja", "trabajais", "trabajamos", "trabajan", "trabajar", "trabajas", "trabajo", "tras", "trata", "través", "tres", "tu", "tus", "tuve", "tuviera", "tuvierais", "tuvieran", "tuvieras", "tuvieron", "tuviese", "tuvieseis", "tuviesen", "tuvieses", "tuvimos", "tuviste", "tuvisteis", "tuviéramos", "tuviésemos", "tuvo", "tuya", "tuyas", "tuyo", "tuyos", "tú", "u", "ultimo", "un", "una", "unas", "uno", "unos", "usa", "usais", "usamos", "usan", "usar", "usas", "uso", "usted", "ustedes", "v", "va", "vais", "valor", "vamos", "van", "varias", "varios", "vaya", "veces", "ver", "verdad", "verdadera", "verdadero", "vez", "vosotras", "vosotros", "voy", "vuestra", "vuestras", "vuestro", "vuestros", "w", "x", "y", "ya", "yo", "z", "él", "éramos", "ésa", "ésas", "ése", "ésos", "ésta", "éstas", "éste", "éstos", "última", "últimas", "último", "últimos"],
+    sw: ["akasema", "alikuwa", "alisema", "baada", "basi", "bila", "cha", "chini", "hadi", "hapo", "hata", "hivyo", "hiyo", "huku", "huo", "ili", "ilikuwa", "juu", "kama", "karibu", "katika", "kila", "kima", "kisha", "kubwa", "kutoka", "kuwa", "kwa", "kwamba", "kwenda", "kwenye", "la", "lakini", "mara", "mdogo", "mimi", "mkubwa", "mmoja", "moja", "muda", "mwenye", "na", "naye", "ndani", "ng", "ni", "nini", "nonkungu", "pamoja", "pia", "sana", "sasa", "sauti", "tafadhali", "tena", "tu", "vile", "wa", "wakati", "wake", "walikuwa", "wao", "watu", "wengine", "wote", "ya", "yake", "yangu", "yao", "yeye", "yule", "za", "zaidi", "zake"],
+    sv: ["aderton", "adertonde", "adjö", "aldrig", "alla", "allas", "allt", "alltid", "alltså", "andra", "andras", "annan", "annat", "artonde", "artonn", "att", "av", "bakom", "bara", "behöva", "behövas", "behövde", "behövt", "beslut", "beslutat", "beslutit", "bland", "blev", "bli", "blir", "blivit", "bort", "borta", "bra", "bäst", "bättre", "båda", "bådas", "dag", "dagar", "dagarna", "dagen", "de", "del", "delen", "dem", "den", "denna", "deras", "dess", "dessa", "det", "detta", "dig", "din", "dina", "dit", "ditt", "dock", "dom", "du", "där", "därför", "då", "e", "efter", "eftersom", "ej", "elfte", "eller", "elva", "emot", "en", "enkel", "enkelt", "enkla", "enligt", "ens", "er", "era", "ers", "ert", "ett", "ettusen", "fanns", "fem", "femte", "femtio", "femtionde", "femton", "femtonde", "fick", "fin", "finnas", "finns", "fjorton", "fjortonde", "fjärde", "fler", "flera", "flesta", "fram", "framför", "från", "fyra", "fyrtio", "fyrtionde", "få", "får", "fått", "följande", "för", "före", "förlåt", "förra", "första", "genast", "genom", "gick", "gjorde", "gjort", "god", "goda", "godare", "godast", "gott", "gälla", "gäller", "gällt", "gärna", "gå", "går", "gått", "gör", "göra", "ha", "hade", "haft", "han", "hans", "har", "heller", "hellre", "helst", "helt", "henne", "hennes", "hit", "hon", "honom", "hundra", "hundraen", "hundraett", "hur", "här", "hög", "höger", "högre", "högst", "i", "ibland", "icke", "idag", "igen", "igår", "imorgon", "in", "inför", "inga", "ingen", "ingenting", "inget", "innan", "inne", "inom", "inte", "inuti", "ja", "jag", "jo", "ju", "just", "jämfört", "kan", "kanske", "knappast", "kom", "komma", "kommer", "kommit", "kr", "kunde", "kunna", "kunnat", "kvar", "legat", "ligga", "ligger", "lika", "likställd", "likställda", "lilla", "lite", "liten", "litet", "länge", "längre", "längst", "lätt", "lättare", "lättast", "långsam", "långsammare", "långsammast", "långsamt", "långt", "låt", "man", "med", "mej", "mellan", "men", "mer", "mera", "mest", "mig", "min", "mina", "mindre", "minst", "mitt", "mittemot", "mot", "mycket", "många", "måste", "möjlig", "möjligen", "möjligt", "möjligtvis", "ned", "nederst", "nedersta", "nedre", "nej", "ner", "ni", "nio", "nionde", "nittio", "nittionde", "nitton", "nittonde", "nog", "noll", "nr", "nu", "nummer", "när", "nästa", "någon", "någonting", "något", "några", "nån", "nånting", "nåt", "nödvändig", "nödvändiga", "nödvändigt", "nödvändigtvis", "och", "också", "ofta", "oftast", "olika", "olikt", "om", "oss", "på", "rakt", "redan", "rätt", "sa", "sade", "sagt", "samma", "sedan", "senare", "senast", "sent", "sex", "sextio", "sextionde", "sexton", "sextonde", "sig", "sin", "sina", "sist", "sista", "siste", "sitt", "sitta", "sju", "sjunde", "sjuttio", "sjuttionde", "sjutton", "sjuttonde", "själv", "sjätte", "ska", "skall", "skulle", "slutligen", "små", "smått", "snart", "som", "stor", "stora", "stort", "större", "störst", "säga", "säger", "sämre", "sämst", "så", "sådan", "sådana", "sådant", "ta", "tack", "tar", "tidig", "tidigare", "tidigast", "tidigt", "till", "tills", "tillsammans", "tio", "tionde", "tjugo", "tjugoen", "tjugoett", "tjugonde", "tjugotre", "tjugotvå", "tjungo", "tolfte", "tolv", "tre", "tredje", "trettio", "trettionde", "tretton", "trettonde", "två", "tvåhundra", "under", "upp", "ur", "ursäkt", "ut", "utan", "utanför", "ute", "va", "vad", "var", "vara", "varför", "varifrån", "varit", "varje", "varken", "vars", "varsågod", "vart", "vem", "vems", "verkligen", "vi", "vid", "vidare", "viktig", "viktigare", "viktigast", "viktigt", "vilka", "vilkas", "vilken", "vilket", "vill", "väl", "vänster", "vänstra", "värre", "vår", "våra", "vårt", "än", "ännu", "är", "även", "åt", "åtminstone", "åtta", "åttio", "åttionde", "åttonde", "över", "övermorgon", "överst", "övre"],
+    th: ["กล่าว", "กว่า", "กัน", "กับ", "การ", "ก็", "ก่อน", "ขณะ", "ขอ", "ของ", "ขึ้น", "คง", "ครั้ง", "ความ", "คือ", "จะ", "จัด", "จาก", "จึง", "ช่วง", "ซึ่ง", "ดัง", "ด้วย", "ด้าน", "ตั้ง", "ตั้งแต่", "ตาม", "ต่อ", "ต่าง", "ต่างๆ", "ต้อง", "ถึง", "ถูก", "ถ้า", "ทั้ง", "ทั้งนี้", "ทาง", "ที่", "ที่สุด", "ทุก", "ทํา", "ทําให้", "นอกจาก", "นัก", "นั้น", "นี้", "น่า", "นํา", "บาง", "ผล", "ผ่าน", "พบ", "พร้อม", "มา", "มาก", "มี", "ยัง", "รวม", "ระหว่าง", "รับ", "ราย", "ร่วม", "ลง", "วัน", "ว่า", "สุด", "ส่ง", "ส่วน", "สําหรับ", "หนึ่ง", "หรือ", "หลัง", "หลังจาก", "หลาย", "หาก", "อยาก", "อยู่", "อย่าง", "ออก", "อะไร", "อาจ", "อีก", "เขา", "เข้า", "เคย", "เฉพาะ", "เช่น", "เดียว", "เดียวกัน", "เนื่องจาก", "เปิด", "เปิดเผย", "เป็น", "เป็นการ", "เพราะ", "เพื่อ", "เมื่อ", "เรา", "เริ่ม", "เลย", "เห็น", "เอง", "แต่", "แบบ", "แรก", "และ", "แล้ว", "แห่ง", "โดย", "ใน", "ให้", "ได้", "ไป", "ไม่", "ไว้", "้ง"],
+    tl: ["akin", "aking", "ako", "alin", "am", "amin", "aming", "ang", "ano", "anumang", "apat", "at", "atin", "ating", "ay", "bababa", "bago", "bakit", "bawat", "bilang", "dahil", "dalawa", "dapat", "din", "dito", "doon", "gagawin", "gayunman", "ginagawa", "ginawa", "ginawang", "gumawa", "gusto", "habang", "hanggang", "hindi", "huwag", "iba", "ibaba", "ibabaw", "ibig", "ikaw", "ilagay", "ilalim", "ilan", "inyong", "isa", "isang", "itaas", "ito", "iyo", "iyon", "iyong", "ka", "kahit", "kailangan", "kailanman", "kami", "kanila", "kanilang", "kanino", "kanya", "kanyang", "kapag", "kapwa", "karamihan", "katiyakan", "katulad", "kaya", "kaysa", "ko", "kong", "kulang", "kumuha", "kung", "laban", "lahat", "lamang", "likod", "lima", "maaari", "maaaring", "maging", "mahusay", "makita", "marami", "marapat", "masyado", "may", "mayroon", "mga", "minsan", "mismo", "mula", "muli", "na", "nabanggit", "naging", "nagkaroon", "nais", "nakita", "namin", "napaka", "narito", "nasaan", "ng", "ngayon", "ni", "nila", "nilang", "nito", "niya", "niyang", "noon", "o", "pa", "paano", "pababa", "paggawa", "pagitan", "pagkakaroon", "pagkatapos", "palabas", "pamamagitan", "panahon", "pangalawa", "para", "paraan", "pareho", "pataas", "pero", "pumunta", "pumupunta", "sa", "saan", "sabi", "sabihin", "sarili", "sila", "sino", "siya", "tatlo", "tayo", "tulad", "tungkol", "una", "walang"],
+    tr: ["acaba", "acep", "adamakıllı", "adeta", "ait", "altmýþ", "altmış", "altý", "altı", "ama", "amma", "anca", "ancak", "arada", "artýk", "aslında", "aynen", "ayrıca", "az", "açıkça", "açıkçası", "bana", "bari", "bazen", "bazý", "bazı", "başkası", "baţka", "belki", "ben", "benden", "beni", "benim", "beri", "beriki", "beþ", "beş", "beţ", "bilcümle", "bile", "bin", "binaen", "binaenaleyh", "bir", "biraz", "birazdan", "birbiri", "birden", "birdenbire", "biri", "birice", "birileri", "birisi", "birkaç", "birkaçı", "birkez", "birlikte", "birçok", "birçoğu", "birþey", "birþeyi", "birşey", "birşeyi", "birţey", "bitevi", "biteviye", "bittabi", "biz", "bizatihi", "bizce", "bizcileyin", "bizden", "bize", "bizi", "bizim", "bizimki", "bizzat", "boşuna", "bu", "buna", "bunda", "bundan", "bunlar", "bunları", "bunların", "bunu", "bunun", "buracıkta", "burada", "buradan", "burası", "böyle", "böylece", "böylecene", "böylelikle", "böylemesine", "böylesine", "büsbütün", "bütün", "cuk", "cümlesi", "da", "daha", "dahi", "dahil", "dahilen", "daima", "dair", "dayanarak", "de", "defa", "dek", "demin", "demincek", "deminden", "denli", "derakap", "derhal", "derken", "deđil", "değil", "değin", "diye", "diđer", "diğer", "diğeri", "doksan", "dokuz", "dolayı", "dolayısıyla", "doğru", "dört", "edecek", "eden", "ederek", "edilecek", "ediliyor", "edilmesi", "ediyor", "elbet", "elbette", "elli", "emme", "en", "enikonu", "epey", "epeyce", "epeyi", "esasen", "esnasında", "etmesi", "etraflı", "etraflıca", "etti", "ettiği", "ettiğini", "evleviyetle", "evvel", "evvela", "evvelce", "evvelden", "evvelemirde", "evveli", "eđer", "eğer", "fakat", "filanca", "gah", "gayet", "gayetle", "gayri", "gayrı", "gelgelelim", "gene", "gerek", "gerçi", "geçende", "geçenlerde", "gibi", "gibilerden", "gibisinden", "gine", "göre", "gırla", "hakeza", "halbuki", "halen", "halihazırda", "haliyle", "handiyse", "hangi", "hangisi", "hani", "hariç", "hasebiyle", "hasılı", "hatta", "hele", "hem", "henüz", "hep", "hepsi", "her", "herhangi", "herkes", "herkesin", "hiç", "hiçbir", "hiçbiri", "hoş", "hulasaten", "iken", "iki", "ila", "ile", "ilen", "ilgili", "ilk", "illa", "illaki", "imdi", "indinde", "inen", "insermi", "ise", "ister", "itibaren", "itibariyle", "itibarıyla", "iyi", "iyice", "iyicene", "için", "iş", "işte", "iţte", "kadar", "kaffesi", "kah", "kala", "kanýmca", "karşın", "katrilyon", "kaynak", "kaçı", "kelli", "kendi", "kendilerine", "kendini", "kendisi", "kendisine", "kendisini", "kere", "kez", "keza", "kezalik", "keşke", "keţke", "ki", "kim", "kimden", "kime", "kimi", "kimisi", "kimse", "kimsecik", "kimsecikler", "külliyen", "kýrk", "kýsaca", "kırk", "kısaca", "lakin", "leh", "lütfen", "maada", "madem", "mademki", "mamafih", "mebni", "međer", "meğer", "meğerki", "meğerse", "milyar", "milyon", "mu", "mü", "mý", "mı", "nasýl", "nasıl", "nasılsa", "nazaran", "naşi", "ne", "neden", "nedeniyle", "nedenle", "nedense", "nerde", "nerden", "nerdeyse", "nere", "nerede", "nereden", "neredeyse", "neresi", "nereye", "netekim", "neye", "neyi", "neyse", "nice", "nihayet", "nihayetinde", "nitekim", "niye", "niçin", "o", "olan", "olarak", "oldu", "olduklarını", "oldukça", "olduğu", "olduğunu", "olmadı", "olmadığı", "olmak", "olması", "olmayan", "olmaz", "olsa", "olsun", "olup", "olur", "olursa", "oluyor", "on", "ona", "onca", "onculayın", "onda", "ondan", "onlar", "onlardan", "onlari", "onlarýn", "onları", "onların", "onu", "onun", "oracık", "oracıkta", "orada", "oradan", "oranca", "oranla", "oraya", "otuz", "oysa", "oysaki", "pek", "pekala", "peki", "pekçe", "peyderpey", "rağmen", "sadece", "sahi", "sahiden", "sana", "sanki", "sekiz", "seksen", "sen", "senden", "seni", "senin", "siz", "sizden", "sizi", "sizin", "sonra", "sonradan", "sonraları", "sonunda", "tabii", "tam", "tamam", "tamamen", "tamamıyla", "tarafından", "tek", "trilyon", "tüm", "var", "vardı", "vasıtasıyla", "ve", "velev", "velhasıl", "velhasılıkelam", "veya", "veyahut", "ya", "yahut", "yakinen", "yakında", "yakından", "yakınlarda", "yalnız", "yalnızca", "yani", "yapacak", "yapmak", "yaptı", "yaptıkları", "yaptığı", "yaptığını", "yapılan", "yapılması", "yapıyor", "yedi", "yeniden", "yenilerde", "yerine", "yetmiþ", "yetmiş", "yetmiţ", "yine", "yirmi", "yok", "yoksa", "yoluyla", "yüz", "yüzünden", "zarfında", "zaten", "zati", "zira", "çabuk", "çabukça", "çeşitli", "çok", "çokları", "çoklarınca", "çokluk", "çoklukla", "çokça", "çoğu", "çoğun", "çoğunca", "çoğunlukla", "çünkü", "öbür", "öbürkü", "öbürü", "önce", "önceden", "önceleri", "öncelikle", "öteki", "ötekisi", "öyle", "öylece", "öylelikle", "öylemesine", "öz", "üzere", "üç", "þey", "þeyden", "þeyi", "þeyler", "þu", "þuna", "þunda", "þundan", "þunu", "şayet", "şey", "şeyden", "şeyi", "şeyler", "şu", "şuna", "şuncacık", "şunda", "şundan", "şunlar", "şunları", "şunu", "şunun", "şura", "şuracık", "şuracıkta", "şurası", "şöyle", "ţayet", "ţimdi", "ţu", "ţöyle"],
+    uk: ["авжеж", "адже", "але", "б", "без", "був", "була", "були", "було", "бути", "більш", "вам", "вас", "весь", "вздовж", "ви", "вниз", "внизу", "вона", "вони", "воно", "все", "всередині", "всіх", "від", "він", "да", "давай", "давати", "де", "дещо", "для", "до", "з", "завжди", "замість", "й", "коли", "ледве", "майже", "ми", "навколо", "навіть", "нам", "от", "отже", "отож", "поза", "про", "під", "та", "так", "такий", "також", "те", "ти", "тобто", "тож", "тощо", "хоча", "це", "цей", "чи", "чого", "що", "як", "який", "якої", "є", "із", "інших", "їх", "її"],
+    ur: ["آئی", "آئے", "آج", "آخر", "آخرکبر", "آدهی", "آًب", "آٹھ", "آیب", "اة", "اخبزت", "اختتبم", "ادھر", "ارد", "اردگرد", "ارکبى", "اش", "اضتعوبل", "اضتعوبلات", "اضطرذ", "اضکب", "اضکی", "اضکے", "اطراف", "اغیب", "افراد", "الگ", "اور", "اوًچب", "اوًچبئی", "اوًچی", "اوًچے", "اى", "اً", "اًذر", "اًہیں", "اٹھبًب", "اپٌب", "اپٌے", "اچھب", "اچھی", "اچھے", "اکثر", "اکٹھب", "اکٹھی", "اکٹھے", "اکیلا", "اکیلی", "اکیلے", "اگرچہ", "اہن", "ایطے", "ایک", "ب", "ت", "تبزٍ", "تت", "تر", "ترتیت", "تریي", "تعذاد", "تن", "تو", "توبم", "توہی", "توہیں", "تٌہب", "تک", "تھب", "تھوڑا", "تھوڑی", "تھوڑے", "تھی", "تھے", "تیي", "ثب", "ثبئیں", "ثبترتیت", "ثبری", "ثبرے", "ثبعث", "ثبلا", "ثبلترتیت", "ثبہر", "ثدبئے", "ثرآں", "ثراں", "ثرش", "ثعذ", "ثغیر", "ثلٌذ", "ثلٌذوثبلا", "ثلکہ", "ثي", "ثٌب", "ثٌبرہب", "ثٌبرہی", "ثٌبرہے", "ثٌبًب", "ثٌذ", "ثٌذکرو", "ثٌذکرًب", "ثٌذی", "ثڑا", "ثڑوں", "ثڑی", "ثڑے", "ثھر", "ثھرا", "ثھراہوا", "ثھرپور", "ثھی", "ثہت", "ثہتر", "ثہتری", "ثہتریي", "ثیچ", "ج", "خب", "خبرہب", "خبرہی", "خبرہے", "خبهوظ", "خبًب", "خبًتب", "خبًتی", "خبًتے", "خبًٌب", "خت", "ختن", "خجکہ", "خص", "خططرذ", "خلذی", "خو", "خواى", "خوًہی", "خوکہ", "خٌبة", "خگہ", "خگہوں", "خگہیں", "خیطب", "خیطبکہ", "در", "درخبت", "درخہ", "درخے", "درزقیقت", "درضت", "دش", "دفعہ", "دلچطپ", "دلچطپی", "دلچطپیبں", "دو", "دور", "دوراى", "دوضرا", "دوضروں", "دوضری", "دوضرے", "دوًوں", "دکھبئیں", "دکھبتب", "دکھبتی", "دکھبتے", "دکھبو", "دکھبًب", "دکھبیب", "دی", "دیب", "دیتب", "دیتی", "دیتے", "دیر", "دیٌب", "دیکھو", "دیکھٌب", "دیکھی", "دیکھیں", "دے", "ر", "راضتوں", "راضتہ", "راضتے", "رریعہ", "رریعے", "رکي", "رکھ", "رکھب", "رکھتب", "رکھتبہوں", "رکھتی", "رکھتے", "رکھی", "رکھے", "رہب", "رہی", "رہے", "ز", "زبصل", "زبضر", "زبل", "زبلات", "زبلیہ", "زصوں", "زصہ", "زصے", "زقبئق", "زقیتیں", "زقیقت", "زکن", "زکویہ", "زیبدٍ", "صبف", "صسیر", "صفر", "صورت", "صورتسبل", "صورتوں", "صورتیں", "ض", "ضبت", "ضبتھ", "ضبدٍ", "ضبرا", "ضبرے", "ضبل", "ضبلوں", "ضت", "ضرور", "ضرورت", "ضروری", "ضلطلہ", "ضوچ", "ضوچب", "ضوچتب", "ضوچتی", "ضوچتے", "ضوچو", "ضوچٌب", "ضوچی", "ضوچیں", "ضکب", "ضکتب", "ضکتی", "ضکتے", "ضکٌب", "ضکی", "ضکے", "ضیذھب", "ضیذھی", "ضیذھے", "ضیکٌڈ", "ضے", "طرف", "طریق", "طریقوں", "طریقہ", "طریقے", "طور", "طورپر", "ظبہر", "ع", "عذد", "عظین", "علاقوں", "علاقہ", "علاقے", "علاوٍ", "عووهی", "غبیذ", "غخص", "غذ", "غروع", "غروعبت", "غے", "فرد", "فی", "ق", "قجل", "قجیلہ", "قطن", "لئے", "لا", "لازهی", "لو", "لوجب", "لوجی", "لوجے", "لوسبت", "لوسہ", "لوگ", "لوگوں", "لڑکپي", "لگتب", "لگتی", "لگتے", "لگٌب", "لگی", "لگیں", "لگے", "لی", "لیب", "لیٌب", "لیں", "لے", "ه", "هتعلق", "هختلف", "هسترم", "هسترهہ", "هسطوش", "هسیذ", "هطئلہ", "هطئلے", "هطبئل", "هطتعول", "هطلق", "هعلوم", "هػتول", "هلا", "هوکي", "هوکٌبت", "هوکٌہ", "هٌبضت", "هڑا", "هڑًب", "هڑے", "هکول", "هگر", "هہرثبى", "هیرا", "هیری", "هیرے", "هیں", "و", "وار", "والے", "وٍ", "ًئی", "ًئے", "ًب", "ًبپطٌذ", "ًبگسیر", "ًطجت", "ًقطہ", "ًو", "ًوخواى", "ًکبلٌب", "ًکتہ", "ًہ", "ًہیں", "ًیب", "ًے", "ٓ آش", "ٹھیک", "پبئے", "پبش", "پبًب", "پبًچ", "پر", "پراًب", "پطٌذ", "پل", "پورا", "پوچھب", "پوچھتب", "پوچھتی", "پوچھتے", "پوچھو", "پوچھوں", "پوچھٌب", "پوچھیں", "پچھلا", "پھر", "پہلا", "پہلی", "پہلےضی", "پہلےضے", "پہلےضےہی", "پیع", "چبر", "چبہب", "چبہٌب", "چبہے", "چلا", "چلو", "چلیں", "چلے", "چکب", "چکی", "چکیں", "چکے", "چھوٹب", "چھوٹوں", "چھوٹی", "چھوٹے", "چھہ", "چیسیں", "ڈھوًڈا", "ڈھوًڈلیب", "ڈھوًڈو", "ڈھوًڈًب", "ڈھوًڈی", "ڈھوًڈیں", "ک", "کئی", "کئے", "کب", "کبفی", "کبم", "کت", "کجھی", "کرا", "کرتب", "کرتبہوں", "کرتی", "کرتے", "کرتےہو", "کررہب", "کررہی", "کررہے", "کرو", "کرًب", "کریں", "کرے", "کطی", "کل", "کن", "کوئی", "کوتر", "کورا", "کوروں", "کورٍ", "کورے", "کوطي", "کوى", "کوًطب", "کوًطی", "کوًطے", "کھولا", "کھولو", "کھولٌب", "کھولی", "کھولیں", "کھولے", "کہ", "کہب", "کہتب", "کہتی", "کہتے", "کہو", "کہوں", "کہٌب", "کہی", "کہیں", "کہے", "کی", "کیب", "کیطب", "کیطرف", "کیطے", "کیلئے", "کیوًکہ", "کیوں", "کیے", "کے", "کےثعذ", "کےرریعے", "گئی", "گئے", "گب", "گرد", "گروٍ", "گروپ", "گروہوں", "گٌتی", "گی", "گیب", "گے", "ہر", "ہن", "ہو", "ہوئی", "ہوئے", "ہوا", "ہوبرا", "ہوبری", "ہوبرے", "ہوتب", "ہوتی", "ہوتے", "ہورہب", "ہورہی", "ہورہے", "ہوضکتب", "ہوضکتی", "ہوضکتے", "ہوًب", "ہوًی", "ہوًے", "ہوچکب", "ہوچکی", "ہوچکے", "ہوگئی", "ہوگئے", "ہوگیب", "ہوں", "ہی", "ہیں", "ہے", "ی", "یقیٌی", "یہ", "یہبں"],
+    vi: ["a ha", "a-lô", "ai", "ai ai", "ai nấy", "alô", "amen", "anh", "bao giờ", "bao lâu", "bao nhiêu", "bao nả", "bay biến", "biết", "biết bao", "biết bao nhiêu", "biết chừng nào", "biết mấy", "biết đâu", "biết đâu chừng", "biết đâu đấy", "bà", "bài", "bác", "bây bẩy", "bây chừ", "bây giờ", "bây nhiêu", "bèn", "béng", "bông", "bạn", "bản", "bất chợt", "bất cứ", "bất giác", "bất kì", "bất kể", "bất kỳ", "bất luận", "bất nhược", "bất quá", "bất thình lình", "bất tử", "bất đồ", "bấy", "bấy chầy", "bấy chừ", "bấy giờ", "bấy lâu", "bấy lâu nay", "bấy nay", "bấy nhiêu", "bập bà bập bõm", "bập bõm", "bắt đầu từ", "bằng", "bằng không", "bằng nấy", "bằng ấy", "bển", "bệt", "bị", "bỏ mẹ", "bỗng", "bỗng chốc", "bỗng dưng", "bỗng không", "bỗng nhiên", "bỗng đâu", "bộ", "bội phần", "bớ", "bởi", "bởi chưng", "bởi nhưng", "bởi thế", "bởi vì", "bởi vậy", "bức", "cao", "cha", "cha chả", "chao ôi", "chiếc", "cho", "cho nên", "cho tới", "cho tới khi", "cho đến", "cho đến khi", "choa", "chu cha", "chui cha", "chung cục", "chung qui", "chung quy", "chung quy lại", "chuyện", "chành chạnh", "chí chết", "chính", "chính là", "chính thị", "chùn chùn", "chùn chũn", "chú", "chú mày", "chú mình", "chúng mình", "chúng ta", "chúng tôi", "chăn chắn", "chăng", "chưa", "chầm chập", "chậc", "chắc", "chắc hẳn", "chẳng lẽ", "chẳng những", "chẳng nữa", "chẳng phải", "chết nỗi", "chết thật", "chết tiệt", "chỉ", "chỉn", "chốc chốc", "chớ", "chớ chi", "chợt", "chủn", "chứ", "chứ lị", "coi bộ", "coi mòi", "con", "cu cậu", "cuốn", "cuộc", "càng", "các", "cái", "cây", "còn", "có", "có chăng là", "có dễ", "có thể", "có vẻ", "cóc khô", "cô", "cô mình", "công nhiên", "cùng", "cùng cực", "cùng nhau", "cùng với", "căn", "căn cắt", "cũng", "cũng như", "cũng vậy", "cũng vậy thôi", "cơ", "cơ chừng", "cơ hồ", "cơ mà", "cơn", "cả", "cả thảy", "cả thể", "cảm ơn", "cần", "cật lực", "cật sức", "cậu", "cổ lai", "của", "cứ", "cứ việc", "cực lực", "do", "do vì", "do vậy", "do đó", "duy", "dào", "dì", "dù cho", "dù rằng", "dưới", "dạ", "dần dà", "dần dần", "dầu sao", "dẫu", "dẫu sao", "dễ sợ", "dễ thường", "dở chừng", "dữ", "em", "giữa", "gì", "hay", "hoàn toàn", "hoặc", "hơn", "hầu hết", "họ", "hỏi", "khi", "khác", "không", "luôn", "là", "làm", "lên", "lúc", "lại", "lần", "lớn", "muốn", "mà", "mình", "mỗi", "một", "một cách", "mới", "mợ", "ngay", "ngay cả", "ngay khi", "ngay lúc", "ngay lập tức", "ngay tức khắc", "ngay từ", "nghe chừng", "nghe đâu", "nghen", "nghiễm nhiên", "nghỉm", "ngoài", "ngoài ra", "ngoải", "ngày", "ngày càng", "ngày ngày", "ngày xưa", "ngày xửa", "ngôi", "ngõ hầu", "ngăn ngắt", "ngươi", "người", "ngọn", "ngọt", "ngộ nhỡ", "nh", "nhau", "nhiên hậu", "nhiều", "nhiệt liệt", "nhung nhăng", "nhà", "nhân dịp", "nhân tiện", "nhé", "nhón nhén", "như", "như chơi", "như không", "như quả", "như thể", "như tuồng", "như vậy", "nhưng", "nhưng mà", "nhược bằng", "nhất", "nhất loạt", "nhất luật", "nhất mực", "nhất nhất", "nhất quyết", "nhất sinh", "nhất thiết", "nhất tâm", "nhất tề", "nhất đán", "nhất định", "nhận", "nhỉ", "nhỡ ra", "những", "những ai", "những như", "nào", "này", "nên", "nên chi", "nó", "nóc", "nói", "năm", "nơi", "nấy", "nếu", "nếu như", "nền", "nọ", "nớ", "nức nở", "nữa", "oai oái", "oái", "pho", "phè", "phóc", "phót", "phăn phắt", "phương chi", "phải", "phải chi", "phải chăng", "phắt", "phỉ phui", "phỏng", "phỏng như", "phốc", "phụt", "phứt", "qua", "qua quít", "qua quýt", "quyết", "quyết nhiên", "quyển", "quá", "quá chừng", "quá lắm", "quá sá", "quá thể", "quá trời", "quá xá", "quá đỗi", "quá độ", "quá ư", "quý hồ", "quả", "quả là", "quả tang", "quả thật", "quả tình", "quả vậy", "quả đúng", "ra", "ra phết", "ra sao", "ra trò", "ren rén", "riu ríu", "riêng", "riệt", "rày", "ráo", "ráo trọi", "rén", "rích", "rón rén", "rút cục", "răng", "rất", "rằng", "rằng là", "rốt cuộc", "rốt cục", "rồi", "rứa", "sa sả", "sao", "sau", "sau chót", "sau cuối", "sau cùng", "sau đó", "so", "song le", "suýt", "sì", "sạch", "sất", "sắp", "sẽ", "số", "số là", "sốt sột", "sở dĩ", "sự", "tanh", "tha hồ", "than ôi", "thanh", "theo", "thi thoảng", "thoạt", "thoạt nhiên", "thoắt", "thuần", "thà", "thà là", "thà rằng", "thành ra", "thành thử", "thái quá", "tháng", "thì", "thì thôi", "thình lình", "thím", "thôi", "thúng thắng", "thương ôi", "thường", "thảo hèn", "thảo nào", "thấy", "thẩy", "thậm", "thậm chí", "thật lực", "thật ra", "thật vậy", "thế", "thế là", "thế mà", "thế nào", "thế nên", "thế ra", "thế thì", "thế à", "thếch", "thỉnh thoảng", "thỏm", "thốc", "thốc tháo", "thốt", "thốt nhiên", "thộc", "thời gian", "thục mạng", "thửa", "thực ra", "thực sự", "thực vậy", "tiếp theo", "tiếp đó", "tiện thể", "toà", "toé khói", "toẹt", "trong", "trên", "trước", "trước kia", "trước nay", "trước tiên", "trước đây", "trước đó", "trếu tráo", "trển", "trệt", "trệu trạo", "trỏng", "trời đất ơi", "trừ phi", "tuy", "tuy nhiên", "tuy rằng", "tuy thế", "tuy vậy", "tuyệt nhiên", "tuần tự", "tuốt luốt", "tuốt tuồn tuột", "tuốt tuột", "tà tà", "tênh", "tít mù", "tò te", "tôi", "tông tốc", "tù tì", "tăm tắp", "tại", "tại vì", "tấm", "tấn", "tất cả", "tất thảy", "tất tần tật", "tất tật", "tắp", "tắp lự", "tọt", "tỏ ra", "tỏ vẻ", "tốc tả", "tối ư", "tột", "tớ", "tới", "tức thì", "tức tốc", "từ", "từng", "tự vì", "tựu trung", "veo", "veo veo", "việc", "vung thiên địa", "vung tàn tán", "vung tán tàn", "và", "vào", "vâng", "vèo", "vì", "vì chưng", "vì thế", "vì vậy", "ví bằng", "ví dù", "ví phỏng", "ví thử", "vô hình trung", "vô kể", "vô luận", "vô vàn", "văng tê", "vạn nhất", "vả chăng", "vả lại", "vẫn", "vậy", "vậy là", "vậy thì", "về", "vị tất", "vốn dĩ", "với", "với lại", "vở", "vụt", "vừa", "vừa mới", "xa xả", "xiết bao", "xon xón", "xoành xoạch", "xoét", "xoẳn", "xoẹt", "xuất kì bất ý", "xuất kỳ bất ý", "xuể", "xuống", "xăm xúi", "xăm xăm", "xăm xắm", "xềnh xệch", "xệp", "à", "à ơi", "ào", "á", "á à", "ái", "ái chà", "ái dà", "áng", "âu là", "ô hay", "ô hô", "ô kê", "ô kìa", "ôi chao", "ôi thôi", "ông", "úi", "úi chà", "úi dào", "ý", "ý chừng", "ý da", "đang", "đi", "điều", "đành đạch", "đáng lí", "đáng lý", "đáng lẽ", "đánh đùng", "đáo để", "đây", "đã", "đó", "được", "đại loại", "đại nhân", "đại phàm", "đại để", "đến", "đến nỗi", "đều", "để", "ơ", "ơ hay", "ơ kìa", "ơi", "ư", "ạ", "ạ ơi", "ấy", "ầu ơ", "ắt", "ắt hẳn", "ắt là", "ối dào", "ối giời", "ối giời ơi", "ồ", "ổng", "ớ", "ờ", "ở", "ở trên", "ủa", "ứ hự", "ứ ừ", "ừ", "ử"],
+    yo: ["a", "an", "bá", "bí", "bẹ̀rẹ̀", "fún", "fẹ́", "gbogbo", "inú", "jù", "jẹ", "jẹ́", "kan", "kì", "kí", "kò", "láti", "lè", "lọ", "mi", "mo", "máa", "mọ̀", "ni", "náà", "ní", "nígbà", "nítorí", "nǹkan", "o", "padà", "pé", "púpọ̀", "pẹ̀lú", "rẹ̀", "sì", "sí", "sínú", "ṣ", "ti", "tí", "wà", "wá", "wọn", "wọ́n", "yìí", "àti", "àwọn", "é", "í", "òun", "ó", "ń", "ńlá", "ṣe", "ṣé", "ṣùgbọ́n", "ẹmọ́", "ọjọ́", "ọ̀pọ̀lọpọ̀"],
+    zu: ["futhi", "kahle", "kakhulu", "kanye", "khona", "kodwa", "kungani", "kusho", "la", "lakhe", "lapho", "mina", "ngesikhathi", "nje", "phansi", "phezulu", "u", "ukuba", "ukuthi", "ukuze", "uma", "wahamba", "wakhe", "wami", "wase", "wathi", "yakhe", "zakhe", "zonke"]
+  };
+});
+
+// src/core/source-index/keyword-stopwords.ts
+function functionWords(language) {
+  const existing = cached.get(language);
+  if (existing)
+    return existing;
+  const data2 = words[new Intl.Locale(language).language];
+  const result = data2 ? new Set(data2.map(key)) : EMPTY;
+  cached.set(language, result);
+  return result;
+}
+function keywordQueryLanguage(query, minLength = 30, englishWords = functionWords("eng")) {
+  const language = franc(query, { minLength });
+  const tokens = query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
+  const english = tokens.filter((token) => englishWords.has(key(token))).length;
+  const languages = francAll(query, { minLength: 6 }).map(([code]) => code).filter((code) => code !== "und");
+  const scores = new Map(languages.map((code) => [code, code === "eng" ? english : tokens.filter((token) => functionWords(code).has(key(token))).length]));
+  scores.set("eng", english);
+  const best = Math.max(0, ...scores.values());
+  if (best >= 2) {
+    if (english === best)
+      return "eng";
+    if (scores.get(language) === best)
+      return language;
+    const winners = [...scores].filter(([, score]) => score === best);
+    if (winners.length === 1)
+      return winners[0][0];
+  }
+  const foreign = scores.get(language) ?? 0;
+  return english > foreign && (language !== "und" || english >= 2) ? "eng" : language;
+}
+function foreignQueryStopwords(query, defaultStopwords) {
+  if (keywordExpansionDisabled())
+    return EMPTY;
+  const language = keywordQueryLanguage(query, 6, defaultStopwords);
+  if (language === "eng" || language === "und")
+    return EMPTY;
+  const candidate = functionWords(language);
+  const tokens = query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
+  const defaultSignals = tokens.filter((token) => defaultStopwords.has(key(token))).length;
+  const foreignSignals = tokens.filter((token) => candidate.has(key(token))).length;
+  return defaultSignals > foreignSignals ? EMPTY : new Set(tokens.filter((token) => candidate.has(key(token))));
+}
+var EMPTY, cached, key = (word) => word.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase(), words;
+var init_keyword_stopwords = __esm(() => {
+  init_franc_min();
+  init_stopwords_iso();
+  init_keyword_context();
+  EMPTY = new Set;
+  cached = new Map;
+  words = stopwords_iso_default;
+});
+
 // src/core/source-index/fts.ts
+function sourceIndexQueryLanguage(query) {
+  return keywordQueryLanguage(query, 30, FTS_QUERY_STOPWORDS);
+}
 function sourceIndexFtsQuery(query, options = {}) {
   const terms = sourceIndexFtsTerms(query);
   if (terms.length === 0)
@@ -33768,21 +18963,21 @@ function sourceIndexFtsTerms(query) {
   return terms;
 }
 function queryInitialisms(query) {
-  const words = [...query.matchAll(TOKEN_PATTERN2)].map((match) => match[0]);
+  const words2 = [...query.matchAll(TOKEN_PATTERN2)].map((match) => match[0]);
   const capitalised = (word) => /^\p{Lu}\p{Ll}/u.test(word) && !INITIALISM_CONNECTORS.has(word.toLowerCase());
   const found = new Map;
-  for (let start = 0;start < words.length && found.size < MAX_INITIALISMS; start += 1) {
-    if (!capitalised(words[start]))
+  for (let start = 0;start < words2.length && found.size < MAX_INITIALISMS; start += 1) {
+    if (!capitalised(words2[start]))
       continue;
     let names = 1;
-    for (let end = start + 1;end < words.length && names < 3; end += 1) {
-      const word = words[end];
+    for (let end = start + 1;end < words2.length && names < 3; end += 1) {
+      const word = words2[end];
       if (INITIALISM_CONNECTORS.has(word.toLowerCase()))
         continue;
       if (!capitalised(word))
         break;
       names += 1;
-      const span = words.slice(start, end + 1);
+      const span = words2.slice(start, end + 1);
       const covered = span.filter(capitalised).map((entry) => entry.toLowerCase());
       for (const letters of [span.map((entry) => entry[0]), span.filter(capitalised).map((entry) => entry[0])]) {
         const initialism = letters.join("").toLowerCase();
@@ -33846,10 +19041,10 @@ function sourceIndexFtsTermGroups(query, options = {}) {
     if (!group)
       continue;
     for (const term of alternatives) {
-      const key = lexicalKey(term);
-      if (!key || [...owned].some(([existing, owner]) => owner !== group && (overlaps(key, existing) || overlaps(existing, key))))
+      const key2 = lexicalKey(term);
+      if (!key2 || [...owned].some(([existing, owner]) => owner !== group && (overlaps(key2, existing) || overlaps(existing, key2))))
         continue;
-      owned.set(key, group);
+      owned.set(key2, group);
       group.push(term);
     }
   }
@@ -34128,10 +19323,10 @@ async function expandCachedSourceIndexKeywords(query, profile) {
   const sources = sourceIndexFtsTermGroups(query).map((group) => group[0]).filter((term) => !/\p{N}/u.test(term));
   const vocabulary = keyword_equivalents_default;
   const keyOf = (word) => stemmer(word.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase());
-  const concepts = sources.map((source) => Object.values(vocabulary).find((row) => Object.values(row).some((words) => words.some((word) => !word.includes(" ") && keyOf(word) === keyOf(source)))));
+  const concepts = sources.map((source) => Object.values(vocabulary).find((row) => Object.values(row).some((words2) => words2.some((word) => !word.includes(" ") && keyOf(word) === keyOf(source)))));
   if (!builtIn?.available() && !concepts.some(Boolean))
     return EMPTY2;
-  const detectedLanguage = keywordQueryLanguage(query);
+  const detectedLanguage = sourceIndexQueryLanguage(query);
   const knownLanguages = concepts.every(Boolean) && concepts.length > 0 ? Object.keys(concepts[0]).filter((language) => concepts.every((row, index) => row?.[language]?.some((word) => !word.includes(" ") && keyOf(word) === keyOf(sources[index])))) : [];
   const sourceLanguages = detectedLanguage === "und" ? knownLanguages : [detectedLanguage];
   const targetProfile = typeof profile === "function" ? profile() : profile;
@@ -34154,12 +19349,12 @@ async function expandCachedSourceIndexKeywords(query, profile) {
     cache = new Map;
     caches.set(builtIn.model, cache);
   }
-  const key = JSON.stringify([query, languages]);
-  const existing = cache.get(key);
+  const key2 = JSON.stringify([query, languages]);
+  const existing = cache.get(key2);
   if (existing && existing.expires > Date.now())
     return existing.pending;
   const pending = translate();
-  cache.set(key, { pending, expires: Date.now() + 5 * 60000 });
+  cache.set(key2, { pending, expires: Date.now() + 5 * 60000 });
   if (cache.size > 128)
     cache.delete(cache.keys().next().value);
   return pending;
@@ -34198,19 +19393,19 @@ Target languages: ` + languages.map((code) => code + " = " + new Intl.DisplayNam
         const decoded = { ...seeded[language] };
         const generatedLanguage = generated?.[language];
         if (generatedLanguage && typeof generatedLanguage === "object" && !Array.isArray(generatedLanguage)) {
-          for (const [id, words] of Object.entries(generatedLanguage)) {
+          for (const [id, words2] of Object.entries(generatedLanguage)) {
             const index = Number(id);
-            if (!Number.isSafeInteger(index) || String(index) !== id || !sources[index] || !Array.isArray(words))
+            if (!Number.isSafeInteger(index) || String(index) !== id || !sources[index] || !Array.isArray(words2))
               continue;
             const source = sources[index];
-            decoded[source] = [...Array.isArray(decoded[source]) ? decoded[source] : [], ...words];
+            decoded[source] = [...Array.isArray(decoded[source]) ? decoded[source] : [], ...words2];
           }
         }
         merged[language] = decoded;
       }
       return parseKeywordExpansion(JSON.stringify(merged), sources, languages);
     } catch {
-      const entry = cache.get(key);
+      const entry = cache.get(key2);
       if (entry)
         entry.expires = Date.now() + 30000;
       return fallback;
@@ -34266,7 +19461,6 @@ var caches, EMPTY2, MAX_LANGUAGES = 6, MAX_TERMS_PER_LANGUAGE = 8, SYSTEM;
 var init_keyword_expansion = __esm(() => {
   init_stemmer();
   init_keyword_equivalents();
-  init_keyword_stopwords();
   init_built_in_sniffer();
   init_fts();
   init_keyword_context();
@@ -34613,13 +19807,13 @@ function mergeRetrievalDegradations(...lists) {
   const merged = new Map;
   for (const list of lists) {
     for (const entry of list ?? []) {
-      const key = [entry.laneName, entry.laneType, entry.reason, entry.detail ?? ""].join("|");
-      const existing = merged.get(key);
+      const key2 = [entry.laneName, entry.laneType, entry.reason, entry.detail ?? ""].join("|");
+      const existing = merged.get(key2);
       if (existing) {
         existing.occurrences += Math.max(1, entry.occurrences);
         continue;
       }
-      merged.set(key, { ...entry, occurrences: Math.max(1, entry.occurrences) });
+      merged.set(key2, { ...entry, occurrences: Math.max(1, entry.occurrences) });
     }
   }
   return [...merged.values()].sort((left, right) => {
@@ -34649,14 +19843,14 @@ function normalizeSourceReactions(value) {
       throw new SourceReactionValidationError("entry_not_an_object", "Each reaction aggregate entry must be an object with a key and a count.");
     }
     const record = entry;
-    const key = normalizeReactionKey(record["key"]);
-    if (seenKeys.has(key)) {
+    const key2 = normalizeReactionKey(record["key"]);
+    if (seenKeys.has(key2)) {
       throw new SourceReactionValidationError("duplicate_key", "A reaction aggregate carries one entry per token; duplicate tokens are not aggregated.");
     }
-    seenKeys.add(key);
+    seenKeys.add(key2);
     const actors = normalizeReactionActors(record["actors"]);
     normalized.push({
-      key,
+      key: key2,
       count: normalizeReactionCount(record["count"]),
       ...actors.length > 0 ? { actors } : {}
     });
@@ -34704,17 +19898,17 @@ function normalizeReactionKey(value) {
   if (typeof value !== "string") {
     throw new SourceReactionValidationError("invalid_key", "A reaction token must be a non-empty string.");
   }
-  const key = value.trim();
-  if (!key) {
+  const key2 = value.trim();
+  if (!key2) {
     throw new SourceReactionValidationError("invalid_key", "A reaction token must be a non-empty string.");
   }
-  if (key.length > MAX_SOURCE_REACTION_KEY_CHARS) {
+  if (key2.length > MAX_SOURCE_REACTION_KEY_CHARS) {
     throw new SourceReactionValidationError("key_too_long", `A reaction token is limited to ${MAX_SOURCE_REACTION_KEY_CHARS} characters.`);
   }
-  if (hasControlCharacter(key)) {
+  if (hasControlCharacter(key2)) {
     throw new SourceReactionValidationError("invalid_key", "A reaction token must not contain line breaks or control characters.");
   }
-  return key;
+  return key2;
 }
 function normalizeReactionCount(value) {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
@@ -34824,7 +20018,7 @@ function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) 
   }
   const margin = topScore - ordinary;
   const intimateMargin = scores.intimate - ordinary;
-  const kept = Object.fromEntries(Object.entries(scores).map(([key, value]) => [key, rounded(value)]));
+  const kept = Object.fromEntries(Object.entries(scores).map(([key2, value]) => [key2, rounded(value)]));
   if (margin >= thresholds.margin) {
     return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
   }
@@ -34848,8 +20042,8 @@ function canJudgeMedia(provider) {
   return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
 }
 function mediaJudgePromptVectors(provider) {
-  const key = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
-  let cached2 = promptVectorCache.get(key);
+  const key2 = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
+  let cached2 = promptVectorCache.get(key2);
   if (!cached2) {
     const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
     cached2 = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
@@ -34858,8 +20052,8 @@ function mediaJudgePromptVectors(provider) {
       }
       return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
     });
-    promptVectorCache.set(key, cached2);
-    cached2.catch(() => promptVectorCache.delete(key));
+    promptVectorCache.set(key2, cached2);
+    cached2.catch(() => promptVectorCache.delete(key2));
   }
   return cached2;
 }
@@ -35161,8 +20355,8 @@ function tallyExclusion(tally, decision) {
   }
   if (decision.ruleId === undefined || decision.prefix === undefined)
     return;
-  const key = `${decision.ruleId}:${decision.prefix}`;
-  const row = tally.byPrefix.get(key);
+  const key2 = `${decision.ruleId}:${decision.prefix}`;
+  const row = tally.byPrefix.get(key2);
   if (row)
     row.items += 1;
 }
@@ -35992,8 +21186,8 @@ function classificationInputFromRawItem(item) {
     text: text ?? ""
   };
 }
-function metadataStringArray(metadata, key) {
-  const value = metadata[key];
+function metadataStringArray(metadata, key2) {
+  const value = metadata[key2];
   if (!Array.isArray(value))
     return [];
   return value.map((entry) => typeof entry === "string" ? entry.trim() : "").filter(Boolean);
@@ -36021,10 +21215,10 @@ function itemSearchText(item, title, reactionLine) {
   ];
   const seen = new Set;
   const unique = parts.map((part) => part?.trim()).filter((part) => Boolean(part)).filter((part) => {
-    const key = part.toLowerCase();
-    if (seen.has(key))
+    const key2 = part.toLowerCase();
+    if (seen.has(key2))
       return false;
-    seen.add(key);
+    seen.add(key2);
     return true;
   });
   return unique.length > 0 ? unique.join(`
@@ -36040,10 +21234,10 @@ function mergeSearchTextLines(stored, emitted, literalEscapes, preserveOwnedFace
   });
   const unique = [...storedLines, ...emitted?.split(`
 `) ?? []].map((value) => value.trim()).filter(Boolean).filter((value) => {
-    const key = value.toLowerCase();
-    if (seen.has(key))
+    const key2 = value.toLowerCase();
+    if (seen.has(key2))
       return false;
-    seen.add(key);
+    seen.add(key2);
     return true;
   });
   return unique.length > 0 ? unique.join(`
@@ -36085,8 +21279,8 @@ function parseFacetRefreshJournal(value) {
     throw new Error("Connector store facet-refresh journal is corrupt.");
   }
   const counts = record.counts;
-  const read = (key) => {
-    const count = counts[key];
+  const read = (key2) => {
+    const count = counts[key2];
     if (!Number.isSafeInteger(count) || count < 0) {
       throw new Error("Connector store facet-refresh journal is corrupt.");
     }
@@ -37007,23 +22201,23 @@ function assertContentFetchFailureBudget(consecutiveFailures) {
 function itemIdHash(item) {
   return hashString2(item.identity.localItemId).slice(0, 16);
 }
-function metadataString(metadata, key) {
-  const value = metadata[key];
+function metadataString(metadata, key2) {
+  const value = metadata[key2];
   if (typeof value !== "string")
     return;
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
 }
-function metadataStringList(metadata, key) {
-  const value = metadata[key];
+function metadataStringList(metadata, key2) {
+  const value = metadata[key2];
   if (Array.isArray(value)) {
     return value.flatMap((entry) => typeof entry === "string" && entry.trim() ? [entry.trim()] : []);
   }
-  const single = metadataString(metadata, key);
+  const single = metadataString(metadata, key2);
   return single ? [single] : [];
 }
-function metadataBoolean(metadata, key) {
-  const value = metadata[key];
+function metadataBoolean(metadata, key2) {
+  const value = metadata[key2];
   return typeof value === "boolean" ? value : undefined;
 }
 function senderMetadataFromRawItem(item) {
@@ -37900,8 +23094,8 @@ var init_local_index = __esm(() => {
           return false;
         const override = ledger.getOverride(item.identity);
         const metadataString = (keys) => {
-          for (const key of keys) {
-            const value = item.metadata[key];
+          for (const key2 of keys) {
+            const value = item.metadata[key2];
             if (typeof value === "string" && value.trim())
               return value.trim();
           }
@@ -38004,9 +23198,9 @@ var init_local_index = __esm(() => {
       if (!ledger || identities.length === 0 || !ledger.corpusHasCopies(this.corpusId))
         return new Set;
       const hidden = new Set;
-      for (const [key, copies] of ledger.copiesForMany(identities)) {
+      for (const [key2, copies] of ledger.copiesForMany(identities)) {
         if (copies.some((copy) => copy.corpusId === this.corpusId && copy.state !== "current"))
-          hidden.add(key);
+          hidden.add(key2);
       }
       return hidden;
     }
@@ -38095,7 +23289,7 @@ var init_local_index = __esm(() => {
       try {
         const parsed = row.source_scope_folder_keys_json ? JSON.parse(row.source_scope_folder_keys_json) : [];
         if (Array.isArray(parsed))
-          folderKeys = parsed.filter((key) => typeof key === "string");
+          folderKeys = parsed.filter((key2) => typeof key2 === "string");
       } catch {
         folderKeys = [];
       }
@@ -38539,7 +23733,7 @@ var init_local_index = __esm(() => {
         try {
           const parsed = row.source_scope_folder_keys_json ? JSON.parse(row.source_scope_folder_keys_json) : [];
           if (Array.isArray(parsed))
-            folderKeys = parsed.filter((key) => typeof key === "string");
+            folderKeys = parsed.filter((key2) => typeof key2 === "string");
         } catch {
           folderKeys = [];
         }
@@ -38758,9 +23952,9 @@ var init_local_index = __esm(() => {
       }), () => "metadata");
       const distinct = new Map;
       for (const row of visible) {
-        const key = JSON.stringify([row.provider_conversation_id, row.title]);
-        if (!distinct.has(key))
-          distinct.set(key, { conversationId: row.provider_conversation_id, title: row.title });
+        const key2 = JSON.stringify([row.provider_conversation_id, row.title]);
+        if (!distinct.has(key2))
+          distinct.set(key2, { conversationId: row.provider_conversation_id, title: row.title });
       }
       const candidates = [...distinct.values()];
       return {
@@ -39429,11 +24623,11 @@ var init_local_index = __esm(() => {
         if (record.media?.sha256 !== record.expectation.mediaSha256) {
           throw new Error("Representation restore media does not match its expectation.");
         }
-        const key = sourceItemIdentityKey(item.identity);
-        if (seenIdentities.has(key)) {
+        const key2 = sourceItemIdentityKey(item.identity);
+        if (seenIdentities.has(key2)) {
           throw new Error("Representation restore contains a duplicate item identity.");
         }
-        seenIdentities.add(key);
+        seenIdentities.add(key2);
       }
       const summary = this.db.transaction(() => {
         const syncRunId = `connector-representation-restore-${randomUUID5()}`;
@@ -39755,10 +24949,10 @@ var init_local_index = __esm(() => {
       `);
         const hiddenCopies = this.hiddenCopyKeys(options.identities);
         for (const identity of options.identities) {
-          const key = sourceItemIdentityKey(identity);
-          if (considered.has(key))
+          const key2 = sourceItemIdentityKey(identity);
+          if (considered.has(key2))
             continue;
-          considered.add(key);
+          considered.add(key2);
           if (hiddenCopies.has(tierLedgerIdentityKey(identity)))
             continue;
           const row = findActive.get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
@@ -43312,9 +28506,9 @@ function installComplete(paths, modelFiles, runtimePackages) {
 async function verifyModelFiles(dir, files, reporter) {
   for (const file of files) {
     const path = join21(dir, file.name);
-    const key = `${path}:${file.sha256}`;
+    const key2 = `${path}:${file.sha256}`;
     verifiedThisProcess ??= new Set;
-    if (verifiedThisProcess.has(key))
+    if (verifiedThisProcess.has(key2))
       continue;
     const size = statSync10(path).size;
     const digest2 = size === file.bytes ? await sha256File(path) : undefined;
@@ -43322,7 +28516,7 @@ async function verifyModelFiles(dir, files, reporter) {
       rmSync8(path, { force: true });
       throw new BuiltInEmbeddingInstallError("checksum_mismatch", `${file.name} did not match its pinned checksum and was removed; it will download again.`);
     }
-    verifiedThisProcess.add(key);
+    verifiedThisProcess.add(key2);
   }
   reporter.touch();
 }
@@ -44051,25 +29245,25 @@ function normalize2(text) {
   return cleaned.toLowerCase().normalize("NFD").replace(COMBINING_MARK, "");
 }
 function preTokenize(text) {
-  const words = [];
+  const words2 = [];
   let current = "";
   for (const char of text) {
     if (char === " " || WHITESPACE.test(char)) {
       if (current)
-        words.push(current);
+        words2.push(current);
       current = "";
     } else if (isPunctuation(char)) {
       if (current)
-        words.push(current);
-      words.push(char);
+        words2.push(current);
+      words2.push(char);
       current = "";
     } else {
       current += char;
     }
   }
   if (current)
-    words.push(current);
-  return words;
+    words2.push(current);
+  return words2;
 }
 function isPunctuation(char) {
   const code = char.codePointAt(0);
@@ -44551,12 +29745,12 @@ function sharedBuiltInSourceEmbeddingProvider(options) {
     throw new OperationError("config_error", `This version of Olympus does not include the built-in embedding model "${options.modelId}".`, `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(", ")} for the built-in profile, or update Olympus.`);
   }
   const env = options.env ?? process.env;
-  const key = `${builtInEmbeddingPaths(env).root}\x00${options.modelId}`;
+  const key2 = `${builtInEmbeddingPaths(env).root}\x00${options.modelId}`;
   sharedProviders ??= new Map;
-  let provider = sharedProviders.get(key);
+  let provider = sharedProviders.get(key2);
   if (!provider) {
     provider = new BuiltInSourceEmbeddingProvider({ env, model });
-    sharedProviders.set(key, provider);
+    sharedProviders.set(key2, provider);
   }
   return provider;
 }
@@ -44707,8 +29901,8 @@ function isEmbeddingLedgerEntry(value) {
     return false;
   if (!isStatus(record.status))
     return false;
-  for (const key of ["model_id", "epoch", "endpoint", "why", "entry_id"]) {
-    if (record[key] !== undefined && typeof record[key] !== "string")
+  for (const key2 of ["model_id", "epoch", "endpoint", "why", "entry_id"]) {
+    if (record[key2] !== undefined && typeof record[key2] !== "string")
       return false;
   }
   return record.scope === undefined || isScope(record.scope);
@@ -45139,14 +30333,14 @@ async function rehomePrivateTierRows(options) {
         report.guardedStores += 1;
         continue;
       }
-      const key = `${CURSOR_KEY_PREFIX}${store.corpusId}`;
-      const stored = Number.parseInt(ledger.readMeta(key) ?? "", 10);
+      const key2 = `${CURSOR_KEY_PREFIX}${store.corpusId}`;
+      const stored = Number.parseInt(ledger.readMeta(key2) ?? "", 10);
       const page = store.privateTierRowWindow({
         ...Number.isFinite(stored) && stored > 0 ? { after: stored } : {},
         window: window2,
         limit
       });
-      ledger.writeMeta(key, page.next === undefined ? "" : String(page.next));
+      ledger.writeMeta(key2, page.next === undefined ? "" : String(page.next));
       for (const row of page.rows) {
         report.examined += 1;
         try {
@@ -45315,10 +30509,10 @@ async function runQueuedMoves(options, report, found) {
       }
     }
     for (const identity of found) {
-      const key = tierLedgerIdentityKey(identity);
-      const record = work.has(key) ? undefined : ledger.getCurrent(identity);
+      const key2 = tierLedgerIdentityKey(identity);
+      const record = work.has(key2) ? undefined : ledger.getCurrent(identity);
       if (record && isOurQueuedRaise(record))
-        work.set(key, record);
+        work.set(key2, record);
     }
   } catch {
     return;
@@ -45329,20 +30523,20 @@ async function runQueuedMoves(options, report, found) {
   const maxLooked = Math.max(1, options.maxLooked ?? DEFAULT_ROW_REHOME_LOOKED);
   const ordered = [...work.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
   const cursor = ledger.readMeta(QUEUE_CURSOR_META_KEY) ?? "";
-  const start = Math.max(0, ordered.findIndex(([key]) => key > cursor));
-  const rotated = cursor === "" || ordered.every(([key]) => key <= cursor) ? ordered : [...ordered.slice(start), ...ordered.slice(0, start)];
+  const start = Math.max(0, ordered.findIndex(([key2]) => key2 > cursor));
+  const rotated = cursor === "" || ordered.every(([key2]) => key2 <= cursor) ? ordered : [...ordered.slice(start), ...ordered.slice(0, start)];
   let looked = 0;
   let waiting = 0;
   let lastLooked = "";
   const moved = [];
-  for (const [key, queued] of rotated) {
+  for (const [key2, queued] of rotated) {
     const identity = identityOfRecord(queued);
     if (looked >= maxLooked || budget === 0) {
       waiting += 1;
       continue;
     }
     looked += 1;
-    lastLooked = key;
+    lastLooked = key2;
     const refusedKey = refusalKey(identity, queued.generation);
     if (refused.has(refusedKey)) {
       report.refused += 1;
@@ -45505,9 +30699,9 @@ function rejudgeRoutedItems(options) {
     return { report };
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
-  const key = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
+  const key2 = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
   const page = ledger.rejudgeCandidatePage({
-    ...key,
+    ...key2,
     ...options.after ? { after: options.after } : {},
     limit
   });
@@ -45518,7 +30712,7 @@ function rejudgeRoutedItems(options) {
         sniffer: classification.sniffer,
         ...classification.retirePublic ? { retirePublic: true } : {},
         report,
-        key,
+        key: key2,
         autoMoves: options.autoMoves === true
       });
     } catch {
@@ -45528,12 +30722,12 @@ function rejudgeRoutedItems(options) {
   return { report, ...page.next ? { next: page.next } : {} };
 }
 function rejudgeStoredContent(set, record, options) {
-  const { report, key, autoMoves } = options;
+  const { report, key: key2, autoMoves } = options;
   const ledger = set.ledger;
   const identity = identityOf2(record);
   if (ledger.getOverride(identity)) {
-    if (key)
-      ledger.markRejudged(identity, key);
+    if (key2)
+      ledger.markRejudged(identity, key2);
     report.skipped += 1;
     return;
   }
@@ -45544,8 +30738,8 @@ function rejudgeStoredContent(set, record, options) {
   const text = exported?.chunks.map((chunk) => chunk.boundedText).join(`
 `) ?? "";
   if (!exported || !text.trim()) {
-    if (key)
-      ledger.markRejudged(identity, key);
+    if (key2)
+      ledger.markRejudged(identity, key2);
     report.skipped += 1;
     return;
   }
@@ -45597,8 +30791,8 @@ function rejudgeStoredContent(set, record, options) {
     return;
   }
   if (content.contentPending && record.state === "pending") {
-    if (key)
-      ledger.markHeldRejudged(record, key);
+    if (key2)
+      ledger.markHeldRejudged(record, key2);
     report.asked += 1;
     return;
   }
@@ -45617,8 +30811,8 @@ function rejudgeStoredContent(set, record, options) {
     ...autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true },
     guard: { generation: record.generation, override: undefined }
   });
-  if (key)
-    ledger.markRejudged(identity, key);
+  if (key2)
+    ledger.markRejudged(identity, key2);
   if (recorded.outcome === "queued_move")
     report.movesQueued += 1;
   else
@@ -45675,7 +30869,7 @@ function storedFolderKeys(value) {
     return [];
   try {
     const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((key) => typeof key === "string") : [];
+    return Array.isArray(parsed) ? parsed.filter((key2) => typeof key2 === "string") : [];
   } catch {
     return [];
   }
@@ -45698,14 +30892,14 @@ function sweepOwnerRuleRaises(options) {
   const raising = (classification.rules ?? []).filter(isRaisingRule);
   const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
   const state = readState(ledger.readMeta(SWEEP_META_KEY));
-  const done = state.done.filter((key) => keyed.has(key));
-  const pendingKeys = [...keyed.keys()].filter((key) => !done.includes(key)).sort();
+  const done = state.done.filter((key2) => keyed.has(key2));
+  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
   if (pendingKeys.length === 0) {
     if (done.length !== state.done.length || state.pending)
       writeState(ledger, { done });
     return report;
   }
-  const pendingRules = pendingKeys.map((key) => keyed.get(key));
+  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
   const resume = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending.after : undefined;
   const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
   const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
@@ -45796,7 +30990,7 @@ function storedSignals(copy) {
     try {
       const parsed = JSON.parse(keysJson);
       if (Array.isArray(parsed))
-        folderKeys = parsed.filter((key) => typeof key === "string");
+        folderKeys = parsed.filter((key2) => typeof key2 === "string");
     } catch {
       folderKeys = [];
     }
@@ -45816,7 +31010,7 @@ function readState(raw) {
   try {
     const parsed = JSON.parse(raw);
     return {
-      done: Array.isArray(parsed.done) ? parsed.done.filter((key) => typeof key === "string") : [],
+      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
       ...parsed.pending && Array.isArray(parsed.pending.rules) ? { pending: parsed.pending } : {}
     };
   } catch {
@@ -45827,7 +31021,7 @@ function writeState(ledger, state) {
   ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
 }
 function sameKeys(left, right) {
-  return left.length === right.length && left.every((key, index) => key === right[index]);
+  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
 }
 function identityOf3(record) {
   return {
@@ -46625,11 +31819,11 @@ class TieredRoutingRun {
     const domain = this.set.domainForCorpus(input.store.corpusId);
     if (!domain)
       throw new Error("A tier route was asked by a store outside its set.");
-    const key = identityKey(input.item.identity);
-    let entry = this.plans.get(key);
+    const key2 = identityKey(input.item.identity);
+    let entry = this.plans.get(key2);
     if (!entry) {
       entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
-      this.plans.set(key, entry);
+      this.plans.set(key2, entry);
     }
     if (this.mode === "per_leg" && !entry.handedOff) {
       entry.handedOff = true;
@@ -46826,8 +32020,8 @@ function identityKey(identity) {
   return tierLedgerIdentityKey(identity);
 }
 function stringMetadata(item, keys) {
-  for (const key of keys) {
-    const value = item.metadata[key];
+  for (const key2 of keys) {
+    const value = item.metadata[key2];
     if (typeof value === "string" && value.trim())
       return value.trim();
   }
@@ -46942,12 +32136,12 @@ function connectorStoreFilterCapabilityRegistry(entries) {
       throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
     }
     const registry = provider === undefined ? familyEntries : providerEntries;
-    const key = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
-    if (registry.has(key)) {
+    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
+    if (registry.has(key2)) {
       const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
       throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
     }
-    registry.set(key, Object.freeze({ ...capabilities }));
+    registry.set(key2, Object.freeze({ ...capabilities }));
   }
   return Object.freeze({
     resolve(identity) {
@@ -48157,11 +33351,11 @@ function evidenceVersions(items) {
   const similarity = (a, b) => {
     if (a === b)
       return 1;
-    const key = a < b ? `${a}:${b}` : `${b}:${a}`;
-    let value = memo.get(key);
+    const key2 = a < b ? `${a}:${b}` : `${b}:${a}`;
+    let value = memo.get(key2);
     if (value === undefined) {
       value = jaccard(shingles[a], shingles[b]);
-      memo.set(key, value);
+      memo.set(key2, value);
     }
     return value;
   };
@@ -48213,10 +33407,10 @@ function evidenceDateValue(date) {
   return Number.isFinite(value) ? value : Number.NaN;
 }
 function shingleSet(text) {
-  const words = text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  const words2 = text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
   const set = new Set;
-  for (let index = 0;index + SHINGLE_WORDS <= words.length; index += 1) {
-    set.add(words.slice(index, index + SHINGLE_WORDS).join(" "));
+  for (let index = 0;index + SHINGLE_WORDS <= words2.length; index += 1) {
+    set.add(words2.slice(index, index + SHINGLE_WORDS).join(" "));
   }
   return set;
 }
@@ -48636,10 +33830,10 @@ function candidateLocalPrivateProvenance(candidate) {
     ["updated_at", citation.updatedAt]
   ];
   const metadata = {};
-  for (const [key, value] of entries) {
+  for (const [key2, value] of entries) {
     const trimmed = value?.trim();
     if (trimmed)
-      metadata[key] = trimmed;
+      metadata[key2] = trimmed;
   }
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
@@ -48758,8 +33952,8 @@ function statedSentences(text) {
   return new Set(sentenceKeys(text));
 }
 function absorbStatedSentences(stated, text) {
-  for (const key of sentenceKeys(text))
-    stated.add(key);
+  for (const key2 of sentenceKeys(text))
+    stated.add(key2);
 }
 function sentenceKeys(text) {
   const sentences = [];
@@ -48773,12 +33967,12 @@ function sentenceKeys(text) {
     sentenceInitial = endsSentence(rawToken);
   }
   return sentences.map((tokens) => {
-    const key = tokens.join(" ");
-    return key.endsWith(".") ? key.slice(0, -1) : key;
+    const key2 = tokens.join(" ");
+    return key2.endsWith(".") ? key2.slice(0, -1) : key2;
   });
 }
 function claimAddsToAnswer(claim, stated) {
-  return sentenceKeys(claim).some((key) => !stated.has(key));
+  return sentenceKeys(claim).some((key2) => !stated.has(key2));
 }
 function claimShape(claim) {
   const shape = { frame: new Set, facts: new Set };
@@ -50121,16 +35315,16 @@ function assertNoForbiddenRouterResultKeys(value, path) {
     value.forEach((item, index) => assertNoForbiddenRouterResultKeys(item, [...path, String(index)]));
     return;
   }
-  for (const [key, child] of Object.entries(value)) {
-    if (NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS.has(normalizeRouterResultKey(key))) {
-      const location = [...path, key].join(".");
+  for (const [key2, child] of Object.entries(value)) {
+    if (NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS.has(normalizeRouterResultKey(key2))) {
+      const location = [...path, key2].join(".");
       throw new Error(`Source-index routed search output included forbidden raw field "${location}".`);
     }
-    assertNoForbiddenRouterResultKeys(child, [...path, key]);
+    assertNoForbiddenRouterResultKeys(child, [...path, key2]);
   }
 }
-function normalizeRouterResultKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+function normalizeRouterResultKey(key2) {
+  return key2.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 var DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 1e4, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
@@ -50686,12 +35880,12 @@ class SecureAnalystPoolState {
     }
   }
   memberHealth(poolId, memberId) {
-    const key = `${poolId}\x00${memberId}`;
-    const existing = this.health.get(key);
+    const key2 = `${poolId}\x00${memberId}`;
+    const existing = this.health.get(key2);
     if (existing)
       return existing;
     const created = { consecutiveFailures: 0, cooldownUntilMs: 0 };
-    this.health.set(key, created);
+    this.health.set(key2, created);
     return created;
   }
 }
@@ -52017,10 +37211,10 @@ function evidenceFromCitations(citations, detail) {
     const candidate = detail.pack.candidates[candidateIndex];
     const corpusId = detail.candidateCorpusIds[candidateIndex] ?? "unknown";
     const item = citation.provenance.sourceItem;
-    const key = `${corpusId}:${item.providerItemId}`;
-    if (seen.has(key))
+    const key2 = `${corpusId}:${item.providerItemId}`;
+    if (seen.has(key2))
       continue;
-    seen.add(key);
+    seen.add(key2);
     const cite = citation.provenance.citation;
     evidence.push({
       corpus_id: corpusId,
@@ -52103,10 +37297,10 @@ function appendUnreadableMatchedEvidence(evidence, detail, releaseSecureContent)
       ...candidate.provenance.citation?.updatedAt ? { updated_at: candidate.provenance.citation.updatedAt } : {},
       ...citationSpanFields(candidate.provenance)
     };
-    const key = evidenceKey(entry);
-    if (seen.has(key))
+    const key2 = evidenceKey(entry);
+    if (seen.has(key2))
       continue;
-    seen.add(key);
+    seen.add(key2);
     evidence.push(entry);
   }
   return evidence;
@@ -52186,10 +37380,10 @@ async function searchReleasedEvidence(input) {
     }
     const corpusId = detail.candidateCorpusIds[index] ?? "unknown";
     const item = candidate.provenance.sourceItem;
-    const key = `${corpusId}:${item.providerItemId}`;
-    if (seen.has(key))
+    const key2 = `${corpusId}:${item.providerItemId}`;
+    if (seen.has(key2))
       return;
-    seen.add(key);
+    seen.add(key2);
     const excerpt = candidate.chunks.join(`
 …
 `).trim().slice(0, RELEASED_EXCERPT_MAX_CHARS);
@@ -52293,13 +37487,13 @@ async function privateNeighbours(adapters, build, matches) {
   }
   if (Object.keys(neighbourAdapters).length === 0)
     return [];
-  const key = (candidate) => `${candidate.corpusId}\x00${candidate.provenance.sourceItem?.localItemId ?? ""}`;
-  const seen = new Set(matches.map(key));
+  const key2 = (candidate) => `${candidate.corpusId}\x00${candidate.provenance.sourceItem?.localItemId ?? ""}`;
+  const seen = new Set(matches.map(key2));
   try {
     return (await build(neighbourAdapters)).filter((candidate) => {
-      if (!candidate.provenance.sourceItem?.localItemId || seen.has(key(candidate)))
+      if (!candidate.provenance.sourceItem?.localItemId || seen.has(key2(candidate)))
         return false;
-      seen.add(key(candidate));
+      seen.add(key2(candidate));
       return true;
     }).slice(0, PRIVATE_NEIGHBOURS_MAX).map((candidate) => ({ ...candidate, neighbour: true }));
   } catch {
@@ -52613,7 +37807,7 @@ function fileSourceScopeAllowsMetadata(approval, itemScopeKeys) {
 }
 function matchingSelections(approval, itemScopeKeys) {
   const byKey = new Map(approval.selections.map((selection) => [selection.key, selection]));
-  return itemScopeKeys.map((key) => byKey.get(key)).filter((selection) => selection !== undefined);
+  return itemScopeKeys.map((key2) => byKey.get(key2)).filter((selection) => selection !== undefined);
 }
 function isSameSaveReplayed(statePath, sourceId, request) {
   const read = readState3(statePath);
@@ -52636,18 +37830,18 @@ function pendingSnapshot(sourceId, revision, accountGeneration, reason) {
 function normalizeSelections(input) {
   const byKey = new Map;
   for (const selection of input) {
-    const key = selection.key.trim();
-    if (!key || key.length > 1024)
+    const key2 = selection.key.trim();
+    if (!key2 || key2.length > 1024)
       throw new OperationError("invalid_request", "Every selected folder requires a valid key.");
     if (!["ingest", "metadata_only", "exclude"].includes(selection.state)) {
       throw new OperationError("invalid_request", "Every selected folder requires a valid disposition.");
     }
-    if (byKey.has(key))
+    if (byKey.has(key2))
       throw new OperationError("invalid_request", "A folder may be selected only once.");
     const ancestorKeys = selection.ancestorKeys === undefined ? undefined : normalizeAncestorKeys(selection.ancestorKeys);
-    byKey.set(key, { state: selection.state, ...ancestorKeys?.length ? { ancestorKeys } : {} });
+    byKey.set(key2, { state: selection.state, ...ancestorKeys?.length ? { ancestorKeys } : {} });
   }
-  return [...byKey].sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => ({ key, ...value }));
+  return [...byKey].sort(([left], [right]) => left.localeCompare(right)).map(([key2, value]) => ({ key: key2, ...value }));
 }
 function normalizeAncestorKeys(input) {
   if (!Array.isArray(input) || input.length > 100) {
@@ -52697,7 +37891,7 @@ function parseApproval(value) {
     if (typeof selection.key !== "string" || typeof selection.state !== "string")
       throw new Error("selection");
     const ancestorKeys = selection.ancestorKeys;
-    if (ancestorKeys !== undefined && (!Array.isArray(ancestorKeys) || ancestorKeys.some((key) => typeof key !== "string")))
+    if (ancestorKeys !== undefined && (!Array.isArray(ancestorKeys) || ancestorKeys.some((key2) => typeof key2 !== "string")))
       throw new Error("selection");
     return {
       key: selection.key,
@@ -53205,12 +38399,12 @@ function accountFromGoogleHandle(handle, fallback = "personal") {
   const match = /^[a-z_]+\.([a-z0-9_-]+)(?:\.|$)/i.exec(trimmed);
   return match?.[1] ?? fallback;
 }
-function metadataString2(metadata, key) {
-  const value = metadata[key];
+function metadataString2(metadata, key2) {
+  const value = metadata[key2];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
-function metadataStringArray2(metadata, key) {
-  const value = metadata[key];
+function metadataStringArray2(metadata, key2) {
+  const value = metadata[key2];
   if (!Array.isArray(value))
     return [];
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
@@ -54155,8 +39349,8 @@ function gmailAttachmentLine(filename, part, size) {
   ].filter((value) => Boolean(value));
   return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
 }
-function metadataCount(metadata, key) {
-  const value = metadata[key];
+function metadataCount(metadata, key2) {
+  const value = metadata[key2];
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 function extractMessageText(message) {
@@ -54238,9 +39432,9 @@ function asRecord6(value, label) {
 function stringValue2(value) {
   return typeof value === "string" ? value : "";
 }
-function optionalStringProp(record, key) {
-  const value = stringValue2(record[key]).trim();
-  return value ? { [key]: value } : {};
+function optionalStringProp(record, key2) {
+  const value = stringValue2(record[key2]).trim();
+  return value ? { [key2]: value } : {};
 }
 function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
@@ -55217,9 +40411,9 @@ function asRecord7(value, label) {
 function stringValue3(value) {
   return typeof value === "string" ? value : "";
 }
-function optionalStringProp2(record, key) {
-  const value = stringValue3(record[key]).trim();
-  return value ? { [key]: value } : {};
+function optionalStringProp2(record, key2) {
+  const value = stringValue3(record[key2]).trim();
+  return value ? { [key2]: value } : {};
 }
 function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
@@ -55327,7 +40521,7 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
         sourceScopeObservation: (item) => ({
           accountGeneration: options.scope.generation,
           scopeRevision: options.scope.revision,
-          folderKeys: Array.isArray(item.metadata["folderAncestorIds"]) ? item.metadata["folderAncestorIds"].filter((key) => typeof key === "string") : []
+          folderKeys: Array.isArray(item.metadata["folderAncestorIds"]) ? item.metadata["folderAncestorIds"].filter((key2) => typeof key2 === "string") : []
         })
       } : {},
       ...input.maxItems !== undefined ? { maxItems: input.maxItems } : {},
@@ -55998,10 +41192,10 @@ function captureAttachmentNames(message) {
   }
   const seen = new Set;
   return values.filter((value) => {
-    const key = value.toLowerCase();
-    if (seen.has(key))
+    const key2 = value.toLowerCase();
+    if (seen.has(key2))
       return false;
-    seen.add(key);
+    seen.add(key2);
     return true;
   });
 }
@@ -56294,8 +41488,8 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
     }
   };
 }
-function sum(runs, key) {
-  return runs.reduce((total, run) => total + Number(run[key]), 0);
+function sum(runs, key2) {
+  return runs.reduce((total, run) => total + Number(run[key2]), 0);
 }
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4;
 var init_store_sync = __esm(() => {
@@ -56796,7 +41990,7 @@ function createReadwiseSourceConnector(options) {
         title: signalText(item.metadata, "title"),
         sender: signalText(item.metadata, "author"),
         labels: signalTexts(item.metadata, "tags"),
-        folderKeys: [signalText(item.metadata, "category"), signalText(item.metadata, "location")].filter((key) => Boolean(key))
+        folderKeys: [signalText(item.metadata, "category"), signalText(item.metadata, "location")].filter((key2) => Boolean(key2))
       });
     },
     requestBudgetStatus: () => requestBudget.status()
@@ -57005,10 +42199,10 @@ function advanceWatermark(current, items) {
   return best;
 }
 function assertNewProviderPage3(seen, cursor) {
-  const key = `${cursor.phase}:${cursor.pageCursor ?? ""}`;
-  if (seen.has(key))
+  const key2 = `${cursor.phase}:${cursor.pageCursor ?? ""}`;
+  if (seen.has(key2))
     throw new Error("Readwise connector pagination cursor repeated.");
-  seen.add(key);
+  seen.add(key2);
 }
 function dedupeItems(items) {
   return [...new Map(items.map((item) => [
@@ -57526,8 +42720,8 @@ class XApiClient {
   }
   async getJson(path, params, context2) {
     const url = new URL(path.startsWith("/") ? path.slice(1) : path, this.baseUrl);
-    for (const [key, value] of Object.entries(params)) {
-      url.searchParams.set(key, String(value));
+    for (const [key2, value] of Object.entries(params)) {
+      url.searchParams.set(key2, String(value));
     }
     const controller = new AbortController;
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -57594,10 +42788,10 @@ function postsFromPayload(payload, strictSnapshot = false) {
       usersById.set(id, user);
     }
     for (const media of recordArray(includes.media, "X bookmarks media include")) {
-      const key = optionalString7(media.media_key);
-      if (!key)
+      const key2 = optionalString7(media.media_key);
+      if (!key2)
         throw new XApiError("X bookmarks media include contains a malformed identity.");
-      mediaByKey.set(key, media);
+      mediaByKey.set(key2, media);
     }
   }
   return payloadDataRecords(payload, "X bookmarks response", strictSnapshot).map((post) => postFromRecord(post, usersById, mediaByKey));
@@ -57609,7 +42803,7 @@ function postFromRecord(post, usersById, mediaByKey) {
   const authorId = optionalIdString(post.author_id);
   const author = authorId ? usersById.get(authorId) : undefined;
   const mediaKeys = mediaKeysFromPost(post);
-  const mediaUrls = mediaKeys.flatMap((key) => mediaUrlsFromRecord(mediaByKey.get(key))).filter(Boolean);
+  const mediaUrls = mediaKeys.flatMap((key2) => mediaUrlsFromRecord(mediaByKey.get(key2))).filter(Boolean);
   const createdAt = optionalString7(post.created_at);
   const text = optionalString7(post.text);
   const authorUsername = author ? optionalString7(author.username) : undefined;
@@ -57698,8 +42892,8 @@ function parseJsonObject3(text, context2) {
   }
   return parsed;
 }
-function recordAt(record, key) {
-  const value = record[key];
+function recordAt(record, key2) {
+  const value = record[key2];
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function recordArray(value, context2) {
@@ -57830,10 +43024,10 @@ function escapeReservedFolderFacetLine(value) {
 function uniqueOrdinarySearchTextLines(values) {
   const seen = new Set;
   return values.filter((value) => {
-    const key = value.toLowerCase();
-    if (seen.has(key))
+    const key2 = value.toLowerCase();
+    if (seen.has(key2))
       return false;
-    seen.add(key);
+    seen.add(key2);
     return true;
   });
 }
@@ -63390,15 +48584,15 @@ function createWhatsAppReactionIndexBuilder() {
       const actorKey = reactionActorKey(line);
       const actorId = trimmed(line.senderJid);
       const label = trimmed(line.senderName) ?? actorId;
-      const key = trimmed(line.reactionKey);
+      const key2 = trimmed(line.reactionKey);
       actors.set(actorKey, {
         ...targetChatJid === undefined ? {} : { targetChatJid },
         chatJid: line.chatJid,
         actorKey,
         ...actorId === undefined ? {} : { actorId },
         ...label === undefined ? {} : { actorLabel: label },
-        ...key === undefined ? {} : { key },
-        removed: line.reactionRemoved === true || key === undefined
+        ...key2 === undefined ? {} : { key: key2 },
+        removed: line.reactionRemoved === true || key2 === undefined
       });
       return true;
     },
@@ -63421,15 +48615,15 @@ function boundedReactionsForTarget(entries, targetChatJid) {
   for (const entry of matched) {
     if (entry.removed)
       continue;
-    const key = reactionToken(entry.key);
-    if (key === undefined)
+    const key2 = reactionToken(entry.key);
+    if (key2 === undefined)
       continue;
-    const actors = byToken.get(key) ?? new Map;
-    byToken.set(key, actors);
+    const actors = byToken.get(key2) ?? new Map;
+    byToken.set(key2, actors);
     actors.set(entry.actorKey, reactionActor(entry));
   }
-  const ranked = [...byToken.entries()].map(([key, actors]) => ({
-    key,
+  const ranked = [...byToken.entries()].map(([key2, actors]) => ({
+    key: key2,
     count: Math.min(actors.size, MAX_SOURCE_REACTION_COUNT),
     actors: [...actors.values()].filter((actor) => actor !== undefined).sort(compareActors).slice(0, MAX_SOURCE_REACTION_ACTORS)
   })).sort((left, right) => right.count - left.count || compareStrings2(left.key, right.key)).slice(0, MAX_SOURCE_REACTION_TOKENS);
@@ -63478,8 +48672,8 @@ function reactionActor(entry) {
     ...label === undefined ? {} : { label }
   };
 }
-function reactionToken(key) {
-  const token = key?.trim();
+function reactionToken(key2) {
+  const token = key2?.trim();
   if (!token)
     return;
   if (token.length > MAX_SOURCE_REACTION_KEY_CHARS)
@@ -64028,10 +49222,10 @@ function optionalStringRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return;
   const entries = [];
-  for (const [key, entryValue] of Object.entries(value)) {
-    if (key.trim() === "" || typeof entryValue !== "string" || entryValue.trim() === "")
+  for (const [key2, entryValue] of Object.entries(value)) {
+    if (key2.trim() === "" || typeof entryValue !== "string" || entryValue.trim() === "")
       continue;
-    entries.push([key, entryValue]);
+    entries.push([key2, entryValue]);
   }
   return entries.length === 0 ? undefined : Object.fromEntries(entries);
 }
@@ -64785,12 +49979,12 @@ function assertNoRawEmailFieldsAtPath(value, path) {
     value.forEach((item, index) => assertNoRawEmailFieldsAtPath(item, [...path, String(index)]));
     return;
   }
-  for (const [key, child] of Object.entries(value)) {
-    if (FORBIDDEN_RAW_RESPONSE_KEYS.has(key)) {
-      const location = [...path, key].join(".");
+  for (const [key2, child] of Object.entries(value)) {
+    if (FORBIDDEN_RAW_RESPONSE_KEYS.has(key2)) {
+      const location = [...path, key2].join(".");
       throw new OperationError("email_policy_violation", `Private email lane response included forbidden raw field "${location}".`, "Return a bounded answer plus safe evidence metadata instead of raw email content.");
     }
-    assertNoRawEmailFieldsAtPath(child, [...path, key]);
+    assertNoRawEmailFieldsAtPath(child, [...path, key2]);
   }
 }
 var FORBIDDEN_RAW_RESPONSE_KEYS;
@@ -65653,7 +50847,7 @@ function requireExecutor(capability) {
   }
 }
 function assertOnlyFields(input, allowed, label) {
-  const unsupported = Object.keys(input).find((key) => !allowed.has(key));
+  const unsupported = Object.keys(input).find((key2) => !allowed.has(key2));
   if (unsupported) {
     throw new TypeError(`Source watch ${label} cannot accept field "${unsupported}".`);
   }
@@ -66562,7 +51756,7 @@ function parseSecretLocations(value) {
   return value.map((entry) => {
     const record = asRecord8(entry);
     const allowed = new Set(["source", "ref", "locator", "title", "finding_kinds"]);
-    const extra = Object.keys(record).filter((key) => !allowed.has(key));
+    const extra = Object.keys(record).filter((key2) => !allowed.has(key2));
     if (extra.length > 0 || typeof record.source !== "string" || typeof record.ref !== "string" || !Array.isArray(record.finding_kinds) || record.locator !== undefined && typeof record.locator !== "string" || record.title !== undefined && typeof record.title !== "string" || record.finding_kinds.some((kind) => typeof kind !== "string")) {
       throw new OperationError("email_error", "secret_locations entries carry location only.");
     }
@@ -66854,7 +52048,7 @@ function containsLocatorPayload(value) {
     return false;
   if (Array.isArray(value))
     return value.some(containsLocatorPayload);
-  return Object.entries(value).some(([key, child]) => SOURCE_INDEX_LOCATOR_KEYS.has(key) || containsLocatorPayload(child));
+  return Object.entries(value).some(([key2, child]) => SOURCE_INDEX_LOCATOR_KEYS.has(key2) || containsLocatorPayload(child));
 }
 function validateDropboxLocatorPayloads(hits) {
   let count = 0;
@@ -66889,17 +52083,17 @@ function validateDropboxLocatorShape(value) {
   const record = value;
   const keys = Object.keys(record).sort();
   const allowedKeys = new Set([...DROPBOX_LOCATOR_REQUIRED_KEYS, ...DROPBOX_LOCATOR_OPTIONAL_KEYS]);
-  if (keys.some((key) => !allowedKeys.has(key))) {
+  if (keys.some((key2) => !allowedKeys.has(key2))) {
     throw new OperationError("email_error", "source index Dropbox locator contains an unsupported field.");
   }
-  for (const key of DROPBOX_LOCATOR_REQUIRED_KEYS) {
-    if (typeof record[key] !== "string" || record[key].length === 0) {
-      throw new OperationError("email_error", `source index Dropbox locator requires string field ${key}.`);
+  for (const key2 of DROPBOX_LOCATOR_REQUIRED_KEYS) {
+    if (typeof record[key2] !== "string" || record[key2].length === 0) {
+      throw new OperationError("email_error", `source index Dropbox locator requires string field ${key2}.`);
     }
   }
-  for (const key of DROPBOX_LOCATOR_OPTIONAL_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(record, key) && (typeof record[key] !== "string" || record[key].length === 0)) {
-      throw new OperationError("email_error", `source index Dropbox locator field ${key} must be a non-empty string.`);
+  for (const key2 of DROPBOX_LOCATOR_OPTIONAL_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(record, key2) && (typeof record[key2] !== "string" || record[key2].length === 0)) {
+      throw new OperationError("email_error", `source index Dropbox locator field ${key2} must be a non-empty string.`);
     }
   }
   const displayPath = record.display_path;
@@ -66910,9 +52104,9 @@ function validateDropboxLocatorShape(value) {
   if (!isDropboxHomeUrl(record.dropbox_web_url) || !isDropboxHomeUrl(record.parent_dropbox_web_url)) {
     throw new OperationError("email_error", "source index Dropbox locator web URLs must use the Dropbox home HTTPS origin.");
   }
-  for (const key of DROPBOX_LOCATOR_OPTIONAL_KEYS) {
-    if (typeof record[key] === "string" && !isFileUrl(record[key])) {
-      throw new OperationError("email_error", `source index Dropbox locator field ${key} must use the file URL scheme.`);
+  for (const key2 of DROPBOX_LOCATOR_OPTIONAL_KEYS) {
+    if (typeof record[key2] === "string" && !isFileUrl(record[key2])) {
+      throw new OperationError("email_error", `source index Dropbox locator field ${key2} must use the file URL scheme.`);
     }
   }
 }
@@ -66941,12 +52135,12 @@ function assertNoSourceIndexOperationalLeakFieldsAtPath(value, path) {
     value.forEach((item, index) => assertNoSourceIndexOperationalLeakFieldsAtPath(item, [...path, String(index)]));
     return;
   }
-  for (const [key, child] of Object.entries(value)) {
-    if (FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS.has(key)) {
-      const location = [...path, key].join(".");
+  for (const [key2, child] of Object.entries(value)) {
+    if (FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS.has(key2)) {
+      const location = [...path, key2].join(".");
       throw new OperationError("email_policy_violation", `Private source worker response included forbidden operational field "${location}".`, "Return safe hashes, counts, provenance labels, and local index identifiers instead of raw paths, scopes, cursors, sessions, or credentials.");
     }
-    assertNoSourceIndexOperationalLeakFieldsAtPath(child, [...path, key]);
+    assertNoSourceIndexOperationalLeakFieldsAtPath(child, [...path, key2]);
   }
 }
 function parseSourceAnswerOpsec(value) {
@@ -68119,7 +53313,7 @@ import { delimiter as delimiter4, dirname as dirname33, isAbsolute as isAbsolute
 function zkapiStageRows(timings) {
   if (!timings)
     return [];
-  return ZKAPI_STAGE_LABELS.filter(([key]) => typeof timings[key] === "number").map(([key, label]) => ({ label, ms: timings[key] }));
+  return ZKAPI_STAGE_LABELS.filter(([key2]) => typeof timings[key2] === "number").map(([key2, label]) => ({ label, ms: timings[key2] }));
 }
 function formatZkapiStageTable(timings) {
   const rows = zkapiStageRows(timings);
@@ -68640,10 +53834,10 @@ function processGroupOf(pid) {
 }
 function childEnvironment(env) {
   const out = {};
-  for (const key of CHILD_ENV_KEYS) {
-    const value = env[key];
+  for (const key2 of CHILD_ENV_KEYS) {
+    const value = env[key2];
     if (value)
-      out[key] = value;
+      out[key2] = value;
   }
   return out;
 }
@@ -69160,12 +54354,12 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
   let timings = withTiming({}, "leaseAcquireMs", elapsedMs(clock, startedAt));
   let openStage;
   let lastSampleAt;
-  const stage = (key) => {
+  const stage = (key2) => {
     const at = sampleClock(clock);
     lastSampleAt = at;
     if (openStage)
       timings = withTiming(timings, openStage.key, durationMs(openStage.at, at));
-    openStage = key ? { key, at } : undefined;
+    openStage = key2 ? { key: key2, at } : undefined;
   };
   const now = options.now ?? (() => new Date);
   const settings = options.settings;
@@ -69228,7 +54422,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
     return fail("state_unavailable");
   }
   const fenced = Boolean(fences[scope]);
-  const fencedElsewhere = Object.keys(fences).some((key) => key !== scope);
+  const fencedElsewhere = Object.keys(fences).some((key2) => key2 !== scope);
   if (fenced || fencedElsewhere)
     receipt.fence = "held";
   if (fenced)
@@ -69570,7 +54764,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
       }, settings.settleTimeoutMs, { giveUp: unexpectedExit });
       const ours = [...facts.requests.entries()].filter(([id, request2]) => !requestsBefore.has(id) && request2.route === "/v1/chat/completions");
       const request = correlated && ours.length === 1 ? ours[0][1] : undefined;
-      if (request && request.keys.some((key) => key.source !== "fresh"))
+      if (request && request.keys.some((key2) => key2.source !== "fresh"))
         receipt.keyReuse = "not_verified";
       const keyRef = request?.keys.length === 1 ? request.keys[0].keyRef : undefined;
       let fenceClears = false;
@@ -69713,8 +54907,8 @@ function durationMs(from, to) {
 function elapsedMs(clock, since) {
   return since === undefined ? undefined : durationMs(since, sampleClock(clock));
 }
-function withTiming(timings, key, ms) {
-  return ms === undefined ? timings : { ...timings, [key]: ms };
+function withTiming(timings, key2, ms) {
+  return ms === undefined ? timings : { ...timings, [key2]: ms };
 }
 function adminStatusNetwork(response) {
   if (response.status !== 200)
@@ -70608,9 +55802,9 @@ function seedEngineSovereignty(path) {
 function engineSovereigntySeedBlocker(input) {
   try {
     if (existsSync31(input.workerEnvPath)) {
-      const key = ENV_POLICY_KEY.exec(readFileSync30(input.workerEnvPath, "utf8"))?.[1];
-      if (key)
-        return `${input.workerEnvPath} already sets ${key}, which chooses this worker's models and privacy routes.`;
+      const key2 = ENV_POLICY_KEY.exec(readFileSync30(input.workerEnvPath, "utf8"))?.[1];
+      if (key2)
+        return `${input.workerEnvPath} already sets ${key2}, which chooses this worker's models and privacy routes.`;
     }
   } catch {
     return `${input.workerEnvPath} could not be read to check for an existing policy.`;
@@ -71077,15 +56271,15 @@ function absolute(value, label) {
     return trimmed2;
   throw new OperationError("config_error", `Could not resolve an absolute ${label} path.`);
 }
-function objectAt(parent, key) {
-  const existing = parent[key];
+function objectAt(parent, key2) {
+  const existing = parent[key2];
   if (existing && typeof existing === "object" && !Array.isArray(existing))
     return existing;
   if (existing !== undefined) {
-    throw new OperationError("config_error", `engine.json "${key}" must be an object.`);
+    throw new OperationError("config_error", `engine.json "${key2}" must be an object.`);
   }
   const created = {};
-  parent[key] = created;
+  parent[key2] = created;
   return created;
 }
 function unxml(value) {
@@ -71202,11 +56396,11 @@ function localServerPrerequisite(profileId, profile) {
     remedy: `Start a local OpenAI-compatible model server on ${baseUrl.replace(/\/v1\/?$/, "")} or choose --preset no-sensitive.`
   };
 }
-function storeSecretRemedy(key) {
-  if (key === "venice.api_key") {
+function storeSecretRemedy(key2) {
+  if (key2 === "venice.api_key") {
     return "Open Models in Olympus Setup to connect Venice. Headless fallback: olympus connect venice --api-key-prompt";
   }
-  return `Store ${key} with the matching olympus connect command before source answering.`;
+  return `Store ${key2} with the matching olympus connect command before source answering.`;
 }
 var init_setup_preflight = __esm(() => {
   init_secret_store();
@@ -71558,23 +56752,23 @@ var init_source_failure = __esm(() => {
 
 // src/workers/dashboard/answer-ready-coverage.ts
 function metadataOnlyByPolicyFromCounts(counts) {
-  const policyVocabularyPresent = POLICY_NOT_READ_COUNT_KEYS.some((key) => {
-    const value = counts[key];
+  const policyVocabularyPresent = POLICY_NOT_READ_COUNT_KEYS.some((key2) => {
+    const value = counts[key2];
     return typeof value === "number" && Number.isFinite(value);
   });
   if (!policyVocabularyPresent)
     return;
   let total = 0;
-  for (const key of METADATA_ONLY_POLICY_COUNT_KEYS) {
-    const value = counts[key];
+  for (const key2 of METADATA_ONLY_POLICY_COUNT_KEYS) {
+    const value = counts[key2];
     if (typeof value === "number" && Number.isFinite(value))
       total += Math.max(0, Math.trunc(value));
   }
   return total;
 }
 function answerReadyEligibleFromCounts(counts) {
-  for (const key of ANSWER_READY_ELIGIBLE_COUNT_KEYS) {
-    const value = counts[key];
+  for (const key2 of ANSWER_READY_ELIGIBLE_COUNT_KEYS) {
+    const value = counts[key2];
     if (typeof value === "number" && Number.isFinite(value))
       return Math.max(0, Math.trunc(value));
   }
@@ -71582,8 +56776,8 @@ function answerReadyEligibleFromCounts(counts) {
 }
 function notReadByPolicyFromCounts(counts) {
   let total;
-  for (const key of POLICY_NOT_READ_COUNT_KEYS) {
-    const value = counts[key];
+  for (const key2 of POLICY_NOT_READ_COUNT_KEYS) {
+    const value = counts[key2];
     if (typeof value !== "number" || !Number.isFinite(value))
       continue;
     total = (total ?? 0) + Math.max(0, Math.trunc(value));
@@ -71793,8 +56987,8 @@ function dashboardSetupLead(sourceId, instructions) {
 }
 function fill(template, values) {
   let out = template;
-  for (const key of Object.keys(values))
-    out = out.split(`{${key}}`).join(String(values[key]));
+  for (const key2 of Object.keys(values))
+    out = out.split(`{${key2}}`).join(String(values[key2]));
   return out;
 }
 function dashboardCheckedLabel(generatedAt, now) {
@@ -73433,7 +58627,7 @@ function isCanonicalCredentialHealthPolicy(value) {
   const canonical = credentialHealthPolicy();
   const policy = value;
   const keys = Object.keys(canonical);
-  return Object.keys(policy).length === keys.length && keys.every((key) => policy[key] === canonical[key]);
+  return Object.keys(policy).length === keys.length && keys.every((key2) => policy[key2] === canonical[key2]);
 }
 function credentialHealthPolicy() {
   return {
@@ -73545,7 +58739,7 @@ class SecretLocationsIndex {
     const namesReleasable = input.namesReleasable === true;
     const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
     const locator = input.locator?.trim() && detectSecretFindingKinds(input.locator).length === 0 ? input.locator.trim().slice(0, 1000) : null;
-    const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
+    const folderKeys = [...new Set((input.folderKeys ?? []).map((key2) => key2.trim()).filter(Boolean))].sort();
     const contentHash = input.text !== undefined ? createHash39("sha256").update(input.text, "utf8").digest("hex") : null;
     const existing = this.get(input.identity);
     if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
@@ -73635,10 +58829,10 @@ function secretLocationWithinScope(location, scope) {
     return false;
   if (filters.sourceScopeRevision !== undefined && location.scopeRevision !== filters.sourceScopeRevision)
     return false;
-  if (filters.sourceScopeFolderAnyKeys !== undefined && !filters.sourceScopeFolderAnyKeys.some((key) => location.folderKeys.includes(key))) {
+  if (filters.sourceScopeFolderAnyKeys !== undefined && !filters.sourceScopeFolderAnyKeys.some((key2) => location.folderKeys.includes(key2))) {
     return false;
   }
-  if (filters.sourceScopeFolderNoneKeys?.some((key) => location.folderKeys.includes(key)))
+  if (filters.sourceScopeFolderNoneKeys?.some((key2) => location.folderKeys.includes(key2)))
     return false;
   const pathScopes = [
     ...filters.locatorPathScope ? [filters.locatorPathScope] : [],
@@ -73858,7 +59052,7 @@ function assertSupportedStatusRequest(request) {
     "source_job_statuses",
     "max_items",
     "query"
-  ].filter((key) => request[key] !== undefined);
+  ].filter((key2) => request[key2] !== undefined);
   if (request.include_items === true)
     unsupported.push("include_items");
   if (request.account !== undefined && request.include_sender_aggregation !== true)
@@ -75043,7 +60237,7 @@ function cardTrustDomain(definition, corpora) {
 }
 function tierClassificationFromCorpora(corpora, migration) {
   const counts = corpora.map(numericCounts);
-  const sum2 = (key) => counts.reduce((total, entry) => total + (entry[key] ?? 0), 0);
+  const sum2 = (key2) => counts.reduce((total, entry) => total + (entry[key2] ?? 0), 0);
   const secrets = sum2("secret_locations");
   const pending = sum2("pending_classification_items");
   const superseded = sum2("superseded_chunks");
@@ -75550,8 +60744,8 @@ function formatHours(hours) {
     return `${Math.round(hours * 10) / 10}h`;
   return `${Math.round(hours / 24 * 10) / 10}d`;
 }
-function recordProperty(value, key, nestedKey) {
-  const outer = value[key];
+function recordProperty(value, key2, nestedKey) {
+  const outer = value[key2];
   if (!outer || typeof outer !== "object" || Array.isArray(outer))
     return;
   const nested = outer[nestedKey];
@@ -75613,9 +60807,9 @@ function numericCounts(corpus) {
   if (!raw)
     return {};
   const output = {};
-  for (const [key, value] of Object.entries(raw)) {
+  for (const [key2, value] of Object.entries(raw)) {
     if (typeof value === "number" && Number.isFinite(value))
-      output[key] = Math.max(0, Math.trunc(value));
+      output[key2] = Math.max(0, Math.trunc(value));
   }
   return output;
 }
@@ -75709,7 +60903,7 @@ function queueHealth(counts, scheduler) {
 }
 function liveQueueCount(counts, gaugeKeys, jobKeys) {
   const gauge = firstCount(counts, gaugeKeys, -1);
-  const jobs = jobKeys.some((key) => counts[key] !== undefined) ? sumCounts(counts, jobKeys) : -1;
+  const jobs = jobKeys.some((key2) => counts[key2] !== undefined) ? sumCounts(counts, jobKeys) : -1;
   if (gauge < 0 && jobs < 0)
     return -1;
   return Math.max(gauge, 0) + Math.max(jobs, 0);
@@ -75720,9 +60914,9 @@ function schedulerTaskCounts(scheduler) {
     const counts = task.last_result?.counts;
     if (!counts)
       continue;
-    for (const [key, value] of Object.entries(counts)) {
+    for (const [key2, value] of Object.entries(counts)) {
       if (typeof value === "number" && Number.isFinite(value))
-        output[key] = (output[key] ?? 0) + Math.max(0, Math.trunc(value));
+        output[key2] = (output[key2] ?? 0) + Math.max(0, Math.trunc(value));
     }
   }
   return output;
@@ -76058,18 +61252,18 @@ function trustDomainLabel(trustDomain) {
   }
 }
 function firstCount(counts, keys, fallback = 0) {
-  for (const key of keys) {
-    if (counts[key] !== undefined)
-      return counts[key];
+  for (const key2 of keys) {
+    if (counts[key2] !== undefined)
+      return counts[key2];
   }
   return fallback;
 }
 function sumCounts(counts, keys) {
-  return keys.reduce((sum2, key) => sum2 + (counts[key] ?? 0), 0);
+  return keys.reduce((sum2, key2) => sum2 + (counts[key2] ?? 0), 0);
 }
-function stringProperty(value, key) {
+function stringProperty(value, key2) {
   const record = value;
-  return typeof record[key] === "string" ? record[key] : undefined;
+  return typeof record[key2] === "string" ? record[key2] : undefined;
 }
 function titleCase(value) {
   return value.replace(/\b\w/g, (letter) => letter.toUpperCase());
@@ -76778,9 +61972,9 @@ function corpusMetrics(counts) {
 }
 function definedCounts(counts) {
   const output = {};
-  for (const [key, value] of Object.entries(counts)) {
+  for (const [key2, value] of Object.entries(counts)) {
     if (typeof value === "number" && Number.isFinite(value))
-      output[key] = value;
+      output[key2] = value;
   }
   return output;
 }
@@ -77335,22 +62529,22 @@ import { basename as basename8, dirname as dirname39, join as join53 } from "nod
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 import { gunzipSync as gunzipSync2 } from "node:zlib";
 function classifyPath(path, isNumber) {
-  const key = path.slice(path.lastIndexOf(".") + 1).replace(/\[\]$/u, "");
+  const key2 = path.slice(path.lastIndexOf(".") + 1).replace(/\[\]$/u, "");
   for (const root of PROVENANCE_ROOTS) {
     if (path === root || path.startsWith(`${root}.`)) {
       const relative6 = path.slice(root.length + 1);
       const kind2 = PROVENANCE_PATH_KINDS.get(relative6);
-      return { kind: kind2 ?? "identifier", known: kind2 !== undefined || isKnownProvenancePath(relative6), key, relative: relative6 };
+      return { kind: kind2 ?? "identifier", known: kind2 !== undefined || isKnownProvenancePath(relative6), key: key2, relative: relative6 };
     }
   }
   const kind = PACK_PATH_KINDS.get(path);
-  return { kind: kind ?? (isNumber ? "text" : "identifier"), known: kind !== undefined || BOOLEAN_PATHS.has(path), key, relative: path };
+  return { kind: kind ?? (isNumber ? "text" : "identifier"), known: kind !== undefined || BOOLEAN_PATHS.has(path), key: key2, relative: path };
 }
 function isKnownProvenancePath(relative6) {
   return /^(?:chunk\.)?sourceItem\.(?:provider|providerItemId|providerThreadId|providerConversationId|providerFileId|providerEventId|localItemId|sourceVersion)$/u.test(relative6) || /^(?:chunk\.(?:chunkId|contentHash)|providerIds\.\*|localIds\.\*|syncRunId|syncCheckpoint|citation\.(?:title|sourceLabel|uri|authoredAt|updatedAt))$/u.test(relative6);
 }
-function pathSegment(key) {
-  return /^[A-Za-z0-9_]+$/u.test(key) ? key : `{${JSON.stringify(key)}}`;
+function pathSegment(key2) {
+  return /^[A-Za-z0-9_]+$/u.test(key2) ? key2 : `{${JSON.stringify(key2)}}`;
 }
 function consultWriterContextFromPack(pack, options = {}) {
   const entries = [];
@@ -77405,11 +62599,11 @@ function consultWriterContextFromPack(pack, options = {}) {
     } else {
       const parentKey = path.slice(path.lastIndexOf(".") + 1);
       const isMap = MAP_KEYS.has(parentKey);
-      for (const [key, child] of Object.entries(value)) {
-        const segment = isMap ? "*" : pathSegment(key);
+      for (const [key2, child] of Object.entries(value)) {
+        const segment = isMap ? "*" : pathSegment(key2);
         const childPath = path ? `${path}.${segment}` : segment;
-        if (isMap || !SCHEMA_FIELD_NAMES.has(key))
-          push("identifier", key, `${childPath}#key`, group);
+        if (isMap || !SCHEMA_FIELD_NAMES.has(key2))
+          push("identifier", key2, `${childPath}#key`, group);
         walk(child, childPath, group, depth + 1);
       }
     }
@@ -77820,13 +63014,13 @@ function selectionKey(options) {
 function consultVocabulary(options) {
   if (evaluationVocabulary)
     return evaluationVocabulary;
-  const key = selectionKey(options);
-  let loaded = vocabularyCache.get(key);
+  const key2 = selectionKey(options);
+  let loaded = vocabularyCache.get(key2);
   if (!loaded) {
     const selection = consultVocabularySelection(options);
     const shipped = Object.fromEntries(selection.shipped.map((id) => [id, CONSULT_VOCABULARY_PACKS[id]]));
     loaded = loadConsultVocabulary(shipped, consultUserVocabularyDir(), selection.user);
-    vocabularyCache.set(key, loaded);
+    vocabularyCache.set(key2, loaded);
   }
   return loaded.vocabulary;
 }
@@ -77923,9 +63117,9 @@ function loadConsultVocabulary(packs = CONSULT_VOCABULARY_PACKS, userDir = null,
   if (!complete)
     return { vocabulary: null, status };
   const curated = new Set(CURATED_VOCABULARY);
-  const words = curated.size + loaded.reduce((total, pack) => total + pack.starts.length, 0);
+  const words2 = curated.size + loaded.reduce((total, pack) => total + pack.starts.length, 0);
   return {
-    vocabulary: { has: (word) => curated.has(word) || loaded.some((pack) => packHas(pack, word)), words },
+    vocabulary: { has: (word) => curated.has(word) || loaded.some((pack) => packHas(pack, word)), words: words2 },
     status
   };
 }
@@ -78087,29 +63281,29 @@ function questionModel(subQuestions) {
     const viewFolded = foldText(text);
     const normalized2 = caseFold(viewFolded);
     const wordDigits = numberWordsToDigits(wordsOf(viewFolded));
-    for (const key of figureKeys(normalized2, false).keys())
-      numberKeys.add(key);
-    for (const key of figureKeys(wordDigits.join(" "), false).keys())
-      numberKeys.add(key);
+    for (const key2 of figureKeys(normalized2, false).keys())
+      numberKeys.add(key2);
+    for (const key2 of figureKeys(wordDigits.join(" "), false).keys())
+      numberKeys.add(key2);
     for (const form of [figureKeys(normalized2, true), figureKeys(wordDigits.join(" "), true)]) {
-      for (const [key, seen] of form)
-        ruleSeen.set(key, mergeFigureSeen(ruleSeen.get(key), seen));
+      for (const [key2, seen] of form)
+        ruleSeen.set(key2, mergeFigureSeen(ruleSeen.get(key2), seen));
     }
     digitConcat += (normalized2.match(/\d/gu) ?? []).join("");
     const viewDates = dateKeys(normalized2, wordDigits);
-    for (const key of viewDates.full)
-      dates.full.add(key);
-    for (const key of viewDates.monthDay)
-      dates.monthDay.add(key);
+    for (const key2 of viewDates.full)
+      dates.full.add(key2);
+    for (const key2 of viewDates.monthDay)
+      dates.monthDay.add(key2);
   }
   const normalized = caseFold(folded);
   const hostKeys = new Set;
   const spelled = normalized.replace(/\s+dot\s+/gu, ".").replace(/[\u3002\uFF0E\uFF61]/gu, ".");
   for (const host of hostnames(spelled))
-    for (const key of hostKeysOf(host))
-      hostKeys.add(key);
-  const ruleOnlyKeys = new Set([...numberKeys].filter((key) => {
-    const seen = ruleSeen.get(key);
+    for (const key2 of hostKeysOf(host))
+      hostKeys.add(key2);
+  const ruleOnlyKeys = new Set([...numberKeys].filter((key2) => {
+    const seen = ruleSeen.get(key2);
     return seen !== undefined && seen.rule && !seen.bare && !seen.other;
   }));
   return { tokens, forms, tokenKeys, numberKeys, ruleOnlyKeys, figureSeen: ruleSeen, digitConcat, dates, hostKeys, compactViews };
@@ -78287,9 +63481,9 @@ function compareWithSnapshot(model, context2, unnamed, ordinaryWord, asked, thin
   const contentTokens = model.tokens.filter(isContent);
   const copiedWords = unnamed ? new Set : undefined;
   let copyFromQuestion = false;
-  const copyHit = (words) => {
+  const copyHit = (words2) => {
     if (thin) {
-      for (const word of words)
+      for (const word of words2)
         copiedWords?.add(word);
       return;
     }
@@ -78297,7 +63491,7 @@ function compareWithSnapshot(model, context2, unnamed, ordinaryWord, asked, thin
       reasons.add("shared_token_run");
       return;
     }
-    for (const word of words)
+    for (const word of words2)
       copiedWords.add(word);
   };
   const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS, (start, end) => copyHit(model.tokens.slice(start, end + 1)));
@@ -78307,12 +63501,12 @@ function compareWithSnapshot(model, context2, unnamed, ordinaryWord, asked, thin
   const askedToken = (token) => asked !== undefined && asked.tokens.has(token) && requestTokens.has(token);
   const askedFigures = new Set;
   if (asked) {
-    for (const key of model.numberKeys) {
-      if (!asked.figures.has(key) || YEAR_LIKE.test(key))
+    for (const key2 of model.numberKeys) {
+      if (!asked.figures.has(key2) || YEAR_LIKE.test(key2))
         continue;
-      const seen = model.figureSeen.get(key);
-      if (key.length <= 3 || seen !== undefined && seen.unit && !seen.bare)
-        askedFigures.add(key);
+      const seen = model.figureSeen.get(key2);
+      if (key2.length <= 3 || seen !== undefined && seen.unit && !seen.bare)
+        askedFigures.add(key2);
     }
   }
   const longestCompact = Math.max(...model.compactViews.map((view) => view.length));
@@ -78355,27 +63549,27 @@ function compareWithSnapshot(model, context2, unnamed, ordinaryWord, asked, thin
     }
     const folded = foldText(entry.text);
     const normalized = caseFold(folded);
-    const words = hasNumberWord(normalized) ? numberWordsToDigits(wordsOf(folded)) : undefined;
+    const words2 = hasNumberWord(normalized) ? numberWordsToDigits(wordsOf(folded)) : undefined;
     const snapshotFigures = figureKeys(normalized, true);
-    if (words) {
-      for (const [key, seen] of figureKeys(words.join(" "), false))
-        if (!snapshotFigures.has(key))
-          snapshotFigures.set(key, seen);
+    if (words2) {
+      for (const [key2, seen] of figureKeys(words2.join(" "), false))
+        if (!snapshotFigures.has(key2))
+          snapshotFigures.set(key2, seen);
     }
     if (unnamed) {
-      const forms = [figureKeys(normalized, true), ...words ? [figureKeys(words.join(" "), true)] : []];
+      const forms = [figureKeys(normalized, true), ...words2 ? [figureKeys(words2.join(" "), true)] : []];
       for (const form of forms) {
-        for (const [key, seen] of form)
-          if (model.numberKeys.has(key))
-            figureSeen.set(key, mergeFigureSeen(figureSeen.get(key), seen));
+        for (const [key2, seen] of form)
+          if (model.numberKeys.has(key2))
+            figureSeen.set(key2, mergeFigureSeen(figureSeen.get(key2), seen));
       }
     }
-    for (const [key, seen] of snapshotFigures) {
-      if (!model.numberKeys.has(key))
+    for (const [key2, seen] of snapshotFigures) {
+      if (!model.numberKeys.has(key2))
         continue;
-      if (key.length >= CONSULT_GATE_MIN_FIGURE_DIGITS || seen.unit) {
+      if (key2.length >= CONSULT_GATE_MIN_FIGURE_DIGITS || seen.unit) {
         if (unnamed)
-          figureRefused.add(key);
+          figureRefused.add(key2);
         else
           reasons.add("snapshot_figure");
       }
@@ -78386,18 +63580,18 @@ function compareWithSnapshot(model, context2, unnamed, ordinaryWord, asked, thin
         reasons.add("snapshot_figure");
     }
     if (model.dates.full.size > 0 || model.dates.monthDay.size > 0) {
-      const snapshotDates = dateKeys(normalized, words);
-      for (const key of model.dates.full)
-        if (snapshotDates.full.has(key))
+      const snapshotDates = dateKeys(normalized, words2);
+      for (const key2 of model.dates.full)
+        if (snapshotDates.full.has(key2))
           reasons.add("snapshot_date");
-      for (const key of model.dates.monthDay)
-        if (snapshotDates.monthDay.has(key))
+      for (const key2 of model.dates.monthDay)
+        if (snapshotDates.monthDay.has(key2))
           reasons.add("snapshot_date");
     }
     if (model.hostKeys.size > 0) {
       for (const host of hostnames(normalized)) {
-        for (const key of hostKeysOf(host))
-          if (model.hostKeys.has(key))
+        for (const key2 of hostKeysOf(host))
+          if (model.hostKeys.has(key2))
             reasons.add("snapshot_hostname");
       }
     }
@@ -78514,9 +63708,9 @@ function compareWithSnapshot(model, context2, unnamed, ordinaryWord, asked, thin
         const known = model.forms.has(previous.norm + token.norm) || model.forms.has(token.norm + previous.norm) || model.forms.has(previous.norm) || model.forms.has(token.norm);
         if (known) {
           const midSentence = !(first || token.initial) || !previous.initial;
-          const key = `${previous.norm} ${token.norm}`;
-          const existing = pairCandidates.get(key);
-          pairCandidates.set(key, { left: previous.norm, right: token.norm, midSentence: midSentence || (existing?.midSentence ?? false) });
+          const key2 = `${previous.norm} ${token.norm}`;
+          const existing = pairCandidates.get(key2);
+          pairCandidates.set(key2, { left: previous.norm, right: token.norm, midSentence: midSentence || (existing?.midSentence ?? false) });
         }
       }
       const initial = first || token.initial;
@@ -78544,16 +63738,16 @@ function compareWithSnapshot(model, context2, unnamed, ordinaryWord, asked, thin
   }
   if (reasons.size > 0)
     return reasons;
-  for (const key of figureRefused) {
-    const seen = figureSeen.get(key);
-    const exempt = askedFigures.has(key) || seen !== undefined && seen.rule && !seen.bare && !seen.other && key.length <= CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS && model.ruleOnlyKeys.has(key);
+  for (const key2 of figureRefused) {
+    const seen = figureSeen.get(key2);
+    const exempt = askedFigures.has(key2) || seen !== undefined && seen.rule && !seen.bare && !seen.other && key2.length <= CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS && model.ruleOnlyKeys.has(key2);
     if (!exempt) {
       reasons.add("snapshot_figure");
       return reasons;
     }
   }
-  for (const { words, fromQuestion } of overlapCandidates) {
-    const rare = words.filter((word) => (contentCounts.get(word) ?? 0) <= CONSULT_GATE_RARE_WORD_OCCURRENCES);
+  for (const { words: words2, fromQuestion } of overlapCandidates) {
+    const rare = words2.filter((word) => (contentCounts.get(word) ?? 0) <= CONSULT_GATE_RARE_WORD_OCCURRENCES);
     if (rare.length >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) {
       copyFromQuestion = fromQuestion;
       copyHit(rare);
@@ -78628,11 +63822,11 @@ function askedWords(texts) {
       return glued || run.replace(/\D/gu, "").length > CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS || /\d[\s\-/]+\d/u.test(run) ? " " : run;
     });
     for (const form of [figureKeys(standalone, true), figureKeys(numberWordsToDigits(wordsOf(standalone)).join(" "), true)]) {
-      for (const [key, value] of form)
-        seen.set(key, mergeFigureSeen(seen.get(key), value));
+      for (const [key2, value] of form)
+        seen.set(key2, mergeFigureSeen(seen.get(key2), value));
     }
   }
-  const figures = new Set([...seen].filter(([key, value]) => !YEAR_LIKE.test(key) && (key.length <= 3 || value.unit && !value.bare)).map(([key]) => key));
+  const figures = new Set([...seen].filter(([key2, value]) => !YEAR_LIKE.test(key2) && (key2.length <= 3 || value.unit && !value.bare)).map(([key2]) => key2));
   return { tokens, pairs, figures };
 }
 function copiesAskedQuestion(model, texts) {
@@ -78651,9 +63845,9 @@ function copiesAskedQuestion(model, texts) {
   const contentWindows = new Set(windows(request.filter(isContent), 0));
   for (const text of texts) {
     const sequence = numberWordsToDigits(wordsOf(foldText(text)));
-    if (windows(sequence, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS).some((key) => tokenWindows.has(key)))
+    if (windows(sequence, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS).some((key2) => tokenWindows.has(key2)))
       return true;
-    if (windows(sequence.filter(isContent), 0).some((key) => contentWindows.has(key)))
+    if (windows(sequence.filter(isContent), 0).some((key2) => contentWindows.has(key2)))
       return true;
   }
   return false;
@@ -78663,10 +63857,10 @@ function askedPair(asked, model, left, right) {
   return asked.pairs.has(`${left}${SEP}${right}`) && written(left, right) || asked.pairs.has(`${right}${SEP}${left}`) && written(right, left);
 }
 function spanMatcher(question, size, onHit) {
-  const key = (tokens) => [...tokens].sort().join(" ");
+  const key2 = (tokens) => [...tokens].sort().join(" ");
   const wanted = new Set;
   for (let start = 0;start + size <= question.length; start += 1)
-    wanted.add(key(question.slice(start, start + size)));
+    wanted.add(key2(question.slice(start, start + size)));
   const vocabulary = new Set(question);
   let window2 = [];
   let inQuestion = 0;
@@ -78679,7 +63873,7 @@ function spanMatcher(question, size, onHit) {
         inQuestion += 1;
       if (window2.length > size && vocabulary.has(window2.shift()))
         inQuestion -= 1;
-      const hit = window2.length === size && inQuestion === size && wanted.has(key(window2));
+      const hit = window2.length === size && inQuestion === size && wanted.has(key2(window2));
       if (hit)
         onHit?.(window2);
       return hit;
@@ -78691,9 +63885,9 @@ function spanMatcher(question, size, onHit) {
   };
 }
 function wordsOf(folded) {
-  const words = [];
-  forEachToken(folded, (token) => words.push(token.norm));
-  return words;
+  const words2 = [];
+  forEachToken(folded, (token) => words2.push(token.norm));
+  return words2;
 }
 function hasNumberWord(normalized) {
   NUMBER_WORD_PREFIX ??= new RegExp(`\\b(?:${NUMBER_PARTS.filter((part) => part.length >= 3).join("|")})`, "u");
@@ -78765,7 +63959,7 @@ function buildMonthNames() {
   names.set("sept", 9);
   return names;
 }
-function dateKeys(normalized, words) {
+function dateKeys(normalized, words2) {
   const keys = { full: new Set, monthDay: new Set };
   const add = (year, month, day) => {
     if (month < 1 || month > 12 || day < 1 || day > 31)
@@ -78785,7 +63979,7 @@ function dateKeys(normalized, words) {
   for (const match of normalized.matchAll(/(?:(\d{2,4})\s*[\u5E74\uB144]\s*)?(\d{1,2})\s*[\u6708\uC6D4]\s*(\d{1,2})\s*[\u65E5\uC77C]?/gu)) {
     add(match[1] ? expandYear(match[1]) : undefined, Number(match[2]), Number(match[3]));
   }
-  const tokens = words ?? (normalized.match(/[\p{L}\p{N}]+/gu) ?? []);
+  const tokens = words2 ?? (normalized.match(/[\p{L}\p{N}]+/gu) ?? []);
   const at = (index) => tokens[index];
   const skipJoiners = (index) => {
     let cursor = index;
@@ -78855,12 +64049,12 @@ function addressSpans(normalized) {
           if (number2 === undefined || !/^\d{1,5}[a-z]?$/u.test(number2))
             continue;
           const [from, to] = other < at ? [other, at] : [at, other];
-          let words = tokens.slice(from + 1, to);
-          if (words.length === 0)
-            words = tokens.slice(to + 1, to + 4);
-          words = words.filter((word) => isContent(word) && !/^\d+$/u.test(word));
-          if (words.length > 0)
-            spans.push({ number: number2.replace(/^0+(?=\d)/u, ""), words, suffix: token });
+          let words2 = tokens.slice(from + 1, to);
+          if (words2.length === 0)
+            words2 = tokens.slice(to + 1, to + 4);
+          words2 = words2.filter((word) => isContent(word) && !/^\d+$/u.test(word));
+          if (words2.length > 0)
+            spans.push({ number: number2.replace(/^0+(?=\d)/u, ""), words: words2, suffix: token });
         }
       }
     });
@@ -78889,9 +64083,9 @@ function figureKeys(normalized, needUnits) {
     }
     for (const part of parts) {
       const digits = part.replace(/\D/gu, "");
-      for (const key of [digits, digits.replace(/^0+(?=\d)/u, ""), digits.replace(/0+$/u, "")]) {
-        if (key.length >= 2)
-          keys.set(key, mergeFigureSeen(keys.get(key), seen));
+      for (const key2 of [digits, digits.replace(/^0+(?=\d)/u, ""), digits.replace(/0+$/u, "")]) {
+        if (key2.length >= 2)
+          keys.set(key2, mergeFigureSeen(keys.get(key2), seen));
       }
     }
   }
@@ -80398,9 +65592,9 @@ function parseConsultSettings(value) {
     return;
   if (!isPlainObject(domains))
     return;
-  if (!Object.keys(domains).every((key) => DOMAIN_KEYS.includes(key)))
+  if (!Object.keys(domains).every((key2) => DOMAIN_KEYS.includes(key2)))
     return;
-  if (!DOMAIN_KEYS.every((key) => (key in domains) ? typeof domains[key] === "boolean" : OPTIONAL_DOMAIN_KEYS.includes(key)))
+  if (!DOMAIN_KEYS.every((key2) => (key2 in domains) ? typeof domains[key2] === "boolean" : OPTIONAL_DOMAIN_KEYS.includes(key2)))
     return;
   let writer;
   if (Object.hasOwn(value, "writer")) {
@@ -80442,7 +65636,7 @@ function parseConsultSettings(value) {
     revision,
     enabled,
     languages: Object.freeze([...languages]),
-    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] : true]))),
+    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key2) => [key2, key2 in domains ? domains[key2] : true]))),
     strict,
     level,
     ...writer ? { writer } : {},
@@ -80592,10 +65786,10 @@ function hasDuplicateObjectKey(text) {
         end += text[end] === "\\" ? 2 : 1;
       const top = frames.at(-1);
       if (top?.keys && top.expectKey) {
-        const key = JSON.parse(text.slice(index, end + 1));
-        if (top.keys.has(key))
+        const key2 = JSON.parse(text.slice(index, end + 1));
+        if (top.keys.has(key2))
           return true;
-        top.keys.add(key);
+        top.keys.add(key2);
         top.expectKey = false;
       }
       index = end;
@@ -80610,7 +65804,7 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 function hasKeys(value, required3, optional) {
-  return required3.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => required3.includes(key) || optional.includes(key));
+  return required3.every((key2) => Object.hasOwn(value, key2)) && Object.keys(value).every((key2) => required3.includes(key2) || optional.includes(key2));
 }
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
@@ -81029,7 +66223,7 @@ function describeZkapiReadiness(readiness) {
   const tor = readiness.tor === "off" ? "Tor off" : readiness.torExecutable ? "tor found (a fresh client per consult)" : "tor not found";
   const confinement = `confinement on this platform: ${readiness.confinement.limit}`;
   const ports = `daemon port ${readiness.daemonPort === "free" ? "free" : "IN USE"}${readiness.torPort === "not_used" ? "" : `, Tor port ${readiness.torPort === "free" ? "free" : "IN USE"}`}`;
-  const key = readiness.apiKeyConfigured ? "local API key configured" : "local API key NOT configured";
+  const key2 = readiness.apiKeyConfigured ? "local API key configured" : "local API key NOT configured";
   const money = readiness.money;
   const acks = `acknowledgements ${money.acknowledgements.complete ? "complete" : "incomplete"} (${money.acknowledgements.accepted}/${money.acknowledgements.required})`;
   const expiry = money.expiryEstimate;
@@ -81042,7 +66236,7 @@ function describeZkapiReadiness(readiness) {
   const stranded = readiness.stranded ? readiness.stranded.supervisorRunning ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})` : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(", ") || "no group recorded"}` : "";
   const last = readiness.lastSession ? `last ${readiness.lastSession.recovery ? "recovery session" : "consult"} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}${stageTimings(readiness.lastSession.stageMs)}${readiness.lastSession.exited ? `; ${zkapiProcessExitMessage(readiness.lastSession.exited)}` : ""}` : "no consult run yet";
   const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(", ")}` : "; ready";
-  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
+  return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key2}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
 }
 function stageTimings(timings) {
   const rows = zkapiStageRows(timings);
@@ -81746,8 +66940,8 @@ function ingestionHealthStateFromLedger(ledger) {
     for (const item of row.ingestion_health.stuck_work.by_class) {
       if (item.status !== "failed_terminal")
         continue;
-      const key = `${item.extractor_kind}:${item.error_class ?? "unknown"}`;
-      terminal[key] = (terminal[key] ?? 0) + item.count;
+      const key2 = `${item.extractor_kind}:${item.error_class ?? "unknown"}`;
+      terminal[key2] = (terminal[key2] ?? 0) + item.count;
     }
     sources[row.source_id] = {
       actionable_stuck: row.ingestion_health.stuck_work.queued + row.ingestion_health.stuck_work.failed_retryable,
@@ -81769,7 +66963,7 @@ function readIngestionHealthState(path) {
       const terminal = asRecord9(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
-        failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
+        failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key2, value]) => [key2, asCount(value)]))
       };
     }
     return {
@@ -82054,18 +67248,18 @@ function selectedItemContentFieldPathInner(value, path) {
     }
     return;
   }
-  for (const [key, nestedValue] of Object.entries(value)) {
-    if (FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS.has(normalizeSelectedItemField(key))) {
-      return `${path}.${key}`;
+  for (const [key2, nestedValue] of Object.entries(value)) {
+    if (FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS.has(normalizeSelectedItemField(key2))) {
+      return `${path}.${key2}`;
     }
-    const nested = selectedItemContentFieldPathInner(nestedValue, `${path}.${key}`);
+    const nested = selectedItemContentFieldPathInner(nestedValue, `${path}.${key2}`);
     if (nested)
       return nested;
   }
   return;
 }
-function normalizeSelectedItemField(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
+function normalizeSelectedItemField(key2) {
+  return key2.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
 var init_selected_item_safety = __esm(() => {
@@ -82168,9 +67362,9 @@ async function openRemote(ctx, params, deps = {}) {
   if (ctx.ownerAgentSession !== true) {
     throw new OperationError("invalid_request", "Only the owner, in their own direct chat with their assistant, can open Olympus on their computer; not a scheduled, background or sub-agent run, and not a group chat.", "Ask from your own chat with your assistant.");
   }
-  const extra = Object.keys(params).filter((key) => key !== "target" && key !== "computer");
+  const extra = Object.keys(params).filter((key2) => key2 !== "target" && key2 !== "computer");
   if (extra.length > 0) {
-    throw new OperationError("invalid_request", `Open remote takes only "target" and "computer"; remove ${extra.map((key) => `"${key}"`).join(", ")}.`);
+    throw new OperationError("invalid_request", `Open remote takes only "target" and "computer"; remove ${extra.map((key2) => `"${key2}"`).join(", ")}.`);
   }
   const computer = OPEN_REMOTE_COMPUTERS.find((value) => value === params.computer);
   if (!computer) {
@@ -82566,13 +67760,13 @@ function requiredSelectedItemString(value, name) {
   }
   return value.trim();
 }
-function optionalSelectedItemString(value, key) {
+function optionalSelectedItemString(value, key2) {
   if (value === undefined || value === null || value === "")
     return {};
   if (typeof value !== "string" || value.length > 1000) {
-    throw new OperationError("invalid_params", `selected_items.${key} must be a safe string.`);
+    throw new OperationError("invalid_params", `selected_items.${key2} must be a safe string.`);
   }
-  return { [key]: value.trim() };
+  return { [key2]: value.trim() };
 }
 function optionalAnalystModel(value, name, analystProvider) {
   const model = optionalString9(value)?.trim();
@@ -83194,10 +68388,10 @@ function parseClassificationLedgerJsonl(text) {
   }
   return { entries, skipped };
 }
-function isClassifierApproved(entries, key, options = {}) {
-  const defaultCounts = options.builtInDefault === true && !builtInDefaultRevoked(entries, key);
+function isClassifierApproved(entries, key2, options = {}) {
+  const defaultCounts = options.builtInDefault === true && !builtInDefaultRevoked(entries, key2);
   for (const entry of entries) {
-    if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion || entry.lane !== key.lane || entry.profile_id !== key.profileId)
+    if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
       continue;
     const owner = entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL;
     const builtInDefault = defaultCounts && entry.approved_by === CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL;
@@ -83210,9 +68404,9 @@ function isClassifierApproved(entries, key, options = {}) {
   }
   return false;
 }
-function builtInDefaultRevoked(entries, key) {
+function builtInDefaultRevoked(entries, key2) {
   for (const entry of entries) {
-    if (entry.model_id !== key.modelId || entry.lane !== key.lane || entry.profile_id !== key.profileId)
+    if (entry.model_id !== key2.modelId || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
       continue;
     if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
       continue;
@@ -83237,8 +68431,8 @@ function isClassificationLedgerEntry(value) {
     return false;
   if (!["pending", "complete", "n/a"].includes(record.status))
     return false;
-  for (const key of ["model_id", "prompt_version", "lane", "profile_id", "why", "entry_id"]) {
-    if (record[key] !== undefined && typeof record[key] !== "string")
+  for (const key2 of ["model_id", "prompt_version", "lane", "profile_id", "why", "entry_id"]) {
+    if (record[key2] !== undefined && typeof record[key2] !== "string")
       return false;
   }
   return true;
@@ -83354,11 +68548,11 @@ class TierSnifferStore {
         restrictFiles(this.dbPath);
     }
   }
-  getVerdict(key) {
+  getVerdict(key2) {
     const row = this.db.query(`
       SELECT tier, category, confidence, fail_safe, decided_at FROM sniffer_verdicts
       WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
-    `).get(key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+    `).get(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision);
     if (!row)
       return;
     return {
@@ -83369,14 +68563,14 @@ class TierSnifferStore {
       decidedAt: row.decided_at
     };
   }
-  putVerdict(key, verdict) {
+  putVerdict(key2, verdict) {
     this.db.query(`
       INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
         tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
         fail_safe = excluded.fail_safe, decided_at = excluded.decided_at
-    `).run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString());
+    `).run(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString());
   }
   enqueue(question) {
     const materialHash = snifferMaterialHash(question.pass, question.material);
@@ -83555,16 +68749,16 @@ function snifferMaterialLooksLikeInjection(material) {
   return false;
 }
 function wholeWordRunHas(normalized, markers) {
-  const words = normalized.split(/[^a-z0-9.]+/).filter(Boolean);
+  const words2 = normalized.split(/[^a-z0-9.]+/).filter(Boolean);
   const starts = new Set;
   const ends = new Set;
   let at = 0;
-  for (const word of words) {
+  for (const word of words2) {
     starts.add(at);
     at += word.length;
     ends.add(at);
   }
-  const compact2 = words.join("");
+  const compact2 = words2.join("");
   return markers.some((marker) => {
     for (let index = compact2.indexOf(marker);index >= 0; index = compact2.indexOf(marker, index + 1)) {
       if (starts.has(index) && ends.has(index + marker.length))
@@ -83654,10 +68848,10 @@ function snifferCategoryOf(raw, tier) {
     return raw;
   if (tier !== "private")
     return;
-  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if (SNIFFER_CATEGORIES.includes(key))
-    return key;
-  return SNIFFER_CATEGORY_SYNONYMS[key] ?? "other";
+  const key2 = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (SNIFFER_CATEGORIES.includes(key2))
+    return key2;
+  return SNIFFER_CATEGORY_SYNONYMS[key2] ?? "other";
 }
 function snifferMaterialCarriesSecret(material) {
   return detectSecretFindingKinds(material).length > 0;
@@ -83942,7 +69136,7 @@ function parseOwnerTierRules(raw, label = "tier rules") {
   if (root.rules.length > MAX_RULES) {
     throw new OperationError("config_error", `${label}.rules may hold at most ${MAX_RULES} rules.`);
   }
-  const unknownKeys = Object.keys(root).filter((key) => key !== "schemaVersion" && key !== "rules");
+  const unknownKeys = Object.keys(root).filter((key2) => key2 !== "schemaVersion" && key2 !== "rules");
   if (unknownKeys.length > 0) {
     throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
   }
@@ -83959,7 +69153,7 @@ function parseOwnerTierRule(raw, label = "tier rule") {
   const record = asRecord10(raw);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
-  const unknownKeys = Object.keys(record).filter((key) => !["id", "source", "match", "tier", "strength"].includes(key));
+  const unknownKeys = Object.keys(record).filter((key2) => !["id", "source", "match", "tier", "strength"].includes(key2));
   if (unknownKeys.length > 0) {
     throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
   }
@@ -84179,8 +69373,8 @@ function batchSelectorsFor(sourceId, item) {
     for (let depth = 1;depth < parts.length; depth += 1)
       selectors.push(`folder:/${parts.slice(0, depth).join("/")}`);
   }
-  for (const key of item.folderKeys)
-    selectors.push(`label:${key}`);
+  for (const key2 of item.folderKeys)
+    selectors.push(`label:${key2}`);
   const sender = item.senderLabel ?? item.senderId;
   if (sender)
     selectors.push(`sender:${sender}`);
@@ -84357,19 +69551,19 @@ async function planTierMigration(options) {
       for (;; ) {
         const page = store.migrationItemsPage({ ...after !== undefined ? { afterItemPk: after } : {}, limit: options.pageSize ?? 500 });
         for (const item of page.items) {
-          const key = tierLedgerIdentityKey(item.identity);
+          const key2 = tierLedgerIdentityKey(item.identity);
           const copies = ledger.copies(item.identity);
           if (copies.length > 0) {
-            if (seen.has(key))
+            if (seen.has(key2))
               continue;
-            seen.add(key);
+            seen.add(key2);
             totals.itemsScanned += 1;
             const record = ledger.getCurrent(item.identity);
             if (record?.state === "moving" && record.targetMetadataTier && record.targetContentTier) {
               const from2 = moveSourcePlacement(copies, record.generation);
               const contentFrom = copyServingLayer(from2, "content") ?? from2[0];
               if (!contentFrom || contentFrom.corpusId !== store.corpusId) {
-                seen.delete(key);
+                seen.delete(key2);
                 totals.itemsScanned -= 1;
                 continue;
               }
@@ -84386,9 +69580,9 @@ async function planTierMigration(options) {
             }
             continue;
           }
-          if (seen.has(key))
+          if (seen.has(key2))
             continue;
-          seen.add(key);
+          seen.add(key2);
           totals.itemsScanned += 1;
           const elsewhere = stores.some((other) => other !== store && other.itemPresence(item.identity).active);
           if (elsewhere) {
@@ -84583,7 +69777,7 @@ function addPlanned(planned, totals, patterns, lane, store, item, decision, from
     ["folder", folder],
     ["sender", sender],
     ["chat", item.identity.providerConversationId],
-    ...item.folderKeys.map((key) => ["label", key])
+    ...item.folderKeys.map((key2) => ["label", key2])
   ];
   for (const [kind, value] of facets) {
     if (!value)
@@ -84672,7 +69866,7 @@ function canonical(value) {
   if (Array.isArray(value))
     return value.map(canonical);
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+    return Object.fromEntries(Object.keys(value).sort().map((key2) => [key2, canonical(value[key2])]));
   }
   return value;
 }
@@ -85929,7 +71123,7 @@ function installedDomainIdentity(env) {
   };
 }
 function snake(value) {
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key.replace(/[A-Z]/gu, (letter) => `_${letter.toLowerCase()}`), entry]));
+  return Object.fromEntries(Object.entries(value).map(([key2, entry]) => [key2.replace(/[A-Z]/gu, (letter) => `_${letter.toLowerCase()}`), entry]));
 }
 function parseFlags(args) {
   const values = new Map;
@@ -86032,8 +71226,8 @@ class LocalSourceSchedulerStateStore {
   close() {
     closeSqliteStore(this.db);
   }
-  get(key) {
-    const safeKey = requireStateKey(key);
+  get(key2) {
+    const safeKey = requireStateKey(key2);
     const row = this.db.query(`
       SELECT *
       FROM source_scheduler_task_state
@@ -86176,7 +71370,7 @@ class LocalSourceSchedulerStateStore {
     }));
   }
   claimUnparkAttempt(input) {
-    const key = requireStateKey(input);
+    const key2 = requireStateKey(input);
     const requestId = requirePositiveSafeInteger(input.requestId, "requestId");
     const expectedNotBeforeAt = requireTimestamp2(input.expectedNotBeforeAt, "expectedNotBeforeAt");
     const attemptedAt = requireTimestamp2(input.attemptedAt, "attemptedAt");
@@ -86185,7 +71379,7 @@ class LocalSourceSchedulerStateStore {
         SELECT not_before_at, attempt_in_progress
         FROM source_scheduler_task_state
         WHERE source_id = ? AND corpus_id = ? AND task_id = ?
-      `).get(key.sourceId, key.corpusId, key.taskId);
+      `).get(key2.sourceId, key2.corpusId, key2.taskId);
       if (!state || state.not_before_at !== expectedNotBeforeAt || state.attempt_in_progress === 1) {
         this.db.query(`
           UPDATE source_scheduler_unpark_request
@@ -86201,11 +71395,11 @@ class LocalSourceSchedulerStateStore {
           AND source_id = ? AND corpus_id = ? AND task_id = ?
           AND expected_not_before_at = ?
           AND status = 'pending'
-      `).run(attemptedAt, requestId, key.sourceId, key.corpusId, key.taskId, expectedNotBeforeAt);
+      `).run(attemptedAt, requestId, key2.sourceId, key2.corpusId, key2.taskId, expectedNotBeforeAt);
       if (claimed.changes !== 1)
         return;
-      this.recordAttemptStatement(key, attemptedAt);
-      const recorded = this.get(key);
+      this.recordAttemptStatement(key2, attemptedAt);
+      const recorded = this.get(key2);
       if (!recorded) {
         throw new Error("Source scheduler unpark attempt could not be read after its atomic claim.");
       }
@@ -86213,14 +71407,14 @@ class LocalSourceSchedulerStateStore {
     })();
   }
   recordAttempt(input) {
-    const key = requireStateKey(input);
+    const key2 = requireStateKey(input);
     const attemptedAt = requireTimestamp2(input.attemptedAt, "attemptedAt");
-    return this.writeCurrentVersion(key, () => {
-      this.recordAttemptStatement(key, attemptedAt);
+    return this.writeCurrentVersion(key2, () => {
+      this.recordAttemptStatement(key2, attemptedAt);
     });
   }
   recordSuccess(input) {
-    const key = requireStateKey(input);
+    const key2 = requireStateKey(input);
     const completedAt = requireTimestamp2(input.completedAt, "completedAt");
     const countsJson = encodeCounts(input.counts);
     const warningsJson = encodeWarnings(input.warnings);
@@ -86229,7 +71423,7 @@ class LocalSourceSchedulerStateStore {
     const notBeforeAt = input.notBeforeAt === undefined ? null : requireTimestamp2(input.notBeforeAt, "notBeforeAt");
     const effectiveIntervalMs = input.effectiveIntervalMs === undefined ? null : requirePositiveSafeInteger(input.effectiveIntervalMs, "effectiveIntervalMs");
     const degradedReason = input.degradedReason === undefined ? null : requireStateToken(input.degradedReason, "degradedReason");
-    return this.writeCurrentVersion(key, () => {
+    return this.writeCurrentVersion(key2, () => {
       this.db.query(`
         INSERT INTO source_scheduler_task_state (
           source_id, corpus_id, task_id, state_version, checkpoint,
@@ -86253,16 +71447,16 @@ class LocalSourceSchedulerStateStore {
           effective_interval_ms = excluded.effective_interval_ms,
           degraded_reason = excluded.degraded_reason,
           updated_at = excluded.updated_at
-      `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, checkpoint, completedAt, completedAt, notBeforeAt, input.resultStatus, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, checkpointSupplied ? 1 : 0);
+      `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, checkpoint, completedAt, completedAt, notBeforeAt, input.resultStatus, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, checkpointSupplied ? 1 : 0);
     });
   }
   adoptExternalSuccess(input) {
-    const key = requireStateKey(input);
+    const key2 = requireStateKey(input);
     const completedAt = requireTimestamp2(input.completedAt, "completedAt");
     const countsJson = encodeCounts(input.counts);
     const warningsJson = encodeWarnings(input.warnings);
-    return this.writeCurrentVersion(key, () => {
-      const existing = this.get(key);
+    return this.writeCurrentVersion(key2, () => {
+      const existing = this.get(key2);
       const newestActivity = Math.max(...[existing?.lastAttemptAt, existing?.lastCompletedAt, existing?.lastSuccessAt].map((value) => value ? Date.parse(value) : Number.NEGATIVE_INFINITY));
       if (existing && Date.parse(completedAt) <= newestActivity)
         return;
@@ -86288,11 +71482,11 @@ class LocalSourceSchedulerStateStore {
           effective_interval_ms = NULL,
           degraded_reason = NULL,
           updated_at = excluded.updated_at
-      `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, completedAt, input.resultStatus, countsJson, warningsJson, completedAt);
+      `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, completedAt, input.resultStatus, countsJson, warningsJson, completedAt);
     });
   }
   recordFailure(input) {
-    const key = requireStateKey(input);
+    const key2 = requireStateKey(input);
     const completedAt = requireTimestamp2(input.completedAt, "completedAt");
     const notBeforeAt = requireTimestamp2(input.notBeforeAt, "notBeforeAt");
     const errorKind = requireStateToken(input.errorKind, "errorKind");
@@ -86303,7 +71497,7 @@ class LocalSourceSchedulerStateStore {
     const effectiveIntervalMs = input.effectiveIntervalMs === undefined ? null : requirePositiveSafeInteger(input.effectiveIntervalMs, "effectiveIntervalMs");
     const degradedReasonSupplied = Object.prototype.hasOwnProperty.call(input, "degradedReason");
     const degradedReason = input.degradedReason === undefined ? null : requireStateToken(input.degradedReason, "degradedReason");
-    return this.writeCurrentVersion(key, () => {
+    return this.writeCurrentVersion(key2, () => {
       this.db.query(`
         INSERT INTO source_scheduler_task_state (
           source_id, corpus_id, task_id, state_version,
@@ -86325,27 +71519,27 @@ class LocalSourceSchedulerStateStore {
           effective_interval_ms = CASE WHEN ? = 1 THEN excluded.effective_interval_ms ELSE source_scheduler_task_state.effective_interval_ms END,
           degraded_reason = CASE WHEN ? = 1 THEN excluded.degraded_reason ELSE source_scheduler_task_state.degraded_reason END,
           updated_at = excluded.updated_at
-      `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, notBeforeAt, errorKind, errorHash, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, effectiveIntervalSupplied ? 1 : 0, degradedReasonSupplied ? 1 : 0);
+      `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, notBeforeAt, errorKind, errorHash, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, effectiveIntervalSupplied ? 1 : 0, degradedReasonSupplied ? 1 : 0);
     });
   }
-  writeCurrentVersion(key, write) {
+  writeCurrentVersion(key2, write) {
     return this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT state_version
         FROM source_scheduler_task_state
         WHERE source_id = ? AND corpus_id = ? AND task_id = ?
-      `).get(key.sourceId, key.corpusId, key.taskId);
+      `).get(key2.sourceId, key2.corpusId, key2.taskId);
       if (existing && existing.state_version !== SOURCE_SCHEDULER_TASK_STATE_VERSION) {
         throw new Error("Source scheduler task state uses an unsupported state_version.");
       }
       write();
-      const state = this.get(key);
+      const state = this.get(key2);
       if (!state)
         throw new Error("Source scheduler task state could not be read after its atomic update.");
       return state;
     })();
   }
-  recordAttemptStatement(key, attemptedAt) {
+  recordAttemptStatement(key2, attemptedAt) {
     this.db.query(`
       INSERT INTO source_scheduler_task_state (
         source_id, corpus_id, task_id, state_version,
@@ -86355,7 +71549,7 @@ class LocalSourceSchedulerStateStore {
         last_attempt_at = excluded.last_attempt_at,
         attempt_in_progress = 1,
         updated_at = excluded.updated_at
-    `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, attemptedAt, attemptedAt);
+    `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, attemptedAt, attemptedAt);
   }
 }
 function sourceSchedulerStateMigrations() {
@@ -86461,11 +71655,11 @@ function encodeCounts(counts) {
   if (counts === undefined)
     return null;
   const safe = {};
-  for (const key of Object.keys(counts).sort()) {
-    if (!SAFE_STATE_TOKEN.test(key) || !Number.isSafeInteger(counts[key]) || counts[key] < 0) {
+  for (const key2 of Object.keys(counts).sort()) {
+    if (!SAFE_STATE_TOKEN.test(key2) || !Number.isSafeInteger(counts[key2]) || counts[key2] < 0) {
       throw new TypeError("Source scheduler counts must use safe keys and non-negative safe integers.");
     }
-    safe[key] = counts[key];
+    safe[key2] = counts[key2];
   }
   return JSON.stringify(safe);
 }
@@ -86528,10 +71722,10 @@ function decodeCounts(value) {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       return;
     const safe = {};
-    for (const [key, count] of Object.entries(parsed)) {
-      if (!SAFE_STATE_TOKEN.test(key) || !Number.isSafeInteger(count) || count < 0)
+    for (const [key2, count] of Object.entries(parsed)) {
+      if (!SAFE_STATE_TOKEN.test(key2) || !Number.isSafeInteger(count) || count < 0)
         return;
-      safe[key] = count;
+      safe[key2] = count;
     }
     return safe;
   } catch {
@@ -87341,7 +72535,7 @@ function freshPluginConfig(contextConfig, initialPluginConfig) {
   if (entries) {
     return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   }
-  if (root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key))) {
+  if (root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2))) {
     return root;
   }
   return initialPluginConfig;
@@ -87592,7 +72786,7 @@ function freshConfig(contextConfig, initialPluginConfig) {
   const entries = asRecord13(plugins?.entries);
   const olympus = asRecord13(entries?.olympus);
   const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
-  const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key)) ? root : undefined;
+  const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2)) ? root : undefined;
   const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
   return { config: configFromPluginConfig(pluginConfig), pluginConfig };
 }
@@ -87604,7 +72798,7 @@ function assertNativeWorkerScopeConfigSupported(pluginConfig) {
     "ingestionPolicies",
     "ingestionExclusions",
     "ingestionExclusionsPath"
-  ].filter((key) => sourceIndex && Object.prototype.hasOwnProperty.call(sourceIndex, key));
+  ].filter((key2) => sourceIndex && Object.prototype.hasOwnProperty.call(sourceIndex, key2));
   if (unsupported.length > 0) {
     throw new NativeProcessConfigurationError(`Gateway-managed Olympus workers do not support explicit sourceIndex.${unsupported[0]} plugin config; configure source scope through the worker environment.`);
   }
@@ -87760,9 +72954,9 @@ function stripGatewayBootstrapSecrets(env) {
     "NODE_OPTIONS",
     "BUN_OPTIONS"
   ]);
-  for (const key of Object.keys(env)) {
-    if (exact.has(key) || key.startsWith("OP_SESSION_"))
-      delete env[key];
+  for (const key2 of Object.keys(env)) {
+    if (exact.has(key2) || key2.startsWith("OP_SESSION_"))
+      delete env[key2];
   }
 }
 function asRecord13(value) {
@@ -87960,7 +73154,7 @@ function relayFreshConfig(contextConfig, initialPluginConfig) {
   let pluginConfig;
   if (entries) {
     pluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
-  } else if (root && ["remote", "worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key))) {
+  } else if (root && ["remote", "worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2))) {
     pluginConfig = root;
   } else {
     pluginConfig = initialPluginConfig;
@@ -88770,8 +73964,8 @@ function parseConsultWriterReply(raw, options = {}) {
       return { kind: "invalid", reason: "form" };
     if (!question.endsWith("?") || question.indexOf("?") !== question.length - 1)
       return { kind: "invalid", reason: "form" };
-    const words = question.split(/\s+/);
-    if (words.length > CONSULT_WRITER_LIMITS.maxQuestionWords || words.length < CONSULT_WRITER_LIMITS.minQuestionWords)
+    const words2 = question.split(/\s+/);
+    if (words2.length > CONSULT_WRITER_LIMITS.maxQuestionWords || words2.length < CONSULT_WRITER_LIMITS.minQuestionWords)
       return { kind: "invalid", reason: "form" };
     cleaned.push(question);
   }
@@ -89222,10 +74416,10 @@ function consultWriterCheckCanaryPresent(questions, canaries) {
   });
 }
 function consultWriterCheckAsksAboutDocuments(question) {
-  const words = question.toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, " ").split(/\s+/).filter(Boolean);
-  const pointed = words.some((word, index) => DOCUMENT_NOUNS.includes(word) && ["the", "this", "that", "my", "your", "their", "his", "her"].includes(words[index - 1] ?? ""));
-  const saying = words.some((word) => DOCUMENT_VERBS.includes(word));
-  const sharing = words.some((word) => ["upload", "attach", "share", "send"].includes(word)) && words.some((word) => DOCUMENT_NOUNS.includes(word));
+  const words2 = question.toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, " ").split(/\s+/).filter(Boolean);
+  const pointed = words2.some((word, index) => DOCUMENT_NOUNS.includes(word) && ["the", "this", "that", "my", "your", "their", "his", "her"].includes(words2[index - 1] ?? ""));
+  const saying = words2.some((word) => DOCUMENT_VERBS.includes(word));
+  const sharing = words2.some((word) => ["upload", "attach", "share", "send"].includes(word)) && words2.some((word) => DOCUMENT_NOUNS.includes(word));
   return pointed && saying || sharing;
 }
 async function runConsultWriterCheck(options) {
@@ -89578,9 +74772,9 @@ function floatSafeRemainder(val, step) {
     return 0;
   return ratio - roundedRatio;
 }
-function defineLazy(object, key, getter) {
+function defineLazy(object, key2, getter) {
   let value = undefined;
-  Object.defineProperty(object, key, {
+  Object.defineProperty(object, key2, {
     get() {
       if (value === EVALUATING) {
         return;
@@ -89592,7 +74786,7 @@ function defineLazy(object, key, getter) {
       return value;
     },
     set(v) {
-      Object.defineProperty(object, key, {
+      Object.defineProperty(object, key2, {
         value: v
       });
     },
@@ -89624,11 +74818,11 @@ function cloneDef(schema) {
 function getElementAtPath(obj, path) {
   if (!path)
     return obj;
-  return path.reduce((acc, key) => acc?.[key], obj);
+  return path.reduce((acc, key2) => acc?.[key2], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
-  const promises = keys.map((key) => promisesObj[key]);
+  const promises = keys.map((key2) => promisesObj[key2]);
   return Promise.all(promises).then((results) => {
     const resolvedObj = {};
     for (let i = 0;i < keys.length; i++) {
@@ -89683,8 +74877,8 @@ function shallowClone(o) {
 }
 function numKeys(data2) {
   let keyCount = 0;
-  for (const key in data2) {
-    if (Object.prototype.hasOwnProperty.call(data2, key)) {
+  for (const key2 in data2) {
+    if (Object.prototype.hasOwnProperty.call(data2, key2)) {
       keyCount++;
     }
   }
@@ -89770,13 +74964,13 @@ function pick(schema, mask) {
   const def = mergeDefs(schema._zod.def, {
     get shape() {
       const newShape = {};
-      for (const key in mask) {
-        if (!(key in currDef.shape)) {
-          throw new Error(`Unrecognized key: "${key}"`);
+      for (const key2 in mask) {
+        if (!(key2 in currDef.shape)) {
+          throw new Error(`Unrecognized key: "${key2}"`);
         }
-        if (!mask[key])
+        if (!mask[key2])
           continue;
-        newShape[key] = currDef.shape[key];
+        newShape[key2] = currDef.shape[key2];
       }
       assignProp(this, "shape", newShape);
       return newShape;
@@ -89795,13 +74989,13 @@ function omit(schema, mask) {
   const def = mergeDefs(schema._zod.def, {
     get shape() {
       const newShape = { ...schema._zod.def.shape };
-      for (const key in mask) {
-        if (!(key in currDef.shape)) {
-          throw new Error(`Unrecognized key: "${key}"`);
+      for (const key2 in mask) {
+        if (!(key2 in currDef.shape)) {
+          throw new Error(`Unrecognized key: "${key2}"`);
         }
-        if (!mask[key])
+        if (!mask[key2])
           continue;
-        delete newShape[key];
+        delete newShape[key2];
       }
       assignProp(this, "shape", newShape);
       return newShape;
@@ -89818,8 +75012,8 @@ function extend(schema, shape) {
   const hasChecks = checks && checks.length > 0;
   if (hasChecks) {
     const existingShape = schema._zod.def.shape;
-    for (const key in shape) {
-      if (Object.getOwnPropertyDescriptor(existingShape, key) !== undefined) {
+    for (const key2 in shape) {
+      if (Object.getOwnPropertyDescriptor(existingShape, key2) !== undefined) {
         throw new Error("Cannot overwrite keys on object schemas containing refinements. Use `.safeExtend()` instead.");
       }
     }
@@ -89875,23 +75069,23 @@ function partial(Class, schema, mask) {
       const oldShape = schema._zod.def.shape;
       const shape = { ...oldShape };
       if (mask) {
-        for (const key in mask) {
-          if (!(key in oldShape)) {
-            throw new Error(`Unrecognized key: "${key}"`);
+        for (const key2 in mask) {
+          if (!(key2 in oldShape)) {
+            throw new Error(`Unrecognized key: "${key2}"`);
           }
-          if (!mask[key])
+          if (!mask[key2])
             continue;
-          shape[key] = Class ? new Class({
+          shape[key2] = Class ? new Class({
             type: "optional",
-            innerType: oldShape[key]
-          }) : oldShape[key];
+            innerType: oldShape[key2]
+          }) : oldShape[key2];
         }
       } else {
-        for (const key in oldShape) {
-          shape[key] = Class ? new Class({
+        for (const key2 in oldShape) {
+          shape[key2] = Class ? new Class({
             type: "optional",
-            innerType: oldShape[key]
-          }) : oldShape[key];
+            innerType: oldShape[key2]
+          }) : oldShape[key2];
         }
       }
       assignProp(this, "shape", shape);
@@ -89907,22 +75101,22 @@ function required3(Class, schema, mask) {
       const oldShape = schema._zod.def.shape;
       const shape = { ...oldShape };
       if (mask) {
-        for (const key in mask) {
-          if (!(key in shape)) {
-            throw new Error(`Unrecognized key: "${key}"`);
+        for (const key2 in mask) {
+          if (!(key2 in shape)) {
+            throw new Error(`Unrecognized key: "${key2}"`);
           }
-          if (!mask[key])
+          if (!mask[key2])
             continue;
-          shape[key] = new Class({
+          shape[key2] = new Class({
             type: "nonoptional",
-            innerType: oldShape[key]
+            innerType: oldShape[key2]
           });
         }
       } else {
-        for (const key in oldShape) {
-          shape[key] = new Class({
+        for (const key2 in oldShape) {
+          shape[key2] = new Class({
             type: "nonoptional",
-            innerType: oldShape[key]
+            innerType: oldShape[key2]
           });
         }
       }
@@ -90846,13 +76040,13 @@ function handleArrayResult(result, final, index) {
   }
   final.value[index] = result.value;
 }
-function handlePropertyResult(result, final, key, input, isOptionalIn, isOptionalOut) {
-  const isPresent = key in input;
+function handlePropertyResult(result, final, key2, input, isOptionalIn, isOptionalOut) {
+  const isPresent = key2 in input;
   if (result.issues.length) {
     if (isOptionalIn && isOptionalOut && !isPresent) {
       return;
     }
-    final.issues.push(...prefixIssues(key, result.issues));
+    final.issues.push(...prefixIssues(key2, result.issues));
   }
   if (!isPresent && !isOptionalIn) {
     if (!result.issues.length) {
@@ -90860,17 +76054,17 @@ function handlePropertyResult(result, final, key, input, isOptionalIn, isOptiona
         code: "invalid_type",
         expected: "nonoptional",
         input: undefined,
-        path: [key]
+        path: [key2]
       });
     }
     return;
   }
   if (result.value === undefined) {
     if (isPresent) {
-      final.value[key] = undefined;
+      final.value[key2] = undefined;
     }
   } else {
-    final.value[key] = result.value;
+    final.value[key2] = result.value;
   }
 }
 function normalizeDef(def) {
@@ -90896,20 +76090,20 @@ function handleCatchall(proms, input, payload, ctx, def, inst) {
   const t = _catchall.def.type;
   const isOptionalIn = _catchall.optin === "optional";
   const isOptionalOut = _catchall.optout === "optional";
-  for (const key in input) {
-    if (key === "__proto__")
+  for (const key2 in input) {
+    if (key2 === "__proto__")
       continue;
-    if (keySet.has(key))
+    if (keySet.has(key2))
       continue;
     if (t === "never") {
-      unrecognized.push(key);
+      unrecognized.push(key2);
       continue;
     }
-    const r = _catchall.run({ value: input[key], issues: [] }, ctx);
+    const r = _catchall.run({ value: input[key2], issues: [] }, ctx);
     if (r instanceof Promise) {
-      proms.push(r.then((r2) => handlePropertyResult(r2, payload, key, input, isOptionalIn, isOptionalOut)));
+      proms.push(r.then((r2) => handlePropertyResult(r2, payload, key2, input, isOptionalIn, isOptionalOut)));
     } else {
-      handlePropertyResult(r, payload, key, input, isOptionalIn, isOptionalOut);
+      handlePropertyResult(r, payload, key2, input, isOptionalIn, isOptionalOut);
     }
   }
   if (unrecognized.length) {
@@ -90955,17 +76149,17 @@ function mergeValues(a, b) {
   }
   if (isPlainObject2(a) && isPlainObject2(b)) {
     const bKeys = Object.keys(b);
-    const sharedKeys = Object.keys(a).filter((key) => bKeys.indexOf(key) !== -1);
+    const sharedKeys = Object.keys(a).filter((key2) => bKeys.indexOf(key2) !== -1);
     const newObj = { ...a, ...b };
-    for (const key of sharedKeys) {
-      const sharedValue = mergeValues(a[key], b[key]);
+    for (const key2 of sharedKeys) {
+      const sharedValue = mergeValues(a[key2], b[key2]);
       if (!sharedValue.valid) {
         return {
           valid: false,
-          mergeErrorPath: [key, ...sharedValue.mergeErrorPath]
+          mergeErrorPath: [key2, ...sharedValue.mergeErrorPath]
         };
       }
-      newObj[key] = sharedValue.data;
+      newObj[key2] = sharedValue.data;
     }
     return { valid: true, data: newObj };
   }
@@ -91593,12 +76787,12 @@ var init_schemas = __esm(() => {
     defineLazy(inst._zod, "propValues", () => {
       const shape = def.shape;
       const propValues = {};
-      for (const key in shape) {
-        const field = shape[key]._zod;
+      for (const key2 in shape) {
+        const field = shape[key2]._zod;
         if (field.values) {
-          propValues[key] ?? (propValues[key] = new Set);
+          propValues[key2] ?? (propValues[key2] = new Set);
           for (const v of field.values)
-            propValues[key].add(v);
+            propValues[key2].add(v);
         }
       }
       return propValues;
@@ -91621,15 +76815,15 @@ var init_schemas = __esm(() => {
       payload.value = {};
       const proms = [];
       const shape = value.shape;
-      for (const key of value.keys) {
-        const el = shape[key];
+      for (const key2 of value.keys) {
+        const el = shape[key2];
         const isOptionalIn = el._zod.optin === "optional";
         const isOptionalOut = el._zod.optout === "optional";
-        const r = el._zod.run({ value: input[key], issues: [] }, ctx);
+        const r = el._zod.run({ value: input[key2], issues: [] }, ctx);
         if (r instanceof Promise) {
-          proms.push(r.then((r2) => handlePropertyResult(r2, payload, key, input, isOptionalIn, isOptionalOut)));
+          proms.push(r.then((r2) => handlePropertyResult(r2, payload, key2, input, isOptionalIn, isOptionalOut)));
         } else {
-          handlePropertyResult(r, payload, key, input, isOptionalIn, isOptionalOut);
+          handlePropertyResult(r, payload, key2, input, isOptionalIn, isOptionalOut);
         }
       }
       if (!catchall) {
@@ -91645,24 +76839,24 @@ var init_schemas = __esm(() => {
     const generateFastpass = (shape) => {
       const doc = new Doc(["shape", "payload", "ctx"]);
       const normalized = _normalized.value;
-      const parseStr = (key) => {
-        const k = esc(key);
+      const parseStr = (key2) => {
+        const k = esc(key2);
         return `shape[${k}]._zod.run({ value: input[${k}], issues: [] }, ctx)`;
       };
       doc.write(`const input = payload.value;`);
       const ids = Object.create(null);
       let counter = 0;
-      for (const key of normalized.keys) {
-        ids[key] = `key_${counter++}`;
+      for (const key2 of normalized.keys) {
+        ids[key2] = `key_${counter++}`;
       }
       doc.write(`const newResult = {};`);
-      for (const key of normalized.keys) {
-        const id = ids[key];
-        const k = esc(key);
-        const schema = shape[key];
+      for (const key2 of normalized.keys) {
+        const id = ids[key2];
+        const k = esc(key2);
+        const schema = shape[key2];
         const isOptionalIn = schema?._zod?.optin === "optional";
         const isOptionalOut = schema?._zod?.optout === "optional";
-        doc.write(`const ${id} = ${parseStr(key)};`);
+        doc.write(`const ${id} = ${parseStr(key2)};`);
         if (isOptionalIn && isOptionalOut) {
           doc.write(`
         if (${id}.issues.length) {
@@ -91910,10 +77104,10 @@ var init_schemas = __esm(() => {
       if (values) {
         payload.value = {};
         const recordKeys = new Set;
-        for (const key of values) {
-          if (typeof key === "string" || typeof key === "number" || typeof key === "symbol") {
-            recordKeys.add(typeof key === "number" ? key.toString() : key);
-            const keyResult = def.keyType._zod.run({ value: key, issues: [] }, ctx);
+        for (const key2 of values) {
+          if (typeof key2 === "string" || typeof key2 === "number" || typeof key2 === "symbol") {
+            recordKeys.add(typeof key2 === "number" ? key2.toString() : key2);
+            const keyResult = def.keyType._zod.run({ value: key2, issues: [] }, ctx);
             if (keyResult instanceof Promise) {
               throw new Error("Async schemas not supported in object keys currently");
             }
@@ -91922,34 +77116,34 @@ var init_schemas = __esm(() => {
                 code: "invalid_key",
                 origin: "record",
                 issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
-                input: key,
-                path: [key],
+                input: key2,
+                path: [key2],
                 inst
               });
               continue;
             }
             const outKey = keyResult.value;
-            const result = def.valueType._zod.run({ value: input[key], issues: [] }, ctx);
+            const result = def.valueType._zod.run({ value: input[key2], issues: [] }, ctx);
             if (result instanceof Promise) {
               proms.push(result.then((result2) => {
                 if (result2.issues.length) {
-                  payload.issues.push(...prefixIssues(key, result2.issues));
+                  payload.issues.push(...prefixIssues(key2, result2.issues));
                 }
                 payload.value[outKey] = result2.value;
               }));
             } else {
               if (result.issues.length) {
-                payload.issues.push(...prefixIssues(key, result.issues));
+                payload.issues.push(...prefixIssues(key2, result.issues));
               }
               payload.value[outKey] = result.value;
             }
           }
         }
         let unrecognized;
-        for (const key in input) {
-          if (!recordKeys.has(key)) {
+        for (const key2 in input) {
+          if (!recordKeys.has(key2)) {
             unrecognized = unrecognized ?? [];
-            unrecognized.push(key);
+            unrecognized.push(key2);
           }
         }
         if (unrecognized && unrecognized.length > 0) {
@@ -91962,18 +77156,18 @@ var init_schemas = __esm(() => {
         }
       } else {
         payload.value = {};
-        for (const key of Reflect.ownKeys(input)) {
-          if (key === "__proto__")
+        for (const key2 of Reflect.ownKeys(input)) {
+          if (key2 === "__proto__")
             continue;
-          if (!Object.prototype.propertyIsEnumerable.call(input, key))
+          if (!Object.prototype.propertyIsEnumerable.call(input, key2))
             continue;
-          let keyResult = def.keyType._zod.run({ value: key, issues: [] }, ctx);
+          let keyResult = def.keyType._zod.run({ value: key2, issues: [] }, ctx);
           if (keyResult instanceof Promise) {
             throw new Error("Async schemas not supported in object keys currently");
           }
-          const checkNumericKey = typeof key === "string" && number2.test(key) && keyResult.issues.length;
+          const checkNumericKey = typeof key2 === "string" && number2.test(key2) && keyResult.issues.length;
           if (checkNumericKey) {
-            const retryResult = def.keyType._zod.run({ value: Number(key), issues: [] }, ctx);
+            const retryResult = def.keyType._zod.run({ value: Number(key2), issues: [] }, ctx);
             if (retryResult instanceof Promise) {
               throw new Error("Async schemas not supported in object keys currently");
             }
@@ -91983,30 +77177,30 @@ var init_schemas = __esm(() => {
           }
           if (keyResult.issues.length) {
             if (def.mode === "loose") {
-              payload.value[key] = input[key];
+              payload.value[key2] = input[key2];
             } else {
               payload.issues.push({
                 code: "invalid_key",
                 origin: "record",
                 issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
-                input: key,
-                path: [key],
+                input: key2,
+                path: [key2],
                 inst
               });
             }
             continue;
           }
-          const result = def.valueType._zod.run({ value: input[key], issues: [] }, ctx);
+          const result = def.valueType._zod.run({ value: input[key2], issues: [] }, ctx);
           if (result instanceof Promise) {
             proms.push(result.then((result2) => {
               if (result2.issues.length) {
-                payload.issues.push(...prefixIssues(key, result2.issues));
+                payload.issues.push(...prefixIssues(key2, result2.issues));
               }
               payload.value[keyResult.value] = result2.value;
             }));
           } else {
             if (result.issues.length) {
-              payload.issues.push(...prefixIssues(key, result.issues));
+              payload.issues.push(...prefixIssues(key2, result.issues));
             }
             payload.value[keyResult.value] = result.value;
           }
@@ -93042,8 +78236,8 @@ function extractDefs(ctx, schema) {
     if (defId)
       seen.defId = defId;
     const schema2 = seen.schema;
-    for (const key in schema2) {
-      delete schema2[key];
+    for (const key2 in schema2) {
+      delete schema2[key2];
     }
     schema2.$ref = ref;
   };
@@ -93110,20 +78304,20 @@ function finalize(ctx, schema) {
       Object.assign(schema2, _cached);
       const isParentRef = zodSchema._zod.parent === ref;
       if (isParentRef) {
-        for (const key in schema2) {
-          if (key === "$ref" || key === "allOf")
+        for (const key2 in schema2) {
+          if (key2 === "$ref" || key2 === "allOf")
             continue;
-          if (!(key in _cached)) {
-            delete schema2[key];
+          if (!(key2 in _cached)) {
+            delete schema2[key2];
           }
         }
       }
       if (refSchema.$ref && refSeen.def) {
-        for (const key in schema2) {
-          if (key === "$ref" || key === "allOf")
+        for (const key2 in schema2) {
+          if (key2 === "$ref" || key2 === "allOf")
             continue;
-          if (key in refSeen.def && JSON.stringify(schema2[key]) === JSON.stringify(refSeen.def[key])) {
-            delete schema2[key];
+          if (key2 in refSeen.def && JSON.stringify(schema2[key2]) === JSON.stringify(refSeen.def[key2])) {
+            delete schema2[key2];
           }
         }
       }
@@ -93135,11 +78329,11 @@ function finalize(ctx, schema) {
       if (parentSeen?.schema.$ref) {
         schema2.$ref = parentSeen.schema.$ref;
         if (parentSeen.def) {
-          for (const key in schema2) {
-            if (key === "$ref" || key === "allOf")
+          for (const key2 in schema2) {
+            if (key2 === "$ref" || key2 === "allOf")
               continue;
-            if (key in parentSeen.def && JSON.stringify(schema2[key]) === JSON.stringify(parentSeen.def[key])) {
-              delete schema2[key];
+            if (key2 in parentSeen.def && JSON.stringify(schema2[key2]) === JSON.stringify(parentSeen.def[key2])) {
+              delete schema2[key2];
             }
           }
         }
@@ -93237,8 +78431,8 @@ function isTransforming(_schema, _ctx) {
     return isTransforming(def.in, ctx) || isTransforming(def.out, ctx);
   }
   if (def.type === "object") {
-    for (const key in def.shape) {
-      if (isTransforming(def.shape[key], ctx))
+    for (const key2 in def.shape) {
+      if (isTransforming(def.shape[key2], ctx))
         return true;
     }
     return false;
@@ -93425,15 +78619,15 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
   json.type = "object";
   json.properties = {};
   const shape = def.shape;
-  for (const key in shape) {
-    json.properties[key] = process2(shape[key], ctx, {
+  for (const key2 in shape) {
+    json.properties[key2] = process2(shape[key2], ctx, {
       ...params,
-      path: [...params.path, "properties", key]
+      path: [...params.path, "properties", key2]
     });
   }
   const allKeys = new Set(Object.keys(shape));
-  const requiredKeys = new Set([...allKeys].filter((key) => {
-    const v = def.shape[key]._zod;
+  const requiredKeys = new Set([...allKeys].filter((key2) => {
+    const v = def.shape[key2]._zod;
     if (ctx.io === "input") {
       return v.optin === undefined;
     } else {
@@ -93827,14 +79021,14 @@ function _installLazyMethods(inst, group, methods) {
   if (installed.has(group))
     return;
   installed.add(group);
-  for (const key in methods) {
-    const fn = methods[key];
-    Object.defineProperty(proto, key, {
+  for (const key2 in methods) {
+    const fn = methods[key2];
+    Object.defineProperty(proto, key2, {
       configurable: true,
       enumerable: false,
       get() {
         const bound = fn.bind(this);
-        Object.defineProperty(this, key, {
+        Object.defineProperty(this, key2, {
           configurable: true,
           writable: true,
           enumerable: true,
@@ -93843,7 +79037,7 @@ function _installLazyMethods(inst, group, methods) {
         return bound;
       },
       set(v) {
-        Object.defineProperty(this, key, {
+        Object.defineProperty(this, key2, {
           configurable: true,
           writable: true,
           enumerable: true,
@@ -96597,8 +81791,8 @@ function isPlainObject3(value) {
 }
 function mergeCapabilities(base, additional) {
   const result = { ...base };
-  for (const key in additional) {
-    const k = key;
+  for (const key2 in additional) {
+    const k = key2;
     const addValue = additional[k];
     if (addValue === undefined)
       continue;
@@ -96755,15 +81949,15 @@ var require_code = __commonJS((exports) => {
     return JSON.stringify(x).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
   }
   exports.safeStringify = safeStringify;
-  function getProperty(key) {
-    return typeof key == "string" && exports.IDENTIFIER.test(key) ? new _Code(`.${key}`) : _`[${key}]`;
+  function getProperty(key2) {
+    return typeof key2 == "string" && exports.IDENTIFIER.test(key2) ? new _Code(`.${key2}`) : _`[${key2}]`;
   }
   exports.getProperty = getProperty;
-  function getEsmExportName(key) {
-    if (typeof key == "string" && exports.IDENTIFIER.test(key)) {
-      return new _Code(`${key}`);
+  function getEsmExportName(key2) {
+    if (typeof key2 == "string" && exports.IDENTIFIER.test(key2)) {
+      return new _Code(`${key2}`);
     }
-    throw new Error(`CodeGen: invalid export name: ${key}, use explicit $id name mapping`);
+    throw new Error(`CodeGen: invalid export name: ${key2}, use explicit $id name mapping`);
   }
   exports.getEsmExportName = getEsmExportName;
   function regexpCode(rx) {
@@ -97400,11 +82594,11 @@ var require_codegen = __commonJS((exports) => {
     }
     object(...keyValues) {
       const code = ["{"];
-      for (const [key, value] of keyValues) {
+      for (const [key2, value] of keyValues) {
         if (code.length > 1)
           code.push(",");
-        code.push(key);
-        if (key !== value || this.opts.es5) {
+        code.push(key2);
+        if (key2 !== value || this.opts.es5) {
           code.push(":");
           (0, code_1.addCodeArg)(code, value);
         }
@@ -97657,17 +82851,17 @@ var require_util = __commonJS((exports) => {
     if (typeof schema === "boolean")
       return;
     const rules = self.RULES.keywords;
-    for (const key in schema) {
-      if (!rules[key])
-        checkStrictMode(it, `unknown keyword: "${key}"`);
+    for (const key2 in schema) {
+      if (!rules[key2])
+        checkStrictMode(it, `unknown keyword: "${key2}"`);
     }
   }
   exports.checkUnknownRules = checkUnknownRules;
   function schemaHasRules(schema, rules) {
     if (typeof schema == "boolean")
       return !schema;
-    for (const key in schema)
-      if (rules[key])
+    for (const key2 in schema)
+      if (rules[key2])
         return true;
     return false;
   }
@@ -97675,8 +82869,8 @@ var require_util = __commonJS((exports) => {
   function schemaHasRulesButRef(schema, RULES) {
     if (typeof schema == "boolean")
       return !schema;
-    for (const key in schema)
-      if (key !== "$ref" && RULES.all[key])
+    for (const key2 in schema)
+      if (key2 !== "$ref" && RULES.all[key2])
         return true;
     return false;
   }
@@ -98221,8 +83415,8 @@ var require_defaults = __commonJS((exports) => {
   function assignDefaults(it, ty) {
     const { properties, items } = it.schema;
     if (ty === "object" && properties) {
-      for (const key in properties) {
-        assignDefault(it, key, properties[key].default);
+      for (const key2 in properties) {
+        assignDefault(it, key2, properties[key2].default);
       }
     } else if (ty === "array" && Array.isArray(items)) {
       items.forEach((sch, i) => assignDefault(it, i, sch.default));
@@ -98602,8 +83796,8 @@ var require_fast_deep_equal = __commonJS((exports, module) => {
         if (!Object.prototype.hasOwnProperty.call(b, keys[i]))
           return false;
       for (i = length;i-- !== 0; ) {
-        var key = keys[i];
-        if (!equal(a[key], b[key]))
+        var key2 = keys[i];
+        if (!equal(a[key2], b[key2]))
           return false;
       }
       return true;
@@ -98671,20 +83865,20 @@ var require_json_schema_traverse = __commonJS((exports, module) => {
   function _traverse(opts, pre, post2, schema, jsonPtr, rootSchema, parentJsonPtr, parentKeyword, parentSchema, keyIndex) {
     if (schema && typeof schema == "object" && !Array.isArray(schema)) {
       pre(schema, jsonPtr, rootSchema, parentJsonPtr, parentKeyword, parentSchema, keyIndex);
-      for (var key in schema) {
-        var sch = schema[key];
+      for (var key2 in schema) {
+        var sch = schema[key2];
         if (Array.isArray(sch)) {
-          if (key in traverse.arrayKeywords) {
+          if (key2 in traverse.arrayKeywords) {
             for (var i = 0;i < sch.length; i++)
-              _traverse(opts, pre, post2, sch[i], jsonPtr + "/" + key + "/" + i, rootSchema, jsonPtr, key, schema, i);
+              _traverse(opts, pre, post2, sch[i], jsonPtr + "/" + key2 + "/" + i, rootSchema, jsonPtr, key2, schema, i);
           }
-        } else if (key in traverse.propsKeywords) {
+        } else if (key2 in traverse.propsKeywords) {
           if (sch && typeof sch == "object") {
             for (var prop in sch)
-              _traverse(opts, pre, post2, sch[prop], jsonPtr + "/" + key + "/" + escapeJsonPtr(prop), rootSchema, jsonPtr, key, schema, prop);
+              _traverse(opts, pre, post2, sch[prop], jsonPtr + "/" + key2 + "/" + escapeJsonPtr(prop), rootSchema, jsonPtr, key2, schema, prop);
           }
-        } else if (key in traverse.keywords || opts.allKeys && !(key in traverse.skipKeywords)) {
-          _traverse(opts, pre, post2, sch, jsonPtr + "/" + key, rootSchema, jsonPtr, key, schema);
+        } else if (key2 in traverse.keywords || opts.allKeys && !(key2 in traverse.skipKeywords)) {
+          _traverse(opts, pre, post2, sch, jsonPtr + "/" + key2, rootSchema, jsonPtr, key2, schema);
         }
       }
       post2(schema, jsonPtr, rootSchema, parentJsonPtr, parentKeyword, parentSchema, keyIndex);
@@ -98738,10 +83932,10 @@ var require_resolve = __commonJS((exports) => {
     "$dynamicAnchor"
   ]);
   function hasRef(schema) {
-    for (const key in schema) {
-      if (REF_KEYWORDS.has(key))
+    for (const key2 in schema) {
+      if (REF_KEYWORDS.has(key2))
         return true;
-      const sch = schema[key];
+      const sch = schema[key2];
       if (Array.isArray(sch) && sch.some(hasRef))
         return true;
       if (typeof sch == "object" && hasRef(sch))
@@ -98751,14 +83945,14 @@ var require_resolve = __commonJS((exports) => {
   }
   function countKeys(schema) {
     let count = 0;
-    for (const key in schema) {
-      if (key === "$ref")
+    for (const key2 in schema) {
+      if (key2 === "$ref")
         return Infinity;
       count++;
-      if (SIMPLE_INLINED.has(key))
+      if (SIMPLE_INLINED.has(key2))
         continue;
-      if (typeof schema[key] == "object") {
-        (0, util_1.eachItem)(schema[key], (sch) => count += countKeys(sch));
+      if (typeof schema[key2] == "object") {
+        (0, util_1.eachItem)(schema[key2], (sch) => count += countKeys(sch));
       }
       if (count === Infinity)
         return Infinity;
@@ -98944,8 +84138,8 @@ var require_validate = __commonJS((exports) => {
   function schemaCxtHasRules({ schema, self }) {
     if (typeof schema == "boolean")
       return !schema;
-    for (const key in schema)
-      if (self.RULES.all[key])
+    for (const key2 in schema)
+      if (self.RULES.all[key2])
         return true;
     return false;
   }
@@ -100530,7 +85724,7 @@ var require_core = __commonJS((exports) => {
         }
       }
     }
-    addSchema(schema, key, _meta, _validateSchema = this.opts.validateSchema) {
+    addSchema(schema, key2, _meta, _validateSchema = this.opts.validateSchema) {
       if (Array.isArray(schema)) {
         for (const sch of schema)
           this.addSchema(sch, undefined, _meta, _validateSchema);
@@ -100544,13 +85738,13 @@ var require_core = __commonJS((exports) => {
           throw new Error(`schema ${schemaId} must be string`);
         }
       }
-      key = (0, resolve_1.normalizeId)(key || id);
-      this._checkUnique(key);
-      this.schemas[key] = this._addSchema(schema, _meta, key, _validateSchema, true);
+      key2 = (0, resolve_1.normalizeId)(key2 || id);
+      this._checkUnique(key2);
+      this.schemas[key2] = this._addSchema(schema, _meta, key2, _validateSchema, true);
       return this;
     }
-    addMetaSchema(schema, key, _validateSchema = this.opts.validateSchema) {
-      this.addSchema(schema, key, true, _validateSchema);
+    addMetaSchema(schema, key2, _validateSchema = this.opts.validateSchema) {
+      this.addSchema(schema, key2, true, _validateSchema);
       return this;
     }
     validateSchema(schema, throwOrLogError) {
@@ -100696,14 +85890,14 @@ var require_core = __commonJS((exports) => {
         let keywords = metaSchema;
         for (const seg of segments)
           keywords = keywords[seg];
-        for (const key in rules) {
-          const rule = rules[key];
+        for (const key2 in rules) {
+          const rule = rules[key2];
           if (typeof rule != "object")
             continue;
           const { $data } = rule.definition;
-          const schema = keywords[key];
+          const schema = keywords[key2];
           if ($data && schema)
-            keywords[key] = schemaOrData(schema);
+            keywords[key2] = schemaOrData(schema);
         }
       }
       return metaSchema;
@@ -100776,10 +85970,10 @@ var require_core = __commonJS((exports) => {
   Ajv.MissingRefError = ref_error_1.default;
   exports.default = Ajv;
   function checkOptions(checkOpts, options, msg, log = "error") {
-    for (const key in checkOpts) {
-      const opt = key;
+    for (const key2 in checkOpts) {
+      const opt = key2;
       if (opt in options)
-        this.logger[log](`${msg}: option ${key}. ${checkOpts[opt]}`);
+        this.logger[log](`${msg}: option ${key2}. ${checkOpts[opt]}`);
     }
   }
   function getSchEnv(keyRef) {
@@ -100793,8 +85987,8 @@ var require_core = __commonJS((exports) => {
     if (Array.isArray(optsSchemas))
       this.addSchema(optsSchemas);
     else
-      for (const key in optsSchemas)
-        this.addSchema(optsSchemas[key], key);
+      for (const key2 in optsSchemas)
+        this.addSchema(optsSchemas[key2], key2);
   }
   function addInitialFormats() {
     for (const name in this.opts.formats) {
@@ -101767,11 +86961,11 @@ var require_dependencies = __commonJS((exports) => {
   function splitDependencies({ schema }) {
     const propertyDeps = {};
     const schemaDeps = {};
-    for (const key in schema) {
-      if (key === "__proto__")
+    for (const key2 in schema) {
+      if (key2 === "__proto__")
         continue;
-      const deps = Array.isArray(schema[key]) ? propertyDeps : schemaDeps;
-      deps[key] = schema[key];
+      const deps = Array.isArray(schema[key2]) ? propertyDeps : schemaDeps;
+      deps[key2] = schema[key2];
     }
     return [propertyDeps, schemaDeps];
   }
@@ -101840,13 +87034,13 @@ var require_propertyNames = __commonJS((exports) => {
       if ((0, util_1.alwaysValidSchema)(it, schema))
         return;
       const valid = gen.name("valid");
-      gen.forIn("key", data2, (key) => {
-        cxt.setParams({ propertyName: key });
+      gen.forIn("key", data2, (key2) => {
+        cxt.setParams({ propertyName: key2 });
         cxt.subschema({
           keyword: "propertyNames",
-          data: key,
+          data: key2,
           dataTypes: ["string"],
-          propertyName: key,
+          propertyName: key2,
           compositeRule: true
         }, valid);
         gen.if((0, codegen_1.not)(valid), () => {
@@ -101892,38 +87086,38 @@ var require_additionalProperties = __commonJS((exports) => {
       checkAdditionalProperties();
       cxt.ok((0, codegen_1._)`${errsCount} === ${names_1.default.errors}`);
       function checkAdditionalProperties() {
-        gen.forIn("key", data2, (key) => {
+        gen.forIn("key", data2, (key2) => {
           if (!props.length && !patProps.length)
-            additionalPropertyCode(key);
+            additionalPropertyCode(key2);
           else
-            gen.if(isAdditional(key), () => additionalPropertyCode(key));
+            gen.if(isAdditional(key2), () => additionalPropertyCode(key2));
         });
       }
-      function isAdditional(key) {
+      function isAdditional(key2) {
         let definedProp;
         if (props.length > 8) {
           const propsSchema = (0, util_1.schemaRefOrVal)(it, parentSchema.properties, "properties");
-          definedProp = (0, code_1.isOwnProperty)(gen, propsSchema, key);
+          definedProp = (0, code_1.isOwnProperty)(gen, propsSchema, key2);
         } else if (props.length) {
-          definedProp = (0, codegen_1.or)(...props.map((p) => (0, codegen_1._)`${key} === ${p}`));
+          definedProp = (0, codegen_1.or)(...props.map((p) => (0, codegen_1._)`${key2} === ${p}`));
         } else {
           definedProp = codegen_1.nil;
         }
         if (patProps.length) {
-          definedProp = (0, codegen_1.or)(definedProp, ...patProps.map((p) => (0, codegen_1._)`${(0, code_1.usePattern)(cxt, p)}.test(${key})`));
+          definedProp = (0, codegen_1.or)(definedProp, ...patProps.map((p) => (0, codegen_1._)`${(0, code_1.usePattern)(cxt, p)}.test(${key2})`));
         }
         return (0, codegen_1.not)(definedProp);
       }
-      function deleteAdditional(key) {
-        gen.code((0, codegen_1._)`delete ${data2}[${key}]`);
+      function deleteAdditional(key2) {
+        gen.code((0, codegen_1._)`delete ${data2}[${key2}]`);
       }
-      function additionalPropertyCode(key) {
+      function additionalPropertyCode(key2) {
         if (opts.removeAdditional === "all" || opts.removeAdditional && schema === false) {
-          deleteAdditional(key);
+          deleteAdditional(key2);
           return;
         }
         if (schema === false) {
-          cxt.setParams({ additionalProperty: key });
+          cxt.setParams({ additionalProperty: key2 });
           cxt.error();
           if (!allErrors)
             gen.break();
@@ -101932,22 +87126,22 @@ var require_additionalProperties = __commonJS((exports) => {
         if (typeof schema == "object" && !(0, util_1.alwaysValidSchema)(it, schema)) {
           const valid = gen.name("valid");
           if (opts.removeAdditional === "failing") {
-            applyAdditionalSchema(key, valid, false);
+            applyAdditionalSchema(key2, valid, false);
             gen.if((0, codegen_1.not)(valid), () => {
               cxt.reset();
-              deleteAdditional(key);
+              deleteAdditional(key2);
             });
           } else {
-            applyAdditionalSchema(key, valid);
+            applyAdditionalSchema(key2, valid);
             if (!allErrors)
               gen.if((0, codegen_1.not)(valid), () => gen.break());
           }
         }
       }
-      function applyAdditionalSchema(key, valid, errors3) {
+      function applyAdditionalSchema(key2, valid, errors3) {
         const subschema = {
           keyword: "additionalProperties",
-          dataProp: key,
+          dataProp: key2,
           dataPropType: util_1.Type.Str
         };
         if (errors3 === false) {
@@ -102066,19 +87260,19 @@ var require_patternProperties = __commonJS((exports) => {
         }
       }
       function validateProperties(pat) {
-        gen.forIn("key", data2, (key) => {
-          gen.if((0, codegen_1._)`${(0, code_1.usePattern)(cxt, pat)}.test(${key})`, () => {
+        gen.forIn("key", data2, (key2) => {
+          gen.if((0, codegen_1._)`${(0, code_1.usePattern)(cxt, pat)}.test(${key2})`, () => {
             const alwaysValid = alwaysValidPatterns.includes(pat);
             if (!alwaysValid) {
               cxt.subschema({
                 keyword: "patternProperties",
                 schemaProp: pat,
-                dataProp: key,
+                dataProp: key2,
                 dataPropType: util_2.Type.Str
               }, valid);
             }
             if (it.opts.unevaluated && props !== true) {
-              gen.assign((0, codegen_1._)`${props}[${key}]`, true);
+              gen.assign((0, codegen_1._)`${props}[${key2}]`, true);
             } else if (!alwaysValid && !it.allErrors) {
               gen.if((0, codegen_1.not)(valid), () => gen.break());
             }
@@ -104099,8 +89293,8 @@ function base32(data2) {
 function installIdForPublicKey(spkiDer) {
   return base32(createHash48("sha256").update(spkiDer).digest().subarray(0, 20));
 }
-function spkiOf(key) {
-  return key.export({ format: "der", type: "spki" });
+function spkiOf(key2) {
+  return key2.export({ format: "der", type: "spki" });
 }
 function signedPayload(kind, nonce, installId, relayHost, scheme) {
   const fields = scheme === AUTH_LEGACY ? [SIGNATURE_DOMAIN, kind, nonce, installId] : [SIGNATURE_DOMAIN, kind, nonce, installId, relayHost.toLowerCase()];
@@ -106393,21 +91587,21 @@ class LocalFileExtractionJobStore {
     return row.status === "leased" && row.lease_token !== null && row.lease_token === requireBoundedString(claim.leaseToken, "leaseToken") && row.lease_grant_ordinal !== null && row.lease_grant_ordinal === claim.grantOrdinal && claim.grantAuthority === this.claimGrantAuthority();
   }
   counts(lane) {
-    const key = requireLaneKey(lane);
+    const key2 = requireLaneKey(lane);
     const rows = this.db.query(`
       SELECT status, extractor_kind, COUNT(*) AS jobs
       FROM extraction_jobs
       WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
       GROUP BY status, extractor_kind
       ORDER BY status ASC, extractor_kind ASC
-    `).all(key.corpusId, key.provider, key.accountScope, key.approvedScopeKey);
+    `).all(key2.corpusId, key2.provider, key2.accountScope, key2.approvedScopeKey);
     return rows.flatMap((row) => {
       const status = jobStatus(row.status);
       return status ? [{ status, extractorKind: row.extractor_kind, jobs: row.jobs }] : [];
     });
   }
   nextRetryAt(lane, now = new Date) {
-    const key = requireLaneKey(lane);
+    const key2 = requireLaneKey(lane);
     const row = this.db.query(`
       SELECT MIN(next_retry_at) AS next_retry_at
       FROM extraction_jobs
@@ -106415,14 +91609,14 @@ class LocalFileExtractionJobStore {
         AND status = 'failed_retryable'
         AND next_retry_at IS NOT NULL
         AND next_retry_at > ?
-    `).get(key.corpusId, key.provider, key.accountScope, key.approvedScopeKey, now.toISOString());
+    `).get(key2.corpusId, key2.provider, key2.accountScope, key2.approvedScopeKey, now.toISOString());
     return row?.next_retry_at ?? undefined;
   }
   scopedReadiness(lanes, options = {}) {
     const uniqueLanes = new Map;
     for (const lane of lanes) {
-      const key = requireLaneKey(lane);
-      uniqueLanes.set(JSON.stringify(key), key);
+      const key2 = requireLaneKey(lane);
+      uniqueLanes.set(JSON.stringify(key2), key2);
     }
     const select = this.db.query(`
       SELECT * FROM extraction_jobs
@@ -106591,7 +91785,7 @@ class LocalFileExtractionJobStore {
       WHERE corpus_id = ?
     `).get(now.toISOString(), now.toISOString(), ...pendingRetry.params, corpus);
     const count = (value) => Math.max(0, Math.trunc(value ?? 0));
-    const jobCount = (key) => count(typeof jobs?.[key] === "number" ? jobs[key] : undefined);
+    const jobCount = (key2) => count(typeof jobs?.[key2] === "number" ? jobs[key2] : undefined);
     return {
       blockedByPolicyItems: count(items?.blocked_items) + unreadable.blocked,
       metadataOnlyExpectedItems: count(items?.metadata_only_items),
@@ -109104,13 +94298,13 @@ function collectJsonMessages(value, messages) {
   if (!value || typeof value !== "object")
     return;
   const record3 = value;
-  for (const key of ["message", "error", "code"]) {
-    const field = record3[key];
+  for (const key2 of ["message", "error", "code"]) {
+    const field = record3[key2];
     if (typeof field === "string")
       messages.push(field);
   }
-  for (const key of ["issues", "errors", "details"]) {
-    collectJsonMessages(record3[key], messages);
+  for (const key2 of ["issues", "errors", "details"]) {
+    collectJsonMessages(record3[key2], messages);
   }
 }
 var REMOTE_VLM_EXTRACTOR_VERSION = "venice-v1", APPROVED_REMOTE_EXTRACTION_HOST = "api.venice.ai", REMOTE_VLM_EXTRACTOR_KINDS, DEFAULT_REMOTE_EXTRACTION_PROMPT;
@@ -109618,9 +94812,9 @@ function findServerBinary(runtimeDir) {
   throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
 }
 async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
-  const key = `${path}:${file.sha256}`;
+  const key2 = `${path}:${file.sha256}`;
   verifiedThisProcess2 ??= new Set;
-  if (verifiedThisProcess2.has(key))
+  if (verifiedThisProcess2.has(key2))
     return;
   const size = statSync24(path).size;
   const label = `Checking the ${noun}`;
@@ -109630,7 +94824,7 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
     rmSync16(path, { force: true });
     throw new BuiltInReasoningInstallError("checksum_mismatch", `${file.name} did not match its pinned checksum and was removed; it will download again.`);
   }
-  verifiedThisProcess2.add(key);
+  verifiedThisProcess2.add(key2);
 }
 function readRuntimeMarker(runtimeDir) {
   try {
@@ -111412,8 +96606,8 @@ function metadataForItem(stored, ref, requested) {
     ...stored.updatedAt ? { updatedAt: stored.updatedAt } : {},
     ...requested ?? {}
   };
-  for (const key of SOURCE_EXCLUSION_PATH_METADATA_KEYS)
-    delete merged[key];
+  for (const key2 of SOURCE_EXCLUSION_PATH_METADATA_KEYS)
+    delete merged[key2];
   if (stored.locatorUri) {
     merged["locatorUri"] = stored.locatorUri;
     merged["pathDisplay"] = stored.locatorUri;
@@ -111758,12 +96952,12 @@ function createFileExtractionRunner(options) {
           logPlanRefusal(request.corpusId, extractor?.kind ?? "unrouted", PLAN_REFUSED_ROUTING_FAILED, 1, error2);
           continue;
         }
-        const key = `${extractor.kind}\x00${version2}`;
-        const bucket = byKind.get(key);
+        const key2 = `${extractor.kind}\x00${version2}`;
+        const bucket = byKind.get(key2);
         if (bucket)
           bucket.refs.push(ref);
         else
-          byKind.set(key, { kind: extractor.kind, version: version2, refs: [ref] });
+          byKind.set(key2, { kind: extractor.kind, version: version2, refs: [ref] });
       }
       let jobsQueued = 0;
       let jobsExisting = 0;
@@ -112679,8 +97873,8 @@ function recordSecret(set2, item, text, options) {
   });
 }
 function stringMetadata2(item, keys) {
-  for (const key of keys) {
-    const value = item.metadata[key];
+  for (const key2 of keys) {
+    const value = item.metadata[key2];
     if (typeof value === "string" && value.trim())
       return value.trim();
   }
@@ -113397,10 +98591,10 @@ function createUnreadableFiles(options) {
     const out = [];
     for (const corpusId of new Set(corpusIds)) {
       for (const item of listed(corpusId)) {
-        const key = keyOf(item.ref);
-        if (seen.has(key))
+        const key2 = keyOf(item.ref);
+        if (seen.has(key2))
           continue;
-        seen.add(key);
+        seen.add(key2);
         out.push(item);
       }
     }
@@ -113776,8 +98970,8 @@ function catalogCategory(catalog, modelId) {
   if (exact)
     return exact;
   const lower = modelId.toLowerCase();
-  for (const [key, category] of Object.entries(catalog.models)) {
-    if (key.toLowerCase() === lower)
+  for (const [key2, category] of Object.entries(catalog.models)) {
+    if (key2.toLowerCase() === lower)
       return category;
   }
   return;
@@ -114877,8 +100071,8 @@ function fitPhaseBucketsToWall(phases, wallMs) {
     return phases;
   const ratio = wallMs / total;
   const entries = Object.entries(phases);
-  const fitted = Object.fromEntries(entries.map(([key, value]) => [
-    key,
+  const fitted = Object.fromEntries(entries.map(([key2, value]) => [
+    key2,
     Math.floor(value * ratio)
   ]));
   const fittedTotal = Object.values(fitted).reduce((sum2, value) => sum2 + value, 0);
@@ -115455,8 +100649,8 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (url.protocol !== "https:")
     throw new TypeError("Verified HTTPS request requires an HTTPS URL.");
   const headers = {};
-  new Headers(init.headers).forEach((value, key) => {
-    headers[key] = value;
+  new Headers(init.headers).forEach((value, key2) => {
+    headers[key2] = value;
   });
   const hostname = url.hostname.startsWith("[") && url.hostname.endsWith("]") ? url.hostname.slice(1, -1) : url.hostname;
   const servername = hostname.includes(":") ? undefined : hostname;
@@ -115512,11 +100706,11 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         incoming.on("end", () => {
           try {
             const responseHeaders = new Headers;
-            for (const [key, value] of Object.entries(incoming.headers)) {
+            for (const [key2, value] of Object.entries(incoming.headers)) {
               if (Array.isArray(value))
-                value.forEach((item) => responseHeaders.append(key, item));
+                value.forEach((item) => responseHeaders.append(key2, item));
               else if (value !== undefined)
-                responseHeaders.set(key, value);
+                responseHeaders.set(key2, value);
             }
             succeed(new Response(Buffer.concat(chunks2), {
               status: incoming.statusCode ?? 0,
@@ -115764,7 +100958,7 @@ function mountDashboardController(options) {
   function sameFormRecord(form, expected) {
     const actual = formRecord(form);
     const keys = new Set([...Object.keys(actual), ...Object.keys(expected)]);
-    return [...keys].every((key) => actual[key] === expected[key]);
+    return [...keys].every((key2) => actual[key2] === expected[key2]);
   }
   function releaseSubmittedForm(form, submittedValues) {
     const sheet = form.closest(".sheet");
@@ -116119,12 +101313,12 @@ function mountDashboardController(options) {
       return `${node.tagName}:${action}`;
     return node.textContent?.trim().slice(0, 120) || "";
   }
-  function findByFocusKey(key) {
-    if (!key)
+  function findByFocusKey(key2) {
+    if (!key2)
       return null;
-    if (key.startsWith("#"))
-      return query(`#${CSS.escape(key.slice(1))}`);
-    return queryAll("a,button,summary,[tabindex]").find((node) => focusKey(node) === key) || null;
+    if (key2.startsWith("#"))
+      return query(`#${CSS.escape(key2.slice(1))}`);
+    return queryAll("a,button,summary,[tabindex]").find((node) => focusKey(node) === key2) || null;
   }
   function activeElement() {
     const tree = root.getRootNode();
@@ -116161,8 +101355,8 @@ function mountDashboardController(options) {
     const focused = focusKey(active);
     root.innerHTML = result.body;
     queryAll("details").forEach((node) => {
-      const key = node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || "";
-      if (open7.has(key))
+      const key2 = node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || "";
+      if (open7.has(key2))
         node.open = true;
     });
     for (const id of openSheets) {
@@ -116579,7 +101773,7 @@ var init_theme = __esm(() => {
   ROOT_BLOCK = [
     ":root {",
     "  color-scheme: light dark;",
-    ...Object.keys(CSS_VARIABLE_NAMES).map((key) => `  ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS[key]};`),
+    ...Object.keys(CSS_VARIABLE_NAMES).map((key2) => `  ${CSS_VARIABLE_NAMES[key2]}: ${DASHBOARD_THEME_TOKENS[key2]};`),
     `  --mono: ${MONO_STACK};`,
     `  --fs-title: ${DASHBOARD_TYPE_SCALE.title};`,
     `  --fs-section: ${DASHBOARD_TYPE_SCALE.section};`,
@@ -116589,7 +101783,7 @@ var init_theme = __esm(() => {
     "}",
     "@media (prefers-color-scheme: light) {",
     "  :root {",
-    ...Object.keys(CSS_VARIABLE_NAMES).map((key) => `    ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS_LIGHT[key]};`),
+    ...Object.keys(CSS_VARIABLE_NAMES).map((key2) => `    ${CSS_VARIABLE_NAMES[key2]}: ${DASHBOARD_THEME_TOKENS_LIGHT[key2]};`),
     "  }",
     "}"
   ].join(`
@@ -116947,8 +102141,8 @@ function actionButton(input) {
   const button = `<button class="btn${action.primary ? " primary" : ""}" type="submit">${escapeHtml2(action.label)}</button>`;
   const source = `<input type="hidden" name="source" value="${escapeHtml2(action.source ?? "")}">`;
   const message = `<span class="actmsg" data-action-message role="status"></span>`;
-  const key = action.kind === "api_key" ? `<input class="keyfield" type="password" name="api_key" required placeholder="API key" aria-label="API key">` : "";
-  return `<form class="rowform" data-connect-kind="${action.kind}">${source}${key}${button}${message}</form>`;
+  const key2 = action.kind === "api_key" ? `<input class="keyfield" type="password" name="api_key" required placeholder="API key" aria-label="API key">` : "";
+  return `<form class="rowform" data-connect-kind="${action.kind}">${source}${key2}${button}${message}</form>`;
 }
 function dashboardControlGate(input) {
   if (input.connected) {
@@ -117459,7 +102653,7 @@ function usageLine(ready) {
 function unlockFirst(label, primary = true) {
   return `<button type="button" class="btn${primary ? " primary" : ""}" data-outside-needs-unlock>${escapeHtml2(label)}</button>`;
 }
-function problemLine(words, fix, access, input = {}) {
+function problemLine(words2, fix, access, input = {}) {
   const canEdit = access === "edit";
   let action = "";
   if (fix?.kind === "post" && access === "unlock") {
@@ -117471,7 +102665,7 @@ function problemLine(words, fix, access, input = {}) {
   } else if (fix?.kind === "recheck") {
     action = `<button type="button" class="btn" data-outside-recheck>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.checkAgain)}</button>`;
   }
-  return `<li${input.attrs ?? ""}><span>${escapeHtml2(words)}</span>${action}</li>`;
+  return `<li${input.attrs ?? ""}><span>${escapeHtml2(words2)}</span>${action}</li>`;
 }
 function renderProblems(status, access) {
   const canEdit = access === "edit";
@@ -117510,9 +102704,9 @@ function renderProblems(status, access) {
         items.push(...ready.fences.filter((fence) => !fence.thisWallet).map((fence) => problemLine(fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session_other_wallet, { at: shortTime(fence.at) }), { kind: "post", form: "abandon", label: DASHBOARD_OUTSIDE_HELP_COPY.abandon, primary: false, attrs: ` data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}"` }, access, { attrs })));
         continue;
       }
-      const words = CAP_BLOCKERS.has(code) && caps.length > 1 ? DASHBOARD_OUTSIDE_HELP_COPY.capsReached : outsideHelpBlockerWords(code);
+      const words2 = CAP_BLOCKERS.has(code) && caps.length > 1 ? DASHBOARD_OUTSIDE_HELP_COPY.capsReached : outsideHelpBlockerWords(code);
       const fix = CAP_BLOCKERS.has(code) ? { kind: "post", form: "route", label: DASHBOARD_OUTSIDE_HELP_COPY.removeLimits, attrs: " data-outside-nolimit" } : FUNDING_BLOCKERS.has(code) ? { kind: "open", section: "limits", label: DASHBOARD_OUTSIDE_HELP_COPY.enterFundingDate, focus: "funding_date" } : SETUP_BLOCKERS.has(code) ? { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps } : { kind: "recheck" };
-      items.push(problemLine(words, fix, access, { attrs }));
+      items.push(problemLine(words2, fix, access, { attrs }));
     }
   }
   if (status.writer?.modelProblem) {
@@ -117525,12 +102719,12 @@ function renderProblems(status, access) {
 function renderFenceLine(ready, access) {
   const canEdit = access === "edit";
   const mine = ready.fences.find((fence) => fence.thisWallet);
-  const words = fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session, { at: mine ? shortTime(mine.at) : "" });
+  const words2 = fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session, { at: mine ? shortTime(mine.at) : "" });
   if (access === "unlock")
-    return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words)}</span>${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</li>`;
+    return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words2)}</span>${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</li>`;
   const abandon = mine && canEdit ? `<form class="ohform ohinline" data-outside-form="abandon" data-outside-scope="${escapeHtml2(mine.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
   const recover = canEdit ? `<form class="ohform ohinline" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
-  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ""}</li>`;
+  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words2)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ""}</li>`;
 }
 function renderSection(input) {
   return `<details class="ohsect" id="outside-${escapeHtml2(input.id)}" data-outside-section="${escapeHtml2(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title">${escapeHtml2(input.title)}</span><span class="ohsect-sum">${escapeHtml2(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
@@ -117668,9 +102862,9 @@ function renderLanguages(status, canEdit) {
     return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled2}>` + `<span>${escapeHtml2(name)}${off ? ` <span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
   }).join("");
   const domainNames = DASHBOARD_OUTSIDE_HELP_COPY.domainNames;
-  const domainsOn = Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => domainNames[key] ?? key);
-  const domainsOff = Object.entries(status.settings.domains).filter(([, on]) => !on).map(([key]) => domainNames[key] ?? key);
-  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => key).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
+  const domainsOn = Object.entries(status.settings.domains).filter(([, on]) => on).map(([key2]) => domainNames[key2] ?? key2);
+  const domainsOff = Object.entries(status.settings.domains).filter(([, on]) => !on).map(([key2]) => domainNames[key2] ?? key2);
+  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key2]) => key2).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
   const named = status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => LANGUAGE_NAMES[entry.language]);
   return renderSection({
     id: "languages",
@@ -118072,10 +103266,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     state.hostReadOnly = value.readOnly === true;
     const links = {};
     const given = value.links && typeof value.links === "object" ? value.links : {};
-    for (const key of ["keys", "agents", "outsideHelp", "connector"]) {
-      const href = given[key];
+    for (const key2 of ["keys", "agents", "outsideHelp", "connector"]) {
+      const href = given[key2];
       if (typeof href === "string" && /^https?:\/\//.test(href))
-        links[key] = href;
+        links[key2] = href;
     }
     state.hostLinks = value.kind === "computer" ? links : {};
     const landing = value.landing;
@@ -118188,15 +103382,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
     return text ? String(text.text) : "";
   }
-  function callTool(name, args, key) {
+  function callTool(name, args, key2) {
     const mine = supersede();
-    state.busy = key;
+    state.busy = key2;
     state.confirming = "";
     state.notice = "";
     state.actionError = null;
     render();
     request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs).then((result) => {
-      if (state.busy === key)
+      if (state.busy === key2)
         state.busy = "";
       if (mine !== generation) {
         redraw();
@@ -118206,11 +103400,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (failed) {
         if (name === config2.syncTool) {
           state.syncPressed = {};
-          if (key.indexOf("menu:") === 0)
-            state.open[key.slice(0, key.lastIndexOf(":"))] = true;
+          if (key2.indexOf("menu:") === 0)
+            state.open[key2.slice(0, key2.lastIndexOf(":"))] = true;
         }
-        state.actionError = { key, text: failed };
-        render(key);
+        state.actionError = { key: key2, text: failed };
+        render(key2);
         return;
       }
       if (name === H.unreadableOpenTool) {
@@ -118246,7 +103440,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (!state.relayDown && name !== config2.toolName)
         refresh();
     }, (error2) => {
-      if (state.busy === key)
+      if (state.busy === key2)
         state.busy = "";
       if (name === config2.syncTool)
         state.syncPressed = {};
@@ -118264,7 +103458,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function openLink(href) {
     if (typeof href !== "string")
       return;
-    const hostLink = Object.keys(state.hostLinks).some((key) => state.hostLinks[key] === href);
+    const hostLink = Object.keys(state.hostLinks).some((key2) => state.hostLinks[key2] === href);
     if (href.slice(0, 6) !== "https:" && !hostLink)
       return;
     const host = openai();
@@ -118290,16 +103484,16 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function fill2(template, values) {
     let out = template;
-    for (const key of Object.keys(values))
-      out = out.split("{" + key + "}").join(String(values[key]));
+    for (const key2 of Object.keys(values))
+      out = out.split("{" + key2 + "}").join(String(values[key2]));
     return out;
   }
   function count(value) {
     return Math.max(0, Math.round(value)).toLocaleString("en-US");
   }
   function unitWord(unit, n) {
-    const words = P.units[unit] || P.units.items;
-    return n === 1 ? words.one : words.many;
+    const words2 = P.units[unit] || P.units.items;
+    return n === 1 ? words2.one : words2.many;
   }
   function ago(iso) {
     const at = Date.parse(iso);
@@ -118353,10 +103547,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return parent;
   }
   let accentUsed = false;
-  function button(label, key, onClick, style) {
+  function button(label, key2, onClick, style) {
     const node = el("button", "btn", label);
     node.type = "button";
-    node.setAttribute("data-key", key);
+    node.setAttribute("data-key", key2);
     if (style === "danger")
       node.className = "btn danger";
     else if (style === "warn" && onClick)
@@ -118382,17 +103576,17 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     fillNode.style.width = percent(value) + "%";
     return add(bar, fillNode);
   }
-  function details(key, summary, cls) {
+  function details(key2, summary, cls) {
     const node = el("details", cls);
-    node.setAttribute("data-open-key", key);
-    if (state.open[key])
+    node.setAttribute("data-open-key", key2);
+    if (state.open[key2])
       node.open = true;
     node.addEventListener("toggle", () => {
-      state.open[key] = node.open;
+      state.open[key2] = node.open;
       reportHeight();
     });
     const head = el("summary");
-    head.setAttribute("data-key", "summary:" + key);
+    head.setAttribute("data-key", "summary:" + key2);
     add(head, summary);
     return add(node, head);
   }
@@ -118416,21 +103610,21 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return "";
     return host === "olympusplugin.ai" || host === "www.olympusplugin.ai" ? parsed.href : "";
   }
-  function howWords(key) {
-    return key === "blocker" || key.indexOf("need:") === 0 ? P.howOnComputerFix : P.howOnComputer;
+  function howWords(key2) {
+    return key2 === "blocker" || key2.indexOf("need:") === 0 ? P.howOnComputerFix : P.howOnComputer;
   }
-  function howLink(fix, key, source) {
+  function howLink(fix, key2, source) {
     const href = helpHref(fix && fix.href);
     if (!href || compact2())
       return null;
     if (remoteMode()) {
-      const toggle = button(howWords(key), key + ":how", () => toggleRemote(key), "plain");
+      const toggle = button(howWords(key2), key2 + ":how", () => toggleRemote(key2), "plain");
       toggle.className = "btn link";
-      toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
+      toggle.setAttribute("aria-expanded", state.open["remote:" + key2] ? "true" : "false");
       const wrap = add(el("span", "fix"), toggle);
-      return add(wrap, remoteBox(key, href, source));
+      return add(wrap, remoteBox(key2, href, source));
     }
-    const link = button(howWords(key), key + ":how", () => openLink(href), "plain");
+    const link = button(howWords(key2), key2 + ":how", () => openLink(href), "plain");
     link.className = "btn link";
     return link;
   }
@@ -118440,9 +103634,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const remote = state.data ? state.data.remote : null;
     return !!remote && typeof remote.port === "number" && remote.port >= 1 && remote.port <= 65535 && Math.floor(remote.port) === remote.port;
   }
-  function toggleRemote(key) {
-    state.open["remote:" + key] = !state.open["remote:" + key];
-    render(key);
+  function toggleRemote(key2) {
+    state.open["remote:" + key2] = !state.open["remote:" + key2];
+    render(key2);
   }
   function openPath(href) {
     const match = /^https:\/\/(?:www\.)?olympusplugin\.ai\/open\/((?:connect|fix|unreadable)\/[a-z]+)\/$/.exec(href);
@@ -118459,9 +103653,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       port
     };
   }
-  function copyControl(code, key) {
+  function copyControl(code, key2) {
     const R2 = P.remote;
-    const node = button(R2.copy, key, () => {
+    const node = button(R2.copy, key2, () => {
       let copied = false;
       try {
         const selection = window.getSelection();
@@ -118479,12 +103673,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }, "plain");
     return node;
   }
-  function copyLine(text, key) {
+  function copyLine(text, key2) {
     const code = el("code", "", text);
-    return add(el("div", "remote-line"), code, copyControl(code, key));
+    return add(el("div", "remote-line"), code, copyControl(code, key2));
   }
-  function remoteBox(key, href, source) {
-    if (!state.open["remote:" + key])
+  function remoteBox(key2, href, source) {
+    if (!state.open["remote:" + key2])
       return null;
     const R2 = P.remote;
     const lines = remoteLines(href);
@@ -118493,9 +103687,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     box.setAttribute("aria-label", R2.title);
     if (state.data.remote.agent === true) {
       const phrase = source && openPath(href).indexOf("connect/") === 0 ? fill2(R2.askPhraseFor, { source: source.label }) : R2.askPhrase;
-      add(box, el("p", "", R2.askLine), copyLine(phrase, key + ":remote:ask"), el("p", "muted", R2.byHandAfterAsk));
+      add(box, el("p", "", R2.askLine), copyLine(phrase, key2 + ":remote:ask"), el("p", "muted", R2.byHandAfterAsk));
     }
-    add(box, el("p", "", R2.onComputer), copyLine(lines.onComputer, key + ":remote:tunnel"), el("p", "", R2.onServer), copyLine(lines.onServer, key + ":remote:link"), el("p", "muted", fill2(R2.portNote, { port: lines.port })));
+    add(box, el("p", "", R2.onComputer), copyLine(lines.onComputer, key2 + ":remote:tunnel"), el("p", "", R2.onServer), copyLine(lines.onServer, key2 + ":remote:link"), el("p", "muted", fill2(R2.portNote, { port: lines.port })));
     return box;
   }
   function globalReason() {
@@ -118514,77 +103708,77 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function compact2() {
     return state.displayMode !== "" && state.displayMode !== "fullscreen";
   }
-  function fixControl(fix, key, style, allowConfirm, source) {
+  function fixControl(fix, key2, style, allowConfirm, source) {
     const wrap = el("span", "fix");
     if (!fix || typeof fix.label !== "string")
       return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
+      add(wrap, button(fix.label, key2, null, style), rowReason(blocked || String(fix.disabledReason)));
       if (!blocked)
-        add(wrap, howLink(fix, key, source));
+        add(wrap, howLink(fix, key2, source));
       return wrap;
     }
-    if (state.busy === key) {
-      const busy = button(P.working, key, null, style);
+    if (state.busy === key2) {
+      const busy = button(P.working, key2, null, style);
       busy.setAttribute("aria-busy", "true");
       return add(wrap, busy);
     }
-    const failure2 = state.actionError && state.actionError.key === key ? state.actionError.text : "";
+    const failure2 = state.actionError && state.actionError.key === key2 ? state.actionError.text : "";
     let action = null;
     const opens = fix.openHref === true ? helpHref(fix.href) : "";
     if (opens && remoteMode()) {
-      const toggle = button(fix.label, key, () => toggleRemote(key), style);
-      toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
-      return add(wrap, toggle, remoteBox(key, opens, source));
+      const toggle = button(fix.label, key2, () => toggleRemote(key2), style);
+      toggle.setAttribute("aria-expanded", state.open["remote:" + key2] ? "true" : "false");
+      return add(wrap, toggle, remoteBox(key2, opens, source));
     }
     if (opens) {
-      return add(wrap, button(fix.label, key, () => openLink(opens), style));
+      return add(wrap, button(fix.label, key2, () => openLink(opens), style));
     }
     if (privacy && privacy.handles(fix)) {
-      action = () => openPrivacy(key);
+      action = () => openPrivacy(key2);
     } else if (picker && picker.handles(fix)) {
       action = () => {
         supersede();
         state.notice = "";
         state.confirming = "";
-        picker.start(fix, source ? source.id : "", source ? source.label : "", key);
+        picker.start(fix, source ? source.id : "", source ? source.label : "", key2);
       };
     } else if (fix.tool === config2.syncTool && source) {
       action = () => {
         state.syncPressed[source.id] = true;
         state.open["menu:" + source.id] = false;
-        callTool(fix.tool, fix.args || {}, key);
+        callTool(fix.tool, fix.args || {}, key2);
       };
     } else if (typeof fix.tool === "string" && fix.tool)
-      action = () => callTool(fix.tool, fix.args || {}, key);
+      action = () => callTool(fix.tool, fix.args || {}, key2);
     else if (helpHref(fix.href)) {
       if (remoteMode()) {
-        const toggle = button(howWords(key), key, () => toggleRemote(key), style);
-        toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
-        return add(wrap, toggle, remoteBox(key, helpHref(fix.href), source));
+        const toggle = button(howWords(key2), key2, () => toggleRemote(key2), style);
+        toggle.setAttribute("aria-expanded", state.open["remote:" + key2] ? "true" : "false");
+        return add(wrap, toggle, remoteBox(key2, helpHref(fix.href), source));
       }
-      return add(wrap, button(howWords(key), key, () => openLink(helpHref(fix.href)), style));
+      return add(wrap, button(howWords(key2), key2, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {
       if (!allowConfirm)
         return wrap;
-      if (state.confirming === key) {
+      if (state.confirming === key2) {
         const run = action;
         wrap.className = "fix confirm";
-        add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key + ":yes", run, "danger"), button(P.cancel, key + ":no", () => {
+        add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key2 + ":yes", run, "danger"), button(P.cancel, key2 + ":no", () => {
           state.confirming = "";
-          render(key);
+          render(key2);
         }, "plain"));
         return wrap;
       }
-      return add(wrap, button(fix.label, key, () => {
+      return add(wrap, button(fix.label, key2, () => {
         supersede();
-        state.confirming = key;
-        render(key + ":no");
+        state.confirming = key2;
+        render(key2 + ":no");
       }, "plain"), errorNote(failure2));
     }
-    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key, source) : null, errorNote(failure2));
+    return add(wrap, button(fix.label, key2, action, style), action && fix.tool ? howLink(fix, key2, source) : null, errorNote(failure2));
   }
   function errorNote(text) {
     if (!text)
@@ -118621,7 +103815,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (install)
         add(actions, button(C2.not_connected.install, "connection-install", () => openLink(install), "plain"));
     } else if (current !== "installing" && conn.action && C2.actions[conn.action.id]) {
-      const words = C2.actions[conn.action.id];
+      const words2 = C2.actions[conn.action.id];
       const href = conn.action.href;
       let onClick;
       if (conn.action.id === "retry")
@@ -118633,12 +103827,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
           state.helpOpen = !state.helpOpen;
           render("connection-action");
         };
-      const control = button(words.label, "connection-action", onClick, "main");
+      const control = button(words2.label, "connection-action", onClick, "main");
       if (!href && conn.action.id !== "retry")
         control.setAttribute("aria-expanded", String(state.helpOpen));
       add(actions, control);
-      if (state.helpOpen && !href && words.help)
-        add(body, el("p", "help", words.help));
+      if (state.helpOpen && !href && words2.help)
+        add(body, el("p", "help", words2.help));
     }
     if (actions.childNodes.length)
       add(body, actions);
@@ -118650,21 +103844,21 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const failure2 = state.lastFailure;
     if (!failure2)
       return null;
-    const words = C2.relay_unavailable.why;
+    const words2 = C2.relay_unavailable.why;
     let line;
     if (failure2.kind === "no_answer")
-      line = fill2(words.no_answer, { seconds: Math.round(config2.resultTimeoutMs / 1000) });
+      line = fill2(words2.no_answer, { seconds: Math.round(config2.resultTimeoutMs / 1000) });
     else if (failure2.kind === "error")
-      line = fill2(words.error, { text: failure2.text || "" });
+      line = fill2(words2.error, { text: failure2.text || "" });
     else if (failure2.kind === "host")
-      line = fill2(words.host, { text: failure2.text || "" });
+      line = fill2(words2.host, { text: failure2.text || "" });
     else
-      line = words.unreadable;
+      line = words2.unreadable;
     const box = details("why:relay", doc2.createTextNode(P.seeWhy), "why");
     const list = add(el("ul", "plain"), el("li", "", line));
     const when = ago(new Date(failure2.at).toISOString());
     if (when)
-      add(list, el("li", "muted", fill2(words.at, { when })));
+      add(list, el("li", "muted", fill2(words2.at, { when })));
     return add(box, list);
   }
   function itemSource(item) {
@@ -118675,12 +103869,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const match = sources.filter((source) => source && String(source.id) === id)[0];
     return { id, label: match ? String(match.label || id) : id };
   }
-  function itemBanner(item, key, allowConfirm) {
+  function itemBanner(item, key2, allowConfirm) {
     const banner = el("section", "banner warn");
     banner.setAttribute("role", "alert");
     add(banner, icon("!"));
     const body = add(el("div", "banner-body"), el("p", "banner-title", String(item.sentence || "")));
-    add(body, add(el("div", "actions"), fixControl(item.fix, key, "main", allowConfirm, itemSource(item))));
+    add(body, add(el("div", "actions"), fixControl(item.fix, key2, "main", allowConfirm, itemSource(item))));
     return add(banner, body);
   }
   function staleWords() {
@@ -118693,11 +103887,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return fill2(P.updated, { when: ago(data2.generatedAt) });
   }
   function staleLine() {
-    const words = staleWords();
-    drawnStale = words;
-    if (!words)
+    const words2 = staleWords();
+    drawnStale = words2;
+    if (!words2)
       return null;
-    const line = add(el("p", "stale"), el("span", "muted", words));
+    const line = add(el("p", "stale"), el("span", "muted", words2));
     return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
   }
   function needsYouSection(items) {
@@ -118706,8 +103900,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const section = add(el("section", "section"), el("h2", "", P.needsYou));
     const list = el("ul", "rows");
     items.forEach((item, index) => {
-      const key = "need:" + String(item.id || index);
-      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key, "warn", true, itemSource(item)));
+      const key2 = "need:" + String(item.id || index);
+      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key2, "warn", true, itemSource(item)));
       add(list, add(el("li", "row need"), body));
     });
     return add(section, list);
@@ -118810,10 +104004,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function seeWhy(source, id, stalled) {
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
     const unreadable = source.unreadable;
-    const words = P.unreadableReasons;
-    const lines = unreadable && typeof unreadable === "object" && Array.isArray(unreadable.reasons) ? unreadable.reasons.filter((reason) => reason && words[reason.code] && Number(reason.count) > 0).map((reason) => {
+    const words2 = P.unreadableReasons;
+    const lines = unreadable && typeof unreadable === "object" && Array.isArray(unreadable.reasons) ? unreadable.reasons.filter((reason) => reason && words2[reason.code] && Number(reason.count) > 0).map((reason) => {
       const n = Number(reason.count);
-      return add(el("li"), document.createTextNode(fill2(n === 1 ? words[reason.code].one : words[reason.code].other, { count: count(n) })));
+      return add(el("li"), document.createTextNode(fill2(n === 1 ? words2[reason.code].one : words2[reason.code].other, { count: count(n) })));
     }) : [];
     if (!lines.length && !stall.length)
       return null;
@@ -118834,8 +104028,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       own3.files.forEach((file, index) => {
         const item = el("li");
         if (typeof file.token === "string" && file.token) {
-          const key = "why-file:" + id + ":" + index;
-          const control = fixControl({ label: file.name, tool: H.unreadableOpenTool, args: { token: file.token } }, key, "plain", false);
+          const key2 = "why-file:" + id + ":" + index;
+          const control = fixControl({ label: file.name, tool: H.unreadableOpenTool, args: { token: file.token } }, key2, "plain", false);
           const opener = control.querySelector("button");
           if (opener && opener.textContent === file.name) {
             opener.className = "btn link file";
@@ -118914,8 +104108,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const manual = source && source.lastManualSync;
     return !!manual && typeof manual === "object" && ["checked", "failed", "busy"].indexOf(manual.outcome) >= 0;
   }
-  function checkingControl(key) {
-    const busy = button(P.syncChecking, key, null, "plain");
+  function checkingControl(key2) {
+    const busy = button(P.syncChecking, key2, null, "plain");
     busy.setAttribute("aria-busy", "true");
     return add(el("span", "fix"), busy);
   }
@@ -118977,8 +104171,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function stalledSentence(progress, source) {
     if (!progress.stalled || !progress.stalledReason)
       return "";
-    const words = P.stalledReasons[progress.stalledReason];
-    return typeof words === "string" ? fill2(words, { source: String(source.label || "") }) : "";
+    const words2 = P.stalledReasons[progress.stalledReason];
+    return typeof words2 === "string" ? fill2(words2, { source: String(source.label || "") }) : "";
   }
   function sourceProgressLabel(progress) {
     const total = Number(progress.total) || 0;
@@ -119070,8 +104264,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const text = el("div", "row-text");
     if (configured) {
       const rules = typeof info.ruleCount === "number" && isFinite(info.ruleCount) ? Math.max(0, Math.round(info.ruleCount)) : state.privacyRules;
-      const words = rules === 0 ? W.row.none : rules === 1 ? W.row.one : W.row.many;
-      add(text, el("p", "", rules >= 0 ? fill2(words, { n: count(rules) }) : W.rowNoCount));
+      const words2 = rules === 0 ? W.row.none : rules === 1 ? W.row.one : W.row.many;
+      add(text, el("p", "", rules >= 0 ? fill2(words2, { n: count(rules) }) : W.rowNoCount));
     }
     if (pending2 > 0)
       add(text, el("p", "muted", fill2(pending2 === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending2) })));
@@ -119227,12 +104421,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return { summary: P.models + " — " + kind + " · " + overall, search: kind + " · " + ready, answers: answersWords };
   }
   function notWorking(reason) {
-    const words = typeof reason === "string" && Object.prototype.hasOwnProperty.call(P.modelInstallReasons, reason) ? P.modelInstallReasons[reason] : "";
-    return words ? fill2(P.modelNotWorkingBecause, { reason: words }) : P.modelNotWorking;
+    const words2 = typeof reason === "string" && Object.prototype.hasOwnProperty.call(P.modelInstallReasons, reason) ? P.modelInstallReasons[reason] : "";
+    return words2 ? fill2(P.modelNotWorkingBecause, { reason: words2 }) : P.modelNotWorking;
   }
   function couldNotStart(model, reason) {
-    const words = P.modelLoadFailedReasons[typeof reason === "string" && Object.prototype.hasOwnProperty.call(P.modelLoadFailedReasons, reason) ? reason : "unknown"];
-    return fill2(P.modelCouldNotStartBecause, { model, reason: words });
+    const words2 = P.modelLoadFailedReasons[typeof reason === "string" && Object.prototype.hasOwnProperty.call(P.modelLoadFailedReasons, reason) ? reason : "unknown"];
+    return fill2(P.modelCouldNotStartBecause, { model, reason: words2 });
   }
   function transcriptionWords(models) {
     const entry = models.transcription;
@@ -119260,10 +104454,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
   }
   function transcriptionItem(models) {
-    const words = transcriptionWords(models);
-    if (!words)
+    const words2 = transcriptionWords(models);
+    if (!words2)
       return null;
-    const item = el("li", "", P.modelTranscription + ": " + words + " ");
+    const item = el("li", "", P.modelTranscription + ": " + words2 + " ");
     const fix = models.transcription && models.transcription.download;
     if (fix)
       add(item, fixControl(fix, "models:transcription", "plain", false));
@@ -119307,11 +104501,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function modelsSection(models) {
     if (!models || !models.embedding)
       return null;
-    const words = modelWords(models);
-    const box = details("models", doc2.createTextNode(words.summary), "section models");
-    const list = add(el("ul", "plain"), el("li", "", P.modelSearch + ": " + words.search));
-    if (words.answers)
-      add(list, el("li", "", P.modelAnswers + ": " + words.answers));
+    const words2 = modelWords(models);
+    const box = details("models", doc2.createTextNode(words2.summary), "section models");
+    const list = add(el("ul", "plain"), el("li", "", P.modelSearch + ": " + words2.search));
+    if (words2.answers)
+      add(list, el("li", "", P.modelAnswers + ": " + words2.answers));
     add(list, transcriptionItem(models));
     add(box, list);
     if (models.change)
@@ -119374,18 +104568,18 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!onComputer())
       return null;
     const W = H.copy;
-    const keys = ["keys", "agents", "outsideHelp", "connector"].filter((key) => !!state.hostLinks[key]);
+    const keys = ["keys", "agents", "outsideHelp", "connector"].filter((key2) => !!state.hostLinks[key2]);
     if (!keys.length)
       return null;
     const heading = add(el("h2"), doc2.createTextNode(W.section + " "), el("span", "tag", W.onlyHere));
     const section = add(el("section", "section on-computer"), heading);
     const list = el("ul", "rows");
-    for (const key of keys) {
-      const words = W.rows[key];
-      const text = add(el("div", "row-text"), el("p", "", words.title), el("p", "muted", words.line));
-      const href = state.hostLinks[key];
-      const open7 = button(W.open, "computer:" + key, () => openLink(href), "plain");
-      open7.setAttribute("aria-label", W.open + " " + words.title);
+    for (const key2 of keys) {
+      const words2 = W.rows[key2];
+      const text = add(el("div", "row-text"), el("p", "", words2.title), el("p", "muted", words2.line));
+      const href = state.hostLinks[key2];
+      const open7 = button(W.open, "computer:" + key2, () => openLink(href), "plain");
+      open7.setAttribute("aria-label", W.open + " " + words2.title);
       add(list, add(el("li", "row"), text, open7));
     }
     return add(section, list);
@@ -119750,7 +104944,7 @@ function privacyLogic(config2) {
       ["plans", "share"]
     ] }
   ];
-  const words = config2.topicWords;
+  const words2 = config2.topicWords;
   function topicById(id) {
     return TOPICS.filter((entry) => entry.id === id)[0];
   }
@@ -119759,15 +104953,15 @@ function privacyLogic(config2) {
     return new RegExp("(^|[^a-z0-9])(" + alternatives.join("|") + ")(?![a-z0-9])", "i").test(text2);
   }
   function leadOf(id) {
-    if (!words || !words.topics[id])
+    if (!words2 || !words2.topics[id])
       return "";
-    return words.about.split("{topic}").join(words.topics[id].name);
+    return words2.about.split("{topic}").join(words2.topics[id].name);
   }
   function lineTopic(line) {
-    if (!words)
+    if (!words2)
       return "";
     const trimmed2 = line.trim();
-    const parts = [words.privateList.split("{list}")[0], words.shareList.split("{list}")[0]];
+    const parts = [words2.privateList.split("{list}")[0], words2.shareList.split("{list}")[0]];
     for (const topic of TOPICS) {
       const lead = leadOf(topic.id);
       if (!lead)
@@ -119801,10 +104995,10 @@ function privacyLogic(config2) {
   }
   function topicAnswers(description) {
     const out = {};
-    if (!words)
+    if (!words2)
       return out;
-    const privatePrefix = words.privateList.split("{list}")[0];
-    const sharePrefix = words.shareList.split("{list}")[0];
+    const privatePrefix = words2.privateList.split("{list}")[0];
+    const sharePrefix = words2.shareList.split("{list}")[0];
     for (const line of String(description || "").split(`
 `)) {
       const id = lineTopic(line);
@@ -119818,7 +105012,7 @@ function privacyLogic(config2) {
       const sharePart = q < 0 ? "" : body.slice(q + sharePrefix.length, p > q ? p : body.length);
       const answer = {};
       for (const [option, side] of topic.options) {
-        const label = words.topics[id].options[option] || "";
+        const label = words2.topics[id].options[option] || "";
         answer[option] = label && holds(" " + privatePart, label) ? "private" : label && holds(" " + sharePart, label) ? "share" : side;
       }
       out[id] = answer;
@@ -119827,20 +105021,20 @@ function privacyLogic(config2) {
   }
   function sentence(id, answer) {
     const topic = topicById(id);
-    if (!words || !topic || !words.topics[id])
+    if (!words2 || !topic || !words2.topics[id])
       return "";
     const kept = [];
     const shared = [];
     for (const [option, side] of topic.options) {
-      const label = words.topics[id].options[option] || "";
+      const label = words2.topics[id].options[option] || "";
       if (label)
         ((answer[option] || side) === "private" ? kept : shared).push(label);
     }
     const parts = [];
     if (kept.length)
-      parts.push(words.privateList.split("{list}").join(kept.join(", ")));
+      parts.push(words2.privateList.split("{list}").join(kept.join(", ")));
     if (shared.length)
-      parts.push(words.shareList.split("{list}").join(shared.join(", ")));
+      parts.push(words2.shareList.split("{list}").join(shared.join(", ")));
     return leadOf(id) + " " + parts.join("; ") + ".";
   }
   function refineDescription(description, answers) {
@@ -119854,7 +105048,7 @@ function privacyLogic(config2) {
 `), answers).length <= DESCRIPTION_MAX;
   }
   function refineUnbounded(text2, answers) {
-    if (!words)
+    if (!words2)
       return text2;
     const lines = text2.split(`
 `);
@@ -119876,13 +105070,13 @@ function privacyLogic(config2) {
 `);
   }
   function questions(description) {
-    if (!words)
+    if (!words2)
       return [];
     const saved = topicAnswers(description);
     const out = [];
     for (const id of detectTopics(description)) {
       const topic = topicById(id);
-      const said = words.topics[id];
+      const said = words2.topics[id];
       if (!topic || !said)
         continue;
       const answer = saved[id];
@@ -119987,10 +105181,10 @@ function chatgptPickerProgram(kit) {
       done(picked || null);
       return;
     }
-    const key = p ? p.returnKey : "";
+    const key2 = p ? p.returnKey : "";
     p = null;
     session++;
-    kit.close(notice, refresh, key);
+    kit.close(notice, refresh, key2);
   }
   function start(fix, sourceId, sourceLabel3, returnKey) {
     stopTimer();
@@ -120142,12 +105336,12 @@ function chatgptPickerProgram(kit) {
     }
     add(page, box);
   }
-  function pickFolder(sourceId, sourceLabel3, words, taken, done) {
+  function pickFolder(sourceId, sourceLabel3, words2, taken, done) {
     stopTimer();
     session++;
     if (kit.compact())
       kit.fullscreen();
-    openScope(sourceId, sourceLabel3, words.title, "", "", undefined, { words, taken: taken.slice(), done });
+    openScope(sourceId, sourceLabel3, words2.title, "", "", undefined, { words: words2, taken: taken.slice(), done });
   }
   function openScope(id, label, title, returnKey, notice, initial, pick2) {
     stopTimer();
@@ -120269,7 +105463,7 @@ function chatgptPickerProgram(kit) {
         if (!selection || typeof selection.key !== "string" || STATES.indexOf(selection.state) < 0)
           continue;
         p.own.set(selection.key, selection.state);
-        p.ancestors.set(selection.key, Array.isArray(selection.ancestor_keys) ? selection.ancestor_keys.filter((key) => typeof key === "string") : []);
+        p.ancestors.set(selection.key, Array.isArray(selection.ancestor_keys) ? selection.ancestor_keys.filter((key2) => typeof key2 === "string") : []);
       }
       p.loaded = true;
     }
@@ -120308,31 +105502,31 @@ function chatgptPickerProgram(kit) {
     else
       kit.render(focus);
   }
-  function trailOf(key) {
-    return (p.ancestors.get(key) || []).concat([key]);
+  function trailOf(key2) {
+    return (p.ancestors.get(key2) || []).concat([key2]);
   }
-  function nameOf(key) {
-    const node = p.catalog.get(key);
+  function nameOf(key2) {
+    const node = p.catalog.get(key2);
     if (node && typeof node.name === "string" && node.name)
       return node.name;
-    const above = (p.ancestors.get(key) || []).filter((ancestor) => {
+    const above = (p.ancestors.get(key2) || []).filter((ancestor) => {
       const known = p.catalog.get(ancestor);
       return known && typeof known.name === "string" && known.name;
     });
     return above.length ? fill2(Q.insideFolder, { name: p.catalog.get(above[above.length - 1]).name }) : Q.unknownFolder;
   }
-  function shortPath(key) {
-    const node = p.catalog.get(key);
+  function shortPath(key2) {
+    const node = p.catalog.get(key2);
     if (!node || typeof node.name !== "string" || !node.name)
-      return nameOf(key);
-    const ancestors = p.ancestors.get(key) || [];
+      return nameOf(key2);
+    const ancestors = p.ancestors.get(key2) || [];
     const parent = ancestors.length ? p.catalog.get(ancestors[ancestors.length - 1]) : null;
     return parent && typeof parent.name === "string" && parent.name ? parent.name + " / " + node.name : node.name;
   }
-  function inherited(key) {
+  function inherited(key2) {
     let state = p.whole ? "ingest" : "";
     let from = p.whole ? ACCOUNT : "";
-    for (const ancestor of p.ancestors.get(key) || []) {
+    for (const ancestor of p.ancestors.get(key2) || []) {
       const choice = p.own.get(ancestor);
       if (choice === "exclude") {
         state = "exclude";
@@ -120347,17 +105541,17 @@ function chatgptPickerProgram(kit) {
     }
     return { state, from };
   }
-  function effective(key) {
-    const from = inherited(key).state;
-    const own3 = p.own.get(key) || "";
+  function effective(key2) {
+    const from = inherited(key2).state;
+    const own3 = p.own.get(key2) || "";
     if (from === "exclude" || own3 === "exclude")
       return "exclude";
     if (from === "metadata_only")
       return "metadata_only";
     return own3 || from;
   }
-  function allowed(key, state) {
-    const from = inherited(key).state;
+  function allowed(key2, state) {
+    const from = inherited(key2).state;
     if (!state)
       return true;
     if (from === "exclude")
@@ -120366,18 +105560,18 @@ function chatgptPickerProgram(kit) {
       return state !== "ingest";
     return true;
   }
-  function descendants(key) {
+  function descendants(key2) {
     const out = [];
     p.own.forEach((_state, other) => {
-      if (other !== key && (p.ancestors.get(other) || []).indexOf(key) >= 0)
+      if (other !== key2 && (p.ancestors.get(other) || []).indexOf(key2) >= 0)
         out.push(other);
     });
     return out;
   }
-  function mixed(key) {
+  function mixed(key2) {
     const access = (state) => state === "exclude" ? "" : state;
-    const mine = access(effective(key));
-    for (const other of descendants(key)) {
+    const mine = access(effective(key2));
+    for (const other of descendants(key2)) {
       const theirs = effective(other);
       if (access(theirs) !== mine)
         return theirs || "exclude";
@@ -120414,16 +105608,16 @@ function chatgptPickerProgram(kit) {
   }
   function exceptions() {
     const out = [];
-    p.own.forEach((state, key) => {
-      if (state !== inherited(key).state)
-        out.push(key);
+    p.own.forEach((state, key2) => {
+      if (state !== inherited(key2).state)
+        out.push(key2);
     });
     return out;
   }
-  function choose(key, value, focus) {
+  function choose(key2, value, focus) {
     if (p.saving)
       return;
-    if (key === ACCOUNT) {
+    if (key2 === ACCOUNT) {
       const whole = value === "ingest";
       if (whole !== p.whole) {
         p.whole = whole;
@@ -120433,18 +105627,18 @@ function chatgptPickerProgram(kit) {
     } else {
       if (value && STATES.indexOf(value) < 0)
         return;
-      if (value && !allowed(key, value))
+      if (value && !allowed(key2, value))
         return;
-      if (value && !p.own.has(key) && p.own.size >= MAX_RULES2)
+      if (value && !p.own.has(key2) && p.own.size >= MAX_RULES2)
         return;
       if (value)
-        p.own.set(key, value);
+        p.own.set(key2, value);
       else
-        p.own.delete(key);
+        p.own.delete(key2);
       p.edited = true;
       const tapped = focus.slice(focus.lastIndexOf(":") + 1);
-      if (!value && tapped && !allowed(key, tapped))
-        focus = "picker:seg:" + key + ":" + effective(key);
+      if (!value && tapped && !allowed(key2, tapped))
+        focus = "picker:seg:" + key2 + ":" + effective(key2);
     }
     if (p.notice && p.notice !== Q.conflict)
       p.notice = "";
@@ -120452,22 +105646,22 @@ function chatgptPickerProgram(kit) {
     p.lastSeg = focus;
     kit.render(focus);
   }
-  function drill(key) {
+  function drill(key2) {
     if (p.loading || p.saving)
       return;
     const arrive = () => {
-      p.path = trailOf(key);
+      p.path = trailOf(key2);
       kit.render("picker:up");
     };
-    if (p.branches.has(key))
+    if (p.branches.has(key2))
       arrive();
     else
-      list(key, false, arrive);
+      list(key2, false, arrive);
   }
-  function jump(key) {
+  function jump(key2) {
     if (p.loading || p.saving)
       return;
-    const trail = trailOf(key);
+    const trail = trailOf(key2);
     const mine = session;
     const step = (index) => {
       if (mine !== session || !p)
@@ -120490,8 +105684,8 @@ function chatgptPickerProgram(kit) {
   }
   function counts() {
     const totals = { ingest: 0, metadata_only: 0, exclude: 0 };
-    p.own.forEach((_state, key) => {
-      const state = effective(key);
+    p.own.forEach((_state, key2) => {
+      const state = effective(key2);
       if (state)
         totals[state]++;
     });
@@ -120502,9 +105696,9 @@ function chatgptPickerProgram(kit) {
       return -1;
     let total = 0;
     let known = true;
-    p.own.forEach((_state, key) => {
-      const state = effective(key);
-      const ancestors = p.ancestors.get(key) || [];
+    p.own.forEach((_state, key2) => {
+      const state = effective(key2);
+      const ancestors = p.ancestors.get(key2) || [];
       let nearest = "";
       for (const ancestor of ancestors)
         if (p.own.has(ancestor))
@@ -120517,7 +105711,7 @@ function chatgptPickerProgram(kit) {
         sign2 = -1;
       if (!sign2)
         return;
-      const node = p.catalog.get(key);
+      const node = p.catalog.get(key2);
       if (!node || typeof node.size_bytes !== "number" || !isFinite(node.size_bytes)) {
         known = false;
         return;
@@ -120553,8 +105747,8 @@ function chatgptPickerProgram(kit) {
   }
   function anyChosen() {
     let chosen = false;
-    p.own.forEach((_state, key) => {
-      const state = effective(key);
+    p.own.forEach((_state, key2) => {
+      const state = effective(key2);
       if (state === "ingest" || state === "metadata_only")
         chosen = true;
     });
@@ -120564,8 +105758,8 @@ function chatgptPickerProgram(kit) {
     if (!canSaveFolders())
       return;
     const selections = [];
-    p.own.forEach((state, key) => {
-      selections.push({ key, state, ancestor_keys: (p.ancestors.get(key) || []).slice() });
+    p.own.forEach((state, key2) => {
+      selections.push({ key: key2, state, ancestor_keys: (p.ancestors.get(key2) || []).slice() });
     });
     const args = {
       source_id: p.id,
@@ -120654,14 +105848,14 @@ function chatgptPickerProgram(kit) {
     group2.setAttribute("aria-label", fill2(Q.choiceGroup, { name }));
     const buttons = [];
     for (const state of STATES) {
-      const words = Q.segments[state];
+      const words2 = Q.segments[state];
       const pressed = model.pressed === state;
       const button = el("button", "seg-opt" + (pressed ? " on" : model.inherited === state ? " inherited" : ""));
       button.type = "button";
       button.setAttribute("data-key", focusBase + state);
-      button.setAttribute("aria-label", words[0]);
+      button.setAttribute("aria-label", words2[0]);
       button.setAttribute("aria-pressed", pressed ? "true" : "false");
-      add(button, el("span", "seg-long", words[0]), el("span", "seg-short", words[1]));
+      add(button, el("span", "seg-long", words2[0]), el("span", "seg-short", words2[1]));
       const blocked = pressed ? "" : model.blocked(state);
       const note = blocked || model.note(state);
       if (note) {
@@ -120682,19 +105876,19 @@ function chatgptPickerProgram(kit) {
       button.tabIndex = button === home2 ? 0 : -1;
     return group2;
   }
-  function folderControl(key, name, node) {
-    const own3 = p.own.get(key) || "";
-    const from = inherited(key);
-    const now = effective(key);
+  function folderControl(key2, name, node) {
+    const own3 = p.own.get(key2) || "";
+    const from = inherited(key2);
+    const now = effective(key2);
     const selectable = !node || node.selectable !== false;
     const capped = !own3 && p.own.size >= MAX_RULES2;
-    return segControl(name, "picker:seg:" + key + ":", {
+    return segControl(name, "picker:seg:" + key2 + ":", {
       pressed: own3,
       inherited: own3 ? now !== own3 ? now : "" : from.state,
       blocked: (state) => {
         if (!selectable)
           return Q.cannotChoose;
-        if (!allowed(key, state))
+        if (!allowed(key2, state))
           return fill2(Q.notPossible, { parent: sourceName(from.from), state: Q.statesLower[from.state] });
         if (capped)
           return fill2(Q.capReached, { max: kit.count(MAX_RULES2) });
@@ -120707,7 +105901,7 @@ function chatgptPickerProgram(kit) {
           return fill2(Q.inheritedFrom, { parent: sourceName(from.from) });
         return "";
       },
-      pick: (state) => choose(key, own3 === state ? "" : state, "picker:seg:" + key + ":" + state)
+      pick: (state) => choose(key2, own3 === state ? "" : state, "picker:seg:" + key2 + ":" + state)
     });
   }
   function accountControl() {
@@ -120719,21 +105913,21 @@ function chatgptPickerProgram(kit) {
       pick: (state) => choose(ACCOUNT, p.whole ? "" : state, "picker:seg:" + ACCOUNT + ":" + state)
     });
   }
-  function pickButton(key, name, focusKey) {
-    const words = p.pick.words;
-    if (p.pick.taken.indexOf(key) >= 0)
-      return kit.button(words.alreadyPrivate, focusKey, null, "plain");
-    const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => leave("", false, { key, name }), "plain");
-    control.setAttribute("aria-label", fill2(words.makePrivateFor, { name }));
+  function pickButton(key2, name, focusKey) {
+    const words2 = p.pick.words;
+    if (p.pick.taken.indexOf(key2) >= 0)
+      return kit.button(words2.alreadyPrivate, focusKey, null, "plain");
+    const control = kit.button(words2.makePrivate, focusKey, p.loading ? null : () => leave("", false, { key: key2, name }), "plain");
+    control.setAttribute("aria-label", fill2(words2.makePrivateFor, { name }));
     return control;
   }
   function pickRow(node) {
-    const key = node.key;
+    const key2 = node.key;
     const li = el("li", "frow pick");
     if (node.has_children) {
       const open7 = el("button", "fname");
       open7.type = "button";
-      open7.setAttribute("data-key", "picker:open:" + key);
+      open7.setAttribute("data-key", "picker:open:" + key2);
       add(open7, el("span", "fname-text", node.name));
       const chevron = el("span", "chev", "›");
       chevron.setAttribute("aria-hidden", "true");
@@ -120741,17 +105935,17 @@ function chatgptPickerProgram(kit) {
       if (p.loading || p.saving)
         open7.disabled = true;
       else
-        open7.addEventListener("click", () => drill(key));
+        open7.addEventListener("click", () => drill(key2));
       add(li, open7);
     } else
       add(li, add(el("p", "fname leaf"), el("span", "fname-text", node.name)));
     if (node.selectable !== false)
-      add(li, pickButton(key, node.name, "picker:pick:" + key));
+      add(li, pickButton(key2, node.name, "picker:pick:" + key2));
     return li;
   }
-  function nameParts(target, name, key, node) {
+  function nameParts(target, name, key2, node) {
     const main = add(el("span", "fname-main"), el("span", "fname-text", name));
-    const differs = key ? mixed(key) : "";
+    const differs = key2 ? mixed(key2) : "";
     if (differs) {
       const tag = el("span", "ftag", Q.mixed);
       tag.title = fill2(Q.mixedSome, { state: Q.statesLower[differs] });
@@ -120769,19 +105963,19 @@ function chatgptPickerProgram(kit) {
   function folderRow(node) {
     if (p.pick)
       return pickRow(node);
-    const key = node.key;
+    const key2 = node.key;
     const li = el("li", "frow seg-row");
     const busy = p.loading || p.saving;
     let label;
     if (node.has_children) {
       const open7 = el("button", "fname");
       open7.type = "button";
-      open7.setAttribute("data-key", "picker:open:" + key);
+      open7.setAttribute("data-key", "picker:open:" + key2);
       open7.setAttribute("aria-label", fill2(Q.openFolder, { name: node.name }));
       if (busy)
         open7.disabled = true;
       else
-        open7.addEventListener("click", () => drill(key));
+        open7.addEventListener("click", () => drill(key2));
       const chevron = el("span", "fopen", "›");
       chevron.setAttribute("aria-hidden", "true");
       add(open7, chevron);
@@ -120793,8 +105987,8 @@ function chatgptPickerProgram(kit) {
       add(label, spacer);
     }
     label.title = node.name;
-    nameParts(label, node.name, key, node);
-    add(li, label, folderControl(key, node.name, node));
+    nameParts(label, node.name, key2, node);
+    add(li, label, folderControl(key2, node.name, node));
     return li;
   }
   function loadMore(parentKey) {
@@ -120831,12 +106025,12 @@ function chatgptPickerProgram(kit) {
     const section = el("section", "fsection exceptions");
     add(section, el("h2", "", fill2(Q.exceptions, { n: kit.count(rules.length) })));
     const listNode = el("ul", "flist");
-    for (const key of rules) {
-      const path = shortPath(key);
-      const state = p.own.get(key);
+    for (const key2 of rules) {
+      const path = shortPath(key2);
+      const state = p.own.get(key2);
       const jumpButton = el("button", "jump-btn");
       jumpButton.type = "button";
-      jumpButton.setAttribute("data-key", "picker:jump:" + key);
+      jumpButton.setAttribute("data-key", "picker:jump:" + key2);
       jumpButton.title = path;
       add(jumpButton, el("span", "fname-text", path), el("span", "jtag jtag-" + state, Q.segments[state][0]));
       const chevron = el("span", "chev", "›");
@@ -120845,7 +106039,7 @@ function chatgptPickerProgram(kit) {
       if (p.loading || p.saving)
         jumpButton.disabled = true;
       else
-        jumpButton.addEventListener("click", () => jump(key));
+        jumpButton.addEventListener("click", () => jump(key2));
       add(listNode, add(el("li", "frow jump"), jumpButton));
     }
     return add(section, listNode);
@@ -120877,7 +106071,7 @@ function chatgptPickerProgram(kit) {
     add(body, folders);
   }
   function pathLine() {
-    const names = [p.label].concat(p.path.map((key) => nameOf(key)));
+    const names = [p.label].concat(p.path.map((key2) => nameOf(key2)));
     const shown = names.length > 3 ? [Q.pathMore].concat(names.slice(-2)) : names;
     const head = el("h1", "fpath");
     shown.forEach((name, index) => {
@@ -120889,20 +106083,20 @@ function chatgptPickerProgram(kit) {
     return head;
   }
   function folderScreen(body) {
-    const key = p.path[p.path.length - 1];
+    const key2 = p.path[p.path.length - 1];
     add(body, pathLine());
     noticeAndError(body);
-    const node = p.catalog.get(key);
+    const node = p.catalog.get(key2);
     if (p.pick) {
       const here = el("div", "this-row pick");
-      add(here, add(el("p", "this-text"), el("span", "this-label", nameOf(key))));
+      add(here, add(el("p", "this-text"), el("span", "this-label", nameOf(key2))));
       if (!node || node.selectable !== false)
-        add(here, pickButton(key, nameOf(key), "picker:pick-this"));
+        add(here, pickButton(key2, nameOf(key2), "picker:pick-this"));
       add(body, here);
     } else
-      add(body, topRow(Q.thisFolder, folderControl(key, nameOf(key), node)));
+      add(body, topRow(Q.thisFolder, folderControl(key2, nameOf(key2), node)));
     add(body, loadingLine());
-    add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
+    add(body, levelList(key2, p.branches.get(key2) || [], p.cursors.has(key2)));
   }
   function noticeAndError(body) {
     if (p.notice) {
@@ -121044,7 +106238,7 @@ function chatgptPickerProgram(kit) {
     p.saveError = "";
     kit.render(focus);
   }
-  function option(type, name, key, checked, text, hint, onChange) {
+  function option(type, name, key2, checked, text, hint, onChange) {
     const label = el("label", "opt");
     const input = el("input");
     input.type = type;
@@ -121052,12 +106246,12 @@ function chatgptPickerProgram(kit) {
       input.name = name;
     input.checked = checked;
     input.disabled = p.saving;
-    input.setAttribute("data-key", key);
+    input.setAttribute("data-key", key2);
     input.addEventListener("change", () => onChange(input));
-    const words = add(el("span", "opt-text"), el("span", "", text));
+    const words2 = add(el("span", "opt-text"), el("span", "", text));
     if (hint)
-      add(words, el("span", "muted opt-hint", hint));
-    return add(label, input, words);
+      add(words2, el("span", "muted opt-hint", hint));
+    return add(label, input, words2);
   }
   function group(legend, help) {
     const box = el("fieldset", "group");
@@ -121089,8 +106283,8 @@ function chatgptPickerProgram(kit) {
   function lowerFirst2(value) {
     return value ? value.charAt(0).toLowerCase() + value.slice(1) : value;
   }
-  function plural(words, n) {
-    return fill2(n === 1 ? words.one : words.many, { n: kit.count(n) });
+  function plural(words2, n) {
+    return fill2(n === 1 ? words2.one : words2.many, { n: kit.count(n) });
   }
   function mailSummary() {
     const draft = draftOut();
@@ -121142,10 +106336,10 @@ function chatgptPickerProgram(kit) {
     add(page, windows);
     const categories = group(Q.mailCategories, Q.mailCategoriesHelp);
     for (const category of CATEGORIES) {
-      const words = Q.mailCategoryNames[category];
+      const words2 = Q.mailCategoryNames[category];
       const known = p.categories.filter((entry) => entry && entry.category === category)[0];
-      const hint = known && typeof known.messages_total === "number" ? words[1] + " · " + fill2(Q.mailCategoryCount, { count: kit.count(known.messages_total) }) : words[1];
-      add(categories, option("checkbox", "", "picker:category:" + category, draft.skipped_categories.indexOf(category) < 0, words[0], hint, (input) => {
+      const hint = known && typeof known.messages_total === "number" ? words2[1] + " · " + fill2(Q.mailCategoryCount, { count: kit.count(known.messages_total) }) : words2[1];
+      add(categories, option("checkbox", "", "picker:category:" + category, draft.skipped_categories.indexOf(category) < 0, words2[0], hint, (input) => {
         const rest = draft.skipped_categories.filter((entry) => entry !== category);
         draft.skipped_categories = input.checked ? rest : rest.concat([category]);
         mailEdited("picker:category:" + category);
@@ -121340,10 +106534,10 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     load();
   }
   function leave(notice, refresh) {
-    const key = s ? s.returnKey : "";
+    const key2 = s ? s.returnKey : "";
     s = null;
     session++;
-    kit.close(notice, refresh, key);
+    kit.close(notice, refresh, key2);
   }
   function settings(result) {
     if (!result || result.isError || !result._meta || typeof result._meta !== "object")
@@ -122415,7 +107609,7 @@ function dashboardHostBridge(config2, io) {
   function openLink(raw) {
     if (typeof raw !== "string")
       return false;
-    const local = Object.keys(config2.links).some((key) => config2.links[key] === raw);
+    const local = Object.keys(config2.links).some((key2) => config2.links[key2] === raw);
     if (local) {
       io.openUrl(raw);
       return true;
@@ -122620,9 +107814,9 @@ function hostProgram(input, bridge) {
   const prompt = document.getElementById("gate-prompt");
   if (copy && prompt) {
     copy.addEventListener("click", () => {
-      const done = (words) => {
+      const done = (words2) => {
         if (copyStatus)
-          copyStatus.textContent = words;
+          copyStatus.textContent = words2;
       };
       if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
         navigator.clipboard.writeText(prompt.textContent || "").then(() => done(input.words.copied), () => done(input.words.copyFailed));
@@ -122637,9 +107831,9 @@ function hostProgram(input, bridge) {
       event.preventDefault();
       const field = form.querySelector("input");
       const status = form.querySelector("[data-gate-status]");
-      const say = (words) => {
+      const say = (words2) => {
         if (status)
-          status.textContent = words;
+          status.textContent = words2;
       };
       const pasted = field ? field.value.trim() : "";
       if (field)
@@ -122859,7 +108053,7 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
     });
   }
   if (pathname === DASHBOARD_AGENT_KEYS_PATH) {
-    const unknown4 = Object.keys(body).filter((key) => key !== "name");
+    const unknown4 = Object.keys(body).filter((key2) => key2 !== "name");
     if (unknown4.length > 0)
       return refusal(400, "invalid_request", "A key takes only a name.");
     const name = sanitizeCallerDisplayName(body.name);
@@ -122877,7 +108071,7 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
       ...remoteAccess.state === "on" ? { mcp_url: remoteAccess.mcpUrl, openapi_url: remoteAccess.openapiUrl } : {}
     });
   }
-  const unknown3 = Object.keys(body).filter((key) => key !== "connection_id");
+  const unknown3 = Object.keys(body).filter((key2) => key2 !== "connection_id");
   if (unknown3.length > 0)
     return refusal(400, "invalid_request", "Revoke takes only a connection_id.");
   const id = typeof body.connection_id === "string" ? body.connection_id : "";
@@ -122895,7 +108089,7 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
   });
 }
 async function setRemoteAccess(body, backend) {
-  const unknown3 = Object.keys(body).filter((key) => key !== "enabled" && key !== "accept_terms");
+  const unknown3 = Object.keys(body).filter((key2) => key2 !== "enabled" && key2 !== "accept_terms");
   if (unknown3.length > 0 || typeof body.enabled !== "boolean") {
     return refusal(400, "invalid_request", "Say whether to turn remote access on or off.");
   }
@@ -124130,16 +109324,16 @@ function remoteAccessToggleLimitedResponse() {
 }
 function agentMintLimiter(now, limit = AGENT_MINT_LIMIT, windowMs = AGENT_MINT_WINDOW_MS) {
   const recent = new Map;
-  return (key) => {
+  return (key2) => {
     const at = now();
-    const kept = (recent.get(key) ?? []).filter((time3) => at - time3 < windowMs);
+    const kept = (recent.get(key2) ?? []).filter((time3) => at - time3 < windowMs);
     if (kept.length >= limit) {
-      recent.set(key, kept);
+      recent.set(key2, kept);
       return false;
     }
     kept.push(at);
-    recent.delete(key);
-    recent.set(key, kept);
+    recent.delete(key2);
+    recent.set(key2, kept);
     if (recent.size > AGENT_MINT_MAX_KEYS)
       recent.delete(recent.keys().next().value);
     return true;
@@ -125985,7 +111179,7 @@ function createEmailSourceWorker(options = {}) {
             const source = parseDashboardSyncSource(record3.source);
             assertDashboardSourceMayRead(source, sourceDashboard, dashboardDisconnectedSources);
             const schedulerSourceId = dashboardSchedulerSourceId(source);
-            const key = schedulerSourceId ?? source;
+            const key2 = schedulerSourceId ?? source;
             const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === schedulerSourceId);
             const label = definition?.label ?? "this source";
             const answer = (status, statusMessage, lastManualSync) => json({
@@ -126000,21 +111194,21 @@ function createEmailSourceWorker(options = {}) {
               }
             });
             const run = await prepareDashboardSourceSync({ source, reason: "manual" });
-            if (dashboardManualSyncRuns.has(key)) {
+            if (dashboardManualSyncRuns.has(key2)) {
               return answer("busy", dashboardManualSyncBusyLine(label));
             }
             const startedAt = Date.now();
-            const previous = dashboardManualSyncStarts.get(key);
+            const previous = dashboardManualSyncStarts.get(key2);
             if (previous !== undefined && startedAt - previous < DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS && startedAt >= previous) {
               return answer("too_soon", dashboardManualSyncTooSoonLine(label));
             }
             const before = sourceScheduler?.status();
             const checking = { at: new Date(startedAt).toISOString(), outcome: "checking" };
-            dashboardManualSyncStarts.set(key, startedAt);
-            dashboardManualSyncs.set(key, checking);
+            dashboardManualSyncStarts.set(key2, startedAt);
+            dashboardManualSyncs.set(key2, checking);
             const work = Promise.resolve().then(run).then((result) => {
               assertNoRawEmailFields(result);
-              dashboardManualSyncs.set(key, dashboardManualSyncOutcome({
+              dashboardManualSyncs.set(key2, dashboardManualSyncOutcome({
                 result,
                 ...before ? { before } : {},
                 ...schedulerSourceId ? { schedulerSourceId } : {},
@@ -126026,16 +111220,16 @@ function createEmailSourceWorker(options = {}) {
               if (failureRef || !(error2 instanceof EmailSourceWorkerError) && !(error2 instanceof OperationError)) {
                 logSourceWorkerInternalError(request, error2, failureRef);
               }
-              dashboardManualSyncs.set(key, {
+              dashboardManualSyncs.set(key2, {
                 at: new Date().toISOString(),
                 outcome: "failed",
                 failure_kind: failureKind,
                 ...failureRef ? { failure_ref: failureRef } : {}
               });
             }).finally(() => {
-              dashboardManualSyncRuns.delete(key);
+              dashboardManualSyncRuns.delete(key2);
             });
-            dashboardManualSyncRuns.set(key, work);
+            dashboardManualSyncRuns.set(key2, work);
             return answer("checking", dashboardManualSyncPendingLine(label), checking);
           });
         }
@@ -126084,8 +111278,8 @@ function createEmailSourceWorker(options = {}) {
               }
               const secretStore = dashboardSecretStore(sourceDashboard);
               try {
-                for (const key of plan.credentialKeys)
-                  await secretStore.delete(key);
+                for (const key2 of plan.credentialKeys)
+                  await secretStore.delete(key2);
                 const oauth2StateStore = sourceDashboard.oauth2StateStore ?? credentialOAuth2StateStoreFromEnv(process.env);
                 for (const handle of plan.handles.filter((candidate) => candidate.provider === "x")) {
                   if (handle.oauth2Refresh || handle.tokenSecretRefs?.length)
@@ -126206,9 +111400,9 @@ function createEmailSourceWorker(options = {}) {
                 }
               }
               const failedSteps = [];
-              for (const key of session.credentialKeys) {
+              for (const key2 of session.credentialKeys) {
                 try {
-                  await secretStore.delete(key);
+                  await secretStore.delete(key2);
                 } catch {
                   if (!failedSteps.includes("stored_reference"))
                     failedSteps.push("stored_reference");
@@ -127358,13 +112552,13 @@ async function parseSourceIndexStatusRequest(request, connectorStores = []) {
 }
 function recordFromSearchParams(params) {
   const record3 = {};
-  for (const [key, value] of params.entries()) {
+  for (const [key2, value] of params.entries()) {
     if (value === "true")
-      record3[key] = true;
+      record3[key2] = true;
     else if (value === "false")
-      record3[key] = false;
+      record3[key2] = false;
     else
-      record3[key] = value;
+      record3[key2] = value;
   }
   return record3;
 }
@@ -127860,13 +113054,13 @@ function parseExtractionPolicyDecision(value) {
   }
   return decision;
 }
-function optionalStringField(value, key) {
+function optionalStringField(value, key2) {
   const parsed = asOptionalString(value);
-  return parsed === undefined ? {} : { [key]: parsed };
+  return parsed === undefined ? {} : { [key2]: parsed };
 }
-function optionalNumberField(value, name, key) {
+function optionalNumberField(value, name, key2) {
   const parsed = asOptionalNumber(value, name);
-  return parsed === undefined ? {} : { [key]: parsed };
+  return parsed === undefined ? {} : { [key2]: parsed };
 }
 function fileExtractionRunBody(result) {
   return {
@@ -128016,12 +113210,12 @@ function sourceWatchNotSupported() {
 function asOptionalString(value) {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
-function asOptionalNarrowingString(record3, key) {
-  if (!Object.prototype.hasOwnProperty.call(record3, key))
+function asOptionalNarrowingString(record3, key2) {
+  if (!Object.prototype.hasOwnProperty.call(record3, key2))
     return;
-  const value = record3[key];
+  const value = record3[key2];
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new EmailSourceWorkerError(400, "invalid_request", `${key} must be a non-empty string when provided.`);
+    throw new EmailSourceWorkerError(400, "invalid_request", `${key2} must be a non-empty string when provided.`);
   }
   return value.trim();
 }
@@ -128034,12 +113228,12 @@ function asOptionalTrustDomainConsistency(record3, expectedTrustDomain) {
   }
   return value;
 }
-function asOptionalExactNarrowingString(record3, key) {
-  if (!Object.prototype.hasOwnProperty.call(record3, key))
+function asOptionalExactNarrowingString(record3, key2) {
+  if (!Object.prototype.hasOwnProperty.call(record3, key2))
     return;
-  const value = record3[key];
+  const value = record3[key2];
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new EmailSourceWorkerError(400, "invalid_request", `${key} must be a non-empty string when provided.`);
+    throw new EmailSourceWorkerError(400, "invalid_request", `${key2} must be a non-empty string when provided.`);
   }
   return value;
 }
@@ -128076,13 +113270,13 @@ function parseSourceScopeSelections(value) {
       throw new EmailSourceWorkerError(400, "invalid_request", "Every scope selection must be an object.");
     }
     const record3 = entry;
-    const key = asOptionalString(record3.key);
-    if (!key || !["ingest", "metadata_only", "exclude"].includes(String(record3.state))) {
+    const key2 = asOptionalString(record3.key);
+    if (!key2 || !["ingest", "metadata_only", "exclude"].includes(String(record3.state))) {
       throw new EmailSourceWorkerError(400, "invalid_request", "Every scope selection requires a folder key and disposition.");
     }
     const ancestorKeys = record3.ancestor_keys === undefined ? undefined : Array.isArray(record3.ancestor_keys) ? record3.ancestor_keys.map((ancestor) => asOptionalString(ancestor)).filter((ancestor) => Boolean(ancestor)) : undefined;
     return {
-      key,
+      key: key2,
       state: record3.state,
       ...ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}
     };
@@ -128130,20 +113324,20 @@ async function dashboardSessionPathSecretKeys(source, handleCredentialKeys, secr
   const prefix = `${source === "telegram" ? "telegram" : "whatsapp"}.`;
   const canonical2 = source === "telegram" ? "telegram.personal.session_path" : "whatsapp.personal_local.session_path";
   const candidates = new Set([canonical2]);
-  for (const key of handleCredentialKeys) {
-    if (key.startsWith(prefix) && key.endsWith(".session_path"))
-      candidates.add(key);
+  for (const key2 of handleCredentialKeys) {
+    if (key2.startsWith(prefix) && key2.endsWith(".session_path"))
+      candidates.add(key2);
   }
   try {
-    for (const key of await secretStore.list()) {
-      if (key.startsWith(prefix) && key.endsWith(".session_path"))
-        candidates.add(key);
+    for (const key2 of await secretStore.list()) {
+      if (key2.startsWith(prefix) && key2.endsWith(".session_path"))
+        candidates.add(key2);
     }
   } catch {}
   const keys = [];
-  for (const key of [...candidates].sort()) {
-    const value = (await secretStore.get(key))?.trim();
-    keys.push({ key, stored: value !== undefined && value !== "" });
+  for (const key2 of [...candidates].sort()) {
+    const value = (await secretStore.get(key2))?.trim();
+    keys.push({ key: key2, stored: value !== undefined && value !== "" });
   }
   return keys;
 }
@@ -128211,14 +113405,14 @@ function dashboardUnpairedSourceStates(unpaired, registryPath) {
 }
 function createDashboardOAuthCallbackRateLimiter() {
   const buckets = new Map;
-  return (key, now) => {
+  return (key2, now) => {
     for (const [bucketKey, bucket] of buckets) {
       if (now - bucket.windowStart >= DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS)
         buckets.delete(bucketKey);
     }
-    const existing = buckets.get(key);
+    const existing = buckets.get(key2);
     if (!existing || now - existing.windowStart >= DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS) {
-      buckets.set(key, { windowStart: now, count: 1 });
+      buckets.set(key2, { windowStart: now, count: 1 });
       return true;
     }
     if (existing.count >= DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW)
@@ -128470,8 +113664,8 @@ function readDashboardExclusionDebt(source) {
 function resolveDashboardExclusionDebt(cache, source, nowMs) {
   if (!source.excludedItemsPresent && !source.metadataOnlyContentPresent)
     return {};
-  const key = dashboardExclusionDebtCacheKey(source);
-  const cached3 = cache.get(key);
+  const key2 = dashboardExclusionDebtCacheKey(source);
+  const cached3 = cache.get(key2);
   const ageMs = cached3 ? nowMs - cached3.computed_at_ms : undefined;
   if (cached3 && ageMs !== undefined && ageMs >= 0 && ageMs <= DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS) {
     return cached3.debt;
@@ -128479,7 +113673,7 @@ function resolveDashboardExclusionDebt(cache, source, nowMs) {
   const debt = readDashboardExclusionDebt(source);
   if (!debt)
     return {};
-  cache.set(key, { debt, computed_at_ms: nowMs });
+  cache.set(key2, { debt, computed_at_ms: nowMs });
   return debt;
 }
 function readDashboardRegistry(registryPath) {
@@ -128874,13 +114068,13 @@ function requiredSelectedItemString2(value, name) {
   }
   return value.trim();
 }
-function optionalSelectedItemString2(value, key) {
+function optionalSelectedItemString2(value, key2) {
   if (value === undefined || value === null || value === "")
     return {};
   if (typeof value !== "string" || value.length > 1000) {
-    throw new EmailSourceWorkerError(400, "invalid_request", `selected_items.${key} must be a safe string.`);
+    throw new EmailSourceWorkerError(400, "invalid_request", `selected_items.${key2} must be a safe string.`);
   }
-  return { [key]: value.trim() };
+  return { [key2]: value.trim() };
 }
 function asOptionalRetrievalMode(value) {
   if (value === undefined || value === null || value === "")
@@ -129448,10 +114642,10 @@ function cleanUnanswered(gaps, answer, options) {
       continue;
     if (terms.every((term) => answered.has(termStem(term)) || answerText.includes(term)))
       continue;
-    const key = gap.toLowerCase();
-    if (seen.has(key))
+    const key2 = gap.toLowerCase();
+    if (seen.has(key2))
       continue;
-    seen.add(key);
+    seen.add(key2);
     out.push(gap);
   }
   return out;
@@ -129946,10 +115140,10 @@ function createTierVisibilityGate(scopes) {
         continue;
       }
       for (const hit of governed) {
-        const key = tierLedgerIdentityKey(hit.sourceItem);
-        const itemCopies = copies.get(key);
+        const key2 = tierLedgerIdentityKey(hit.sourceItem);
+        const itemCopies = copies.get(key2);
         if (!itemCopies || itemCopies.length === 0) {
-          if (routedWithoutCopies.has(key))
+          if (routedWithoutCopies.has(key2))
             hidden.add(hit);
           continue;
         }
@@ -130445,8 +115639,8 @@ ${request.taskId}`);
     throw lastError;
   }
   createTaskState(source, task, firstRun) {
-    const key = schedulerTaskStateKey(source, task);
-    let persisted = this.stateStore?.get(key);
+    const key2 = schedulerTaskStateKey(source, task);
+    let persisted = this.stateStore?.get(key2);
     const externalBootstrapLastSuccessAt = taskBootstrapLastSuccessAt(source, task);
     const externalBootstrapMs = parseSchedulerTimestamp(externalBootstrapLastSuccessAt);
     const persistedActivityMs = Math.max(...[
@@ -130458,7 +115652,7 @@ ${request.taskId}`);
     const bootstrapResult = useExternalBootstrap ? task.bootstrapLastResult?.() : undefined;
     if (useExternalBootstrap && externalBootstrapLastSuccessAt && this.stateStore?.adoptExternalSuccess) {
       persisted = this.stateStore.adoptExternalSuccess({
-        ...key,
+        ...key2,
         completedAt: externalBootstrapLastSuccessAt,
         resultStatus: bootstrapResult?.status ?? "idle",
         ...bootstrapResult?.counts ? { counts: bootstrapResult.counts } : {},
@@ -131322,12 +116516,12 @@ function nextZeroChangeRuns(previous, current) {
 }
 function sanitizeSchedulerCounts(counts) {
   const safe = {};
-  for (const [key, count] of Object.entries(counts)) {
-    if (!/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(key))
+  for (const [key2, count] of Object.entries(counts)) {
+    if (!/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(key2))
       continue;
     if (!Number.isSafeInteger(count) || count < 0)
       continue;
-    safe[key] = count;
+    safe[key2] = count;
   }
   return safe;
 }
@@ -132079,19 +117273,19 @@ function createGoogleDriveFolderScopeBrowser(options) {
       const ancestry = new GoogleDriveFolderAncestry(client);
       const ancestorsByKey = new Map;
       for (const selection of selections) {
-        const key = normalizeDriveParent(selection.key);
-        if (key === "root")
+        const key2 = normalizeDriveParent(selection.key);
+        if (key2 === "root")
           throw new Error("Whole-account access requires explicit confirmation.");
-        const folder = await client.getFolder(key);
-        if (folder.id !== key || !folder.parents || folder.parents.length === 0) {
+        const folder = await client.getFolder(key2);
+        if (folder.id !== key2 || !folder.parents || folder.parents.length === 0) {
           throw new Error("A selected Google Drive folder could not be verified below the account root.");
         }
         const ancestors = await ancestry.resolve({ parents: folder.parents });
         if (!ancestors)
           throw new Error("A selected Google Drive folder ancestry could not be verified.");
-        ancestorsByKey.set(key, ancestors);
+        ancestorsByKey.set(key2, ancestors);
       }
-      return effectiveSelections(selections, (key) => ancestorsByKey.get(key) ?? []);
+      return effectiveSelections(selections, (key2) => ancestorsByKey.get(key2) ?? []);
     }
   };
 }
@@ -132135,10 +117329,10 @@ function createDropboxFolderScopeBrowser(options) {
         for (const entry of page.entries) {
           if (entry.tag !== "folder")
             continue;
-          const key = normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`);
-          if (!nodes.some((node) => node.key === key))
+          const key2 = normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`);
+          if (!nodes.some((node) => node.key === key2))
             nodes.push({
-              key,
+              key: key2,
               ...request.parentKey ? { parent_key: parent } : {},
               name: entry.name,
               kind: "folder",
@@ -132163,12 +117357,12 @@ function createDropboxFolderScopeBrowser(options) {
     async validateSelections(selections) {
       const api2 = await metadataClient();
       for (const selection of selections) {
-        const key = normalizeDropboxNodeKey(selection.key);
-        if (key === "/")
+        const key2 = normalizeDropboxNodeKey(selection.key);
+        if (key2 === "/")
           throw new Error("Whole-account access requires explicit confirmation.");
-        await api2.listFolder({ path: key, recursive: false, limit: 1, includeDeleted: false });
+        await api2.listFolder({ path: key2, recursive: false, limit: 1, includeDeleted: false });
       }
-      return effectiveSelections(selections.map((selection) => ({ ...selection, key: normalizeDropboxNodeKey(selection.key) })), (key) => dropboxAncestorPaths(normalizeDropboxNodeKey(key)));
+      return effectiveSelections(selections.map((selection) => ({ ...selection, key: normalizeDropboxNodeKey(selection.key) })), (key2) => dropboxAncestorPaths(normalizeDropboxNodeKey(key2)));
     }
   };
 }
@@ -132176,7 +117370,7 @@ function effectiveSelections(selections, ancestorsFor) {
   const states = new Map(selections.map((selection) => [selection.key, selection.state]));
   return selections.map((selection) => {
     const ancestorKeys = [...ancestorsFor(selection.key)];
-    const ancestorStates = ancestorKeys.map((key) => states.get(key)).filter((state2) => state2 !== undefined);
+    const ancestorStates = ancestorKeys.map((key2) => states.get(key2)).filter((state2) => state2 !== undefined);
     const state = ancestorStates.includes("exclude") ? "exclude" : ancestorStates.includes("metadata_only") && selection.state === "ingest" ? "metadata_only" : selection.state;
     return { key: selection.key, state, ancestorKeys };
   });
@@ -132433,7 +117627,7 @@ function parsePrivacyProfileInput(raw) {
   const record3 = asRecord15(raw);
   if (!record3)
     throw invalid2("The privacy settings must be an object.");
-  const unknownKeys = Object.keys(record3).filter((key) => key !== "description" && key !== "rules");
+  const unknownKeys = Object.keys(record3).filter((key2) => key2 !== "description" && key2 !== "rules");
   if (unknownKeys.length > 0)
     throw invalid2("The privacy settings have unknown fields.");
   const out = {};
@@ -132471,7 +117665,7 @@ function parsePrivacyRule(raw) {
   const record3 = asRecord15(raw);
   if (!record3)
     throw invalid2("Each rule must be an object.");
-  const unknownKeys = Object.keys(record3).filter((key2) => !["kind", "source_id", "key", "value", "display"].includes(key2));
+  const unknownKeys = Object.keys(record3).filter((key3) => !["kind", "source_id", "key", "value", "display"].includes(key3));
   if (unknownKeys.length > 0)
     throw invalid2("A rule has unknown fields.");
   const kind = record3.kind;
@@ -132493,19 +117687,19 @@ function parsePrivacyRule(raw) {
     }
     return { kind, source_id: sourceId, value };
   }
-  const key = typeof record3.key === "string" ? record3.key.trim() : "";
-  if (!key || key.length > PRIVACY_KEY_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(key)) {
+  const key2 = typeof record3.key === "string" ? record3.key.trim() : "";
+  if (!key2 || key2.length > PRIVACY_KEY_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(key2)) {
     throw invalid2(`A folder or label rule needs its key (at most ${PRIVACY_KEY_MAX_CHARS} characters).`);
   }
-  if (sources[sourceId].match === "pathPrefix" && !key.startsWith("/"))
+  if (sources[sourceId].match === "pathPrefix" && !key2.startsWith("/"))
     throw invalid2("A folder key for this source is a path.");
   if (kind === "label") {
     const value = boundedName(record3.value, "value");
-    return { kind, source_id: sourceId, key, value };
+    return { kind, source_id: sourceId, key: key2, value };
   }
   if (record3.value !== undefined)
     throw invalid2("A folder rule takes key, not value.");
-  return { kind, source_id: sourceId, key, ...display ? { display } : {} };
+  return { kind, source_id: sourceId, key: key2, ...display ? { display } : {} };
 }
 function boundedName(value, field) {
   const name = typeof value === "string" ? value.trim() : "";
@@ -132810,13 +118004,13 @@ async function runSnifferPass(options) {
       const verdicts = parseSnifferBatchResponse(text2, new Set(batch.map((_, index) => index + 1)));
       for (const [index, group] of batch.entries()) {
         const verdict = verdicts.get(index + 1);
-        const key = keyOf(group[0].question);
+        const key2 = keyOf(group[0].question);
         if (verdict) {
           const stored = { ...verdict, failSafe: false };
-          group[0].target.sniffer.putVerdict(key, stored);
+          group[0].target.sniffer.putVerdict(key2, stored);
           for (const item of group) {
             if (item.target !== group[0].target)
-              item.target.sniffer.putVerdict(key, stored);
+              item.target.sniffer.putVerdict(key2, stored);
             apply(item, stored);
           }
           continue;
@@ -132825,7 +118019,7 @@ async function runSnifferPass(options) {
         if (attempts >= SNIFFER_MAX_ATTEMPTS) {
           const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
           for (const item of group) {
-            item.target.sniffer.putVerdict(key, failSafe);
+            item.target.sniffer.putVerdict(key2, failSafe);
             apply(item, failSafe);
           }
         }
@@ -132845,12 +118039,12 @@ function openPasses(row) {
 function groupByMaterial(items) {
   const groups = new Map;
   for (const item of items) {
-    const key = `${item.question.materialHash}\x00${item.question.mapRevision}`;
-    const group = groups.get(key);
+    const key2 = `${item.question.materialHash}\x00${item.question.mapRevision}`;
+    const group = groups.get(key2);
     if (group)
       group.push(item);
     else
-      groups.set(key, [item]);
+      groups.set(key2, [item]);
   }
   return [...groups.values()];
 }
@@ -133138,9 +118332,9 @@ class TierSnifferService {
     const ownerContext = this.options.ownerContext?.();
     const versions2 = snifferPromptVersions(ownerContext);
     const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
-    const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions2.approval };
+    const key2 = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions2.approval };
     const builtInDefault = this.options.autoApproveBuiltIn === true && isBuiltInLane(lane);
-    if (builtInDefault && !isClassifierApproved(ledger.entries, key, { builtInDefault: true }) && !builtInDefaultRevoked(ledger.entries, key)) {
+    if (builtInDefault && !isClassifierApproved(ledger.entries, key2, { builtInDefault: true }) && !builtInDefaultRevoked(ledger.entries, key2)) {
       await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
         recorded_at: (this.options.now?.() ?? new Date).toISOString(),
         kind: "classifier_model_decision",
@@ -133155,7 +118349,7 @@ class TierSnifferService {
         entry_id: `sniffer-default-approval:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions2.approval}`
       });
     }
-    const approved = builtInDefault ? isClassifierApproved((await readClassificationLedger(this.options.classificationLedgerPath)).entries, key, { builtInDefault: true }) : isClassifierApproved(ledger.entries, key);
+    const approved = builtInDefault ? isClassifierApproved((await readClassificationLedger(this.options.classificationLedgerPath)).entries, key2, { builtInDefault: true }) : isClassifierApproved(ledger.entries, key2);
     if (!approved) {
       await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
         recorded_at: (this.options.now?.() ?? new Date).toISOString(),
@@ -133277,8 +118471,8 @@ class TierSnifferService {
           this.rejudgeCursors.set(ledgerPath, next);
         else
           this.rejudgeCursors.delete(ledgerPath);
-        for (const key of Object.keys(total))
-          total[key] += report[key];
+        for (const key2 of Object.keys(total))
+          total[key2] += report[key2];
       } catch {}
     }
     if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0) {
@@ -134591,7 +119785,7 @@ function checkAgainFix(href) {
   return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {}, ...href ? { href } : {} };
 }
 function openOnComputer(definition, section) {
-  const source = definition ? Object.keys(OPEN_CONNECT_SOURCES).find((key) => OPEN_CONNECT_SOURCES[key].sourceId === definition.source_id) : undefined;
+  const source = definition ? Object.keys(OPEN_CONNECT_SOURCES).find((key2) => OPEN_CONNECT_SOURCES[key2].sourceId === definition.source_id) : undefined;
   return source ? openPageUrl({ kind: "connect", source }) : openPageUrl({ kind: "fix", section });
 }
 function withDiskFreeUp(sentence, reason, bytes) {
@@ -135593,8 +120787,8 @@ function chatgptPrivateAnswerProgram(config2) {
     const macKey = await subtle.importKey("raw", macRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
     const shared = await subtle.deriveBits({ name: "ECDH", public: macKey }, privateKey, 256);
     const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-    const key = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, ciphertext);
+    const key2 = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, ciphertext);
     return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
   }
   function readOpen(value) {
@@ -135865,12 +121059,12 @@ function chatgptPrivateAnswerProgram(config2) {
     return node;
   }
   function fill2(template, values) {
-    return template.replace(/\{(\w+)\}/g, (whole, key) => (key in values) ? values[key] : whole);
+    return template.replace(/\{(\w+)\}/g, (whole, key2) => (key2 in values) ? values[key2] : whole);
   }
-  function button(label, key, onClick, name) {
+  function button(label, key2, onClick, name) {
     const node = el("button", "btn", label);
     node.type = "button";
-    node.setAttribute("data-key", key);
+    node.setAttribute("data-key", key2);
     if (name)
       node.setAttribute("aria-label", name);
     node.addEventListener("click", onClick);
@@ -136056,9 +121250,9 @@ function chatgptPrivateAnswerProgram(config2) {
     if (!focusAfter && had)
       focusAfter = had;
     if (focusAfter) {
-      const key = focusAfter;
+      const key2 = focusAfter;
       focusAfter = "";
-      const target = root.querySelector('[data-key="' + key + '"]');
+      const target = root.querySelector('[data-key="' + key2 + '"]');
       if (target && typeof target.focus === "function")
         target.focus();
     }
@@ -136819,9 +122013,9 @@ function chatgptPrivateQuestionProgram(config2) {
     const engineRaw = fromB64url(askKey);
     if (!engineRaw || engineRaw.length !== 65)
       throw new Error("malformed");
-    const key = await aesKey(privateKey, engineRaw, jobId, "encrypt");
+    const key2 = await aesKey(privateKey, engineRaw, jobId, "encrypt");
     const iv = window.crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, utf83(plaintext));
+    const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, utf83(plaintext));
     return { iv: toB64url(iv), ciphertext: toB64url(new Uint8Array(ciphertext)) };
   }
   async function open7(jobId, privateKey, sealed) {
@@ -136830,8 +122024,8 @@ function chatgptPrivateQuestionProgram(config2) {
     const ciphertext = fromB64url(sealed.ciphertext);
     if (!macRaw || macRaw.length !== 65 || !iv || iv.length !== 12 || !ciphertext)
       throw new Error("malformed");
-    const key = await aesKey(privateKey, macRaw, jobId, "decrypt");
-    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, ciphertext);
+    const key2 = await aesKey(privateKey, macRaw, jobId, "decrypt");
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, ciphertext);
     return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
   }
   const KS = config2.keyStore;
@@ -137355,7 +122549,7 @@ function chatgptPrivateQuestionProgram(config2) {
     return value.toLocaleString("en-US");
   }
   function fill2(text2, values) {
-    return text2.replace(/\{(\w+)\}/g, (match, key) => (key in values) ? values[key] : match);
+    return text2.replace(/\{(\w+)\}/g, (match, key2) => (key2 in values) ? values[key2] : match);
   }
   function render() {
     if (theme)
@@ -137389,9 +122583,9 @@ function chatgptPrivateQuestionProgram(config2) {
     if (!focusAfter && had)
       focusAfter = had;
     if (focusAfter) {
-      const key = focusAfter;
+      const key2 = focusAfter;
       focusAfter = "";
-      const target = root.querySelector('[data-key="' + key + '"]');
+      const target = root.querySelector('[data-key="' + key2 + '"]');
       if (target && typeof target.focus === "function")
         target.focus();
     }
@@ -138672,14 +123866,14 @@ function secretLocationsFromRules(rules) {
 function loadSecretLocations(env = process.env) {
   return secretLocationsFromRules(loadOwnerTierRules({ env, allowMissing: true }));
 }
-function isSecretFolder(locations, key, ancestorKeys = []) {
-  const keys = [key, ...ancestorKeys];
+function isSecretFolder(locations, key2, ancestorKeys = []) {
+  const keys = [key2, ...ancestorKeys];
   for (const folderKey of locations.folderKeys)
     if (locationKeyMatches(keys, folderKey))
       return true;
-  if (!key.startsWith("/"))
+  if (!key2.startsWith("/"))
     return false;
-  return locations.pathPrefixes.some((prefix) => pathPrefixMatches(key, prefix === "" ? "/" : prefix));
+  return locations.pathPrefixes.some((prefix) => pathPrefixMatches(key2, prefix === "" ? "/" : prefix));
 }
 function isSecretLabel(locations, labelId) {
   for (const label of locations.labelIds)
@@ -138745,7 +123939,7 @@ async function callSetupTool(name, args, backend) {
   if (!backend)
     throw new ChatGptSurfaceError("unavailable");
   const declared = SETUP_TOOLS.find((tool) => tool.name === name)?.inputSchema.properties ?? {};
-  if (Object.keys(args).some((key) => !Object.prototype.hasOwnProperty.call(declared, key))) {
+  if (Object.keys(args).some((key2) => !Object.prototype.hasOwnProperty.call(declared, key2))) {
     throw new ChatGptSurfaceError("invalid_params");
   }
   try {
@@ -139061,10 +124255,10 @@ function parseSelections(value) {
     throw new ChatGptSurfaceError("invalid_params");
   return value.map((entry) => {
     const record3 = typeof entry === "object" && entry !== null && !Array.isArray(entry) ? entry : {};
-    const key = requiredString6(record3.key);
+    const key2 = requiredString6(record3.key);
     const state = oneOf(record3.state, ["ingest", "metadata_only", "exclude"]);
     const ancestors = Array.isArray(record3.ancestor_keys) ? record3.ancestor_keys.filter((ancestor) => typeof ancestor === "string" && ancestor.length > 0 && ancestor.length <= 4096).slice(0, 64) : [];
-    return { key, state, ...ancestors.length > 0 ? { ancestor_keys: ancestors } : {} };
+    return { key: key2, state, ...ancestors.length > 0 ? { ancestor_keys: ancestors } : {} };
   });
 }
 function oneOf(value, allowed) {
@@ -139469,12 +124663,12 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
         if (!question)
           throw new ChatGptSurfaceError("invalid_params");
         const params = { question };
-        for (const key of ["level", "cleanup", "model"]) {
-          if (args[key] === undefined)
+        for (const key2 of ["level", "cleanup", "model"]) {
+          if (args[key2] === undefined)
             continue;
-          if (typeof args[key] !== "string")
+          if (typeof args[key2] !== "string")
             throw new ChatGptSurfaceError("invalid_params");
-          params[key] = args[key];
+          params[key2] = args[key2];
         }
         if (args.remember !== undefined) {
           if (typeof args.remember !== "boolean")
@@ -139596,10 +124790,10 @@ function rememberPrivateMatch(caller, jobId, match) {
   privateMatchByJob.set(privateMatchKey(caller, jobId), { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
 }
 function privateMatchForJob(caller, jobId, done) {
-  const key = privateMatchKey(caller, jobId);
-  const entry = privateMatchByJob.get(key);
+  const key2 = privateMatchKey(caller, jobId);
+  const entry = privateMatchByJob.get(key2);
   if (done)
-    privateMatchByJob.delete(key);
+    privateMatchByJob.delete(key2);
   return entry !== undefined && entry.expiresAt > Date.now() ? entry.match : undefined;
 }
 async function runOperation(name, ctx, params) {
@@ -140870,12 +126064,12 @@ function tokenBucket(capacity, refillWindowMs, now) {
 }
 function singleParams(params) {
   const out = new Map;
-  for (const [key, value] of params) {
-    if (out.has(key))
+  for (const [key2, value] of params) {
+    if (out.has(key2))
       return;
-    out.set(key, value);
+    out.set(key2, value);
   }
-  return { get: (key) => out.get(key) ?? null };
+  return { get: (key2) => out.get(key2) ?? null };
 }
 async function readBounded2(request, maxBytes) {
   const body = await readBoundedRequestText(request, maxBytes, { deadlineMs: CONNECT_BODY_DEADLINE_MS });
@@ -140892,8 +126086,8 @@ async function readForm(request) {
 }
 function readCookie(request, name) {
   for (const part of (request.headers.get("cookie") ?? "").split(";")) {
-    const [key, ...rest] = part.trim().split("=");
-    if (key === name)
+    const [key2, ...rest] = part.trim().split("=");
+    if (key2 === name)
       return rest.join("=");
   }
   return;
@@ -140914,9 +126108,9 @@ function sha2566(value) {
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
-  for (const [key, value] of Object.entries(params))
+  for (const [key2, value] of Object.entries(params))
     if (value !== undefined)
-      target.searchParams.set(key, value);
+      target.searchParams.set(key2, value);
   return new Response(null, {
     status: 303,
     headers: { Location: target.toString(), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" }
@@ -141018,8 +126212,8 @@ async function importPanelPublicKey(value) {
   if (!raw || raw[0] !== 4)
     return;
   try {
-    const key = await subtle().importKey("raw", raw, { name: "ECDH", namedCurve: PRIVATE_ANSWER_CURVE }, false, []);
-    return { key, raw: toBase64Url(raw) };
+    const key2 = await subtle().importKey("raw", raw, { name: "ECDH", namedCurve: PRIVATE_ANSWER_CURVE }, false, []);
+    return { key: key2, raw: toBase64Url(raw) };
   } catch {
     return;
   }
@@ -141037,9 +126231,9 @@ function padPrivateAnswerPlaintext(json2) {
 }
 async function sealPrivateAnswer(jobId, panelPublicKey, plaintext) {
   const mac2 = await subtle().generateKey({ name: "ECDH", namedCurve: PRIVATE_ANSWER_CURVE }, false, ["deriveBits"]);
-  const key = await aesKey(mac2.privateKey, panelPublicKey, jobId, "encrypt");
+  const key2 = await aesKey(mac2.privateKey, panelPublicKey, jobId, "encrypt");
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));
-  const ciphertext = await subtle().encrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, utf83(plaintext));
+  const ciphertext = await subtle().encrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, utf83(plaintext));
   const macPublicKey = new Uint8Array(await subtle().exportKey("raw", mac2.publicKey));
   return { macPublicKey: toBase64Url(macPublicKey), iv: toBase64Url(iv), ciphertext: toBase64Url(new Uint8Array(ciphertext)) };
 }
@@ -141055,8 +126249,8 @@ async function openPrivateQuestion(jobId, enginePrivateKey, panelKey, sealed) {
   const ciphertext = fromBase64Url(sealed.ciphertext);
   if (!iv || !ciphertext || ciphertext.byteLength > 32768)
     throw new Error("malformed sealed question");
-  const key = await aesKey(enginePrivateKey, panelKey, jobId, "decrypt");
-  const plaintext = await subtle().decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key, ciphertext);
+  const key2 = await aesKey(enginePrivateKey, panelKey, jobId, "decrypt");
+  const plaintext = await subtle().decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, ciphertext);
   return new TextDecoder().decode(plaintext);
 }
 var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf83 = (value) => new TextEncoder().encode(value), PRIVATE_ANSWER_PAD_BUCKETS;
@@ -141319,8 +126513,8 @@ function isPrivateEligible(item) {
   const domain = item.trust_domain ?? item.trustDomain;
   if (domain !== undefined && domain !== "secure_local")
     return false;
-  for (const key of ["trust_tier", "trustTier", "tier", "content_tier", "contentTier", "metadata_tier", "metadataTier"]) {
-    const tier = item[key];
+  for (const key2 of ["trust_tier", "trustTier", "tier", "content_tier", "contentTier", "metadata_tier", "metadataTier"]) {
+    const tier = item[key2];
     if (typeof tier === "string" && (/secret/i.test(tier) || tier.trim().toUpperCase() === "S5"))
       return false;
   }
@@ -141534,9 +126728,9 @@ class PrivateAnswerJobs {
       if (job.expiresAt <= at)
         this.drop(id);
     }
-    for (const [key, analysis] of this.shared) {
+    for (const [key2, analysis] of this.shared) {
       if (analysis.createdAt + this.dedupeMs <= at || analysis.state === "failed")
-        this.shared.delete(key);
+        this.shared.delete(key2);
     }
   }
   drop(id) {
@@ -141569,9 +126763,9 @@ class PrivateAnswerJobs {
     this.pump();
   }
   analysisFor(question, detail, evidence, claimedAt, fresh2 = false) {
-    const key = `${detail}\x00${questionKey(question)}`;
+    const key2 = `${detail}\x00${questionKey(question)}`;
     const at = this.now();
-    const existing = this.shared.get(key);
+    const existing = this.shared.get(key2);
     if (!fresh2 && existing && existing.state !== "failed" && existing.createdAt + this.dedupeMs > at)
       return existing;
     let settle = () => {
@@ -141581,7 +126775,7 @@ class PrivateAnswerJobs {
       settle = resolve11;
     });
     const analysis = {
-      key,
+      key: key2,
       detail,
       createdAt: at,
       claimedAt,
@@ -141598,7 +126792,7 @@ class PrivateAnswerJobs {
       settled,
       settle
     };
-    this.shared.set(key, analysis);
+    this.shared.set(key2, analysis);
     this.waiting.push(analysis);
     return analysis;
   }
@@ -141634,13 +126828,13 @@ class PrivateAnswerJobs {
     analysis.abort.abort();
   }
   forget(analysis, items) {
-    const gone = new Set(items.map(privateEvidenceKey).filter((key) => key !== undefined));
+    const gone = new Set(items.map(privateEvidenceKey).filter((key2) => key2 !== undefined));
     for (const job of analysis.jobs) {
       if (!job.evidence)
         continue;
       job.evidence = job.evidence.filter((item) => {
-        const key = privateEvidenceKey(item);
-        return key === undefined ? !items.includes(item) : !gone.has(key);
+        const key2 = privateEvidenceKey(item);
+        return key2 === undefined ? !items.includes(item) : !gone.has(key2);
       });
     }
   }
@@ -141882,7 +127076,7 @@ class PrivateAnswerJobs {
         settle({ kind: "failed" }, "no_evidence");
         return;
       }
-      const current = new Set(evidence.map(privateEvidenceKey).filter((key) => key !== undefined));
+      const current = new Set(evidence.map(privateEvidenceKey).filter((key2) => key2 !== undefined));
       for (let attempt = 0;attempt < 2; attempt += 1) {
         let analysis = job.analysis;
         const precomputed = analysis !== undefined;
@@ -142041,10 +127235,10 @@ function usedKeys(evidence, used) {
     return;
   const keys = [];
   for (const item of read) {
-    const key = privateEvidenceKey(item);
-    if (key === undefined)
+    const key2 = privateEvidenceKey(item);
+    if (key2 === undefined)
       return;
-    keys.push(key);
+    keys.push(key2);
   }
   return keys;
 }
@@ -142053,19 +127247,19 @@ function sourceItemIdentity(value) {
   if (!record3)
     return;
   const kept = {};
-  for (const key of SOURCE_ITEM_FIELDS) {
-    const field = record3[key];
+  for (const key2 of SOURCE_ITEM_FIELDS) {
+    const field = record3[key2];
     if (typeof field === "string")
-      kept[key] = field;
+      kept[key2] = field;
   }
   return Object.keys(kept).length > 0 ? kept : undefined;
 }
 function privateEvidenceIdentity(item) {
   const kept = {};
-  for (const key of IDENTITY_FIELDS) {
-    const value = item[key];
+  for (const key2 of IDENTITY_FIELDS) {
+    const value = item[key2];
     if (typeof value === "string")
-      kept[key] = value;
+      kept[key2] = value;
   }
   const sourceItem = sourceItemIdentity(item.sourceItem);
   if (sourceItem)
@@ -142083,7 +127277,7 @@ function usedItems(evidence, used) {
   return read.every((item) => item !== undefined) ? read : evidence;
 }
 function stillEligible(used, current) {
-  return used !== undefined && used.every((key) => current.has(key));
+  return used !== undefined && used.every((key2) => current.has(key2));
 }
 function asRecord17(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
@@ -143075,9 +128269,9 @@ async function callTool(request, name, options) {
   const params = await readParams(request);
   if (!params.ok)
     return params.response;
-  const undeclared = Object.keys(params.value).filter((key) => !Object.prototype.hasOwnProperty.call(operation.params, key)).sort();
+  const undeclared = Object.keys(params.value).filter((key2) => !Object.prototype.hasOwnProperty.call(operation.params, key2)).sort();
   if (undeclared.length > 0) {
-    const names = undeclared.slice(0, 10).map((key) => JSON.stringify(key.slice(0, 64))).join(", ");
+    const names = undeclared.slice(0, 10).map((key2) => JSON.stringify(key2.slice(0, 64))).join(", ");
     return invalidRequest(`Undeclared parameters: ${names}. Remove them and retry.`);
   }
   try {
@@ -143799,7 +128993,7 @@ function createDashboardConsultAdapter(options) {
     };
   };
   const languages = () => {
-    const status = consultVocabularyFileStatus({ languages: ALL_LANGUAGES, domains: Object.fromEntries(Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS).map((key) => [key, false])) }, env);
+    const status = consultVocabularyFileStatus({ languages: ALL_LANGUAGES, domains: Object.fromEntries(Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS).map((key2) => [key2, false])) }, env);
     return ALL_LANGUAGES.map((language) => {
       const pack = CONSULT_LANGUAGE_PACKS[language];
       const entry = status.find((item) => item.id === pack);
@@ -144121,17 +129315,17 @@ function createDashboardConsultAdapter(options) {
           return invalid4(MESSAGES2.fundingDate, "funding_date_invalid");
         zkapi.fundingDate = update.funding_date;
       }
-      for (const [field, key] of [["daily_request_cap", "dailyRequestCap"], ["daily_spend_cap_usd", "dailySpendCapUsd"], ["deposit_usd", "depositUsd"]]) {
+      for (const [field, key2] of [["daily_request_cap", "dailyRequestCap"], ["daily_spend_cap_usd", "dailySpendCapUsd"], ["deposit_usd", "depositUsd"]]) {
         const raw = update[field];
         if (raw === undefined)
           continue;
         if (raw === null || raw === "") {
-          cleared.push(key);
+          cleared.push(key2);
           continue;
         }
-        if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || key === "dailyRequestCap" && !Number.isInteger(raw))
+        if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || key2 === "dailyRequestCap" && !Number.isInteger(raw))
           return invalid4(MESSAGES2.caps, "cap_invalid");
-        zkapi[key] = raw;
+        zkapi[key2] = raw;
       }
       try {
         const refused = writePolicy((current) => {
@@ -144140,8 +129334,8 @@ function createDashboardConsultAdapter(options) {
           if (!profile || profile.provider !== "zkapi")
             throw new OperationError("config_error", "The zkAPI route is no longer in the policy file.");
           const block = { ...profile.zkapi ?? {}, ...zkapi };
-          for (const key of cleared)
-            delete block[key];
+          for (const key2 of cleared)
+            delete block[key2];
           profile.zkapi = block;
           return next;
         });
@@ -144357,7 +129551,7 @@ function computerSetup(options, context2) {
 }
 async function indexFaster(options, args) {
   const keys = Object.keys(args);
-  if (typeof args.on !== "boolean" || keys.some((key) => key !== "on"))
+  if (typeof args.on !== "boolean" || keys.some((key2) => key2 !== "on"))
     return refused("on must be true or false.", "invalid_params");
   const response = await options.workerFetch(new Request("http://olympus-worker.internal/dashboard/embedding-priority", {
     method: "POST",
@@ -144373,7 +129567,7 @@ async function indexFaster(options, args) {
 }
 async function unpairSource(options, args) {
   const keys = Object.keys(args);
-  if (typeof args.source_id !== "string" || !UNPAIR_SOURCE_IDS.has(args.source_id) || keys.some((key) => key !== "source_id")) {
+  if (typeof args.source_id !== "string" || !UNPAIR_SOURCE_IDS.has(args.source_id) || keys.some((key2) => key2 !== "source_id")) {
     return refused("source_id must be a paired chat app.", "invalid_params");
   }
   const response = await options.workerFetch(new Request("http://olympus-worker.internal/dashboard/unpair", {
@@ -144393,7 +129587,7 @@ async function unpairSource(options, args) {
 }
 async function openUnreadableFile(options, args, context2) {
   const keys = Object.keys(args);
-  if (typeof args.token !== "string" || keys.some((key) => key !== "token"))
+  if (typeof args.token !== "string" || keys.some((key2) => key2 !== "token"))
     return refused("token must be a file token from the dashboard.", "invalid_params");
   const files = options.unreadableFiles?.();
   if (!files || !context2.opener)
@@ -144417,7 +129611,7 @@ async function openUnreadableFile(options, args, context2) {
 async function unreadableFilesPage(options, args, context2) {
   const keys = Object.keys(args);
   const after = args.after;
-  if (typeof args.source_id !== "string" || !isUnreadablePageCursor(after) || keys.some((key) => key !== "source_id" && key !== "after")) {
+  if (typeof args.source_id !== "string" || !isUnreadablePageCursor(after) || keys.some((key2) => key2 !== "source_id" && key2 !== "after")) {
     return refused("source_id and after must come from the dashboard.", "invalid_params");
   }
   const files = options.unreadableFiles?.();
@@ -144645,8 +129839,8 @@ function createEmailSourceConnectorFromEnv(env = process.env) {
   }) : undefined;
 }
 function requireSourceEmbeddingDimension(options) {
-  const configuredKey = options.envKeys.find((key) => Boolean(options.env[key]?.trim()));
-  if (options.envKeys.every((key) => options.env[key] === undefined)) {
+  const configuredKey = options.envKeys.find((key2) => Boolean(options.env[key2]?.trim()));
+  if (options.envKeys.every((key2) => options.env[key2] === undefined)) {
     const canonicalDimension = canonicalEmbeddingDimension(options.model);
     if (canonicalDimension !== undefined)
       return canonicalDimension;
@@ -146871,7 +132065,7 @@ async function main() {
       if (!handle)
         throw new OperationError("source_index_policy_violation", "The connected Gmail credential is unavailable.");
       const scope = mailScopeFromDraft(input.draft);
-      const key = JSON.stringify([accountGeneration, scope, process.env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY ?? ""]);
+      const key2 = JSON.stringify([accountGeneration, scope, process.env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY ?? ""]);
       const now = Date.now();
       for (const [entryKey, entry] of mailScopeSummaryCache) {
         if (now - entry.at > MAIL_SCOPE_SUMMARY_TTL_MS)
@@ -146883,7 +132077,7 @@ async function main() {
           break;
         mailScopeSummaryCache.delete(oldest);
       }
-      const cached3 = mailScopeSummaryCache.get(key);
+      const cached3 = mailScopeSummaryCache.get(key2);
       if (!cached3) {
         const operatorQuery = process.env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim();
         gmailPickerRequestBudget ??= createGmailPickerRequestBudget({
@@ -146897,12 +132091,12 @@ async function main() {
           scope,
           ...operatorQuery ? { operatorQuery } : {}
         });
-        value.catch(() => mailScopeSummaryCache.delete(key));
-        mailScopeSummaryCache.set(key, { at: now, value });
+        value.catch(() => mailScopeSummaryCache.delete(key2));
+        mailScopeSummaryCache.set(key2, { at: now, value });
       }
       let summary;
       try {
-        summary = await mailScopeSummaryCache.get(key).value;
+        summary = await mailScopeSummaryCache.get(key2).value;
       } catch (error2) {
         if (error2 instanceof GoogleRequestBudgetError) {
           throw new OperationError("source_index_policy_violation", "The mail picker has used today's Gmail request allowance, which is kept separate from syncing. Try again after midnight UTC.");
@@ -147840,11 +133034,11 @@ function createRefreshableReadwiseConnectorStoreRuntime(options) {
         cachedSync = undefined;
         return;
       }
-      const key = [handle.handle, handle.accountRole ?? ""].join("\x00");
-      if (cachedKey === key && cachedSync)
+      const key2 = [handle.handle, handle.accountRole ?? ""].join("\x00");
+      if (cachedKey === key2 && cachedSync)
         return cachedSync;
       cachedSync = buildSync(handle);
-      cachedKey = key;
+      cachedKey = key2;
       return cachedSync;
     }
   };
@@ -147883,8 +133077,8 @@ function createRefreshableXBookmarksConnectorStoreRuntime(options) {
         cachedRuntime = undefined;
         return;
       }
-      const key = [binding.handle.handle, binding.principalAccount, binding.providerUserId].join("\x00");
-      if (cachedKey === key && cachedRuntime)
+      const key2 = [binding.handle.handle, binding.principalAccount, binding.providerUserId].join("\x00");
+      if (cachedKey === key2 && cachedRuntime)
         return cachedRuntime;
       usageStore ??= new LocalXBookmarksApiUsageStore;
       reconcileStateStore ??= new LocalXBookmarksReconcileStateStore(defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath));
@@ -147896,7 +133090,7 @@ function createRefreshableXBookmarksConnectorStoreRuntime(options) {
         env,
         ...tierSet ? { tierSet } : {}
       });
-      cachedKey = key;
+      cachedKey = key2;
       return cachedRuntime;
     }
   };
@@ -149683,21 +134877,21 @@ function sanitizeForExport(value) {
   if (!value || typeof value !== "object")
     return value;
   const sanitized = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (isSecretKey(key))
+  for (const [key2, child] of Object.entries(value)) {
+    if (isSecretKey(key2))
       continue;
-    sanitized[key] = sanitizeForExport(child);
+    sanitized[key2] = sanitizeForExport(child);
   }
   return sanitized;
 }
-function isSecretKey(key) {
-  if (key === "secretRef")
+function isSecretKey(key2) {
+  if (key2 === "secretRef")
     return false;
-  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const normalized = key2.toLowerCase().replace(/[^a-z0-9]/g, "");
   if (normalized === "secret" || normalized === "token" || normalized === "authtoken" || normalized === "accesstoken" || normalized === "refreshtoken" || normalized === "apikey" || normalized === "clientsecret" || normalized === "password" || normalized === "privatekey" || normalized === "serviceaccountjson" || normalized === "credential" || normalized === "credentials") {
     return true;
   }
-  const lowered = key.toLowerCase();
+  const lowered = key2.toLowerCase();
   return lowered === "secret" || lowered.includes("authtoken") || lowered.includes("access_token") || lowered.includes("refreshtoken") || lowered.includes("refresh_token") || lowered.includes("apikey") || lowered.includes("api_key") || lowered.includes("clientsecret") || lowered.includes("client_secret") || lowered.includes("password") || lowered === "token";
 }
 function containsPrivateKeyBlock(value) {
@@ -151501,11 +136695,11 @@ async function runTierClassifier(args, context2 = {}) {
   }
   throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier classifier"]}`);
 }
-function classifierDecision(entries, key) {
-  if (isClassifierApproved(entries, key))
+function classifierDecision(entries, key2) {
+  if (isClassifierApproved(entries, key2))
     return "approved";
   for (const entry of entries) {
-    if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion || entry.lane !== key.lane || entry.profile_id !== key.profileId)
+    if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
       continue;
     if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
       continue;
@@ -151521,13 +136715,13 @@ function parseFlags2(args, allowed) {
     if (!arg.startsWith("--"))
       throw new OperationError("invalid_params", `Unexpected argument: ${arg}`);
     const equals = arg.indexOf("=");
-    const key = arg.slice(2, equals === -1 ? undefined : equals);
-    if (!allowed.includes(key))
-      throw new OperationError("invalid_params", `Unknown option: --${key}`);
+    const key2 = arg.slice(2, equals === -1 ? undefined : equals);
+    if (!allowed.includes(key2))
+      throw new OperationError("invalid_params", `Unknown option: --${key2}`);
     const value = equals === -1 ? args[index += 1] : arg.slice(equals + 1);
     if (value === undefined)
-      throw new OperationError("invalid_params", `--${key} needs a value.`);
-    values.set(key, value);
+      throw new OperationError("invalid_params", `--${key2} needs a value.`);
+    values.set(key2, value);
   }
   return values;
 }
@@ -152644,32 +137838,32 @@ function parseArgs(operation, args) {
       const equalsIndex = rawFlag.indexOf("=");
       const rawKey = equalsIndex === -1 ? rawFlag : rawFlag.slice(0, equalsIndex);
       const inlineValue = equalsIndex === -1 ? undefined : rawFlag.slice(equalsIndex + 1);
-      const key = rawKey.replace(/-/g, "_");
-      const definition = operation.params[key];
+      const key2 = rawKey.replace(/-/g, "_");
+      const definition = operation.params[key2];
       if (definition?.type === "boolean") {
         if (inlineValue !== undefined) {
-          params[key] = parseCliBoolean(inlineValue, key);
+          params[key2] = parseCliBoolean(inlineValue, key2);
         } else if (isBooleanLiteral(args[index + 1])) {
-          params[key] = parseCliBoolean(args[index + 1], key);
+          params[key2] = parseCliBoolean(args[index + 1], key2);
           index += 1;
         } else {
-          params[key] = true;
+          params[key2] = true;
         }
       } else {
         const value = inlineValue ?? args[index + 1];
         if (value === undefined) {
-          throw new OperationError("invalid_params", `Missing value for --${key.replace(/_/g, "-")}.`);
+          throw new OperationError("invalid_params", `Missing value for --${key2.replace(/_/g, "-")}.`);
         }
-        params[key] = definition?.type === "number" ? Number(value) : value;
+        params[key2] = definition?.type === "number" ? Number(value) : value;
         if (inlineValue === undefined)
           index += 1;
       }
     } else if (position < positional.length) {
-      const key = positional[position];
-      if (!key)
+      const key2 = positional[position];
+      if (!key2)
         continue;
-      const definition = operation.params[key];
-      params[key] = definition?.type === "number" ? Number(arg) : arg;
+      const definition = operation.params[key2];
+      params[key2] = definition?.type === "number" ? Number(arg) : arg;
       position += 1;
     } else {
       throw new OperationError("invalid_params", `Unexpected argument: ${arg}.`, 'Quote multi-word values, for example: olympus source answer "what did we decide about the contract".');
@@ -152683,12 +137877,12 @@ function parseArgs(operation, args) {
 function isBooleanLiteral(value) {
   return value === "true" || value === "false" || value === "1" || value === "0" || value === "yes" || value === "no";
 }
-function parseCliBoolean(value, key) {
+function parseCliBoolean(value, key2) {
   if (value === "true" || value === "1" || value === "yes")
     return true;
   if (value === "false" || value === "0" || value === "no")
     return false;
-  throw new OperationError("invalid_params", `${key} must be true or false.`);
+  throw new OperationError("invalid_params", `${key2} must be true or false.`);
 }
 var MAX_CLI_NAME_WORDS = Math.max(...operations.map((operation) => operation.cliHints.name.split(" ").length));
 function resolveCliOperation(args) {
@@ -152770,7 +137964,7 @@ function parseTerminalContentRequalifyArgs(args) {
       continue;
     if (!arg.startsWith("--"))
       throw new OperationError("invalid_params", `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
+    const key2 = arg.slice(2);
     if (![
       "scope",
       "account",
@@ -152781,13 +137975,13 @@ function parseTerminalContentRequalifyArgs(args) {
       "target-version",
       "limit",
       "reason"
-    ].includes(key)) {
+    ].includes(key2)) {
       throw new OperationError("invalid_params", `Unknown terminal-requalify option: ${arg}.`);
     }
     const value = args[index + 1];
     if (!value || value.startsWith("--"))
       throw new OperationError("invalid_params", `${arg} requires a value.`);
-    values.set(key, value);
+    values.set(key2, value);
     index += 1;
   }
   const scope = values.get("scope")?.trim();
@@ -152868,14 +138062,14 @@ function parseQueuedContentRetargetArgs(args) {
       continue;
     if (!arg.startsWith("--"))
       throw new OperationError("invalid_params", `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (!["scope", "account", "source-kind", "target-kind", "target-version", "limit"].includes(key)) {
+    const key2 = arg.slice(2);
+    if (!["scope", "account", "source-kind", "target-kind", "target-version", "limit"].includes(key2)) {
       throw new OperationError("invalid_params", `Unknown queued-retarget option: ${arg}.`);
     }
     const value = args[index + 1];
     if (!value || value.startsWith("--"))
       throw new OperationError("invalid_params", `${arg} requires a value.`);
-    values.set(key, value);
+    values.set(key2, value);
     index += 1;
   }
   const scope = values.get("scope")?.trim();
@@ -152941,14 +138135,14 @@ function parseEvalShardExportArgs(args) {
       continue;
     if (!arg.startsWith("--"))
       throw new OperationError("invalid_params", `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (!["scope", "account", "count", "out", "doc-types"].includes(key)) {
+    const key2 = arg.slice(2);
+    if (!["scope", "account", "count", "out", "doc-types"].includes(key2)) {
       throw new OperationError("invalid_params", `Unknown eval-shard export option: ${arg}.`);
     }
     const value = args[index + 1];
     if (!value || value.startsWith("--"))
       throw new OperationError("invalid_params", `${arg} requires a value.`);
-    values.set(key, value);
+    values.set(key2, value);
     index += 1;
   }
   const scope = values.get("scope")?.trim();
@@ -153003,14 +138197,14 @@ function parseOwnerTierOverrideArgs(args) {
       continue;
     if (!arg.startsWith("--"))
       throw new OperationError("invalid_params", `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (!["input", "reason"].includes(key)) {
+    const key2 = arg.slice(2);
+    if (!["input", "reason"].includes(key2)) {
       throw new OperationError("invalid_params", `Unknown apply-tier-overrides option: ${arg}.`);
     }
     const value = args[index + 1];
     if (!value || value.startsWith("--"))
       throw new OperationError("invalid_params", `${arg} requires a value.`);
-    values.set(key, value);
+    values.set(key2, value);
     index += 1;
   }
   const input2 = values.get("input")?.trim();
@@ -153035,11 +138229,11 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override --input file must be a JSON object mapping review keys to trust tiers.");
   }
   const overrides = {};
-  for (const [key, value] of Object.entries(parsed)) {
+  for (const [key2, value] of Object.entries(parsed)) {
     if (typeof value !== "string") {
-      throw new OperationError("invalid_params", `Owner tier override --input value for ${JSON.stringify(key)} must be a trust-tier string.`);
+      throw new OperationError("invalid_params", `Owner tier override --input value for ${JSON.stringify(key2)} must be a trust-tier string.`);
     }
-    overrides[key] = value;
+    overrides[key2] = value;
   }
   return { overrides, reason, dry_run: !execute };
 }
@@ -153350,8 +138544,8 @@ function isHelpRequest(args) {
   return args.some(isHelpFlag);
 }
 function printCommandGroupHelp(path) {
-  const key = path.join(" ");
-  const lines = COMMAND_GROUP_HELP[key];
+  const key2 = path.join(" ");
+  const lines = COMMAND_GROUP_HELP[key2];
   if (!lines)
     return false;
   console.log(lines.join(`
@@ -153373,15 +138567,15 @@ function parseSourceSchedulerUnparkArgs(args) {
       throw new OperationError("invalid_params", `Unexpected source scheduler unpark argument: ${arg}`);
     }
     const equals = arg.indexOf("=");
-    const key = arg.slice(2, equals === -1 ? undefined : equals);
-    if (!["source", "task", "expected-not-before", "reason"].includes(key)) {
-      throw new OperationError("invalid_params", `Unknown source scheduler unpark option: --${key}`);
+    const key2 = arg.slice(2, equals === -1 ? undefined : equals);
+    if (!["source", "task", "expected-not-before", "reason"].includes(key2)) {
+      throw new OperationError("invalid_params", `Unknown source scheduler unpark option: --${key2}`);
     }
-    const value = equals === -1 ? requireOptionValue(args, index += 1, `--${key}`) : arg.slice(equals + 1);
+    const value = equals === -1 ? requireOptionValue(args, index += 1, `--${key2}`) : arg.slice(equals + 1);
     if (!value.trim()) {
-      throw new OperationError("invalid_params", `--${key} requires a non-empty value.`);
+      throw new OperationError("invalid_params", `--${key2} requires a non-empty value.`);
     }
-    values.set(key, value.trim());
+    values.set(key2, value.trim());
   }
   const source = values.get("source");
   const task = values.get("task");
@@ -153449,12 +138643,12 @@ function parseGoogleRequestBudgetFutureRecoveryArgs(args) {
       throw new OperationError("invalid_params", `Unexpected request-budget recovery argument: ${arg}`);
     }
     const equals = arg.indexOf("=");
-    const key = arg.slice(2, equals === -1 ? undefined : equals);
-    if (!["provider", "expected-future-day", "reason"].includes(key)) {
-      throw new OperationError("invalid_params", `Unknown request-budget recovery option: --${key}`);
+    const key2 = arg.slice(2, equals === -1 ? undefined : equals);
+    if (!["provider", "expected-future-day", "reason"].includes(key2)) {
+      throw new OperationError("invalid_params", `Unknown request-budget recovery option: --${key2}`);
     }
-    const value = equals === -1 ? requireOptionValue(args, index += 1, `--${key}`) : arg.slice(equals + 1);
-    values.set(key, value.trim());
+    const value = equals === -1 ? requireOptionValue(args, index += 1, `--${key2}`) : arg.slice(equals + 1);
+    values.set(key2, value.trim());
   }
   const provider = values.get("provider");
   const expectedFutureDay = values.get("expected-future-day");
@@ -153597,8 +138791,8 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
   const capabilities = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((item) => [item.source_id, item]));
   const signals = [];
   const add = (signal) => {
-    const key = `${signal.kind}|${signal.source_id ?? ""}|${signal.dependency_id ?? ""}`;
-    if (!signals.some((existing) => `${existing.kind}|${existing.source_id ?? ""}|${existing.dependency_id ?? ""}` === key)) {
+    const key2 = `${signal.kind}|${signal.source_id ?? ""}|${signal.dependency_id ?? ""}`;
+    if (!signals.some((existing) => `${existing.kind}|${existing.source_id ?? ""}|${existing.dependency_id ?? ""}` === key2)) {
       signals.push(signal);
     }
   };

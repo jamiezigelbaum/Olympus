@@ -14,12 +14,13 @@ const languages = [
   ['German','Notar','Die öffentliche Urkunde wird vor dem Notar unterschrieben. Beide Parteien legen vor der Unterzeichnung ihre Ausweisdokumente vor und erhalten eine Kopie der unterschriebenen Urkunde.'],
   ['Italian','notaio',"L’atto pubblico viene firmato davanti al notaio. Le due parti presentano i documenti di identità prima della firma e ricevono una copia del documento firmato."],
 ] as const;
-for (const [language, word, text] of languages) {
+const questions = ['¿Quién es el notario?', 'Quem é o notário?', 'Qui est le notaire?', 'Wer ist der Notar?', 'Chi è il notaio?'];
+for (const [index, [language, word, text]] of languages.entries()) {
   test(`English keywords retrieve ${language} content and the reverse without any model`, async () => {
-    for (const [query, body] of [['notary',text],[word,english]]) {
+    for (const [query, body] of [['Who is the notary?',text],[word,english],[questions[index]!,english]]) {
       await withStore([{id:'answer',text:body!}], async store => {
         const response = await search(store,query!);
-        expect(response.hits.map(hit=>hit.sourceItem.localItemId)).toEqual(['answer']);
+        expect({query,ids:response.hits.map(hit=>hit.sourceItem.localItemId)}).toEqual({query,ids:['answer']});
       });
     }
   });
