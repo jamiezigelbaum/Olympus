@@ -2,7 +2,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
-import type { AccountBoundProvider } from './provider-account-identity.ts';
+import {
+  compareProviderAccounts,
+  hasImmutableAccountLabel,
+  mergeProviderAccountIds,
+  sameProviderAccount,
+  type AccountBoundProvider,
+} from './provider-account-identity.ts';
 
 /**
  * One source, one provider account: which account a file source's stored items
@@ -16,7 +22,14 @@ import type { AccountBoundProvider } from './provider-account-identity.ts';
  * keeps that from happening:
  *
  * - `provider_account_id` is the account the source's stores were filled from.
- *   The worker binds it on the first sync it verifies.
+ *   The worker binds it on the first sync it verifies, and keeps it current:
+ *   a binding recorded from a Google address alone takes on the account's
+ *   immutable labels from the first token that matches it, so a later rename
+ *   of the address is still the same account (provider-account-identity.ts).
+ * - `bound_grant` is the `connectedAt` of the grant whose tokens last
+ *   confirmed that account. Under that same grant, a token naming the bound
+ *   account is that grant's even when the grant's own record names it only
+ *   by an address since renamed.
  * - `reconnected_at` is written by every connect that could not prove it is
  *   the same account (no earlier binding, or the provider did not say). The
  *   worker settles it against the token's own account before syncing.
@@ -40,6 +53,7 @@ export type SourceAccountPurgeReason = 'account_changed' | 'previous_account_unk
 export interface SourceAccountBinding {
   provider_account_id?: string;
   bound_at?: string;
+  bound_grant?: string;
   reconnected_at?: string;
   purge_required?: {
     reason: SourceAccountPurgeReason;
@@ -161,26 +175,55 @@ export function recordFileSourceConnect(input: {
     if (current?.purge_required) {
       // The previous account reconnected: its own items are what the source
       // holds, so the source resumes as it was.
-      if (current.provider_account_id && current.provider_account_id === input.providerAccountId) {
+      if (current.provider_account_id && input.providerAccountId
+        && sameProviderAccount(current.provider_account_id, input.providerAccountId)) {
         outcome = 'same_account';
         const { purge_required: _lifted, reconnected_at: _settled, ...rest } = current;
-        return rest;
+        return { ...rest, provider_account_id: mergeProviderAccountIds(current.provider_account_id, input.providerAccountId) };
       }
       outcome = 'purge_required';
       return current;
     }
     if (current?.provider_account_id && input.providerAccountId) {
-      if (current.provider_account_id === input.providerAccountId) {
+      const match = compareProviderAccounts(current.provider_account_id, input.providerAccountId);
+      if (match === 'same') {
         outcome = 'same_account';
         const { reconnected_at: _settled, ...rest } = current;
-        return rest;
+        return { ...rest, provider_account_id: mergeProviderAccountIds(current.provider_account_id, input.providerAccountId) };
       }
+      // Neither proven nor disproven (the new token carried no immutable
+      // label this record has): the worker settles it against the token.
+      if (match === 'unproven') return { ...current, reconnected_at: at };
       outcome = 'purge_required';
       return { ...current, purge_required: { reason: 'account_changed', detected_at: at } };
     }
     return { ...current, reconnected_at: at };
   });
   return outcome;
+}
+
+/**
+ * Before a connect replaces the grant of a source bound by a Google address
+ * alone: follow that address to what a token minted now from the grant's own
+ * refresh token names (a refresh token belongs to one account for good), when
+ * the grant's record names the binding's account. A rename made before the
+ * source learned an immutable label is then the same account to the connect
+ * that follows, and an address since given to another account is not
+ * (independent review rounds 1-4). Kept even if the connect then fails: it is
+ * what the grant still in force says. Changes nothing unless the binding is
+ * still exactly `expected`.
+ */
+export function followFileSourceRename(input: {
+  registryPath: string;
+  provider: AccountBoundProvider;
+  expected: string;
+  currentAccountId: string;
+}): void {
+  const sourceId = accountBoundSourceIdForProvider(input.provider)!;
+  updateSourceAccountBinding(sourceAccountBindingsPath(input.registryPath), sourceId, (current) =>
+    current && current.provider_account_id === input.expected && !current.purge_required && !current.reconnected_at
+      ? { ...current, provider_account_id: input.currentAccountId }
+      : current);
 }
 
 export type SourceAccountDecision =
@@ -192,32 +235,53 @@ export type SourceAccountDecision =
  * The worker's decision before a file source touches its provider or stores.
  *
  * `grantAccountId` is the account the registry says the grant authorizes
- * (written at connect); `tokenAccountId` is what the provider says about the
- * access token this run would use, or undefined when it could not be asked.
- * `write` is the entry to store (null removes it; absent leaves it).
+ * (written at connect) and `grantConnectedAt` that grant's `connectedAt`;
+ * `tokenAccountId` is what the provider says about the access token this run
+ * would use, or undefined when it could not be asked. Ids are compared with
+ * compareProviderAccounts, never as strings. `write` is the entry to store (null
+ * removes it; absent leaves it).
  */
 export function decideSourceAccountAction(input: {
   binding: SourceAccountBinding | undefined;
   grantAccountId: string | undefined;
+  grantConnectedAt?: string;
   tokenAccountId: string | undefined;
   laneHoldsItems: boolean;
   now: Date;
 }): SourceAccountDecision {
   const { binding, grantAccountId, tokenAccountId: token } = input;
+  const bindingMatch = binding?.provider_account_id && token
+    ? compareProviderAccounts(binding.provider_account_id, token)
+    : undefined;
+  const tokenIsBound = bindingMatch === 'same';
   // The incident's own shape: a token minted for one account serving a grant
-  // that belongs to another. Never read with it.
-  if (grantAccountId && token && grantAccountId !== token) {
-    return { action: 'refuse', reason: 'token_account_mismatch' };
+  // that belongs to another. Never read with it. Unless this same grant's
+  // tokens already confirmed the binding, and the token names that account:
+  // the grant was recorded by an address the account has since been renamed
+  // from (the token's own labels say which account it is).
+  const grantMatch = grantAccountId && token ? compareProviderAccounts(grantAccountId, token) : 'same';
+  if (grantMatch !== 'same') {
+    const confirmedUnderThisGrant = tokenIsBound && !binding?.purge_required
+      && input.grantConnectedAt !== undefined && binding?.bound_grant === input.grantConnectedAt;
+    if (!confirmedUnderThisGrant) {
+      return { action: 'refuse', reason: grantMatch === 'different' ? 'token_account_mismatch' : 'account_unverified' };
+    }
   }
   const bindTo = (id: string | undefined): SourceAccountDecision => ({
     action: 'proceed',
-    write: id ? { provider_account_id: id, bound_at: input.now.toISOString() } : null,
+    write: id
+      ? {
+          provider_account_id: id,
+          bound_at: input.now.toISOString(),
+          ...(input.grantConnectedAt ? { bound_grant: input.grantConnectedAt } : {}),
+        }
+      : null,
   });
 
   if (binding?.purge_required) {
     // The previous account is back (reconnected, or the token in hand is its
     // own): its items are what the source holds, so the marker lifts.
-    if (binding.provider_account_id && token === binding.provider_account_id) return bindTo(token);
+    if (tokenIsBound) return bindTo(mergeProviderAccountIds(binding.provider_account_id!, token!));
     if (input.laneHoldsItems) return { action: 'purge', reason: binding.purge_required.reason };
     // Nothing of the previous account is left. Bind only an account the token
     // itself proved; otherwise leave the source unbound.
@@ -234,10 +298,29 @@ export function decideSourceAccountAction(input: {
   // not what it is; an environment token or a stale mint could be another.
   // Unverifiable this run: wait, never purge on a blip.
   if (!token) return { action: 'refuse', reason: 'account_unverified' };
-  if (binding.provider_account_id === token) {
-    return binding.reconnected_at ? bindTo(token) : { action: 'proceed' };
+  if (tokenIsBound) {
+    const merged = mergeProviderAccountIds(binding.provider_account_id!, token);
+    if (binding.reconnected_at) return bindTo(merged);
+    // The migration: an address-only binding takes on the immutable labels
+    // (and the current address) of the token that matched it, and records
+    // the grant that confirmed it.
+    if (merged === binding.provider_account_id
+      && (input.grantConnectedAt === undefined || binding.bound_grant === input.grantConnectedAt)) {
+      return { action: 'proceed' };
+    }
+    return {
+      action: 'proceed',
+      write: {
+        ...binding,
+        provider_account_id: merged,
+        ...(input.grantConnectedAt ? { bound_grant: input.grantConnectedAt } : {}),
+      },
+    };
   }
   if (!input.laneHoldsItems) return bindTo(token);
+  // The binding knows its account by an immutable label and this token has
+  // none of its kinds: not proof of a change, so wait rather than purge.
+  if (bindingMatch === 'unproven') return { action: 'refuse', reason: 'account_unverified' };
   return {
     action: 'purge',
     reason: binding.provider_account_id ? 'account_changed' : 'previous_account_unknown',
@@ -269,6 +352,7 @@ function normalizeBindings(value: unknown): SourceAccountBindingsRead {
         ? { provider_account_id: entry.provider_account_id.trim() }
         : {}),
       ...(typeof entry.bound_at === 'string' ? { bound_at: entry.bound_at } : {}),
+      ...(typeof entry.bound_grant === 'string' ? { bound_grant: entry.bound_grant } : {}),
       ...(typeof entry.reconnected_at === 'string' ? { reconnected_at: entry.reconnected_at } : {}),
       ...(folders.length > 0 ? { previous_account_folders: folders } : {}),
       ...(purge

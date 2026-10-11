@@ -596,6 +596,13 @@ token.
    OAuth verification **and** an annual third-party security assessment (CASA),
    which costs money and weeks. Plan the soft launch inside the Testing cap and
    start verification before it binds.
+7. **`openid` (2026-10-11)**: every Google connect also requests the
+   non-sensitive `openid` scope. It grants no data access; it lets Google's
+   tokeninfo name the account's immutable subject, which is how a file
+   source recognises its account after a Workspace address rename
+   (`src/core/provider-account-identity.ts`). List it with the restricted
+   scopes on the publisher app's Data Access page so the verification
+   submission matches what the app requests.
 
 ### X
 

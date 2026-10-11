@@ -24195,7 +24195,8 @@ var init_provider_account_identity = __esm(() => {
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
     dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
     gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 });
@@ -24204,6 +24205,7 @@ var init_provider_account_identity = __esm(() => {
 var init_source_account_binding = __esm(() => {
   init_atomic_file();
   init_file_lease();
+  init_provider_account_identity();
 });
 
 // src/core/connect.ts
