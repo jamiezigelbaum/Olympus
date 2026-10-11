@@ -93,10 +93,10 @@ or credentials). Credentials live in 1Password, never in this repository.
 >    private network is needed.
 > 5. You return to ChatGPT, connected. Try the test cases below.
 >
-> The demo belongs to a fictional person, Robin Vale: about 25 sample emails,
+> The demo belongs to a fictional person, Robin Vale: about 22 sample emails,
 > notes and documents covering a lease renewal, a kitchen renovation budget, a
-> dentist appointment, a trip to Lisbon and a book club. A few items are
-> deliberately Private (clinic visit, lab results, bank notice, tax notes) or
+> trip to Lisbon and a book club. A few items are
+> deliberately Private (a bank notice, an insurance claim, tax notes) or
 > Secret (fake router recovery codes). Private items are never sent to
 > ChatGPT: when a question matches them, a small Olympus panel under
 > ChatGPT's reply shows the answer, marked "Not sent to ChatGPT". Secret items
@@ -146,9 +146,9 @@ recording of ChatGPT on the web, with captions, no voice needed.
 | 2 | 8-18 s | Add Olympus from the directory; ask "Show my Olympus dashboard" | Not-set-up state |
 | 3 | 18-30 s | Connect: sign-in page → "Sign in to the demo" → Sign in and connect → back in ChatGPT | Caption: "Real users approve on their own Mac with one click; this demo uses sample data." |
 | 4 | 30-45 s | P1 lease question | Answer with numbered citations; hover/open one citation |
-| 5 | 45-55 s | P3 budget question | Answer pulling note + email |
+| 5 | 45-55 s | P2 budget question | Answer pulling note + email |
 | 6 | 55-65 s | Sidebar dashboard (P4) | Sources ready, indexing complete |
-| 7 | 65-78 s | N1 lab results | Short ChatGPT reply; the private answer panel opens under it with the answer and "Not sent to ChatGPT"; caption: "Private answers appear only in this panel. Secrets are never answered." |
+| 7 | 65-78 s | P3 bank overdraft notice | Short ChatGPT reply; the private answer panel opens under it with the answer and "Not sent to ChatGPT"; caption: "Private answers appear only in this panel. Secrets are never answered." |
 | 8 | 78-88 s | End card | olympusplugin.ai · Privacy · Support |
 
 Upload unlisted; paste the URL as `demo_recording_url` in the form.

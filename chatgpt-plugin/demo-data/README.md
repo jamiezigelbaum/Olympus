@@ -15,9 +15,11 @@ carries the demo marker (`src/core/remote-access.ts`, `DEMO_INSTALL_MARKER_TEXT`
 Robin Vale rents a flat at 14 Larch Court with their partner Priya. This
 autumn they are renewing the lease, renovating the kitchen, planning a trip
 to Lisbon, hosting a book club and running a library workshop. Robin also has
-a clinic visit, blood test results, a bank overdraft notice and tax notes:
-these are the Private items, there to show that Olympus keeps their contents
-out of ChatGPT and answers from them only in the private answer panel.
+a bank overdraft notice, an insurance claim and tax notes: these are the
+Private items, there to show that Olympus keeps their contents out of ChatGPT
+and answers from them only in the private answer panel. The demo holds no
+health information (owner decision 2026-10-11: health data is the category
+OpenAI restricts most clearly, and money items show the same boundary).
 
 ## Files and intended tiers
 
@@ -32,28 +34,25 @@ install keeps as Personal (there is no Public tier).
 |---|---|---|---|
 | `mail/001-sam-lease-renewal.eml` | mail | Personal | P1 |
 | `mail/002-sam-lease-followup.eml` | mail | Personal | P1 |
-| `mail/003-dentist-appointment.eml` | mail | Personal | P2 |
 | `mail/004-garden-newsletter.eml` | mail | Personal (reference) | - |
-| `mail/005-priya-budget.eml` | mail | Personal | P3 |
-| `mail/006-contractor-quote.eml` | mail | Personal | P3 |
+| `mail/005-priya-budget.eml` | mail | Personal | P2 |
+| `mail/006-contractor-quote.eml` | mail | Personal | P2 |
 | `mail/007-flight-confirmation.eml` | mail | Personal | - |
-| `mail/008-lab-results.eml` | mail | Private (health) | N1 |
-| `mail/009-bank-notice.eml` | mail | Private (money) | - |
+| `mail/009-bank-notice.eml` | mail | Private (money) | P3 |
 | `mail/010-book-club-reminder.eml` | mail | Personal | - |
 | `mail/011-library-events.eml` | mail | Personal | - |
 | `notes/2026-08-14-garden-plan.md` | note | Personal | - |
-| `notes/2026-09-02-budget-decision.md` | note | Personal | P3 |
+| `notes/2026-09-02-budget-decision.md` | note | Personal | P2 |
 | `notes/2026-09-10-book-club.md` | note | Personal | - |
 | `notes/2026-09-18-lisbon-itinerary.md` | note | Personal | - |
-| `notes/2026-09-20-clinic-visit.md` | note | Private (health) | N1 |
 | `notes/2026-09-24-ideas-workshop.md` | note | Personal | - |
 | `notes/old-router-recovery.md` | note | Secret | - |
 | `notes/reading-list.md` | note | Personal | - |
 | `docs/lease-summary.md` | document | Personal | P1 |
-| `docs/kitchen-renovation-plan.md` | document | Personal | P3 |
+| `docs/kitchen-renovation-plan.md` | document | Personal | P2 |
 | `docs/household-budget-2026.csv` | document | Personal | - |
 | `docs/garden-bylaws.md` | document | Personal (reference) | - |
-| `docs/insurance-claim.md` | document | Private (health, money) | - |
+| `docs/insurance-claim.md` | document | Private (money) | - |
 | `docs/tax-notes-2025.md` | document | Private (money) | - |
 
 Mail is stored as plain-text `.eml` files so the demo needs no mail account.
@@ -63,5 +62,5 @@ on it.
 
 ## Keeping it small
 
-25 data files plus this README. Add an item only when a test case needs it,
+22 data files plus this README. Add an item only when a test case needs it,
 and keep every addition obviously fictional.
