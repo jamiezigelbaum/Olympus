@@ -679,7 +679,7 @@ describe('the response builder', () => {
       expect(question).toContain('The question to look up, as the user asked it and complete');
       // The directory scan flags wording that reads as asking for the conversation.
       expect(question).not.toMatch(/message|conversation|history|transcript|word for word/i);
-      expect(question).toContain('including any part you will answer another way');
+      expect(question).not.toMatch(/another way|from the web/i);
       expect(question).toContain('Do not shorten it, split it or turn it into keywords');
     }
   });
