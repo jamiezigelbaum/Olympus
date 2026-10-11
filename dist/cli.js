@@ -53607,6 +53607,7 @@ __export(exports_managed_tools, {
   managedToolsBase: () => managedToolsBase,
   managedToolExecutable: () => managedToolExecutable,
   installManagedTools: () => installManagedTools,
+  earlierManagedVersions: () => earlierManagedVersions,
   defaultVersionCheck: () => defaultVersionCheck,
   defaultCommandRunner: () => defaultCommandRunner,
   createManagedToolsJob: () => createManagedToolsJob,
@@ -53635,8 +53636,8 @@ import { open as open4 } from "node:fs/promises";
 import { homedir as homedir35 } from "node:os";
 import { dirname as dirname33, isAbsolute as isAbsolute10, join as join48, posix, sep as sep6 } from "node:path";
 import { gunzip } from "node:zlib";
-function zkapiAsset(name, sha2563, bytes) {
-  return { url: `${ZKAPI_RELEASE}/${name}`, sha256: sha2563, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
+function zkapiAsset(url, sha2563, bytes) {
+  return { url, sha256: sha2563, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
 }
 function torMacAsset(name, sha2563, bytes, adhocSign) {
   return { url: `${TOR_RELEASE}/${name}`, sha256: sha2563, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"], ...adhocSign ? { adhocSign } : {} };
@@ -53779,15 +53780,55 @@ function managedToolsState(host = {}) {
   return MANAGED_TOOL_ORDER.map((tool) => {
     const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
     const executable = managedToolExecutable(tool, host);
+    const outdated = executable ? undefined : earlierManagedVersions(tool, host)[0];
     return {
       tool,
       label: pin.label,
       version: pin.version,
       offered: platformKey !== undefined && pin.assets[platformKey] !== undefined,
       installed: executable !== undefined,
-      ...executable ? { executable } : {}
+      ...executable ? { executable } : {},
+      ...outdated ? { outdatedVersion: outdated } : {}
     };
   });
+}
+function earlierManagedVersions(tool, host = {}) {
+  return earlierManagedFolders(tool, host).map((entry) => entry.version);
+}
+function earlierManagedFolders(tool, host) {
+  const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
+  const platformKey = managedToolsPlatform(host.platform, host.arch);
+  const root = managedToolsRoot(host);
+  if (!pin?.replaces || !platformKey || !root)
+    return [];
+  const uid = currentUid(host);
+  const toolDir = join48(root, tool);
+  try {
+    if (lstatSync14(toolDir).isSymbolicLink() || !privatelyOwned(toolDir, uid, "dir"))
+      return [];
+  } catch {
+    return [];
+  }
+  const found = [];
+  for (const [version, hashes] of Object.entries(pin.replaces)) {
+    const sha2563 = hashes[platformKey];
+    if (!sha2563 || version === pin.version || version.startsWith(".") || version.includes("/") || version.includes(sep6))
+      continue;
+    const dir = join48(toolDir, version);
+    let stats;
+    try {
+      stats = lstatSync14(dir);
+    } catch {
+      continue;
+    }
+    if (stats.isSymbolicLink() || !privatelyOwned(dir, uid, "dir"))
+      continue;
+    const manifest = readManifest(join48(dir, MANIFEST_FILE), uid);
+    if (!manifest || manifest.tool !== tool || manifest.version !== version || manifest.platform !== platformKey || manifest.sha256 !== sha2563)
+      continue;
+    found.push({ version, dev: stats.dev, ino: stats.ino });
+  }
+  return found.sort((a, b) => a.version < b.version ? 1 : a.version > b.version ? -1 : 0);
 }
 async function adhocSignUnsigned(staging, asset, platformKey, run, label, tool) {
   if (platformKey !== "darwin-arm64" || !asset.adhocSign?.length)
@@ -53983,7 +54024,24 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     const executable = managedToolExecutable(tool, host);
     if (!executable)
       throw new ManagedToolsError("install_failed", `${pin.label} was installed but could not be found afterwards.`, tool);
-    return { tool, version: pin.version, outcome: "installed", executable };
+    const replaced = [];
+    if (earlierManagedFolders(tool, host).length > 0) {
+      await commit(async () => {
+        for (const dir of [dirname33(root), root, toolDir]) {
+          if (lstatSync14(dir).isSymbolicLink() || !privatelyOwned(dir, uid, "dir"))
+            return;
+        }
+        for (const folder of earlierManagedFolders(tool, host)) {
+          const path = join48(toolDir, folder.version);
+          const now = lstatSync14(path);
+          if (now.isSymbolicLink() || now.dev !== folder.dev || now.ino !== folder.ino)
+            continue;
+          rmSync11(path, { recursive: true, force: true });
+          replaced.push(folder.version);
+        }
+      });
+    }
+    return { tool, version: pin.version, outcome: "installed", executable, ...replaced.length > 0 ? { replaced } : {} };
   } catch (error) {
     rmSync11(download, { force: true });
     rmSync11(staging, { recursive: true, force: true });
@@ -54285,7 +54343,7 @@ function createManagedToolsJob(options = {}) {
     settled: () => current
   };
 }
-var ZKAPI_RELEASE = "https://github.com/ethereum/zkapi/releases/download/clientd-v0.1.6", ZKAPI_REQUIRED, ZKAPI_RENAME, TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve9) => {
+var ZKAPI_VERSION = "0.1.6-olympus2", ZKAPI_REQUIRED, ZKAPI_RENAME, TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve9) => {
   execFile(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
     if (!error) {
       resolve9({ code: 0, stdout, stderr });
@@ -54337,13 +54395,21 @@ var init_managed_tools = __esm(() => {
     "zkapi-clientd": {
       tool: "zkapi-clientd",
       label: "zkAPI",
-      version: "0.1.6",
-      versionLine: /^zkapi-clientd 0\.1\.6(\s|$)/,
+      version: ZKAPI_VERSION,
+      versionLine: /^zkapi-clientd 0\.1\.6-olympus2(\s|$)/,
       assets: {
-        "darwin-arm64": zkapiAsset("zkapi-clientd_0.1.6_darwin_arm64.tar.gz", "0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4", 22904346),
-        "darwin-x64": zkapiAsset("zkapi-clientd_0.1.6_darwin_amd64.tar.gz", "ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12", 23547367),
-        "linux-x64": zkapiAsset("zkapi-clientd_0.1.6_linux_amd64.tar.gz", "41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95", 23826995),
-        "linux-arm64": zkapiAsset("zkapi-clientd_0.1.6_linux_arm64.tar.gz", "41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf", 23612951)
+        "darwin-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz", "93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c", 23233212),
+        "darwin-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz", "eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9", 23924127),
+        "linux-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz", "33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1", 24179427),
+        "linux-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz", "ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0", 23914142)
+      },
+      replaces: {
+        "0.1.6": {
+          "darwin-arm64": "0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4",
+          "darwin-x64": "ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12",
+          "linux-x64": "41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95",
+          "linux-arm64": "41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf"
+        }
       }
     }
   };
@@ -103608,10 +103674,13 @@ var init_components = __esm(() => {
 });
 
 // src/workers/dashboard/outside-help-tools.ts
+function installable(entry) {
+  return entry.source === "missing" || entry.source === "outdated";
+}
 function outsideHelpToolsNeedAttention(tools) {
   if (!tools)
     return false;
-  return tools.install.state === "running" || tools.install.state === "failed" || tools.tools.some((entry) => entry.source === "missing");
+  return tools.install.state === "running" || tools.install.state === "failed" || tools.tools.some(installable);
 }
 function progressLine(install) {
   if (install.state === "running") {
@@ -103624,19 +103693,26 @@ function progressLine(install) {
   }
   return "";
 }
-function installButton(tools, canEdit) {
-  const missing = tools.tools.some((entry) => entry.source === "missing");
-  if (!missing || tools.install.state === "running")
+function installButton(tools, canEdit, replacing) {
+  if (tools.install.state === "running")
     return "";
+  const missing = tools.tools.some((entry) => entry.source === "missing");
+  const outdated = tools.tools.filter((entry) => entry.source === "outdated").map((entry) => entry.label);
+  if (!missing && outdated.length === 0 && !replacing)
+    return "";
+  const label = tools.install.state === "failed" ? C.retry : missing ? C.install : outdated.length > 0 ? fill(C.update, { tools: outdated.join(" and ") }) : fill(C.installOwn, { tools: replacing.label });
   const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
-  return `<form class="ohform" data-outside-tools-form><div class="pbuttons">` + `<button type="submit" class="btn primary"${disabled2}>${escapeHtml2(tools.install.state === "failed" ? C.retry : C.install)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return `<form class="ohform" data-outside-tools-form><div class="pbuttons">` + `<button type="submit" class="btn primary"${disabled2}>${escapeHtml2(label)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+function sourceWords(entry) {
+  return fill(C.source[entry.source], { path: entry.path ?? "", installed: entry.installedVersion ?? "", version: entry.version ?? "" });
 }
 function renderOutsideHelpTools(tools, input) {
   if (!tools)
     return "";
   const install = tools.install;
-  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml2(entry.tool)}" data-outside-tool-source="${escapeHtml2(entry.source)}">` + `${escapeHtml2(fill(C.line, { tool: entry.label, state: fill(C.source[entry.source], { path: entry.path ?? "" }) }))}</li>`).join("");
-  const missing = tools.tools.some((entry) => entry.source === "missing");
+  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml2(entry.tool)}" data-outside-tool-source="${escapeHtml2(entry.source)}">` + `${escapeHtml2(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join("");
+  const missing = tools.tools.some(installable);
   const parts = [
     `<p class="pnote"><strong>${escapeHtml2(C.title)}</strong></p>`,
     `<p class="pnote">${escapeHtml2(C.intro)}</p>`,
@@ -103654,8 +103730,19 @@ function renderOutsideHelpToolsFix(tools, input) {
   if (!tools || !outsideHelpToolsNeedAttention(tools))
     return "";
   const missing = tools.tools.filter((entry) => entry.source === "missing").map((entry) => entry.label);
-  const text = missing.length === 0 ? C.fixWorking : fill(missing.length === 1 ? C.fixOne : C.fixMany, { tools: missing.join(" and ") });
+  const outdated = tools.tools.filter((entry) => entry.source === "outdated").map((entry) => entry.label);
+  const said = [
+    ...missing.length > 0 ? [fill(missing.length === 1 ? C.fixOne : C.fixMany, { tools: missing.join(" and ") })] : [],
+    ...outdated.length > 0 ? [fill(C.fixOutdated, { tools: outdated.join(" and ") })] : []
+  ];
+  const text = said.length === 0 ? C.fixWorking : said.join(" ");
   return `<li data-outside-tools="fix" data-install-state="${escapeHtml2(tools.install.state)}"><span>${escapeHtml2(text)}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit)}</li>`;
+}
+function renderOutsideHelpToolsReplace(tools, tool, input) {
+  const entry = tools?.tools.find((item) => item.tool === tool);
+  if (!tools || entry?.source !== "system" || entry.offered !== true)
+    return "";
+  return `<li${input.attrs} data-outside-tools="replace" data-install-state="${escapeHtml2(tools.install.state)}"><span>${escapeHtml2(fill(C.systemOld, { tool: entry.label, version: entry.version ?? "" }))}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit, entry)}</li>`;
 }
 function renderOutsideHelpToolsScript(tools, input) {
   if (!tools || !input.canEdit || input.csrfToken === undefined)
@@ -103744,12 +103831,17 @@ var init_outside_help_tools = __esm(() => {
       system: "Installed (your system)",
       missing: "Not installed",
       not_offered: "No download for this computer; install it yourself",
+      outdated: "Needs an update (Olympus installed {installed}; anonymous answers need {version})",
       configured: "Set in your zkAPI route ({path})",
       configured_missing: "Not found at {path}, the path set in your zkAPI route"
     },
     configuredMissing: "The {tool} program at {path} (set in your zkAPI route) was not found. Install it there, or remove that path from the route to use the one Olympus installs.",
+    configuredOld: "The {tool} program at {path} (set in your zkAPI route) is not the build anonymous answers need. Remove that path from the route to use the one Olympus installs, or point it at {version}. Nothing was sent.",
+    systemOld: "The {tool} program found on this computer cannot run anonymous answers. Olympus can install its own checked build ({version}), which it uses instead. Nothing was sent.",
     line: "{tool}: {state}",
     install: "Install Tor and zkAPI",
+    update: "Update {tools}",
+    installOwn: "Install Olympus's {tools}",
     retry: "Try again",
     allInstalled: "Both are installed. Nothing else changed.",
     phase: {
@@ -103764,6 +103856,7 @@ var init_outside_help_tools = __esm(() => {
     failed: "The install could not start. Reload the page and try again.",
     fixOne: "{tools} is not installed on this computer.",
     fixMany: "{tools} are not installed on this computer.",
+    fixOutdated: "{tools} needs an update before anonymous answers can run.",
     fixWorking: "Installing Tor and zkAPI."
   };
   C = DASHBOARD_OUTSIDE_HELP_TOOLS_COPY;
@@ -103900,6 +103993,7 @@ function renderProblems(status, access) {
     const ready = route.readiness;
     const blockers = ready.blockers;
     const caps = blockers.filter((code) => CAP_BLOCKERS.has(code));
+    let replacedOld = false;
     for (const code of blockers) {
       if (code === "acknowledgements_incomplete")
         continue;
@@ -103908,11 +104002,24 @@ function renderProblems(status, access) {
       const attrs = ` data-outside-blocker="${escapeHtml2(code)}"`;
       const tool = TOOL_BLOCKERS.get(code);
       const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
-      if (entry?.source === "missing")
+      if (entry?.source === "missing" || entry?.source === "outdated")
         continue;
       if (entry?.source === "configured_missing") {
         items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? "" }), { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs }));
         continue;
+      }
+      if (OLD_DAEMON_BLOCKERS.has(code) && entry?.source === "configured") {
+        items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredOld, { tool: entry.label, path: entry.path ?? "", version: entry.version ?? "" }), { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs }));
+        continue;
+      }
+      if (OLD_DAEMON_BLOCKERS.has(code)) {
+        const replace = renderOutsideHelpToolsReplace(status.tools, "zkapi-clientd", { canEdit, attrs });
+        if (replace) {
+          if (!replacedOld)
+            items.push(replace);
+          replacedOld = true;
+          continue;
+        }
       }
       if (code === "unresolved_session") {
         items.push(renderFenceLine(ready, access));
@@ -104312,7 +104419,7 @@ function outsideHelpClientScript(config2) {
   });
 })();`;
 }
-var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OLD_DAEMON_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
 var init_outside_help = __esm(() => {
   init_zkapi_consult_settings();
   init_components();
@@ -104345,7 +104452,13 @@ var init_outside_help = __esm(() => {
   CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
   FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
   SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "daemon_supervisor_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
-  TOOL_BLOCKERS = new Map([["daemon_not_found", "zkapi-clientd"], ["tor_not_found", "tor"]]);
+  TOOL_BLOCKERS = new Map([
+    ["daemon_not_found", "zkapi-clientd"],
+    ["tor_not_found", "tor"],
+    ["daemon_version_unsupported", "zkapi-clientd"],
+    ["daemon_supervisor_unsupported", "zkapi-clientd"]
+  ]);
+  OLD_DAEMON_BLOCKERS = new Set(["daemon_version_unsupported", "daemon_supervisor_unsupported"]);
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
@@ -130308,13 +130421,18 @@ function createDashboardConsultAdapter(options) {
     return managedToolsState({ env }).map((entry) => {
       const explicit = entry.tool === "tor" ? settings?.torExecutable : settings?.daemonExecutable;
       if (explicit) {
-        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? "configured" : "configured_missing", path: explicit };
+        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? "configured" : "configured_missing", path: explicit, version: entry.version };
+      }
+      if (!entry.installed && entry.outdatedVersion && entry.offered) {
+        return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
       return {
         tool: entry.tool,
         label: entry.label,
-        source: entry.installed ? "olympus" : system ? "system" : entry.offered ? "missing" : "not_offered"
+        source: entry.installed ? "olympus" : system ? "system" : entry.offered ? "missing" : "not_offered",
+        version: entry.version,
+        offered: entry.offered
       };
     });
   });

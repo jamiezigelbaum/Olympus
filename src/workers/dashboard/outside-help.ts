@@ -26,6 +26,7 @@ import {
   outsideHelpToolsNeedAttention,
   renderOutsideHelpTools,
   renderOutsideHelpToolsFix,
+  renderOutsideHelpToolsReplace,
   renderOutsideHelpToolsScript,
   type DashboardOutsideHelpTools,
 } from './outside-help-tools.ts';
@@ -400,6 +401,7 @@ function renderProblems(status: DashboardOutsideHelpStatus, access: Access): str
     const ready = route.readiness;
     const blockers = ready.blockers;
     const caps = blockers.filter((code) => CAP_BLOCKERS.has(code));
+    let replacedOld = false;
     for (const code of blockers) {
       // The statements block below is its own fix; and both limits share one line.
       if (code === 'acknowledgements_incomplete') continue;
@@ -407,11 +409,24 @@ function renderProblems(status: DashboardOutsideHelpStatus, access: Access): str
       const attrs = ` data-outside-blocker="${escapeHtml(code)}"`;
       const tool = TOOL_BLOCKERS.get(code);
       const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
-      // Missing and installable: the parts' own line (above) says it, with its button.
-      if (entry?.source === 'missing') continue;
+      // Missing or outdated and installable: the parts' own line (above) says it, with its button.
+      if (entry?.source === 'missing' || entry?.source === 'outdated') continue;
       if (entry?.source === 'configured_missing') {
         items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? '' }), { kind: 'open', section: 'steps', label: W.showSteps }, access, { attrs }));
         continue;
+      }
+      if (OLD_DAEMON_BLOCKERS.has(code) && entry?.source === 'configured') {
+        items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredOld, { tool: entry.label, path: entry.path ?? '', version: entry.version ?? '' }), { kind: 'open', section: 'steps', label: W.showSteps }, access, { attrs }));
+        continue;
+      }
+      if (OLD_DAEMON_BLOCKERS.has(code)) {
+        // A program outside Olympus's folder: one click installs Olympus's checked build, which the route then uses.
+        const replace = renderOutsideHelpToolsReplace(status.tools, 'zkapi-clientd', { canEdit, attrs });
+        if (replace) {
+          if (!replacedOld) items.push(replace);
+          replacedOld = true;
+          continue;
+        }
       }
       if (code === 'unresolved_session') {
         items.push(renderFenceLine(ready, access));
@@ -472,7 +487,14 @@ function renderSection(input: { id: string; title: string; summary: string; open
 }
 
 /** The not-installed blockers the parts' own "To fix" line (outside-help-tools.ts) stands in for. */
-const TOOL_BLOCKERS: ReadonlyMap<string, 'zkapi-clientd' | 'tor'> = new Map([['daemon_not_found', 'zkapi-clientd'], ['tor_not_found', 'tor']]);
+const TOOL_BLOCKERS: ReadonlyMap<string, 'zkapi-clientd' | 'tor'> = new Map([
+  ['daemon_not_found', 'zkapi-clientd'],
+  ['tor_not_found', 'tor'],
+  ['daemon_version_unsupported', 'zkapi-clientd'],
+  ['daemon_supervisor_unsupported', 'zkapi-clientd'],
+]);
+/** The daemon is there but too old for the managed route; the install (or the route's path) is the fix. */
+const OLD_DAEMON_BLOCKERS: ReadonlySet<string> = new Set(['daemon_version_unsupported', 'daemon_supervisor_unsupported']);
 
 /** The current statements as a plain list; with `inputs`, the ids an Accept posts. */
 function renderStatements(inputs: boolean): string {

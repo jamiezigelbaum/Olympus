@@ -182,7 +182,29 @@ const PUBLIC_INSTALL_URLS = new Set([
   'https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-beta.11',
 ]);
 
+/**
+ * The pinned zkAPI download (src/core/managed-tools.ts): the Olympus fork's
+ * public release, which the shipped installer must name. The four exact asset
+ * URLs, each a quoted literal, in the managed-tools source and its two bundles.
+ */
+const PUBLIC_DOWNLOAD_URL_FILES = new Set([
+  'src/core/managed-tools.ts',
+  'dist/cli.js',
+  'dist/index.js',
+]);
+const PUBLIC_DOWNLOAD_URLS = new Set([
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz',
+]);
+
 export function scannableText(relativePath: string, text: string): string {
+  if (PUBLIC_DOWNLOAD_URL_FILES.has(relativePath)) {
+    return text.replace(/(['"])(https:\/\/[^\s<>"'`()]+)\1/g, (quoted, quote: string, url: string) => (
+      PUBLIC_DOWNLOAD_URLS.has(url) ? `${quote}<public-zkapi-download-url>${quote}` : quoted
+    ));
+  }
   if (PUBLIC_INSTALL_URL_FILES.has(relativePath)) {
     return text.replace(/https:\/\/[^\s<>"'`()]+/g, (url) => (
       PUBLIC_INSTALL_URLS.has(url) ? '<public-olympus-install-url>' : url

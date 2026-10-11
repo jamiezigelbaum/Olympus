@@ -17,10 +17,18 @@ import { fill } from './vocabulary.ts';
 export interface DashboardOutsideHelpTool {
   readonly tool: ManagedToolName;
   readonly label: string;
-  /** `configured`/`configured_missing`: the route names a path, which is the only one used; the install button cannot fix it. */
-  readonly source: ManagedToolSource | 'configured' | 'configured_missing';
+  /**
+   * `configured`/`configured_missing`: the route names a path, which is the only one used; the install button cannot fix it.
+   * `outdated`: Olympus installed an earlier pinned build; the install button updates it.
+   */
+  readonly source: ManagedToolSource | 'outdated' | 'configured' | 'configured_missing';
   /** The path set in the route, for the two `configured` sources. */
   readonly path?: string;
+  /** For `outdated`: the version installed now, and the pinned one the update installs. */
+  readonly installedVersion?: string;
+  readonly version?: string;
+  /** Whether Olympus has a pinned download of this tool for this computer; absent (an older worker) reads as no. */
+  readonly offered?: boolean;
 }
 
 export type DashboardOutsideHelpInstall =
@@ -45,12 +53,17 @@ export const DASHBOARD_OUTSIDE_HELP_TOOLS_COPY = {
     system: 'Installed (your system)',
     missing: 'Not installed',
     not_offered: 'No download for this computer; install it yourself',
+    outdated: 'Needs an update (Olympus installed {installed}; anonymous answers need {version})',
     configured: 'Set in your zkAPI route ({path})',
     configured_missing: 'Not found at {path}, the path set in your zkAPI route',
   },
   configuredMissing: 'The {tool} program at {path} (set in your zkAPI route) was not found. Install it there, or remove that path from the route to use the one Olympus installs.',
+  configuredOld: 'The {tool} program at {path} (set in your zkAPI route) is not the build anonymous answers need. Remove that path from the route to use the one Olympus installs, or point it at {version}. Nothing was sent.',
+  systemOld: 'The {tool} program found on this computer cannot run anonymous answers. Olympus can install its own checked build ({version}), which it uses instead. Nothing was sent.',
   line: '{tool}: {state}',
   install: 'Install Tor and zkAPI',
+  update: 'Update {tools}',
+  installOwn: 'Install Olympus\'s {tools}',
   retry: 'Try again',
   allInstalled: 'Both are installed. Nothing else changed.',
   phase: {
@@ -65,6 +78,7 @@ export const DASHBOARD_OUTSIDE_HELP_TOOLS_COPY = {
   failed: 'The install could not start. Reload the page and try again.',
   fixOne: '{tools} is not installed on this computer.',
   fixMany: '{tools} are not installed on this computer.',
+  fixOutdated: '{tools} needs an update before anonymous answers can run.',
   fixWorking: 'Installing Tor and zkAPI.',
 } as const;
 
@@ -73,10 +87,15 @@ const C = DASHBOARD_OUTSIDE_HELP_TOOLS_COPY;
 /** Polling interval while an install runs. */
 export const DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS = 1500;
 
-/** Whether the parts need the owner: something missing, or an install running or failed. */
+/** A part the install button fixes: not installed, or an earlier Olympus build. */
+function installable(entry: DashboardOutsideHelpTool): boolean {
+  return entry.source === 'missing' || entry.source === 'outdated';
+}
+
+/** Whether the parts need the owner: something missing or outdated, or an install running or failed. */
 export function outsideHelpToolsNeedAttention(tools: DashboardOutsideHelpTools | undefined): boolean {
   if (!tools) return false;
-  return tools.install.state === 'running' || tools.install.state === 'failed' || tools.tools.some((entry) => entry.source === 'missing');
+  return tools.install.state === 'running' || tools.install.state === 'failed' || tools.tools.some(installable);
 }
 
 function progressLine(install: DashboardOutsideHelpInstall): string {
@@ -91,13 +110,28 @@ function progressLine(install: DashboardOutsideHelpInstall): string {
   return '';
 }
 
-function installButton(tools: DashboardOutsideHelpTools, canEdit: boolean): string {
+/**
+ * The one install button. Its words follow what it fixes: Install when
+ * something is missing, Update when an earlier Olympus build is all that is
+ * wrong, Install Olympus's zkAPI when `replacing` a program found elsewhere
+ * that cannot run the route. Every one runs the same pinned install.
+ */
+function installButton(tools: DashboardOutsideHelpTools, canEdit: boolean, replacing?: DashboardOutsideHelpTool): string {
+  if (tools.install.state === 'running') return '';
   const missing = tools.tools.some((entry) => entry.source === 'missing');
-  if (!missing || tools.install.state === 'running') return '';
+  const outdated = tools.tools.filter((entry) => entry.source === 'outdated').map((entry) => entry.label);
+  if (!missing && outdated.length === 0 && !replacing) return '';
+  const label = tools.install.state === 'failed'
+    ? C.retry
+    : missing ? C.install : outdated.length > 0 ? fill(C.update, { tools: outdated.join(' and ') }) : fill(C.installOwn, { tools: replacing!.label });
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
   return `<form class="ohform" data-outside-tools-form><div class="pbuttons">`
-    + `<button type="submit" class="btn primary"${disabled}>${escapeHtml(tools.install.state === 'failed' ? C.retry : C.install)}</button></div>`
+    + `<button type="submit" class="btn primary"${disabled}>${escapeHtml(label)}</button></div>`
     + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+
+function sourceWords(entry: DashboardOutsideHelpTool): string {
+  return fill(C.source[entry.source], { path: entry.path ?? '', installed: entry.installedVersion ?? '', version: entry.version ?? '' });
 }
 
 /**
@@ -110,8 +144,8 @@ export function renderOutsideHelpTools(tools: DashboardOutsideHelpTools | undefi
   if (!tools) return '';
   const install = tools.install;
   const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml(entry.tool)}" data-outside-tool-source="${escapeHtml(entry.source)}">`
-    + `${escapeHtml(fill(C.line, { tool: entry.label, state: fill(C.source[entry.source], { path: entry.path ?? '' }) }))}</li>`).join('');
-  const missing = tools.tools.some((entry) => entry.source === 'missing');
+    + `${escapeHtml(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join('');
+  const missing = tools.tools.some(installable);
   const parts: string[] = [
     `<p class="pnote"><strong>${escapeHtml(C.title)}</strong></p>`,
     `<p class="pnote">${escapeHtml(C.intro)}</p>`,
@@ -131,9 +165,28 @@ export function renderOutsideHelpTools(tools: DashboardOutsideHelpTools | undefi
 export function renderOutsideHelpToolsFix(tools: DashboardOutsideHelpTools | undefined, input: { canEdit: boolean }): string {
   if (!tools || !outsideHelpToolsNeedAttention(tools)) return '';
   const missing = tools.tools.filter((entry) => entry.source === 'missing').map((entry) => entry.label);
-  const text = missing.length === 0 ? C.fixWorking : fill(missing.length === 1 ? C.fixOne : C.fixMany, { tools: missing.join(' and ') });
+  const outdated = tools.tools.filter((entry) => entry.source === 'outdated').map((entry) => entry.label);
+  const said = [
+    ...(missing.length > 0 ? [fill(missing.length === 1 ? C.fixOne : C.fixMany, { tools: missing.join(' and ') })] : []),
+    ...(outdated.length > 0 ? [fill(C.fixOutdated, { tools: outdated.join(' and ') })] : []),
+  ];
+  const text = said.length === 0 ? C.fixWorking : said.join(' ');
   return `<li data-outside-tools="fix" data-install-state="${escapeHtml(tools.install.state)}"><span>${escapeHtml(text)}</span>`
     + `${progressLine(tools.install)}${installButton(tools, input.canEdit)}</li>`;
+}
+
+/**
+ * The "To fix" line for a program found outside Olympus's folder (PATH or a
+ * standard install folder) that is too old for the managed route: the
+ * blocker's own words and the same install, since the transport prefers
+ * Olympus's verified build over PATH. '' unless that is the case.
+ */
+export function renderOutsideHelpToolsReplace(tools: DashboardOutsideHelpTools | undefined, tool: ManagedToolName, input: { canEdit: boolean; attrs: string }): string {
+  const entry = tools?.tools.find((item) => item.tool === tool);
+  // Only when there is a download to install: otherwise the click changes nothing and the blocker's own line stands.
+  if (!tools || entry?.source !== 'system' || entry.offered !== true) return '';
+  return `<li${input.attrs} data-outside-tools="replace" data-install-state="${escapeHtml(tools.install.state)}"><span>${escapeHtml(fill(C.systemOld, { tool: entry.label, version: entry.version ?? '' }))}</span>`
+    + `${progressLine(tools.install)}${installButton(tools, input.canEdit, entry)}</li>`;
 }
 
 /** The one controller for every install button on the page; '' without the controls. */
