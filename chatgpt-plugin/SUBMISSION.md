@@ -1,3 +1,11 @@
+- [x] `mcp.json` names a provided public client: `client: {mode:
+      "provided", clientId: "https://chatgpt.com/oauth/client.json",
+      tokenEndpointAuthMethod: "none"}`. The portal's Connect refused both
+      `mode: "cimd"` and no `client` block with "OAuth client ID is required
+      when using pre-defined OAuth client credentials" (2026-10-11): without
+      a registration endpoint it treats the client as provided. Olympus has
+      no routable DCR, and every engine already pins this client ID and its
+      `connector_platform_oauth_redirect` callback.
 # Olympus: ChatGPT directory submission kit
 
 Status: package complete 2026-10-10 (directory endpoint `/openai/mcp`, review

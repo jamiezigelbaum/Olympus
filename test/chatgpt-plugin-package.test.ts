@@ -8,6 +8,7 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { CHATGPT_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
 
 const root = join(import.meta.dir, '..', 'chatgpt-plugin');
 const repo = join(import.meta.dir, '..');
@@ -98,7 +99,10 @@ describe('chatgpt-plugin/mcp.json', () => {
     expect(servers[0]![1]).toEqual({
       type: 'streamable-http',
       url: 'https://mcp.olympusplugin.ai/openai/mcp',
-      extensions: { 'com.openai': { auth: { type: 'oauth' } } },
+      // The portal's Connect needs DCR or a provided client; Olympus has no
+      // routable DCR, so it names the ChatGPT client the engines pin
+      // (src/workers/remote-oauth/pinned-clients.ts), a public client.
+      extensions: { 'com.openai': { auth: { type: 'oauth', client: { mode: 'provided', clientId: CHATGPT_CLIENT_ID, tokenEndpointAuthMethod: 'none' } } } },
     });
   });
 });
