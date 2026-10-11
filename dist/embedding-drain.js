@@ -5168,11 +5168,51 @@ var init_publisher_oauth_client = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
+import { randomUUID as randomUUID4 } from "node:crypto";
 import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync8 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname6, join as join7 } from "node:path";
 function defaultHandleRegistryPath() {
   return join7(homedir6(), ".config", "olympus", "handles.json");
+}
+function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
+  const path = connectedHandleGrantEpochPath(registryPath);
+  if (!existsSync6(path))
+    return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync8(path, "utf8"));
+  } catch {
+    throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
+  }
+  const record = parsed;
+  if (!record || typeof record !== "object" || Array.isArray(record) || record.version !== 1 || typeof record.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record.epoch)) {
+    throw new Error("Olympus credential-grant generation has an unsupported format. Refusing connection changes.");
+  }
+  return record.epoch;
+}
+async function withConnectedHandleGrantCustody(registryPath, options, mutation) {
+  try {
+    return await withFileLease(`${registryPath}.grant-custody`, (lease) => lease.commit(async () => {
+      const currentEpoch = readConnectedHandleGrantEpoch(registryPath);
+      if (options.expectedEpoch !== undefined && options.expectedEpoch !== currentEpoch) {
+        throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
+      }
+      if (options.advanceEpoch === true) {
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID4() }, null, 2)}
+`);
+      }
+      return await mutation();
+    }));
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
+      throw new ConnectedHandleGrantMutationError("credential_grant_busy", "Another connection change is in progress. Retry shortly.");
+    }
+    throw error;
+  }
+}
+function connectedHandleGrantEpochPath(registryPath) {
+  return `${registryPath}.grant-epoch.json`;
 }
 function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
@@ -5441,11 +5481,20 @@ function isStoreRef(value) {
     return false;
   return isSafeSecretKey(value.slice("store:".length));
 }
+var INITIAL_CONNECTED_HANDLE_GRANT_EPOCH = "initial", ConnectedHandleGrantMutationError;
 var init_connected_handles = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_secret_store();
   init_credential_broker();
+  ConnectedHandleGrantMutationError = class ConnectedHandleGrantMutationError extends Error {
+    code;
+    retryable = true;
+    constructor(code, message) {
+      super(message);
+      this.code = code;
+    }
+  };
 });
 
 // src/workers/credential-broker/index.ts
@@ -5779,7 +5828,7 @@ class EnvCredentialBroker {
     } catch (error) {
       await lease?.assertOwned();
       if (isTerminalOAuthRefreshError(error)) {
-        await commitFileLease(lease, async () => {
+        await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
           await this.oauth2StateStore?.save(definition.handle, {
             ...storedState,
             status: "reauth_required",
@@ -5787,19 +5836,19 @@ class EnvCredentialBroker {
             pendingRefreshStartedAt: undefined
           });
           this.markRegistryHandleReauthRequired(definition.handle, now);
-        });
+        }));
         throw new CredentialBrokerError("credential_reauth_required", storedState?.pendingRefreshStartedAt ? `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${storedState.pendingRefreshStartedAt} did not record its outcome, so the stored refresh token was already spent.` : `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
       }
       if (error instanceof OAuth2TokenEndpointError) {
         if (TOKEN_UNISSUED_STATUSES.has(error.status)) {
-          await commitFileLease(lease, async () => {
+          await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
             await this.oauth2StateStore?.save(definition.handle, {
               ...storedState,
               status: "available",
               updatedAt: now.toISOString(),
               pendingRefreshStartedAt: undefined
             });
-          });
+          }));
         }
         const brokerError = new CredentialBrokerError("credential_refresh_failed", `Credential handle ${definition.handle} OAuth refresh failed (${error.status}): ${error.safeDetail}`, { handle: definition.handle, capability });
         this.recordMintFailure(cacheKey, brokerError);
@@ -5808,9 +5857,8 @@ class EnvCredentialBroker {
       throw error;
     }
     await lease?.assertOwned();
-    await this.assertGrantNotSuperseded(definition, capability, refreshToken);
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
-    await this.persistRefreshedOAuth2State({
+    await this.withCurrentGrant(definition, capability, refreshToken, () => this.persistRefreshedOAuth2State({
       definition,
       capability,
       refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
@@ -5821,7 +5869,7 @@ class EnvCredentialBroker {
       scopes,
       now,
       lease
-    });
+    }));
     const session = bearerSessionFromMintedToken({
       definition,
       capability,
@@ -5834,6 +5882,24 @@ class EnvCredentialBroker {
       PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
     PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
     return session;
+  }
+  async withCurrentGrant(definition, capability, spentRefreshToken, commit) {
+    const registryPath = this.connectedHandleRegistryPath;
+    if (!registryPath || definition.grantGeneration === undefined) {
+      await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+      return commit();
+    }
+    try {
+      return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+        await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+        return commit();
+      });
+    } catch (error) {
+      if (error instanceof ConnectedHandleGrantMutationError && error.code === "credential_grant_busy") {
+        throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} is being reconnected; its refresh was not recorded. Retry shortly.`, { handle: definition.handle, capability });
+      }
+      throw error;
+    }
   }
   async assertGrantNotSuperseded(definition, capability, spentRefreshToken) {
     const oauth2 = definition.oauth2Refresh;
@@ -12089,7 +12155,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync8, lstatSync as lstatSync3, mkdirSync as mkdirSync8, statSync as statSync5 } from "node:fs";
 import { dirname as dirname9 } from "node:path";
 import { Database as Database2 } from "bun:sqlite";
@@ -14265,7 +14331,7 @@ var init_local_index = __esm(() => {
     constructor(options) {
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID4()}` : this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID5()}` : this.dbPath;
       this.stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
       this.family = options.family;
       this.trustDomain = options.trustDomain;
@@ -14596,7 +14662,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID4()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID5()}`;
       const startedAt = nowIso();
       try {
         return this.db.transaction(() => {
@@ -14700,7 +14766,7 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID4()}`;
+      const syncRunId = `connector-tier-move-${randomUUID5()}`;
       const now = nowIso();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -15079,7 +15145,7 @@ var init_local_index = __esm(() => {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID4()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID5()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
@@ -15891,7 +15957,7 @@ var init_local_index = __esm(() => {
         seenIdentities.add(key);
       }
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID4()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID5()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -16227,7 +16293,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID4()}`;
+        const syncRunId = `connector-relinquish-${randomUUID5()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -16366,7 +16432,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID4()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID5()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -16985,7 +17051,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID4()}`;
+      const syncRunId = `connector-sync-${randomUUID5()}`;
       const startedAt = nowIso();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -19512,7 +19578,7 @@ var END_OF_CENTRAL_DIRECTORY = 101010256, CENTRAL_DIRECTORY_ENTRY = 33639248, LO
 var init_zip = () => {};
 
 // src/workers/source-index/built-in-embedding/assets.ts
-import { createHash as createHash6, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash6, randomUUID as randomUUID6 } from "node:crypto";
 import {
   closeSync as closeSync4,
   createReadStream,
@@ -19685,7 +19751,7 @@ async function liteRtLibraryIntact(runtimeDir, wheel) {
   return expected !== undefined && await sha256File(join8(runtimeDir, basename2(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID5()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID6()}`;
   ensureDirectory(staging);
   try {
     const archivePath = join8(staging, wheel.name);
@@ -19754,7 +19820,7 @@ function runtimeInstalled(runtimeDir, packages) {
   }
 }
 async function installRuntime(fetchImpl, runtimeDir, packages, platform2, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID5()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID6()}`;
   ensureDirectory(staging);
   try {
     for (const pack of packages) {
@@ -19799,7 +19865,7 @@ function runtimeEntryWanted(packageName, path, platform2) {
   return path === "package/package.json" || path.startsWith("package/dist/") || path.startsWith(`package/bin/napi-v6/${os}/${arch}/`) || path === "package/LICENSE" || path === "package/ThirdPartyNotices.txt";
 }
 async function downloadVerified(fetchImpl, url, target, expectedBytes, expected, reporter, label, stallMs) {
-  const partial = `${target}.partial-${process.pid}-${randomUUID5()}`;
+  const partial = `${target}.partial-${process.pid}-${randomUUID6()}`;
   const algorithm = expected.kind === "sha256" ? "sha256" : integrityAlgorithm(expected.expected);
   const hash = createHash6(algorithm);
   let received = 0;
@@ -31637,7 +31703,7 @@ import {
   rmSync as rmSync4,
   writeFileSync as writeFileSync5
 } from "node:fs";
-import { randomUUID as randomUUID6 } from "node:crypto";
+import { randomUUID as randomUUID7 } from "node:crypto";
 import { homedir as homedir13 } from "node:os";
 import { dirname as dirname14, isAbsolute as isAbsolute5, join as join17 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
@@ -31854,7 +31920,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID6()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID7()}.tmp`;
   try {
     mkdirSync10(dirname14(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));

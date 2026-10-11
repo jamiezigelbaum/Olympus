@@ -5507,7 +5507,7 @@ class EnvCredentialBroker {
     } catch (error) {
       await lease?.assertOwned();
       if (isTerminalOAuthRefreshError(error)) {
-        await commitFileLease(lease, async () => {
+        await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
           await this.oauth2StateStore?.save(definition.handle, {
             ...storedState,
             status: "reauth_required",
@@ -5515,19 +5515,19 @@ class EnvCredentialBroker {
             pendingRefreshStartedAt: undefined
           });
           this.markRegistryHandleReauthRequired(definition.handle, now);
-        });
+        }));
         throw new CredentialBrokerError("credential_reauth_required", storedState?.pendingRefreshStartedAt ? `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${storedState.pendingRefreshStartedAt} did not record its outcome, so the stored refresh token was already spent.` : `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
       }
       if (error instanceof OAuth2TokenEndpointError) {
         if (TOKEN_UNISSUED_STATUSES.has(error.status)) {
-          await commitFileLease(lease, async () => {
+          await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
             await this.oauth2StateStore?.save(definition.handle, {
               ...storedState,
               status: "available",
               updatedAt: now.toISOString(),
               pendingRefreshStartedAt: undefined
             });
-          });
+          }));
         }
         const brokerError = new CredentialBrokerError("credential_refresh_failed", `Credential handle ${definition.handle} OAuth refresh failed (${error.status}): ${error.safeDetail}`, { handle: definition.handle, capability });
         this.recordMintFailure(cacheKey, brokerError);
@@ -5536,9 +5536,8 @@ class EnvCredentialBroker {
       throw error;
     }
     await lease?.assertOwned();
-    await this.assertGrantNotSuperseded(definition, capability, refreshToken);
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
-    await this.persistRefreshedOAuth2State({
+    await this.withCurrentGrant(definition, capability, refreshToken, () => this.persistRefreshedOAuth2State({
       definition,
       capability,
       refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
@@ -5549,7 +5548,7 @@ class EnvCredentialBroker {
       scopes,
       now,
       lease
-    });
+    }));
     const session = bearerSessionFromMintedToken({
       definition,
       capability,
@@ -5562,6 +5561,24 @@ class EnvCredentialBroker {
       PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
     PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
     return session;
+  }
+  async withCurrentGrant(definition, capability, spentRefreshToken, commit) {
+    const registryPath = this.connectedHandleRegistryPath;
+    if (!registryPath || definition.grantGeneration === undefined) {
+      await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+      return commit();
+    }
+    try {
+      return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+        await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+        return commit();
+      });
+    } catch (error) {
+      if (error instanceof ConnectedHandleGrantMutationError && error.code === "credential_grant_busy") {
+        throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} is being reconnected; its refresh was not recorded. Retry shortly.`, { handle: definition.handle, capability });
+      }
+      throw error;
+    }
   }
   async assertGrantNotSuperseded(definition, capability, spentRefreshToken) {
     const oauth2 = definition.oauth2Refresh;
@@ -6912,11 +6929,51 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
+import { randomUUID as randomUUID8 } from "node:crypto";
 import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync14 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { dirname as dirname14, join as join18 } from "node:path";
 function defaultHandleRegistryPath() {
   return join18(homedir11(), ".config", "olympus", "handles.json");
+}
+function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
+  const path = connectedHandleGrantEpochPath(registryPath);
+  if (!existsSync9(path))
+    return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync14(path, "utf8"));
+  } catch {
+    throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
+  }
+  const record = parsed;
+  if (!record || typeof record !== "object" || Array.isArray(record) || record.version !== 1 || typeof record.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record.epoch)) {
+    throw new Error("Olympus credential-grant generation has an unsupported format. Refusing connection changes.");
+  }
+  return record.epoch;
+}
+async function withConnectedHandleGrantCustody(registryPath, options, mutation) {
+  try {
+    return await withFileLease(`${registryPath}.grant-custody`, (lease) => lease.commit(async () => {
+      const currentEpoch = readConnectedHandleGrantEpoch(registryPath);
+      if (options.expectedEpoch !== undefined && options.expectedEpoch !== currentEpoch) {
+        throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
+      }
+      if (options.advanceEpoch === true) {
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID8() }, null, 2)}
+`);
+      }
+      return await mutation();
+    }));
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
+      throw new ConnectedHandleGrantMutationError("credential_grant_busy", "Another connection change is in progress. Retry shortly.");
+    }
+    throw error;
+  }
+}
+function connectedHandleGrantEpochPath(registryPath) {
+  return `${registryPath}.grant-epoch.json`;
 }
 function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
@@ -7185,11 +7242,20 @@ function isStoreRef(value) {
     return false;
   return isSafeSecretKey(value.slice("store:".length));
 }
+var INITIAL_CONNECTED_HANDLE_GRANT_EPOCH = "initial", ConnectedHandleGrantMutationError;
 var init_connected_handles = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_secret_store();
   init_credential_broker();
+  ConnectedHandleGrantMutationError = class ConnectedHandleGrantMutationError extends Error {
+    code;
+    retryable = true;
+    constructor(code, message) {
+      super(message);
+      this.code = code;
+    }
+  };
 });
 
 // src/core/privacy-language.ts

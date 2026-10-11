@@ -37,11 +37,13 @@ import {
 } from '../../core/secret-store.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import {
+  ConnectedHandleGrantMutationError,
   deriveEnvCredentialHandlesFromRegistry,
   handleRegistryPathFromEnv,
   markConnectedHandleExchangeVia,
   markConnectedHandleReauthRequired,
   readConnectedHandleRegistry,
+  withConnectedHandleGrantCustody,
 } from './connected-handles.ts';
 
 /**
@@ -1340,7 +1342,9 @@ export class EnvCredentialBroker implements CredentialBroker {
         // is known and the in-flight marker is retired with it. Every other
         // failure below leaves the marker standing: a timeout or a 5xx can land
         // after the rotation was already committed on the provider's side.
-        await commitFileLease(lease, async () => {
+        // A refusal of a grant that was replaced meanwhile says nothing about
+        // the new one, which must not be marked for reauthorization.
+        await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
           await this.oauth2StateStore?.save(definition.handle, {
             ...storedState,
             status: 'reauth_required',
@@ -1348,7 +1352,7 @@ export class EnvCredentialBroker implements CredentialBroker {
             pendingRefreshStartedAt: undefined,
           });
           this.markRegistryHandleReauthRequired(definition.handle, now);
-        });
+        }));
         throw new CredentialBrokerError(
           'credential_reauth_required',
           storedState?.pendingRefreshStartedAt
@@ -1363,14 +1367,14 @@ export class EnvCredentialBroker implements CredentialBroker {
           // with it. Leaving it standing turned a rate limit into a permanent
           // reauth: the classifier above declines to latch on this attempt and
           // the marker guard latched on the next one anyway.
-          await commitFileLease(lease, async () => {
+          await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
             await this.oauth2StateStore?.save(definition.handle, {
               ...storedState,
               status: 'available',
               updatedAt: now.toISOString(),
               pendingRefreshStartedAt: undefined,
             });
-          });
+          }));
         }
         const brokerError = new CredentialBrokerError(
           'credential_refresh_failed',
@@ -1383,14 +1387,13 @@ export class EnvCredentialBroker implements CredentialBroker {
       throw error;
     }
     await lease?.assertOwned();
-    await this.assertGrantNotSuperseded(definition, capability, refreshToken);
 
     const scopes = tokenResponse.scopes.length > 0
       ? tokenResponse.scopes
       : storedState?.scopes?.length
         ? storedState.scopes
         : oauth2.scopes ?? definition.scopes ?? [];
-    await this.persistRefreshedOAuth2State({
+    await this.withCurrentGrant(definition, capability, refreshToken, () => this.persistRefreshedOAuth2State({
       definition,
       capability,
       refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
@@ -1401,7 +1404,7 @@ export class EnvCredentialBroker implements CredentialBroker {
       scopes,
       now,
       lease,
-    });
+    }));
     const session = bearerSessionFromMintedToken({
       definition,
       capability,
@@ -1416,12 +1419,49 @@ export class EnvCredentialBroker implements CredentialBroker {
   }
 
   /**
-   * A refresh that was in flight when the handle was reconnected belongs to
-   * the grant it started from (Codex round 1 on 6475d315). Its access token
-   * must not be handed out, and a rotated refresh token it brought back must
-   * not overwrite the new grant's. Checked after the exchange, before anything
-   * is persisted or cached: the registry still names the grant this mint was
-   * for, and the refresh token on file is still the one it spent.
+   * Commit the outcome of a refresh only while the grant it spent is still
+   * the connected one, under the same custody Connect and Disconnect take to
+   * replace a grant (Codex rounds 1 and 2 on this change). Without the shared
+   * custody a reconnect could land between the check and the write; without
+   * the check, a refresh that was in flight across a reconnect would hand out
+   * the old account's token, overwrite the new grant's refresh token with a
+   * rotated old one, or mark the new grant for reauthorization because the old
+   * one was refused. A superseded outcome is discarded and nothing changes.
+   *
+   * Lock order: the per-handle refresh lease, then grant custody. Connect and
+   * Disconnect never take a refresh lease, so the order cannot invert.
+   */
+  private async withCurrentGrant<T>(
+    definition: EnvCredentialHandleDefinition,
+    capability: string,
+    spentRefreshToken: string,
+    commit: () => Promise<T>,
+  ): Promise<T> {
+    const registryPath = this.connectedHandleRegistryPath;
+    if (!registryPath || definition.grantGeneration === undefined) {
+      await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+      return commit();
+    }
+    try {
+      return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+        await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+        return commit();
+      });
+    } catch (error) {
+      if (error instanceof ConnectedHandleGrantMutationError && error.code === 'credential_grant_busy') {
+        throw new CredentialBrokerError(
+          'credential_refresh_busy',
+          `Credential handle ${definition.handle} is being reconnected; its refresh was not recorded. Retry shortly.`,
+          { handle: definition.handle, capability },
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The registry still names the grant this mint was for, and the refresh
+   * token on file is still the one it spent.
    */
   private async assertGrantNotSuperseded(
     definition: EnvCredentialHandleDefinition,

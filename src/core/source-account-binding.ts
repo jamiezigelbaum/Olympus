@@ -107,9 +107,41 @@ export function updateSourceAccountBinding(
 export type FileSourceConnectOutcome = 'same_account' | 'reconnected' | 'purge_required';
 
 /**
- * What a connect that is about to store a grant for `provider` means for the
- * source's stored items. Runs before the grant is written, so a connect that
- * fails afterwards leaves at most a marker the worker settles harmlessly.
+ * First half of a connect, before it replaces a file source's grant: leave
+ * the marker the worker re-verifies against if the connect stops anywhere
+ * after this point (Codex round 2 on this change). Written after the grant
+ * instead, a crash between the two left the new account connected over the
+ * old account's items with nothing to say so.
+ *
+ * The marker alone never purges a bound source whose token still names its
+ * account, so a connect that fails to store its grant costs one identity
+ * check. A never-bound, never-reconnected source (an install from before
+ * bindings existed) first adopts the account of the grant being replaced,
+ * when connect could identify it: its items came from that grant, and
+ * without it a same-account reconnect could not be told from a change.
+ */
+export function recordFileSourceConnectIntent(input: {
+  registryPath: string;
+  provider: AccountBoundProvider;
+  previousAccountId: string | undefined;
+  now: Date;
+}): void {
+  const sourceId = accountBoundSourceIdForProvider(input.provider)!;
+  updateSourceAccountBinding(sourceAccountBindingsPath(input.registryPath), sourceId, (current) => {
+    if (current?.purge_required) return current;
+    const at = input.now.toISOString();
+    const adopt = !current?.provider_account_id && !current?.reconnected_at ? input.previousAccountId : undefined;
+    return {
+      ...current,
+      ...(adopt ? { provider_account_id: adopt, bound_at: at } : {}),
+      reconnected_at: at,
+    };
+  });
+}
+
+/**
+ * Second half of a connect, once the new grant is fully stored: what it means
+ * for the source's stored items.
  */
 export function recordFileSourceConnect(input: {
   registryPath: string;

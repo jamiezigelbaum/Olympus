@@ -165,6 +165,8 @@ describe('Dropbox connect records the account its grant belongs to', () => {
   });
 
   test('a reconnect that fails to store its credential leaves no purge marker (Codex round 1 #1)', async () => {
+    // It does leave the reconnect marker (Codex round 2 #2): the worker then
+    // confirms the still-connected account's token and settles it.
     const install = installDir();
     updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
       provider_account_id: 'dbid:main-account',
@@ -180,7 +182,10 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     try {
       await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl)).rejects.toThrow();
       const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
-      expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toEqual({ provider_account_id: 'dbid:main-account' });
+      const binding = read.kind === 'ok' ? read.bindings.sources['dropbox.files'] : undefined;
+      expect(binding?.provider_account_id).toBe('dbid:main-account');
+      expect(binding?.purge_required).toBeUndefined();
+      expect(binding?.reconnected_at).toBeTruthy();
     } finally {
       server.close();
     }
@@ -197,6 +202,54 @@ describe('Dropbox connect records the account its grant belongs to', () => {
       expect(result.sourceAccountPurgeRequired).toBeUndefined();
       const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
       expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toEqual({ provider_account_id: 'dbid:main-account' });
+    } finally {
+      server.close();
+    }
+  });
+
+  test('a never-bound source reconnected to the SAME account keeps its items (Codex round 2 #1)', async () => {
+    const install = installDir();
+    const account: { tokenAccountId?: string; lookupAccountId?: string } = {};
+    const server = await dropboxServer(account);
+    try {
+      // An install from before bindings existed: connected, items indexed,
+      // no account recorded anywhere.
+      await connectDropbox(install, server.baseUrl);
+      rmSync(sourceAccountBindingsPath(install.registryPath), { force: true });
+      expect(readConnectedHandleRegistry(install.registryPath).handles[0]?.providerAccountId).toBeUndefined();
+
+      // The old grant answers for itself (minted from its refresh token).
+      account.lookupAccountId = 'dbid:main-account';
+      account.tokenAccountId = 'dbid:main-account';
+      const result = await connectDropbox(install, server.baseUrl);
+      expect(result.sourceAccountPurgeRequired).toBeUndefined();
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      const binding = read.kind === 'ok' ? read.bindings.sources['dropbox.files'] : undefined;
+      expect(binding?.provider_account_id).toBe('dbid:main-account');
+      expect(binding?.reconnected_at).toBeUndefined();
+      expect(binding?.purge_required).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  test('a never-bound source reconnected to a DIFFERENT account requires a purge', async () => {
+    const install = installDir();
+    const account: { tokenAccountId?: string; lookupAccountId?: string } = {};
+    const server = await dropboxServer(account);
+    try {
+      await connectDropbox(install, server.baseUrl);
+      rmSync(sourceAccountBindingsPath(install.registryPath), { force: true });
+
+      account.lookupAccountId = 'dbid:main-account'; // the old grant
+      account.tokenAccountId = 'dbid:demo-account'; // the new one
+      const result = await connectDropbox(install, server.baseUrl);
+      expect(result.sourceAccountPurgeRequired).toEqual(['dropbox.files']);
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toMatchObject({
+        provider_account_id: 'dbid:main-account',
+        purge_required: { reason: 'account_changed' },
+      });
     } finally {
       server.close();
     }

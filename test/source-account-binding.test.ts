@@ -9,6 +9,7 @@ import {
   decideSourceAccountAction,
   readSourceAccountBindings,
   recordFileSourceConnect,
+  recordFileSourceConnectIntent,
   sourceAccountBindingsPath,
   updateSourceAccountBinding,
   type SourceAccountBinding,
@@ -33,7 +34,7 @@ function registryPath(): string {
 }
 
 function decide(input: {
-  binding?: SourceAccountBinding;
+  binding?: SourceAccountBinding | undefined;
   grant?: string;
   token?: string;
   holds?: boolean;
@@ -168,6 +169,52 @@ describe('recordFileSourceConnect', () => {
     expect(readSourceAccountBindings(sourceAccountBindingsPath(registry))).toEqual({ kind: 'malformed' });
     expect(() => recordFileSourceConnect({ registryPath: registry, provider: 'dropbox', providerAccountId: 'dbid:a', now: NOW }))
       .toThrow('unreadable');
+  });
+});
+
+describe('recordFileSourceConnectIntent (Codex round 2 #2)', () => {
+  function binding(registry: string) {
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(registry));
+    return read.kind === 'ok' ? read.bindings.sources['dropbox.files'] : undefined;
+  }
+
+  test('a connect that stops after publishing a different account still purges before syncing it', () => {
+    const registry = registryPath();
+    // Never bound; the replaced grant identified as A.
+    recordFileSourceConnectIntent({ registryPath: registry, provider: 'dropbox', previousAccountId: 'dbid:a', now: NOW });
+    expect(binding(registry)).toEqual({ provider_account_id: 'dbid:a', bound_at: NOW.toISOString(), reconnected_at: NOW.toISOString() });
+    // B was published, then the process died before the completion record.
+    expect(decide({ binding: binding(registry), grant: 'dbid:b', token: 'dbid:b' })).toEqual({ action: 'purge', reason: 'account_changed' });
+    // Or the connect failed and A is still connected: settled, nothing purged.
+    expect(decide({ binding: binding(registry), grant: 'dbid:a', token: 'dbid:a' }))
+      .toEqual({ action: 'proceed', write: { provider_account_id: 'dbid:a', bound_at: NOW.toISOString() } });
+  });
+
+  test('an unidentified replaced grant over stored items cannot be adopted, so the change purges', () => {
+    const registry = registryPath();
+    recordFileSourceConnectIntent({ registryPath: registry, provider: 'dropbox', previousAccountId: undefined, now: NOW });
+    expect(binding(registry)).toEqual({ reconnected_at: NOW.toISOString() });
+    expect(decide({ binding: binding(registry), token: 'dbid:b' })).toEqual({ action: 'purge', reason: 'previous_account_unknown' });
+  });
+
+  test('a bound or already-reconnected source never adopts the replaced grant\'s account', () => {
+    const registry = registryPath();
+    const path = sourceAccountBindingsPath(registry);
+    updateSourceAccountBinding(path, 'dropbox.files', () => ({ reconnected_at: '2026-10-10T00:00:00.000Z' }));
+    recordFileSourceConnectIntent({ registryPath: registry, provider: 'dropbox', previousAccountId: 'dbid:a', now: NOW });
+    expect(binding(registry)).toEqual({ reconnected_at: NOW.toISOString() });
+
+    updateSourceAccountBinding(path, 'dropbox.files', () => ({ provider_account_id: 'dbid:a' }));
+    recordFileSourceConnectIntent({ registryPath: registry, provider: 'dropbox', previousAccountId: 'dbid:z', now: NOW });
+    expect(binding(registry)).toEqual({ provider_account_id: 'dbid:a', reconnected_at: NOW.toISOString() });
+  });
+
+  test('a standing purge is left exactly as it is', () => {
+    const registry = registryPath();
+    const purge = { provider_account_id: 'dbid:a', purge_required: { reason: 'account_changed' as const, detected_at: NOW.toISOString() } };
+    updateSourceAccountBinding(sourceAccountBindingsPath(registry), 'dropbox.files', () => purge);
+    recordFileSourceConnectIntent({ registryPath: registry, provider: 'dropbox', previousAccountId: 'dbid:a', now: NOW });
+    expect(binding(registry)).toEqual(purge);
   });
 });
 

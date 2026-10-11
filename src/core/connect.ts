@@ -38,6 +38,7 @@ import {
   type UnpairedSourcesRead,
 } from '../workers/credential-broker/unpaired-sources.ts';
 import {
+  createEnvCredentialBroker,
   credentialOAuth2StateStoreFromEnv,
   invalidateMintedCredentialSessions,
   type CredentialOAuth2StateStore,
@@ -50,7 +51,10 @@ import {
 } from './provider-account-identity.ts';
 import {
   accountBoundSourceIdForProvider,
+  readSourceAccountBindings,
   recordFileSourceConnect,
+  recordFileSourceConnectIntent,
+  sourceAccountBindingsPath,
   type AccountBoundSourceId,
 } from './source-account-binding.ts';
 
@@ -639,6 +643,25 @@ async function completeOAuthSourceConnection(
         timeoutMs: prepared.tokenExchangeTimeoutMs,
       })
     : undefined;
+  // And which account the grant being replaced belongs to, for a source that
+  // was never bound (Codex round 2 on this change). Asked here, outside the
+  // custody fence: it mints from the old grant, and the broker commits a
+  // refresh under that same fence.
+  const accountBoundHandle = prepared.definition.handles.find((definition) => isAccountBoundProvider(definition.provider));
+  const previousFileSourceAccountId = accountBoundProvider && accountBoundHandle
+    ? await identifyReplacedGrantAccount({
+        registryPath: prepared.registryPath,
+        handle: accountBoundHandle.handle(prepared.accountRole),
+        provider: accountBoundProvider,
+        capability: accountBoundHandle.capability,
+        ...(accountBoundHandle.trustDomain ? { trustDomain: accountBoundHandle.trustDomain } : {}),
+        secretStore: prepared.secretStore,
+        oauth2StateStore: prepared.oauth2StateStore,
+        tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+        fetchImpl: prepared.options.fetch ?? fetch,
+        timeoutMs: prepared.tokenExchangeTimeoutMs,
+      })
+    : undefined;
 
   return withConnectedHandleGrantCustody(
     prepared.registryPath,
@@ -649,6 +672,18 @@ async function completeOAuthSourceConnection(
         provider: definition.provider,
       }));
       assertOneConnectedAccountForProposedProviders(prepared.registryPath, proposedHandles);
+
+      // Before anything of the new grant is stored: from here on, a connect
+      // that stops halfway leaves the worker a marker to re-verify against.
+      for (const handleDefinition of prepared.definition.handles) {
+        if (!isAccountBoundProvider(handleDefinition.provider)) continue;
+        recordFileSourceConnectIntent({
+          registryPath: prepared.registryPath,
+          provider: handleDefinition.provider,
+          previousAccountId: previousFileSourceAccountId,
+          now: prepared.now(),
+        });
+      }
 
       const secretRefs: string[] = [];
       const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
@@ -736,8 +771,8 @@ async function completeOAuthSourceConnection(
       // Only once the new grant is fully stored (Codex round 1 on 6475d315):
       // recorded first, a connect that then failed to store its credential left
       // the previous account connected with a purge marker that would delete
-      // that account's items. The guard still catches a known account change
-      // without this marker; the marker adds the cases connect alone can tell.
+      // that account's items. If this step never runs, the intent marker above
+      // still makes the worker verify the new token before anything syncs.
       const sourceAccountPurgeRequired: AccountBoundSourceId[] = [];
       for (const handleDefinition of prepared.definition.handles) {
         if (!isAccountBoundProvider(handleDefinition.provider)) continue;
@@ -1803,6 +1838,58 @@ async function exchangeAuthorizationCode(options: {
  * on Google's API hosts for the real Google token endpoint; a token endpoint
  * on any other origin (a local mock, a self-hosted relay) answers it itself.
  */
+/**
+ * The account of the grant a connect is about to replace, for a file source
+ * that has never been bound to one. Best effort and only then: a bound or
+ * already-reconnected source has its own record, and an answer that cannot
+ * be had leaves the worker to purge rather than guess.
+ */
+async function identifyReplacedGrantAccount(options: {
+  registryPath: string;
+  handle: string;
+  provider: AccountBoundProvider;
+  capability: string;
+  trustDomain?: ConnectedCredentialHandle['trustDomain'];
+  secretStore: SecretStore;
+  oauth2StateStore: CredentialOAuth2StateStore | undefined;
+  tokenUrl: string;
+  fetchImpl: OAuthFetch;
+  timeoutMs: number;
+}): Promise<string | undefined> {
+  try {
+    const existing = readConnectedHandleRegistry(options.registryPath).handles
+      .find((entry) => entry.handle === options.handle);
+    if (!existing) return undefined;
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(options.registryPath));
+    if (read.kind !== 'ok') return undefined;
+    const binding = read.bindings.sources[accountBoundSourceIdForProvider(options.provider)!];
+    if (binding?.provider_account_id || binding?.reconnected_at || binding?.purge_required) return undefined;
+    const broker = createEnvCredentialBroker({
+      handleRegistryPath: options.registryPath,
+      secretStore: options.secretStore,
+      ...(options.oauth2StateStore ? { oauth2StateStore: options.oauth2StateStore } : {}),
+      fetch: (url, init) => options.fetchImpl(url, init),
+    });
+    const session = await broker.issueSession({
+      handle: options.handle,
+      provider: options.provider,
+      capability: options.capability,
+      ...(options.trustDomain ? { trustDomain: options.trustDomain } : {}),
+      purpose: 'Identify the account of the grant being replaced, so a same-account reconnect keeps the source\'s items.',
+    });
+    if (session.kind !== 'bearer_token') return undefined;
+    return await lookupConnectedAccountId({
+      provider: options.provider,
+      tokenUrl: options.tokenUrl,
+      accessToken: session.token,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 async function lookupConnectedAccountId(options: {
   provider: AccountBoundProvider;
   tokenUrl: string;

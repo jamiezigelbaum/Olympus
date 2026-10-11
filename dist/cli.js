@@ -3437,7 +3437,7 @@ class EnvCredentialBroker {
     } catch (error) {
       await lease?.assertOwned();
       if (isTerminalOAuthRefreshError(error)) {
-        await commitFileLease(lease, async () => {
+        await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
           await this.oauth2StateStore?.save(definition.handle, {
             ...storedState,
             status: "reauth_required",
@@ -3445,19 +3445,19 @@ class EnvCredentialBroker {
             pendingRefreshStartedAt: undefined
           });
           this.markRegistryHandleReauthRequired(definition.handle, now);
-        });
+        }));
         throw new CredentialBrokerError("credential_reauth_required", storedState?.pendingRefreshStartedAt ? `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${storedState.pendingRefreshStartedAt} did not record its outcome, so the stored refresh token was already spent.` : `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
       }
       if (error instanceof OAuth2TokenEndpointError) {
         if (TOKEN_UNISSUED_STATUSES.has(error.status)) {
-          await commitFileLease(lease, async () => {
+          await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
             await this.oauth2StateStore?.save(definition.handle, {
               ...storedState,
               status: "available",
               updatedAt: now.toISOString(),
               pendingRefreshStartedAt: undefined
             });
-          });
+          }));
         }
         const brokerError = new CredentialBrokerError("credential_refresh_failed", `Credential handle ${definition.handle} OAuth refresh failed (${error.status}): ${error.safeDetail}`, { handle: definition.handle, capability });
         this.recordMintFailure(cacheKey, brokerError);
@@ -3466,9 +3466,8 @@ class EnvCredentialBroker {
       throw error;
     }
     await lease?.assertOwned();
-    await this.assertGrantNotSuperseded(definition, capability, refreshToken);
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
-    await this.persistRefreshedOAuth2State({
+    await this.withCurrentGrant(definition, capability, refreshToken, () => this.persistRefreshedOAuth2State({
       definition,
       capability,
       refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
@@ -3479,7 +3478,7 @@ class EnvCredentialBroker {
       scopes,
       now,
       lease
-    });
+    }));
     const session = bearerSessionFromMintedToken({
       definition,
       capability,
@@ -3492,6 +3491,24 @@ class EnvCredentialBroker {
       PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
     PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
     return session;
+  }
+  async withCurrentGrant(definition, capability, spentRefreshToken, commit) {
+    const registryPath = this.connectedHandleRegistryPath;
+    if (!registryPath || definition.grantGeneration === undefined) {
+      await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+      return commit();
+    }
+    try {
+      return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+        await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+        return commit();
+      });
+    } catch (error) {
+      if (error instanceof ConnectedHandleGrantMutationError && error.code === "credential_grant_busy") {
+        throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} is being reconnected; its refresh was not recorded. Retry shortly.`, { handle: definition.handle, capability });
+      }
+      throw error;
+    }
   }
   async assertGrantNotSuperseded(definition, capability, spentRefreshToken) {
     const oauth2 = definition.oauth2Refresh;
@@ -5598,6 +5615,20 @@ function updateSourceAccountBinding(path, sourceId, mutate) {
     return next;
   });
 }
+function recordFileSourceConnectIntent(input) {
+  const sourceId = accountBoundSourceIdForProvider(input.provider);
+  updateSourceAccountBinding(sourceAccountBindingsPath(input.registryPath), sourceId, (current) => {
+    if (current?.purge_required)
+      return current;
+    const at = input.now.toISOString();
+    const adopt = !current?.provider_account_id && !current?.reconnected_at ? input.previousAccountId : undefined;
+    return {
+      ...current,
+      ...adopt ? { provider_account_id: adopt, bound_at: at } : {},
+      reconnected_at: at
+    };
+  });
+}
 function recordFileSourceConnect(input) {
   const sourceId = accountBoundSourceIdForProvider(input.provider);
   let outcome = "reconnected";
@@ -6021,12 +6052,35 @@ async function completeOAuthSourceConnection(prepared, code) {
     fetchImpl: prepared.options.fetch ?? fetch,
     timeoutMs: prepared.tokenExchangeTimeoutMs
   }) : undefined;
+  const accountBoundHandle = prepared.definition.handles.find((definition) => isAccountBoundProvider(definition.provider));
+  const previousFileSourceAccountId = accountBoundProvider && accountBoundHandle ? await identifyReplacedGrantAccount({
+    registryPath: prepared.registryPath,
+    handle: accountBoundHandle.handle(prepared.accountRole),
+    provider: accountBoundProvider,
+    capability: accountBoundHandle.capability,
+    ...accountBoundHandle.trustDomain ? { trustDomain: accountBoundHandle.trustDomain } : {},
+    secretStore: prepared.secretStore,
+    oauth2StateStore: prepared.oauth2StateStore,
+    tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+    fetchImpl: prepared.options.fetch ?? fetch,
+    timeoutMs: prepared.tokenExchangeTimeoutMs
+  }) : undefined;
   return withConnectedHandleGrantCustody(prepared.registryPath, { expectedEpoch: prepared.grantEpoch }, async () => {
     const proposedHandles = prepared.definition.handles.map((definition) => ({
       handle: definition.handle(prepared.accountRole),
       provider: definition.provider
     }));
     assertOneConnectedAccountForProposedProviders(prepared.registryPath, proposedHandles);
+    for (const handleDefinition of prepared.definition.handles) {
+      if (!isAccountBoundProvider(handleDefinition.provider))
+        continue;
+      recordFileSourceConnectIntent({
+        registryPath: prepared.registryPath,
+        provider: handleDefinition.provider,
+        previousAccountId: previousFileSourceAccountId,
+        now: prepared.now()
+      });
+    }
     const secretRefs = [];
     const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
     const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
@@ -6639,6 +6693,43 @@ async function exchangeAuthorizationCode(options) {
     scopes: typeof payload.scope === "string" ? payload.scope.split(/\s+/).filter(Boolean) : [],
     ...options.source === "dropbox" && dropboxAccountIdFromTokenPayload(payload) ? { providerAccountId: dropboxAccountIdFromTokenPayload(payload) } : {}
   };
+}
+async function identifyReplacedGrantAccount(options) {
+  try {
+    const existing = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
+    if (!existing)
+      return;
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(options.registryPath));
+    if (read.kind !== "ok")
+      return;
+    const binding = read.bindings.sources[accountBoundSourceIdForProvider(options.provider)];
+    if (binding?.provider_account_id || binding?.reconnected_at || binding?.purge_required)
+      return;
+    const broker = createEnvCredentialBroker({
+      handleRegistryPath: options.registryPath,
+      secretStore: options.secretStore,
+      ...options.oauth2StateStore ? { oauth2StateStore: options.oauth2StateStore } : {},
+      fetch: (url, init) => options.fetchImpl(url, init)
+    });
+    const session = await broker.issueSession({
+      handle: options.handle,
+      provider: options.provider,
+      capability: options.capability,
+      ...options.trustDomain ? { trustDomain: options.trustDomain } : {},
+      purpose: "Identify the account of the grant being replaced, so a same-account reconnect keeps the source's items."
+    });
+    if (session.kind !== "bearer_token")
+      return;
+    return await lookupConnectedAccountId({
+      provider: options.provider,
+      tokenUrl: options.tokenUrl,
+      accessToken: session.token,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs
+    });
+  } catch {
+    return;
+  }
 }
 async function lookupConnectedAccountId(options) {
   const tokenOrigin = new URL(options.tokenUrl).origin;
