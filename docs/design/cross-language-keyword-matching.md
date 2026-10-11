@@ -142,3 +142,22 @@ The two historical blind sets remain outside git. Their replay uses read-only
 store copies on Xanthos under the owner's explicit local replay exception;
 only aggregate counts enter the PR. Builds and synthetic checks use Sparta.
 Activation requires an engine restart; this task does not restart it.
+
+
+### Mechanical ordering fixes (2026-10-11)
+
+Primary translations now claim ownership across all concepts before any backup
+translation is considered. Within the existing eight-alternative language
+budget, each primary stays first; single-word backups precede extra phrases,
+with round-robin allocation in each class. The collision predicate, concept
+thresholds, calibrated relevance bars, model prompt and embedding identity
+remain unchanged. This implements the proposal's bounded concept alternatives
+without a new translation or retrieval policy.
+
+Replay of the same frozen local-model completions finds 16/26 answerable cases
+and their expected passages, up from the shipped feature's 14/26. All 14 prior
+hits remain; cases 3 and 9 are recovered. The four fictional LOI phrasings stay
+4/4. All six missing-fact cases remain honest, with one read in both versions.
+Ten answerable misses remain; these fixes do not claim complete multilingual
+retrieval. Activation still requires an engine restart, which this task does
+not perform.

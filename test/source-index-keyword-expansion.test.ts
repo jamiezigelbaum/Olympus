@@ -187,3 +187,30 @@ test('a single shared preposition does not turn a short foreign question into En
   registerBuiltInPrivateModel({available:()=>true,model:{async complete(){return {text:'{"eng":{"0":["cost"]}}',modelId:'fixture'};}}});
   expect((await expandSourceIndexKeywords('gastos a cargo',['eng'])).get('gastos')).toContain('fees');
 });
+
+
+test('primary translations claim ownership before another concept’s backup', () => {
+  withKeywordAlternatives('seller keys', new Map([
+    ['seller', ['vendedor', 'chaves']],
+    ['keys', ['chaves', 'vendedor']],
+  ]), () => {
+    expect(sourceIndexFtsTermGroups('seller keys')).toEqual([
+      ['seller', 'vendedor'], ['keys', 'chaves'],
+    ]);
+  });
+});
+
+test('bounded backup budget preserves single words before extra phrases', () => {
+  const sources = ['administration', 'cost', 'deposit', 'buyer'];
+  const parsed = parseKeywordExpansion(JSON.stringify({por: {
+    administration: ['administração', 'gestão administrativa', 'serviço administrativo'],
+    cost: ['emolumentos', 'despesas', 'custos'],
+    deposit: ['arras', 'sinal', 'depósito'],
+    buyer: ['comprador', 'adquirente'],
+  }}), sources, ['por']);
+  expect(parsed.get('administration')).toEqual(['administração']);
+  expect(parsed.get('cost')).toEqual(['emolumentos', 'despesas', 'custos']);
+  expect(parsed.get('deposit')).toEqual(['arras', 'sinal']);
+  expect(parsed.get('buyer')).toEqual(['comprador', 'adquirente']);
+  expect([...parsed.values()].flat()).toHaveLength(8);
+});
