@@ -118,12 +118,13 @@ export interface ConnectResult {
   next?: string;
   messages?: string[];
   /**
-   * File sources this connect handed a different account (or one it could not
-   * prove was the same) while their stores still hold the previous account's
-   * items. Nothing syncs them until those items are removed; the worker does
-   * that at its next start, which the dashboard requests at once.
+   * File sources this connect handed a different account while their stores
+   * still hold the previous account's items. Nothing syncs them until the
+   * owner removes those items (`olympus data delete --source`) or reconnects
+   * the previous account; `sourceAccountNotice` says so in words.
    */
   sourceAccountPurgeRequired?: AccountBoundSourceId[];
+  sourceAccountNotice?: string;
 }
 
 export interface PendingOAuthConnection {
@@ -648,21 +649,25 @@ async function completeOAuthSourceConnection(
   // was never bound (Codex round 2 on this change). Asked here, outside the
   // custody fence: it mints from the old grant, and the broker commits a
   // refresh under that same fence.
-  const accountBoundHandle = prepared.definition.handles.find((definition) => isAccountBoundProvider(definition.provider));
-  const previousFileSourceAccountId = accountBoundProvider && accountBoundHandle
-    ? await identifyReplacedGrantAccount({
-        registryPath: prepared.registryPath,
-        handle: accountBoundHandle.handle(prepared.accountRole),
-        provider: accountBoundProvider,
-        capability: accountBoundHandle.capability,
-        ...(accountBoundHandle.trustDomain ? { trustDomain: accountBoundHandle.trustDomain } : {}),
-        secretStore: prepared.secretStore,
-        oauth2StateStore: prepared.oauth2StateStore,
-        tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
-        fetchImpl: prepared.options.fetch ?? fetch,
-        timeoutMs: prepared.tokenExchangeTimeoutMs,
-      })
-    : undefined;
+  // Each handle on its own: one Google connect can replace a Gmail grant and
+  // a Drive grant that belonged to different accounts.
+  const previousFileSourceAccountIds = new Map<string, string | undefined>();
+  for (const definition of prepared.definition.handles) {
+    if (!isAccountBoundProvider(definition.provider)) continue;
+    const handle = definition.handle(prepared.accountRole);
+    previousFileSourceAccountIds.set(handle, await identifyReplacedGrantAccount({
+      registryPath: prepared.registryPath,
+      handle,
+      provider: definition.provider,
+      capability: definition.capability,
+      ...(definition.trustDomain ? { trustDomain: definition.trustDomain } : {}),
+      secretStore: prepared.secretStore,
+      oauth2StateStore: prepared.oauth2StateStore,
+      tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      fetchImpl: prepared.options.fetch ?? fetch,
+      timeoutMs: prepared.tokenExchangeTimeoutMs,
+    }));
+  }
 
   return withConnectedHandleGrantCustody(
     prepared.registryPath,
@@ -681,7 +686,7 @@ async function completeOAuthSourceConnection(
         recordFileSourceConnectIntent({
           registryPath: prepared.registryPath,
           provider: handleDefinition.provider,
-          previousAccountId: previousFileSourceAccountId,
+          previousAccountId: previousFileSourceAccountIds.get(handleDefinition.handle(prepared.accountRole)),
           now: prepared.now(),
         });
       }
@@ -809,7 +814,15 @@ async function completeOAuthSourceConnection(
         registryPath: prepared.registryPath,
         oauth2StateWrite: prepared.oauth2StateStore ? 'updated' : 'not_configured',
         secretRefs: secretRefs.sort(),
-        ...(sourceAccountPurgeRequired.length > 0 ? { sourceAccountPurgeRequired } : {}),
+        ...(sourceAccountPurgeRequired.length > 0
+          ? {
+              sourceAccountPurgeRequired,
+              sourceAccountNotice: `${sourceAccountPurgeRequired.join(', ')} now ${sourceAccountPurgeRequired.length === 1 ? 'belongs' : 'belong'} to a different account than the items already stored, so nothing syncs. `
+                + 'To keep those items, reconnect the previous account. To replace them, Disconnect, run '
+                + sourceAccountPurgeRequired.map((sourceId) => `\`olympus data delete --source ${sourceId}\``).join(' and ')
+                + ' (preview with --dry-run), then connect again.',
+            }
+          : {}),
       };
     },
   );

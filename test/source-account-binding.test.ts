@@ -66,7 +66,7 @@ describe('decideSourceAccountAction', () => {
       .toEqual({ action: 'proceed', write: { provider_account_id: 'dbid:b', bound_at: NOW.toISOString() } });
   });
 
-  test('a standing purge blocks until the stores are empty', () => {
+  test('a standing removal marker blocks until the stores are empty or the previous account is back', () => {
     const binding: SourceAccountBinding = {
       provider_account_id: 'dbid:a',
       purge_required: { reason: 'account_changed', detected_at: NOW.toISOString() },
@@ -74,6 +74,9 @@ describe('decideSourceAccountAction', () => {
     expect(decide({ binding, grant: 'dbid:b', token: 'dbid:b' })).toEqual({ action: 'purge', reason: 'account_changed' });
     expect(decide({ binding, grant: 'dbid:b', token: 'dbid:b', holds: false }))
       .toEqual({ action: 'proceed', write: { provider_account_id: 'dbid:b', bound_at: NOW.toISOString() } });
+    // The previous account back: the marker lifts and its items stay.
+    expect(decide({ binding, grant: 'dbid:a', token: 'dbid:a' }))
+      .toEqual({ action: 'proceed', write: { provider_account_id: 'dbid:a', bound_at: NOW.toISOString() } });
   });
 
   test('a reconnect over unbound stored items cannot prove the account and purges', () => {
@@ -134,23 +137,15 @@ describe('recordFileSourceConnect', () => {
       bound_at: NOW.toISOString(),
       purge_required: { reason: 'account_changed', detected_at: NOW.toISOString() },
     });
-    // A second connect while the purge stands keeps it.
+    // Another account while the purge stands keeps it...
+    expect(recordFileSourceConnect({ registryPath: registry, provider: 'dropbox', providerAccountId: 'dbid:c', now: NOW }))
+      .toBe('purge_required');
+    // ...and the previous account coming back lifts it: its own items stay.
     expect(recordFileSourceConnect({ registryPath: registry, provider: 'dropbox', providerAccountId: 'dbid:a', now: NOW }))
-      .toBe('purge_required');
-  });
-
-  test('a connect retries a start-up purge that failed', () => {
-    const registry = registryPath();
-    const path = sourceAccountBindingsPath(registry);
-    updateSourceAccountBinding(path, 'dropbox.files', () => ({
-      provider_account_id: 'dbid:a',
-      purge_required: { reason: 'account_changed', detected_at: NOW.toISOString(), failed_at: NOW.toISOString() },
-    }));
-    expect(recordFileSourceConnect({ registryPath: registry, provider: 'dropbox', providerAccountId: 'dbid:b', now: NOW }))
-      .toBe('purge_required');
-    const read = readSourceAccountBindings(path);
-    expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']?.purge_required)
-      .toEqual({ reason: 'account_changed', detected_at: NOW.toISOString() });
+      .toBe('same_account');
+    const lifted = readSourceAccountBindings(path);
+    expect(lifted.kind === 'ok' && lifted.bindings.sources['dropbox.files'])
+      .toEqual({ provider_account_id: 'dbid:a', bound_at: NOW.toISOString() });
   });
 
   test('a connect with no binding, or an unknown account, leaves a reconnect marker', () => {
@@ -252,6 +247,17 @@ describe('provider account identity', () => {
     expect(gmail).toBe(drive);
     expect(gmail).toBe(googleAccountIdFromAddress('owner@example.test'));
     expect(gmail).toMatch(/^google:[0-9a-f]{40}$/);
+  });
+
+  test('a lookup whose body stalls is bounded by the same deadline (PR review)', async () => {
+    const started = Date.now();
+    await expect(fetchProviderAccountId({
+      provider: 'dropbox',
+      accessToken: 'access-token-fixture',
+      timeoutMs: 100,
+      fetchImpl: async () => new Response(new ReadableStream({ start() { /* headers sent, body never ends */ } }), { status: 200 }),
+    })).rejects.toThrow('did not answer');
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 
   test('a refused lookup is an error, never a guessed account', async () => {

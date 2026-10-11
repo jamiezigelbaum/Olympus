@@ -14,7 +14,8 @@ import {
   sourceAccountBindingsPath,
   updateSourceAccountBinding,
 } from '../src/core/source-account-binding.ts';
-import { readConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
+import { readConnectedHandleRegistry, upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
+import { DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, googleAccountIdFromAddress } from '../src/core/provider-account-identity.ts';
 import { JsonCredentialOAuth2StateStore } from '../src/workers/credential-broker/index.ts';
 
 const dirs: string[] = [];
@@ -153,6 +154,9 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     try {
       const result = await connectDropbox(install, second.baseUrl);
       expect(result.sourceAccountPurgeRequired).toEqual(['dropbox.files']);
+      // Said in words, with the route that clears it; nothing is deleted.
+      expect(result.sourceAccountNotice).toContain('olympus data delete --source dropbox.files');
+      expect(result.sourceAccountNotice).toContain('reconnect the previous account');
       expect(readConnectedHandleRegistry(install.registryPath).handles[0]?.providerAccountId).toBe('dbid:demo-account');
       const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
       expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toMatchObject({
@@ -301,4 +305,86 @@ describe('Dropbox connect records the account its grant belongs to', () => {
       server.close();
     }
   });
+
+  test('one Google connect replacing separate Gmail and Drive grants judges each source by its own previous account (PR review)', async () => {
+    const install = installDir();
+    // Before bindings existed: Gmail connected as A, Drive separately as B.
+    for (const [provider, handle, capability, trustDomain] of [
+      ['gmail', 'gmail.personal', 'gmail.email.sync', 'secure_local'],
+      ['google_drive', 'google_drive.personal', 'google_drive.docs.sync', 'internal'],
+    ] as const) {
+      await install.secretStore.set(`${handle}.oauth.client_id`, 'google-test-client');
+      await install.secretStore.set(`${handle}.oauth.client_secret`, 'google-test-secret');
+      await install.secretStore.set(`${handle}.oauth.refresh_token`, `${provider}-old-refresh`);
+      upsertConnectedHandle({
+        handle,
+        provider,
+        accountRole: 'personal',
+        trustDomain,
+        allowedCapabilities: [capability],
+        scopes: [],
+        oauth2Refresh: {
+          tokenUrl: 'https://oauth2.googleapis.com/token',
+          clientIdSecretRef: `store:${handle}.oauth.client_id`,
+          clientSecretSecretRef: `store:${handle}.oauth.client_secret`,
+          refreshTokenSecretRef: `store:${handle}.oauth.refresh_token`,
+        },
+        connectedAt: '2026-09-01T00:00:00.000Z',
+      }, install.registryPath);
+    }
+    const addressFor: Record<string, string> = {
+      'gmail-old-access': 'a@example.test',
+      'google_drive-old-access': 'b@example.test',
+      'new-access': 'a@example.test',
+    };
+    const identity = (init: RequestInit | undefined) => {
+      const token = String(new Headers(init?.headers).get('authorization') ?? '').replace(/^Bearer /, '');
+      return addressFor[token];
+    };
+    const fetchMock = async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail) {
+        return new Response(JSON.stringify({ emailAddress: identity(init) }), { status: 200 });
+      }
+      if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_drive) {
+        return new Response(JSON.stringify({ user: { emailAddress: identity(init) } }), { status: 200 });
+      }
+      const body = new URLSearchParams(String(init?.body ?? ''));
+      const refresh = body.get('refresh_token');
+      return new Response(JSON.stringify(refresh
+        ? { access_token: refresh.replace('-refresh', '-access'), expires_in: 3600 }
+        : { access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+    const result = await connectOAuthSource({
+      source: 'google',
+      clientId: 'google-test-client',
+      clientSecret: 'google-test-secret',
+      registryPath: install.registryPath,
+      oauth2StateStore: new JsonCredentialOAuth2StateStore(install.statePath),
+      secretStore: install.secretStore,
+      openBrowser: false,
+      fetch: fetchMock,
+      onAuthorizationUrl: async (url) => {
+        const consent = new URL(url);
+        const callback = new URL(consent.searchParams.get('redirect_uri')!);
+        callback.searchParams.set('state', consent.searchParams.get('state')!);
+        callback.searchParams.set('code', 'fixture-code');
+        await fetch(callback);
+      },
+    });
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+    const sources = read.kind === 'ok' ? read.bindings.sources : {};
+    // Gmail was A and stays A: kept.
+    expect(sources['gmail.email']?.provider_account_id).toBe(googleAccountIdFromAddress('a@example.test'));
+    expect(sources['gmail.email']?.purge_required).toBeUndefined();
+    // Drive was B and is now A: stopped, never mixed.
+    expect(sources['google_drive.docs']).toMatchObject({
+      provider_account_id: googleAccountIdFromAddress('b@example.test'),
+      purge_required: { reason: 'account_changed' },
+    });
+    expect(result.sourceAccountPurgeRequired).toEqual(['google_drive.docs']);
+  }, 30_000);
 });

@@ -21,8 +21,12 @@ import type { AccountBoundProvider } from './provider-account-identity.ts';
  *   the same account (no earlier binding, or the provider did not say). The
  *   worker settles it against the token's own account before syncing.
  * - `purge_required` is written when the accounts are known to differ. Nothing
- *   syncs while it stands; the worker removes the source's stored data at its
- *   next start (before any store is open) and then binds the new account.
+ *   syncs while it stands. Olympus never removes the previous account's items
+ *   by itself: the index can hold mail and files the provider no longer has,
+ *   and whole-source deletion is the deliberate CLI-only flow
+ *   (`olympus data delete --source`, docs/V0_4_RELEASE.md). Once the owner has
+ *   removed them the new account is bound; reconnecting the previous account
+ *   instead lifts the marker and sync resumes where it was.
  *
  * It sits beside the connected-handle registry so the CLI and the dashboard
  * connect paths, and the worker, all read and write the same file.
@@ -40,12 +44,6 @@ export interface SourceAccountBinding {
   purge_required?: {
     reason: SourceAccountPurgeReason;
     detected_at: string;
-    /**
-     * Set by the start-up purge when removal failed. The source stays stopped,
-     * and the guard stops asking for restarts: a removal that failed once will
-     * fail on every restart, and each restart takes the whole worker down.
-     */
-    failed_at?: string;
   };
 }
 
@@ -154,11 +152,15 @@ export function recordFileSourceConnect(input: {
   updateSourceAccountBinding(sourceAccountBindingsPath(input.registryPath), sourceId, (current) => {
     const at = input.now.toISOString();
     if (current?.purge_required) {
+      // The previous account reconnected: its own items are what the source
+      // holds, so the source resumes as it was.
+      if (current.provider_account_id && current.provider_account_id === input.providerAccountId) {
+        outcome = 'same_account';
+        const { purge_required: _lifted, reconnected_at: _settled, ...rest } = current;
+        return rest;
+      }
       outcome = 'purge_required';
-      // A connect is an explicit retry: a start-up removal that failed before
-      // gets another restart.
-      const { failed_at: _retried, ...purge } = current.purge_required;
-      return { ...current, purge_required: purge };
+      return current;
     }
     if (current?.provider_account_id && input.providerAccountId) {
       if (current.provider_account_id === input.providerAccountId) {
@@ -206,6 +208,9 @@ export function decideSourceAccountAction(input: {
   });
 
   if (binding?.purge_required) {
+    // The previous account is back (reconnected, or the token in hand is its
+    // own): its items are what the source holds, so the marker lifts.
+    if (binding.provider_account_id && token === binding.provider_account_id) return bindTo(token);
     if (input.laneHoldsItems) return { action: 'purge', reason: binding.purge_required.reason };
     // Nothing of the previous account is left. Bind only an account the token
     // itself proved; otherwise leave the source unbound.
@@ -248,7 +253,6 @@ function normalizeBindings(value: unknown): SourceAccountBindingsRead {
       !purge || typeof purge !== 'object'
       || (purge.reason !== 'account_changed' && purge.reason !== 'previous_account_unknown')
       || typeof purge.detected_at !== 'string'
-      || (purge.failed_at !== undefined && typeof purge.failed_at !== 'string')
     )) return { kind: 'malformed' };
     sources[key as AccountBoundSourceId] = prune({
       ...(typeof entry.provider_account_id === 'string' && entry.provider_account_id.trim()
@@ -261,7 +265,6 @@ function normalizeBindings(value: unknown): SourceAccountBindingsRead {
             purge_required: {
               reason: purge.reason as SourceAccountPurgeReason,
               detected_at: purge.detected_at as string,
-              ...(typeof purge.failed_at === 'string' ? { failed_at: purge.failed_at } : {}),
             },
           }
         : {}),

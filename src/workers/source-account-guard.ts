@@ -48,12 +48,6 @@ export interface SourceAccountGuardOptions {
   registryPath: string;
   /** Whether any of the source's stores (every tier) holds an item row. */
   laneHoldsItems: () => boolean;
-  /**
-   * Ask the supervised worker to restart, so its start-up purge removes the
-   * previous account's stored data before any store is open. False when this
-   * worker cannot restart itself.
-   */
-  requestPurgeRestart: () => boolean;
   broker?: CredentialBroker;
   fetch?: TimeoutFetch;
   identityEndpoints?: ProviderIdentityEndpoints;
@@ -154,23 +148,15 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
           `${options.sourceId}: could not confirm which account the credential belongs to; nothing was synced this run.`,
         );
       }
-      const what = `${options.sourceId} was reconnected to ${decision.reason === 'account_changed' ? 'a different account' : 'an account that could not be matched to the previous one'}. `
-        + 'Nothing syncs until the previous account\'s stored items are removed; ';
-      const current = readSourceAccountBindings(bindingsPath);
-      if (current.kind === 'ok' && current.bindings.sources[options.sourceId]?.purge_required?.failed_at) {
-        // The start-up removal already failed once: another restart would fail
-        // the same way and take every other source down with it.
-        throw new SourceAccountChangedError(
-          'source_account_changed',
-          `${what}removing them at start-up failed. Disconnect the source, run \`olympus data delete --source ${options.sourceId}\`, then connect again.`,
-        );
-      }
-      const restarting = options.requestPurgeRestart();
+      // Fail closed and say exactly what clears it. Olympus does not delete
+      // the previous account's items by itself: the index can hold mail and
+      // files the provider no longer has, and whole-source deletion is the
+      // deliberate CLI-only flow (docs/V0_4_RELEASE.md).
       throw new SourceAccountChangedError(
         'source_account_changed',
-        what + (restarting
-          ? 'the worker is restarting to remove them.'
-          : 'restart the Olympus worker to remove them.'),
+        `${options.sourceId} is now connected to ${decision.reason === 'account_changed' ? 'a different account' : 'an account that could not be matched to the one its items came from'}, `
+          + 'so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. '
+          + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`,
       );
     },
   };

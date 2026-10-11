@@ -9,9 +9,10 @@
   belongs to (Dropbox asks for `account_info.read`, which every Dropbox app
   already has), and before any sync the worker checks that the token, the
   connected grant and the items already stored name the same account. When
-  a reconnect changed the account, the source stops, the worker restarts and
-  removes the previous account's stored items (as `olympus data delete
-  --source` would), then syncs the new account from scratch.
+  a reconnect changed the account, the source stops and says why. Nothing is
+  deleted for you: reconnect the previous account to carry on, or Disconnect,
+  run `olympus data delete --source <id>`, and connect again to start over
+  with the new one.
 - **Olympus on a server opens on your computer.** When the engine runs on a
   server (`olympus server-mode on --ssh-target you@your-server`, or found
   automatically on a Linux host with no screen), Connect and "Fix this on

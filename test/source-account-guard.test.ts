@@ -1,8 +1,9 @@
-// The worker's account check in front of every Dropbox, Drive and Gmail task,
-// and the start-up purge it hands off to when a reconnect changed the account.
+// The worker's account check in front of every Dropbox, Drive and Gmail task.
+// An account change fails closed: nothing syncs and nothing is deleted until
+// the owner removes the previous account's items or reconnects that account.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -12,14 +13,11 @@ import {
 } from '../src/core/source-account-binding.ts';
 import { upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import type { CredentialBroker, CredentialSessionRequest } from '../src/workers/credential-broker/index.ts';
-import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { defaultDropboxConnectorStoreDbPath } from '../src/workers/dropbox-files/index.ts';
 import {
   accountBoundSchedulerSource,
   createSourceAccountGuard,
   SourceAccountChangedError,
 } from '../src/workers/source-account-guard.ts';
-import { purgeSourcesAwaitingAccountChange } from '../src/workers/source-account-purge.ts';
 import type { SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 
 const dirs: string[] = [];
@@ -55,7 +53,6 @@ function harness(input: {
 }) {
   const issued: CredentialSessionRequest[] = [];
   const lookups: string[] = [];
-  let restarts = 0;
   const broker: CredentialBroker = {
     async issueSession(request) {
       issued.push(request);
@@ -84,10 +81,6 @@ function harness(input: {
     capability: 'dropbox.files.sync',
     registryPath: input.registryPath,
     laneHoldsItems: () => input.holdsItems ?? true,
-    requestPurgeRestart: () => {
-      restarts += 1;
-      return true;
-    },
     broker,
     fetch: async (_url, init) => {
       const token = String((init.headers as Record<string, string>).Authorization).replace('Bearer token-of-', '');
@@ -98,7 +91,7 @@ function harness(input: {
     },
     now: () => new Date('2026-10-10T22:43:00.000Z'),
   });
-  return { guard, issued, lookups, restarts: () => restarts };
+  return { guard, issued, lookups };
 }
 
 function binding(registryPath: string) {
@@ -120,38 +113,56 @@ describe('the account guard', () => {
     expect(ran).toBe(0);
   });
 
-  test('a reconnect to a different account over stored items stops sync, marks the purge and restarts', async () => {
+  test('a reconnect to a different account over stored items stops sync and deletes nothing', async () => {
     const registryPath = join(tempDir(), 'handles.json');
     writeGrant(registryPath, 'dbid:demo');
     updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({ provider_account_id: 'dbid:main' }));
-    const { guard, restarts } = harness({ registryPath, tokenAccount: 'dbid:demo' });
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:demo' });
     let ran = 0;
     const source = accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard });
 
     const error = await source.tasks[0]!.run().catch((reason: unknown) => reason);
     expect((error as SourceAccountChangedError).code).toBe('source_account_changed');
-    expect((error as Error).message).toContain('restarting');
+    // Both routes out, in words: keep (reconnect the previous account) or
+    // replace (the deliberate CLI deletion flow).
+    expect((error as Error).message).toContain('reconnect the previous account');
+    expect((error as Error).message).toContain('olympus data delete --source dropbox.files');
     expect(ran).toBe(0);
-    expect(restarts()).toBe(1);
     expect(binding(registryPath)).toMatchObject({
       provider_account_id: 'dbid:main',
       purge_required: { reason: 'account_changed' },
     });
+    // Asked again, the same answer: it never escalates to deleting anything.
+    expect((await source.tasks[0]!.run().catch((reason: unknown) => reason) as SourceAccountChangedError).code)
+      .toBe('source_account_changed');
   });
 
-  test('after a failed start-up purge the source stays stopped without restarting the worker again', async () => {
+  test('reconnecting the previous account lifts the marker and sync resumes', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:main');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({
+      provider_account_id: 'dbid:main',
+      purge_required: { reason: 'account_changed', detected_at: '2026-10-10T22:43:00.000Z' },
+    }));
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:main' });
+    let ran = 0;
+    await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run();
+    expect(ran).toBe(1);
+    expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:main', bound_at: '2026-10-10T22:43:00.000Z' });
+  });
+
+  test('once the owner has removed the previous account\'s items, the new account is bound', async () => {
     const registryPath = join(tempDir(), 'handles.json');
     writeGrant(registryPath, 'dbid:demo');
     updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({
       provider_account_id: 'dbid:main',
-      purge_required: { reason: 'account_changed', detected_at: '2026-10-10T22:43:00.000Z', failed_at: '2026-10-10T22:44:00.000Z' },
+      purge_required: { reason: 'account_changed', detected_at: '2026-10-10T22:43:00.000Z' },
     }));
-    const { guard, restarts } = harness({ registryPath, tokenAccount: 'dbid:demo' });
-    const error = await accountBoundSchedulerSource({ source: lane(() => undefined), guard }).tasks[0]!.run()
-      .catch((reason: unknown) => reason);
-    expect((error as SourceAccountChangedError).code).toBe('source_account_changed');
-    expect((error as Error).message).toContain('olympus data delete --source dropbox.files');
-    expect(restarts()).toBe(0);
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:demo', holdsItems: false });
+    let ran = 0;
+    await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run();
+    expect(ran).toBe(1);
+    expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:demo', bound_at: '2026-10-10T22:43:00.000Z' });
   });
 
   test('a bound source whose token cannot be identified does not sync on the grant\'s word', async () => {
@@ -189,60 +200,6 @@ describe('the account guard', () => {
     await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run();
     expect(ran).toBe(1);
     expect(binding(registryPath)).toBeUndefined();
-  });
-});
-
-describe('the start-up purge', () => {
-  test('removes the source\'s stores and unbinds it; a source not marked is untouched', () => {
-    const dir = tempDir();
-    const env = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'xdg-data') };
-    const registryPath = join(dir, 'handles.json');
-    const storePath = defaultDropboxConnectorStoreDbPath(env);
-    const store = new LocalConnectorStore({
-      dbPath: storePath,
-      corpusId: 'secure_local.dropbox.files',
-      family: 'file',
-      trustDomain: 'secure_local',
-    });
-    expect(store.holdsAnyItem()).toBe(false);
-    store.close();
-    expect(existsSync(storePath)).toBe(true);
-    const path = sourceAccountBindingsPath(registryPath);
-    updateSourceAccountBinding(path, 'dropbox.files', () => ({
-      provider_account_id: 'dbid:main',
-      purge_required: { reason: 'account_changed', detected_at: '2026-10-10T22:43:00.000Z' },
-    }));
-    updateSourceAccountBinding(path, 'gmail.email', () => ({ provider_account_id: 'google:abc' }));
-
-    const outcomes = purgeSourcesAwaitingAccountChange({ registryPath, env, homeDir: env.HOME });
-
-    expect(outcomes).toEqual([{ sourceId: 'dropbox.files', status: 'purged', removedPaths: expect.any(Number) }]);
-    expect(existsSync(storePath)).toBe(false);
-    const read = readSourceAccountBindings(path);
-    expect(read.kind === 'ok' && read.bindings.sources).toEqual({ 'gmail.email': { provider_account_id: 'google:abc' } });
-  });
-
-  test('a removal that fails is recorded, so the guard stops asking for restarts', () => {
-    const dir = tempDir();
-    const env = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'xdg-data') };
-    const registryPath = join(dir, 'handles.json');
-    // A directory where the store file should be: removal refuses it.
-    mkdirSync(join(defaultDropboxConnectorStoreDbPath(env), 'not-a-store'), { recursive: true });
-    const path = sourceAccountBindingsPath(registryPath);
-    updateSourceAccountBinding(path, 'dropbox.files', () => ({
-      provider_account_id: 'dbid:main',
-      purge_required: { reason: 'account_changed', detected_at: '2026-10-10T22:43:00.000Z' },
-    }));
-
-    expect(purgeSourcesAwaitingAccountChange({ registryPath, env, homeDir: env.HOME }))
-      .toEqual([{ sourceId: 'dropbox.files', status: 'failed', removedPaths: 0 }]);
-    const read = readSourceAccountBindings(path);
-    expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']?.purge_required?.failed_at).toBeTruthy();
-  });
-
-  test('does nothing without a marker', () => {
-    const dir = tempDir();
-    expect(purgeSourcesAwaitingAccountChange({ registryPath: join(dir, 'handles.json'), env: { HOME: dir } })).toEqual([]);
   });
 });
 

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { fetchWithTimeout, type TimeoutFetch } from './http-timeout.ts';
+import { fetchBoundedText, type TimeoutFetch } from './http-timeout.ts';
 
 /**
  * Which provider account an OAuth access token belongs to, for the file
@@ -42,7 +42,7 @@ export const DEFAULT_PROVIDER_IDENTITY_ENDPOINTS: Required<ProviderIdentityEndpo
   google_drive: 'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)',
 };
 
-const IDENTITY_RESPONSE_LIMIT_CHARS = 64 * 1024;
+const IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 const DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
 
 export class ProviderAccountIdentityError extends Error {
@@ -87,13 +87,14 @@ export async function fetchProviderAccountId(options: {
   let response: Response;
   let text: string;
   try {
-    response = await fetchWithTimeout(
+    // One deadline and one byte cap over headers AND body: every guarded
+    // sync awaits this, so a stalled or endless body must not hang a lane.
+    ({ response, text } = await fetchBoundedText(
       options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)),
       endpoint,
       init,
-      options.timeoutMs ?? 15_000,
-    );
-    text = await response.text();
+      { timeoutMs: options.timeoutMs ?? 15_000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES },
+    ));
   } catch {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not answer the account lookup.`);
   }
@@ -104,7 +105,6 @@ export async function fetchProviderAccountId(options: {
   }
   let payload: Record<string, unknown>;
   try {
-    if (text.length > IDENTITY_RESPONSE_LIMIT_CHARS) throw new Error('oversized');
     const parsed = JSON.parse(text) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
     payload = parsed as Record<string, unknown>;

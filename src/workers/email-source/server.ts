@@ -348,7 +348,6 @@ import {
   createSourceAccountGuard,
   type SourceAccountGuard,
 } from '../source-account-guard.ts';
-import { purgeSourcesAwaitingAccountChange } from '../source-account-purge.ts';
 import type { AccountBoundProvider } from '../../core/provider-account-identity.ts';
 import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
@@ -1808,17 +1807,6 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
 }
 
 export async function main(): Promise<void> {
-  // Before anything opens a store: a file source reconnected to a different
-  // account has its previous account's stored data removed here, the only
-  // point in a live worker where no handle to it is open.
-  for (const outcome of purgeSourcesAwaitingAccountChange({
-    registryPath: handleRegistryPathFromEnv(process.env, true),
-    env: process.env,
-  })) {
-    console.log(outcome.status === 'purged'
-      ? `[source-account] ${outcome.sourceId}: removed the previous account's stored data (${outcome.removedPaths} paths) after a reconnect to a different account.`
-      : `[source-account] ${outcome.sourceId}: could not remove the previous account's stored data; the source stays stopped.`);
-  }
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010');
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
@@ -3630,8 +3618,8 @@ export async function main(): Promise<void> {
     onDemand: ReadonlyArray<OnDemandTierStore | undefined>,
   ) => (): boolean => stores.some((store) => store?.holdsAnyItem() === true)
     // A tier store not opened this run counts as holding items when its file
-    // exists: the purge removes it either way, and guessing "empty" could bind
-    // a new account over a previous account's rows.
+    // exists: guessing "empty" could bind a new account over a previous
+    // account's rows.
     || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false);
   const withSourceAccountGuard = (
     source: SourceSchedulerSource | undefined,
@@ -3654,7 +3642,6 @@ export async function main(): Promise<void> {
         capability: lane.capability,
         registryPath: connectedHandleRegistryPath,
         laneHoldsItems: lane.laneHoldsItems,
-        requestPurgeRestart: () => requestModelReload(),
       });
       sourceAccountGuards.set(key, guard);
     }
@@ -4397,9 +4384,6 @@ export async function main(): Promise<void> {
       ? {
           sourceDashboard: {
             sovereigntyEngine,
-            // A reconnect to a different account: restart now so the start-up
-            // purge removes the previous account's items instead of serving them.
-            onSourceAccountPurgeRequired: () => { requestModelReload(); },
             modelSetup: getModelSetup,
             checkModelSetup: () => modelSetup.checkLocalModels(),
             connectModelKey,
