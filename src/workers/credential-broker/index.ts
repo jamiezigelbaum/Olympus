@@ -1318,10 +1318,16 @@ export class EnvCredentialBroker implements CredentialBroker {
     // marker is what makes that window visible afterwards. A store that cannot
     // accept the marker also cannot accept the rotation, so refuse now rather
     // than spend a token whose replacement would have nowhere to live.
-    await commitFileLease(
+    // The claim is taken under grant custody, after checking the token just
+    // read still belongs to the grant this mint is for: a reconnect landing
+    // between the definition read and the secret read would otherwise spend
+    // the new grant's refresh token under the old generation, and the
+    // superseded outcome would then be discarded with the rotation in it (PR
+    // review on this change).
+    await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(
       lease,
       () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now),
-    );
+    ));
 
     const exchangeVia = this.resolveExchangeVia(definition, oauth2, clientId);
 

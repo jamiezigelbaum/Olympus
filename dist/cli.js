@@ -3428,7 +3428,7 @@ class EnvCredentialBroker {
     if (storedState?.status === "reauth_required" || registryMarksReauthRequired(definition) || !refreshToken) {
       throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
     }
-    await commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now));
+    await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now)));
     const exchangeVia = this.resolveExchangeVia(definition, oauth2, clientId);
     let tokenResponse;
     try {

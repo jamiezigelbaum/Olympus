@@ -245,6 +245,52 @@ describe('minted access tokens are bound to the grant that minted them', () => {
       .toBe('refresh-token-account-b');
   });
 
+  test('a reconnect landing before the refresh token is read never spends it under the old grant (PR review)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const sent: string[] = [];
+    // The reconnect publishes between the broker reading the grant's
+    // definition (generation A) and reading the refresh token (now B's).
+    let reconnected = false;
+    const racingStore: SecretStore = {
+      ...secretStore,
+      async get(key) {
+        if (key === 'dropbox.personal.oauth.refresh_token' && !reconnected) {
+          reconnected = true;
+          await secretStore.set(key, 'refresh-token-account-b');
+          writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+        }
+        return secretStore.get(key);
+      },
+    };
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore: racingStore,
+      oauth2CacheNamespace: `reconnect-preread-${registryPath}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        sent.push(refreshToken);
+        return new Response(JSON.stringify({
+          access_token: `access-for-${refreshToken}`,
+          refresh_token: `rotated-${refreshToken}`,
+          expires_in: 14_400,
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      },
+    });
+
+    const superseded = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect(reconnected).toBe(true);
+    expect((superseded as { code?: string }).code).toBe('credential_refresh_busy');
+    // B's token was never sent under generation A.
+    expect(sent).toEqual([]);
+    expect(secretStore.values.get('dropbox.personal.oauth.refresh_token')).toBe('refresh-token-account-b');
+
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+    expect(sent).toEqual(['refresh-token-account-b']);
+  });
+
   test('an environment-supplied refresh token that changes is a new cache identity (Codex round 1 #5)', async () => {
     const env: Record<string, string | undefined> = {
       OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_CLIENT_ID: 'dropbox-client-id-fixture',
