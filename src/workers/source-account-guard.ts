@@ -30,7 +30,7 @@ import type { SourceSchedulerSource } from './source-scheduler.ts';
  * record it keeps and the 2026-10-10 incident it closes.
  */
 export class SourceAccountChangedError extends Error {
-  readonly code: 'source_account_changed' | 'source_account_token_mismatch' | 'source_account_unverified';
+  readonly code: 'source_account_changed' | 'source_account_token_mismatch' | 'source_account_unverified' | 'source_stores_reopen_required';
 
   constructor(code: SourceAccountChangedError['code'], message: string) {
     super(message);
@@ -48,6 +48,14 @@ export interface SourceAccountGuardOptions {
   registryPath: string;
   /** Whether any of the source's stores (every tier) holds an item row. */
   laneHoldsItems: () => boolean;
+  /**
+   * Whether a store this process holds open was deleted or replaced on disk
+   * (a `data delete --source` while the worker stayed up). Its open handle
+   * would still report the deleted rows and swallow new writes.
+   */
+  laneStoresStale?: () => boolean;
+  /** Ask a supervised worker to restart and reopen its stores; false when it cannot. */
+  requestStoreReopen?: () => boolean;
   broker?: CredentialBroker;
   fetch?: TimeoutFetch;
   identityEndpoints?: ProviderIdentityEndpoints;
@@ -102,6 +110,17 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
         .find((entry) => entry.handle === options.handle);
       if (!handle) {
         throw new SourceAccountChangedError('source_account_unverified', `${options.sourceId} is not connected.`);
+      }
+      if (options.laneStoresStale?.()) {
+        // Before anything else: the open stores no longer are the source's
+        // stores, so neither the account decision nor the task can use them.
+        const restarting = options.requestStoreReopen?.() ?? false;
+        throw new SourceAccountChangedError(
+          'source_stores_reopen_required',
+          restarting
+            ? `${options.sourceId}'s stored data was deleted while the worker was running; the worker is restarting to reopen it.`
+            : `${options.sourceId}'s stored data was deleted while the worker was running. Restart the Olympus worker so it reopens the source's stores before syncing.`,
+        );
       }
       const token = await tokenAccountId();
       const decide = (binding: Parameters<typeof decideSourceAccountAction>[0]['binding']): SourceAccountDecision =>

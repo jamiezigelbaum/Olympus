@@ -50,7 +50,10 @@ function harness(input: {
   tokenAccount: string;
   holdsItems?: boolean;
   identityStatus?: number;
+  storesStale?: boolean;
+  restarts?: boolean;
 }) {
+  let reopenRequests = 0;
   const issued: CredentialSessionRequest[] = [];
   const lookups: string[] = [];
   const broker: CredentialBroker = {
@@ -81,6 +84,8 @@ function harness(input: {
     capability: 'dropbox.files.sync',
     registryPath: input.registryPath,
     laneHoldsItems: () => input.holdsItems ?? true,
+    laneStoresStale: () => input.storesStale ?? false,
+    requestStoreReopen: () => { reopenRequests += 1; return input.restarts ?? false; },
     broker,
     fetch: async (_url, init) => {
       const token = String((init.headers as Record<string, string>).Authorization).replace('Bearer token-of-', '');
@@ -91,7 +96,7 @@ function harness(input: {
     },
     now: () => new Date('2026-10-10T22:43:00.000Z'),
   });
-  return { guard, issued, lookups };
+  return { guard, issued, lookups, reopenRequests: () => reopenRequests };
 }
 
 function binding(registryPath: string) {
@@ -100,6 +105,32 @@ function binding(registryPath: string) {
 }
 
 describe('the account guard', () => {
+  test('stores deleted while the worker stayed up are reopened before anything is decided or synced (PR review)', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:demo');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({
+      provider_account_id: 'dbid:main',
+      purge_required: { reason: 'account_changed', detected_at: '2026-10-10T22:42:30.000Z' },
+    }));
+    for (const restarts of [true, false]) {
+      const { guard, issued, reopenRequests } = harness({ registryPath, tokenAccount: 'dbid:demo', storesStale: true, restarts });
+      let ran = 0;
+      const source = accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard });
+      const error = await source.tasks[0]!.run().catch((reason: unknown) => reason);
+      expect((error as SourceAccountChangedError).code).toBe('source_stores_reopen_required');
+      expect((error as Error).message).toContain(restarts ? 'restarting' : 'Restart the Olympus worker');
+      expect(reopenRequests()).toBe(1);
+      expect(issued).toEqual([]);
+      expect(ran).toBe(0);
+    }
+    // The marker stands until a worker with freshly opened (empty) stores decides.
+    expect(binding(registryPath)).toMatchObject({ purge_required: { reason: 'account_changed' } });
+    const reopened = harness({ registryPath, tokenAccount: 'dbid:demo', holdsItems: false });
+    await accountBoundSchedulerSource({ source: lane(() => undefined), guard: reopened.guard }).tasks[0]!.run();
+    expect(binding(registryPath)).toMatchObject({ provider_account_id: 'dbid:demo' });
+    expect((binding(registryPath) as { purge_required?: unknown }).purge_required).toBeUndefined();
+  });
+
   test('the 2026-10-10 shape: a cached token for the first account under the second account\'s grant never syncs', async () => {
     const registryPath = join(tempDir(), 'handles.json');
     writeGrant(registryPath, 'dbid:demo');

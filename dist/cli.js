@@ -21174,6 +21174,16 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
+function fileIdentity(path) {
+  if (path === ":memory:" || path === "")
+    return;
+  try {
+    const stat2 = statSync9(path);
+    return { dev: stat2.dev, ino: stat2.ino };
+  } catch {
+    return;
+  }
+}
 var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -21272,6 +21282,7 @@ var init_local_index = __esm(() => {
   };
   LocalConnectorStore = class LocalConnectorStore {
     dbPath;
+    openedFile;
     corpusId;
     family;
     trustDomain;
@@ -21322,6 +21333,7 @@ var init_local_index = __esm(() => {
         mkdirSync12(dirname17(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database3(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
+      this.openedFile = fileIdentity(this.dbPath);
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
         assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
@@ -25914,6 +25926,12 @@ var init_local_index = __esm(() => {
     }
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
+    }
+    fileReplacedOrRemoved() {
+      if (!this.openedFile)
+        return false;
+      const current = fileIdentity(this.dbPath);
+      return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
     }
     status(scope) {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
@@ -116477,6 +116495,10 @@ function createSourceAccountGuard(options) {
       if (!handle) {
         throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId} is not connected.`);
       }
+      if (options.laneStoresStale?.()) {
+        const restarting = options.requestStoreReopen?.() ?? false;
+        throw new SourceAccountChangedError("source_stores_reopen_required", restarting ? `${options.sourceId}'s stored data was deleted while the worker was running; the worker is restarting to reopen it.` : `${options.sourceId}'s stored data was deleted while the worker was running. Restart the Olympus worker so it reopens the source's stores before syncing.`);
+      }
       const token = await tokenAccountId();
       const decide = (binding) => decideSourceAccountAction({
         binding,
@@ -131130,7 +131152,10 @@ async function main() {
     handles: readActiveConnectedHandles(process.env)
   }));
   const sourceAccountGuards = new Map;
-  const holdsItems = (stores, onDemand) => () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false);
+  const laneStores = (stores, onDemand) => ({
+    laneHoldsItems: () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
+    laneStoresStale: () => stores.some((store) => store?.fileReplacedOrRemoved() === true) || onDemand.some((leg) => leg?.current()?.fileReplacedOrRemoved() === true)
+  });
   const withSourceAccountGuard = (source, lane) => {
     if (!source || !lane.handle || !connectedHandleRegistryPath)
       return source;
@@ -131144,7 +131169,9 @@ ${lane.handle}`;
         handle: lane.handle,
         capability: lane.capability,
         registryPath: connectedHandleRegistryPath,
-        laneHoldsItems: lane.laneHoldsItems
+        laneHoldsItems: lane.laneHoldsItems,
+        laneStoresStale: lane.laneStoresStale,
+        requestStoreReopen: () => requestModelReload()
       });
       sourceAccountGuards.set(key, guard);
     }
@@ -131256,7 +131283,7 @@ ${lane.handle}`;
           provider: "gmail",
           capability: "gmail.email.sync",
           handle: currentGmailHandle?.handle,
-          laneHoldsItems: holdsItems([gmailInternalConnectorStore, gmailSecureConnectorStore], [gmailTierLane?.publicStore])
+          ...laneStores([gmailInternalConnectorStore, gmailSecureConnectorStore], [gmailTierLane?.publicStore])
         });
       }),
       recordLane(SCHEDULER_SOURCE_IDS.googleDrive, !currentGoogleDriveHandle ? "no_handle" : !currentGoogleDriveScopeRef ? "scope_pending" : undefined, () => {
@@ -131273,7 +131300,7 @@ ${lane.handle}`;
           provider: "google_drive",
           capability: "google_drive.docs.sync",
           handle: currentGoogleDriveHandle?.handle,
-          laneHoldsItems: holdsItems([googleDriveInternalConnectorStore, googleDriveSecureConnectorStore], [googleDriveTierLane?.publicStore])
+          ...laneStores([googleDriveInternalConnectorStore, googleDriveSecureConnectorStore], [googleDriveTierLane?.publicStore])
         });
       }),
       recordLane(SCHEDULER_SOURCE_IDS.dropbox, !currentDropboxHandle ? "no_handle" : !currentDropboxScopeRef ? "scope_pending" : !currentDropboxProviderStoreSync || !dropboxConnectorStore ? "no_store_sync" : undefined, () => {
@@ -131297,7 +131324,7 @@ ${lane.handle}`;
           provider: "dropbox",
           capability: "dropbox.files.sync",
           handle: currentDropboxHandle?.handle,
-          laneHoldsItems: holdsItems([dropboxConnectorStore], dropboxTierLane ? [dropboxTierLane.internal, dropboxTierLane.public] : [])
+          ...laneStores([dropboxConnectorStore], dropboxTierLane ? [dropboxTierLane.internal, dropboxTierLane.public] : [])
         });
       }),
       recordLane(SCHEDULER_SOURCE_IDS.readwise, !currentReadwiseHandle ? "no_handle" : !currentReadwiseConnectorStoreSync ? "no_store_sync" : undefined, () => createReadwiseSchedulerSource({

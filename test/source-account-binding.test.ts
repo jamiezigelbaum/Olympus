@@ -268,3 +268,31 @@ describe('provider account identity', () => {
     })).rejects.toThrow('status 401');
   });
 });
+
+describe('a connector store notices its file was deleted under it', () => {
+  test('removed or replaced on disk, the open store says so; a fresh open does not', async () => {
+    const { LocalConnectorStore } = await import('../src/workers/connector-store/local-index.ts');
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-store-identity-'));
+    try {
+      const dbPath = join(dir, 'dropbox.sqlite');
+      const open = () => new LocalConnectorStore({ dbPath, corpusId: 'dropbox.files', family: 'file', trustDomain: 'internal' });
+      const before = open();
+      expect(before.fileReplacedOrRemoved()).toBe(false);
+      // What `olympus data delete --source` does while the worker stays up.
+      for (const suffix of ['', '-wal', '-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
+      expect(before.fileReplacedOrRemoved()).toBe(true);
+      const after = open();
+      expect(after.fileReplacedOrRemoved()).toBe(false);
+      expect(after.holdsAnyItem()).toBe(false);
+      // The old handle stays stale: its file is not the one at the path.
+      expect(before.fileReplacedOrRemoved()).toBe(true);
+      before.close();
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

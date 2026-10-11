@@ -3613,14 +3613,20 @@ export async function main(): Promise<void> {
   // reads with, the connected grant and the stored items name one account.
   // Kept across scheduler rebuilds so a token is looked up once, not per pass.
   const sourceAccountGuards = new Map<string, SourceAccountGuard>();
-  const holdsItems = (
+  const laneStores = (
     stores: ReadonlyArray<LocalConnectorStore | undefined>,
     onDemand: ReadonlyArray<OnDemandTierStore | undefined>,
-  ) => (): boolean => stores.some((store) => store?.holdsAnyItem() === true)
-    // A tier store not opened this run counts as holding items when its file
-    // exists: guessing "empty" could bind a new account over a previous
-    // account's rows.
-    || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false);
+  ) => ({
+    laneHoldsItems: (): boolean => stores.some((store) => store?.holdsAnyItem() === true)
+      // A tier store not opened this run counts as holding items when its file
+      // exists: guessing "empty" could bind a new account over a previous
+      // account's rows.
+      || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
+    // A `data delete --source` while the worker stayed up leaves these
+    // handles on deleted files (PR review): only a restart reopens them.
+    laneStoresStale: (): boolean => stores.some((store) => store?.fileReplacedOrRemoved() === true)
+      || onDemand.some((leg) => leg?.current()?.fileReplacedOrRemoved() === true),
+  });
   const withSourceAccountGuard = (
     source: SourceSchedulerSource | undefined,
     lane: {
@@ -3629,6 +3635,7 @@ export async function main(): Promise<void> {
       capability: string;
       handle: string | undefined;
       laneHoldsItems: () => boolean;
+      laneStoresStale: () => boolean;
     },
   ): SourceSchedulerSource | undefined => {
     if (!source || !lane.handle || !connectedHandleRegistryPath) return source;
@@ -3642,6 +3649,8 @@ export async function main(): Promise<void> {
         capability: lane.capability,
         registryPath: connectedHandleRegistryPath,
         laneHoldsItems: lane.laneHoldsItems,
+        laneStoresStale: lane.laneStoresStale,
+        requestStoreReopen: () => requestModelReload(),
       });
       sourceAccountGuards.set(key, guard);
     }
@@ -3808,7 +3817,7 @@ export async function main(): Promise<void> {
             provider: 'gmail',
             capability: 'gmail.email.sync',
             handle: currentGmailHandle?.handle,
-            laneHoldsItems: holdsItems([gmailInternalConnectorStore, gmailSecureConnectorStore], [gmailTierLane?.publicStore]),
+            ...laneStores([gmailInternalConnectorStore, gmailSecureConnectorStore], [gmailTierLane?.publicStore]),
           });
         },
       ),
@@ -3832,7 +3841,7 @@ export async function main(): Promise<void> {
             provider: 'google_drive',
             capability: 'google_drive.docs.sync',
             handle: currentGoogleDriveHandle?.handle,
-            laneHoldsItems: holdsItems(
+            ...laneStores(
               [googleDriveInternalConnectorStore, googleDriveSecureConnectorStore],
               [googleDriveTierLane?.publicStore],
             ),
@@ -3878,7 +3887,7 @@ export async function main(): Promise<void> {
             provider: 'dropbox',
             capability: 'dropbox.files.sync',
             handle: currentDropboxHandle?.handle,
-            laneHoldsItems: holdsItems(
+            ...laneStores(
               [dropboxConnectorStore],
               dropboxTierLane ? [dropboxTierLane.internal, dropboxTierLane.public] : [],
             ),
