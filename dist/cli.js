@@ -54113,7 +54113,7 @@ function createManagedToolsJob(options = {}) {
     settled: () => current
   };
 }
-var ZKAPI_VERSION = "0.1.6-olympus2", ZKAPI_RELEASE, ZKAPI_REQUIRED, ZKAPI_RENAME, TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve9) => {
+var ZKAPI_VERSION = "0.1.6-olympus2", ZKAPI_RELEASE = "https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2", ZKAPI_REQUIRED, ZKAPI_RENAME, TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve9) => {
   execFile(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
     if (!error) {
       resolve9({ code: 0, stdout, stderr });
@@ -54138,7 +54138,6 @@ var ZKAPI_VERSION = "0.1.6-olympus2", ZKAPI_RELEASE, ZKAPI_REQUIRED, ZKAPI_RENAM
 });
 var init_managed_tools = __esm(() => {
   init_file_lease();
-  ZKAPI_RELEASE = `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v${ZKAPI_VERSION}`;
   ZKAPI_REQUIRED = [
     "bin/zkapi-clientd",
     "bin/zkapi-walletd",

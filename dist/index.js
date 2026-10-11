@@ -16654,7 +16654,7 @@ import { homedir as homedir8 } from "node:os";
 import { dirname as dirname10, isAbsolute as isAbsolute10, join as join15, posix, sep as sep3 } from "node:path";
 init_file_lease();
 var ZKAPI_VERSION = "0.1.6-olympus2";
-var ZKAPI_RELEASE = `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v${ZKAPI_VERSION}`;
+var ZKAPI_RELEASE = "https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2";
 var ZKAPI_REQUIRED = [
   "bin/zkapi-clientd",
   "bin/zkapi-walletd",
