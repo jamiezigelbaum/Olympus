@@ -20,6 +20,8 @@ Environment=RELAY_ENGINE_PORT=8010
 Environment=RELAY_REGISTRY_PATH=/var/lib/olympus-relay/registry.jsonl
 # OpenAI's domain verification token (one line, readable by user relay); absent answers 404.
 Environment=RELAY_OPENAI_APPS_CHALLENGE_FILE=/etc/olympus-relay/openai-apps-challenge
+# While this file exists the OAuth metadata leaves out CIMD (main.ts); absent by default.
+Environment=RELAY_CIMD_OFF_FILE=/etc/olympus-relay/cimd-off
 StateDirectory=olympus-relay
 StateDirectoryMode=0700
 ExecStart=/usr/local/bin/olympus-relay

@@ -126,6 +126,8 @@ export interface RelayConfig {
    * `/connect/demo/authorize` answers 404.
    */
   readonly demoInstallId?: string;
+  /** Whether the metadata advertises CIMD, read per request (default yes; oauth-metadata.ts). */
+  readonly advertiseCimd?: () => boolean;
   /** OpenAI's domain verification token, read per request; empty or undefined answers 404. */
   readonly appsChallenge?: () => string | undefined;
   /**
@@ -954,7 +956,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         case OAUTH_PATHS.authorizationServer:
           if (request.method === 'OPTIONS') return metadataPreflight();
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, OPTIONS' });
-          return metadataResponse(authorizationServerMetadata(origin));
+          return metadataResponse(authorizationServerMetadata(origin, { advertiseCimd: config.advertiseCimd?.() ?? true }));
         case OAUTH_PATHS.authorize:
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
           return authorizeBridge(url, bridge);
