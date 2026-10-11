@@ -325,8 +325,9 @@ describe('nothing to show', () => {
 
   // Live 2026-10-11: ChatGPT kept an empty frame about 200px tall under a
   // reply with no Private match. The panel stays at zero height and re-sends
-  // it once the result has landed; it never closes itself, since an empty or
-  // pending result is not final and a match may still arrive.
+  // it once the result has landed; it closes itself only on the server's
+  // explicit "none" outcome, since an empty or pending result is not final
+  // and a match may still arrive.
   const closes = (host: Host) => host.calls.filter(([name]) => name === 'requestClose').length;
 
   test('empty initial metadata (no output yet) is not a result: zero height, no close, and a later match shows', async () => {
@@ -366,6 +367,50 @@ describe('nothing to show', () => {
     expect(host.heights().length).toBeGreaterThan(0);
     expect(host.heights().every((height) => height === 0)).toBe(true);
     expect(closes(host)).toBe(0);
+  });
+
+  const NONE = { v: 1, count: 0, state: 'none' };
+
+  test('the explicit "none" outcome closes the empty frame once, at zero height', async () => {
+    const host = mount();
+    await sleep(30);
+    host.push({ content: [], structuredContent: { status: 'found' }, _meta: meta(NONE) });
+    expect(closes(host)).toBe(1);
+    expect(host.text()).toBe('');
+    expect(host.heights().every((height) => height === 0)).toBe(true);
+    host.push({ content: [], structuredContent: { status: 'found' }, _meta: meta(NONE) });
+    (host.win as any).dispatchEvent(new (host.win as any).Event('openai:set_globals'));
+    await sleep(20);
+    expect(closes(host)).toBe(1);
+    expect(host.fetched).toHaveLength(0);
+  });
+
+  test('"none" already in the globals at mount closes the frame', async () => {
+    const host = mount({ openai: { toolOutput: { status: 'found' }, toolResponseMetadata: meta(NONE) } });
+    await sleep(30);
+    expect(closes(host)).toBe(1);
+    expect(host.text()).toBe('');
+  });
+
+  test('"none" never closes a panel that is showing a match', async () => {
+    const host = mount({ replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '30' }] });
+    host.push(ready());
+    await host.until(() => host.fetched.length > 0, 'the collection');
+    host.push({ content: [], _meta: meta(NONE) });
+    await sleep(20);
+    expect(closes(host)).toBe(0);
+    expect(host.text()).toContain(W.title);
+  });
+
+  test('anything short of the exact "none" shape never closes', async () => {
+    const host = mount();
+    await sleep(20);
+    for (const value of [{ v: 2, count: 0, state: 'none' }, { v: 1, count: 1, state: 'none' }, { v: 1, state: 'none' }, { v: 1, count: 0, state: 'None' }, 'none']) {
+      host.push({ content: [], structuredContent: { status: 'found' }, _meta: meta(value) });
+    }
+    await sleep(20);
+    expect(closes(host)).toBe(0);
+    expect(host.text()).toBe('');
   });
 
   test('a match that is explicitly withdrawn collapses back to zero height', async () => {

@@ -41,6 +41,7 @@ import type { PrivateQuestionJobs } from './private-question-jobs.ts';
 import { PRIVATE_QUESTION_RESOURCE, privateQuestionResourceHtml, privateQuestionResourceMeta } from './private-question-resource.ts';
 import {
   answerToolMeta,
+  withPrivateAnswerOutcome,
   answerToolResult,
   askAnonymouslyToolResult,
   isAskAnonymouslyResult,
@@ -395,7 +396,29 @@ function askToolListed(ctx: OperationContext): boolean {
   return operation !== undefined && shouldExposeOperation(operation, { config: ctx.config, surface: 'remote' });
 }
 
+/** Tools whose results render the private answer panel (answerToolMeta). */
+const PANEL_TOOL_NAMES: ReadonlySet<string> = new Set(
+  CHATGPT_TOOLS.filter((tool) => tool._meta?.['openai/outputTemplate'] === answerToolMeta()['openai/outputTemplate']).map((tool) => tool.name),
+);
+
+/**
+ * Runs one tool call. Every result of a tool that renders the private answer
+ * panel, errors included, carries an explicit panel outcome: the match, or
+ * "none" so the panel closes instead of leaving an empty frame.
+ */
 export async function callChatGptTool(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: OperationContext,
+  options: ChatGptSurfaceOptions,
+  signal?: AbortSignal,
+  detachedContext?: () => OperationContext,
+): Promise<ChatGptToolResult> {
+  const result = await runChatGptTool(name, args, ctx, options, signal, detachedContext);
+  return PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result;
+}
+
+async function runChatGptTool(
   name: string,
   args: Record<string, unknown>,
   ctx: OperationContext,

@@ -497,9 +497,13 @@ count and state travel only in the widget-only `_meta`; with no match the
 panel renders nothing (zero height), and once a result has landed (the
 host holds its output) without a match it re-sends that zero height, once,
 for the host to size the frame by (live 2026-10-11: an empty frame about
-200 px tall under such a reply). It never closes itself: empty metadata or a
-pending result is not final, and a match arriving later still shows the
-panel. With one, the panel is a compact card,
+200 px tall under such a reply). ChatGPT still kept about 150 px blank, so
+every result of a panel tool (search, source_answer, source_answer_result,
+errors included) now carries an explicit outcome: the match, or
+`{v: 1, count: 0, state: "none"}`. On that exact "none", and only then, the
+panel asks the host to close it (`requestClose`); empty metadata or a
+pending result is not final and never closes it, and a panel already
+showing a match ignores "none". With one, the panel is a compact card,
 **"Private answer from your Mac"**, that collects the answer itself, from
 the relay, as soon as a `ready` result renders (no Show button,
 since 2026-10-01), and shows it as text under the badge

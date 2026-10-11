@@ -5,7 +5,8 @@
  * - Resource: `ui://olympus/private-answer` (MCP Apps HTML), linked from the
  *   answer tools' and olympus_search's `_meta.ui.resourceUri`. Rendered under
  *   every result; it renders nothing (zero height) unless the result's
- *   `_meta` carries a private match.
+ *   `_meta` carries a private match, and closes itself on an explicit
+ *   PrivateAnswerNoneMetaV1.
  * - Tool result `_meta[PRIVATE_ANSWER_META_KEY]`: PrivateAnswerMetaV1 below.
  *   Widget-only; never the model's context. It carries no key, no token, no
  *   answer text.
@@ -67,6 +68,22 @@ export interface PrivateAnswerMetaV1 {
   /** 0-100; only when state is `model_downloading` and known. */
   percent?: number;
 }
+
+/**
+ * The explicit "no private match" outcome: every result of a tool that
+ * renders the panel carries either PrivateAnswerMetaV1 or this, so the panel
+ * can close itself instead of leaving an empty frame (live 2026-10-11:
+ * ChatGPT kept about 150px blank under replies with no Private match even
+ * when the panel reported zero height). Widget-only like the match itself;
+ * the model never sees either.
+ */
+export interface PrivateAnswerNoneMetaV1 {
+  v: 1;
+  count: 0;
+  state: 'none';
+}
+
+export const PRIVATE_ANSWER_NONE_META: PrivateAnswerNoneMetaV1 = Object.freeze({ v: 1, count: 0, state: 'none' }) as PrivateAnswerNoneMetaV1;
 
 export interface PrivateMatchSummary {
   count: number;
