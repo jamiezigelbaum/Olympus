@@ -5168,11 +5168,51 @@ var init_publisher_oauth_client = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
+import { randomUUID as randomUUID4 } from "node:crypto";
 import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync8 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname6, join as join7 } from "node:path";
 function defaultHandleRegistryPath() {
   return join7(homedir6(), ".config", "olympus", "handles.json");
+}
+function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
+  const path = connectedHandleGrantEpochPath(registryPath);
+  if (!existsSync6(path))
+    return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync8(path, "utf8"));
+  } catch {
+    throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
+  }
+  const record = parsed;
+  if (!record || typeof record !== "object" || Array.isArray(record) || record.version !== 1 || typeof record.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record.epoch)) {
+    throw new Error("Olympus credential-grant generation has an unsupported format. Refusing connection changes.");
+  }
+  return record.epoch;
+}
+async function withConnectedHandleGrantCustody(registryPath, options, mutation) {
+  try {
+    return await withFileLease(`${registryPath}.grant-custody`, (lease) => lease.commit(async () => {
+      const currentEpoch = readConnectedHandleGrantEpoch(registryPath);
+      if (options.expectedEpoch !== undefined && options.expectedEpoch !== currentEpoch) {
+        throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
+      }
+      if (options.advanceEpoch === true) {
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID4() }, null, 2)}
+`);
+      }
+      return await mutation();
+    }));
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
+      throw new ConnectedHandleGrantMutationError("credential_grant_busy", "Another connection change is in progress. Retry shortly.");
+    }
+    throw error;
+  }
+}
+function connectedHandleGrantEpochPath(registryPath) {
+  return `${registryPath}.grant-epoch.json`;
 }
 function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
@@ -5280,7 +5320,9 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
       allowedCapabilities: [...handle.allowedCapabilities],
       scopes: [...handle.scopes],
       tokenEnvNames: [],
-      expiresInSeconds: 3600
+      expiresInSeconds: 3600,
+      grantGeneration: `${handle.connectedAt}
+${handle.providerAccountId ?? ""}`
     };
     if (handle.sessionKind)
       definition.sessionKind = handle.sessionKind;
@@ -5439,11 +5481,20 @@ function isStoreRef(value) {
     return false;
   return isSafeSecretKey(value.slice("store:".length));
 }
+var INITIAL_CONNECTED_HANDLE_GRANT_EPOCH = "initial", ConnectedHandleGrantMutationError;
 var init_connected_handles = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_secret_store();
   init_credential_broker();
+  ConnectedHandleGrantMutationError = class ConnectedHandleGrantMutationError extends Error {
+    code;
+    retryable = true;
+    constructor(code, message) {
+      super(message);
+      this.code = code;
+    }
+  };
 });
 
 // src/workers/credential-broker/index.ts
@@ -5520,6 +5571,8 @@ class JsonCredentialOAuth2StateStore {
       if (state.refreshToken !== undefined && previous?.refreshToken !== undefined && state.refreshToken !== previous.refreshToken && state.pendingRefreshStartedAt === undefined) {
         merged.pendingRefreshStartedAt = undefined;
       }
+      if (merged.pendingRefreshStartedAt === undefined)
+        merged.pendingRefreshGrantGeneration = undefined;
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
         await mkdir2(dirname7(this.path), { recursive: true, mode: 448 });
@@ -5700,11 +5753,17 @@ class EnvCredentialBroker {
     return this.mintCachedBearerSession(definition, capability, (cacheKey) => this.issueFreshServiceAccountJwtSession(definition, capability, cacheKey));
   }
   async mintCachedBearerSession(definition, capability, mint) {
-    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability);
+    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability, this.env);
     const now = this.now();
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
-    if (cached && isReusableMintedSession(cached, now))
+    if (cached && isReusableMintedSession(cached, now)) {
+      if (definition.grantGeneration !== undefined && this.findHandle(definition.handle)?.grantGeneration !== definition.grantGeneration) {
+        PROCESS_MINTED_SESSION_CACHE.delete(cacheKey);
+        throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} was reconnected; retry to use the new grant.`, { handle: definition.handle, capability });
+      }
       return cached;
+    }
+    forgetSupersededGrantSessions(this.oauth2CacheNamespace, definition, capability, cacheKey);
     const backoff = PROCESS_MINT_FAILURE_BACKOFF.get(cacheKey);
     if (backoff && now.getTime() < backoff.untilMs)
       throw backoff.error;
@@ -5739,18 +5798,33 @@ class EnvCredentialBroker {
     if (!oauth2)
       throw missingCredentialError(definition.handle, capability);
     const now = this.now();
-    const storedState = await this.oauth2StateStore?.load(definition.handle);
+    let storedState = await this.oauth2StateStore?.load(definition.handle);
     if (storedState?.pendingRefreshStartedAt) {
-      await commitFileLease(lease, async () => {
-        await this.oauth2StateStore?.save(definition.handle, {
-          ...storedState,
-          status: "reauth_required",
-          updatedAt: now.toISOString(),
-          pendingRefreshStartedAt: undefined
+      const pending = storedState.pendingRefreshStartedAt;
+      const resolved = await this.withCurrentGrant(definition, capability, undefined, async () => {
+        const latest = await this.oauth2StateStore?.load(definition.handle);
+        if (!latest?.pendingRefreshStartedAt)
+          return { latched: false, state: latest };
+        if (latest.pendingRefreshGrantGeneration !== undefined && latest.pendingRefreshGrantGeneration !== definition.grantGeneration) {
+          const cleared = { ...latest, pendingRefreshStartedAt: undefined, pendingRefreshGrantGeneration: undefined };
+          await commitFileLease(lease, () => this.oauth2StateStore.save(definition.handle, cleared));
+          return { latched: false, state: cleared };
+        }
+        await commitFileLease(lease, async () => {
+          await this.oauth2StateStore?.save(definition.handle, {
+            ...latest,
+            status: "reauth_required",
+            updatedAt: now.toISOString(),
+            pendingRefreshStartedAt: undefined
+          });
+          this.markRegistryHandleReauthRequired(definition.handle, now);
         });
-        this.markRegistryHandleReauthRequired(definition.handle, now);
+        return { latched: true };
       });
-      throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${storedState.pendingRefreshStartedAt} did not record its outcome, so the stored refresh token may already be spent.`, { handle: definition.handle, capability });
+      if (resolved.latched) {
+        throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${pending} did not record its outcome, so the stored refresh token may already be spent.`, { handle: definition.handle, capability });
+      }
+      storedState = resolved.state;
     }
     const clientId = await this.resolveFirstSecret(oauth2.clientIdEnvNames, oauth2.clientIdSecretRef ? [oauth2.clientIdSecretRef] : []);
     const clientSecret = await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
@@ -5761,7 +5835,7 @@ class EnvCredentialBroker {
     if (storedState?.status === "reauth_required" || registryMarksReauthRequired(definition) || !refreshToken) {
       throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
     }
-    await commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now));
+    await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now)));
     const exchangeVia = this.resolveExchangeVia(definition, oauth2, clientId);
     let tokenResponse;
     try {
@@ -5776,7 +5850,7 @@ class EnvCredentialBroker {
     } catch (error) {
       await lease?.assertOwned();
       if (isTerminalOAuthRefreshError(error)) {
-        await commitFileLease(lease, async () => {
+        await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
           await this.oauth2StateStore?.save(definition.handle, {
             ...storedState,
             status: "reauth_required",
@@ -5784,19 +5858,19 @@ class EnvCredentialBroker {
             pendingRefreshStartedAt: undefined
           });
           this.markRegistryHandleReauthRequired(definition.handle, now);
-        });
+        }));
         throw new CredentialBrokerError("credential_reauth_required", storedState?.pendingRefreshStartedAt ? `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${storedState.pendingRefreshStartedAt} did not record its outcome, so the stored refresh token was already spent.` : `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
       }
       if (error instanceof OAuth2TokenEndpointError) {
         if (TOKEN_UNISSUED_STATUSES.has(error.status)) {
-          await commitFileLease(lease, async () => {
+          await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
             await this.oauth2StateStore?.save(definition.handle, {
               ...storedState,
               status: "available",
               updatedAt: now.toISOString(),
               pendingRefreshStartedAt: undefined
             });
-          });
+          }));
         }
         const brokerError = new CredentialBrokerError("credential_refresh_failed", `Credential handle ${definition.handle} OAuth refresh failed (${error.status}): ${error.safeDetail}`, { handle: definition.handle, capability });
         this.recordMintFailure(cacheKey, brokerError);
@@ -5806,30 +5880,63 @@ class EnvCredentialBroker {
     }
     await lease?.assertOwned();
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
-    await this.persistRefreshedOAuth2State({
-      definition,
-      capability,
-      refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
-      refreshTokenPinnedInEnv,
-      storedState,
-      spentRefreshToken: refreshToken,
-      returnedRefreshToken: tokenResponse.refreshToken,
-      scopes,
-      now,
-      lease
+    return this.withCurrentGrant(definition, capability, refreshToken, async () => {
+      await this.persistRefreshedOAuth2State({
+        definition,
+        capability,
+        refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
+        refreshTokenPinnedInEnv,
+        storedState,
+        spentRefreshToken: refreshToken,
+        returnedRefreshToken: tokenResponse.refreshToken,
+        scopes,
+        now,
+        lease
+      });
+      const session = bearerSessionFromMintedToken({
+        definition,
+        capability,
+        accessToken: tokenResponse.accessToken,
+        scopes,
+        now,
+        expiresInSeconds: tokenResponse.expiresInSeconds
+      });
+      if (isReusableMintedSession(session, now))
+        PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
+      PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
+      return session;
     });
-    const session = bearerSessionFromMintedToken({
-      definition,
-      capability,
-      accessToken: tokenResponse.accessToken,
-      scopes,
-      now,
-      expiresInSeconds: tokenResponse.expiresInSeconds
-    });
-    if (isReusableMintedSession(session, now))
-      PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
-    PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
-    return session;
+  }
+  async withCurrentGrant(definition, capability, spentRefreshToken, commit) {
+    const registryPath = this.connectedHandleRegistryPath;
+    if (!registryPath || definition.grantGeneration === undefined) {
+      await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+      return commit();
+    }
+    try {
+      return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+        await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+        return commit();
+      });
+    } catch (error) {
+      if (error instanceof ConnectedHandleGrantMutationError && error.code === "credential_grant_busy") {
+        throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} is being reconnected; its refresh was not recorded. Retry shortly.`, { handle: definition.handle, capability });
+      }
+      throw error;
+    }
+  }
+  async assertGrantNotSuperseded(definition, capability, spentRefreshToken) {
+    const oauth2 = definition.oauth2Refresh;
+    const current = this.findHandle(definition.handle);
+    if (spentRefreshToken === undefined) {
+      if (current?.grantGeneration === definition.grantGeneration)
+        return;
+      throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} was reconnected; retry to use the new grant.`, { handle: definition.handle, capability });
+    }
+    const onFile = oauth2 ? await this.resolveFirstSecret(oauth2.refreshTokenEnvNames ?? [], oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : []) ?? (await this.oauth2StateStore?.load(definition.handle))?.refreshToken?.trim() : undefined;
+    if (current?.grantGeneration === definition.grantGeneration && onFile === spentRefreshToken)
+      return;
+    throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} was reconnected while a refresh was in flight; that refresh was discarded. Retry to use the new grant.`, { handle: definition.handle, capability });
   }
   async markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now) {
     if (!this.oauth2StateStore)
@@ -5837,7 +5944,8 @@ class EnvCredentialBroker {
     try {
       await this.oauth2StateStore.save(definition.handle, {
         ...storedState,
-        pendingRefreshStartedAt: now.toISOString()
+        pendingRefreshStartedAt: now.toISOString(),
+        pendingRefreshGrantGeneration: definition.grantGeneration
       });
     } catch (error) {
       if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
@@ -6129,10 +6237,26 @@ function bearerSessionFromMintedToken(options) {
     }
   };
 }
-function mintedSessionCacheKey(namespace, definition, capability) {
+function mintedSessionCacheKey(namespace, definition, capability, env) {
+  const envRefreshToken = firstNonEmptyEnv(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
+  const envGrant = envRefreshToken ? createHash2("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
+${envGrant}`;
+}
+function mintedSessionCachePrefix(namespace, handle, capability) {
   return `${namespace}
-${definition.handle}
-${capability}`;
+${handle}
+${capability}
+`;
+}
+function forgetSupersededGrantSessions(namespace, definition, capability, currentKey) {
+  const prefix = mintedSessionCachePrefix(namespace, definition.handle, capability);
+  for (const cache of [PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_FAILURE_BACKOFF]) {
+    for (const key of [...cache.keys()]) {
+      if (key !== currentKey && key.startsWith(prefix))
+        cache.delete(key);
+    }
+  }
 }
 function isReusableMintedSession(session, now) {
   if (!session.expiresAt)
@@ -6483,7 +6607,8 @@ function mergeRegistryHandleWithDefault(registry, fallback) {
     ...registry.accountRole ?? fallback.accountRole ? { accountRole: registry.accountRole ?? fallback.accountRole } : {},
     ...registry.trustDomain ?? fallback.trustDomain ? { trustDomain: registry.trustDomain ?? fallback.trustDomain } : {},
     ...registry.expiresInSeconds ?? fallback.expiresInSeconds ? { expiresInSeconds: registry.expiresInSeconds ?? fallback.expiresInSeconds } : {},
-    ...registry.backendState ?? fallback.backendState ? { backendState: registry.backendState ?? fallback.backendState } : {}
+    ...registry.backendState ?? fallback.backendState ? { backendState: registry.backendState ?? fallback.backendState } : {},
+    ...registry.grantGeneration ? { grantGeneration: registry.grantGeneration } : {}
   };
 }
 function backendStateStoreFromEnv(env) {
@@ -6516,6 +6641,7 @@ function normalizeOAuth2HandleState(value, handle) {
   const status = record.status;
   const updatedAt = optionalString2(record.updatedAt);
   const pendingRefreshStartedAt = optionalString2(record.pendingRefreshStartedAt);
+  const pendingRefreshGrantGeneration = typeof record.pendingRefreshGrantGeneration === "string" && record.pendingRefreshGrantGeneration ? record.pendingRefreshGrantGeneration : undefined;
   const scopes = Array.isArray(record.scopes) ? record.scopes.map((item) => optionalString2(item)).filter((item) => !!item) : undefined;
   return {
     ...refreshToken ? { refreshToken } : {},
@@ -6523,7 +6649,8 @@ function normalizeOAuth2HandleState(value, handle) {
     ...scopes && scopes.length > 0 ? { scopes } : {},
     ...status ? { status } : {},
     ...updatedAt ? { updatedAt } : {},
-    ...pendingRefreshStartedAt ? { pendingRefreshStartedAt } : {}
+    ...pendingRefreshStartedAt ? { pendingRefreshStartedAt } : {},
+    ...pendingRefreshStartedAt && pendingRefreshGrantGeneration ? { pendingRefreshGrantGeneration } : {}
   };
 }
 function normalizeBackendState(value, handle, expectedKind) {
@@ -12922,7 +13049,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync8, lstatSync as lstatSync3, mkdirSync as mkdirSync8, statSync as statSync5 } from "node:fs";
 import { dirname as dirname9 } from "node:path";
 import { Database as Database2 } from "bun:sqlite";
@@ -14982,6 +15109,16 @@ function errorMessage2(error) {
 function nowIso() {
   return new Date().toISOString();
 }
+function fileIdentity(path) {
+  if (path === ":memory:" || path === "")
+    return;
+  try {
+    const stat2 = statSync5(path);
+    return { dev: stat2.dev, ino: stat2.ino };
+  } catch {
+    return;
+  }
+}
 var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -15083,6 +15220,7 @@ var init_local_index = __esm(() => {
   };
   LocalConnectorStore = class LocalConnectorStore {
     dbPath;
+    openedFile;
     corpusId;
     family;
     trustDomain;
@@ -15107,7 +15245,7 @@ var init_local_index = __esm(() => {
     constructor(options) {
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID4()}` : this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID5()}` : this.dbPath;
       this.stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
       this.family = options.family;
       this.trustDomain = options.trustDomain;
@@ -15133,6 +15271,7 @@ var init_local_index = __esm(() => {
         mkdirSync8(dirname9(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database2(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
+      this.openedFile = fileIdentity(this.dbPath);
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
         assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
@@ -15438,7 +15577,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID4()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID5()}`;
       const startedAt = nowIso();
       try {
         return this.db.transaction(() => {
@@ -15542,7 +15681,7 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID4()}`;
+      const syncRunId = `connector-tier-move-${randomUUID5()}`;
       const now = nowIso();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -15921,7 +16060,7 @@ var init_local_index = __esm(() => {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID4()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID5()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
@@ -16733,7 +16872,7 @@ var init_local_index = __esm(() => {
         seenIdentities.add(key2);
       }
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID4()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID5()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -17069,7 +17208,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID4()}`;
+        const syncRunId = `connector-relinquish-${randomUUID5()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -17208,7 +17347,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID4()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID5()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -17827,7 +17966,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID4()}`;
+      const syncRunId = `connector-sync-${randomUUID5()}`;
       const startedAt = nowIso();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -19726,6 +19865,15 @@ var init_local_index = __esm(() => {
       const row = this.db.query("SELECT reactions_json FROM items WHERE local_item_id = ? AND tombstoned = 0").get(localItemId);
       return parseStoredSourceReactions(row?.reactions_json);
     }
+    holdsAnyItem() {
+      return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
+    }
+    fileReplacedOrRemoved() {
+      if (!this.openedFile)
+        return false;
+      const current = fileIdentity(this.dbPath);
+      return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
+    }
     status(scope) {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
@@ -20354,7 +20502,7 @@ var END_OF_CENTRAL_DIRECTORY = 101010256, CENTRAL_DIRECTORY_ENTRY = 33639248, LO
 var init_zip = () => {};
 
 // src/workers/source-index/built-in-embedding/assets.ts
-import { createHash as createHash6, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash6, randomUUID as randomUUID6 } from "node:crypto";
 import {
   closeSync as closeSync4,
   createReadStream,
@@ -20527,7 +20675,7 @@ async function liteRtLibraryIntact(runtimeDir, wheel) {
   return expected !== undefined && await sha256File(join8(runtimeDir, basename2(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID5()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID6()}`;
   ensureDirectory(staging);
   try {
     const archivePath = join8(staging, wheel.name);
@@ -20596,7 +20744,7 @@ function runtimeInstalled(runtimeDir, packages) {
   }
 }
 async function installRuntime(fetchImpl, runtimeDir, packages, platform2, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID5()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID6()}`;
   ensureDirectory(staging);
   try {
     for (const pack of packages) {
@@ -20641,7 +20789,7 @@ function runtimeEntryWanted(packageName, path, platform2) {
   return path === "package/package.json" || path.startsWith("package/dist/") || path.startsWith(`package/bin/napi-v6/${os}/${arch}/`) || path === "package/LICENSE" || path === "package/ThirdPartyNotices.txt";
 }
 async function downloadVerified(fetchImpl, url, target, expectedBytes, expected, reporter, label, stallMs) {
-  const partial = `${target}.partial-${process.pid}-${randomUUID5()}`;
+  const partial = `${target}.partial-${process.pid}-${randomUUID6()}`;
   const algorithm = expected.kind === "sha256" ? "sha256" : integrityAlgorithm(expected.expected);
   const hash = createHash6(algorithm);
   let received = 0;
@@ -23899,6 +24047,24 @@ var init_worker_service = __esm(() => {
   WORKER_LOG_TAIL_BYTES = 64 * 1024;
 });
 
+// src/core/provider-account-identity.ts
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+});
+
+// src/core/source-account-binding.ts
+var init_source_account_binding = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+});
+
 // src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
@@ -23913,6 +24079,8 @@ var init_connect = __esm(() => {
   init_connected_handles();
   init_unpaired_sources();
   init_credential_broker();
+  init_provider_account_identity();
+  init_source_account_binding();
   DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
   DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
   OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -32548,7 +32716,7 @@ import {
   rmSync as rmSync4,
   writeFileSync as writeFileSync5
 } from "node:fs";
-import { randomUUID as randomUUID6 } from "node:crypto";
+import { randomUUID as randomUUID7 } from "node:crypto";
 import { homedir as homedir13 } from "node:os";
 import { dirname as dirname14, isAbsolute as isAbsolute5, join as join17 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
@@ -32765,7 +32933,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID6()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID7()}.tmp`;
   try {
     mkdirSync10(dirname14(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
@@ -32865,6 +33033,7 @@ init_model_transport();
 
 // src/workers/email-source/index.ts
 init_google_handle_compatibility();
+init_source_account_binding();
 init_consent_page();
 init_analyst();
 init_types();
@@ -34794,7 +34963,14 @@ init_request_budget();
 var GMAIL_PICKER_DAILY_REQUEST_BUDGET = 4 * GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
 var SKIPPABLE_SYSTEM_LABELS = new Set(["SENT", "CHAT"]);
 
+// src/workers/source-account-guard.ts
+init_provider_account_identity();
+init_source_account_binding();
+init_connected_handles();
+init_credential_broker();
+
 // src/workers/email-source/server.ts
+init_provider_account_identity();
 init_request_budget();
 init_gmail();
 init_mail_source_scope();

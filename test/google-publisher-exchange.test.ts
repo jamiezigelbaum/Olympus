@@ -13,6 +13,7 @@
 // refresh routes on stored provenance (`exchangeVia`) rather than by
 // re-deriving it from the client id every time.
 
+import { DEFAULT_PROVIDER_IDENTITY_ENDPOINTS } from '../src/core/provider-account-identity.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -115,6 +116,9 @@ function fixture(options: FixtureOptions = {}): Fixture {
   }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
   const oauthFetch: OAuthFetch = async (url, init) => {
     const urlString = String(url);
+    // The connected-account lookup (provider-account-identity.ts) is not a
+    // token exchange; it answers here and stays out of the exchange record.
+    if (isGoogleIdentityLookup(urlString)) return googleIdentityResponse();
     calls.push({ url: urlString, init: (init ?? {}) as RequestInit });
     if (urlString === EXCHANGE_URL || urlString === EXCHANGE_REFRESH_URL) return exchangeResponse();
     return googleDirectResponse();
@@ -814,4 +818,15 @@ function memorySecretStore(initial: Record<string, string> = {}): SecretStore {
       return [...secrets.keys()].sort();
     },
   };
+}
+
+function isGoogleIdentityLookup(url: string): boolean {
+  return url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail || url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_drive;
+}
+
+function googleIdentityResponse(): Response {
+  return new Response(JSON.stringify({ emailAddress: 'owner@example.test', user: { emailAddress: 'owner@example.test' } }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }

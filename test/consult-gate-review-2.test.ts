@@ -3,6 +3,7 @@
 // (`known gap:` tests expect a pass and say why).
 
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import type { EvidenceCandidate, EvidencePack } from '../src/core/contracts.ts';
 import {
   consultWriterContextFromPack,
@@ -192,9 +193,19 @@ describe('review 2: bounded work', () => {
   // 0.5 s wall (CPU exceeds wall because Bun's GC threads count). A real
   // regression, such as a quadratic rescan of the identifier, costs seconds
   // of CPU and still fails this bound.
+  // This thread's CPU where Linux can say: process.cpuUsage() also counts
+  // every other thread in the process, and the fast lane runs other test
+  // files in parallel beside this one (twice over the bound on PR #254 while
+  // main measured 0.85 s wall). Elsewhere, the whole process.
   const cpuMs = (): number => {
-    const usage = process.cpuUsage();
-    return (usage.user + usage.system) / 1e3;
+    try {
+      const fields = readFileSync('/proc/thread-self/stat', 'utf8').split(') ')[1]!.split(' ');
+      // utime and stime (fields 14 and 15), in 100 Hz clock ticks.
+      return (Number(fields[11]) + Number(fields[12])) * 10;
+    } catch {
+      const usage = process.cpuUsage();
+      return (usage.user + usage.system) / 1e3;
+    }
   };
   const question = `Is ${'z '.repeat(76)}it?`;
   test('a half-megabyte single-letter identifier against a long question', () => {

@@ -1,0 +1,524 @@
+// A reconnect must never be served a token minted from the grant it replaced.
+//
+// 2026-10-10, reviewer demo: Dropbox was connected with one account, then at
+// once with another. The second connect replaced the refresh token, but the
+// broker's process cache (keyed by handle and capability only) kept handing the
+// worker the first account's access token for the rest of its four-hour life,
+// and 14,806 of the first account's files were indexed under the second
+// account's credential.
+
+import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { SecretStore } from '../src/core/secret-store.ts';
+import {
+  readConnectedHandleRegistry,
+  upsertConnectedHandle,
+  withConnectedHandleGrantCustody,
+} from '../src/workers/credential-broker/connected-handles.ts';
+import {
+  createEnvCredentialBroker,
+  invalidateMintedCredentialSessions,
+  JsonCredentialOAuth2StateStore,
+} from '../src/workers/credential-broker/index.ts';
+
+const dirs: string[] = [];
+afterEach(() => {
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+const REQUEST = {
+  handle: 'dropbox.personal',
+  provider: 'dropbox' as const,
+  capability: 'dropbox.files.sync',
+  trustDomain: 'secure_local' as const,
+};
+
+function memorySecretStore(initial: Record<string, string>): SecretStore & { values: Map<string, string> } {
+  const values = new Map(Object.entries(initial));
+  return {
+    label: 'memory',
+    values,
+    async get(key) { return values.get(key); },
+    getSync(key) { return values.get(key); },
+    async set(key, value) { values.set(key, value); },
+    async delete(key) { values.delete(key); },
+    async list() { return [...values.keys()]; },
+  };
+}
+
+function writeDropboxGrant(registryPath: string, connectedAt: string, providerAccountId?: string): void {
+  upsertConnectedHandle({
+    handle: 'dropbox.personal',
+    provider: 'dropbox',
+    accountRole: 'personal',
+    trustDomain: 'secure_local',
+    allowedCapabilities: ['dropbox.files.sync'],
+    scopes: ['files.metadata.read', 'files.content.read', 'sharing.read', 'account_info.read'],
+    oauth2Refresh: {
+      tokenUrl: 'https://api.dropboxapi.com/oauth2/token',
+      clientIdSecretRef: 'store:dropbox.personal.oauth.client_id',
+      refreshTokenSecretRef: 'store:dropbox.personal.oauth.refresh_token',
+    },
+    connectedAt,
+    ...(providerAccountId ? { providerAccountId } : {}),
+  }, registryPath);
+}
+
+function fixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-reconnect-cache-'));
+  dirs.push(dir);
+  const registryPath = join(dir, 'handles.json');
+  const secretStore = memorySecretStore({
+    'dropbox.personal.oauth.client_id': 'dropbox-client-id-fixture',
+    'dropbox.personal.oauth.refresh_token': 'refresh-token-account-a',
+  });
+  const mints: string[] = [];
+  const broker = createEnvCredentialBroker({
+    env: {},
+    handleRegistryPath: registryPath,
+    secretStore,
+    oauth2CacheNamespace: `reconnect-cache-${dir}`,
+    now: () => new Date('2026-10-10T22:41:00.000Z'),
+    fetch: async (_url, init) => {
+      const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+      mints.push(refreshToken);
+      return new Response(JSON.stringify({
+        access_token: `access-for-${refreshToken}`,
+        expires_in: 14_400,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    },
+  });
+  return { registryPath, secretStore, mints, broker };
+}
+
+describe('minted access tokens are bound to the grant that minted them', () => {
+  test('a reconnect with a different account mints from the new grant at once', async () => {
+    const { registryPath, secretStore, mints, broker } = fixture();
+    writeDropboxGrant(registryPath, '2026-10-10T22:41:00.000Z', 'dbid:account-a');
+
+    const first = await broker.issueSession(REQUEST);
+    expect(first.kind === 'bearer_token' && first.token).toBe('access-for-refresh-token-account-a');
+    // Still cached within the same grant: no second mint.
+    await broker.issueSession(REQUEST);
+    expect(mints).toEqual(['refresh-token-account-a']);
+
+    // The second connect, a minute later, as the dashboard writes it.
+    await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+    writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+
+    const second = await broker.issueSession(REQUEST);
+    expect(second.kind === 'bearer_token' && second.token).toBe('access-for-refresh-token-account-b');
+    expect(mints).toEqual(['refresh-token-account-a', 'refresh-token-account-b']);
+  });
+
+  test('a reconnect that records no account id still changes the grant', async () => {
+    const { registryPath, secretStore, broker } = fixture();
+    writeDropboxGrant(registryPath, '2026-10-10T22:41:00.000Z');
+    await broker.issueSession(REQUEST);
+
+    await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+    writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z');
+
+    const session = await broker.issueSession(REQUEST);
+    expect(session.kind === 'bearer_token' && session.token).toBe('access-for-refresh-token-account-b');
+  });
+
+  test('a refresh in flight across a reconnect is discarded, never served or persisted (Codex round 1 #3)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-reconnect-inflight-'));
+    dirs.push(dir);
+    const registryPath = join(dir, 'handles.json');
+    writeDropboxGrant(registryPath, '2026-10-10T22:41:00.000Z', 'dbid:account-a');
+    const secretStore = memorySecretStore({
+      'dropbox.personal.oauth.client_id': 'dropbox-client-id-fixture',
+      'dropbox.personal.oauth.refresh_token': 'refresh-token-account-a',
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    let reached!: () => void;
+    const atProvider = new Promise<void>((resolve) => { reached = resolve; });
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2CacheNamespace: `reconnect-inflight-${dir}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        calls += 1;
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        if (calls === 1) {
+          reached();
+          await gate;
+        }
+        return new Response(JSON.stringify({
+          access_token: `access-for-${refreshToken}`,
+          // A rotating provider hands back a new refresh token for the OLD grant.
+          refresh_token: `rotated-${refreshToken}`,
+          expires_in: 14_400,
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      },
+    });
+
+    const inFlight = broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    await atProvider;
+    await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+    writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+    release();
+
+    const superseded = await inFlight;
+    expect((superseded as { code?: string }).code).toBe('credential_refresh_busy');
+    expect(secretStore.values.get('dropbox.personal.oauth.refresh_token')).toBe('refresh-token-account-b');
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+  });
+
+  function gatedBroker(registryPath: string, secretStore: SecretStore, answer: (refreshToken: string) => Response) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    // Resolved once the refresh is at the provider, i.e. past every pre-spend
+    // check: a fixed sleep raced it under CI load.
+    let reached!: () => void;
+    const atProvider = new Promise<void>((resolve) => { reached = resolve; });
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2CacheNamespace: `reconnect-gated-${registryPath}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        calls += 1;
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        if (calls === 1) {
+          reached();
+          await gate;
+        }
+        return answer(refreshToken);
+      },
+    });
+    return { broker, release, atProvider };
+  }
+
+  function grantFixture() {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-reconnect-gated-'));
+    dirs.push(dir);
+    const registryPath = join(dir, 'handles.json');
+    writeDropboxGrant(registryPath, '2026-10-10T22:41:00.000Z', 'dbid:account-a');
+    const secretStore = memorySecretStore({
+      'dropbox.personal.oauth.client_id': 'dropbox-client-id-fixture',
+      'dropbox.personal.oauth.refresh_token': 'refresh-token-account-a',
+    });
+    return { registryPath, secretStore };
+  }
+
+  test('the old grant refused mid-reconnect never marks the new grant for reauthorization (Codex round 2 #3)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const { broker, release, atProvider } = gatedBroker(registryPath, secretStore, (refreshToken) => refreshToken === 'refresh-token-account-a'
+      ? new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+      : new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }));
+
+    const inFlight = broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    await atProvider;
+    await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+    writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+    release();
+
+    expect(((await inFlight) as { code?: string }).code).toBe('credential_refresh_busy');
+    expect(readConnectedHandleRegistry(registryPath).handles[0]?.backendState?.status).not.toBe('reauth_required');
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+  });
+
+  test('a reconnect that holds grant custody across the refresh outcome wins it (Codex round 2 #3)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const { broker, release, atProvider } = gatedBroker(registryPath, secretStore, (refreshToken) => new Response(JSON.stringify({
+      access_token: `access-for-${refreshToken}`,
+      refresh_token: `rotated-${refreshToken}`,
+      expires_in: 14_400,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    const inFlight = broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    await atProvider;
+    // Connect takes custody; the old refresh answers while it is held, and
+    // the new grant is written only afterwards, as the slowest interleaving.
+    await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+      writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+    });
+
+    expect(((await inFlight) as { code?: string }).code).toBe('credential_refresh_busy');
+    expect((secretStore as ReturnType<typeof memorySecretStore>).values.get('dropbox.personal.oauth.refresh_token'))
+      .toBe('refresh-token-account-b');
+  });
+
+  test('a reconnect landing before the refresh token is read never spends it under the old grant (PR review)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const sent: string[] = [];
+    // The reconnect publishes between the broker reading the grant's
+    // definition (generation A) and reading the refresh token (now B's).
+    let reconnected = false;
+    const racingStore: SecretStore = {
+      ...secretStore,
+      async get(key) {
+        if (key === 'dropbox.personal.oauth.refresh_token' && !reconnected) {
+          reconnected = true;
+          await secretStore.set(key, 'refresh-token-account-b');
+          writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+        }
+        return secretStore.get(key);
+      },
+    };
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore: racingStore,
+      oauth2CacheNamespace: `reconnect-preread-${registryPath}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        sent.push(refreshToken);
+        return new Response(JSON.stringify({
+          access_token: `access-for-${refreshToken}`,
+          refresh_token: `rotated-${refreshToken}`,
+          expires_in: 14_400,
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      },
+    });
+
+    const superseded = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect(reconnected).toBe(true);
+    expect((superseded as { code?: string }).code).toBe('credential_refresh_busy');
+    // B's token was never sent under generation A.
+    expect(sent).toEqual([]);
+    expect(secretStore.values.get('dropbox.personal.oauth.refresh_token')).toBe('refresh-token-account-b');
+
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+    expect(sent).toEqual(['refresh-token-account-b']);
+  });
+
+  test('an environment-supplied refresh token that changes is a new cache identity (Codex round 1 #5)', async () => {
+    const env: Record<string, string | undefined> = {
+      OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_CLIENT_ID: 'dropbox-client-id-fixture',
+      OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_REFRESH_TOKEN: 'env-refresh-token-a',
+    };
+    const broker = createEnvCredentialBroker({
+      env,
+      loadDefaultHandleRegistry: false,
+      oauth2CacheNamespace: `reconnect-env-${Math.random()}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        return new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+    const first = await broker.issueSession(REQUEST);
+    expect(first.kind === 'bearer_token' && first.token).toBe('access-for-env-refresh-token-a');
+    env.OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_REFRESH_TOKEN = 'env-refresh-token-b';
+    const second = await broker.issueSession(REQUEST);
+    expect(second.kind === 'bearer_token' && second.token).toBe('access-for-env-refresh-token-b');
+  });
+
+  test('a cached token is not served once another process has replaced its grant (PR review)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    // Another process's reconnect lands after this broker read grant A's
+    // definition and before it looks in its cache. Its invalidation cannot
+    // reach this process; only the registry says the grant changed.
+    let reconnectOnNextClockRead = false;
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2CacheNamespace: `reconnect-cachehit-${registryPath}`,
+      now: () => {
+        if (reconnectOnNextClockRead) {
+          reconnectOnNextClockRead = false;
+          secretStore.values.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+          writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+        }
+        return new Date('2026-10-10T22:41:00.000Z');
+      },
+      fetch: async (_url, init) => {
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        return new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+    const first = await broker.issueSession(REQUEST);
+    expect(first.kind === 'bearer_token' && first.token).toBe('access-for-refresh-token-account-a');
+
+    reconnectOnNextClockRead = true;
+    const raced = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect((raced as { code?: string }).code).toBe('credential_refresh_busy');
+
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+  });
+
+  test('a refresh discarded across a reconnect never latches the new grant for reauthorization (independent review rounds 7 and 8)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const stateStore = new JsonCredentialOAuth2StateStore(join(registryPath, '..', 'broker-state.json'));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    // The refresh request reaching the provider means the write-ahead marker
+    // is already on file; a fixed sleep raced it under CI load.
+    let reached!: () => void;
+    const atProvider = new Promise<void>((resolve) => { reached = resolve; });
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2StateStore: stateStore,
+      oauth2CacheNamespace: `reconnect-marker-${registryPath}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        calls += 1;
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        if (calls === 1) {
+          reached();
+          await gate;
+        }
+        return new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+
+    const inFlight = broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    await atProvider;
+    expect((await stateStore.load('dropbox.personal'))?.pendingRefreshStartedAt).toBeDefined();
+    await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+    writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+    release();
+
+    expect(((await inFlight) as { code?: string }).code).toBe('credential_refresh_busy');
+    // The marker is left as it was: it names grant A, so it is not B's.
+    expect((await stateStore.load('dropbox.personal'))?.pendingRefreshGrantGeneration)
+      .toBe('2026-10-10T22:41:00.000Z\ndbid:account-a');
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+    expect(readConnectedHandleRegistry(registryPath).handles[0]?.backendState?.status).not.toBe('reauth_required');
+  });
+
+  test('a request holding a replaced grant never clears the current grant\'s unresolved marker (independent review round 8)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const inner = new JsonCredentialOAuth2StateStore(join(registryPath, '..', 'broker-state.json'));
+    const markerOfB = {
+      pendingRefreshStartedAt: '2026-10-10T22:42:30.000Z',
+      pendingRefreshGrantGeneration: '2026-10-10T22:42:00.000Z\ndbid:account-b',
+    };
+    // This request read grant A's definition. Before it looks at the state,
+    // B was connected and a refresh of B started, left its marker, and died.
+    let raced = false;
+    const racing = {
+      load: async (handle: string) => {
+        if (!raced) {
+          raced = true;
+          await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+          writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+          await inner.save(handle, markerOfB);
+        }
+        return inner.load(handle);
+      },
+      save: (handle: string, state: Parameters<typeof inner.save>[1]) => inner.save(handle, state),
+      leaseTargetPath: (handle: string) => inner.leaseTargetPath(handle),
+    };
+    const sent: string[] = [];
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2StateStore: racing,
+      oauth2CacheNamespace: `reconnect-ownmarker-${registryPath}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        sent.push(new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '');
+        return new Response(JSON.stringify({ access_token: 'unused', expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+
+    const stale = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect((stale as { code?: string }).code).toBe('credential_refresh_busy');
+    expect(await inner.load('dropbox.personal')).toMatchObject(markerOfB);
+    // B's own unresolved refresh is still what decides B: it latches.
+    const forB = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect((forB as { code?: string }).code).toBe('credential_reauth_required');
+    expect(sent).toEqual([]);
+  });
+
+  test('a stale write-ahead marker never latches the grant that replaced it (independent review round 7)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const inner = new JsonCredentialOAuth2StateStore(join(registryPath, '..', 'broker-state.json'));
+    // A crashed refresh of grant A left its marker.
+    await inner.save('dropbox.personal', { pendingRefreshStartedAt: '2026-10-10T22:40:00.000Z' });
+    // The broker reads that marker; a reconnect to B (which clears it) lands
+    // before the broker acts on what it read.
+    let reconnected = false;
+    const racing = {
+      load: async (handle: string) => {
+        const snapshot = await inner.load(handle);
+        if (!reconnected) {
+          reconnected = true;
+          await inner.save(handle, { pendingRefreshStartedAt: undefined });
+          await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+          writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+        }
+        return snapshot;
+      },
+      save: (handle: string, state: Parameters<typeof inner.save>[1]) => inner.save(handle, state),
+      leaseTargetPath: (handle: string) => inner.leaseTargetPath(handle),
+    };
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2StateStore: racing,
+      oauth2CacheNamespace: `reconnect-stalemarker-${registryPath}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        return new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+
+    const raced = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect((raced as { code?: string }).code).toBe('credential_refresh_busy');
+    expect(readConnectedHandleRegistry(registryPath).handles[0]?.backendState?.status).not.toBe('reauth_required');
+    expect((await inner.load('dropbox.personal'))?.status).not.toBe('reauth_required');
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+  });
+
+  test('invalidation drops a cached token even when the grant looks unchanged', async () => {
+    const { registryPath, secretStore, mints, broker } = fixture();
+    writeDropboxGrant(registryPath, '2026-10-10T22:41:00.000Z', 'dbid:account-a');
+    await broker.issueSession(REQUEST);
+    await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-rotated');
+
+    invalidateMintedCredentialSessions('dropbox.personal');
+
+    const session = await broker.issueSession(REQUEST);
+    expect(session.kind === 'bearer_token' && session.token).toBe('access-for-refresh-token-rotated');
+    expect(mints).toEqual(['refresh-token-account-a', 'refresh-token-rotated']);
+  });
+});

@@ -2362,6 +2362,8 @@ interface SyncRunRow {
 
 export class LocalConnectorStore {
   readonly dbPath: string;
+  /** The file this store opened, so a later delete or replace of it is seen. */
+  private readonly openedFile: { dev: number; ino: number } | undefined;
   readonly corpusId: string;
   readonly family: SourceFamily;
   readonly trustDomain: SourceTrustDomain;
@@ -2455,6 +2457,7 @@ export class LocalConnectorStore {
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
       : { create: true });
+    this.openedFile = fileIdentity(this.dbPath);
     try {
       this.db.exec(options.readOnly === true
         ? 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;'
@@ -10001,6 +10004,27 @@ export class LocalConnectorStore {
     return parseStoredSourceReactions(row?.reactions_json);
   }
 
+  /**
+   * Whether the store holds any item row at all, tombstones included. The
+   * account guard asks this before deciding a reconnect needs a purge: an
+   * empty store has nothing of a previous account to remove.
+   */
+  holdsAnyItem(): boolean {
+    return this.db.query('SELECT 1 AS present FROM items LIMIT 1').get() !== null;
+  }
+
+  /**
+   * Whether the file this store opened has since been removed or replaced on
+   * disk (`olympus data delete --source` may run while the worker stays up,
+   * once the source is disconnected). The open handle then still reads the
+   * deleted rows and would write into a file nothing will open again.
+   */
+  fileReplacedOrRemoved(): boolean {
+    if (!this.openedFile) return false;
+    const current = fileIdentity(this.dbPath);
+    return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
+  }
+
   status(scope?: ConnectorStoreStatusScope): ConnectorStoreStatus {
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
@@ -14202,4 +14226,14 @@ function errorMessage(error: unknown): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function fileIdentity(path: string): { dev: number; ino: number } | undefined {
+  if (path === ':memory:' || path === '') return undefined;
+  try {
+    const stat = statSync(path);
+    return { dev: stat.dev, ino: stat.ino };
+  } catch {
+    return undefined;
+  }
 }

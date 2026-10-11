@@ -1,5 +1,6 @@
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
+import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -978,6 +979,12 @@ export interface DashboardSourceCard {
   /** Reasons the ingestion ledger already wrote for this source, verbatim. */
   attention_reasons?: string[];
   /**
+   * The source was reconnected with a different provider account than the
+   * items it already holds, so it does not sync (source-account-binding.ts).
+   * `next_action` names both ways out in the page's own words.
+   */
+  account_change?: { next_action: string };
+  /**
    * The metadata-sync phase's own folder-walk evidence, when the corpus
    * publishes it (`metadata_sync_folders_*`).
    *
@@ -1210,6 +1217,13 @@ export interface SourceDashboardBuildOptions {
   // configured registry when one exists.
   sourceCorpusRegistry?: SourceCorpusRegistry;
   connectedHandleRegistry?: ConnectedHandleRegistry;
+  /**
+   * Which provider account each file source's items came from, and whether a
+   * reconnect changed it. A changed account stops sync in the worker; the card
+   * is where the owner learns that and what clears it, whichever connect path
+   * (dashboard, CLI, detached) made the change.
+   */
+  sourceAccountBindings?: SourceAccountBindings['sources'];
   /**
    * Whether `connectedHandleRegistry` is an empty stand-in for a registry the
    * caller could not read, rather than a registry that is genuinely empty.
@@ -2110,6 +2124,14 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       ...(manualSync ? { last_manual_sync: { ...manualSync } } : {}),
       ...(unreadableFiles ? { unreadable_files: unreadableFiles } : {}),
     };
+    if (card.configured && options.sourceAccountBindings?.[definition.source_id as AccountBoundSourceId]?.purge_required) {
+      card.account_change = {
+        next_action: `${card.label} is now connected to a different account than the items already stored, so nothing syncs. `
+          + `Reconnect the previous account to resume, or Disconnect ${card.label}, ask your agent to delete its stored data, and connect the new account.`,
+      };
+      card.answer_readiness = { state: 'needs_attention', label: 'Connected to a different account' };
+      card.setup = dashboardSourceSetupStatus(card);
+    }
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
     // to sync is a fact about the card.
@@ -2619,6 +2641,14 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       stage: 'credential_or_pairing',
       condition: 'blocked',
       next_action: `Reauthenticate ${card.label} from this page, then run the initial sync again.`,
+      dependencies,
+    };
+  }
+  if (card.account_change) {
+    return {
+      stage: 'credential_or_pairing',
+      condition: 'blocked',
+      next_action: card.account_change.next_action,
       dependencies,
     };
   }
