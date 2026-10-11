@@ -53,6 +53,7 @@
 // exit path, the tokenizer calls included.
 
 import { execFileSync, spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { freemem, platform as osPlatform, totalmem } from 'node:os';
 import { fetchModelEndpoint } from './model-transport.ts';
 import type { ConsultLevel } from './consult-gate.ts';
@@ -496,19 +497,81 @@ export function consultWriterMemoryDecision(
 }
 
 /**
+ * Linux pressure thresholds on PSI `some avg10` (/proc/pressure/memory): the
+ * percentage of the last 10 s in which at least one task was stalled waiting
+ * for memory (reclaim or refaulting its working set). Under 10 is `normal`;
+ * 10 or more is `warn` (allowed, like macOS `warn`: reclaim is active and a
+ * writer may add paging); 40 or more is `critical` (the machine spends a
+ * large share of its time thrashing, the analogue of macOS `critical`).
+ */
+export const LINUX_PSI_SOME_AVG10_THRESHOLDS = Object.freeze({ warn: 10, critical: 40 });
+
+/** PSI `some avg10` to a pressure level; unknown when the line is absent. */
+export function linuxMemoryPressureFromPsi(psi: string | undefined): ConsultMemoryPressure {
+  const raw = psi === undefined ? undefined : /^some\b.*\bavg10=(\d+(?:\.\d+)?)/m.exec(psi)?.[1];
+  if (raw === undefined) return 'unknown';
+  const some = Number(raw);
+  if (!Number.isFinite(some)) return 'unknown';
+  if (some >= LINUX_PSI_SOME_AVG10_THRESHOLDS.critical) return 'critical';
+  if (some >= LINUX_PSI_SOME_AVG10_THRESHOLDS.warn) return 'warn';
+  return 'normal';
+}
+
+/** One `/proc/meminfo` field in bytes (the file reports kB); undefined when absent. */
+function meminfoBytes(meminfo: string, field: string): number | undefined {
+  const raw = new RegExp(`^${field}:\\s*(\\d+)\\s*kB`, 'm').exec(meminfo)?.[1];
+  return raw === undefined ? undefined : Number(raw) * 1024;
+}
+
+/**
  * macOS: `memory_pressure` reports the kernel's free percentage and
  * `kern.memorystatus_vm_pressure_level` its pressure level (1 normal, 2 warn,
- * 4 critical). Elsewhere the figures are taken from node:os with pressure
- * unknown, which the rule refuses (the built-in model ships for Apple
- * silicon only). Never throws.
+ * 4 critical).
+ *
+ * Linux (the OpenClaw-hosted plugin; the built-in model runs there when
+ * OLYMPUS_BUILT_IN_ANALYST=on): free percent is `MemAvailable` over
+ * `MemTotal` from /proc/meminfo, the kernel's estimate of what can be
+ * allocated without swapping, page cache it can reclaim included (os.freemem()
+ * counts that cache as used, so a host with a warm cache would always read
+ * low). Pressure is PSI `some avg10` from /proc/pressure/memory, mapped by
+ * LINUX_PSI_SOME_AVG10_THRESHOLDS. A kernel without PSI (CONFIG_PSI off, or
+ * `psi=0`) has no pressure figure; `MemAvailable` already reflects reclaim,
+ * so pressure is then reported as `warn` (allowed, never claimed `normal`)
+ * and the 20% floor alone decides. Without `MemAvailable` the free figure is
+ * not a number, which the rule refuses. Both figures are host-wide: a cgroup
+ * memory limit below the host's free memory is not seen.
+ *
+ * Any other platform: pressure unknown, which the rule refuses. Never throws.
  */
 export function defaultConsultMemoryProbe(
-  deps: { exec?: (file: string, args: readonly string[]) => string; platform?: string } = {},
+  deps: {
+    exec?: (file: string, args: readonly string[]) => string;
+    readFile?: (path: string) => string;
+    platform?: string;
+  } = {},
 ): ConsultMemoryProbe {
   const exec = deps.exec ?? ((file: string, args: readonly string[]) => execFileSync(file, [...args], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }));
+  const readFile = deps.readFile ?? ((path: string) => readFileSync(path, 'utf8'));
   const platform = deps.platform ?? osPlatform();
+  const readOptional = (path: string): string | undefined => {
+    try {
+      return readFile(path);
+    } catch {
+      return undefined;
+    }
+  };
   return () => {
     try {
+      if (platform === 'linux') {
+        const meminfo = readOptional('/proc/meminfo');
+        const psi = readOptional('/proc/pressure/memory');
+        if (meminfo === undefined && psi === undefined) return undefined;
+        const totalBytes = (meminfo === undefined ? undefined : meminfoBytes(meminfo, 'MemTotal')) ?? totalmem();
+        const availableBytes = meminfo === undefined ? undefined : meminfoBytes(meminfo, 'MemAvailable');
+        const freePercent = availableBytes === undefined ? Number.NaN : (availableBytes / totalBytes) * 100;
+        const pressure = psi === undefined ? 'warn' : linuxMemoryPressureFromPsi(psi);
+        return { totalBytes, freePercent, pressure };
+      }
       const totalBytes = totalmem();
       if (platform !== 'darwin') {
         return { totalBytes, freePercent: (freemem() / totalBytes) * 100, pressure: 'unknown' };

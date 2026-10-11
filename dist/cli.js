@@ -75309,6 +75309,7 @@ __export(exports_consult_writer, {
   runOwnConsultWriter: () => runOwnConsultWriter,
   runConsultWriter: () => runConsultWriter,
   parseConsultWriterReply: () => parseConsultWriterReply,
+  linuxMemoryPressureFromPsi: () => linuxMemoryPressureFromPsi,
   defaultConsultMemoryProbe: () => defaultConsultMemoryProbe,
   createConsultWriterServer: () => createConsultWriterServer,
   consultWriterSystem: () => consultWriterSystem,
@@ -75316,6 +75317,7 @@ __export(exports_consult_writer, {
   consultWriterEvidence: () => consultWriterEvidence,
   buildConsultWriterPrompt: () => buildConsultWriterPrompt,
   boundConsultWriterInput: () => boundConsultWriterInput,
+  LINUX_PSI_SOME_AVG10_THRESHOLDS: () => LINUX_PSI_SOME_AVG10_THRESHOLDS,
   CONSULT_WRITER_SYSTEM_UNNAMED: () => CONSULT_WRITER_SYSTEM_UNNAMED,
   CONSULT_WRITER_SYSTEM_DIRECT: () => CONSULT_WRITER_SYSTEM_DIRECT,
   CONSULT_WRITER_SYSTEM: () => CONSULT_WRITER_SYSTEM,
@@ -75325,6 +75327,7 @@ __export(exports_consult_writer, {
   CONSULT_STANDARD_REPLY_FORMAT: () => CONSULT_STANDARD_REPLY_FORMAT
 });
 import { execFileSync as execFileSync3 } from "node:child_process";
+import { readFileSync as readFileSync44 } from "node:fs";
 import { freemem, platform as osPlatform5, totalmem } from "node:os";
 function consultWriterSystem(level, options = {}) {
   if (level === "unnamed")
@@ -75475,11 +75478,47 @@ function consultWriterMemoryDecision(sample, footprintBytes = CONSULT_WRITER_LIM
     return { ok: false, reason: "memory_low" };
   return { ok: true, freeAfterPercent };
 }
+function linuxMemoryPressureFromPsi(psi) {
+  const raw = psi === undefined ? undefined : /^some\b.*\bavg10=(\d+(?:\.\d+)?)/m.exec(psi)?.[1];
+  if (raw === undefined)
+    return "unknown";
+  const some = Number(raw);
+  if (!Number.isFinite(some))
+    return "unknown";
+  if (some >= LINUX_PSI_SOME_AVG10_THRESHOLDS.critical)
+    return "critical";
+  if (some >= LINUX_PSI_SOME_AVG10_THRESHOLDS.warn)
+    return "warn";
+  return "normal";
+}
+function meminfoBytes(meminfo, field) {
+  const raw = new RegExp(`^${field}:\\s*(\\d+)\\s*kB`, "m").exec(meminfo)?.[1];
+  return raw === undefined ? undefined : Number(raw) * 1024;
+}
 function defaultConsultMemoryProbe(deps = {}) {
   const exec = deps.exec ?? ((file, args) => execFileSync3(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
+  const readFile7 = deps.readFile ?? ((path) => readFileSync44(path, "utf8"));
   const platform2 = deps.platform ?? osPlatform5();
+  const readOptional = (path) => {
+    try {
+      return readFile7(path);
+    } catch {
+      return;
+    }
+  };
   return () => {
     try {
+      if (platform2 === "linux") {
+        const meminfo = readOptional("/proc/meminfo");
+        const psi = readOptional("/proc/pressure/memory");
+        if (meminfo === undefined && psi === undefined)
+          return;
+        const totalBytes2 = (meminfo === undefined ? undefined : meminfoBytes(meminfo, "MemTotal")) ?? totalmem();
+        const availableBytes = meminfo === undefined ? undefined : meminfoBytes(meminfo, "MemAvailable");
+        const freePercent = availableBytes === undefined ? Number.NaN : availableBytes / totalBytes2 * 100;
+        const pressure2 = psi === undefined ? "warn" : linuxMemoryPressureFromPsi(psi);
+        return { totalBytes: totalBytes2, freePercent, pressure: pressure2 };
+      }
       const totalBytes = totalmem();
       if (platform2 !== "darwin") {
         return { totalBytes, freePercent: freemem() / totalBytes * 100, pressure: "unknown" };
@@ -75706,7 +75745,7 @@ async function runOwnConsultWriter(input, options) {
     return { kind: "declined", promptTokens: 0, ms };
   return { kind: "questions", questions: reply.questions, promptTokens: 0, ms };
 }
-var CONSULT_WRITER_LIMITS, CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.', CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_DIRECT_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_STRICT_RULES, CONSULT_WRITER_STRICT_FORM = "Form: each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary words of the user's language only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings or spelled-out letters. At most three questions, on one subject, at most 600 bytes and 80 words in all; do not reuse wording between them.", CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_WRITER_SYSTEM_DIRECT, CONSULT_STANDARD_RESPONSE_SCHEMA, CONSULT_WRITER_RESPONSE_SCHEMA, CONSULT_WRITER_FEEDBACK_CHARS = 240;
+var CONSULT_WRITER_LIMITS, CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.', CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_DIRECT_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_STRICT_RULES, CONSULT_WRITER_STRICT_FORM = "Form: each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary words of the user's language only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings or spelled-out letters. At most three questions, on one subject, at most 600 bytes and 80 words in all; do not reuse wording between them.", CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_WRITER_SYSTEM_DIRECT, CONSULT_STANDARD_RESPONSE_SCHEMA, CONSULT_WRITER_RESPONSE_SCHEMA, CONSULT_WRITER_FEEDBACK_CHARS = 240, LINUX_PSI_SOME_AVG10_THRESHOLDS;
 var init_consult_writer = __esm(() => {
   init_model_transport();
   init_local_model_policy();
@@ -75848,6 +75887,7 @@ var init_consult_writer = __esm(() => {
     required: ["questions"],
     additionalProperties: false
   });
+  LINUX_PSI_SOME_AVG10_THRESHOLDS = Object.freeze({ warn: 10, critical: 40 });
 });
 
 // src/core/consult-writer-check.ts
@@ -90896,7 +90936,7 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync21, existsSync as existsSync46, lstatSync as lstatSync20, mkdirSync as mkdirSync37, readFileSync as readFileSync44, renameSync as renameSync14, writeFileSync as writeFileSync16 } from "node:fs";
+import { chmodSync as chmodSync21, existsSync as existsSync46, lstatSync as lstatSync20, mkdirSync as mkdirSync37, readFileSync as readFileSync45, renameSync as renameSync14, writeFileSync as writeFileSync16 } from "node:fs";
 import { join as join70 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync37(stateDir, { recursive: true, mode: 448 });
@@ -90919,7 +90959,7 @@ function loadOrCreateIdentity(stateDir) {
   const path = join70(ensureStateDir(stateDir), "install-key.pem");
   let privateKey;
   if (existsSync46(path)) {
-    privateKey = createPrivateKey(readFileSync44(path));
+    privateKey = createPrivateKey(readFileSync45(path));
   } else {
     privateKey = generateKeyPairSync("ed25519").privateKey;
     writePrivateFile(path, privateKey.export({ format: "pem", type: "pkcs8" }));
@@ -91946,7 +91986,7 @@ function createModelKeyReload(options) {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes14 } from "node:crypto";
-import { chmodSync as chmodSync22, lstatSync as lstatSync21, mkdirSync as mkdirSync38, readFileSync as readFileSync45 } from "node:fs";
+import { chmodSync as chmodSync22, lstatSync as lstatSync21, mkdirSync as mkdirSync38, readFileSync as readFileSync46 } from "node:fs";
 import { dirname as dirname51, join as join71 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
   return join71(dirname51(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
@@ -91966,7 +92006,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
     else if ((stats.mode & 63) !== 0)
       existing = "invalid";
     else {
-      const text = readFileSync45(path, "utf8").trim();
+      const text = readFileSync46(path, "utf8").trim();
       if (SECRET_PATTERN.test(text))
         return { secret: text, source: "file", path };
       existing = "invalid";
@@ -96075,7 +96115,7 @@ import {
   existsSync as existsSync48,
   mkdirSync as mkdirSync40,
   openSync as openSync13,
-  readFileSync as readFileSync46,
+  readFileSync as readFileSync47,
   readdirSync as readdirSync9,
   renameSync as renameSync15,
   rmSync as rmSync16,
@@ -96130,7 +96170,7 @@ function readPinnedModelStatus(statusPath, modelId, noun) {
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync46(statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync47(statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -96329,7 +96369,7 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
 }
 function readRuntimeMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync46(join77(runtimeDir, RUNTIME_MARKER2), "utf8"));
+    return JSON.parse(readFileSync47(join77(runtimeDir, RUNTIME_MARKER2), "utf8"));
   } catch {
     return;
   }
@@ -96588,7 +96628,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
 }
 function lockHolder(lockPath) {
   try {
-    return JSON.parse(readFileSync46(lockPath, "utf8"));
+    return JSON.parse(readFileSync47(lockPath, "utf8"));
   } catch {
     return;
   }
@@ -96618,7 +96658,7 @@ function tryAcquireLock2(lockPath, token) {
 }
 function lockIsStale2(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync46(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync47(lockPath, "utf8"));
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
       try {
         process.kill(holder.pid, 0);
@@ -96738,7 +96778,7 @@ var init_install = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { readFileSync as readFileSync47 } from "node:fs";
+import { readFileSync as readFileSync48 } from "node:fs";
 import { isAbsolute as isAbsolute18, join as join78 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join78(olympusModelsDir(env), "built-in-transcription");
@@ -96781,7 +96821,7 @@ function readBuiltInTranscriptionStatusFile(env = process.env, model = QWEN3_ASR
   const status = readBuiltInTranscriptionStatus(env, model);
   let raw;
   try {
-    raw = readFileSync47(builtInTranscriptionLayout(model, env).statusPath, "utf8");
+    raw = readFileSync48(builtInTranscriptionLayout(model, env).statusPath, "utf8");
   } catch (error2) {
     return { file: error2.code === "ENOENT" ? "missing" : "unreadable", status };
   }
@@ -100387,7 +100427,7 @@ var init_analyst_openai = __esm(() => {
 import {
   existsSync as existsSync50,
   mkdirSync as mkdirSync41,
-  readFileSync as readFileSync48,
+  readFileSync as readFileSync49,
   renameSync as renameSync16,
   rmSync as rmSync17,
   writeFileSync as writeFileSync18
@@ -100572,7 +100612,7 @@ function readCatalogCache(path, type) {
     return;
   let payload;
   try {
-    payload = JSON.parse(readFileSync48(path, "utf8"));
+    payload = JSON.parse(readFileSync49(path, "utf8"));
   } catch {
     return;
   }
@@ -101593,7 +101633,7 @@ var init_answer_latency_log = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash55 } from "node:crypto";
-import { readFileSync as readFileSync49 } from "node:fs";
+import { readFileSync as readFileSync50 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir55 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
@@ -101760,7 +101800,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync49(trustPath, "utf8");
+        this.caPem = readFileSync50(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -101863,7 +101903,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url, init, timeoutMs, readFileSync49(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync50(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
 }
@@ -111556,7 +111596,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync24, copyFileSync, existsSync as existsSync51, lstatSync as lstatSync22, mkdirSync as mkdirSync42, readFileSync as readFileSync50 } from "node:fs";
+import { chmodSync as chmodSync24, copyFileSync, existsSync as existsSync51, lstatSync as lstatSync22, mkdirSync as mkdirSync42, readFileSync as readFileSync51 } from "node:fs";
 import { dirname as dirname59 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
@@ -111570,7 +111610,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text2 = readFileSync50(path, "utf8");
+  const text2 = readFileSync51(path, "utf8");
   const raw = JSON.parse(text2);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -111893,7 +111933,7 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
 import { createHash as createHash59, randomBytes as randomBytes18, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
-import { readFileSync as readFileSync51, statSync as statSync25 } from "node:fs";
+import { readFileSync as readFileSync52, statSync as statSync25 } from "node:fs";
 import { homedir as homedir56 } from "node:os";
 import { join as join83, resolve as resolve10 } from "node:path";
 
@@ -115248,7 +115288,7 @@ function dashboardSourceAccountBindings(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync51(join83(homedir56(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync52(join83(homedir56(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -119534,7 +119574,7 @@ var init_privacy_profile = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync44, readFileSync as readFileSync52 } from "node:fs";
+import { mkdirSync as mkdirSync44, readFileSync as readFileSync53 } from "node:fs";
 import { dirname as dirname62 } from "node:path";
 function defaultSnifferMaxCallsPerPass(kind) {
   return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
@@ -119552,7 +119592,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync52(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync53(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -120464,7 +120504,7 @@ __export(exports_open_target, {
   createDropboxOpenTargets: () => createDropboxOpenTargets,
   OPENABLE_EXTENSIONS: () => OPENABLE_EXTENSIONS
 });
-import { existsSync as existsSync53, lstatSync as lstatSync23, readFileSync as readFileSync53, readdirSync as readdirSync10, realpathSync as realpathSync5, statSync as statSync26 } from "node:fs";
+import { existsSync as existsSync53, lstatSync as lstatSync23, readFileSync as readFileSync54, readdirSync as readdirSync10, realpathSync as realpathSync5, statSync as statSync26 } from "node:fs";
 import { homedir as homedir58 } from "node:os";
 import { extname as extname2, join as join86, sep as sep8 } from "node:path";
 function dropboxPreviewUrl(displayPath) {
@@ -120491,7 +120531,7 @@ function localDropboxRoots(options = {}) {
     }
   } catch {}
   try {
-    const info = JSON.parse(readFileSync53(join86(home2, ".dropbox", "info.json"), "utf8"));
+    const info = JSON.parse(readFileSync54(join86(home2, ".dropbox", "info.json"), "utf8"));
     if (info && typeof info === "object") {
       for (const account of Object.values(info)) {
         const path = account && typeof account === "object" ? account.path : undefined;
@@ -135709,7 +135749,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes22 } from "node:crypto";
-import { readFileSync as readFileSync54, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
+import { readFileSync as readFileSync55, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve11 } from "node:path";
@@ -139780,7 +139820,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync54("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync55("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -140125,7 +140165,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync54(resolve11(input2), "utf8");
+    raw = readFileSync55(resolve11(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }

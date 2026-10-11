@@ -23,6 +23,7 @@ import {
   consultWriterMemoryDecision,
   createConsultWriterServer,
   defaultConsultMemoryProbe,
+  linuxMemoryPressureFromPsi,
   consultWriterEvidence,
   parseConsultWriterReply,
   runConsultWriter,
@@ -193,7 +194,7 @@ describe('memory rule', () => {
     expect(consultWriterMemoryDecision({ ...NORMAL, freePercent: Number.NaN })).toEqual({ ok: false, reason: 'memory_unknown' });
   });
 
-  test('the macOS probe reads memory_pressure and the kernel pressure level; elsewhere pressure is unknown; a failing probe is undefined', () => {
+  test('the macOS probe reads memory_pressure and the kernel pressure level; other platforms read pressure unknown; a failing probe is undefined', () => {
     const calls: string[] = [];
     const probe = defaultConsultMemoryProbe({
       platform: 'darwin',
@@ -204,8 +205,72 @@ describe('memory rule', () => {
     });
     expect(probe()).toMatchObject({ freePercent: 37, pressure: 'warn' });
     expect(calls).toEqual(['/usr/bin/memory_pressure', '/usr/sbin/sysctl -n kern.memorystatus_vm_pressure_level']);
-    expect(defaultConsultMemoryProbe({ platform: 'linux', exec: () => { throw new Error('never'); } })()).toMatchObject({ pressure: 'unknown' });
+    expect(defaultConsultMemoryProbe({ platform: 'freebsd', exec: () => { throw new Error('never'); } })()).toMatchObject({ pressure: 'unknown' });
     expect(defaultConsultMemoryProbe({ platform: 'darwin', exec: () => { throw new Error('no tool'); } })()).toBeUndefined();
+  });
+
+  // The demo host's shape: 7.5 GiB, no swap, a warm page cache (MemFree low, MemAvailable high).
+  const MEMINFO = 'MemTotal:        7864320 kB\nMemFree:          524288 kB\nMemAvailable:    5505024 kB\nCached:          4718592 kB\nSwapTotal:             0 kB\n';
+  const PSI = (some: string, full = '0.00') =>
+    `some avg10=${some} avg60=0.00 avg300=0.00 total=12345\nfull avg10=${full} avg60=0.00 avg300=0.00 total=678\n`;
+  const linuxProbe = (files: Record<string, string>) => {
+    const reads: string[] = [];
+    const probe = defaultConsultMemoryProbe({
+      platform: 'linux',
+      exec: () => { throw new Error('the Linux probe runs no command'); },
+      readFile: (path) => {
+        reads.push(path);
+        const body = files[path];
+        if (body === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' });
+        return body;
+      },
+    });
+    return { probe, reads };
+  };
+
+  test('the Linux probe reads MemAvailable (reclaimable cache counts as free) and PSI some avg10', () => {
+    const { probe, reads } = linuxProbe({ '/proc/meminfo': MEMINFO, '/proc/pressure/memory': PSI('0.00') });
+    const sample = probe();
+    expect(sample).toEqual({ totalBytes: 7864320 * 1024, freePercent: 70, pressure: 'normal' });
+    expect(reads).toEqual(['/proc/meminfo', '/proc/pressure/memory']);
+    // The live demo failure: this sample now lets the built-in writer start.
+    expect(consultWriterMemoryDecision(sample)).toMatchObject({ ok: true });
+  });
+
+  test('PSI some avg10 maps to normal below 10, warn from 10, critical from 40', () => {
+    const pressureAt = (some: string) => linuxProbe({ '/proc/meminfo': MEMINFO, '/proc/pressure/memory': PSI(some) }).probe()?.pressure;
+    expect(pressureAt('9.99')).toBe('normal');
+    expect(pressureAt('10.00')).toBe('warn');
+    expect(pressureAt('39.99')).toBe('warn');
+    expect(pressureAt('40.00')).toBe('critical');
+    expect(pressureAt('87.50')).toBe('critical');
+    // `full` alone never raises the level; only `some avg10` is read.
+    expect(linuxProbe({ '/proc/meminfo': MEMINFO, '/proc/pressure/memory': PSI('1.00', '55.00') }).probe()?.pressure).toBe('normal');
+    expect(linuxMemoryPressureFromPsi(undefined)).toBe('unknown');
+    expect(linuxMemoryPressureFromPsi('full avg10=1.00 avg60=0.00 avg300=0.00 total=1\n')).toBe('unknown');
+  });
+
+  test('critical PSI refuses as swap pressure; a low MemAvailable refuses as low memory', () => {
+    const critical = linuxProbe({ '/proc/meminfo': MEMINFO, '/proc/pressure/memory': PSI('45.00') }).probe();
+    expect(consultWriterMemoryDecision(critical)).toEqual({ ok: false, reason: 'swap_pressure' });
+    const tight = 'MemTotal:        7864320 kB\nMemFree:          524288 kB\nMemAvailable:    1572864 kB\n';
+    const low = linuxProbe({ '/proc/meminfo': tight, '/proc/pressure/memory': PSI('0.00') }).probe();
+    expect(low).toMatchObject({ freePercent: 20, pressure: 'normal' });
+    expect(consultWriterMemoryDecision(low)).toEqual({ ok: false, reason: 'memory_low' });
+  });
+
+  test('without PSI the free floor alone decides (pressure warn); without MemAvailable, or with neither file, it refuses', () => {
+    const noPsi = linuxProbe({ '/proc/meminfo': MEMINFO }).probe();
+    expect(noPsi).toMatchObject({ freePercent: 70, pressure: 'warn' });
+    expect(consultWriterMemoryDecision(noPsi)).toMatchObject({ ok: true });
+    const noAvailable = linuxProbe({ '/proc/meminfo': 'MemTotal:        7864320 kB\nMemFree:          524288 kB\n', '/proc/pressure/memory': PSI('0.00') }).probe();
+    expect(noAvailable?.pressure).toBe('normal');
+    expect(consultWriterMemoryDecision(noAvailable)).toEqual({ ok: false, reason: 'memory_unknown' });
+    const noMeminfo = linuxProbe({ '/proc/pressure/memory': PSI('0.00') }).probe();
+    expect(consultWriterMemoryDecision(noMeminfo)).toEqual({ ok: false, reason: 'memory_unknown' });
+    const neither = linuxProbe({}).probe();
+    expect(neither).toBeUndefined();
+    expect(consultWriterMemoryDecision(neither)).toEqual({ ok: false, reason: 'memory_unknown' });
   });
 });
 
