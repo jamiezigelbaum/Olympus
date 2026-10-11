@@ -133,15 +133,11 @@ function providerLabel(provider: AccountBoundProvider): string {
 }
 
 /**
- * Whether every sampled stored Dropbox item still opens for this token's
- * account: the migration for grants made before `account_info.read` was
- * requested, whose account could never be read (PR review). Their source has
- * no recorded account, so a reconnect cannot be told apart from an account
- * change by identity; it can by reach. True only when every id resolves;
- * false as soon as one is not found (another account's file); undefined when
- * Dropbox could not say. Items in a folder shared with both accounts resolve
- * for either, so a source whose sample lies wholly in shared folders binds to
- * whichever account can open them, which is also who can read them.
+ * Whether every one of these Dropbox ids still opens for this token's
+ * account: true when all do, false as soon as one is not found, undefined
+ * when Dropbox could not say. Used with the ids of folders only the previous
+ * account could open (see dropboxOwnRootFolderIds), never with arbitrary
+ * stored items: a shared item opens for every account it is shared with.
  */
 export async function dropboxItemsOpenForToken(options: {
   accessToken: string;
@@ -175,4 +171,53 @@ export async function dropboxItemsOpenForToken(options: {
     return undefined;
   }
   return true;
+}
+
+/**
+ * Up to `limit` ids of folders in the root of this token's Dropbox that are
+ * shared with no one. Only the account that owns such a folder can open it,
+ * so they identify the account without `account_info.read`: the evidence a
+ * grant made before that scope was requested leaves for a later reconnect to
+ * be checked against (PR review). Undefined when Dropbox could not say.
+ */
+export async function dropboxOwnRootFolderIds(options: {
+  accessToken: string;
+  limit?: number;
+  fetchImpl?: TimeoutFetch;
+  timeoutMs?: number;
+  endpoint?: string;
+}): Promise<string[] | undefined> {
+  let response: Response;
+  let text: string;
+  try {
+    ({ response, text } = await fetchBoundedText(
+      options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)),
+      options.endpoint ?? 'https://api.dropboxapi.com/2/files/list_folder',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${options.accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '', recursive: false, limit: 200 }),
+      },
+      { timeoutMs: options.timeoutMs ?? 15_000, limitBytes: 1024 * 1024 },
+    ));
+  } catch {
+    return undefined;
+  }
+  if (!response.ok) return undefined;
+  try {
+    const parsed = JSON.parse(text) as { entries?: unknown };
+    if (!Array.isArray(parsed.entries)) return undefined;
+    return parsed.entries
+      .filter((entry): entry is { '.tag': string; id: string; sharing_info?: unknown } =>
+        !!entry && typeof entry === 'object'
+        && (entry as Record<string, unknown>)['.tag'] === 'folder'
+        && typeof (entry as Record<string, unknown>).id === 'string'
+        && /^id:[A-Za-z0-9_-]{1,200}$/.test((entry as Record<string, unknown>).id as string)
+        // Present on a shared folder and on anything inside one.
+        && (entry as Record<string, unknown>).sharing_info === undefined)
+      .slice(0, options.limit ?? 5)
+      .map((entry) => entry.id);
+  } catch {
+    return undefined;
+  }
 }

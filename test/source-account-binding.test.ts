@@ -297,7 +297,7 @@ describe('a connector store notices its file was deleted under it', () => {
   });
 });
 
-describe('Dropbox reach over stored items (legacy grants without account_info.read)', () => {
+describe('Dropbox account evidence for legacy grants without account_info.read', () => {
   test('true only when every sampled id opens; false on a not-found; unknown otherwise', async () => {
     const { dropboxItemsOpenForToken } = await import('../src/core/provider-account-identity.ts');
     const answer = (byId: Record<string, Response>) => async (_url: string, init: RequestInit) => {
@@ -311,10 +311,24 @@ describe('Dropbox reach over stored items (legacy grants without account_info.re
     expect(await dropboxItemsOpenForToken({ accessToken: 't', itemIds: ['not-an-id'], fetchImpl: answer({}) })).toBeUndefined();
   });
 
-  test('a fresh store samples nothing', async () => {
-    const { LocalConnectorStore } = await import('../src/workers/connector-store/local-index.ts');
-    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'dropbox.files', family: 'file', trustDomain: 'internal' });
-    expect(store.sampleProviderItemIds(20)).toEqual([]);
-    store.close();
+  test('own-folder evidence lists only unshared folders at the root', async () => {
+    const { dropboxOwnRootFolderIds } = await import('../src/core/provider-account-identity.ts');
+    const entries = [
+      { '.tag': 'folder', id: 'id:own1', name: 'Photos' },
+      { '.tag': 'folder', id: 'id:shared', name: 'Team', sharing_info: { read_only: false, shared_folder_id: '1' } },
+      { '.tag': 'file', id: 'id:file', name: 'a.txt' },
+      { '.tag': 'folder', id: 'id:own2', name: 'Notes' },
+    ];
+    let request: { path?: string; recursive?: boolean } = {};
+    const ids = await dropboxOwnRootFolderIds({
+      accessToken: 't',
+      fetchImpl: async (_url, init) => {
+        request = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ entries, has_more: false }), { status: 200 });
+      },
+    });
+    expect(request).toMatchObject({ path: '', recursive: false });
+    expect(ids).toEqual(['id:own1', 'id:own2']);
+    expect(await dropboxOwnRootFolderIds({ accessToken: 't', fetchImpl: async () => new Response('{}', { status: 401 }) })).toBeUndefined();
   });
 });

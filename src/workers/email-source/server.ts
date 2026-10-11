@@ -347,8 +347,9 @@ import {
   guardAccountBoundLanes,
   createSourceAccountGuard,
   type SourceAccountGuard,
+  type SourceAccountGuardOptions,
 } from '../source-account-guard.ts';
-import { dropboxItemsOpenForToken, type AccountBoundProvider } from '../../core/provider-account-identity.ts';
+import { dropboxItemsOpenForToken, dropboxOwnRootFolderIds, type AccountBoundProvider } from '../../core/provider-account-identity.ts';
 import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
@@ -3613,7 +3614,6 @@ export async function main(): Promise<void> {
   // reads with, the connected grant and the stored items name one account.
   // Kept across scheduler rebuilds so a token is looked up once, not per pass.
   const sourceAccountGuards = new Map<string, SourceAccountGuard>();
-  const DROPBOX_REACH_SAMPLE = 20;
   // The guards of the lanes being assembled, applied once every task of the
   // lane is attached: an embedding sweep or watch task appended later writes
   // the same stores and must not run past the guard (independent review
@@ -3642,7 +3642,7 @@ export async function main(): Promise<void> {
       handle: string | undefined;
       laneHoldsItems: () => boolean;
       laneStoresStale: () => boolean;
-      storedItemsOpenForToken?: (accessToken: string) => Promise<boolean | undefined>;
+      ownAccountEvidence?: SourceAccountGuardOptions['ownAccountEvidence'];
     },
   ): SourceSchedulerSource | undefined => {
     if (!source || !lane.handle || !connectedHandleRegistryPath) return source;
@@ -3658,7 +3658,7 @@ export async function main(): Promise<void> {
         laneHoldsItems: lane.laneHoldsItems,
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
-        ...(lane.storedItemsOpenForToken ? { storedItemsOpenForToken: lane.storedItemsOpenForToken } : {}),
+        ...(lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}),
       });
       sourceAccountGuards.set(key, guard);
     }
@@ -3902,13 +3902,10 @@ export async function main(): Promise<void> {
               dropboxTierLane ? [dropboxTierLane.internal, dropboxTierLane.public] : [],
             ),
             // Grants from before account_info.read have no readable account;
-            // reach over a sample of the stored items stands in for it.
-            storedItemsOpenForToken: async (accessToken) => {
-              const sample = [dropboxConnectorStore, dropboxTierLane?.internal.current(), dropboxTierLane?.public.current()]
-                .flatMap((store) => store?.sampleProviderItemIds(DROPBOX_REACH_SAMPLE) ?? [])
-                .slice(0, DROPBOX_REACH_SAMPLE);
-              // Nothing sampled proves nothing: an unopened tier may hold items.
-              return sample.length > 0 ? dropboxItemsOpenForToken({ accessToken, itemIds: sample }) : undefined;
+            // folders only that account can open stand in for it.
+            ownAccountEvidence: {
+              record: (accessToken) => dropboxOwnRootFolderIds({ accessToken }),
+              check: (accessToken, folderIds) => dropboxItemsOpenForToken({ accessToken, itemIds: folderIds }),
             },
           });
         },

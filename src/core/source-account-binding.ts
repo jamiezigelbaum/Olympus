@@ -45,6 +45,13 @@ export interface SourceAccountBinding {
     reason: SourceAccountPurgeReason;
     detected_at: string;
   };
+  /**
+   * For a grant whose account cannot be read (Dropbox grants made before
+   * `account_info.read`): ids of folders only that account can open,
+   * recorded while it was connected. A reconnect that opens all of them is
+   * the same account.
+   */
+  previous_account_folders?: string[];
 }
 
 export interface SourceAccountBindings {
@@ -254,12 +261,16 @@ function normalizeBindings(value: unknown): SourceAccountBindingsRead {
       || (purge.reason !== 'account_changed' && purge.reason !== 'previous_account_unknown')
       || typeof purge.detected_at !== 'string'
     )) return { kind: 'malformed' };
+    const folders = Array.isArray(entry.previous_account_folders)
+      ? entry.previous_account_folders.filter((id): id is string => typeof id === 'string' && /^id:[A-Za-z0-9_-]{1,200}$/.test(id)).slice(0, 5)
+      : [];
     sources[key as AccountBoundSourceId] = prune({
       ...(typeof entry.provider_account_id === 'string' && entry.provider_account_id.trim()
         ? { provider_account_id: entry.provider_account_id.trim() }
         : {}),
       ...(typeof entry.bound_at === 'string' ? { bound_at: entry.bound_at } : {}),
       ...(typeof entry.reconnected_at === 'string' ? { reconnected_at: entry.reconnected_at } : {}),
+      ...(folders.length > 0 ? { previous_account_folders: folders } : {}),
       ...(purge
         ? {
             purge_required: {

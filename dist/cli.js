@@ -5614,6 +5614,29 @@ async function dropboxItemsOpenForToken(options) {
   }
   return true;
 }
+async function dropboxOwnRootFolderIds(options) {
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), options.endpoint ?? "https://api.dropboxapi.com/2/files/list_folder", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "", recursive: false, limit: 200 })
+    }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: 1024 * 1024 }));
+  } catch {
+    return;
+  }
+  if (!response.ok)
+    return;
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed.entries))
+      return;
+    return parsed.entries.filter((entry) => !!entry && typeof entry === "object" && entry[".tag"] === "folder" && typeof entry.id === "string" && /^id:[A-Za-z0-9_-]{1,200}$/.test(entry.id) && entry.sharing_info === undefined).slice(0, options.limit ?? 5).map((entry) => entry.id);
+  } catch {
+    return;
+  }
+}
 var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, ProviderAccountIdentityError;
 var init_provider_account_identity = __esm(() => {
   init_http_timeout();
@@ -5763,10 +5786,12 @@ function normalizeBindings(value) {
     const purge = entry.purge_required;
     if (purge !== undefined && (!purge || typeof purge !== "object" || purge.reason !== "account_changed" && purge.reason !== "previous_account_unknown" || typeof purge.detected_at !== "string"))
       return { kind: "malformed" };
+    const folders = Array.isArray(entry.previous_account_folders) ? entry.previous_account_folders.filter((id) => typeof id === "string" && /^id:[A-Za-z0-9_-]{1,200}$/.test(id)).slice(0, 5) : [];
     sources[key] = prune({
       ...typeof entry.provider_account_id === "string" && entry.provider_account_id.trim() ? { provider_account_id: entry.provider_account_id.trim() } : {},
       ...typeof entry.bound_at === "string" ? { bound_at: entry.bound_at } : {},
       ...typeof entry.reconnected_at === "string" ? { reconnected_at: entry.reconnected_at } : {},
+      ...folders.length > 0 ? { previous_account_folders: folders } : {},
       ...purge ? {
         purge_required: {
           reason: purge.reason,
@@ -25991,10 +26016,6 @@ var init_local_index = __esm(() => {
     }
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
-    }
-    sampleProviderItemIds(limit) {
-      const rows = this.db.query("SELECT provider_item_id FROM items WHERE tombstoned = 0 AND provider_item_id IS NOT NULL ORDER BY random() LIMIT ?").all(Math.max(0, Math.floor(limit)));
-      return rows.map((row) => row.provider_item_id);
     }
     fileReplacedOrRemoved() {
       if (!this.openedFile)
@@ -116553,22 +116574,24 @@ function createSourceAccountGuard(options) {
   const bindingsPath = sourceAccountBindingsPath(options.registryPath);
   const verified = new Map;
   let lastAccessToken;
-  const reached = new Map;
-  const storedItemsOpen = async (accessToken) => {
-    const key = createHash61("sha256").update(accessToken).digest("hex");
-    const known = reached.get(key);
+  const evidenceChecked = new Map;
+  const evidenceOpens = async (accessToken, folderIds) => {
+    const key = createHash61("sha256").update(`${accessToken}
+${folderIds.join(",")}`).digest("hex");
+    const known = evidenceChecked.get(key);
     if (known !== undefined)
       return known;
-    const answer = await options.storedItemsOpenForToken?.(accessToken).catch(() => {
+    const answer = await options.ownAccountEvidence?.check(accessToken, folderIds).catch(() => {
       return;
     });
     if (answer !== undefined) {
-      if (reached.size >= 8)
-        reached.clear();
-      reached.set(key, answer);
+      if (evidenceChecked.size >= 8)
+        evidenceChecked.clear();
+      evidenceChecked.set(key, answer);
     }
     return answer;
   };
+  let evidenceRecordAttempted = false;
   const tokenAccountId = async () => {
     const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
     const session = await broker.issueSession({
@@ -116623,11 +116646,12 @@ function createSourceAccountGuard(options) {
       if (read.kind === "malformed")
         throw new SourceAccountBindingsUnreadableError(bindingsPath);
       let decision = decide(read.bindings.sources[options.sourceId]);
-      if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && options.storedItemsOpenForToken && await storedItemsOpen(lastAccessToken) === true) {
+      const current = read.bindings.sources[options.sourceId];
+      if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && current?.previous_account_folders?.length && await evidenceOpens(lastAccessToken, current.previous_account_folders) === true) {
         let bound = false;
-        updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
-          if (current?.provider_account_id)
-            return current;
+        updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => {
+          if (latest?.provider_account_id)
+            return latest;
           bound = true;
           return { provider_account_id: token, bound_at: now().toISOString() };
         });
@@ -116638,18 +116662,28 @@ function createSourceAccountGuard(options) {
           throw new SourceAccountBindingsUnreadableError(bindingsPath);
         decision = decide(reread.bindings.sources[options.sourceId]);
       }
+      if (decision.action === "proceed" && decision.write === undefined && !token && lastAccessToken && options.ownAccountEvidence && !evidenceRecordAttempted && !current?.provider_account_id && !current?.reconnected_at && !current?.previous_account_folders?.length) {
+        const folders = await options.ownAccountEvidence.record(lastAccessToken).catch(() => {
+          return;
+        });
+        if (folders !== undefined)
+          evidenceRecordAttempted = true;
+        if (folders?.length) {
+          updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => latest?.provider_account_id || latest?.reconnected_at || latest?.purge_required ? latest : { ...latest, previous_account_folders: folders.slice(0, 5) });
+        }
+      }
       if (decision.action === "proceed" && decision.write === undefined)
         return;
       if (decision.action !== "refuse") {
-        updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
-          decision = decide(current);
+        updateSourceAccountBinding(bindingsPath, options.sourceId, (current2) => {
+          decision = decide(current2);
           if (decision.action === "proceed") {
-            return decision.write === undefined ? current : decision.write ?? undefined;
+            return decision.write === undefined ? current2 : decision.write ?? undefined;
           }
           if (decision.action === "purge") {
-            return current?.purge_required ? current : { ...current, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
+            return current2?.purge_required ? current2 : { ...current2, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
           }
-          return current;
+          return current2;
         });
       }
       if (decision.action === "proceed")
@@ -131285,7 +131319,6 @@ async function main() {
     handles: readActiveConnectedHandles(process.env)
   }));
   const sourceAccountGuards = new Map;
-  const DROPBOX_REACH_SAMPLE = 20;
   const laneGuards = new Map;
   const laneStores = (stores, onDemand) => ({
     laneHoldsItems: () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
@@ -131307,7 +131340,7 @@ ${lane.handle}`;
         laneHoldsItems: lane.laneHoldsItems,
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
-        ...lane.storedItemsOpenForToken ? { storedItemsOpenForToken: lane.storedItemsOpenForToken } : {}
+        ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}
       });
       sourceAccountGuards.set(key, guard);
     }
@@ -131463,9 +131496,9 @@ ${lane.handle}`;
           capability: "dropbox.files.sync",
           handle: currentDropboxHandle?.handle,
           ...laneStores([dropboxConnectorStore], dropboxTierLane ? [dropboxTierLane.internal, dropboxTierLane.public] : []),
-          storedItemsOpenForToken: async (accessToken) => {
-            const sample = [dropboxConnectorStore, dropboxTierLane?.internal.current(), dropboxTierLane?.public.current()].flatMap((store) => store?.sampleProviderItemIds(DROPBOX_REACH_SAMPLE) ?? []).slice(0, DROPBOX_REACH_SAMPLE);
-            return sample.length > 0 ? dropboxItemsOpenForToken({ accessToken, itemIds: sample }) : undefined;
+          ownAccountEvidence: {
+            record: (accessToken) => dropboxOwnRootFolderIds({ accessToken }),
+            check: (accessToken, folderIds) => dropboxItemsOpenForToken({ accessToken, itemIds: folderIds })
           }
         });
       }),

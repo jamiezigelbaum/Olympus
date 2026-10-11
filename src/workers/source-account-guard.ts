@@ -57,13 +57,17 @@ export interface SourceAccountGuardOptions {
   /** Ask a supervised worker to restart and reopen its stores; false when it cannot. */
   requestStoreReopen?: () => boolean;
   /**
-   * Whether the stored items still open for the account of this access token
-   * (true), visibly do not (false), or the provider could not say. The
-   * migration for grants whose account could never be read (Dropbox grants
-   * made before `account_info.read`): with no recorded account, reach is the
-   * only proof a reconnect is the same account (PR review).
+   * Evidence of the account for grants whose account cannot be read (Dropbox
+   * grants made before `account_info.read`; PR review). `record` names
+   * folders only the token's account can open, kept while that grant syncs;
+   * `check` says whether a later token opens all of them (the same account).
+   * Arbitrary stored items are no evidence: a shared item opens for every
+   * account it is shared with (independent review round 13).
    */
-  storedItemsOpenForToken?: (accessToken: string) => Promise<boolean | undefined>;
+  ownAccountEvidence?: {
+    record: (accessToken: string) => Promise<string[] | undefined>;
+    check: (accessToken: string, folderIds: readonly string[]) => Promise<boolean | undefined>;
+  };
   broker?: CredentialBroker;
   fetch?: TimeoutFetch;
   identityEndpoints?: ProviderIdentityEndpoints;
@@ -83,19 +87,20 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
   const verified = new Map<string, string>();
   // The token the last lookup was about, for the reach check below.
   let lastAccessToken: string | undefined;
-  // One reach check per access token: it costs a provider call per sample.
-  const reached = new Map<string, boolean>();
-  const storedItemsOpen = async (accessToken: string): Promise<boolean | undefined> => {
-    const key = createHash('sha256').update(accessToken).digest('hex');
-    const known = reached.get(key);
+  // One evidence check per access token and folder set.
+  const evidenceChecked = new Map<string, boolean>();
+  const evidenceOpens = async (accessToken: string, folderIds: readonly string[]): Promise<boolean | undefined> => {
+    const key = createHash('sha256').update(`${accessToken}\n${folderIds.join(',')}`).digest('hex');
+    const known = evidenceChecked.get(key);
     if (known !== undefined) return known;
-    const answer = await options.storedItemsOpenForToken?.(accessToken).catch(() => undefined);
+    const answer = await options.ownAccountEvidence?.check(accessToken, folderIds).catch(() => undefined);
     if (answer !== undefined) {
-      if (reached.size >= 8) reached.clear();
-      reached.set(key, answer);
+      if (evidenceChecked.size >= 8) evidenceChecked.clear();
+      evidenceChecked.set(key, answer);
     }
     return answer;
   };
+  let evidenceRecordAttempted = false;
 
   const tokenAccountId = async (): Promise<string | undefined> => {
     const handle = readConnectedHandleRegistry(options.registryPath).handles
@@ -159,15 +164,16 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
       const read = readSourceAccountBindings(bindingsPath);
       if (read.kind === 'malformed') throw new SourceAccountBindingsUnreadableError(bindingsPath);
       let decision = decide(read.bindings.sources[options.sourceId]);
+      const current = read.bindings.sources[options.sourceId];
       if (decision.action === 'purge' && decision.reason === 'previous_account_unknown' && token
-        && lastAccessToken && options.storedItemsOpenForToken
-        && await storedItemsOpen(lastAccessToken) === true) {
-        // Every sampled stored item opens for this account: they are its
-        // items, so it binds. Only while the record still names no account;
+        && lastAccessToken && current?.previous_account_folders?.length
+        && await evidenceOpens(lastAccessToken, current.previous_account_folders) === true) {
+        // The new token opens folders only the previous account could: it is
+        // that account. Bound only while the record still names no account;
         // a connect landing meanwhile is decided afresh below.
         let bound = false;
-        updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
-          if (current?.provider_account_id) return current;
+        updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => {
+          if (latest?.provider_account_id) return latest;
           bound = true;
           return { provider_account_id: token, bound_at: now().toISOString() };
         });
@@ -175,6 +181,21 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
         const reread = readSourceAccountBindings(bindingsPath);
         if (reread.kind === 'malformed') throw new SourceAccountBindingsUnreadableError(bindingsPath);
         decision = decide(reread.bindings.sources[options.sourceId]);
+      }
+      if (decision.action === 'proceed' && decision.write === undefined && !token && lastAccessToken
+        && options.ownAccountEvidence && !evidenceRecordAttempted
+        && !current?.provider_account_id && !current?.reconnected_at && !current?.previous_account_folders?.length) {
+        // An unreadable account syncing unbound: keep the evidence a later
+        // reconnect is checked against, while this grant is the one in force.
+        const folders = await options.ownAccountEvidence.record(lastAccessToken).catch(() => undefined);
+        // Asked once per process; a provider that could not say is asked again.
+        if (folders !== undefined) evidenceRecordAttempted = true;
+        if (folders?.length) {
+          updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) =>
+            latest?.provider_account_id || latest?.reconnected_at || latest?.purge_required
+              ? latest
+              : { ...latest, previous_account_folders: folders.slice(0, 5) });
+        }
       }
       if (decision.action === 'proceed' && decision.write === undefined) return;
       if (decision.action !== 'refuse') {

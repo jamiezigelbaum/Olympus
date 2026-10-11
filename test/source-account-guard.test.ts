@@ -54,9 +54,10 @@ function harness(input: {
   identityStatus?: number;
   storesStale?: boolean;
   restarts?: boolean;
-  itemsOpen?: boolean | undefined | 'unset';
+  evidence?: { folders?: string[] | undefined; opens?: boolean | undefined };
 }) {
   let reopenRequests = 0;
+  const evidenceCalls = { record: 0, check: [] as string[][] };
   const issued: CredentialSessionRequest[] = [];
   const lookups: string[] = [];
   const broker: CredentialBroker = {
@@ -89,9 +90,17 @@ function harness(input: {
     laneHoldsItems: () => input.holdsItems ?? true,
     laneStoresStale: () => input.storesStale ?? false,
     requestStoreReopen: () => { reopenRequests += 1; return input.restarts ?? false; },
-    ...(input.itemsOpen === 'unset' || !('itemsOpen' in input)
-      ? {}
-      : { storedItemsOpenForToken: async () => input.itemsOpen as boolean | undefined }),
+    ...(input.evidence
+      ? {
+          ownAccountEvidence: {
+            record: async () => { evidenceCalls.record += 1; return input.evidence!.folders; },
+            check: async (_token: string, folderIds: readonly string[]) => {
+              evidenceCalls.check.push([...folderIds]);
+              return input.evidence!.opens;
+            },
+          },
+        }
+      : {}),
     broker,
     fetch: async (_url, init) => {
       const token = String((init.headers as Record<string, string>).Authorization).replace('Bearer token-of-', '');
@@ -102,7 +111,7 @@ function harness(input: {
     },
     now: () => new Date('2026-10-10T22:43:00.000Z'),
   });
-  return { guard, issued, lookups, reopenRequests: () => reopenRequests };
+  return { guard, issued, lookups, evidenceCalls, reopenRequests: () => reopenRequests };
 }
 
 function binding(registryPath: string) {
@@ -111,18 +120,50 @@ function binding(registryPath: string) {
 }
 
 describe('the account guard', () => {
-  test('a legacy grant with no readable account binds on reconnect only when the stored items open for the new account (PR review)', async () => {
-    for (const [itemsOpen, binds] of [[true, true], [false, false], [undefined, false]] as const) {
+  test('a legacy grant with no readable account records folders only it can open while it is the grant in force (independent review round 13)', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, undefined);
+    // The account cannot be read (no account_info.read): the run proceeds unbound and records evidence.
+    const legacy = harness({ registryPath, tokenAccount: 'dbid:main', identityStatus: 400, evidence: { folders: ['id:own1', 'id:own2'] } });
+    let ran = 0;
+    const source = accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard: legacy.guard });
+    await source.tasks[0]!.run();
+    await source.tasks[0]!.run();
+    expect(ran).toBe(2);
+    expect(legacy.evidenceCalls.record).toBe(1);
+    expect(binding(registryPath)).toEqual({ previous_account_folders: ['id:own1', 'id:own2'] });
+
+    // After a reconnect nothing is recorded: the token may be the new account's.
+    const reconnected = join(tempDir(), 'handles.json');
+    writeGrant(reconnected, undefined);
+    updateSourceAccountBinding(sourceAccountBindingsPath(reconnected), 'dropbox.files', () => ({ reconnected_at: '2026-10-10T22:42:00.000Z' }));
+    const after = harness({ registryPath: reconnected, tokenAccount: 'dbid:demo', identityStatus: 400, evidence: { folders: ['id:other'] } });
+    await accountBoundSchedulerSource({ source: lane(() => undefined), guard: after.guard }).tasks[0]!.run().catch(() => undefined);
+    expect(after.evidenceCalls.record).toBe(0);
+    expect(binding(reconnected)).toEqual({ reconnected_at: '2026-10-10T22:42:00.000Z' });
+  });
+
+  test('a legacy grant binds on reconnect only when the new token opens every recorded folder (independent review round 13)', async () => {
+    const cases = [
+      { folders: ['id:own1', 'id:own2'], opens: true, binds: true },
+      { folders: ['id:own1', 'id:own2'], opens: false, binds: false },
+      { folders: ['id:own1', 'id:own2'], opens: undefined, binds: false },
+      // No evidence was recorded: nothing proves the account, so it fails closed.
+      { folders: undefined, opens: true, binds: false },
+    ] as const;
+    for (const { folders, opens, binds } of cases) {
       const registryPath = join(tempDir(), 'handles.json');
       writeGrant(registryPath, 'dbid:demo');
-      // Reconnected over items whose account was never read.
       updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({
         reconnected_at: '2026-10-10T22:42:00.000Z',
+        ...(folders ? { previous_account_folders: [...folders] } : {}),
       }));
-      const { guard } = harness({ registryPath, tokenAccount: 'dbid:demo', itemsOpen });
+      const { guard, evidenceCalls } = harness({ registryPath, tokenAccount: 'dbid:demo', evidence: { opens } });
       let ran = 0;
       const outcome = await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run()
         .catch((reason: unknown) => reason);
+      expect(evidenceCalls.check).toEqual(folders ? [[...folders]] : []);
+      expect(evidenceCalls.record).toBe(0);
       if (binds) {
         expect(ran).toBe(1);
         expect(binding(registryPath)).toEqual({ provider_account_id: 'dbid:demo', bound_at: '2026-10-10T22:43:00.000Z' });

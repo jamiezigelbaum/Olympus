@@ -10008,14 +10008,6 @@ export class LocalConnectorStore {
     return this.db.query('SELECT 1 AS present FROM items LIMIT 1').get() !== null;
   }
 
-  /** Up to `limit` provider ids of live (untombstoned) items, in no particular order. */
-  sampleProviderItemIds(limit: number): string[] {
-    const rows = this.db.query(
-      'SELECT provider_item_id FROM items WHERE tombstoned = 0 AND provider_item_id IS NOT NULL ORDER BY random() LIMIT ?',
-    ).all(Math.max(0, Math.floor(limit))) as Array<{ provider_item_id: string }>;
-    return rows.map((row) => row.provider_item_id);
-  }
-
   /**
    * Whether the file this store opened has since been removed or replaced on
    * disk (`olympus data delete --source` may run while the worker stays up,
