@@ -527,6 +527,8 @@ describe('bounds and the owner-approval gate', () => {
       let busy = true;
       let clock = 0;
       let release: (() => void) | undefined;
+      let callStarted: () => void = () => {};
+      const inCall = new Promise<void>((resolve) => { callStarted = resolve; });
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'therapy', confidence: 0.9 }));
       const service = new TierSnifferService({
         installed,
@@ -555,6 +557,7 @@ describe('bounds and the owner-approval gate', () => {
         lane: LOCAL_LANE,
         model: {
           async complete(request) {
+            callStarted();
             await new Promise<void>((resolve) => {
               release = resolve;
               if (request.signal?.aborted) resolve();
@@ -570,7 +573,9 @@ describe('bounds and the owner-approval gate', () => {
         maxPassMs: 60_000,
       });
       const first = hanging.runOnce();
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      // The stop must land while the model call is in flight: an abort that
+      // reaches the pass before its first dispatch stops it as 'aborted'.
+      await inCall;
       expect((await hanging.runOnce()).state).toBe('skipped_running');
       clock += 61_000;
       expect((await hanging.runOnce()).state).toBe('skipped_running');
@@ -603,6 +608,8 @@ describe('bounds and the owner-approval gate', () => {
       const lines: string[] = [];
       let clock = 0;
       let calls = 0;
+      let callStarted: () => void = () => {};
+      const inCall = new Promise<void>((resolve) => { callStarted = resolve; });
       const answering = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'therapy', confidence: 0.9 }));
       const service = new TierSnifferService({
         installed,
@@ -611,6 +618,7 @@ describe('bounds and the owner-approval gate', () => {
           // The first call never settles and ignores its signal; later calls answer.
           complete(request) {
             calls += 1;
+            if (calls === 1) callStarted();
             return calls === 1 ? new Promise(() => {}) : answering.complete(request);
           },
         },
@@ -622,7 +630,7 @@ describe('bounds and the owner-approval gate', () => {
         abandonAfterMs: 30_000,
       });
       void service.runOnce();
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await inCall;
       expect((await service.runOnce()).state).toBe('skipped_running');
       expect(service.status().waiting?.reason).toBe('pass_running');
       clock += 61_000;
