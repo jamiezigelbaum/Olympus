@@ -27,6 +27,8 @@ export interface DashboardOutsideHelpTool {
   /** For `outdated`: the version installed now, and the pinned one the update installs. */
   readonly installedVersion?: string;
   readonly version?: string;
+  /** Whether Olympus has a pinned download of this tool for this computer; absent (an older worker) reads as no. */
+  readonly offered?: boolean;
 }
 
 export type DashboardOutsideHelpInstall =
@@ -181,7 +183,8 @@ export function renderOutsideHelpToolsFix(tools: DashboardOutsideHelpTools | und
  */
 export function renderOutsideHelpToolsReplace(tools: DashboardOutsideHelpTools | undefined, tool: ManagedToolName, input: { canEdit: boolean; attrs: string }): string {
   const entry = tools?.tools.find((item) => item.tool === tool);
-  if (!tools || entry?.source !== 'system') return '';
+  // Only when there is a download to install: otherwise the click changes nothing and the blocker's own line stands.
+  if (!tools || entry?.source !== 'system' || entry.offered !== true) return '';
   return `<li${input.attrs} data-outside-tools="replace" data-install-state="${escapeHtml(tools.install.state)}"><span>${escapeHtml(fill(C.systemOld, { tool: entry.label, version: entry.version ?? '' }))}</span>`
     + `${progressLine(tools.install)}${installButton(tools, input.canEdit, entry)}</li>`;
 }

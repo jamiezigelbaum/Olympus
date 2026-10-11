@@ -87,6 +87,12 @@ export interface ManagedToolPin {
   /** What `<executable> --version` prints first, for this pin. */
   readonly versionLine: RegExp;
   readonly assets: Readonly<Partial<Record<ManagedToolPlatform, ManagedToolAsset>>>;
+  /**
+   * Earlier pins this one replaces: version → the SHA-256 each platform's
+   * asset had. Only an install whose manifest names one of these, with the
+   * matching hash, reads as outdated and is removed after an update.
+   */
+  readonly replaces?: Readonly<Record<string, Readonly<Partial<Record<ManagedToolPlatform, string>>>>>;
 }
 
 // The Olympus fork's release (docs/design/private-answers.md): upstream's
@@ -169,6 +175,15 @@ export const MANAGED_TOOL_PINS: Readonly<Record<ManagedToolName, ManagedToolPin>
       'darwin-x64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz', 'eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9', 23_924_127),
       'linux-x64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz', '33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1', 24_179_427),
       'linux-arm64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz', 'ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0', 23_914_142),
+    },
+    // Upstream clientd-v0.1.6, pinned 2026-10-07 until this release.
+    replaces: {
+      '0.1.6': {
+        'darwin-arm64': '0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4',
+        'darwin-x64': 'ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12',
+        'linux-x64': '41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95',
+        'linux-arm64': '41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf',
+      },
     },
   },
 };
@@ -380,39 +395,47 @@ export function managedToolsState(host: ManagedToolsHost = {}): ManagedToolState
 }
 
 /**
- * Version folders of `tool` other than the pinned one that hold Olympus's own
- * manifest for this tool, version and platform (owner-only, as discovery
- * requires): builds an earlier Olympus installed and a later pin replaced.
- * Newest-named first. Read-only; nothing else in the folder counts.
+ * Folders of `tool` holding an earlier pin this one replaces (`pin.replaces`):
+ * a real, owner-only folder named for that version, holding Olympus's own
+ * manifest for this tool, version and platform with that pin's exact hash.
+ * Nothing else in the folder counts (a newer build, a backup, a manifest with
+ * any other hash). Newest-named first. Read-only.
  */
 export function earlierManagedVersions(tool: ManagedToolName, host: ManagedToolsHost = {}): string[] {
+  return earlierManagedFolders(tool, host).map((entry) => entry.version);
+}
+
+interface EarlierFolder { readonly version: string; readonly dev: number; readonly ino: number }
+
+function earlierManagedFolders(tool: ManagedToolName, host: ManagedToolsHost): EarlierFolder[] {
   const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
   const platformKey = managedToolsPlatform(host.platform, host.arch);
   const root = managedToolsRoot(host);
-  if (!pin || !platformKey || !root) return [];
+  if (!pin?.replaces || !platformKey || !root) return [];
   const uid = currentUid(host);
   const toolDir = join(root, tool);
-  let entries: string[];
   try {
     if (lstatSync(toolDir).isSymbolicLink() || !privatelyOwned(toolDir, uid, 'dir')) return [];
-    entries = readdirSync(toolDir);
   } catch {
     return [];
   }
-  return entries
-    .filter((entry) => !entry.startsWith('.') && entry !== pin.version)
-    .filter((entry) => {
-      const dir = join(toolDir, entry);
-      try {
-        if (lstatSync(dir).isSymbolicLink() || !privatelyOwned(dir, uid, 'dir')) return false;
-      } catch {
-        return false;
-      }
-      const manifest = readManifest(join(dir, MANIFEST_FILE), uid);
-      return manifest !== undefined && manifest.tool === tool && manifest.version === entry && manifest.platform === platformKey;
-    })
-    .sort()
-    .reverse();
+  const found: EarlierFolder[] = [];
+  for (const [version, hashes] of Object.entries(pin.replaces)) {
+    const sha256 = hashes[platformKey];
+    if (!sha256 || version === pin.version || version.startsWith('.') || version.includes('/') || version.includes(sep)) continue;
+    const dir = join(toolDir, version);
+    let stats;
+    try {
+      stats = lstatSync(dir);
+    } catch {
+      continue;
+    }
+    if (stats.isSymbolicLink() || !privatelyOwned(dir, uid, 'dir')) continue;
+    const manifest = readManifest(join(dir, MANIFEST_FILE), uid);
+    if (!manifest || manifest.tool !== tool || manifest.version !== version || manifest.platform !== platformKey || manifest.sha256 !== sha256) continue;
+    found.push({ version, dev: stats.dev, ino: stats.ino });
+  }
+  return found.sort((a, b) => (a.version < b.version ? 1 : a.version > b.version ? -1 : 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -729,10 +752,22 @@ async function installOne(
     // An update: the earlier builds this replaced are Olympus's own (manifest
     // checked) and nothing resolves them any more, so they are removed. Only
     // after the new one is found, so a failed update keeps the old folder.
-    const replaced = earlierManagedVersions(tool, host);
-    if (replaced.length > 0) {
+    const replaced: string[] = [];
+    if (earlierManagedFolders(tool, host).length > 0) {
       await commit(async () => {
-        for (const version of replaced) rmSync(join(toolDir, version), { recursive: true, force: true });
+        // Re-checked under the lease, immediately before each removal: the
+        // tools folder chain still owner-only and link-free, and the folder
+        // still the same one (device and inode) that held the prior pin's manifest.
+        for (const dir of [dirname(root), root, toolDir]) {
+          if (lstatSync(dir).isSymbolicLink() || !privatelyOwned(dir, uid, 'dir')) return;
+        }
+        for (const folder of earlierManagedFolders(tool, host)) {
+          const path = join(toolDir, folder.version);
+          const now = lstatSync(path);
+          if (now.isSymbolicLink() || now.dev !== folder.dev || now.ino !== folder.ino) continue;
+          rmSync(path, { recursive: true, force: true });
+          replaced.push(folder.version);
+        }
       });
     }
     return { tool, version: pin.version, outcome: 'installed', executable, ...(replaced.length > 0 ? { replaced } : {}) };

@@ -290,6 +290,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         label: entry.label,
         source: entry.installed ? 'olympus' : system ? 'system' : entry.offered ? 'missing' : 'not_offered',
         version: entry.version,
+        offered: entry.offered,
       };
     });
   });

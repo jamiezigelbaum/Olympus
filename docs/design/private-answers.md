@@ -458,8 +458,11 @@ and run on an Apple silicon Mac. The macOS daemon is ad-hoc, linker-signed
 (upstream 0.1.6) is not found by discovery and is reported as outdated. The
 same install (dashboard **Update zkAPI**, or `olympus zkapi install-tools`)
 installs the new pin beside it and, once the new build is found, removes the
-earlier version folders that hold Olympus's own manifest. A failed update
-leaves the earlier folder in place. A too-old daemon found on PATH gets the
+earlier pin's folder: only a version the pin lists in `replaces`, a real
+owner-only folder whose Olympus manifest carries that pin's exact hash for
+this platform, re-checked (same device and inode) under the install lease
+just before removal. Backups, newer builds and anything else stay. A failed
+update leaves the earlier folder in place. A too-old daemon found on PATH gets the
 same button (Olympus's verified build wins over PATH); one at a path set in
 the route is named, with the fix, and gets no button, since installing would
 not change which program runs.

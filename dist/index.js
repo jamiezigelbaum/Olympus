@@ -16707,6 +16707,14 @@ var MANAGED_TOOL_PINS = {
       "darwin-x64": zkapiAsset("zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz", "eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9", 23924127),
       "linux-x64": zkapiAsset("zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz", "33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1", 24179427),
       "linux-arm64": zkapiAsset("zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz", "ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0", 23914142)
+    },
+    replaces: {
+      "0.1.6": {
+        "darwin-arm64": "0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4",
+        "darwin-x64": "ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12",
+        "linux-x64": "41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95",
+        "linux-arm64": "41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf"
+      }
     }
   }
 };
