@@ -724,14 +724,16 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
       beforeFlip: () => { raised = runTierSet(['id:bank', 'private'], { storePaths: storePaths() }); },
     });
     await expect(move).rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
-    expect(raised).toMatchObject({ results: [{ override: 'Private', outcome: 'move_retargeted' }] });
+    // Replacing the override cancelled the lower in the same write (it hid
+    // nothing): the item is already Private where it rests, nothing to raise.
+    expect(raised).toMatchObject({ results: [{ override: 'Private', outcome: 'set_applies_next_pass' }] });
     // Never current in the Personal store; the staged copy is kept hidden.
     expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
     expect(install.lane.ledger.copies(bank).find((copy) => copy.corpusId === INTERNAL_CORPUS)).toMatchObject({ state: 'superseded' });
-    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'moving', targetMetadataTier: 'secure', targetContentTier: 'secure' });
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
     expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
 
-    // The retargeted move lands Private.
+    // The next tick records the owner's word; the item stays Private.
     await service.runOnce();
     expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
     expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
@@ -752,14 +754,22 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
     expect(currentCopies(ledger, bank)).toEqual([SECURE_CORPUS]);
   });
 
-  test('a queued lower whose override was cleared before it lands is refused at the flip', async () => {
-    const { install } = await bankPrivate();
+  test('a queued lower whose override was cleared before it lands is cancelled: a move read before never lands', async () => {
+    const { install, service } = await bankPrivate();
     const ledger = install.lane.ledger;
     ledger.setOverride(bank, { kind: 'tier', tier: 'private' });
     expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ lowered: 1 });
+    const read = ledger.getCurrent(bank)!;
     ledger.clearOverride(bank);
-    await expect(moveTieredItem({ set: install.lane.set, identity: bankItem, target: { metadataTier: 'private', contentTier: 'private' } }))
-      .rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    await expect(moveTieredItem({
+      set: install.lane.set,
+      identity: bankItem,
+      target: { metadataTier: 'private', contentTier: 'private' },
+      expectedGeneration: read.generation,
+    })).rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
+    await service.runOnce();
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
     expect(currentCopies(ledger, bank)).toEqual([SECURE_CORPUS]);
     expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
   });
@@ -912,5 +922,113 @@ describe('12c. owner overrides under interleaving, round 2 (review of PR #255)',
     await expect(moveTieredItem({ set: fx.set, identity: d1, target: { metadataTier: 'private', contentTier: 'private' } }))
       .rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
     expect(currentCopies(fx.ledger, d1)).not.toContain(CORPORA.internal);
+  });
+});
+
+describe('12d. a revoked owner move is cancelled or replanned, never stranded (review of PR #255, round 3)', () => {
+  const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
+    ledger.copies(id).filter((copy) => copy.state === 'current')
+      .map((copy) => ({ corpusId: copy.corpusId, layers: copy.layers }))
+      .sort((left, right) => left.corpusId.localeCompare(right.corpusId));
+  const judged = (metadataTier: 'public' | 'private' | 'secure', contentTier: 'private' | 'secure'): TierDecision => ({
+    ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'x' }),
+    metadataTier, contentTier, decidedBy: 'sniffer', state: 'current',
+    contentRead: true, contentPending: false, metadataPending: false,
+  });
+
+  /** One item placed at the given tiers, resting where they put it. */
+  async function placed(prefix: string, metadataTier: 'public' | 'secure', contentTier: 'secure') {
+    const { dir, cleanup } = tempDir(prefix);
+    closers.push(cleanup);
+    const fx = openTierFixture(dir, { embed: false });
+    closers.push(() => fx.close());
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    const d1 = fixtureIdentityOf('d1');
+    const decision = judged(metadataTier, contentTier);
+    if (fx.ledger.recordRoutedPlacement(d1, decision, fx.set.placementFor(decision)).outcome === 'queued_move') {
+      await moveTieredItem({ set: fx.set, identity: d1, target: { metadataTier, contentTier } });
+    }
+    expect(fx.ledger.getCurrent(d1)).toMatchObject({ state: 'current', metadataTier, contentTier });
+    return { fx, d1 };
+  }
+
+  /** The automatic moves' call: the listed row's own target and generation. */
+  const automaticMove = (fx: ReturnType<typeof openTierFixture>, d1: ReturnType<typeof fixtureIdentityOf>, beforeFlip?: () => void) => {
+    const record = fx.ledger.getCurrent(d1)!;
+    return moveTieredItem({
+      set: fx.set,
+      identity: d1,
+      target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
+      expectedGeneration: record.generation,
+      replaceOwnSupersededCopy: true,
+      ...(beforeFlip ? { beforeFlip } : {}),
+    });
+  };
+
+  test('Public names with Private content set Personal, cleared mid-move: replanned from the hidden copies, then found again with the content still Private', async () => {
+    const { fx, d1 } = await placed('olympus-tier-revoked-mixed-', 'public', 'secure');
+    expect(currentCopies(fx.ledger, d1).map((copy) => copy.corpusId)).toEqual([CORPORA.public_safe, CORPORA.secure_local].sort());
+
+    // Personal: the names rise (so the move hides its sources), the content lowers.
+    fx.ledger.setOverride(d1, { kind: 'tier', tier: 'private' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ raised: 1 });
+    expect(currentCopies(fx.ledger, d1)).toEqual([]);
+
+    // The owner clears it from another process after the destination is
+    // written and before the flip: the move in flight never lands.
+    await expect(automaticMove(fx, d1, () => { fx.ledger.clearOverride(d1); }))
+      .rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
+    // Still hidden, and replanned in the clearing write: names no lower than
+    // Personal, content no lower than Private, by the decision before the override.
+    expect(currentCopies(fx.ledger, d1)).toEqual([]);
+    expect(fx.ledger.getCurrent(d1)).toMatchObject({
+      state: 'moving', targetMetadataTier: 'private', targetContentTier: 'secure', decidedBy: 'move',
+    });
+
+    // The next automatic move lands it: findable again, the content never in the Personal store.
+    await automaticMove(fx, d1);
+    expect(fx.ledger.getCurrent(d1)).toMatchObject({ state: 'current', metadataTier: 'private', contentTier: 'secure' });
+    expect(currentCopies(fx.ledger, d1) as Array<{ corpusId: string; layers: string }>).toEqual([
+      { corpusId: CORPORA.internal, layers: 'metadata' },
+      { corpusId: CORPORA.secure_local, layers: 'content' },
+    ].sort((left, right) => left.corpusId.localeCompare(right.corpusId)));
+    expect(fx.stores.internal!.exportItemCopy(d1)?.chunks ?? []).toEqual([]);
+    // Nothing left mid-move, and nothing for the override pass to do.
+    expect(fx.ledger.listMoving()).toEqual([]);
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ checked: 0 });
+  });
+
+  test('an override replaced by not-secret mid-move replans the same way (the new override asks for no tier)', async () => {
+    const { fx, d1 } = await placed('olympus-tier-revoked-not-secret-', 'public', 'secure');
+    fx.ledger.setOverride(d1, { kind: 'tier', tier: 'private' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ raised: 1 });
+    fx.ledger.setOverride(d1, { kind: 'not_secret' });
+    expect(fx.ledger.getCurrent(d1)).toMatchObject({ state: 'moving', targetMetadataTier: 'private', targetContentTier: 'secure' });
+    await automaticMove(fx, d1);
+    expect(fx.ledger.getCurrent(d1)).toMatchObject({ state: 'current', metadataTier: 'private', contentTier: 'secure' });
+    expect(fx.stores.internal!.exportItemCopy(d1)?.chunks ?? []).toEqual([]);
+  });
+
+  test('a queued lower that hid nothing is cancelled when cleared: the item stays where it is, and a move read before never starts again', async () => {
+    const { fx, d1 } = await placed('olympus-tier-revoked-lower-', 'secure', 'secure');
+    fx.ledger.setOverride(d1, { kind: 'tier', tier: 'private' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ lowered: 1 });
+    const read = fx.ledger.getCurrent(d1)!;
+    expect(read).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+
+    fx.ledger.clearOverride(d1);
+    expect(fx.ledger.getCurrent(d1)).toMatchObject({
+      state: 'current', metadataTier: 'secure', contentTier: 'secure', targetContentTier: null, decidedBy: 'move',
+    });
+    expect(currentCopies(fx.ledger, d1).map((copy) => copy.corpusId)).toEqual([CORPORA.secure_local]);
+    // An automatic move listed before the clear carries the generation it read.
+    await expect(moveTieredItem({
+      set: fx.set,
+      identity: d1,
+      target: { metadataTier: 'private', contentTier: 'private' },
+      expectedGeneration: read.generation,
+    })).rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
+    expect(currentCopies(fx.ledger, d1).map((copy) => copy.corpusId)).toEqual([CORPORA.secure_local]);
+    expect(fx.ledger.listMoving()).toEqual([]);
   });
 });

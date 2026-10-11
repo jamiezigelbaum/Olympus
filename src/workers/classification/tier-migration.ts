@@ -1744,7 +1744,15 @@ async function migrateOne(
   if (projectedCost > context.remainingCost + 1e-6) return { kind: 'cap', reason: 'cost_cap' };
 
   try {
-    const moved = await moveTieredItem({ set, identity, decision, vectorIdentities });
+    // Only the row checked above: one the owner changed since (an override
+    // cleared, which cancels the move it queued) is never moved from this read.
+    const moved = await moveTieredItem({
+      set,
+      identity,
+      decision,
+      vectorIdentities,
+      ...(record ? { expectedGeneration: record.generation } : {}),
+    });
     const chunksToEmbed: Record<string, number> = {};
     for (const destination of moved.destinations) {
       if (destination.chunksToEmbed > 0 && vectorIdentities[destination.trustDomain]) {

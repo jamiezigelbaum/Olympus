@@ -803,6 +803,9 @@ export class TierSnifferService {
             // destination costs nothing to replace, and keeping it would
             // strand the item mid-move (hidden, on a raise).
             replaceOwnSupersededCopy: true,
+            // Only the move listed here: one cancelled or replanned meanwhile
+            // (an owner override cleared) is never started again from this read.
+            expectedGeneration: record.generation,
           });
           report.moved += 1;
           this.moveFailures.delete(failureKey);

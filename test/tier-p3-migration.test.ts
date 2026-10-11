@@ -44,6 +44,7 @@ import { runTierMigrateCommand } from '../src/workers/classification/tier-migrat
 import { LocalConnectorStore, defineConnectorCorpus, syncAndEmbedFromConnector } from '../src/workers/connector-store/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import { TierMoveRefusedError, moveTieredItem, type TierMoveEmbeddingIdentity } from '../src/workers/connector-store/tier-move.ts';
+import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import {
   EMBEDDING_LEDGER_OWNER_APPROVAL,
   readEmbeddingLedger,
@@ -1065,6 +1066,55 @@ describe('tier migration review fixes', () => {
     // lose, so the move back is not skipped.
     expect(await migrate('private')).toMatchObject({ moved: 1, skipped: 0 });
     expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
+  });
+
+  test('an owner lowering cleared after the run checked it never lands (the move carries the checked generation)', async () => {
+    const context = await rehearsal();
+    const launch = identityOf('rehearsal-library', 'launch');
+    const planAndRun = async (beforeMove?: (ledger: TierLedger) => void) => {
+      const read = lanes(context, 'read');
+      const plan = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+      await approveTierMigration({ planId: plan.planId, lanes: read.lanes, inputs: context.inputs, paths: context.paths });
+      const write = lanes(context, 'write');
+      const copies = TierLedger.prototype.copies;
+      let fired = false;
+      const spy = spyOn(TierLedger.prototype, 'copies').mockImplementation(function (this: TierLedger, ...args) {
+        // The run has checked the queued move's generation; the owner clears
+        // the override from another process before the move starts.
+        if (beforeMove && !fired && args[0].providerItemId === 'launch' && (new Error().stack ?? '').includes('migrateOne')) {
+          fired = true;
+          beforeMove(this);
+        }
+        return copies.apply(this, args);
+      });
+      try {
+        return await runTierMigration({
+          planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+          selector: 'source:rehearsal.library',
+        });
+      } finally {
+        spy.mockRestore();
+        expect(fired).toBe(beforeMove !== undefined);
+      }
+    };
+    // The owner makes it Private: it rests in the Private store.
+    {
+      const read = lanes(context, 'read');
+      read.lanes[1]!.set.ledger.setOverride(launch, { kind: 'tier', tier: 'secure' });
+    }
+    await planAndRun();
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.secure_local]);
+    // Then Personal: a queued lowering, waiting for the migration.
+    {
+      const read = lanes(context, 'read');
+      read.lanes[1]!.set.ledger.setOverride(launch, { kind: 'tier', tier: 'private' });
+      expect(applyOwnerOverrides({ set: read.lanes[1]!.set })).toMatchObject({ lowered: 1 });
+    }
+    await planAndRun((ledger) => { ledger.clearOverride(launch); });
+    // Cleared: the lowering was cancelled, and the run's stale move never started.
+    const read = lanes(context, 'read');
+    expect(read.lanes[1]!.set.ledger.getCurrent(launch)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.secure_local]);
   });
 });
 
