@@ -72,7 +72,9 @@ describe('native WhatsApp capture service', () => {
       initialPluginConfig: fixture.pluginConfig,
       startupTimeoutMs: 2_000,
       readinessPollMs: 10,
-      stopGraceMs: 200,
+      // stop() returns at the child's exit; the grace only bounds a child that
+      // ignores SIGTERM, so a slow runner must not turn its trap into a SIGKILL.
+      stopGraceMs: 10_000,
     }));
 
     await service.start({});
@@ -211,10 +213,13 @@ function fakeBinarySource(
   const receiptJson = JSON.stringify(configuredReceipt)
     .replace('"$INSTANCE_ID"', '"%s"')
     .replace('"$PID"', '%s');
+  // The TERM trap is set before the readiness receipt is written: start()
+  // resolves on the receipt, and a stop() that lands before the trap would
+  // kill the shell without writing its stop file.
   return `#!/bin/sh
+trap 'printf "stopped\\n" > ${shellQuote(stopPath)}; exit 0' TERM INT
 printf '${format}\\n' "$$" ${values} >> ${shellQuote(startsPath)}
 printf '${receiptJson}\\n' "$OLYMPUS_NATIVE_SERVICE_INSTANCE_ID" "$$" > "$OLYMPUS_WHATSAPP_STATE_DIR/native-service-readiness.json"
-trap 'printf "stopped\\n" > ${shellQuote(stopPath)}; exit 0' TERM INT
 while :; do sleep 1; done
 `;
 }
