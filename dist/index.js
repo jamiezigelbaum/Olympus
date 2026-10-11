@@ -5260,6 +5260,8 @@ class JsonCredentialOAuth2StateStore {
       if (state.refreshToken !== undefined && previous?.refreshToken !== undefined && state.refreshToken !== previous.refreshToken && state.pendingRefreshStartedAt === undefined) {
         merged.pendingRefreshStartedAt = undefined;
       }
+      if (merged.pendingRefreshStartedAt === undefined)
+        merged.pendingRefreshGrantGeneration = undefined;
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
         await mkdir2(dirname13(this.path), { recursive: true, mode: 448 });
@@ -5440,11 +5442,17 @@ class EnvCredentialBroker {
     return this.mintCachedBearerSession(definition, capability, (cacheKey) => this.issueFreshServiceAccountJwtSession(definition, capability, cacheKey));
   }
   async mintCachedBearerSession(definition, capability, mint) {
-    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability);
+    const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability, this.env);
     const now = this.now();
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
-    if (cached && isReusableMintedSession(cached, now))
+    if (cached && isReusableMintedSession(cached, now)) {
+      if (definition.grantGeneration !== undefined && this.findHandle(definition.handle)?.grantGeneration !== definition.grantGeneration) {
+        PROCESS_MINTED_SESSION_CACHE.delete(cacheKey);
+        throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} was reconnected; retry to use the new grant.`, { handle: definition.handle, capability });
+      }
       return cached;
+    }
+    forgetSupersededGrantSessions(this.oauth2CacheNamespace, definition, capability, cacheKey);
     const backoff = PROCESS_MINT_FAILURE_BACKOFF.get(cacheKey);
     if (backoff && now.getTime() < backoff.untilMs)
       throw backoff.error;
@@ -5479,18 +5487,33 @@ class EnvCredentialBroker {
     if (!oauth2)
       throw missingCredentialError(definition.handle, capability);
     const now = this.now();
-    const storedState = await this.oauth2StateStore?.load(definition.handle);
+    let storedState = await this.oauth2StateStore?.load(definition.handle);
     if (storedState?.pendingRefreshStartedAt) {
-      await commitFileLease(lease, async () => {
-        await this.oauth2StateStore?.save(definition.handle, {
-          ...storedState,
-          status: "reauth_required",
-          updatedAt: now.toISOString(),
-          pendingRefreshStartedAt: undefined
+      const pending = storedState.pendingRefreshStartedAt;
+      const resolved = await this.withCurrentGrant(definition, capability, undefined, async () => {
+        const latest = await this.oauth2StateStore?.load(definition.handle);
+        if (!latest?.pendingRefreshStartedAt)
+          return { latched: false, state: latest };
+        if (latest.pendingRefreshGrantGeneration !== undefined && latest.pendingRefreshGrantGeneration !== definition.grantGeneration) {
+          const cleared = { ...latest, pendingRefreshStartedAt: undefined, pendingRefreshGrantGeneration: undefined };
+          await commitFileLease(lease, () => this.oauth2StateStore.save(definition.handle, cleared));
+          return { latched: false, state: cleared };
+        }
+        await commitFileLease(lease, async () => {
+          await this.oauth2StateStore?.save(definition.handle, {
+            ...latest,
+            status: "reauth_required",
+            updatedAt: now.toISOString(),
+            pendingRefreshStartedAt: undefined
+          });
+          this.markRegistryHandleReauthRequired(definition.handle, now);
         });
-        this.markRegistryHandleReauthRequired(definition.handle, now);
+        return { latched: true };
       });
-      throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${storedState.pendingRefreshStartedAt} did not record its outcome, so the stored refresh token may already be spent.`, { handle: definition.handle, capability });
+      if (resolved.latched) {
+        throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${pending} did not record its outcome, so the stored refresh token may already be spent.`, { handle: definition.handle, capability });
+      }
+      storedState = resolved.state;
     }
     const clientId = await this.resolveFirstSecret(oauth2.clientIdEnvNames, oauth2.clientIdSecretRef ? [oauth2.clientIdSecretRef] : []);
     const clientSecret = await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
@@ -5501,7 +5524,7 @@ class EnvCredentialBroker {
     if (storedState?.status === "reauth_required" || registryMarksReauthRequired(definition) || !refreshToken) {
       throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
     }
-    await commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now));
+    await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now)));
     const exchangeVia = this.resolveExchangeVia(definition, oauth2, clientId);
     let tokenResponse;
     try {
@@ -5516,7 +5539,7 @@ class EnvCredentialBroker {
     } catch (error) {
       await lease?.assertOwned();
       if (isTerminalOAuthRefreshError(error)) {
-        await commitFileLease(lease, async () => {
+        await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
           await this.oauth2StateStore?.save(definition.handle, {
             ...storedState,
             status: "reauth_required",
@@ -5524,19 +5547,19 @@ class EnvCredentialBroker {
             pendingRefreshStartedAt: undefined
           });
           this.markRegistryHandleReauthRequired(definition.handle, now);
-        });
+        }));
         throw new CredentialBrokerError("credential_reauth_required", storedState?.pendingRefreshStartedAt ? `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${storedState.pendingRefreshStartedAt} did not record its outcome, so the stored refresh token was already spent.` : `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
       }
       if (error instanceof OAuth2TokenEndpointError) {
         if (TOKEN_UNISSUED_STATUSES.has(error.status)) {
-          await commitFileLease(lease, async () => {
+          await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(lease, async () => {
             await this.oauth2StateStore?.save(definition.handle, {
               ...storedState,
               status: "available",
               updatedAt: now.toISOString(),
               pendingRefreshStartedAt: undefined
             });
-          });
+          }));
         }
         const brokerError = new CredentialBrokerError("credential_refresh_failed", `Credential handle ${definition.handle} OAuth refresh failed (${error.status}): ${error.safeDetail}`, { handle: definition.handle, capability });
         this.recordMintFailure(cacheKey, brokerError);
@@ -5546,30 +5569,63 @@ class EnvCredentialBroker {
     }
     await lease?.assertOwned();
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
-    await this.persistRefreshedOAuth2State({
-      definition,
-      capability,
-      refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
-      refreshTokenPinnedInEnv,
-      storedState,
-      spentRefreshToken: refreshToken,
-      returnedRefreshToken: tokenResponse.refreshToken,
-      scopes,
-      now,
-      lease
+    return this.withCurrentGrant(definition, capability, refreshToken, async () => {
+      await this.persistRefreshedOAuth2State({
+        definition,
+        capability,
+        refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
+        refreshTokenPinnedInEnv,
+        storedState,
+        spentRefreshToken: refreshToken,
+        returnedRefreshToken: tokenResponse.refreshToken,
+        scopes,
+        now,
+        lease
+      });
+      const session = bearerSessionFromMintedToken({
+        definition,
+        capability,
+        accessToken: tokenResponse.accessToken,
+        scopes,
+        now,
+        expiresInSeconds: tokenResponse.expiresInSeconds
+      });
+      if (isReusableMintedSession(session, now))
+        PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
+      PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
+      return session;
     });
-    const session = bearerSessionFromMintedToken({
-      definition,
-      capability,
-      accessToken: tokenResponse.accessToken,
-      scopes,
-      now,
-      expiresInSeconds: tokenResponse.expiresInSeconds
-    });
-    if (isReusableMintedSession(session, now))
-      PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
-    PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
-    return session;
+  }
+  async withCurrentGrant(definition, capability, spentRefreshToken, commit) {
+    const registryPath = this.connectedHandleRegistryPath;
+    if (!registryPath || definition.grantGeneration === undefined) {
+      await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+      return commit();
+    }
+    try {
+      return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+        await this.assertGrantNotSuperseded(definition, capability, spentRefreshToken);
+        return commit();
+      });
+    } catch (error) {
+      if (error instanceof ConnectedHandleGrantMutationError && error.code === "credential_grant_busy") {
+        throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} is being reconnected; its refresh was not recorded. Retry shortly.`, { handle: definition.handle, capability });
+      }
+      throw error;
+    }
+  }
+  async assertGrantNotSuperseded(definition, capability, spentRefreshToken) {
+    const oauth2 = definition.oauth2Refresh;
+    const current = this.findHandle(definition.handle);
+    if (spentRefreshToken === undefined) {
+      if (current?.grantGeneration === definition.grantGeneration)
+        return;
+      throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} was reconnected; retry to use the new grant.`, { handle: definition.handle, capability });
+    }
+    const onFile = oauth2 ? await this.resolveFirstSecret(oauth2.refreshTokenEnvNames ?? [], oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : []) ?? (await this.oauth2StateStore?.load(definition.handle))?.refreshToken?.trim() : undefined;
+    if (current?.grantGeneration === definition.grantGeneration && onFile === spentRefreshToken)
+      return;
+    throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} was reconnected while a refresh was in flight; that refresh was discarded. Retry to use the new grant.`, { handle: definition.handle, capability });
   }
   async markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now) {
     if (!this.oauth2StateStore)
@@ -5577,7 +5633,8 @@ class EnvCredentialBroker {
     try {
       await this.oauth2StateStore.save(definition.handle, {
         ...storedState,
-        pendingRefreshStartedAt: now.toISOString()
+        pendingRefreshStartedAt: now.toISOString(),
+        pendingRefreshGrantGeneration: definition.grantGeneration
       });
     } catch (error) {
       if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
@@ -5869,10 +5926,26 @@ function bearerSessionFromMintedToken(options) {
     }
   };
 }
-function mintedSessionCacheKey(namespace, definition, capability) {
+function mintedSessionCacheKey(namespace, definition, capability, env) {
+  const envRefreshToken = firstNonEmptyEnv2(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
+  const envGrant = envRefreshToken ? createHash4("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
+${envGrant}`;
+}
+function mintedSessionCachePrefix(namespace, handle, capability) {
   return `${namespace}
-${definition.handle}
-${capability}`;
+${handle}
+${capability}
+`;
+}
+function forgetSupersededGrantSessions(namespace, definition, capability, currentKey) {
+  const prefix = mintedSessionCachePrefix(namespace, definition.handle, capability);
+  for (const cache of [PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_FAILURE_BACKOFF]) {
+    for (const key of [...cache.keys()]) {
+      if (key !== currentKey && key.startsWith(prefix))
+        cache.delete(key);
+    }
+  }
 }
 function isReusableMintedSession(session, now) {
   if (!session.expiresAt)
@@ -6223,7 +6296,8 @@ function mergeRegistryHandleWithDefault(registry, fallback) {
     ...registry.accountRole ?? fallback.accountRole ? { accountRole: registry.accountRole ?? fallback.accountRole } : {},
     ...registry.trustDomain ?? fallback.trustDomain ? { trustDomain: registry.trustDomain ?? fallback.trustDomain } : {},
     ...registry.expiresInSeconds ?? fallback.expiresInSeconds ? { expiresInSeconds: registry.expiresInSeconds ?? fallback.expiresInSeconds } : {},
-    ...registry.backendState ?? fallback.backendState ? { backendState: registry.backendState ?? fallback.backendState } : {}
+    ...registry.backendState ?? fallback.backendState ? { backendState: registry.backendState ?? fallback.backendState } : {},
+    ...registry.grantGeneration ? { grantGeneration: registry.grantGeneration } : {}
   };
 }
 function backendStateStoreFromEnv(env) {
@@ -6256,6 +6330,7 @@ function normalizeOAuth2HandleState(value, handle) {
   const status = record.status;
   const updatedAt = optionalString2(record.updatedAt);
   const pendingRefreshStartedAt = optionalString2(record.pendingRefreshStartedAt);
+  const pendingRefreshGrantGeneration = typeof record.pendingRefreshGrantGeneration === "string" && record.pendingRefreshGrantGeneration ? record.pendingRefreshGrantGeneration : undefined;
   const scopes = Array.isArray(record.scopes) ? record.scopes.map((item) => optionalString2(item)).filter((item) => !!item) : undefined;
   return {
     ...refreshToken ? { refreshToken } : {},
@@ -6263,7 +6338,8 @@ function normalizeOAuth2HandleState(value, handle) {
     ...scopes && scopes.length > 0 ? { scopes } : {},
     ...status ? { status } : {},
     ...updatedAt ? { updatedAt } : {},
-    ...pendingRefreshStartedAt ? { pendingRefreshStartedAt } : {}
+    ...pendingRefreshStartedAt ? { pendingRefreshStartedAt } : {},
+    ...pendingRefreshStartedAt && pendingRefreshGrantGeneration ? { pendingRefreshGrantGeneration } : {}
   };
 }
 function normalizeBackendState(value, handle, expectedKind) {
@@ -6895,11 +6971,51 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
+import { randomUUID as randomUUID8 } from "node:crypto";
 import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync14 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { dirname as dirname14, join as join18 } from "node:path";
 function defaultHandleRegistryPath() {
   return join18(homedir11(), ".config", "olympus", "handles.json");
+}
+function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
+  const path = connectedHandleGrantEpochPath(registryPath);
+  if (!existsSync9(path))
+    return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync14(path, "utf8"));
+  } catch {
+    throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
+  }
+  const record = parsed;
+  if (!record || typeof record !== "object" || Array.isArray(record) || record.version !== 1 || typeof record.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record.epoch)) {
+    throw new Error("Olympus credential-grant generation has an unsupported format. Refusing connection changes.");
+  }
+  return record.epoch;
+}
+async function withConnectedHandleGrantCustody(registryPath, options, mutation) {
+  try {
+    return await withFileLease(`${registryPath}.grant-custody`, (lease) => lease.commit(async () => {
+      const currentEpoch = readConnectedHandleGrantEpoch(registryPath);
+      if (options.expectedEpoch !== undefined && options.expectedEpoch !== currentEpoch) {
+        throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
+      }
+      if (options.advanceEpoch === true) {
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID8() }, null, 2)}
+`);
+      }
+      return await mutation();
+    }));
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
+      throw new ConnectedHandleGrantMutationError("credential_grant_busy", "Another connection change is in progress. Retry shortly.");
+    }
+    throw error;
+  }
+}
+function connectedHandleGrantEpochPath(registryPath) {
+  return `${registryPath}.grant-epoch.json`;
 }
 function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
@@ -7007,7 +7123,9 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
       allowedCapabilities: [...handle.allowedCapabilities],
       scopes: [...handle.scopes],
       tokenEnvNames: [],
-      expiresInSeconds: 3600
+      expiresInSeconds: 3600,
+      grantGeneration: `${handle.connectedAt}
+${handle.providerAccountId ?? ""}`
     };
     if (handle.sessionKind)
       definition.sessionKind = handle.sessionKind;
@@ -7166,11 +7284,20 @@ function isStoreRef(value) {
     return false;
   return isSafeSecretKey(value.slice("store:".length));
 }
+var INITIAL_CONNECTED_HANDLE_GRANT_EPOCH = "initial", ConnectedHandleGrantMutationError;
 var init_connected_handles = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_secret_store();
   init_credential_broker();
+  ConnectedHandleGrantMutationError = class ConnectedHandleGrantMutationError extends Error {
+    code;
+    retryable = true;
+    constructor(code, message) {
+      super(message);
+      this.code = code;
+    }
+  };
 });
 
 // src/core/google-handle-compatibility.ts
@@ -17809,6 +17936,22 @@ var UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_
 
 // src/core/connect.ts
 init_credential_broker();
+
+// src/core/provider-account-identity.ts
+init_http_timeout();
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+  dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+  gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+};
+var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+
+// src/core/source-account-binding.ts
+init_atomic_file();
+init_file_lease();
+var ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email"];
+
+// src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
 var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -17876,7 +18019,12 @@ function sanitizeDetachedOAuthState(input) {
     ...input.reason ? { reason: input.reason } : {},
     ...input.errorCode && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(input.errorCode) ? { errorCode: input.errorCode } : {},
     ...input.retryable === true ? { retryable: true } : {},
-    ...input.retryAt && Number.isFinite(Date.parse(input.retryAt)) ? { retryAt: input.retryAt } : {}
+    ...input.retryAt && Number.isFinite(Date.parse(input.retryAt)) ? { retryAt: input.retryAt } : {},
+    ...Array.isArray(input.sourceAccountPurgeRequired) ? (() => {
+      const ids = input.sourceAccountPurgeRequired.filter((id) => ACCOUNT_BOUND_SOURCE_IDS.includes(id));
+      return ids.length > 0 ? { sourceAccountPurgeRequired: ids } : {};
+    })() : {},
+    ...typeof input.sourceAccountNotice === "string" && input.sourceAccountNotice ? { sourceAccountNotice: input.sourceAccountNotice.slice(0, 2000) } : {}
   };
   return state;
 }

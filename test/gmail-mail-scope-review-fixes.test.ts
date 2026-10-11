@@ -661,3 +661,43 @@ async function collect(pages: AsyncIterable<SourceConnectorListPage>) {
   }
   return { items, cursor, done };
 }
+
+describe('a reconnect that lands mid-task stops the Gmail traversal before any store write', () => {
+  // Independent review round 4 on the account-binding change: the task-entry
+  // scope check alone let a reconnect between that check and the connector's
+  // own token request list the new account's mailbox into the old stores.
+  function scopedLane(stores: ReturnType<typeof fileStores>, client: FakeClient, assertScopeCurrent: () => void) {
+    return createGmailConnectorStoreSyncHandler({
+      ...stores,
+      account: 'personal',
+      apiClient: client,
+      env: {},
+      internalEmbeddingProvider: recordingProvider('cloud'),
+      secureEmbeddingProvider: recordingProvider('local'),
+      scope: { contentAfterMs: NOW.getTime() - 365 * DAY },
+      scopeApproval: { generation: 'g'.repeat(64), revision: 'rev-1' },
+      assertScopeCurrent,
+    });
+  }
+
+  test('a superseded approval refuses the provider answer; nothing is stored', async () => {
+    const stores = fileStores(tempDir());
+    const client = fakeClient([message('from-new-account', NOW.getTime() - 10 * DAY)]);
+    let reconnected = false;
+    const lane = scopedLane(stores, client, () => {
+      if (reconnected) throw new Error('source scope approval is no longer current');
+    });
+    reconnected = true;
+    await expect(lane.sync()).rejects.toThrow('no longer current');
+    expect(stores.internalStore.holdsAnyItem()).toBe(false);
+    expect(stores.secureStore.holdsAnyItem()).toBe(false);
+  });
+
+  test('a current approval stores as before', async () => {
+    const stores = fileStores(tempDir());
+    const client = fakeClient([message('same-account', NOW.getTime() - 10 * DAY)]);
+    const lane = scopedLane(stores, client, () => {});
+    await lane.sync();
+    expect(stores.internalStore.holdsAnyItem() || stores.secureStore.holdsAnyItem()).toBe(true);
+  });
+});

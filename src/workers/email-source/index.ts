@@ -1,4 +1,5 @@
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
+import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccountBindings } from '../../core/source-account-binding.ts';
 import { CONSENT_PAGE_STYLE } from '../remote-oauth/consent-page.ts';
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { runWithAnalystAbortSignal } from '../../core/analyst.ts';
@@ -1342,6 +1343,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(sourceDashboard.history ? { history: sourceDashboard.history } : {}),
               connectedHandleRegistry: registry,
               ...(registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {}),
+              ...dashboardSourceAccountBindings(sourceDashboard.registryPath),
               unpairedSources: dashboardUnpairedSourceStates(
                 dashboardUnpairedSources,
                 sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
@@ -5975,6 +5977,18 @@ function readDashboardRegistryOutcome(
     };
   } catch {
     return { registry: { version: 1, handles: [] }, unreadable: true };
+  }
+}
+
+/** The account record beside the registry; unreadable reads as nothing to say (the worker fails closed on it). */
+function dashboardSourceAccountBindings(
+  registryPath: string | undefined,
+): { sourceAccountBindings?: SourceAccountBindings['sources'] } {
+  try {
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(registryPath ?? defaultHandleRegistryPath()));
+    return read.kind === 'ok' ? { sourceAccountBindings: read.bindings.sources } : {};
+  } catch {
+    return {};
   }
 }
 
