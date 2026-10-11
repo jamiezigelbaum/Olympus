@@ -35,12 +35,16 @@ import { PrivateAnswerJobs, createPrivateAnswerHandler, isPrivateEligible } from
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import {
+  answerToolResult,
   copyPrivateMatch,
   PRIVATE_MATCH_NOTE,
+  PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE,
+  PRIVATE_MATCH_PANEL_EVIDENCE_NOTE,
   PRIVATE_MATCH_PANEL_FULL_NOTE,
   PRIVATE_MATCH_PANEL_NOTE,
   PRIVATE_MATCH_PANEL_SETUP_NOTE,
   privateMatchNote,
+  searchToolResult,
 } from '../src/workers/chatgpt/response-builder.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { DASHBOARD_CHATGPT_VOCABULARY } from '../src/workers/dashboard/vocabulary.ts';
@@ -594,6 +598,70 @@ describe('the response builder', () => {
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain("Don't comment on other search results unless they actually answer the question");
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain("don't mention coverage counts, unread items or file names");
     expect(PRIVATE_MATCH_PANEL_FULL_NOTE).toContain('reading the full report can take a few minutes');
+  });
+
+  // 2026-10-11 live: "what I decided about the budget last month" released
+  // the budget note and an email as Personal evidence, and a tax note matched
+  // as Private. The short "see the panel" note left the budget unanswered
+  // while the panel answered with the tax note.
+  test('with released evidence, the note has the model answer from it and add one line about the panel', () => {
+    const jobId = mintCredential('private', INSTALL);
+    const match = { count: 1, panelState: 'ready' as const, jobId };
+    expect(privateMatchNote(match, 0, true)).toBe(PRIVATE_MATCH_PANEL_EVIDENCE_NOTE);
+    expect(privateMatchNote({ ...match, detail: 'full' }, 0, true)).toBe(PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE);
+    // No released evidence: the short "see the panel" reply, as before.
+    expect(privateMatchNote(match, 0, false)).toBe(PRIVATE_MATCH_PANEL_NOTE);
+    // A panel still setting up says so whatever the evidence.
+    expect(privateMatchNote({ count: 1, panelState: 'no_model' }, 0, true)).toBe(PRIVATE_MATCH_PANEL_SETUP_NOTE);
+    for (const note of [PRIVATE_MATCH_PANEL_EVIDENCE_NOTE, PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE]) {
+      expect(note).toContain('Answer the question from the evidence above as usual');
+      expect(note).toContain('Olympus may also add a private answer in the panel above');
+      expect(note).not.toContain('Keep your reply short');
+      // Review of #272: weak Personal hits must not become the answer; with
+      // none answering, the reply is the original short panel notice.
+      expect(note).toContain("If none of the evidence above answers the question, don't answer from it or comment on it; "
+        + 'instead keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; '
+        + "it'll appear in the panel above, visible only to you (");
+      // Every prohibition of the short note still holds.
+      expect(note).toContain("Don't suggest changing folder settings for those items.");
+      expect(note).toContain("Don't ask the user to upload, attach or paste those files");
+      expect(note).toContain('Follow-up questions about them are answered privately in the panel the same way');
+      expect(note).toContain('set the detail argument to full when the user asks for all the details');
+      expect(note).toContain("Don't mention coverage counts, unread items, or any file name other than those of the evidence you cite.");
+      expect(note).not.toMatch(/\d/);
+    }
+    expect(PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE).toContain('reading the full report can take a few minutes');
+
+    // olympus_search: readable Personal evidence picks the evidence note;
+    // the Private item's title and content never appear.
+    const raw = {
+      evidence: [
+        { trust_domain: 'internal', family: 'file', provider: 'dropbox', title: 'Budget note', excerpt: 'We decided to cap travel at 2,000.' },
+        { trust_domain: 'secure_local', family: 'file', provider: 'dropbox', title: 'Tax notes 2025', excerpt: SECRET_ANSWER },
+      ],
+      coverage: { searched_corpora: 2 },
+    };
+    const found = searchToolResult(raw, { privateMatch: match });
+    const text = (found.content[0] as { text: string }).text;
+    expect(text).toContain('We decided to cap travel at 2,000.');
+    expect(text.split(PRIVATE_MATCH_PANEL_EVIDENCE_NOTE).length - 1).toBe(1);
+    expect(text).not.toContain(PRIVATE_MATCH_PANEL_NOTE);
+    expect(JSON.stringify(found)).not.toContain('Tax notes 2025');
+    expect(JSON.stringify(found)).not.toContain(SECRET_ANSWER);
+    // Titles only (nothing ChatGPT could answer from): the short note.
+    const titlesOnly = searchToolResult({ evidence: [{ trust_domain: 'internal', family: 'file', provider: 'dropbox', title: 'Budget note' }], coverage: {} }, { privateMatch: match });
+    expect((titlesOnly.content[0] as { text: string }).text).toContain(PRIVATE_MATCH_PANEL_NOTE);
+    const none = searchToolResult({ evidence: [], coverage: {} }, { privateMatch: match });
+    expect((none.content[0] as { text: string }).text).toBe(PRIVATE_MATCH_PANEL_NOTE);
+
+    // source_answer: a released, cited answer picks the evidence note.
+    const answered = answerToolResult({
+      answer: 'You decided to cap travel at 2,000 [1].',
+      evidence: [{ trust_domain: 'internal', family: 'file', provider: 'dropbox', title: 'Budget note' }],
+    }, { privateMatch: match });
+    expect((answered.structuredContent as { notes: string[] }).notes).toEqual([PRIVATE_MATCH_PANEL_EVIDENCE_NOTE]);
+    const uncited = answerToolResult({ answer: 'Nothing in Personal items answers this.', evidence: [] }, { privateMatch: match });
+    expect((uncited.structuredContent as { notes: string[] }).notes).toEqual([PRIVATE_MATCH_PANEL_NOTE]);
   });
 
   test('the resource declares the relay as its one connect domain', () => {

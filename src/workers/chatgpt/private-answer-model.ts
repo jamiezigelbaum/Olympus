@@ -227,8 +227,8 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       const read = privateEvidence(evidence, limits.maxPassageChars);
       let unreadable = read.unreadable;
       const readableHits = new Set(read.sources);
-      /** Matched items with no readable text: only counted, and only while still eligible. */
-      const unreadableHits = evidence.filter((_, index) => !readableHits.has(index));
+      /** Matched items with no readable text: only counted, and only while still eligible (a neighbour is not a match). */
+      const unreadableHits = evidence.filter((hit, index) => !readableHits.has(index) && hit.neighbour !== true);
       const hitOf = (index: number) => evidence[read.sources[index]!]!;
       // The readable items (indexes into read.items) still eligible now, by
       // the live guard. Every model submission below is issued right after
@@ -263,7 +263,12 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           scores = kept.every((score) => Number.isFinite(score)) ? kept : undefined;
         }
       }
-      const liveRead = { items: live.map((index) => read.items[index]!) };
+      // Nearest neighbours the search did not return (searchPrivateEvidence)
+      // are read only when they outrank every match (panelSelection).
+      const liveRead = {
+        items: live.map((index) => read.items[index]!),
+        neighbours: live.map((index) => hitOf(index).neighbour === true),
+      };
       const selection = await panelSelection(question, liveRead, limits, scores ? async () => scores : undefined, signal);
       let picked = selection.items.map((position) => live[position]!);
       /** The depth re-read's text for an item, by index into read.items. */
@@ -290,7 +295,10 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
         for (const entry of kept) deepItems.set(entry.index, entry.item);
       }
       // Readable items there were, but none may be read now: no evidence.
+      // That includes readable neighbours with no match to read beside them,
+      // unless the matches are unreadable (then the answer says so).
       const hadReadable = read.items.length > 0;
+      const readableMatch = read.sources.some((source) => evidence[source]!.neighbour !== true);
       // Other versions of the items read, not read themselves: only their
       // dates may reach the answer's version note, and only if eligible now.
       const siblings = unreadVersions(live, picked, (index) => read.items[index]!);
@@ -303,7 +311,7 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
         picked = picked.filter((_, position) => ok[position]);
         unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
       }
-      if (hadReadable && picked.length === 0) throw new NoPrivateEvidenceError();
+      if (hadReadable && picked.length === 0 && (readableMatch || unreadable === 0)) throw new NoPrivateEvidenceError();
       const items = picked.map((index) => deepItems.get(index) ?? read.items[index]!);
       try {
         observe?.evidence?.({
@@ -383,9 +391,11 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           ...(links?.localPath ? { localPath: links.localPath } : {}),
         });
       }
-      const unanswered = [...result.unanswered];
+      const unanswered = withoutRepeatedEntries(result.unanswered);
       if (unreadable > 0) unanswered.push(unreadableNote(unreadable));
-      const answerText = withoutEvidenceMarkers(result.answer);
+      // A small model can loop on one sentence (live 2026-10-11: one balance
+      // line three times); repeats are taken out before the answer is sealed.
+      const answerText = withoutRepeatedSentences(withoutEvidenceMarkers(result.answer));
       // Versions are judged with the search-time text the selection grouped
       // them by, over the items read and their other versions that passed the
       // final eligibility check, so the note also says so when only the
@@ -530,6 +540,16 @@ export async function panelItems(
  * (leadingCount), or the only readable item. Leading items are read alone,
  * in depth; an item merely within the relevance floor of them is left out.
  *
+ * Nearest neighbours (`read.neighbours`, analyst-answer.ts privateNeighbours:
+ * items the search did not return, offered so a cross-language item just
+ * under the vector bar can still be read) are read only when they outrank
+ * every match: a neighbour scoring at least the best readable match's score.
+ * One that does not is no closer to the question than what the search found,
+ * and reading it crowds the answer with an unrelated item (live 2026-10-11:
+ * a blood-test question read a bank statement neighbour, and the answer
+ * quoted its balance). Without scores, or with no readable match to measure
+ * against, no neighbour is read.
+ *
  * Versions of one document (evidence-versions.ts: nearly the same text):
  * when any version is read, the group's newest version is read right after
  * it, whatever its own score or retrieval order, so every run over the same
@@ -540,18 +560,20 @@ export async function panelItems(
  */
 export async function panelSelection(
   question: string,
-  read: { items: readonly BuiltInEvidenceItem[] },
+  read: { items: readonly BuiltInEvidenceItem[]; neighbours?: readonly boolean[] },
   limits: Pick<PanelAnswerLimits, 'maxItems' | 'relevanceMargin'> & Partial<Pick<PanelAnswerLimits, 'maxLeadingItems' | 'leadGap'>>,
   relevance?: PanelRelevance,
   signal?: AbortSignal,
 ): Promise<{ items: number[]; leading: boolean }> {
   const max = Math.max(1, limits.maxItems);
   const maxLeading = Math.max(0, Math.floor(limits.maxLeadingItems ?? 0));
-  const order = read.items.map((_, index) => index);
-  if (order.length === 0) return { items: [], leading: false };
-  if (order.length === 1) return { items: order, leading: maxLeading > 0 };
+  const isNeighbour = (index: number) => read.neighbours?.[index] === true;
+  const all = read.items.map((_, index) => index);
+  const matches = all.filter((index) => !isNeighbour(index));
+  if (matches.length === 0) return { items: [], leading: false };
+  if (all.length === 1) return { items: all, leading: maxLeading > 0 };
   let scores: readonly number[] | undefined;
-  if (relevance && order.length > 1) {
+  if (relevance) {
     try {
       scores = await relevance(question, async () => read.items.map((item) => ({ ...(item.title ? { title: item.title } : {}), text: item.text })), signal);
     } catch {
@@ -597,9 +619,15 @@ export async function panelSelection(
     }
     return items;
   };
-  if (!scores || scores.length !== order.length || scores.some((score) => !Number.isFinite(score))) {
-    return { items: flatten(units(order).slice(0, max)), leading: false };
+  if (!scores || scores.length !== all.length || scores.some((score) => !Number.isFinite(score))) {
+    const items = flatten(units(matches).slice(0, max));
+    // The only readable match, read alone, leads (as a single item does).
+    return { items, leading: matches.length === 1 && items.length === 1 && maxLeading > 0 };
   }
+  // A neighbour joins the ranking only when it outranks every match (a newer
+  // version of an item read still follows it, through units).
+  const bestMatch = Math.max(...matches.map((index) => scores![index]!));
+  const order = all.filter((index) => !isNeighbour(index) || scores![index]! >= bestMatch);
   const ranked = units([...order].sort((a, b) => (scores![b]! - scores![a]!) || (a - b)));
   const unitScore = (unit: readonly number[]) => scores![unit[0]!]!;
   const floor = unitScore(ranked[0]!) - Math.max(0, limits.relevanceMargin);
@@ -765,6 +793,110 @@ export function privateEvidenceItems(hits: readonly PrivateEvidenceItem[]): Buil
 export function withoutEvidenceMarkers(answer: string): string {
   return answer
     .replace(/\s*\[\d{1,2}(?:\s*[,;–-]\s*\d{1,2})*\]/g, '')
+    .trim();
+}
+
+/** A sentence this short (in words) is never treated as a repeat: "Dr.", "Yes.". */
+const MIN_REPEAT_WORDS = 3;
+
+/**
+ * The answer with a sentence taken out where it only repeats the sentence
+ * right before it in the same prose paragraph (a small model looping),
+ * conservatively: the two must match after case, spacing and trailing
+ * punctuation are set aside. A blank line, a heading, a list item or a table
+ * row ends the paragraph, and those lines are never touched, so the same
+ * value under two subjects ("September: the fee is €25." and "October: …")
+ * stays. Sentences of fewer than three words are never dropped; a reworded
+ * repeat stays. An answer with no such repeat is returned as given.
+ */
+export function withoutRepeatedSentences(answer: string): string {
+  const lines: string[] = [];
+  let changed = false;
+  /** The last sentence kept in the current prose paragraph. */
+  let previous: string | undefined;
+  for (const line of answer.split('\n')) {
+    if (!line.trim() || !isProseLine(line)) {
+      previous = undefined;
+      lines.push(line);
+      continue;
+    }
+    const sentences = sentencesOf(line.trim());
+    const kept = sentences.filter((sentence) => {
+      const key = repeatKey(sentence);
+      if (key !== undefined && key === previous) return false;
+      previous = key;
+      return true;
+    });
+    if (kept.length === sentences.length) {
+      lines.push(line);
+      continue;
+    }
+    changed = true;
+    if (kept.length > 0) lines.push(`${/^\s*/.exec(line)![0]}${kept.join(' ')}`);
+  }
+  return changed ? lines.join('\n').trim() : answer;
+}
+
+/**
+ * A line of running prose: not a heading (markdown #, a line in bold alone,
+ * or a short label ending in a colon), a list item or a table row.
+ */
+function isProseLine(line: string): boolean {
+  const text = line.trim();
+  if (/^#{1,6}\s/u.test(text)) return false;
+  if (/^(?:[-*+•]|\d{1,3}[.)])\s+/u.test(text)) return false;
+  if (text.startsWith('|')) return false;
+  if (/^(?:\*\*|__)[^*_]+(?:\*\*|__):?$/u.test(text)) return false;
+  if (text.endsWith(':') && wordCount(text) <= 8) return false;
+  return true;
+}
+
+/** Each entry once, by the same comparison as withoutRepeatedSentences. */
+export function withoutRepeatedEntries(entries: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    const key = repeatKey(entry);
+    if (key === undefined) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * A line's sentences: split after . ! or ? and a space; a one-word piece
+ * ("Dr.", "U.S.", "1.") stays joined to the next, so an abbreviation or a
+ * list number never stands alone.
+ */
+function sentencesOf(line: string): string[] {
+  const out: string[] = [];
+  let carry = '';
+  for (const piece of line.split(/(?<=[.!?])\s+(?=\S)/u)) {
+    const sentence = carry ? `${carry} ${piece}` : piece;
+    if (wordCount(piece) <= 1 && /[.!?]$/u.test(piece)) {
+      carry = sentence;
+      continue;
+    }
+    carry = '';
+    out.push(sentence);
+  }
+  if (carry) out.push(carry);
+  return out;
+}
+
+function wordCount(text: string): number {
+  return text.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
+}
+
+/** The comparison key, or undefined for a sentence too short to count as a repeat. */
+function repeatKey(sentence: string): string | undefined {
+  if (wordCount(sentence) < MIN_REPEAT_WORDS) return undefined;
+  return sentence
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\s+([,.;:!?])/gu, '$1')
+    .replace(/[\s.,;:!?…]+$/u, '')
+    .replace(/\s+/gu, ' ')
     .trim();
 }
 

@@ -194,6 +194,19 @@ describe('the panel reads the newest version in every run', () => {
     expect(picked).toEqual({ items: [0, 1], leading: true });
   });
 
+  // The one way a neighbour (privateNeighbours) is read without outranking
+  // every match: it is the newest version of a match that is read.
+  test('a neighbour scoring below the matches is still read when it is the newest version of a match read', async () => {
+    const ids = ['offer-v2', 'offer-v3', 'contract', 'lease'];
+    const neighbours = [false, true, false, true];
+    const picked = await panelSelection('q', { ...read(ids), neighbours }, limits, async () => [0.70, 0.40, 0.39, 0.20]);
+    expect(picked).toEqual({ items: [0, 1], leading: true });
+    // The same newest version, with no version of it among the matches: left out.
+    const alone = ['contract', 'offer-v3', 'lease'];
+    const unrelated = await panelSelection('q', { ...read(alone), neighbours: [false, true, true] }, { ...limits, maxLeadingItems: 0 }, async () => [0.70, 0.69, 0.68]);
+    expect(unrelated.items.map((index) => alone[index])).toEqual(['contract']);
+  });
+
   test('every retrieval order of the same matches sends the model the same evidence, newest version included', async () => {
     const ids = ['offer-v1', 'offer-v2', 'offer-v3', 'offer-v3-scan', 'contract', 'lease'];
     // Fixed per-item relevance (a question's embedding scores do not depend on retrieval order).

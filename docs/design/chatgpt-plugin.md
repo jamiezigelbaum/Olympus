@@ -473,17 +473,33 @@ and the built-in embedding model is loaded and warmed at start and runs a
 question's forward pass before any waiting indexing pass, so a search no
 longer waits behind indexing after a restart.
 
-With the panel `ready`, the note steers ChatGPT to a short reply along the
+With the panel `ready` and no readable Public or Personal evidence in the
+result, the note steers ChatGPT to a short reply along the
 lines of "Olympus is preparing your answer privately on your Mac; it'll
 appear in the panel above, visible only to you (it can take up to a
 minute)", with no commentary on other search results unless they actually
 answer the question and no coverage counts, unread items or file names. A
 `detail: "full"` request says a full read can take a few minutes instead.
+When the result also carries readable Public or Personal evidence (a search
+excerpt, or a released answer with citations), the note
+(`PRIVATE_MATCH_PANEL_EVIDENCE_NOTE`) has ChatGPT answer from that evidence
+as usual and add one short line that Olympus may also add a private answer
+in the panel; if none of that evidence answers the question, ChatGPT gives
+the short panel notice instead. It keeps every other rule (no coverage counts, unread items or
+file names beyond the evidence cited, no folder advice, no upload request,
+follow-ups through the panel). A Private match can be weak while the
+Personal evidence answers the question (live 2026-10-11: a budget question
+was left unanswered while the panel answered from a tax note).
 The search text's leading instruction becomes "use this evidence only where
 it actually answers the question", and the held-back and Names-only
-sentences are left out: the reply is "see the panel". The
+sentences are left out. The
 count and state travel only in the widget-only `_meta`; with no match the
-panel renders nothing (zero height). With one, the panel is a compact card,
+panel renders nothing (zero height), and once a result has landed (the
+host holds its output) without a match it re-sends that zero height, once,
+for the host to size the frame by (live 2026-10-11: an empty frame about
+200 px tall under such a reply). It never closes itself: empty metadata or a
+pending result is not final, and a match arriving later still shows the
+panel. With one, the panel is a compact card,
 **"Private answer from your Mac"**, that collects the answer itself, from
 the relay, as soon as a `ready` result renders (no Show button,
 since 2026-10-01), and shows it as text under the badge

@@ -251,6 +251,7 @@ function mount(options: MountOptions = {}): Host {
     (win as any).openai = {
       ...options.openai,
       notifyIntrinsicHeight: (height: number) => calls.push(['notifyIntrinsicHeight', height]),
+      requestClose: () => calls.push(['requestClose', undefined]),
       setWidgetState: (args: unknown) => calls.push(['setWidgetState', args]),
       sendFollowUpMessage: (args: unknown) => calls.push(['sendFollowUpMessage', args]),
       callTool: (...args: unknown[]) => calls.push(['callTool', args]),
@@ -320,6 +321,51 @@ describe('nothing to show', () => {
     expect(host.text()).toBe('');
     await sleep(10);
     expect(host.fetched).toHaveLength(0);
+  });
+
+  // Live 2026-10-11: ChatGPT kept an empty frame about 200px tall under a
+  // reply with no Private match. The panel stays at zero height and re-sends
+  // it once the result has landed; it never closes itself, since an empty or
+  // pending result is not final and a match may still arrive.
+  const closes = (host: Host) => host.calls.filter(([name]) => name === 'requestClose').length;
+
+  test('empty initial metadata (no output yet) is not a result: zero height, no close, and a later match shows', async () => {
+    const host = mount({ openai: { toolResponseMetadata: {}, toolOutput: null }, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '30' }] });
+    await sleep(60);
+    expect(host.text()).toBe('');
+    expect(host.heights().every((height) => height === 0)).toBe(true);
+    expect(closes(host)).toBe(0);
+    host.push(ready());
+    await host.until(() => host.fetched.length > 0, 'the collection');
+    expect(host.text()).toContain(W.title);
+    expect(closes(host)).toBe(0);
+  });
+
+  test('a landed result without a match re-sends zero height once, never closes, and a match arriving later still shows', async () => {
+    const host = mount({ replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '30' }] });
+    await sleep(30);
+    const before = host.heights().length;
+    host.push({ content: [], structuredContent: { status: 'found' }, _meta: {} });
+    expect(host.heights().slice(before)).toEqual([0]);
+    host.push({ content: [], structuredContent: { status: 'found' }, _meta: {} });
+    expect(host.heights().slice(before)).toEqual([0]);
+    expect(host.text()).toBe('');
+    // A pending result (no output yet) and a long wait change nothing.
+    await sleep(200);
+    expect(closes(host)).toBe(0);
+    host.push(ready());
+    await host.until(() => host.fetched.length > 0, 'the collection');
+    expect(host.text()).toContain(W.title);
+    expect(closes(host)).toBe(0);
+  });
+
+  test('a result already in the globals without a match keeps zero height and never closes', async () => {
+    const host = mount({ openai: { toolOutput: { status: 'found' }, toolResponseMetadata: { other: 1 } } });
+    await sleep(60);
+    expect(host.text()).toBe('');
+    expect(host.heights().length).toBeGreaterThan(0);
+    expect(host.heights().every((height) => height === 0)).toBe(true);
+    expect(closes(host)).toBe(0);
   });
 
   test('a match that is explicitly withdrawn collapses back to zero height', async () => {

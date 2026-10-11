@@ -2730,8 +2730,11 @@ export async function searchPrivateEvidence(input: {
  * in another language, a short question can sit just under it, so the item
  * that answers it was found by neither lane (2026-10-10: ChatGPT's "Letter of
  * Intent notary" never reached a Spanish letter of intent, whose nearest
- * versions all scored 0.70-0.725 under a 0.73 bar). Best effort: a failure
- * keeps the matches alone.
+ * versions all scored 0.70-0.725 under a 0.73 bar). The panel reads a
+ * neighbour only when it outranks every match by its own relevance
+ * (private-answer-model.ts panelSelection), so a neighbour that is merely
+ * nearby never crowds the answer. Best effort: a failure keeps the matches
+ * alone.
  */
 async function privateNeighbours(
   adapters: SourceIndexRouterAdapterMap,

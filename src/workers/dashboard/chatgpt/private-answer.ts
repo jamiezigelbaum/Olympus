@@ -3,7 +3,11 @@
  * under every Olympus search or answer result in ChatGPT.
  *
  * It renders nothing (zero height) unless the result's widget-only `_meta`
- * says Private items match (private-answer-contract.ts). Then it is one
+ * says Private items match (private-answer-contract.ts); a delivered result
+ * without a match re-sends that zero height, so the host sizes the frame
+ * after the result lands (live 2026-10-11: an empty frame about 200px tall
+ * under a reply with no Private match). It never closes itself: an empty or
+ * pending result is not final, and a match may still arrive. Then it is one
  * compact card that collects the answer straight from the relay as soon as it
  * renders, sealed to a key that exists only on this device, and shows it as
  * text inside the card ("Hide" folds it away; "Show" brings it back from
@@ -157,7 +161,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       done(message.result);
       return;
     }
-    if (message.method === 'ui/notifications/tool-result' && message.params) accept(message.params._meta);
+    if (message.method === 'ui/notifications/tool-result' && message.params) accept(message.params._meta, false, true);
     else if (message.method === 'ui/notifications/host-context-changed') hostContext(message.params);
   });
 
@@ -173,7 +177,11 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     const host = openai();
     if (!host) return;
     if (host.theme === 'light' || host.theme === 'dark') theme = host.theme;
-    if (host.toolResponseMetadata) accept(host.toolResponseMetadata, true);
+    if (host.toolResponseMetadata) accept(host.toolResponseMetadata, true, delivered(host));
+  }
+  /** The host holds the tool's output: the result has landed (metadata alone may be an empty placeholder). */
+  function delivered(host: Any): boolean {
+    return host.toolOutput !== undefined && host.toolOutput !== null;
   }
   // The host announces globals often (its own layout changes included). Redraw
   // only for a new theme; a new result redraws through accept.
@@ -182,13 +190,19 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     if (!host) return;
     const before = theme;
     if (host.theme === 'light' || host.theme === 'dark') theme = host.theme;
-    if (host.toolResponseMetadata) accept(host.toolResponseMetadata);
+    if (host.toolResponseMetadata) accept(host.toolResponseMetadata, false, delivered(host));
     if (theme !== before) render();
   });
 
   // ---- the tool result ---------------------------------------------------
-  /** Reads `_meta[metaKey]`; anything unexpected renders nothing. */
-  function accept(meta: Any, quiet?: boolean): void {
+  let zeroResent = false;
+  /**
+   * Reads `_meta[metaKey]`; anything unexpected renders nothing. `landed`: a
+   * delivered tool result, so with no match the zero height is sent again
+   * (forced) for the host to size the frame by. Nothing is ever closed: a
+   * match arriving later still shows the panel.
+   */
+  function accept(meta: Any, quiet?: boolean, landed?: boolean): void {
     const value = meta && typeof meta === 'object' ? meta[config.metaKey] : undefined;
     // The host re-delivers results and globals while the answer loads, some
     // without our key. Absence is no news: only an explicit value replaces
@@ -211,6 +225,12 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     }
     const same = !!info && !!next && info.count === next.count && info.state === next.state
       && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
+    if (!info && !next && landed && !zeroResent) {
+      // Once per page: the host re-delivers globals often, and repeated
+      // reports of one size made it re-lay out the frame each time.
+      zeroResent = true;
+      reportHeight(true);
+    }
     if (same || (!info && !next)) return;
     if (!next || !info || next.jobId !== info.jobId) {
       // Another result: forget everything about the last one.
