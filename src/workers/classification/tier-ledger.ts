@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 4;
+export const TIER_LEDGER_SCHEMA_VERSION = 5;
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
 
@@ -197,6 +197,9 @@ type QueuedMoveDecision = Pick<
   'metadataTier' | 'contentTier' | 'reasons' | 'engineVersion' | 'mapRevision'
   | 'contentRead' | 'metadataPending' | 'contentPending' | 'metadataForced' | 'metadataFlagged'
 > & { decidedBy: string };
+
+/** The decision an owner override took a row over from (`owner_prior_json`). */
+type OwnerPriorDecision = Omit<QueuedMoveDecision, 'metadataTier' | 'contentTier'>;
 
 export interface TierLedgerOptions {
   dbPath: string;
@@ -1175,9 +1178,10 @@ export class TierLedger {
    *
    * Either way the generation is bumped, so the revoked move's own
    * `stageMove`/`completeMove` (compare-and-swap on the generation) can never
-   * land, and the row's decider and reasons go back to the newest decision
-   * recorded before the override, so the replanned move is placed by current
-   * policy (a lane floor yields to the owner only). A move toward Secrets, or
+   * land, and the row goes back to the decision the override took it over
+   * from (decider, reasons, open questions, whether its text was read), so
+   * the replanned move is placed by current policy (a lane floor yields to
+   * the owner only) and an item waiting for its text keeps waiting for it. A move toward Secrets, or
    * one the current override still asks for, is left alone.
    *
    * Runs inside the caller's transaction: the write that clears or replaces
@@ -1205,13 +1209,18 @@ export class TierLedger {
         UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
       `).run(existing.generation, decidedAt, ...idParams(identity));
-      const state: TierLedgerState = existing.metadataPending || existing.contentPending ? 'pending' : 'current';
+      const state: TierLedgerState = prior.metadataPending || prior.contentPending ? 'pending' : 'current';
       const reasonsJson = JSON.stringify(prior.reasons);
       this.db.query(`
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL,
-          generation = ?, decided_by = ?, reasons_json = ?, decided_at = ?, move_attempts = 0
+          generation = ?, decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
+          content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
+          move_attempts = 0, owner_prior_json = NULL
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(state, staleFlip, prior.decidedBy, reasonsJson, decidedAt, ...idParams(identity));
+      `).run(
+        state, staleFlip, prior.decidedBy, reasonsJson, prior.engineVersion, prior.mapRevision, decidedAt,
+        ...decisionFlags(prior), ...idParams(identity),
+      );
       this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
       return 'cancelled';
     }
@@ -1232,11 +1241,36 @@ export class TierLedger {
       UPDATE tier_items SET generation = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(staleFlip, ...idParams(identity));
-    const replanned: QueuedMoveDecision = {
+    this.queueMoveRow(identity, { ...existing, generation: staleFlip }, {
+      ...prior,
       metadataTier: maxTier(existing.metadataTier, targetMetadata),
       contentTier: maxTier(existing.contentTier, targetContent),
-      decidedBy: prior.decidedBy,
-      reasons: prior.reasons,
+    }, { hide: false, decidedAt });
+    // The queued-move write never forgets text once read; the override only
+    // counted as reading it, so the prior decision's word on that stands.
+    this.db.query(`
+      UPDATE tier_items SET content_read = ?, owner_prior_json = NULL
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(prior.contentRead ? 1 : 0, ...idParams(identity));
+    return 'replanned';
+  }
+
+  /**
+   * The decision an owner override took the item over from: saved when the
+   * override queued its move (`owner_prior_json`). Not saved (a row queued
+   * before schema 5): the newest non-override decider and reasons in the
+   * item's history, with the row's own flags.
+   */
+  private decisionBeforeOverride(identity: TierLedgerIdentity, existing: TierLedgerRecord): OwnerPriorDecision {
+    const saved = this.db.query(`
+      SELECT owner_prior_json FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) as { owner_prior_json: string | null } | null;
+    const parsed = saved?.owner_prior_json ? ownerPriorOf(saved.owner_prior_json) : undefined;
+    if (parsed) return parsed;
+    const fallback: OwnerPriorDecision = {
+      decidedBy: 'move',
+      reasons: existing.reasons.filter((reason) => !reason.startsWith('override:')),
       engineVersion: existing.engineVersion,
       mapRevision: existing.mapRevision,
       contentRead: existing.contentRead,
@@ -1245,16 +1279,6 @@ export class TierLedger {
       metadataForced: existing.metadataForced,
       metadataFlagged: existing.metadataFlagged,
     };
-    this.queueMoveRow(identity, { ...existing, generation: staleFlip }, replanned, { hide: false, decidedAt });
-    return 'replanned';
-  }
-
-  /**
-   * The decider and reasons of the newest decision recorded for the item
-   * before an owner override took it over (its history). None recorded: the
-   * row's own reasons without the override's.
-   */
-  private decisionBeforeOverride(identity: TierLedgerIdentity, existing: TierLedgerRecord): { decidedBy: string; reasons: string[] } {
     const row = this.db.query(`
       SELECT decided_by, reasons_json FROM tier_history
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND decided_by <> 'override'
@@ -1264,13 +1288,13 @@ export class TierLedger {
       try {
         const reasons = JSON.parse(row.reasons_json) as unknown;
         if (Array.isArray(reasons) && reasons.every((reason) => typeof reason === 'string')) {
-          return { decidedBy: row.decided_by, reasons };
+          return { ...fallback, decidedBy: row.decided_by, reasons };
         }
       } catch {
         // Unreadable history: fall through.
       }
     }
-    return { decidedBy: 'move', reasons: existing.reasons.filter((reason) => !reason.startsWith('override:')) };
+    return fallback;
   }
 
   // ---- P1b: routed placement and store copies --------------------------------
@@ -1739,6 +1763,24 @@ export class TierLedger {
       ...decisionFlags(decision),
       ...idParams(identity),
     );
+    if (decision.decidedBy === 'override' && existing.decidedBy !== 'override') {
+      // The decision the owner takes the row over from, for a revoked move.
+      const prior: OwnerPriorDecision = {
+        decidedBy: existing.decidedBy,
+        reasons: existing.reasons,
+        engineVersion: existing.engineVersion,
+        mapRevision: existing.mapRevision,
+        contentRead: existing.contentRead,
+        metadataPending: existing.metadataPending,
+        contentPending: existing.contentPending,
+        metadataForced: existing.metadataForced,
+        metadataFlagged: existing.metadataFlagged,
+      };
+      this.db.query(`
+        UPDATE tier_items SET owner_prior_json = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(JSON.stringify(prior), ...idParams(identity));
+    }
     this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, 'moving', options.decidedAt);
     if (options.hide) this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
   }
@@ -2820,6 +2862,21 @@ export function copyServingLayer<T extends Pick<TierCopy, 'layers'>>(
   return copies.find((copy) => copy.layers === 'both' || copy.layers === layer);
 }
 
+function ownerPriorOf(json: string): OwnerPriorDecision | undefined {
+  try {
+    const value = JSON.parse(json) as Partial<Record<keyof OwnerPriorDecision, unknown>>;
+    const flags = ['contentRead', 'metadataPending', 'contentPending', 'metadataForced', 'metadataFlagged'] as const;
+    if (typeof value.decidedBy !== 'string' || typeof value.engineVersion !== 'string' || typeof value.mapRevision !== 'string'
+      || !Array.isArray(value.reasons) || !value.reasons.every((reason) => typeof reason === 'string')
+      || flags.some((flag) => typeof value[flag] !== 'boolean')) {
+      return undefined;
+    }
+    return value as OwnerPriorDecision;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Whether a per-item override still asks for these tiers (Public lifts to Personal on an install without Public). */
 function overrideAuthorizes(override: ItemTierOverride | undefined, metadataTier: TierKey, contentTier: TierKey): boolean {
   if (override?.kind !== 'tier') return false;
@@ -3290,7 +3347,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // - rejudge_json: an open re-judge question. The item stays exactly
       //   where it is (it was visible under its previous decision) until the
       //   sniffer answers; the decision the answer completes is kept here.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 4,
       name: 'tier_rejudge_and_move_attempts',
       up(db) {
         db.exec(`
@@ -3298,6 +3355,18 @@ function tierLedgerMigrations(): SqliteMigration[] {
           ALTER TABLE tier_items ADD COLUMN rejudged_key TEXT;
           ALTER TABLE tier_items ADD COLUMN rejudge_json TEXT;
         `);
+      },
+    },
+    {
+      // owner_prior_json: the decision an owner override took the row over
+      // from (decider, reasons, classifier versions, open questions), saved
+      // when the override queues a move. A move the owner then revokes is
+      // cancelled or replanned under it (`settleRevokedOwnerMove`), so an
+      // item that was waiting for its text keeps waiting for it.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'tier_owner_prior_decision',
+      up(db) {
+        db.exec('ALTER TABLE tier_items ADD COLUMN owner_prior_json TEXT;');
       },
     },
   ];
