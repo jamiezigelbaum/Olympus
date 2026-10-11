@@ -1604,11 +1604,19 @@ describe('Gmail and Google Drive with no Google Desktop client (Olympus 1.0 rele
 });
 
 function isGoogleIdentityLookup(url: string): boolean {
-  return url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail || url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_drive;
+  return url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail
+    || url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_drive
+    || url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo;
 }
 
 function googleIdentityResponse(): Response {
-  return new Response(JSON.stringify({ emailAddress: 'owner@example.test', user: { emailAddress: 'owner@example.test' } }), {
+  // One body answers the Gmail profile, Drive's about and tokeninfo alike.
+  return new Response(JSON.stringify({
+    emailAddress: 'owner@example.test',
+    user: { emailAddress: 'owner@example.test', permissionId: '01234567890123456789' },
+    sub: '109876543210987654321',
+    scope: 'openid https://www.googleapis.com/auth/gmail.readonly',
+  }), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });

@@ -421,26 +421,51 @@ install in the worker and returns at once. The card re-reads its page every
 
 ### Pins (verified 2026-10-07)
 
-**zkapi-clientd 0.1.6** — upstream release `clientd-v0.1.6` of
-`ethereum/zkapi` (published 2026-10-02). Base URL
-`https://github.com/ethereum/zkapi/releases/download/clientd-v0.1.6/`.
+**zkapi-clientd 0.1.6-olympus2** — release `clientd-v0.1.6-olympus2` of the
+Olympus fork `jamiezigelbaum/zkapi` (published 2026-10-11 by its
+`olympus-release` workflow from commit `14fcba96`). The managed route needs
+the fork's supervisor flags and companion custody; an upstream daemon is
+refused with `daemon_supervisor_unsupported`. Base URL
+`https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/`.
 
 | Platform | Asset | Bytes | SHA-256 |
 |---|---|---|---|
-| macOS arm64 | `zkapi-clientd_0.1.6_darwin_arm64.tar.gz` | 22,904,346 | `0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4` |
-| macOS x86_64 | `zkapi-clientd_0.1.6_darwin_amd64.tar.gz` | 23,547,367 | `ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12` |
-| Linux x86_64 | `zkapi-clientd_0.1.6_linux_amd64.tar.gz` | 23,826,995 | `41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95` |
-| Linux arm64 | `zkapi-clientd_0.1.6_linux_arm64.tar.gz` | 23,612,951 | `41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf` |
+| macOS arm64 | `zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz` | 23,233,212 | `93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c` |
+| macOS x86_64 | `zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz` | 23,924,127 | `eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9` |
+| Linux x86_64 | `zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz` | 24,179,427 | `33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1` |
+| Linux arm64 | `zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz` | 23,914,142 | `ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0` |
 
-How verified: each archive downloaded and hashed locally; each hash matched
-the release's `SHA256SUMS` (whose own SHA-256,
-`3d0f047b82280506c0a4d7a7cc0df012e1523f5d832f0cbdaff653dff410213e`, matched
-GitHub's asset digest) and GitHub's per-asset digest. The release carries no
-signature to check. Each archive holds
-`zkapi-clientd`, the wallet companion `zkapi-walletd`, and
-`share/zkapi-clientd/` (proof-setup keys and manifest, build info,
-third-party licences); all three are installed. The macOS binaries are
-ad-hoc, linker-signed (no Developer ID, not notarized).
+How made: each bundle is upstream's `clientd-v0.1.6` archive (its hash
+checked against the fork's `packaging/releases/clientd-0.1.6.json`; the
+upstream hashes are the ones Olympus pinned on 2026-10-07) with
+`zkapi-clientd` rebuilt from the fork with go1.27.1 (built twice, refused if
+the two differ), `VERSION` set to `0.1.6-olympus2`, `NOTICE-modified.md`, and
+`share/zkapi-clientd/olympus-build.json` recording both hashes. The wallet
+companion `zkapi-walletd` and `share/zkapi-clientd/` (proof-setup keys and
+manifest, build info, third-party licences) are upstream's bytes. Each
+platform's bundle is run on its own runner before publishing (`--version`,
+the five supervisor flags in `serve --help`, `zkapi-walletd --help`).
+
+How verified (2026-10-11): each archive downloaded and hashed locally,
+matched to the release's `SHA256SUMS` and GitHub's per-asset digest; every
+file's build-provenance attestation verified with `gh attestation verify -R
+jamiezigelbaum/zkapi` (Sigstore-signed, tied to the workflow run); the macOS
+arm64 bundle diffed against upstream's (only the four files above differ)
+and run on an Apple silicon Mac. The macOS daemon is ad-hoc, linker-signed
+(no Developer ID, not notarized).
+
+**Updating.** The manifest names the version, so an install of an earlier pin
+(upstream 0.1.6) is not found by discovery and is reported as outdated. The
+same install (dashboard **Update zkAPI**, or `olympus zkapi install-tools`)
+installs the new pin beside it and, once the new build is found, removes the
+earlier pin's folder: only a version the pin lists in `replaces`, a real
+owner-only folder whose Olympus manifest carries that pin's exact hash for
+this platform, re-checked (same device and inode) under the install lease
+just before removal. Backups, newer builds and anything else stay. A failed
+update leaves the earlier folder in place. A too-old daemon found on PATH gets the
+same button (Olympus's verified build wins over PATH); one at a path set in
+the route is named, with the fix, and gets no button, since installing would
+not change which program runs.
 
 **Tor Expert Bundle 15.0.24** (the current stable Tor Browser release; the
 binary carries tor 0.4.9.13). Base URL `https://dist.torproject.org/torbrowser/15.0.24/`.

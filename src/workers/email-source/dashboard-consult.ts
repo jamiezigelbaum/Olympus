@@ -277,13 +277,20 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     return managedToolsState({ env }).map((entry) => {
       const explicit = entry.tool === 'tor' ? settings?.torExecutable : settings?.daemonExecutable;
       if (explicit) {
-        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? 'configured' : 'configured_missing', path: explicit };
+        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? 'configured' : 'configured_missing', path: explicit, version: entry.version };
+      }
+      // An earlier Olympus build is named as such even when PATH has another
+      // copy: updating Olympus's own is the fix, and it wins over PATH after.
+      if (!entry.installed && entry.outdatedVersion && entry.offered) {
+        return { tool: entry.tool, label: entry.label, source: 'outdated', installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
       return {
         tool: entry.tool,
         label: entry.label,
         source: entry.installed ? 'olympus' : system ? 'system' : entry.offered ? 'missing' : 'not_offered',
+        version: entry.version,
+        offered: entry.offered,
       };
     });
   });

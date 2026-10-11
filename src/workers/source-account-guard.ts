@@ -204,6 +204,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
         decideSourceAccountAction({
           binding,
           grantAccountId: handle.providerAccountId,
+          grantConnectedAt: handle.connectedAt,
           tokenAccountId: token,
           laneHoldsItems: options.laneHoldsItems(),
           now: now(),
@@ -229,7 +230,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
             || grantNow?.connectedAt !== handle.connectedAt
             || grantNow?.providerAccountId !== handle.providerAccountId) return latest;
           bound = true;
-          return { provider_account_id: token, bound_at: now().toISOString() };
+          return { provider_account_id: token, bound_at: now().toISOString(), bound_grant: handle.connectedAt };
         });
         if (bound) return;
         throw new SourceAccountChangedError(

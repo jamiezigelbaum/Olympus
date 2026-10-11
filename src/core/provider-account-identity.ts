@@ -14,8 +14,19 @@ import { fetchBoundedText, type TimeoutFetch } from './http-timeout.ts';
  * source's stores were filled from.
  *
  * The identifier is an opaque label: Dropbox's own `account_id`, and for Google
- * a digest of the account's address (Gmail exposes no other stable id under
- * `gmail.readonly`), so no address is written to the registry.
+ * digests, so no address or Google id is written to the registry. A Google
+ * account is named by up to three labels joined with `.` (see
+ * sameProviderAccount):
+ *
+ * - `google-sub:` the OpenID subject, from tokeninfo. Immutable. Google gives
+ *   it only to a token granted `openid`, which every Google connect requests
+ *   since 2026-10-11; a grant from before then has none.
+ * - `google-perm:` Drive's `about.user.permissionId`. Immutable, readable
+ *   under `drive.readonly`, so Drive grants from before `openid` have it too.
+ * - `google:` the account's address. A Workspace admin can rename it while
+ *   the account and its mail and files stay the same, so it decides only
+ *   when neither side carries an immutable label (a grant from before
+ *   `openid`, or a delegated service-account token).
  */
 export type AccountBoundProvider = 'dropbox' | 'gmail' | 'google_drive' | 'x';
 
@@ -31,6 +42,8 @@ export interface ProviderIdentityEndpoints {
   gmail?: string;
   google_drive?: string;
   x?: string;
+  /** Google's tokeninfo, asked alongside Gmail or Drive for the OpenID subject. */
+  google_tokeninfo?: string;
 }
 
 export const DEFAULT_PROVIDER_IDENTITY_ENDPOINTS: Required<ProviderIdentityEndpoints> = {
@@ -40,9 +53,12 @@ export const DEFAULT_PROVIDER_IDENTITY_ENDPOINTS: Required<ProviderIdentityEndpo
   // Relative, as gmail.ts writes its paths: a literal `/users/<name>/` reads
   // as a home directory to the release owner-identifier scan.
   gmail: new URL('users/me/profile', 'https://gmail.googleapis.com/gmail/v1/').toString(),
-  google_drive: 'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)',
+  google_drive: 'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)',
   // X's own numeric user id, the same one connect records for the grant.
   x: 'https://api.x.com/2/users/me',
+  // POSTed with the token as a bearer header, as google-auth-library does, so
+  // the token is never written into a URL.
+  google_tokeninfo: 'https://oauth2.googleapis.com/tokeninfo',
 };
 
 const IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -62,9 +78,118 @@ export function dropboxAccountIdFromTokenPayload(payload: Record<string, unknown
   return DROPBOX_ACCOUNT_ID.test(value) ? value : undefined;
 }
 
-/** The opaque Google account label: never the address itself. */
+/** The opaque Google address label: never the address itself. */
 export function googleAccountIdFromAddress(address: string): string {
   return `google:${createHash('sha256').update(address.trim().toLowerCase()).digest('hex').slice(0, 40)}`;
+}
+
+/** The opaque label of a Google OpenID subject (`sub`). */
+export function googleSubjectLabel(subject: string): string {
+  return `google-sub:${createHash('sha256').update(`sub\n${subject.trim()}`).digest('hex').slice(0, 32)}`;
+}
+
+/** The opaque label of a Drive user's `permissionId`. */
+export function googlePermissionLabel(permissionId: string): string {
+  return `google-perm:${createHash('sha256').update(`perm\n${permissionId.trim()}`).digest('hex').slice(0, 32)}`;
+}
+
+/** Labels that name an account for good; anything else can be renamed. */
+const IMMUTABLE_LABEL_KINDS = ['dbid', 'google-sub', 'google-perm'] as const;
+const LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
+
+/**
+ * Join labels into the one account id stored in the registry and the
+ * binding record: immutable labels first, at most one per kind. `.` never
+ * occurs inside a label, and the result stays within the registry's label
+ * alphabet (`[a-zA-Z0-9._:-]`).
+ */
+export function composeProviderAccountId(labels: readonly string[]): string | undefined {
+  const byKind = new Map<string, string>();
+  for (const label of labels) {
+    const kind = LABEL.exec(label)?.[1];
+    if (kind && !byKind.has(kind)) byKind.set(kind, label);
+  }
+  const ordered = [
+    ...IMMUTABLE_LABEL_KINDS.map((kind) => byKind.get(kind)),
+    byKind.get('google'),
+  ].filter((label): label is string => Boolean(label));
+  return ordered.length > 0 ? ordered.join('.') : undefined;
+}
+
+/** kind → label; undefined when `id` is not made of known labels (compared whole). */
+function parseProviderAccountId(id: string): Map<string, string> | undefined {
+  const labels = new Map<string, string>();
+  for (const label of id.trim().split('.')) {
+    const kind = LABEL.exec(label)?.[1];
+    if (!kind || (kind !== 'google' && !(IMMUTABLE_LABEL_KINDS as readonly string[]).includes(kind))) return undefined;
+    if (labels.has(kind)) return undefined;
+    labels.set(kind, label);
+  }
+  return labels.size > 0 ? labels : undefined;
+}
+
+export type ProviderAccountMatch = 'same' | 'different' | 'unproven';
+
+/**
+ * Whether an observed account id names the account a record names.
+ *
+ * - Both carry an immutable label of the same kind: those decide alone. A
+ *   renamed address is the same account; an address now held by another
+ *   account is not.
+ * - The record carries an immutable label and the observation shares none
+ *   (a token without `openid`, an environment token): `unproven`, never
+ *   decided by the address. The address may have passed to another account
+ *   since the record learned who it was (independent review P1).
+ * - The record is an address alone (recorded before immutable labels, or
+ *   from tokens that never had one): the address decides, as it always did.
+ *   That is the transition; such a record takes on the immutable labels of
+ *   the first token that matches it (mergeProviderAccountIds).
+ *
+ * Ids that are not made of known labels compare whole.
+ */
+export function compareProviderAccounts(recorded: string, observed: string): ProviderAccountMatch {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b) return recorded.trim() === observed.trim() ? 'same' : 'different';
+  let shared = false;
+  for (const kind of IMMUTABLE_LABEL_KINDS) {
+    const left = a.get(kind);
+    const right = b.get(kind);
+    if (left === undefined || right === undefined) continue;
+    if (left !== right) return 'different';
+    shared = true;
+  }
+  if (shared) return 'same';
+  if (hasImmutableAccountLabel(recorded)) return 'unproven';
+  const address = a.get('google');
+  return address !== undefined && address === b.get('google') ? 'same' : 'different';
+}
+
+export function sameProviderAccount(recorded: string, observed: string): boolean {
+  return compareProviderAccounts(recorded, observed) === 'same';
+}
+
+/** Whether `id` names its account by something no rename changes. */
+export function hasImmutableAccountLabel(id: string): boolean {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
+}
+
+/**
+ * The record after `observed` was confirmed to be `recorded`'s account
+ * (sameProviderAccount): every immutable label either side holds, and the
+ * address as it is now. Keeping the current address, not the first one, means
+ * an address the account gave up never matches on its own.
+ */
+export function mergeProviderAccountIds(recorded: string, observed: string): string {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b) return observed.trim();
+  const labels = IMMUTABLE_LABEL_KINDS
+    .map((kind) => b.get(kind) ?? a.get(kind))
+    .concat(b.get('google') ?? a.get('google'))
+    .filter((label): label is string => Boolean(label));
+  return composeProviderAccountId(labels)!;
 }
 
 /**
@@ -115,28 +240,98 @@ export async function fetchProviderAccountId(options: {
   } catch {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} returned an unreadable account lookup.`);
   }
-  const id = accountIdFromIdentityPayload(options.provider, payload);
-  if (!id) {
+  if (options.provider === 'x') {
+    // X's raw numeric id, as connect records it and the bookmarks lane reads
+    // as; it is not one of the Google or Dropbox labels and compares whole.
+    const id = xUserIdFromPayload(payload);
+    if (!id) throw new ProviderAccountIdentityError('X did not name the connected account.');
+    return id;
+  }
+  const labels = labelsFromIdentityPayload(options.provider, payload);
+  if (!labels) {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not name the connected account.`);
   }
-  return id;
+  if (options.provider === 'gmail' || options.provider === 'google_drive') {
+    // Asked every time, never skipped on failure: a Google answer without the
+    // subject it could have carried would fall back to the renamable address.
+    const subject = await fetchGoogleSubject({
+      accessToken: options.accessToken,
+      endpoint: options.endpoints?.google_tokeninfo ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs,
+    });
+    if (subject) labels.push(googleSubjectLabel(subject));
+  }
+  return composeProviderAccountId(labels)!;
 }
 
-function accountIdFromIdentityPayload(provider: AccountBoundProvider, payload: Record<string, unknown>): string | undefined {
-  if (provider === 'dropbox') return dropboxAccountIdFromTokenPayload(payload);
-  if (provider === 'x') {
-    const data = payload.data;
-    const id = data && typeof data === 'object' && !Array.isArray(data)
-      ? (data as Record<string, unknown>).id
-      : undefined;
-    return typeof id === 'string' && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
+/**
+ * The OpenID subject of a Google access token, or undefined when the token
+ * was not granted `openid` (Google then leaves `sub` out). Throws when
+ * tokeninfo cannot answer, or when it says `openid` was granted and names no
+ * subject.
+ */
+async function fetchGoogleSubject(options: {
+  accessToken: string;
+  endpoint: string;
+  fetchImpl: TimeoutFetch | undefined;
+  timeoutMs: number | undefined;
+}): Promise<string | undefined> {
+  let response: Response;
+  let text: string;
+  try {
+    ({ response, text } = await fetchBoundedText(
+      options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)),
+      options.endpoint,
+      { method: 'POST', headers: { Authorization: `Bearer ${options.accessToken}`, Accept: 'application/json' } },
+      { timeoutMs: options.timeoutMs ?? 15_000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES },
+    ));
+  } catch {
+    throw new ProviderAccountIdentityError('Google did not answer the token lookup.');
   }
-  const address = provider === 'gmail'
-    ? payload.emailAddress
-    : payload.user && typeof payload.user === 'object' && !Array.isArray(payload.user)
-      ? (payload.user as Record<string, unknown>).emailAddress
-      : undefined;
-  return typeof address === 'string' && address.includes('@') ? googleAccountIdFromAddress(address) : undefined;
+  if (!response.ok) throw new ProviderAccountIdentityError(`Google refused the token lookup with status ${response.status}.`);
+  let payload: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+    payload = parsed as Record<string, unknown>;
+  } catch {
+    throw new ProviderAccountIdentityError('Google returned an unreadable token lookup.');
+  }
+  const subject = typeof payload.sub === 'string' ? payload.sub.trim() : '';
+  if (/^[A-Za-z0-9_-]{1,255}$/.test(subject)) return subject;
+  const scopes = typeof payload.scope === 'string' ? payload.scope.split(/\s+/) : [];
+  if (subject || scopes.includes('openid')) {
+    throw new ProviderAccountIdentityError('Google did not name the subject of an openid token.');
+  }
+  return undefined;
+}
+
+/** X's numeric user id from `users/me`; X ids never change. */
+function xUserIdFromPayload(payload: Record<string, unknown>): string | undefined {
+  const data = payload.data;
+  const id = data && typeof data === 'object' && !Array.isArray(data)
+    ? (data as Record<string, unknown>).id
+    : undefined;
+  return typeof id === 'string' && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
+}
+
+function labelsFromIdentityPayload(provider: AccountBoundProvider, payload: Record<string, unknown>): string[] | undefined {
+  if (provider === 'dropbox') {
+    const id = dropboxAccountIdFromTokenPayload(payload);
+    return id ? [id] : undefined;
+  }
+  const user = payload.user && typeof payload.user === 'object' && !Array.isArray(payload.user)
+    ? payload.user as Record<string, unknown>
+    : undefined;
+  const address = provider === 'gmail' ? payload.emailAddress : user?.emailAddress;
+  if (typeof address !== 'string' || !address.includes('@')) return undefined;
+  const labels = [googleAccountIdFromAddress(address)];
+  const permissionId = typeof user?.permissionId === 'string' ? user.permissionId.trim() : '';
+  if (provider === 'google_drive' && /^[A-Za-z0-9_-]{1,255}$/.test(permissionId)) {
+    labels.push(googlePermissionLabel(permissionId));
+  }
+  return labels;
 }
 
 function providerLabel(provider: AccountBoundProvider): string {

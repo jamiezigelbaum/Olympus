@@ -435,7 +435,8 @@ describe('demo sign-in', () => {
     const real = await connectInstall(relay, realWorker);
 
     const bridge = await (await fetch(`${relay.url}/connect/authorize?state=s`)).text();
-    expect(bridge).toContain('href="/connect/demo/authorize?state=s"');
+    // A prominent button of its own, not a small text link (2026-10-11).
+    expect(bridge).toContain('<a class="button demo-button" id="demo" href="/connect/demo/authorize?state=s">Reviewing Olympus? Sign in to the demo</a>');
     const page = await fetch(`${relay.url}/connect/demo/authorize?state=s`, { headers: { authorization: `Bearer ${mintCredential('access', real.identity.installId)}` } });
     expect(await page.json()).toMatchObject({ worker: 'demo', path: '/connect/demo/authorize' });
     expect(demoWorker.requests.at(-1)!.path).toBe('/connect/demo/authorize?state=s');
