@@ -1208,7 +1208,24 @@ export class EnvCredentialBroker implements CredentialBroker {
     const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability, this.env);
     const now = this.now();
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
-    if (cached && isReusableMintedSession(cached, now)) return cached;
+    if (cached && isReusableMintedSession(cached, now)) {
+      // The definition was read before an await (the secret-store read in
+      // issueSession), and another process's reconnect cannot reach this
+      // process's cache. Re-read the generation last thing before serving, so
+      // a cached token is never handed out after its grant is known replaced
+      // (PR review). A token already handed out stays the consumer's to
+      // fence; the account-bound file sources re-check per item.
+      if (definition.grantGeneration !== undefined
+        && this.findHandle(definition.handle)?.grantGeneration !== definition.grantGeneration) {
+        PROCESS_MINTED_SESSION_CACHE.delete(cacheKey);
+        throw new CredentialBrokerError(
+          'credential_refresh_busy',
+          `Credential handle ${definition.handle} was reconnected; retry to use the new grant.`,
+          { handle: definition.handle, capability },
+        );
+      }
+      return cached;
+    }
     forgetSupersededGrantSessions(this.oauth2CacheNamespace, definition, capability, cacheKey);
 
     const backoff = PROCESS_MINT_FAILURE_BACKOFF.get(cacheKey);

@@ -316,6 +316,44 @@ describe('minted access tokens are bound to the grant that minted them', () => {
     expect(second.kind === 'bearer_token' && second.token).toBe('access-for-env-refresh-token-b');
   });
 
+  test('a cached token is not served once another process has replaced its grant (PR review)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    // Another process's reconnect lands after this broker read grant A's
+    // definition and before it looks in its cache. Its invalidation cannot
+    // reach this process; only the registry says the grant changed.
+    let reconnectOnNextClockRead = false;
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2CacheNamespace: `reconnect-cachehit-${registryPath}`,
+      now: () => {
+        if (reconnectOnNextClockRead) {
+          reconnectOnNextClockRead = false;
+          secretStore.values.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+          writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+        }
+        return new Date('2026-10-10T22:41:00.000Z');
+      },
+      fetch: async (_url, init) => {
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        return new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+    const first = await broker.issueSession(REQUEST);
+    expect(first.kind === 'bearer_token' && first.token).toBe('access-for-refresh-token-account-a');
+
+    reconnectOnNextClockRead = true;
+    const raced = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect((raced as { code?: string }).code).toBe('credential_refresh_busy');
+
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+  });
+
   test('invalidation drops a cached token even when the grant looks unchanged', async () => {
     const { registryPath, secretStore, mints, broker } = fixture();
     writeDropboxGrant(registryPath, '2026-10-10T22:41:00.000Z', 'dbid:account-a');

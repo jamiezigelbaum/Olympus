@@ -3369,8 +3369,13 @@ class EnvCredentialBroker {
     const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability, this.env);
     const now = this.now();
     const cached = PROCESS_MINTED_SESSION_CACHE.get(cacheKey);
-    if (cached && isReusableMintedSession(cached, now))
+    if (cached && isReusableMintedSession(cached, now)) {
+      if (definition.grantGeneration !== undefined && this.findHandle(definition.handle)?.grantGeneration !== definition.grantGeneration) {
+        PROCESS_MINTED_SESSION_CACHE.delete(cacheKey);
+        throw new CredentialBrokerError("credential_refresh_busy", `Credential handle ${definition.handle} was reconnected; retry to use the new grant.`, { handle: definition.handle, capability });
+      }
       return cached;
+    }
     forgetSupersededGrantSessions(this.oauth2CacheNamespace, definition, capability, cacheKey);
     const backoff = PROCESS_MINT_FAILURE_BACKOFF.get(cacheKey);
     if (backoff && now.getTime() < backoff.untilMs)
