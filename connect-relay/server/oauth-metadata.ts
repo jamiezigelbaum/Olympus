@@ -8,9 +8,10 @@ import { DIRECTORY_MCP_PATH, type McpSurface } from '../shared/directory-tools.t
  * produces (`src/workers/remote-oauth/handler.ts`; test/remote-oauth.test.ts,
  * "relay mode", holds the two equal).
  *
- * There is no registration endpoint: a registration request names no install,
- * so the relay could not route it. ChatGPT identifies itself with its client
- * metadata document URL instead, which every engine pins.
+ * ChatGPT identifies itself with its client metadata document URL, which
+ * every engine pins. The registration endpoint is for OpenAI hosts that
+ * register instead: the relay answers it itself with that same pinned client
+ * (client-registration.ts), so a registration needs no routing.
  */
 export const OAUTH_PATHS = {
   protectedResource: '/.well-known/oauth-protected-resource',
@@ -21,6 +22,7 @@ export const OAUTH_PATHS = {
   authorize: '/connect/authorize',
   demoAuthorize: '/connect/demo/authorize',
   token: '/connect/token',
+  register: '/connect/register',
   revoke: '/connect/revoke',
   mcp: '/mcp',
   directoryMcp: DIRECTORY_MCP_PATH,
@@ -69,6 +71,7 @@ export function authorizationServerMetadata(relay: RelayOrigin): Record<string, 
     issuer: relay.origin,
     authorization_endpoint: `${relay.origin}${OAUTH_PATHS.authorize}`,
     token_endpoint: `${relay.origin}${OAUTH_PATHS.token}`,
+    registration_endpoint: `${relay.origin}${OAUTH_PATHS.register}`,
     revocation_endpoint: `${relay.origin}${OAUTH_PATHS.revoke}`,
     response_types_supported: ['code'],
     response_modes_supported: ['query'],

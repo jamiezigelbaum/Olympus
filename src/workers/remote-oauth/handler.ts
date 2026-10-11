@@ -13,8 +13,9 @@
  *   and the approve POST the browser's own navigation. Being at the Mac is the
  *   proof of ownership, so approval is one click, with no pairing code. Codes
  *   and tokens name this install (`oly2c.<id>.…`, connect-relay/shared/tokens.ts)
- *   so the relay can route them. No registration endpoint is advertised: the
- *   relay could not route a registration, and ChatGPT is a pinned client.
+ *   so the relay can route them. The relay answers `/connect/register` itself,
+ *   naming a pinned ChatGPT client (connect-relay/server/client-registration.ts);
+ *   this worker's own registration stays loopback-only.
  * - A tunnel the owner runs (`OLYMPUS_PUBLIC_BASE_URL` / `remote.publicBaseUrl`).
  *   The approval page is reached through the public address, so it asks for a
  *   pairing code from `olympus connections pair`.
@@ -203,7 +204,7 @@ export function authorizationServerMetadata(urls: RemotePublicUrls): Record<stri
     issuer: urls.issuer,
     authorization_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.authorize}`,
     token_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.token}`,
-    ...(urls.installId ? {} : { registration_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.register}` }),
+    registration_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.register}`,
     revocation_endpoint: `${urls.origin}${REMOTE_OAUTH_PATHS.revoke}`,
     response_types_supported: ['code'],
     response_modes_supported: ['query'],

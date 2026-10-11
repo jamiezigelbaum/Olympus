@@ -405,7 +405,7 @@ describe('routing', () => {
     const as = (await (await fetch(`${relay.url}/.well-known/oauth-authorization-server`)).json()) as Record<string, unknown>;
     expect(as.issuer).toBe(`https://${PUBLIC_HOST}`);
     expect(as.token_endpoint).toBe(`https://${PUBLIC_HOST}/connect/token`);
-    expect(as.registration_endpoint).toBeUndefined();
+    expect(as.registration_endpoint).toBe(`https://${PUBLIC_HOST}/connect/register`);
     expect((await fetch(`${relay.url}/healthz`)).status).toBe(200);
 
     const query = '?response_type=code&client_id=https%3A%2F%2Fchatgpt.com%2Foauth%2Fclient.json&state=a"<b';

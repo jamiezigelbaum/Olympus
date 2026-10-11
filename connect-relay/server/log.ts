@@ -18,6 +18,8 @@ export type RelayEvent =
   | 'install_revoked'
   | 'install_restored'
   | 'registration_expired'
+  /** An OAuth client registration answered (client-registration.ts); `ok` only. */
+  | 'client_registration'
   /** A relay-wide budget (registrations, returning registrations, egress) ran dry; once per episode. */
   | 'budget_exhausted';
 

@@ -36,6 +36,7 @@ import { readBoundedRequestText } from '../src/workers/remote-request-body.ts';
 import { parseRemotePublicBaseUrl, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
 import { credentialInstallId, mintCredential } from '../connect-relay/shared/tokens.ts';
 import { authorizationServerMetadata as relayAuthorizationServerMetadata, relayOrigin } from '../connect-relay/server/oauth-metadata.ts';
+import { chatGptClientForRedirect, registerChatGptClient } from '../connect-relay/server/client-registration.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
@@ -43,7 +44,7 @@ import {
   createRemoteMcpHandler,
   withRemoteMcpRoute,
 } from '../src/workers/remote-mcp.ts';
-import { CHATGPT_CLIENT_ID, CHATGPT_CODEX_CLIENT_ID, CHATGPT_REDIRECT_URI, isChatGptGrant } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { CHATGPT_CLIENT_ID, CHATGPT_CODEX_CLIENT_ID, CHATGPT_REDIRECT_URI, isChatGptGrant, pinnedClient } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { DEMO_SIGN_IN_BURST, isDemoGrant, resolveDemoConsent, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
 import { withRequestPeer } from '../src/core/request-peer.ts';
 import { demoInstallMarked, DEMO_INSTALL_MARKER_FILE, DEMO_INSTALL_MARKER_TEXT } from '../src/core/remote-access.ts';
@@ -517,11 +518,21 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
     expect((await mcpInitialize(`Bearer ${mintCredential('access', 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz')}`)).status).toBe(401);
   });
 
-  test('metadata advertises no registration, and equals what the relay serves', async () => {
+  test('metadata advertises the relay\'s registration, and equals what the relay serves', async () => {
     const engine = await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json() as Record<string, unknown>;
-    expect(engine.registration_endpoint).toBeUndefined();
+    expect(engine.registration_endpoint).toBe(`${RELAY_ORIGIN}/connect/register`);
     expect(engine).toEqual(relayAuthorizationServerMetadata(relayOrigin('mcp.olympus.test')));
     expect(authorizationServerMetadata(urls)).toEqual(relayAuthorizationServerMetadata(relayOrigin('mcp.olympus.test')));
+  });
+
+  test('every client the relay\'s registration names is pinned here with that return address', () => {
+    for (const redirect of [CHATGPT_REDIRECT_URI, 'https://chatgpt.com/connector/oauth/cb_Abc-123']) {
+      const outcome = registerChatGptClient(JSON.stringify({ redirect_uris: [redirect] }), 0);
+      expect(outcome.ok).toBe(true);
+      const clientId = outcome.ok ? String(outcome.body.client_id) : '';
+      expect(pinnedClient(clientId)?.redirectUris).toEqual([redirect]);
+    }
+    expect(chatGptClientForRedirect(CHATGPT_REDIRECT_URI)).toBe(CHATGPT_CLIENT_ID);
   });
 
   test('registration is for local development clients only, from this Mac', async () => {

@@ -1,11 +1,3 @@
-- [x] `mcp.json` names a provided public client: `client: {mode:
-      "provided", clientId: "https://chatgpt.com/oauth/client.json",
-      tokenEndpointAuthMethod: "none"}`. The portal's Connect refused both
-      `mode: "cimd"` and no `client` block with "OAuth client ID is required
-      when using pre-defined OAuth client credentials" (2026-10-11): without
-      a registration endpoint it treats the client as provided. Olympus has
-      no routable DCR, and every engine already pins this client ID and its
-      `connector_platform_oauth_redirect` callback.
 # Olympus: ChatGPT directory submission kit
 
 Status: package complete 2026-10-10 (directory endpoint `/openai/mcp`, review
@@ -193,13 +185,15 @@ Package
       `curl | sh` line (2026-10-11: "may download or execute code outside
       the reviewed package"), so the skill now sends the user to
       https://olympusplugin.ai/install/ and shows no commands.
-- [x] `mcp.json` declares `auth: {type: "oauth"}` with no `client` block:
-      the portal's Connect refused `client.mode: "cimd"` with "OAuth client
-      ID is required when using pre-defined OAuth client credentials"
-      (2026-10-11). Discovery still advertises
-      `client_id_metadata_document_supported`.
-
-Installer
+- [x] `mcp.json` declares `auth: {type: "oauth", client: {mode: "dcr"},
+      registrationUrl: "https://mcp.olympusplugin.ai/connect/register"}`.
+      The portal's Connect (2026-10-11) flips a CIMD-only server to
+      "pre-defined client" before it has loaded the server's OAuth metadata,
+      then refuses it for lacking a client ID; a `provided` clientId in
+      mcp.json was dropped on upload. DCR is what the portal completes. The
+      relay answers registration itself, without state, only for ChatGPT
+      return addresses, with the ChatGPT client every engine already pins
+      (connect-relay/server/client-registration.ts).
 - [ ] The build under review is published to the site:
       `bun scripts/publish-release-to-site.ts` (packages the beta.11 Google
       Desktop client, the source default: owner decision 2026-10-03),
