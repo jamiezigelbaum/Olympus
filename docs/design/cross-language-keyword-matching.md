@@ -1,7 +1,8 @@
 # Cross-language keyword matching
 
-Status: not built. Written 2026-10-10 so it can be picked up if the problem
-recurs. Build it only when a measured miss calls for it.
+Status: implemented 2026-10-11 after the owner called for the measured Spanish
+LOI miss. The proposal below records the original design; implementation
+choices and reproducible proof are recorded at the end.
 
 ## The problem
 
@@ -90,3 +91,53 @@ corpus holds to the keyword lane only. The vector lane stays as it is.
   - reads per unanswerable question;
   - whether the LOI passage carries "escritura" for the short phrasing.
 - Ship only if the answerable count rises and unanswerable reads do not.
+
+
+## Implementation and proof
+
+The shared FTS concept groups and passage vocabulary now accept bounded local
+translations. The vector query, embedding identity, relevance bars and stored
+vectors are unchanged. There is no re-embed or document translation.
+
+The implementation differs from the proposal in these bounded ways:
+
+- Existing stores obtain a lazy, read-only language profile from a uniform
+  hash sample (about 1,024 chunks, capped at 2,048), instead of requiring an
+  ingest migration. Counts are approximate; languages near the 5% boundary
+  may fall on either side. Cached content hashes avoid reclassifying unchanged
+  chunks when embeddings or metadata change.
+- The three proposed examples (notary, fees and deposit) have a small local
+  vocabulary in English, Spanish, Portuguese, French, German and Italian.
+  These equivalents preserve the measured LOI fix when the model is absent,
+  cold or fails. Other content words use only the registered built-in Qwen.
+  The question, content-word IDs and target language names are its entire
+  prompt; it receives no document content. No configured cloud model is used.
+- Query language detection also checks local function-word data. This prevents
+  short English questions misidentified by the character detector from being
+  expanded into English synonyms. Foreign function words are excluded from
+  topic groups; the existing English product vocabulary stays in place.
+- Translation preparation precedes the store lane deadline, rather than
+  sharing that deadline with SQL/vector retrieval. An uncached call can add
+  up to 20 seconds. Each request pins its result, including failure, through
+  hydration; a question/profile cache bounds repeat work across requests.
+- Translated alternatives cannot belong to two independent concepts, including
+  overlapping prefix phrases and Porter/accent equivalents. Baseline keyword
+  rows and their completeness are retained when an expanded fetch saturates.
+  Calibrated hybrid retrieval admits novel translated rows only when they
+  cover the whole query. Passage focus uses translations only with complete
+  coverage across the title and text. These conservative rules preserve the
+  historical off-topic read budget; partial translations can still miss.
+
+The independently authored fictional fixture is
+`eval/fixtures/cross-language-blind.json`: 22 new answerable cases, four LOI
+phrasings and six missing-fact cases. None of its documents is real user
+content. Real built-in completions are saved by exact request; deterministic
+CI replay exercises production routing, FTS, counting, passage hydration and
+local Analyst gap responses. All misses remain visible in
+`eval/cross-language-report.json`. The six missing-fact cases are graded for
+honesty separately from off-topic read counts, with owner approval.
+
+The two historical blind sets remain outside git. Their replay uses read-only
+store copies on Xanthos under the owner's explicit local replay exception;
+only aggregate counts enter the PR. Builds and synthetic checks use Sparta.
+Activation requires an engine restart; this task does not restart it.
