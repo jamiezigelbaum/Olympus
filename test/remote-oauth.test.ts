@@ -533,6 +533,9 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
       expect(pinnedClient(clientId)?.redirectUris).toEqual([redirect]);
     }
     expect(chatGptClientForRedirect(CHATGPT_REDIRECT_URI)).toBe(CHATGPT_CLIENT_ID);
+    // The desktop client's id is never handed out: its callbacks are loopback.
+    expect(chatGptClientForRedirect('https://chatgpt.com/connector/oauth/codex')).toBeUndefined();
+    expect(pinnedClient(CHATGPT_CODEX_CLIENT_ID)?.redirectUris.some((uri) => uri.startsWith('https://'))).toBe(false);
   });
 
   test('registration is for local development clients only, from this Mac', async () => {

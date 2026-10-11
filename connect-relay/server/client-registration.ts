@@ -32,7 +32,8 @@ export const MAX_REGISTRATION_BYTES = 16 * 1024;
 export function chatGptClientForRedirect(redirectUri: string): string | undefined {
   if (redirectUri === STABLE_REDIRECT) return STABLE_CLIENT_ID;
   const callback = CALLBACK_REDIRECT.exec(redirectUri)?.[1];
-  return callback ? `${CHATGPT_ORIGIN}/oauth/${callback}/client.json` : undefined;
+  // `codex` names the desktop client, pinned to loopback callbacks instead.
+  return callback && callback !== 'codex' ? `${CHATGPT_ORIGIN}/oauth/${callback}/client.json` : undefined;
 }
 
 export type RegistrationOutcome =

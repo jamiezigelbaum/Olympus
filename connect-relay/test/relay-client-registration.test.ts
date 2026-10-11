@@ -41,6 +41,7 @@ describe('chatGptClientForRedirect', () => {
       'https://chatgpt.com/connector/oauth/a%2Fb',
       `https://chatgpt.com/connector/oauth/${'a'.repeat(129)}`,
       'http://127.0.0.1/callback',
+      'https://chatgpt.com/connector/oauth/codex',
     ]) expect(chatGptClientForRedirect(uri)).toBeUndefined();
   });
 });
