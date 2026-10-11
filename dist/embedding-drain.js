@@ -24195,7 +24195,8 @@ var init_provider_account_identity = __esm(() => {
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
     dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
     gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
+    x: "https://api.x.com/2/users/me"
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 });

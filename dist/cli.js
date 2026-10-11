@@ -5587,11 +5587,16 @@ async function fetchProviderAccountId(options) {
 function accountIdFromIdentityPayload(provider, payload) {
   if (provider === "dropbox")
     return dropboxAccountIdFromTokenPayload(payload);
+  if (provider === "x") {
+    const data = payload.data;
+    const id = data && typeof data === "object" && !Array.isArray(data) ? data.id : undefined;
+    return typeof id === "string" && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
+  }
   const address = provider === "gmail" ? payload.emailAddress : payload.user && typeof payload.user === "object" && !Array.isArray(payload.user) ? payload.user.emailAddress : undefined;
   return typeof address === "string" && address.includes("@") ? googleAccountIdFromAddress(address) : undefined;
 }
 function providerLabel(provider) {
-  return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : "Google Drive";
+  return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : provider === "x" ? "X" : "Google Drive";
 }
 async function dropboxOwnsOneOfFolders(options) {
   const endpoint = options.endpoint ?? "https://api.dropboxapi.com/2/files/get_metadata";
@@ -5677,17 +5682,19 @@ async function dropboxOwnRootFolderIds(options) {
   }
   return found.length > 0 ? found : undefined;
 }
-var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, ProviderAccountIdentityError;
+var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, X_USER_ID, ProviderAccountIdentityError;
 var init_provider_account_identity = __esm(() => {
   init_http_timeout();
-  ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive"];
+  ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive", "x"];
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
     dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
     gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
+    x: "https://api.x.com/2/users/me"
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
   DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
+  X_USER_ID = /^\d{1,32}$/;
   ProviderAccountIdentityError = class ProviderAccountIdentityError extends Error {
     constructor(message) {
       super(message);
@@ -5709,6 +5716,8 @@ function accountBoundSourceIdForProvider(provider) {
     return "google_drive.docs";
   if (provider === "gmail")
     return "gmail.email";
+  if (provider === "x")
+    return "x.bookmarks";
   return;
 }
 function readSourceAccountBindings(path) {
@@ -5849,7 +5858,7 @@ var ACCOUNT_BOUND_SOURCE_IDS, SourceAccountBindingsUnreadableError;
 var init_source_account_binding = __esm(() => {
   init_atomic_file();
   init_file_lease();
-  ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email"];
+  ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email", "x.bookmarks"];
   SourceAccountBindingsUnreadableError = class SourceAccountBindingsUnreadableError extends Error {
     constructor(path) {
       super(`The source account record at ${path} is unreadable; no file source syncs until it is repaired or removed.`);
@@ -6176,7 +6185,7 @@ async function completeOAuthSourceConnection(prepared, code) {
     });
   }
   const accountBoundProvider = prepared.definition.handles.map((definition) => definition.provider).find(isAccountBoundProvider);
-  const fileSourceAccountId = accountBoundProvider ? token.providerAccountId ?? await lookupConnectedAccountId({
+  const fileSourceAccountId = accountBoundProvider === "x" ? xUserId : accountBoundProvider ? token.providerAccountId ?? await lookupConnectedAccountId({
     provider: accountBoundProvider,
     tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
     accessToken: token.accessToken,
@@ -6918,6 +6927,8 @@ async function identifyReplacedGrantAccount(options) {
     const binding = read.bindings.sources[accountBoundSourceIdForProvider(options.provider)];
     if (binding?.provider_account_id || binding?.reconnected_at || binding?.purge_required)
       return;
+    if (options.provider === "x")
+      return existing.providerAccountId?.trim() || undefined;
     const broker = createEnvCredentialBroker({
       handleRegistryPath: options.registryPath,
       secretStore: options.secretStore,
@@ -6946,7 +6957,7 @@ async function identifyReplacedGrantAccount(options) {
 }
 async function lookupConnectedAccountId(options) {
   const tokenOrigin = new URL(options.tokenUrl).origin;
-  const endpoint = options.provider === "dropbox" ? new URL("/2/users/get_current_account", options.tokenUrl).toString() : tokenOrigin === "https://oauth2.googleapis.com" ? undefined : (options.provider === "gmail" ? new URL("users/me/profile", new URL("/gmail/v1/", options.tokenUrl)) : new URL("/drive/v3/about?fields=user(emailAddress)", options.tokenUrl)).toString();
+  const endpoint = options.provider === "x" ? new URL("/2/users/me", options.tokenUrl).toString() : options.provider === "dropbox" ? new URL("/2/users/get_current_account", options.tokenUrl).toString() : tokenOrigin === "https://oauth2.googleapis.com" ? undefined : (options.provider === "gmail" ? new URL("users/me/profile", new URL("/gmail/v1/", options.tokenUrl)) : new URL("/drive/v3/about?fields=user(emailAddress)", options.tokenUrl)).toString();
   try {
     return await fetchProviderAccountId({
       provider: options.provider,
@@ -118257,6 +118268,8 @@ ${folderIds.join(",")}`).digest("hex");
   };
   let evidenceRecordAttempted = false;
   const tokenAccountId = async () => {
+    if (options.readAccountId)
+      return options.readAccountId()?.trim() || undefined;
     const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
     const session = await broker.issueSession({
       handle: options.handle,
@@ -118350,6 +118363,9 @@ ${folderIds.join(",")}`).digest("hex");
       }
       if (decision.action === "proceed")
         return;
+      if (decision.action === "refuse" && decision.reason === "token_account_mismatch" && options.readAccountId) {
+        throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: this source is set to read a different account than the connected credential's, so nothing was synced. This clears once the worker picks up a reconnect; if it stays, remove the account override from the worker's environment.`);
+      }
       if (decision.action === "refuse" && decision.reason === "token_account_mismatch") {
         invalidateMintedCredentialSessions(options.handle);
         verified.clear();
@@ -130942,7 +130958,8 @@ __export(exports_server2, {
   commaSeparatedEnv: () => commaSeparatedEnv,
   applyBuiltInPrivateAnalyst: () => applyBuiltInPrivateAnalyst,
   activeCredentialHandle: () => activeCredentialHandle,
-  accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
+  accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle,
+  accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
 import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync55 } from "node:fs";
@@ -132150,6 +132167,7 @@ async function main() {
   });
   const readwiseConnectorStore = refreshableReadwiseRuntime?.store;
   const xBookmarksConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
+  let xBookmarksTierStores = [];
   const refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
     enabled: xBookmarksConnectorStoreLane.enabled,
     ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
@@ -132157,14 +132175,16 @@ async function main() {
     env: process.env,
     tierSetFor: (store) => {
       const secrets = openTierSecretLocations(defaultXBookmarksSecureConnectorStoreDbPath(process.env), X_BOOKMARKS_SECURE_CORPUS_ID);
-      return existingStoreTierSet(createXBookmarksTierLane({
+      const lane = createXBookmarksTierLane({
         store,
         env: process.env,
         ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
         ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
         ...secrets ? { secretLocations: secrets } : {},
         onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
-      }), { store, ...secrets ? { secrets } : {} });
+      });
+      xBookmarksTierStores = Object.values(lane.newStores).filter((leg) => leg !== undefined);
+      return existingStoreTierSet(lane, { store, ...secrets ? { secrets } : {} });
     }
   });
   const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
@@ -132954,10 +132974,12 @@ async function main() {
       handles: readActiveConnectedHandles(process.env)
     });
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
-    if (runtime) {
-      connectorStoreAccountScopes.set(runtime.store.corpusId, sourceIndexAccount?.trim() || handle?.accountRole?.trim() || "personal");
-    }
-    return runtime;
+    if (!runtime)
+      return;
+    connectorStoreAccountScopes.set(runtime.store.corpusId, sourceIndexAccount?.trim() || handle?.accountRole?.trim() || "personal");
+    xBookmarksLaneReadAccount = runtime.providerUserId;
+    const guard = sourceAccountGuardFor(xBookmarksGuardLane(handle?.handle));
+    return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle) => {
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
@@ -132975,14 +132997,15 @@ async function main() {
     handles: readActiveConnectedHandles(process.env)
   }));
   const sourceAccountGuards = new Map;
+  let xBookmarksLaneReadAccount;
   const laneGuards = new Map;
   const laneStores = (stores, onDemand) => ({
     laneHoldsItems: () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
     laneStoresStale: () => stores.some((store) => store?.fileReplacedOrRemoved() === true) || onDemand.some((leg) => leg?.current()?.fileReplacedOrRemoved() === true)
   });
-  const withSourceAccountGuard = (source, lane) => {
-    if (!source || !lane.handle || !connectedHandleRegistryPath)
-      return source;
+  const sourceAccountGuardFor = (lane) => {
+    if (!lane.handle || !connectedHandleRegistryPath)
+      return;
     const key2 = `${lane.sourceId}
 ${lane.handle}`;
     let guard = sourceAccountGuards.get(key2);
@@ -132996,13 +133019,29 @@ ${lane.handle}`;
         laneHoldsItems: lane.laneHoldsItems,
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
-        ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}
+        ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {},
+        ...lane.readAccountId ? { readAccountId: lane.readAccountId } : {}
       });
       sourceAccountGuards.set(key2, guard);
     }
-    laneGuards.set(source.sourceId, guard);
+    return guard;
+  };
+  const withSourceAccountGuard = (source, lane) => {
+    if (!source)
+      return source;
+    const guard = sourceAccountGuardFor(lane);
+    if (guard)
+      laneGuards.set(source.sourceId, guard);
     return source;
   };
+  const xBookmarksGuardLane = (handle) => ({
+    sourceId: "x.bookmarks",
+    provider: "x",
+    capability: "x.bookmarks.sync",
+    handle,
+    ...laneStores(refreshableXBookmarksRuntime ? [refreshableXBookmarksRuntime.store] : [], xBookmarksTierStores),
+    readAccountId: () => xBookmarksLaneReadAccount
+  });
   const schedulerSourcesForHandles = (handles) => {
     const decisions = [];
     laneGuards.clear();
@@ -133085,6 +133124,7 @@ ${lane.handle}`;
       ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef) } : {}
     }) : undefined;
     const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime?.runtimeForHandle(currentXBookmarksHandle);
+    xBookmarksLaneReadAccount = currentXBookmarksConnectorStoreRuntime?.providerUserId;
     if (currentXBookmarksConnectorStoreRuntime) {
       connectorStoreAccountScopes.set(currentXBookmarksConnectorStoreRuntime.store.corpusId, sourceIndexAccount?.trim() || currentXBookmarksHandle?.accountRole?.trim() || "personal");
     }
@@ -133163,10 +133203,10 @@ ${lane.handle}`;
         ...currentReadwiseConnectorStoreSync ? { liveSync: currentReadwiseConnectorStoreSync } : {},
         ...sourceIndexAccount ? { account: sourceIndexAccount } : currentReadwiseHandle?.accountRole ? { account: currentReadwiseHandle.accountRole } : {}
       })),
-      recordLane(SCHEDULER_SOURCE_IDS.xBookmarks, xBookmarksSkipReason, () => currentXBookmarksConnectorStoreRuntime ? createXBookmarksSchedulerSource({
+      recordLane(SCHEDULER_SOURCE_IDS.xBookmarks, xBookmarksSkipReason, () => withSourceAccountGuard(currentXBookmarksConnectorStoreRuntime ? createXBookmarksSchedulerSource({
         config: olympusConfig,
         liveSync: currentXBookmarksConnectorStoreRuntime.sync
-      }) : undefined),
+      }) : undefined, xBookmarksGuardLane(currentXBookmarksHandle?.handle))),
       recordLane(SCHEDULER_SOURCE_IDS.telegram, !currentTelegramHandle ? "no_handle" : !telegramConnectorStoreSync ? "no_store_sync" : undefined, () => createTelegramSchedulerSource({
         config: olympusConfig,
         ...telegramConnectorStoreSync ? { sync: telegramConnectorStoreSync } : {},
@@ -134217,6 +134257,34 @@ function selectedSourceCredentialHandle(input) {
   }
   return selection.handle;
 }
+function accountCheckedXBookmarksRuntime(runtime, guard) {
+  const checked = async (run) => {
+    try {
+      await guard.assertAccount();
+    } catch (error2) {
+      if (error2 instanceof SourceAccountChangedError) {
+        throw new EmailSourceWorkerError(409, error2.code, error2.message);
+      }
+      throw error2;
+    }
+    return run();
+  };
+  const { sync, contentRecovery } = runtime;
+  return {
+    ...runtime,
+    sync: {
+      syncHead: (request) => checked(() => sync.syncHead(request)),
+      reconcile: (request) => checked(() => sync.reconcile(request)),
+      ...sync.diagnoseWindow ? { diagnoseWindow: sync.diagnoseWindow.bind(sync) } : {},
+      lastCompleteReconcileAt: () => sync.lastCompleteReconcileAt(),
+      completeReconcileWatermark: () => sync.completeReconcileWatermark(),
+      apiUsageStatus: () => sync.apiUsageStatus()
+    },
+    contentRecovery: {
+      recover: (request) => checked(() => contentRecovery.recover(request))
+    }
+  };
+}
 function createReadwiseConnectorStoreRuntime(options) {
   if (!options.enabled || !options.embeddingProvider)
     return;
@@ -134364,7 +134432,7 @@ function bindXBookmarksConnectorStoreRuntime(options) {
     ...env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL?.trim() ? { apiBaseUrl: env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL.trim() } : {},
     env
   });
-  return { store: options.store, sync, contentRecovery };
+  return { store: options.store, providerUserId: options.providerUserId, sync, contentRecovery };
 }
 function activeLaneHandles(handles, env) {
   const registryPath = handleRegistryPathFromEnv(env, true);

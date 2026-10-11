@@ -13,6 +13,12 @@
   deleted for you: reconnect the previous account to carry on, or Disconnect,
   run `olympus data delete --source <id>`, and connect again to start over
   with the new one.
+- **One X account per bookmarks source.** Reconnecting X with a different
+  account over bookmarks already stored stops X bookmarks before anything
+  syncs, as Dropbox, Google Drive and Gmail do, and says how to carry on:
+  reconnect the previous account, or Disconnect, run
+  `olympus data delete --source x.bookmarks`, and connect again. Sync now and
+  bookmark text recovery pass the same check.
 - **X bookmarks stop at a reconnect too.** A bookmarks sync already running
   when X is reconnected stops at its next page and stores nothing it read
   with the previous connection; the next run uses the new one. Recovering

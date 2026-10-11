@@ -646,7 +646,10 @@ async function completeOAuthSourceConnection(
   const accountBoundProvider = prepared.definition.handles
     .map((definition) => definition.provider)
     .find(isAccountBoundProvider);
-  const fileSourceAccountId = accountBoundProvider
+  // X's user id was just read above (connect fails without it).
+  const fileSourceAccountId = accountBoundProvider === 'x'
+    ? xUserId
+    : accountBoundProvider
     ? token.providerAccountId ?? await lookupConnectedAccountId({
         provider: accountBoundProvider,
         tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
@@ -1998,6 +2001,11 @@ async function identifyReplacedGrantAccount(options: {
     if (read.kind !== 'ok') return undefined;
     const binding = read.bindings.sources[accountBoundSourceIdForProvider(options.provider)!];
     if (binding?.provider_account_id || binding?.reconnected_at || binding?.purge_required) return undefined;
+    // X: every X connect has recorded the grant's user id, and the bookmarks
+    // lane reads as that id, so it is the account the stored items came from.
+    // Never mint from the replaced grant here: X rotates refresh tokens, and a
+    // mint in the connect process would revoke the worker's live session.
+    if (options.provider === 'x') return existing.providerAccountId?.trim() || undefined;
     const broker = createEnvCredentialBroker({
       handleRegistryPath: options.registryPath,
       secretStore: options.secretStore,
@@ -2032,7 +2040,9 @@ async function lookupConnectedAccountId(options: {
   timeoutMs: number;
 }): Promise<string | undefined> {
   const tokenOrigin = new URL(options.tokenUrl).origin;
-  const endpoint = options.provider === 'dropbox'
+  const endpoint = options.provider === 'x'
+    ? new URL('/2/users/me', options.tokenUrl).toString()
+    : options.provider === 'dropbox'
     ? new URL('/2/users/get_current_account', options.tokenUrl).toString()
     : tokenOrigin === 'https://oauth2.googleapis.com'
       ? undefined

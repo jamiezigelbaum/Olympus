@@ -18008,14 +18008,15 @@ init_http_timeout();
 var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
   dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
   gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
+  x: "https://api.x.com/2/users/me"
 };
 var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 // src/core/source-account-binding.ts
 init_atomic_file();
 init_file_lease();
-var ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email"];
+var ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email", "x.bookmarks"];
 
 // src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;

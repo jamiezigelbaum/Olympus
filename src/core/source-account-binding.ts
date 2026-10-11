@@ -28,12 +28,14 @@ import type { AccountBoundProvider } from './provider-account-identity.ts';
  *   removed them the new account is bound; reconnecting the previous account
  *   instead lifts the marker and sync resumes where it was.
  *
+ * X bookmarks is bound the same way: one X account per bookmarks source.
+ *
  * It sits beside the connected-handle registry so the CLI and the dashboard
  * connect paths, and the worker, all read and write the same file.
  */
-export type AccountBoundSourceId = 'dropbox.files' | 'google_drive.docs' | 'gmail.email';
+export type AccountBoundSourceId = 'dropbox.files' | 'google_drive.docs' | 'gmail.email' | 'x.bookmarks';
 
-export const ACCOUNT_BOUND_SOURCE_IDS: readonly AccountBoundSourceId[] = ['dropbox.files', 'google_drive.docs', 'gmail.email'];
+export const ACCOUNT_BOUND_SOURCE_IDS: readonly AccountBoundSourceId[] = ['dropbox.files', 'google_drive.docs', 'gmail.email', 'x.bookmarks'];
 
 export type SourceAccountPurgeReason = 'account_changed' | 'previous_account_unknown';
 
@@ -78,6 +80,7 @@ export function accountBoundSourceIdForProvider(provider: string): AccountBoundS
   if (provider === 'dropbox') return 'dropbox.files';
   if (provider === 'google_drive') return 'google_drive.docs';
   if (provider === 'gmail') return 'gmail.email';
+  if (provider === 'x') return 'x.bookmarks';
   return undefined;
 }
 

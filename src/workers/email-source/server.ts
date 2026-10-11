@@ -30,6 +30,7 @@ import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts'
 import { OpenAICompatibleVlmClient } from '../file-extraction/extractors/openai-compatible-client.ts';
 import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
 import {
+  EmailSourceWorkerError,
   createEmailSourceWorker,
   dashboardSourceSyncNotSupportedError,
   defineGmailSecureLocalCorpus,
@@ -344,6 +345,7 @@ import {
 } from '../source-scope-runtime.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import {
+  SourceAccountChangedError,
   guardAccountBoundLanes,
   createSourceAccountGuard,
   type SourceAccountGuard,
@@ -2282,6 +2284,9 @@ export async function main(): Promise<void> {
     'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED',
     sourceIndexReadEnabled,
   );
+  // The X lane's tier stores beyond its own, for the account guard's
+  // "does this source hold items" check.
+  let xBookmarksTierStores: OnDemandTierStore[] = [];
   const refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
     enabled: xBookmarksConnectorStoreLane.enabled,
     ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
@@ -2292,14 +2297,16 @@ export async function main(): Promise<void> {
         defaultXBookmarksSecureConnectorStoreDbPath(process.env),
         X_BOOKMARKS_SECURE_CORPUS_ID,
       );
-      return existingStoreTierSet(createXBookmarksTierLane({
+      const lane = createXBookmarksTierLane({
         store,
         env: process.env,
         ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
         ...(tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {}),
         ...(secrets ? { secretLocations: secrets } : {}),
         onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null),
-      }), { store, ...(secrets ? { secrets } : {}) });
+      });
+      xBookmarksTierStores = Object.values(lane.newStores).filter((leg): leg is OnDemandTierStore => leg !== undefined);
+      return existingStoreTierSet(lane, { store, ...(secrets ? { secrets } : {}) });
     },
   });
   const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
@@ -3573,7 +3580,7 @@ export async function main(): Promise<void> {
   const sourceIngestionLedger = sourceIndexReadEnabled
     ? new SqliteSourceIngestionLedgerStore()
     : undefined;
-  const currentXBookmarksRuntime = () => {
+  const currentXBookmarksRuntime = (): XBookmarksConnectorStoreRuntime | undefined => {
     const handle = connectorStoreLaneHandle({
       env: process.env,
       laneEnvName: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED',
@@ -3583,13 +3590,16 @@ export async function main(): Promise<void> {
       handles: readActiveConnectedHandles(process.env),
     });
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
-    if (runtime) {
-      connectorStoreAccountScopes.set(
-        runtime.store.corpusId,
-        sourceIndexAccount?.trim() || handle?.accountRole?.trim() || 'personal',
-      );
-    }
-    return runtime;
+    if (!runtime) return undefined;
+    connectorStoreAccountScopes.set(
+      runtime.store.corpusId,
+      sourceIndexAccount?.trim() || handle?.accountRole?.trim() || 'personal',
+    );
+    xBookmarksLaneReadAccount = runtime.providerUserId;
+    // The operator routes reach the runtime without the scheduler, so they
+    // pass the same account check its lane does before reading or writing.
+    const guard = sourceAccountGuardFor(xBookmarksGuardLane(handle?.handle));
+    return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle: ConnectedCredentialHandle | undefined) => {
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
@@ -3614,6 +3624,8 @@ export async function main(): Promise<void> {
   // reads with, the connected grant and the stored items name one account.
   // Kept across scheduler rebuilds so a token is looked up once, not per pass.
   const sourceAccountGuards = new Map<string, SourceAccountGuard>();
+  // The X user id the current X lane reads as, refreshed on every build.
+  let xBookmarksLaneReadAccount: string | undefined;
   // The guards of the lanes being assembled, applied once every task of the
   // lane is attached: an embedding sweep or watch task appended later writes
   // the same stores and must not run past the guard (independent review
@@ -3633,19 +3645,18 @@ export async function main(): Promise<void> {
     laneStoresStale: (): boolean => stores.some((store) => store?.fileReplacedOrRemoved() === true)
       || onDemand.some((leg) => leg?.current()?.fileReplacedOrRemoved() === true),
   });
-  const withSourceAccountGuard = (
-    source: SourceSchedulerSource | undefined,
-    lane: {
-      sourceId: AccountBoundSourceId;
-      provider: AccountBoundProvider;
-      capability: string;
-      handle: string | undefined;
-      laneHoldsItems: () => boolean;
-      laneStoresStale: () => boolean;
-      ownAccountEvidence?: SourceAccountGuardOptions['ownAccountEvidence'];
-    },
-  ): SourceSchedulerSource | undefined => {
-    if (!source || !lane.handle || !connectedHandleRegistryPath) return source;
+  type AccountGuardLane = {
+    sourceId: AccountBoundSourceId;
+    provider: AccountBoundProvider;
+    capability: string;
+    handle: string | undefined;
+    laneHoldsItems: () => boolean;
+    laneStoresStale: () => boolean;
+    ownAccountEvidence?: SourceAccountGuardOptions['ownAccountEvidence'];
+    readAccountId?: SourceAccountGuardOptions['readAccountId'];
+  };
+  const sourceAccountGuardFor = (lane: AccountGuardLane): SourceAccountGuard | undefined => {
+    if (!lane.handle || !connectedHandleRegistryPath) return undefined;
     const key = `${lane.sourceId}\n${lane.handle}`;
     let guard = sourceAccountGuards.get(key);
     if (!guard) {
@@ -3659,12 +3670,36 @@ export async function main(): Promise<void> {
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
         ...(lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}),
+        ...(lane.readAccountId ? { readAccountId: lane.readAccountId } : {}),
       });
       sourceAccountGuards.set(key, guard);
     }
-    laneGuards.set(source.sourceId, guard);
+    return guard;
+  };
+  const withSourceAccountGuard = (
+    source: SourceSchedulerSource | undefined,
+    lane: AccountGuardLane,
+  ): SourceSchedulerSource | undefined => {
+    if (!source) return source;
+    const guard = sourceAccountGuardFor(lane);
+    if (guard) laneGuards.set(source.sourceId, guard);
     return source;
   };
+  // The X lane as the account guard sees it, shared by the scheduler lane and
+  // the operator routes (Sync now, content recovery) that call the runtime
+  // directly. Every X bookmarks read is addressed to the runtime's user id,
+  // and X refuses it for another account's token: no identity call needed.
+  const xBookmarksGuardLane = (handle: string | undefined): AccountGuardLane => ({
+    sourceId: 'x.bookmarks',
+    provider: 'x',
+    capability: 'x.bookmarks.sync',
+    handle,
+    ...laneStores(
+      refreshableXBookmarksRuntime ? [refreshableXBookmarksRuntime.store] : [],
+      xBookmarksTierStores,
+    ),
+    readAccountId: () => xBookmarksLaneReadAccount,
+  });
   const schedulerSourcesForHandles = (handles: readonly ConnectedCredentialHandle[]): {
     sources: SourceSchedulerSource[];
     decisions: SourceSchedulerConstructionDecision[];
@@ -3781,6 +3816,7 @@ export async function main(): Promise<void> {
       : undefined;
     const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime
       ?.runtimeForHandle(currentXBookmarksHandle);
+    xBookmarksLaneReadAccount = currentXBookmarksConnectorStoreRuntime?.providerUserId;
     if (currentXBookmarksConnectorStoreRuntime) {
       connectorStoreAccountScopes.set(
         currentXBookmarksConnectorStoreRuntime.store.corpusId,
@@ -3926,12 +3962,12 @@ export async function main(): Promise<void> {
       recordLane(
         SCHEDULER_SOURCE_IDS.xBookmarks,
         xBookmarksSkipReason,
-        () => currentXBookmarksConnectorStoreRuntime
+        () => withSourceAccountGuard(currentXBookmarksConnectorStoreRuntime
           ? createXBookmarksSchedulerSource({
             config: olympusConfig,
             liveSync: currentXBookmarksConnectorStoreRuntime.sync,
           })
-          : undefined,
+          : undefined, xBookmarksGuardLane(currentXBookmarksHandle?.handle)),
       ),
       recordLane(
         SCHEDULER_SOURCE_IDS.telegram,
@@ -5457,8 +5493,48 @@ export function selectedSourceCredentialHandle(input: {
 
 export interface XBookmarksConnectorStoreRuntime {
   store: LocalConnectorStore;
+  /** The X user id every read of this runtime is addressed to. */
+  providerUserId: string;
   sync: XBookmarksConnectorStoreSyncHandler;
   contentRecovery: XBookmarksContentRecoveryHandler;
+}
+
+/**
+ * The X runtime as the operator routes see it: Sync now and content recovery
+ * pass the lane's account check first, as every scheduler task does. The
+ * window diagnostic writes nothing to the stores and stays unchecked, so it
+ * can still look at a source that is stopped.
+ */
+export function accountCheckedXBookmarksRuntime(
+  runtime: XBookmarksConnectorStoreRuntime,
+  guard: SourceAccountGuard,
+): XBookmarksConnectorStoreRuntime {
+  const checked = async <T>(run: () => Promise<T>): Promise<T> => {
+    try {
+      await guard.assertAccount();
+    } catch (error) {
+      if (error instanceof SourceAccountChangedError) {
+        throw new EmailSourceWorkerError(409, error.code, error.message);
+      }
+      throw error;
+    }
+    return run();
+  };
+  const { sync, contentRecovery } = runtime;
+  return {
+    ...runtime,
+    sync: {
+      syncHead: (request) => checked(() => sync.syncHead(request)),
+      reconcile: (request) => checked(() => sync.reconcile(request)),
+      ...(sync.diagnoseWindow ? { diagnoseWindow: sync.diagnoseWindow.bind(sync) } : {}),
+      lastCompleteReconcileAt: () => sync.lastCompleteReconcileAt(),
+      completeReconcileWatermark: () => sync.completeReconcileWatermark(),
+      apiUsageStatus: () => sync.apiUsageStatus(),
+    },
+    contentRecovery: {
+      recover: (request) => checked(() => contentRecovery.recover(request)),
+    },
+  };
 }
 
 export interface RefreshableXBookmarksConnectorStoreRuntime {
@@ -5740,7 +5816,7 @@ function bindXBookmarksConnectorStoreRuntime(options: {
       : {}),
     env,
   });
-  return { store: options.store, sync, contentRecovery };
+  return { store: options.store, providerUserId: options.providerUserId, sync, contentRecovery };
 }
 
 /**

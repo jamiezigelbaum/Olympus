@@ -23,7 +23,7 @@ import {
 import type { SourceSchedulerSource } from './source-scheduler.ts';
 
 /**
- * The check every Dropbox, Google Drive and Gmail scheduler task passes before
+ * The check every Dropbox, Google Drive, Gmail and X bookmarks scheduler task passes before
  * it touches the provider or the source's stores: the token it would read with
  * belongs to the account the grant authorizes, and that account is the one the
  * source's stored items came from. See source-account-binding.ts for the
@@ -68,6 +68,14 @@ export interface SourceAccountGuardOptions {
     record: (accessToken: string) => Promise<string[] | undefined>;
     check: (accessToken: string, folderIds: readonly string[]) => Promise<boolean | undefined>;
   };
+  /**
+   * For a lane whose every read is addressed to an account id the provider
+   * enforces against the token (X bookmarks reads /users/<id>/bookmarks, which
+   * X refuses for any other account's token): the id this lane reads as. It
+   * stands in for asking the provider which account the token is, so the
+   * check costs no provider call and takes no token of its own.
+   */
+  readAccountId?: () => string | undefined;
   broker?: CredentialBroker;
   fetch?: TimeoutFetch;
   identityEndpoints?: ProviderIdentityEndpoints;
@@ -103,6 +111,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
   let evidenceRecordAttempted = false;
 
   const tokenAccountId = async (): Promise<string | undefined> => {
+    if (options.readAccountId) return options.readAccountId()?.trim() || undefined;
     const handle = readConnectedHandleRegistry(options.registryPath).handles
       .find((entry) => entry.handle === options.handle);
     const session = await broker.issueSession({
@@ -222,6 +231,12 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
         });
       }
       if (decision.action === 'proceed') return;
+      if (decision.action === 'refuse' && decision.reason === 'token_account_mismatch' && options.readAccountId) {
+        throw new SourceAccountChangedError(
+          'source_account_token_mismatch',
+          `${options.sourceId}: this source is set to read a different account than the connected credential's, so nothing was synced. This clears once the worker picks up a reconnect; if it stays, remove the account override from the worker's environment.`,
+        );
+      }
       if (decision.action === 'refuse' && decision.reason === 'token_account_mismatch') {
         invalidateMintedCredentialSessions(options.handle);
         verified.clear();

@@ -17,9 +17,9 @@ import { fetchBoundedText, type TimeoutFetch } from './http-timeout.ts';
  * a digest of the account's address (Gmail exposes no other stable id under
  * `gmail.readonly`), so no address is written to the registry.
  */
-export type AccountBoundProvider = 'dropbox' | 'gmail' | 'google_drive';
+export type AccountBoundProvider = 'dropbox' | 'gmail' | 'google_drive' | 'x';
 
-export const ACCOUNT_BOUND_PROVIDERS: readonly AccountBoundProvider[] = ['dropbox', 'gmail', 'google_drive'];
+export const ACCOUNT_BOUND_PROVIDERS: readonly AccountBoundProvider[] = ['dropbox', 'gmail', 'google_drive', 'x'];
 
 export function isAccountBoundProvider(provider: string): provider is AccountBoundProvider {
   return (ACCOUNT_BOUND_PROVIDERS as readonly string[]).includes(provider);
@@ -30,6 +30,7 @@ export interface ProviderIdentityEndpoints {
   dropbox?: string;
   gmail?: string;
   google_drive?: string;
+  x?: string;
 }
 
 export const DEFAULT_PROVIDER_IDENTITY_ENDPOINTS: Required<ProviderIdentityEndpoints> = {
@@ -40,10 +41,13 @@ export const DEFAULT_PROVIDER_IDENTITY_ENDPOINTS: Required<ProviderIdentityEndpo
   // as a home directory to the release owner-identifier scan.
   gmail: new URL('users/me/profile', 'https://gmail.googleapis.com/gmail/v1/').toString(),
   google_drive: 'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)',
+  // X's own numeric user id, the same one connect records for the grant.
+  x: 'https://api.x.com/2/users/me',
 };
 
 const IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 const DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
+const X_USER_ID = /^\d{1,32}$/;
 
 export class ProviderAccountIdentityError extends Error {
   constructor(message: string) {
@@ -120,6 +124,13 @@ export async function fetchProviderAccountId(options: {
 
 function accountIdFromIdentityPayload(provider: AccountBoundProvider, payload: Record<string, unknown>): string | undefined {
   if (provider === 'dropbox') return dropboxAccountIdFromTokenPayload(payload);
+  if (provider === 'x') {
+    const data = payload.data;
+    const id = data && typeof data === 'object' && !Array.isArray(data)
+      ? (data as Record<string, unknown>).id
+      : undefined;
+    return typeof id === 'string' && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
+  }
   const address = provider === 'gmail'
     ? payload.emailAddress
     : payload.user && typeof payload.user === 'object' && !Array.isArray(payload.user)
@@ -129,7 +140,7 @@ function accountIdFromIdentityPayload(provider: AccountBoundProvider, payload: R
 }
 
 function providerLabel(provider: AccountBoundProvider): string {
-  return provider === 'dropbox' ? 'Dropbox' : provider === 'gmail' ? 'Gmail' : 'Google Drive';
+  return provider === 'dropbox' ? 'Dropbox' : provider === 'gmail' ? 'Gmail' : provider === 'x' ? 'X' : 'Google Drive';
 }
 
 /**
