@@ -10195,13 +10195,15 @@ class TierLedger {
         UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
       `).run(existing.generation, decidedAt, ...idParams(identity));
-      const state = existing.metadataPending || existing.contentPending ? "pending" : "current";
+      const state = prior.metadataPending || prior.contentPending ? "pending" : "current";
       const reasonsJson = JSON.stringify(prior.reasons);
       this.db.query(`
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL,
-          generation = ?, decided_by = ?, reasons_json = ?, decided_at = ?, move_attempts = 0
+          generation = ?, decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?,
+          content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
+          move_attempts = 0, owner_prior_json = NULL
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(state, staleFlip, prior.decidedBy, reasonsJson, decidedAt, ...idParams(identity));
+      `).run(state, staleFlip, prior.decidedBy, reasonsJson, prior.engineVersion, prior.mapRevision, decidedAt, ...decisionFlags(prior), ...idParams(identity));
       this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
       return "cancelled";
     }
@@ -10219,11 +10221,28 @@ class TierLedger {
       UPDATE tier_items SET generation = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(staleFlip, ...idParams(identity));
-    const replanned = {
+    this.queueMoveRow(identity, { ...existing, generation: staleFlip }, {
+      ...prior,
       metadataTier: maxTier(existing.metadataTier, targetMetadata),
-      contentTier: maxTier(existing.contentTier, targetContent),
-      decidedBy: prior.decidedBy,
-      reasons: prior.reasons,
+      contentTier: maxTier(existing.contentTier, targetContent)
+    }, { hide: false, decidedAt });
+    this.db.query(`
+      UPDATE tier_items SET content_read = ?, owner_prior_json = NULL
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(prior.contentRead ? 1 : 0, ...idParams(identity));
+    return "replanned";
+  }
+  decisionBeforeOverride(identity, existing) {
+    const saved = this.db.query(`
+      SELECT owner_prior_json FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
+    const parsed = saved?.owner_prior_json ? ownerPriorOf(saved.owner_prior_json) : undefined;
+    if (parsed)
+      return parsed;
+    const fallback = {
+      decidedBy: "move",
+      reasons: existing.reasons.filter((reason) => !reason.startsWith("override:")),
       engineVersion: existing.engineVersion,
       mapRevision: existing.mapRevision,
       contentRead: existing.contentRead,
@@ -10232,10 +10251,6 @@ class TierLedger {
       metadataForced: existing.metadataForced,
       metadataFlagged: existing.metadataFlagged
     };
-    this.queueMoveRow(identity, { ...existing, generation: staleFlip }, replanned, { hide: false, decidedAt });
-    return "replanned";
-  }
-  decisionBeforeOverride(identity, existing) {
     const row = this.db.query(`
       SELECT decided_by, reasons_json FROM tier_history
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND decided_by <> 'override'
@@ -10245,11 +10260,11 @@ class TierLedger {
       try {
         const reasons = JSON.parse(row.reasons_json);
         if (Array.isArray(reasons) && reasons.every((reason) => typeof reason === "string")) {
-          return { decidedBy: row.decided_by, reasons };
+          return { ...fallback, decidedBy: row.decided_by, reasons };
         }
       } catch {}
     }
-    return { decidedBy: "move", reasons: existing.reasons.filter((reason) => !reason.startsWith("override:")) };
+    return fallback;
   }
   ledgerId() {
     const row = this.db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
@@ -10547,6 +10562,23 @@ class TierLedger {
         metadata_forced = ?, metadata_flagged = ?, move_attempts = 0
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, options.decidedAt, ...decisionFlags(decision), ...idParams(identity));
+    if (decision.decidedBy === "override" && existing.decidedBy !== "override") {
+      const prior = {
+        decidedBy: existing.decidedBy,
+        reasons: existing.reasons,
+        engineVersion: existing.engineVersion,
+        mapRevision: existing.mapRevision,
+        contentRead: existing.contentRead,
+        metadataPending: existing.metadataPending,
+        contentPending: existing.contentPending,
+        metadataForced: existing.metadataForced,
+        metadataFlagged: existing.metadataFlagged
+      };
+      this.db.query(`
+        UPDATE tier_items SET owner_prior_json = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(JSON.stringify(prior), ...idParams(identity));
+    }
     this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, "moving", options.decidedAt);
     if (options.hide)
       this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
@@ -11160,6 +11192,18 @@ function trustDomainRank(domain) {
 function copyServingLayer(copies, layer) {
   return copies.find((copy) => copy.layers === "both" || copy.layers === layer);
 }
+function ownerPriorOf(json) {
+  try {
+    const value = JSON.parse(json);
+    const flags = ["contentRead", "metadataPending", "contentPending", "metadataForced", "metadataFlagged"];
+    if (typeof value.decidedBy !== "string" || typeof value.engineVersion !== "string" || typeof value.mapRevision !== "string" || !Array.isArray(value.reasons) || !value.reasons.every((reason) => typeof reason === "string") || flags.some((flag) => typeof value[flag] !== "boolean")) {
+      return;
+    }
+    return value;
+  } catch {
+    return;
+  }
+}
 function overrideAuthorizes(override, metadataTier, contentTier) {
   if (override?.kind !== "tier")
     return false;
@@ -11550,7 +11594,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 4,
       name: "tier_rejudge_and_move_attempts",
       up(db) {
         db.exec(`
@@ -11559,10 +11603,17 @@ function tierLedgerMigrations() {
           ALTER TABLE tier_items ADD COLUMN rejudge_json TEXT;
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "tier_owner_prior_decision",
+      up(db) {
+        db.exec("ALTER TABLE tier_items ADD COLUMN owner_prior_json TEXT;");
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 4, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 5, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();

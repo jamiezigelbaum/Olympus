@@ -1009,6 +1009,35 @@ describe('12d. a revoked owner move is cancelled or replanned, never stranded (r
     expect(fx.stores.internal!.exportItemCopy(d1)?.chunks ?? []).toEqual([]);
   });
 
+  test('an item waiting for its text keeps waiting after an override set and cleared (its open question comes back)', async () => {
+    const { dir, cleanup } = tempDir('olympus-tier-revoked-pending-');
+    closers.push(cleanup);
+    const fx = openTierFixture(dir, { embed: false });
+    closers.push(() => fx.close());
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    const d1 = fixtureIdentityOf('d1');
+    // Names judged Personal; the text has not been read yet.
+    const unread: TierDecision = {
+      ...judged('private', 'private'),
+      state: 'pending', contentRead: false, contentPending: true, metadataForced: false,
+    };
+    fx.ledger.recordRoutedPlacement(d1, unread, fx.set.placementFor(unread), { staleCopiesGone: true });
+    const awaiting = () => fx.ledger.listAwaitingText().map((record) => record.providerItemId);
+    expect(awaiting()).toEqual(['d1']);
+
+    // The owner sets it Public: a lowering, queued (it hides nothing).
+    fx.ledger.setOverride(d1, { kind: 'tier', tier: 'public' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ lowered: 1 });
+    expect(fx.ledger.getCurrent(d1)).toMatchObject({ state: 'moving', decidedBy: 'override', contentRead: true, contentPending: false });
+    expect(awaiting()).toEqual([]);
+    // Cleared: back where it was, still waiting for its text.
+    fx.ledger.clearOverride(d1);
+    expect(fx.ledger.getCurrent(d1)).toMatchObject({
+      state: 'pending', contentRead: false, contentPending: true, metadataForced: false, decidedBy: 'sniffer',
+    });
+    expect(awaiting()).toEqual(['d1']);
+  });
+
   test('a queued lower that hid nothing is cancelled when cleared: the item stays where it is, and a move read before never starts again', async () => {
     const { fx, d1 } = await placed('olympus-tier-revoked-lower-', 'secure', 'secure');
     fx.ledger.setOverride(d1, { kind: 'tier', tier: 'private' });
