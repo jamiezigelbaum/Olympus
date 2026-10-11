@@ -66,8 +66,15 @@ export function protectedResourceMetadata(relay: RelayOrigin, surface: McpSurfac
   };
 }
 
-export function authorizationServerMetadata(relay: RelayOrigin): Record<string, unknown> {
-  return {
+/**
+ * `advertiseCimd: false` leaves out `client_id_metadata_document_supported`
+ * (an operator switch, main.ts RELAY_CIMD_OFF_FILE). OpenAI's plugin portal
+ * records CIMD for a server that advertises it, and its Connect then cannot
+ * complete (2026-10-11); with the switch on while a plugin version is
+ * uploaded and connected, the portal records DCR instead.
+ */
+export function authorizationServerMetadata(relay: RelayOrigin, options: { advertiseCimd?: boolean } = {}): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
     issuer: relay.origin,
     authorization_endpoint: `${relay.origin}${OAUTH_PATHS.authorize}`,
     token_endpoint: `${relay.origin}${OAUTH_PATHS.token}`,
@@ -82,6 +89,8 @@ export function authorizationServerMetadata(relay: RelayOrigin): Record<string, 
     client_id_metadata_document_supported: true,
     authorization_response_iss_parameter_supported: true,
   };
+  if (options.advertiseCimd === false) delete metadata.client_id_metadata_document_supported;
+  return metadata;
 }
 
 /** Public metadata: browser-based MCP clients may read it cross-origin. */

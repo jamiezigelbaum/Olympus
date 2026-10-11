@@ -100,3 +100,19 @@ describe('the relay route', () => {
     expect(metadata.registration_endpoint).toBe(`https://${PUBLIC_HOST}/connect/register`);
   });
 });
+
+describe('the CIMD advertisement switch', () => {
+  test('metadata leaves out CIMD support only while the switch says so, read per request', async () => {
+    let advertise = true;
+    const relay = await startRelay({ publicHost: PUBLIC_HOST, registry: new MemoryInstallRegistry(), listen: { host: '127.0.0.1', port: 0 }, advertiseCimd: () => advertise });
+    cleanups.push(() => relay.close());
+    const metadata = async () => (await (await fetch(`${relay.url}/.well-known/oauth-authorization-server`)).json()) as Record<string, unknown>;
+    expect((await metadata()).client_id_metadata_document_supported).toBe(true);
+    advertise = false;
+    const off = await metadata();
+    expect('client_id_metadata_document_supported' in off).toBe(false);
+    expect(off.registration_endpoint).toBe(`https://${PUBLIC_HOST}/connect/register`);
+    advertise = true;
+    expect((await metadata()).client_id_metadata_document_supported).toBe(true);
+  });
+});

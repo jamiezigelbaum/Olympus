@@ -10,6 +10,8 @@
  *   RELAY_DEMO_INSTALL_ID the demo install reviewers sign in to (unset: no demo)
  *   RELAY_OPENAI_APPS_CHALLENGE / RELAY_OPENAI_APPS_CHALLENGE_FILE
  *                         OpenAI's domain verification token (unset: 404)
+ *   RELAY_CIMD_OFF_FILE   while this file exists the OAuth metadata leaves out
+ *                         CIMD support (oauth-metadata.ts); checked per request
  *   RELAY_REGISTRY_PATH   default /var/lib/olympus-relay/registry.jsonl
  *   RELAY_ADMIN_SOCKET    default <registry dir>/admin.sock
  *   RELAY_LEGACY_AUTH     `off` closes the legacy signature window (default on;
@@ -18,7 +20,7 @@
  * `main.ts admin <status|revoke|restore> ...` runs the operator command
  * instead of the relay (server/admin.ts), so the compiled binary carries both.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { adminSocketPath, DEFAULT_REGISTRY_PATH, runAdmin, startAdminSocket } from './admin.ts';
 import { jsonLineLog } from './log.ts';
 import { FileInstallRegistry } from './registry.ts';
@@ -56,6 +58,12 @@ function appsChallenge(): string | undefined {
   }
 }
 
+/** CIMD is advertised unless the operator's switch file exists (checked per request). */
+function advertiseCimd(): boolean {
+  const file = process.env.RELAY_CIMD_OFF_FILE;
+  return !file || !existsSync(file);
+}
+
 const log = jsonLineLog();
 // Operator commands: a 0600 Unix socket in the state directory, opened BEFORE
 // the registry is read and compacted, so the admin command never mistakes a
@@ -71,6 +79,7 @@ relay = await startRelay({
   ...(process.env.RELAY_INSTALL_URL ? { installUrl: process.env.RELAY_INSTALL_URL } : {}),
   ...(process.env.RELAY_DEMO_INSTALL_ID ? { demoInstallId: process.env.RELAY_DEMO_INSTALL_ID } : {}),
   appsChallenge,
+  advertiseCimd,
   limits: { acceptLegacyAuth: legacyAuth() },
   trustProxy: true,
   log,
