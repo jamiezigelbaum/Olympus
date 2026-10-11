@@ -318,6 +318,33 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     }
   });
 
+  test('a state save that commits and then reports failure keeps the marker (independent review round 11)', async () => {
+    const install = installDir();
+    updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
+      provider_account_id: 'dbid:main-account',
+    }));
+    const inner = new JsonCredentialOAuth2StateStore(install.statePath);
+    const landsThenThrows = {
+      load: (handle: string) => inner.load(handle),
+      save: async (handle: string, state: Parameters<typeof inner.save>[1]) => {
+        await inner.save(handle, state);
+        throw new Error('fsync failed after write');
+      },
+      leaseTargetPath: (handle: string) => inner.leaseTargetPath(handle),
+    };
+    const server = await dropboxServer({ tokenAccountId: 'dbid:demo-account' });
+    try {
+      await expect(connectOAuthSource({ ...dropboxOptions(install, server.baseUrl), oauth2StateStore: landsThenThrows })).rejects.toThrow();
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toMatchObject({
+        provider_account_id: 'dbid:main-account',
+        reconnected_at: expect.any(String),
+      });
+    } finally {
+      server.close();
+    }
+  });
+
   test('a state save that never commits leaves the old grant in force and puts the marker back (PR review)', async () => {
     const install = installDir();
     updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
@@ -350,7 +377,8 @@ describe('Dropbox connect records the account its grant belongs to', () => {
       const inner = install.secretStore;
       const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
         set: async (key: string, value: string) => {
-          if (key.endsWith('.oauth.client_id')) throw new Error('secret store unavailable');
+          // After the state save has put the new token on file.
+          if (key.endsWith('.oauth.refresh_token')) throw new Error('secret store unavailable');
           return inner.set(key, value);
         },
       });

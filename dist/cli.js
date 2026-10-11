@@ -6160,33 +6160,26 @@ async function completeOAuthSourceConnection(prepared, code) {
     const replacedConnectedAt = Math.max(0, ...readConnectedHandleRegistry(prepared.registryPath).handles.filter((entry) => proposedHandles.some((proposed) => proposed.handle === entry.handle)).map((entry) => Date.parse(entry.connectedAt)).filter((ms) => Number.isFinite(ms)));
     const connectedAt = new Date(Math.max(prepared.now().getTime(), replacedConnectedAt + 1));
     const registryOwnsOAuth = prepared.options.source !== "x" || !prepared.oauth2StateStore;
-    const tokenOnFileBefore = await (async () => {
-      try {
-        if ((await prepared.secretStore.get(refreshKey))?.trim() === refreshToken)
-          return true;
-        for (const handleDefinition of prepared.definition.handles) {
-          const stored = await prepared.oauth2StateStore?.load(handleDefinition.handle(prepared.accountRole));
-          if (stored?.refreshToken?.trim() === refreshToken)
-            return true;
-        }
-        return false;
-      } catch {
-        return;
+    const handleNames = prepared.definition.handles.map((definition) => definition.handle(prepared.accountRole));
+    const stateKey = (state) => JSON.stringify(state ?? null);
+    let firstStateBefore;
+    try {
+      if (prepared.oauth2StateStore && handleNames[0]) {
+        firstStateBefore = stateKey(await prepared.oauth2StateStore.load(handleNames[0]));
       }
-    })();
-    const newRefreshTokenMayBeOnFile = async () => {
-      if (tokenOnFileBefore === true)
+    } catch {
+      firstStateBefore = undefined;
+    }
+    let tokenWritesAttempted = 0;
+    const oldGrantStillMints = async () => {
+      if (tokenWritesAttempted === 0)
+        return true;
+      if (tokenWritesAttempted > 1 || firstStateBefore === undefined || !prepared.oauth2StateStore)
         return false;
       try {
-        if ((await prepared.secretStore.get(refreshKey))?.trim() === refreshToken)
-          return true;
-        for (const handle of handles) {
-          if ((await prepared.oauth2StateStore?.load(handle))?.refreshToken?.trim() === refreshToken)
-            return true;
-        }
-        return false;
+        return stateKey(await prepared.oauth2StateStore.load(handleNames[0])) === firstStateBefore;
       } catch {
-        return true;
+        return false;
       }
     };
     try {
@@ -6194,14 +6187,6 @@ async function completeOAuthSourceConnection(prepared, code) {
         const handle = handleDefinition.handle(prepared.accountRole);
         handles.push(handle);
         const providerAccountId = xUserId ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
-        await prepared.oauth2StateStore?.save(handle, {
-          refreshToken,
-          scopes: handleDefinition.scopes,
-          status: "available",
-          updatedAt: connectedAt.toISOString(),
-          pendingRefreshStartedAt: undefined,
-          ...providerAccountId ? { providerAccountId } : {}
-        });
         upsertConnectedHandle({
           handle,
           provider: handleDefinition.provider,
@@ -6225,9 +6210,25 @@ async function completeOAuthSourceConnection(prepared, code) {
       }
       for (const [key, value] of secretWrites)
         await prepared.secretStore.set(key, value);
+      for (const handleDefinition of prepared.definition.handles) {
+        if (!prepared.oauth2StateStore)
+          break;
+        const handle = handleDefinition.handle(prepared.accountRole);
+        const providerAccountId = xUserId ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
+        tokenWritesAttempted += 1;
+        await prepared.oauth2StateStore.save(handle, {
+          refreshToken,
+          scopes: handleDefinition.scopes,
+          status: "available",
+          updatedAt: connectedAt.toISOString(),
+          pendingRefreshStartedAt: undefined,
+          ...providerAccountId ? { providerAccountId } : {}
+        });
+      }
+      tokenWritesAttempted += 1;
       await prepared.secretStore.set(refreshKey, refreshToken);
     } catch (error) {
-      if (!await newRefreshTokenMayBeOnFile()) {
+      if (await oldGrantStillMints()) {
         try {
           for (const [sourceId, snapshot] of intentSnapshots) {
             updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);

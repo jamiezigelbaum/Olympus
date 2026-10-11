@@ -768,36 +768,33 @@ async function completeOAuthSourceConnection(
       // state store and leave handles.json metadata-only. Both writes remain
       // inside the same grant-custody fence.
       const registryOwnsOAuth = prepared.options.source !== 'x' || !prepared.oauth2StateStore;
-      // Whether the new grant may be live after a failure is read back, not
-      // inferred from how far the publish got: the refresh token is what
-      // mints, in the secret store or (the broker's fallback) the state
-      // store. A write that throws may or may not have landed (independent
-      // review rounds 6 and 7); one that never committed leaves the old grant
-      // in force, and its markers go back (PR review).
-      // A provider may hand back the refresh token already on file; finding
-      // that one again says nothing changed.
-      const tokenOnFileBefore = await (async (): Promise<boolean | undefined> => {
-        try {
-          if ((await prepared.secretStore.get(refreshKey))?.trim() === refreshToken) return true;
-          for (const handleDefinition of prepared.definition.handles) {
-            const stored = await prepared.oauth2StateStore?.load(handleDefinition.handle(prepared.accountRole));
-            if (stored?.refreshToken?.trim() === refreshToken) return true;
-          }
-          return false;
-        } catch {
-          return undefined;
+      // Which writes can change the token a handle mints with: the state
+      // store's refresh token (the broker's fallback) and the refresh-token
+      // secret. The registry entries and client secrets go first and cannot;
+      // a failure among them leaves every handle minting exactly as before,
+      // so the markers go back. Once a token write is attempted the markers
+      // stay, because a write that throws may still have landed (independent
+      // review rounds 6, 7 and 11), with one provable exception: the first
+      // state save failing while a fresh read shows its handle unchanged (PR
+      // review: a save that never commits must not strand a legacy source).
+      const handleNames = prepared.definition.handles.map((definition) => definition.handle(prepared.accountRole));
+      const stateKey = (state: unknown): string => JSON.stringify(state ?? null);
+      let firstStateBefore: string | undefined;
+      try {
+        if (prepared.oauth2StateStore && handleNames[0]) {
+          firstStateBefore = stateKey(await prepared.oauth2StateStore.load(handleNames[0]));
         }
-      })();
-      const newRefreshTokenMayBeOnFile = async (): Promise<boolean> => {
-        if (tokenOnFileBefore === true) return false;
+      } catch {
+        firstStateBefore = undefined;
+      }
+      let tokenWritesAttempted = 0;
+      const oldGrantStillMints = async (): Promise<boolean> => {
+        if (tokenWritesAttempted === 0) return true;
+        if (tokenWritesAttempted > 1 || firstStateBefore === undefined || !prepared.oauth2StateStore) return false;
         try {
-          if ((await prepared.secretStore.get(refreshKey))?.trim() === refreshToken) return true;
-          for (const handle of handles) {
-            if ((await prepared.oauth2StateStore?.load(handle))?.refreshToken?.trim() === refreshToken) return true;
-          }
-          return false;
+          return stateKey(await prepared.oauth2StateStore.load(handleNames[0]!)) === firstStateBefore;
         } catch {
-          return true;
+          return false;
         }
       };
       try {
@@ -806,18 +803,6 @@ async function completeOAuthSourceConnection(
           handles.push(handle);
           const providerAccountId = xUserId
             ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
-          await prepared.oauth2StateStore?.save(handle, {
-            refreshToken,
-            scopes: handleDefinition.scopes,
-            status: 'available',
-            updatedAt: connectedAt.toISOString(),
-            // A write-ahead marker left by a refresh of the replaced grant is
-            // about that grant's token; carried forward, the new grant's
-            // first mint would latch reauthorization (independent review
-            // round 7).
-            pendingRefreshStartedAt: undefined,
-            ...(providerAccountId ? { providerAccountId } : {}),
-          });
           upsertConnectedHandle({
             handle,
             provider: handleDefinition.provider,
@@ -846,11 +831,31 @@ async function completeOAuthSourceConnection(
           }, prepared.registryPath);
         }
         for (const [key, value] of secretWrites) await prepared.secretStore.set(key, value);
+        for (const handleDefinition of prepared.definition.handles) {
+          if (!prepared.oauth2StateStore) break;
+          const handle = handleDefinition.handle(prepared.accountRole);
+          const providerAccountId = xUserId
+            ?? (isAccountBoundProvider(handleDefinition.provider) ? fileSourceAccountId : undefined);
+          tokenWritesAttempted += 1;
+          await prepared.oauth2StateStore.save(handle, {
+            refreshToken,
+            scopes: handleDefinition.scopes,
+            status: 'available',
+            updatedAt: connectedAt.toISOString(),
+            // A write-ahead marker left by a refresh of the replaced grant is
+            // about that grant's token; carried forward, the new grant's
+            // first mint would latch reauthorization (independent review
+            // round 7).
+            pendingRefreshStartedAt: undefined,
+            ...(providerAccountId ? { providerAccountId } : {}),
+          });
+        }
         // The refresh token goes last, so the new grant can mint only once
         // everything it needs is in place.
+        tokenWritesAttempted += 1;
         await prepared.secretStore.set(refreshKey, refreshToken);
       } catch (error) {
-        if (!(await newRefreshTokenMayBeOnFile())) {
+        if (await oldGrantStillMints()) {
           try {
             for (const [sourceId, snapshot] of intentSnapshots) {
               updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
