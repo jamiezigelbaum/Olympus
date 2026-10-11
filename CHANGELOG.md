@@ -2,6 +2,15 @@
 
 ## 1.0.0-rc.3 - unreleased
 
+- **Ask anonymously works on Linux hosts.** The built-in question writer
+  (levels Standard with **Lightly cleaned**, and Strict) checks the
+  machine's memory before it starts. On Linux that check never had a
+  pressure reading, so it always refused and the ask failed with "Your
+  model could not prepare the question, so nothing was sent." It now reads
+  free memory from `MemAvailable` in /proc/meminfo (reclaimable cache
+  counts as free) and pressure from /proc/pressure/memory (`some avg10`:
+  under 10 normal, from 10 warn, from 40 critical). Without either file it
+  still refuses. macOS is unchanged.
 - **Anonymous answers work on a fresh install again.** The one-click install
   of Tor and zkAPI now fetches zkAPI 0.1.6-olympus2, the Olympus build the
   anonymous route requires, from its published, checksummed and attested
