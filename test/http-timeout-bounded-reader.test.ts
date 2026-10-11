@@ -123,3 +123,23 @@ describe('fetchWithBodyDeadline', () => {
     expect(await relayed.text()).toBe('{"entries":[]}');
   });
 });
+
+describe('a stalled body whose cancel never settles still fails at the deadline (PR #267 review, Astra round 2)', () => {
+  function hungCancelBody(): Response {
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('{"access_token":"')); },
+      cancel() { return new Promise<void>(() => undefined); },
+    }), { status: 200 });
+  }
+
+  test('fetchWithBodyDeadline', async () => {
+    const relayed = await fetchWithBodyDeadline(async () => hungCancelBody(), URL_UNDER_TEST, {}, 30);
+    const failure = await relayed.text().then(() => undefined, (error: unknown) => error);
+    expect((failure as Error).name).toBe('AbortError');
+  });
+
+  test('fetchBoundedText', async () => {
+    await expect(fetchBoundedText(async () => hungCancelBody(), URL_UNDER_TEST, {}, { timeoutMs: 30 }))
+      .rejects.toThrow(/deadline/);
+  });
+});

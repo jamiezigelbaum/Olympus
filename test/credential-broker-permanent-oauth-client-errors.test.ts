@@ -130,6 +130,38 @@ describe('a permanent OAuth client refusal leaves the retry lane', () => {
   });
 });
 
+describe('a direct refresh has a deadline (PR #267 review, Astra round 2)', () => {
+  test('a token endpoint that sends headers and never finishes the body fails the mint at the deadline', async () => {
+    const dir = temporaryDir('olympus-refresh-deadline-');
+    const registryPath = join(dir, 'handles.json');
+    writeRegisteredXHandle(registryPath);
+    const store = new MemoryOAuth2StateStore();
+    await store.save('x.bookmarks.personal', {
+      refreshToken: 'refresh-token-generation-1',
+      status: 'available',
+    });
+    const broker = createEnvCredentialBroker({
+      env: X_CLIENT_ENV,
+      handleRegistryPath: registryPath,
+      oauth2StateStore: store,
+      oauth2CacheNamespace: `refresh-deadline-${dir}`,
+      oauth2RefreshFailureBackoffMs: 0,
+      oauth2RefreshTimeoutMs: 30,
+      now: () => new Date('2026-08-18T03:00:00.000Z'),
+      fetch: async () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode('{"access_token":"')); },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    });
+
+    const failure = await broker.issueSession(X_REQUEST).catch((reason: unknown) => reason);
+    expect(failure).toBeInstanceOf(CredentialBrokerError);
+    expect((failure as CredentialBrokerError).code).toBe('credential_refresh_failed');
+    expect((failure as Error).message).toContain('token endpoint timed out after 30ms');
+    // Unanswered, so the provider may have rotated: the marker stands, as for any lost answer.
+    expect((await store.load('x.bookmarks.personal'))?.pendingRefreshStartedAt).toBeDefined();
+  });
+});
+
 function temporaryDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   temporaryRoots.push(dir);

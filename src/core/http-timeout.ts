@@ -115,14 +115,16 @@ export async function fetchWithBodyDeadline(
         if (value) stream.enqueue(value);
       } catch (error) {
         settle();
-        await reader.cancel().catch(() => undefined);
+        // Fail the reader first: an upstream whose cancel never settles must
+        // not hold the caller past its deadline (PR #267 review, Astra round 2).
         stream.error(error);
+        reader.cancel().catch(() => undefined);
       }
     },
-    async cancel(reason) {
+    cancel(reason) {
       settle();
       controller.abort();
-      await reader.cancel(reason).catch(() => undefined);
+      reader.cancel(reason).catch(() => undefined);
     },
   });
   return new Response(body, {
@@ -243,7 +245,15 @@ export async function fetchBoundedText(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     removeUpstreamAbortListener?.();
-    if (activeReader) await releaseBodyReader(activeReader);
+    // Awaited only until the next macrotask: a cancel that settles at once has
+    // unlocked the body by then, and one that never settles must not hold the
+    // caller past its deadline (PR #267 review, Astra round 2).
+    if (activeReader) {
+      await Promise.race([
+        releaseBodyReader(activeReader),
+        new Promise<void>((resolve) => { setTimeout(resolve, 0); }),
+      ]);
+    }
   }
 }
 
