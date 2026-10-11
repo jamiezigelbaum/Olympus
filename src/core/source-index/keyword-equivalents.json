@@ -1,0 +1,91 @@
+{
+  "notary": {
+    "eng": [
+      "notary",
+      "notaries"
+    ],
+    "spa": [
+      "escritura pública",
+      "notario",
+      "notaría"
+    ],
+    "por": [
+      "escritura pública",
+      "notário",
+      "cartório"
+    ],
+    "fra": [
+      "acte authentique",
+      "notaire"
+    ],
+    "deu": [
+      "notarielle Urkunde",
+      "Notar"
+    ],
+    "ita": [
+      "atto pubblico",
+      "notaio"
+    ]
+  },
+  "fee": {
+    "eng": [
+      "fee",
+      "fees",
+      "cost",
+      "costs",
+      "expense",
+      "expenses"
+    ],
+    "spa": [
+      "gastos",
+      "honorarios",
+      "tasas"
+    ],
+    "por": [
+      "despesas",
+      "emolumentos",
+      "custos"
+    ],
+    "fra": [
+      "frais",
+      "honoraires"
+    ],
+    "deu": [
+      "Gebühren",
+      "Kosten"
+    ],
+    "ita": [
+      "spese",
+      "onorari"
+    ]
+  },
+  "deposit": {
+    "eng": [
+      "deposit",
+      "deposits",
+      "down payment"
+    ],
+    "spa": [
+      "arras",
+      "señal",
+      "depósito"
+    ],
+    "por": [
+      "sinal",
+      "depósito",
+      "entrada"
+    ],
+    "fra": [
+      "acompte",
+      "dépôt"
+    ],
+    "deu": [
+      "Anzahlung",
+      "Kaution"
+    ],
+    "ita": [
+      "caparra",
+      "deposito"
+    ]
+  }
+}

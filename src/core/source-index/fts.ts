@@ -1,4 +1,7 @@
+import { foreignQueryStopwords, keywordQueryLanguage } from './keyword-stopwords.ts';
+import { stemmer } from 'stemmer';
 import type { Database } from 'bun:sqlite';
+import { keywordAlternatives } from './keyword-context.ts';
 
 export const SOURCE_INDEX_FTS5_TOKENIZER = "tokenize = 'porter unicode61'";
 export const DEFAULT_INLINE_FTS_REBUILD_LIMIT = 25_000;
@@ -88,6 +91,8 @@ export interface SourceIndexFtsTermGroupOptions {
   expandedTermLimit?: number | 'unbounded';
 }
 
+export function sourceIndexQueryLanguage(query: string): string { return keywordQueryLanguage(query,30,FTS_QUERY_STOPWORDS); }
+
 export function sourceIndexFtsQuery(
   query: string,
   options: SourceIndexFtsQueryOptions = {},
@@ -102,9 +107,10 @@ export function sourceIndexFtsQuery(
 export function sourceIndexFtsTerms(query: string): readonly string[] {
   const seen = new Set<string>();
   const terms: string[] = [];
+  const foreignStopwords = foreignQueryStopwords(query, FTS_QUERY_STOPWORDS);
   for (const match of query.matchAll(TOKEN_PATTERN)) {
     const raw = match[0]?.trim().toLowerCase();
-    if (!raw || FTS_QUERY_STOPWORDS.has(raw)) continue;
+    if (!raw || FTS_QUERY_STOPWORDS.has(raw) || (foreignStopwords.has(raw) && !/^[\p{Lu}]{2,}$/u.test(match[0]!))) continue;
     appendTerm(raw, seen, terms);
     for (const synonym of SOURCE_INDEX_SYNONYMS[raw] ?? []) {
       appendTerm(synonym, seen, terms);
@@ -112,6 +118,9 @@ export function sourceIndexFtsTerms(query: string): readonly string[] {
     if (terms.length >= 24) break;
   }
   for (const initialism of queryInitialisms(query).keys()) appendTerm(initialism, seen, terms);
+  for (const group of sourceIndexFtsTermGroups(query)) {
+    for (const term of group) appendTerm(term, seen, terms);
+  }
   return terms;
 }
 
@@ -165,6 +174,7 @@ export function sourceIndexFtsTermGroups(
   const seen = new Set<string>();
   const groups: string[][] = [];
   const groupOf = new Map<string, string[]>();
+  const foreignStopwords = foreignQueryStopwords(query, FTS_QUERY_STOPWORDS);
   let total = 0;
   const expandedTermLimit = options.expandedTermLimit ?? 24;
   const groupLimit = Math.max(1, Math.trunc(options.groupLimit ?? Number.MAX_SAFE_INTEGER));
@@ -175,6 +185,7 @@ export function sourceIndexFtsTermGroups(
     if (
       !raw
       || FTS_QUERY_STOPWORDS.has(raw)
+      || (foreignStopwords.has(raw) && !/^[\p{Lu}]{2,}$/u.test(match[0]!))
       || raw.length < (options.minimumRawLength ?? 0)
       || options.excludedRawTerms?.has(raw)
     ) continue;
@@ -198,6 +209,28 @@ export function sourceIndexFtsTermGroups(
     for (const word of covered) {
       const group = groupOf.get(word);
       if (group && !group.includes(initialism)) group.push(initialism);
+    }
+  }
+  // Translations are alternatives of an existing concept, never new signals.
+  // Append after raw-group construction so they cannot consume its term budget.
+  const lexicalKey = (term: string) => (term.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).map(stemmer).join(' ');
+  // A shorter prefix phrase inside a longer one can match the same occurrence.
+  const overlaps = (left: string, right: string): boolean => {
+    const shorter = left.split(' '), longer = right.split(' ');
+    if (shorter.length > longer.length) return overlaps(right, left);
+    return longer.some((_, start) => start + shorter.length <= longer.length
+      && shorter.every((word, index) => index === shorter.length - 1
+        ? longer[start + index]!.startsWith(word) : longer[start + index] === word));
+  };
+  const owned = new Map(groups.flatMap(group => group.map(term => [lexicalKey(term), group] as const)));
+  for (const [source, alternatives] of keywordAlternatives(query) ?? []) {
+    const group = groupOf.get(source);
+    if (!group) continue;
+    for (const term of alternatives) {
+      const key = lexicalKey(term);
+      if (!key || [...owned].some(([existing, owner]) => owner !== group && (overlaps(key, existing) || overlaps(existing, key)))) continue;
+      owned.set(key, group);
+      group.push(term);
     }
   }
   return groups;
