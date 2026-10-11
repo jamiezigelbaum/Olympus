@@ -240,11 +240,17 @@ export function rejudgeStoredContent(
     else report.skipped += 1;
     return;
   }
+  // The row this decision was made from must still be the row it writes:
+  // the same generation and still no owner override (re-judge candidates
+  // have none). An owner who set the item meanwhile decides it, not this pass.
   const recorded = ledger.recordRoutedPlacement(
     identity,
     decision,
     set.placementFor(decision),
-    autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true },
+    {
+      ...(autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true }),
+      guard: { generation: record.generation, override: undefined },
+    },
   );
   if (key) ledger.markRejudged(identity, key);
   if (recorded.outcome === 'queued_move') report.movesQueued += 1;

@@ -100,13 +100,13 @@ function applyOne(
   );
   const secrets = decision.contentTier === 'secrets';
   if (record.state === 'moving' && !secrets) {
-    if (record.targetMetadataTier === decision.metadataTier && record.targetContentTier === decision.contentTier) return;
     // A move in flight toward tiers less private than the owner's is
-    // invalidated and retargeted, unsafe copies hidden (one ledger write);
-    // any other move lands first and the override applies after it.
+    // invalidated and retargeted; copies below the owner's tier are hidden
+    // even when the move's target already matches (one ledger write). Any
+    // other move lands first and the override applies after it.
     const outcome = ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision), { guard });
-    if (outcome === 'none') report.heldMoving += 1;
-    else report.raised += 1;
+    if (outcome !== 'none') report.raised += 1;
+    else if (record.targetMetadataTier !== decision.metadataTier || record.targetContentTier !== decision.contentTier) report.heldMoving += 1;
     return;
   }
   const atTiers = record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier;

@@ -15184,7 +15184,7 @@ class TierLedger {
         outcome = "held_moving";
         return;
       }
-      if (existing.decidedBy === "override") {
+      if (existing.decidedBy === "override" || this.getOverride(identity)?.kind === "tier") {
         outcome = "unchanged";
         return;
       }
@@ -15225,7 +15225,7 @@ class TierLedger {
         outcome = "held_moving";
         return;
       }
-      if (existing.decidedBy === "override") {
+      if (existing.decidedBy === "override" || this.getOverride(identity)?.kind === "tier") {
         outcome = "unchanged";
         return;
       }
@@ -15294,6 +15294,13 @@ class TierLedger {
   }
   answerRejudgeQuestion(identity, question, verdict, options) {
     const base = question.decision;
+    if (this.getOverride(identity)?.kind === "tier") {
+      this.db.query(`
+        UPDATE tier_items SET rejudge_json = NULL
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity));
+      return "unchanged";
+    }
     if (verdict.mapRevision !== undefined && verdict.mapRevision !== base.mapRevision)
       return "stale_map";
     if (!options.placementFor)
@@ -15879,10 +15886,13 @@ class TierLedger {
       const targetContent = existing.targetContentTier;
       if (targetMetadata === null || targetContent === null)
         return;
-      if (targetMetadata === "secrets" || targetContent === "secrets")
+      if (targetMetadata === "secrets" || targetContent === "secrets" || tierRank(targetMetadata) >= tierRank(decision.metadataTier) && tierRank(targetContent) >= tierRank(decision.contentTier)) {
+        if (!unsafe)
+          return;
+        this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
+        result = "hidden";
         return;
-      if (tierRank(targetMetadata) >= tierRank(decision.metadataTier) && tierRank(targetContent) >= tierRank(decision.contentTier))
-        return;
+      }
       const staleFlip = existing.generation + 1;
       const nextFlip = existing.generation + 2;
       this.db.query(`
@@ -16143,8 +16153,14 @@ class TierLedger {
       const generation = existing.generation + 1;
       const copies = this.copies(identity);
       const sources = this.moveSources(identity, generation);
-      const hidSources = copies.some((copy) => copy.state === "superseded" && copy.supersededByGeneration === generation);
-      if (existing.decidedBy === "override" && !hidSources && !overrideAuthorizes(this.getOverride(identity), existing.targetMetadataTier, existing.targetContentTier)) {
+      const override = this.getOverride(identity);
+      const targetMetadataTier = existing.targetMetadataTier;
+      const targetContentTier = existing.targetContentTier;
+      if (override?.kind === "tier" && (tierRank(targetMetadataTier) < tierRank(override.tier) || tierRank(targetContentTier) < tierRank(override.tier)) && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+        throw new TierLedgerGenerationConflictError("The owner has since set this item more private; the move may not land below it.");
+      }
+      const lowersLayer = tierRank(targetMetadataTier) < tierRank(existing.metadataTier) || tierRank(targetContentTier) < tierRank(existing.contentTier);
+      if (existing.decidedBy === "override" && lowersLayer && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
         throw new TierLedgerGenerationConflictError("The owner override behind this move changed; re-read it before landing.");
       }
       for (const planned of options.destination) {
@@ -28754,7 +28770,10 @@ function rejudgeStoredContent(set, record, options) {
       report.skipped += 1;
     return;
   }
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true });
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    ...autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true },
+    guard: { generation: record.generation, override: undefined }
+  });
   if (key)
     ledger.markRejudged(identity, key);
   if (recorded.outcome === "queued_move")
@@ -29009,13 +29028,11 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
-    if (record.targetMetadataTier === decision.metadataTier && record.targetContentTier === decision.contentTier)
-      return;
     const outcome = ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision), { guard });
-    if (outcome === "none")
-      report.heldMoving += 1;
-    else
+    if (outcome !== "none")
       report.raised += 1;
+    else if (record.targetMetadataTier !== decision.metadataTier || record.targetContentTier !== decision.contentTier)
+      report.heldMoving += 1;
     return;
   }
   const atTiers = record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier;

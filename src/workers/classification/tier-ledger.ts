@@ -331,7 +331,7 @@ export class TierLedger {
         outcome = 'held_moving';
         return;
       }
-      if (existing.decidedBy === 'override') {
+      if (existing.decidedBy === 'override' || this.getOverride(identity)?.kind === 'tier') {
         outcome = 'unchanged';
         return;
       }
@@ -399,7 +399,7 @@ export class TierLedger {
         outcome = 'held_moving';
         return;
       }
-      if (existing.decidedBy === 'override') {
+      if (existing.decidedBy === 'override' || this.getOverride(identity)?.kind === 'tier') {
         outcome = 'unchanged';
         return;
       }
@@ -485,6 +485,15 @@ export class TierLedger {
     options: { placementFor?: (decision: TierDecision) => TierPlacementPlan },
   ): SnifferVerdictOutcome {
     const base = question.decision;
+    if (this.getOverride(identity)?.kind === 'tier') {
+      // The owner decided the item after the question was asked: the answer
+      // no longer decides anything (a re-judge never lowers past the owner).
+      this.db.query(`
+        UPDATE tier_items SET rejudge_json = NULL
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity));
+      return 'unchanged';
+    }
     if (verdict.mapRevision !== undefined && verdict.mapRevision !== base.mapRevision) return 'stale_map';
     if (!options.placementFor) return 'needs_placement';
     const contentTier = maxTier(base.contentTier, verdict.tier);
@@ -1443,8 +1452,17 @@ export class TierLedger {
       const targetMetadata = existing.targetMetadataTier;
       const targetContent = existing.targetContentTier;
       if (targetMetadata === null || targetContent === null) return;
-      if (targetMetadata === 'secrets' || targetContent === 'secrets') return;
-      if (tierRank(targetMetadata) >= tierRank(decision.metadataTier) && tierRank(targetContent) >= tierRank(decision.contentTier)) return;
+      if (targetMetadata === 'secrets' || targetContent === 'secrets'
+        || (tierRank(targetMetadata) >= tierRank(decision.metadataTier) && tierRank(targetContent) >= tierRank(decision.contentTier))) {
+        // The move in flight lands at least as private as the owner asks, but
+        // it may have been queued without hiding (a re-home, a re-judge on an
+        // install whose moves wait for the migration): its copies below the
+        // owner's tier are hidden now, as the move's own sources.
+        if (!unsafe) return;
+        this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
+        result = 'hidden';
+        return;
+      }
       // The in-flight move flips at generation + 1; the retargeted one at + 2.
       const staleFlip = existing.generation + 1;
       const nextFlip = existing.generation + 2;
@@ -1862,12 +1880,23 @@ export class TierLedger {
       const generation = existing.generation + 1;
       const copies = this.copies(identity);
       const sources = this.moveSources(identity, generation);
-      // A lower an owner override queued lands only while that override still
-      // says so: one replaced or cleared since must not publish it. (A raise
-      // hid its sources and only ever lands more private.)
-      const hidSources = copies.some((copy) => copy.state === 'superseded' && copy.supersededByGeneration === generation);
-      if (existing.decidedBy === 'override' && !hidSources
-        && !overrideAuthorizes(this.getOverride(identity), existing.targetMetadataTier, existing.targetContentTier)) {
+      // The owner's current word bounds every flip, whoever queued the move:
+      // - no layer lands below a current tier override (a re-judge or rule
+      //   queued before the owner raised the item never publishes it lower);
+      // - a move an override queued that LOWERS any layer (judged per layer:
+      //   hidden sources only prove some layer rises) lands only while that
+      //   override still asks for exactly these tiers.
+      const override = this.getOverride(identity);
+      const targetMetadataTier = existing.targetMetadataTier;
+      const targetContentTier = existing.targetContentTier;
+      if (override?.kind === 'tier'
+        && (tierRank(targetMetadataTier) < tierRank(override.tier) || tierRank(targetContentTier) < tierRank(override.tier))
+        && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+        throw new TierLedgerGenerationConflictError('The owner has since set this item more private; the move may not land below it.');
+      }
+      const lowersLayer = tierRank(targetMetadataTier) < tierRank(existing.metadataTier)
+        || tierRank(targetContentTier) < tierRank(existing.contentTier);
+      if (existing.decidedBy === 'override' && lowersLayer && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
         throw new TierLedgerGenerationConflictError('The owner override behind this move changed; re-read it before landing.');
       }
       for (const planned of options.destination) {
