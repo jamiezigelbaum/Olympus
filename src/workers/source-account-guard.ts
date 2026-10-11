@@ -182,6 +182,22 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
 }
 
 /** Put the account check in front of every task of a file-source lane. */
+/**
+ * Guard each account-bound lane once all of its own tasks are attached. A
+ * task appended after the guard (an embedding sweep writes the same stores)
+ * would otherwise run on a changed account or on deleted stores
+ * (independent review round 10).
+ */
+export function guardAccountBoundLanes(
+  sources: readonly SourceSchedulerSource[],
+  guards: ReadonlyMap<string, SourceAccountGuard>,
+): SourceSchedulerSource[] {
+  return sources.map((source) => {
+    const guard = guards.get(source.sourceId);
+    return guard ? accountBoundSchedulerSource({ source, guard }) : source;
+  });
+}
+
 export function accountBoundSchedulerSource(input: {
   source: SourceSchedulerSource;
   guard: SourceAccountGuard;

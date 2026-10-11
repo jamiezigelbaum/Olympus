@@ -16,9 +16,11 @@ import type { CredentialBroker, CredentialSessionRequest } from '../src/workers/
 import {
   accountBoundSchedulerSource,
   createSourceAccountGuard,
+  guardAccountBoundLanes,
   SourceAccountChangedError,
 } from '../src/workers/source-account-guard.ts';
-import type { SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { readFileSync } from 'node:fs';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -105,6 +107,25 @@ function binding(registryPath: string) {
 }
 
 describe('the account guard', () => {
+  test('an embedding sweep appended to a lane is guarded with it (independent review round 10)', async () => {
+    let swept = 0;
+    let synced = 0;
+    const withSweep = withEmbeddingSweep([lane(() => { synced += 1; })], () => () => { swept += 1; return []; });
+    expect(withSweep[0]!.tasks.map((task) => task.kind)).toEqual(['sync', 'embed']);
+    const refusing = { async assertAccount() { throw new SourceAccountChangedError('source_stores_reopen_required', 'reopen'); } };
+    const [guarded] = guardAccountBoundLanes(withSweep, new Map([['dropbox.files', refusing]]));
+    for (const task of guarded!.tasks) {
+      const error = await task.run().catch((reason: unknown) => reason);
+      expect((error as SourceAccountChangedError).code).toBe('source_stores_reopen_required');
+    }
+    expect(swept).toBe(0);
+    expect(synced).toBe(0);
+    // The worker applies the guards after the sweep is attached, not before.
+    const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
+    expect(server).toContain('guardAccountBoundLanes(sweptSources, laneGuards)');
+    expect(server).not.toContain('accountBoundSchedulerSource(');
+  });
+
   test('stores deleted while the worker stayed up are reopened before anything is decided or synced (PR review)', async () => {
     const registryPath = join(tempDir(), 'handles.json');
     writeGrant(registryPath, 'dbid:demo');

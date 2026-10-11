@@ -768,11 +768,38 @@ async function completeOAuthSourceConnection(
       // state store and leave handles.json metadata-only. Both writes remain
       // inside the same grant-custody fence.
       const registryOwnsOAuth = prepared.options.source !== 'x' || !prepared.oauth2StateStore;
-      // A broker state store also holds the new refresh token, and the broker
-      // falls back to it when no secret names one, so once its save begins
-      // the new grant may be live: the markers stay from then on
-      // (independent review round 7).
-      let oldGrantIntact = !prepared.oauth2StateStore;
+      // Whether the new grant may be live after a failure is read back, not
+      // inferred from how far the publish got: the refresh token is what
+      // mints, in the secret store or (the broker's fallback) the state
+      // store. A write that throws may or may not have landed (independent
+      // review rounds 6 and 7); one that never committed leaves the old grant
+      // in force, and its markers go back (PR review).
+      // A provider may hand back the refresh token already on file; finding
+      // that one again says nothing changed.
+      const tokenOnFileBefore = await (async (): Promise<boolean | undefined> => {
+        try {
+          if ((await prepared.secretStore.get(refreshKey))?.trim() === refreshToken) return true;
+          for (const handleDefinition of prepared.definition.handles) {
+            const stored = await prepared.oauth2StateStore?.load(handleDefinition.handle(prepared.accountRole));
+            if (stored?.refreshToken?.trim() === refreshToken) return true;
+          }
+          return false;
+        } catch {
+          return undefined;
+        }
+      })();
+      const newRefreshTokenMayBeOnFile = async (): Promise<boolean> => {
+        if (tokenOnFileBefore === true) return false;
+        try {
+          if ((await prepared.secretStore.get(refreshKey))?.trim() === refreshToken) return true;
+          for (const handle of handles) {
+            if ((await prepared.oauth2StateStore?.load(handle))?.refreshToken?.trim() === refreshToken) return true;
+          }
+          return false;
+        } catch {
+          return true;
+        }
+      };
       try {
         for (const handleDefinition of prepared.definition.handles) {
           const handle = handleDefinition.handle(prepared.accountRole);
@@ -819,15 +846,11 @@ async function completeOAuthSourceConnection(
           }, prepared.registryPath);
         }
         for (const [key, value] of secretWrites) await prepared.secretStore.set(key, value);
-        // The refresh token goes last: until its write starts, the token on
-        // file is still the old grant's, so a failure up to here may put the
-        // markers back. Once it starts, the new grant may be live and the
-        // markers stay, so the worker verifies before anything syncs
-        // (independent review round 6).
-        oldGrantIntact = false;
+        // The refresh token goes last, so the new grant can mint only once
+        // everything it needs is in place.
         await prepared.secretStore.set(refreshKey, refreshToken);
       } catch (error) {
-        if (oldGrantIntact) {
+        if (!(await newRefreshTokenMayBeOnFile())) {
           try {
             for (const [sourceId, snapshot] of intentSnapshots) {
               updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);

@@ -32045,6 +32045,7 @@ init_model_transport();
 
 // src/workers/email-source/index.ts
 init_google_handle_compatibility();
+init_source_account_binding();
 init_consent_page();
 init_analyst();
 init_types();

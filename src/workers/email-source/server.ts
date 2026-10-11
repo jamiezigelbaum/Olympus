@@ -344,7 +344,7 @@ import {
 } from '../source-scope-runtime.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import {
-  accountBoundSchedulerSource,
+  guardAccountBoundLanes,
   createSourceAccountGuard,
   type SourceAccountGuard,
 } from '../source-account-guard.ts';
@@ -3613,6 +3613,11 @@ export async function main(): Promise<void> {
   // reads with, the connected grant and the stored items name one account.
   // Kept across scheduler rebuilds so a token is looked up once, not per pass.
   const sourceAccountGuards = new Map<string, SourceAccountGuard>();
+  // The guards of the lanes being assembled, applied once every task of the
+  // lane is attached: an embedding sweep or watch task appended later writes
+  // the same stores and must not run past the guard (independent review
+  // round 10).
+  const laneGuards = new Map<string, SourceAccountGuard>();
   const laneStores = (
     stores: ReadonlyArray<LocalConnectorStore | undefined>,
     onDemand: ReadonlyArray<OnDemandTierStore | undefined>,
@@ -3654,13 +3659,15 @@ export async function main(): Promise<void> {
       });
       sourceAccountGuards.set(key, guard);
     }
-    return accountBoundSchedulerSource({ source, guard });
+    laneGuards.set(source.sourceId, guard);
+    return source;
   };
   const schedulerSourcesForHandles = (handles: readonly ConnectedCredentialHandle[]): {
     sources: SourceSchedulerSource[];
     decisions: SourceSchedulerConstructionDecision[];
   } => {
     const decisions: SourceSchedulerConstructionDecision[] = [];
+    laneGuards.clear();
     // Every lane reports why it did or did not build. A constructed source is
     // recorded under its OWN sourceId rather than the id expected here, so an
     // id that cannot be selected is visible in the boot log instead of showing
@@ -3977,16 +3984,19 @@ export async function main(): Promise<void> {
       // A source with no store that embeds (a keyword-only lane) gets no sweep.
       return targets().length > 0 ? targets : undefined;
     });
+    // Guarded with its sweep; the watch task attached next rides on one host
+    // lane but serves every source, so it stays outside any one lane's guard.
+    const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
       decisions,
       sources: sourceWatchPass
         ? attachSourceWatchSchedulerTask({
-            sources: sweptSources,
+            sources: guardedSources,
             selectedSourceIds: olympusConfig.worker.scheduler.sourceIds,
             intervalMs: olympusConfig.worker.scheduler.syncIntervalSeconds * 1_000,
             pass: sourceWatchPass,
           })
-        : sweptSources,
+        : guardedSources,
     };
   };
   const schedulerAssembly = schedulerSourcesForHandles(connectedHandles);

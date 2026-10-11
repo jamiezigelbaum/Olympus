@@ -657,6 +657,30 @@ describe('multi-source source dashboard', () => {
     });
   });
 
+  test('a source reconnected with a different account says so on its card, with both ways out (PR review)', () => {
+    const build = (purge: boolean) => buildSourceDashboardViewModel({
+      sourceIndexStatus: fixtureStatus(),
+      schedulerStatus: fixtureScheduler(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: dropboxHandleRegistry(),
+      sourceAccountBindings: {
+        'dropbox.files': purge
+          ? { provider_account_id: 'dbid:main', purge_required: { reason: 'account_changed', detected_at: '2026-07-02T11:00:00.000Z' } }
+          : { provider_account_id: 'dbid:main' },
+      },
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    }).sources.find((source) => source.source_id === 'dropbox.files');
+    const changed = build(true);
+    expect(changed?.account_change?.next_action).toContain('different account');
+    expect(changed?.account_change?.next_action).toContain('Reconnect the previous account');
+    expect(changed?.account_change?.next_action).toContain('ask your agent to delete');
+    expect(changed?.answer_readiness).toEqual({ state: 'needs_attention', label: 'Connected to a different account' });
+    expect(changed?.setup?.next_action).toBe(changed?.account_change?.next_action);
+    const unchanged = build(false);
+    expect(unchanged?.account_change).toBeUndefined();
+    expect(unchanged?.answer_readiness.label).not.toBe('Connected to a different account');
+  });
+
   test('renders reauth with missing OAuth client as reconnect, not first-time setup', () => {
     const view = buildSourceDashboardViewModel({
       sourceIndexStatus: fixtureStatus(),

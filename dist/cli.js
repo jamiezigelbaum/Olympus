@@ -6160,7 +6160,35 @@ async function completeOAuthSourceConnection(prepared, code) {
     const replacedConnectedAt = Math.max(0, ...readConnectedHandleRegistry(prepared.registryPath).handles.filter((entry) => proposedHandles.some((proposed) => proposed.handle === entry.handle)).map((entry) => Date.parse(entry.connectedAt)).filter((ms) => Number.isFinite(ms)));
     const connectedAt = new Date(Math.max(prepared.now().getTime(), replacedConnectedAt + 1));
     const registryOwnsOAuth = prepared.options.source !== "x" || !prepared.oauth2StateStore;
-    let oldGrantIntact = !prepared.oauth2StateStore;
+    const tokenOnFileBefore = await (async () => {
+      try {
+        if ((await prepared.secretStore.get(refreshKey))?.trim() === refreshToken)
+          return true;
+        for (const handleDefinition of prepared.definition.handles) {
+          const stored = await prepared.oauth2StateStore?.load(handleDefinition.handle(prepared.accountRole));
+          if (stored?.refreshToken?.trim() === refreshToken)
+            return true;
+        }
+        return false;
+      } catch {
+        return;
+      }
+    })();
+    const newRefreshTokenMayBeOnFile = async () => {
+      if (tokenOnFileBefore === true)
+        return false;
+      try {
+        if ((await prepared.secretStore.get(refreshKey))?.trim() === refreshToken)
+          return true;
+        for (const handle of handles) {
+          if ((await prepared.oauth2StateStore?.load(handle))?.refreshToken?.trim() === refreshToken)
+            return true;
+        }
+        return false;
+      } catch {
+        return true;
+      }
+    };
     try {
       for (const handleDefinition of prepared.definition.handles) {
         const handle = handleDefinition.handle(prepared.accountRole);
@@ -6197,10 +6225,9 @@ async function completeOAuthSourceConnection(prepared, code) {
       }
       for (const [key, value] of secretWrites)
         await prepared.secretStore.set(key, value);
-      oldGrantIntact = false;
       await prepared.secretStore.set(refreshKey, refreshToken);
     } catch (error) {
-      if (oldGrantIntact) {
+      if (!await newRefreshTokenMayBeOnFile()) {
         try {
           for (const [sourceId, snapshot] of intentSnapshots) {
             updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
@@ -58769,6 +58796,13 @@ function buildSourceDashboardViewModel(options) {
       ...manualSync ? { last_manual_sync: { ...manualSync } } : {},
       ...unreadableFiles ? { unreadable_files: unreadableFiles } : {}
     };
+    if (card.configured && options.sourceAccountBindings?.[definition.source_id]?.purge_required) {
+      card.account_change = {
+        next_action: `${card.label} is now connected to a different account than the items already stored, so nothing syncs. ` + `Reconnect the previous account to resume, or Disconnect ${card.label}, ask your agent to delete its stored data, and connect the new account.`
+      };
+      card.answer_readiness = { state: "needs_attention", label: "Connected to a different account" };
+      card.setup = dashboardSourceSetupStatus(card);
+    }
     const syncSource = definition.connect_action.kind === "oauth" || definition.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined)
       return card;
@@ -59053,6 +59087,14 @@ function dashboardSourceSetupStatus(card) {
       stage: "credential_or_pairing",
       condition: "blocked",
       next_action: `Reauthenticate ${card.label} from this page, then run the initial sync again.`,
+      dependencies
+    };
+  }
+  if (card.account_change) {
+    return {
+      stage: "credential_or_pairing",
+      condition: "blocked",
+      next_action: card.account_change.next_action,
       dependencies
     };
   }
@@ -110036,6 +110078,7 @@ function createEmailSourceWorker(options = {}) {
               ...sourceDashboard.history ? { history: sourceDashboard.history } : {},
               connectedHandleRegistry: registry2,
               ...registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {},
+              ...dashboardSourceAccountBindings(sourceDashboard.registryPath),
               unpairedSources: dashboardUnpairedSourceStates(dashboardUnpairedSources, sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
               ...options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {},
@@ -112915,6 +112958,14 @@ function readDashboardRegistryOutcome(registryPath) {
     return { registry: { version: 1, handles: [] }, unreadable: true };
   }
 }
+function dashboardSourceAccountBindings(registryPath) {
+  try {
+    const read = readSourceAccountBindings(sourceAccountBindingsPath(registryPath ?? defaultHandleRegistryPath()));
+    return read.kind === "ok" ? { sourceAccountBindings: read.bindings.sources } : {};
+  } catch {
+    return {};
+  }
+}
 function dashboardGoogleCloudProjectId() {
   try {
     const raw = readFileSync51(join83(homedir56(), ".olympus", "google-bootstrap.json"), "utf8");
@@ -113440,6 +113491,7 @@ function mostPrivateTrustDomain(domains) {
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000;
 var init_email_source = __esm(() => {
   init_google_handle_compatibility();
+  init_source_account_binding();
   init_consent_page();
   init_analyst();
   init_types();
@@ -116538,6 +116590,12 @@ function createSourceAccountGuard(options) {
       throw new SourceAccountChangedError("source_account_changed", `${options.sourceId} is now connected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the one its items came from"}, ` + "so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
     }
   };
+}
+function guardAccountBoundLanes(sources, guards) {
+  return sources.map((source) => {
+    const guard = guards.get(source.sourceId);
+    return guard ? accountBoundSchedulerSource({ source, guard }) : source;
+  });
 }
 function accountBoundSchedulerSource(input) {
   return {
@@ -131152,6 +131210,7 @@ async function main() {
     handles: readActiveConnectedHandles(process.env)
   }));
   const sourceAccountGuards = new Map;
+  const laneGuards = new Map;
   const laneStores = (stores, onDemand) => ({
     laneHoldsItems: () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
     laneStoresStale: () => stores.some((store) => store?.fileReplacedOrRemoved() === true) || onDemand.some((leg) => leg?.current()?.fileReplacedOrRemoved() === true)
@@ -131175,10 +131234,12 @@ ${lane.handle}`;
       });
       sourceAccountGuards.set(key, guard);
     }
-    return accountBoundSchedulerSource({ source, guard });
+    laneGuards.set(source.sourceId, guard);
+    return source;
   };
   const schedulerSourcesForHandles = (handles) => {
     const decisions = [];
+    laneGuards.clear();
     const recordLane = (expectedSourceId, skipReason, build) => {
       if (skipReason) {
         decisions.push({ sourceId: expectedSourceId, outcome: "skipped", reason: skipReason });
@@ -131363,14 +131424,15 @@ ${lane.handle}`;
       });
       return targets().length > 0 ? targets : undefined;
     });
+    const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
       decisions,
       sources: sourceWatchPass ? attachSourceWatchSchedulerTask({
-        sources: sweptSources,
+        sources: guardedSources,
         selectedSourceIds: olympusConfig.worker.scheduler.sourceIds,
         intervalMs: olympusConfig.worker.scheduler.syncIntervalSeconds * 1000,
         pass: sourceWatchPass
-      }) : sweptSources
+      }) : guardedSources
     };
   };
   const schedulerAssembly = schedulerSourcesForHandles(connectedHandles);

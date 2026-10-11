@@ -115,6 +115,17 @@ async function connectDropbox(install: ReturnType<typeof installDir>, baseUrl: s
   });
 }
 
+// The grant a reconnect replaces, with its own refresh token: a provider
+// that hands back the token already on file has changed nothing.
+async function seedPreviousGrant(install: ReturnType<typeof installDir>) {
+  const previous = await dropboxServer({ refreshToken: 'refresh-token-previous' });
+  try {
+    await connectDropbox(install, previous.baseUrl);
+  } finally {
+    previous.close();
+  }
+}
+
 describe('Dropbox connect records the account its grant belongs to', () => {
   test('from the token response, with account_info.read requested', async () => {
     const install = installDir();
@@ -280,7 +291,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     const install = installDir();
     const server = await dropboxServer({});
     try {
-      await connectDropbox(install, server.baseUrl);
+      await seedPreviousGrant(install);
       rmSync(sourceAccountBindingsPath(install.registryPath), { force: true });
       // The store keeps the new refresh token, then reports a failure.
       const inner = install.secretStore;
@@ -307,13 +318,34 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     }
   });
 
+  test('a state save that never commits leaves the old grant in force and puts the marker back (PR review)', async () => {
+    const install = installDir();
+    updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
+      provider_account_id: 'dbid:main-account',
+    }));
+    const inner = new JsonCredentialOAuth2StateStore(install.statePath);
+    const failingState = {
+      load: (handle: string) => inner.load(handle),
+      save: async () => { throw new Error('state lease busy'); },
+      leaseTargetPath: (handle: string) => inner.leaseTargetPath(handle),
+    };
+    const server = await dropboxServer({ tokenAccountId: 'dbid:demo-account' });
+    try {
+      await expect(connectOAuthSource({ ...dropboxOptions(install, server.baseUrl), oauth2StateStore: failingState })).rejects.toThrow();
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toEqual({ provider_account_id: 'dbid:main-account' });
+    } finally {
+      server.close();
+    }
+  });
+
   test('with a broker state store, a failure after the state save keeps the marker (independent review round 7)', async () => {
     // The broker falls back to the state store's refresh token, so B may be
     // live as soon as that save lands, before any secret is written.
     const install = installDir();
     const server = await dropboxServer({});
     try {
-      await connectDropbox(install, server.baseUrl);
+      await seedPreviousGrant(install);
       rmSync(sourceAccountBindingsPath(install.registryPath), { force: true });
       const inner = install.secretStore;
       const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
