@@ -240,27 +240,28 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
     const current = ledger.getCurrent(item.identity);
     if (current?.routed) {
       // A routed item's placement belongs to its tiered store set, which
-      // plans and runs the move. A RAISE never waits for it: every copy in a
-      // less private store is hidden now, in this ledger write, and the move
-      // is queued. Anything else is applied by the set's override pass
-      // (tier-override-settle.ts) at the worker's next tier tick or sync,
-      // whether or not the file changes.
+      // plans and runs the move. A RAISE never waits for it: in this one
+      // ledger write every copy in a less private store is hidden, a move in
+      // flight toward less private tiers is invalidated (it can no longer
+      // land), and the move to the owner's tiers is queued. Anything else is
+      // applied by the set's override pass (tier-override-settle.ts) at the
+      // worker's next tier tick or sync, whether or not the file changes.
       const decision = classifyItemTiers({ signals: {} }, { override });
       if (decision.contentTier === 'secrets') {
         const { outcome } = ledger.recordRoutedPlacement(item.identity, decision, { copies: [], embedHold: false });
         return { override: tierDisplayName(override.tier), outcome: outcome === 'secrets' ? 'hidden_now' : 'set_applies_next_pass' };
       }
+      const raised = ledger.queueOwnerRaise(item.identity, decision, TIER_KEY_TRUST_DOMAIN[override.tier as Exclude<typeof override.tier, 'secrets'>]);
+      if (raised === 'hidden') return { override: tierDisplayName(override.tier), outcome: 'hidden_now_move_queued' };
+      if (raised === 'retargeted') return { override: tierDisplayName(override.tier), outcome: 'move_retargeted' };
       if (current.state === 'moving') {
         return {
           override: tierDisplayName(override.tier),
           outcome: 'set_applies_after_move',
-          note: 'A tier move is in flight for this item; the override applies as soon as it lands.',
+          note: 'A tier move to tiers at least as private is in flight; the override applies once it lands.',
         };
       }
-      const hidden = ledger.queueOwnerRaise(item.identity, decision, TIER_KEY_TRUST_DOMAIN[override.tier as Exclude<typeof override.tier, 'secrets'>]);
-      return hidden
-        ? { override: tierDisplayName(override.tier), outcome: 'hidden_now_move_queued' }
-        : { override: tierDisplayName(override.tier), outcome: 'set_applies_next_pass' };
+      return { override: tierDisplayName(override.tier), outcome: 'set_applies_next_pass' };
     }
     // A tier override is final for both layers: record it now, so the ledger
     // (and a retrieval that reads it) reflects the owner's decision at once.

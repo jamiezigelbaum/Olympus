@@ -46,7 +46,12 @@ import {
   type TierDecision,
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
-import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import {
+  copyServingLayer,
+  type TierLedgerIdentity,
+  type TierLedgerRecord,
+  type TierOwnerOverrideGuard,
+} from '../classification/tier-ledger.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -259,9 +264,12 @@ export function settleRoutedSecrets(
   decision: TierDecision,
   exported: ConnectorStoreItemCopy,
   finding: { text?: string; findingKinds: readonly string[] },
+  placement: { guard?: TierOwnerOverrideGuard } = {},
 ): boolean {
   const ledger = set.ledger;
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    ...(placement.guard ? { guard: placement.guard } : {}),
+  });
   if (recorded.outcome !== 'secrets') return false;
   const locator = columnString(exported.columns['locator_uri']);
   const title = columnString(exported.columns['title']);

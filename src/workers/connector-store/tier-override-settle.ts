@@ -18,12 +18,21 @@
 // - Secrets hides every copy at once and hands them to the one Secrets
 //   policy (secrets-disposition.ts), as an owner-marked secret.
 //
-// Mid-move items are left to their move; the pass applies the override once
-// the move lands. Only tier overrides act here: `not-secret` needs the item's
+// A move in flight toward tiers less private than the owner's is invalidated
+// and retargeted in one write (`TierLedger.queueOwnerRaise`); any other move
+// lands first and the override applies after it. Every write re-checks, in
+// its own transaction, that the override and the item's generation are still
+// what this pass read (`TierOwnerOverrideGuard`). Only tier overrides act here: `not-secret` needs the item's
 // signals and text, which its next listing supplies.
 
 import { classifyItemTiers, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
-import type { TierLedgerIdentity, TierLedgerRecord } from '../classification/tier-ledger.ts';
+import {
+  trustDomainRank,
+  type TierLedgerIdentity,
+  type TierLedgerRecord,
+  type TierOwnerOverrideGuard,
+} from '../classification/tier-ledger.ts';
+import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -43,7 +52,11 @@ export interface TierOverrideSettleReport {
   heldMoving: number;
 }
 
-export function applyOwnerOverrides(options: { set: TieredStoreSet }): TierOverrideSettleReport {
+export function applyOwnerOverrides(options: {
+  set: TieredStoreSet;
+  /** @internal Test hook: runs after the overrides are read, before any is applied (another process's write). */
+  afterRead?: () => void;
+}): TierOverrideSettleReport {
   const report: TierOverrideSettleReport = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0 };
   const { set } = options;
   const ledger = set.ledger;
@@ -53,11 +66,16 @@ export function applyOwnerOverrides(options: { set: TieredStoreSet }): TierOverr
   } catch {
     // An override does not depend on the owner's map or rules.
   }
-  for (const { record, override } of ledger.listRoutedOverrides()) {
+  const overrides = ledger.listRoutedOverrides();
+  options.afterRead?.();
+  for (const { record, override } of overrides) {
     if (override.kind !== 'tier') continue;
     report.checked += 1;
     try {
-      applyOne(set, record, override.tier, retirePublic, report);
+      // What was read here authorizes the write only while it still holds:
+      // the ledger re-checks the override and the generation in the write's
+      // own transaction and refuses if another process changed either.
+      applyOne(set, record, override.tier, retirePublic, report, { generation: record.generation, override });
     } catch {
       // Left as it was; the next pass (or the item's next listing) applies it.
     }
@@ -71,6 +89,7 @@ function applyOne(
   tier: TierKey,
   retirePublic: boolean,
   report: TierOverrideSettleReport,
+  guard: TierOwnerOverrideGuard,
 ): void {
   const ledger = set.ledger;
   const identity = identityOf(record);
@@ -81,9 +100,13 @@ function applyOne(
   );
   const secrets = decision.contentTier === 'secrets';
   if (record.state === 'moving' && !secrets) {
-    if (record.targetMetadataTier !== decision.metadataTier || record.targetContentTier !== decision.contentTier) {
-      report.heldMoving += 1;
-    }
+    if (record.targetMetadataTier === decision.metadataTier && record.targetContentTier === decision.contentTier) return;
+    // A move in flight toward tiers less private than the owner's is
+    // invalidated and retargeted, unsafe copies hidden (one ledger write);
+    // any other move lands first and the override applies after it.
+    const outcome = ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision), { guard });
+    if (outcome === 'none') report.heldMoving += 1;
+    else report.raised += 1;
     return;
   }
   const atTiers = record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier;
@@ -94,14 +117,14 @@ function applyOne(
   if (secrets) {
     const exported = storedCopy(set, identity);
     if (exported) {
-      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] })) report.secrets += 1;
+      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] }, { guard })) report.secrets += 1;
       return;
     }
     // No stored copy to read the location from: hidden all the same.
-    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision)).outcome === 'secrets') report.secrets += 1;
+    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === 'secrets') report.secrets += 1;
     return;
   }
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard });
   switch (recorded.outcome) {
     case 'queued_move':
       if (recorded.raise) report.raised += 1;
@@ -117,6 +140,15 @@ function applyOne(
     default:
       return;
   }
+}
+
+/** The least private store the decision's placement uses: a current copy below it is unsafe. */
+function leastPrivateDomain(set: TieredStoreSet, decision: TierDecision): SourceTrustDomain {
+  const copies = set.placementFor(decision).copies;
+  return copies.reduce<SourceTrustDomain>(
+    (lowest, copy) => (trustDomainRank(copy.trustDomain) < trustDomainRank(lowest) ? copy.trustDomain : lowest),
+    'secure_local',
+  );
 }
 
 /** Whether a Secrets item still has copies the Secrets policy has not settled. */

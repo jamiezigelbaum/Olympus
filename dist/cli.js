@@ -15762,6 +15762,8 @@ class TierLedger {
     let previousCopies = [];
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (options.guard)
+        this.assertOverrideGuard(identity, existing, options.guard);
       previousCopies = this.copies(identity);
       const secrets = decision.contentTier === "secrets";
       if (!existing) {
@@ -15852,23 +15854,89 @@ class TierLedger {
     })();
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
   }
-  queueOwnerRaise(identity, decision, trustDomain) {
+  queueOwnerRaise(identity, decision, trustDomain, options = {}) {
     if (decision.decidedBy !== "override")
       throw new Error("Only an owner override is queued this way.");
     if (!(trustDomain in TRUST_DOMAIN_RANK))
       throw new Error(`Unknown trust domain "${trustDomain}".`);
-    let queued = false;
+    let result = "none";
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing || !existing.routed || existing.state === "moving")
+      if (options.guard)
+        this.assertOverrideGuard(identity, existing, options.guard);
+      if (!existing || !existing.routed)
         return;
-      const below = this.copies(identity).some((copy) => copy.state === "current" && trustDomainRank(copy.trustDomain) < trustDomainRank(trustDomain));
-      if (!below)
+      const decidedAt = this.now().toISOString();
+      const unsafe = this.copies(identity).some((copy) => copy.state === "current" && trustDomainRank(copy.trustDomain) < trustDomainRank(trustDomain));
+      if (existing.state !== "moving") {
+        if (!unsafe)
+          return;
+        this.queueMoveRow(identity, existing, decision, { hide: true, decidedAt });
+        result = "hidden";
         return;
-      this.queueMoveRow(identity, existing, decision, { hide: true, decidedAt: this.now().toISOString() });
-      queued = true;
+      }
+      const targetMetadata = existing.targetMetadataTier;
+      const targetContent = existing.targetContentTier;
+      if (targetMetadata === null || targetContent === null)
+        return;
+      if (targetMetadata === "secrets" || targetContent === "secrets")
+        return;
+      if (tierRank(targetMetadata) >= tierRank(decision.metadataTier) && tierRank(targetContent) >= tierRank(decision.contentTier))
+        return;
+      const staleFlip = existing.generation + 1;
+      const nextFlip = existing.generation + 2;
+      this.db.query(`
+        UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND copy_state = 'superseded' AND superseded_by_generation = ?
+      `).run(nextFlip, decidedAt, ...idParams(identity), staleFlip);
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(staleFlip, decidedAt, ...idParams(identity));
+      this.db.query(`
+        UPDATE tier_items SET generation = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(staleFlip, ...idParams(identity));
+      this.queueMoveRow(identity, { ...existing, generation: staleFlip }, decision, { hide: unsafe, decidedAt });
+      result = unsafe ? "hidden" : "retargeted";
     })();
-    return queued;
+    return result;
+  }
+  assertOverrideGuard(identity, existing, guard) {
+    if (!existing || existing.generation !== guard.generation)
+      throw new TierLedgerGenerationConflictError;
+    const current = this.getOverride(identity);
+    if (JSON.stringify(current ?? null) !== JSON.stringify(guard.override ?? null)) {
+      throw new TierLedgerGenerationConflictError("The owner override changed; re-read it before acting.");
+    }
+  }
+  routedWithoutCopies(identities) {
+    const result = new Set;
+    if (identities.length === 0)
+      return result;
+    const unique = new Map;
+    for (const identity of identities)
+      unique.set(tierLedgerIdentityKey(identity), identity);
+    const list = [...unique.values()];
+    this.db.transaction(() => {
+      for (let offset = 0;offset < list.length; offset += 200) {
+        const batch = list.slice(offset, offset + 200);
+        const rows = this.db.query(`
+          SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
+          WHERE i.routed = 1
+            AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+            AND NOT EXISTS (
+              SELECT 1 FROM tier_copies c
+              WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+                AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+            )
+        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
+        for (const row of rows)
+          result.add(tierLedgerIdentityKey(identityOfRow(row)));
+      }
+    })();
+    return result;
   }
   listRoutedOverrides() {
     const rows = this.db.query(`
@@ -16075,6 +16143,10 @@ class TierLedger {
       const generation = existing.generation + 1;
       const copies = this.copies(identity);
       const sources = this.moveSources(identity, generation);
+      const hidSources = copies.some((copy) => copy.state === "superseded" && copy.supersededByGeneration === generation);
+      if (existing.decidedBy === "override" && !hidSources && !overrideAuthorizes(this.getOverride(identity), existing.targetMetadataTier, existing.targetContentTier)) {
+        throw new TierLedgerGenerationConflictError("The owner override behind this move changed; re-read it before landing.");
+      }
       for (const planned of options.destination) {
         const row = copies.find((copy) => copy.corpusId === planned.corpusId);
         if (!row)
@@ -16506,6 +16578,12 @@ function trustDomainRank(domain) {
 }
 function copyServingLayer(copies, layer) {
   return copies.find((copy) => copy.layers === "both" || copy.layers === layer);
+}
+function overrideAuthorizes(override, metadataTier, contentTier) {
+  if (override?.kind !== "tier")
+    return false;
+  const allowed = (tier) => tier === override.tier || override.tier === "public" && tier === "private";
+  return allowed(metadataTier) && allowed(contentTier);
 }
 function samePlan(current, planned) {
   if (current.length !== planned.length)
@@ -27959,13 +28037,15 @@ async function moveTieredItem(options) {
   if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
     return moveToSecrets(options, record.generation);
   }
+  const ownerOverride = !decision && record.decidedBy === "override";
   const placement = set.placementFor(decision ?? {
     metadataTier: target.metadataTier,
     contentTier: target.contentTier,
     state: record.metadataPending || record.contentPending ? "pending" : "current",
     metadataPending: record.metadataPending,
     contentPending: record.contentPending,
-    contentRead: record.contentRead
+    contentRead: record.contentRead,
+    ...ownerOverride ? { decidedBy: "override" } : {}
   });
   const moveGeneration = record.generation + 1;
   const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
@@ -28048,11 +28128,13 @@ async function moveTieredItem(options) {
       chunksToEmbed: wantsContent ? Math.max(0, payload.chunks.length - written.vectorsCopied) : 0
     });
   }
+  options.beforeFlip?.();
   const flipped = ledger.completeMove(identity, {
     expectedGeneration: record.generation,
     destination: placement.copies,
     embedHold: placement.embedHold === true,
-    ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {}
+    ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {},
+    ...ownerOverride ? { decidedBy: "override", reasons: record.reasons } : {}
   });
   const supersededCorpora = ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId);
   const chunkCount = destinations.reduce((total, destination) => total + destination.chunksWritten + destination.chunksKept, 0);
@@ -28680,9 +28762,11 @@ function rejudgeStoredContent(set, record, options) {
   else
     report.updated += 1;
 }
-function settleRoutedSecrets(set, identity, decision, exported, finding) {
+function settleRoutedSecrets(set, identity, decision, exported, finding, placement = {}) {
   const ledger = set.ledger;
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    ...placement.guard ? { guard: placement.guard } : {}
+  });
   if (recorded.outcome !== "secrets")
     return false;
   const locator = columnString(exported.columns["locator_uri"]);
@@ -28907,25 +28991,31 @@ function applyOwnerOverrides(options) {
   try {
     retirePublic = set.classification()?.retirePublic === true;
   } catch {}
-  for (const { record, override } of ledger.listRoutedOverrides()) {
+  const overrides = ledger.listRoutedOverrides();
+  options.afterRead?.();
+  for (const { record, override } of overrides) {
     if (override.kind !== "tier")
       continue;
     report.checked += 1;
     try {
-      applyOne(set, record, override.tier, retirePublic, report);
+      applyOne(set, record, override.tier, retirePublic, report, { generation: record.generation, override });
     } catch {}
   }
   return report;
 }
-function applyOne(set, record, tier, retirePublic, report) {
+function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
   const identity = identityOf4(record);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
-    if (record.targetMetadataTier !== decision.metadataTier || record.targetContentTier !== decision.contentTier) {
+    if (record.targetMetadataTier === decision.metadataTier && record.targetContentTier === decision.contentTier)
+      return;
+    const outcome = ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision), { guard });
+    if (outcome === "none")
       report.heldMoving += 1;
-    }
+    else
+      report.raised += 1;
     return;
   }
   const atTiers = record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier;
@@ -28938,15 +29028,15 @@ function applyOne(set, record, tier, retirePublic, report) {
   if (secrets) {
     const exported = storedCopy(set, identity);
     if (exported) {
-      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }))
+      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }, { guard }))
         report.secrets += 1;
       return;
     }
-    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision)).outcome === "secrets")
+    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === "secrets")
       report.secrets += 1;
     return;
   }
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard });
   switch (recorded.outcome) {
     case "queued_move":
       if (recorded.raise)
@@ -28964,6 +29054,10 @@ function applyOne(set, record, tier, retirePublic, report) {
     default:
       return;
   }
+}
+function leastPrivateDomain(set, decision) {
+  const copies = set.placementFor(decision).copies;
+  return copies.reduce((lowest, copy) => trustDomainRank(copy.trustDomain) < trustDomainRank(lowest) ? copy.trustDomain : lowest, "secure_local");
 }
 function secretsCopiesLeft(set, identity) {
   const copies = set.ledger.copies(identity);
@@ -28989,6 +29083,7 @@ function identityOf4(record) {
 }
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
+  init_tier_ledger();
   init_tier_rejudge();
 });
 
@@ -113988,17 +114083,24 @@ function createTierVisibilityGate(scopes) {
       if (governed.length === 0)
         continue;
       let copies;
+      let routedWithoutCopies;
       try {
         copies = scope.ledger.copiesForMany(governed.map((hit) => hit.sourceItem));
+        const copyless = governed.filter((hit) => (copies.get(tierLedgerIdentityKey(hit.sourceItem))?.length ?? 0) === 0);
+        routedWithoutCopies = scope.ledger.routedWithoutCopies(copyless.map((hit) => hit.sourceItem));
       } catch {
         for (const hit of governed)
           hidden.add(hit);
         continue;
       }
       for (const hit of governed) {
-        const itemCopies = copies.get(tierLedgerIdentityKey(hit.sourceItem));
-        if (!itemCopies || itemCopies.length === 0)
+        const key = tierLedgerIdentityKey(hit.sourceItem);
+        const itemCopies = copies.get(key);
+        if (!itemCopies || itemCopies.length === 0) {
+          if (routedWithoutCopies.has(key))
+            hidden.add(hit);
           continue;
+        }
         const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current");
         if (!currentHere)
           hidden.add(hit);
@@ -135330,15 +135432,19 @@ function runTierSet(args, context = {}) {
         const { outcome: outcome2 } = ledger.recordRoutedPlacement(item.identity, decision2, { copies: [], embedHold: false });
         return { override: tierDisplayName(override.tier), outcome: outcome2 === "secrets" ? "hidden_now" : "set_applies_next_pass" };
       }
+      const raised = ledger.queueOwnerRaise(item.identity, decision2, TIER_KEY_TRUST_DOMAIN[override.tier]);
+      if (raised === "hidden")
+        return { override: tierDisplayName(override.tier), outcome: "hidden_now_move_queued" };
+      if (raised === "retargeted")
+        return { override: tierDisplayName(override.tier), outcome: "move_retargeted" };
       if (current.state === "moving") {
         return {
           override: tierDisplayName(override.tier),
           outcome: "set_applies_after_move",
-          note: "A tier move is in flight for this item; the override applies as soon as it lands."
+          note: "A tier move to tiers at least as private is in flight; the override applies once it lands."
         };
       }
-      const hidden = ledger.queueOwnerRaise(item.identity, decision2, TIER_KEY_TRUST_DOMAIN[override.tier]);
-      return hidden ? { override: tierDisplayName(override.tier), outcome: "hidden_now_move_queued" } : { override: tierDisplayName(override.tier), outcome: "set_applies_next_pass" };
+      return { override: tierDisplayName(override.tier), outcome: "set_applies_next_pass" };
     }
     const decision = classifyItemTiers({ signals: {} }, { override });
     const { outcome, record } = ledger.recordDecision(item.identity, decision);
