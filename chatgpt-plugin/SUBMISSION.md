@@ -181,12 +181,15 @@ Package
       `assets/icon.png` is the site's mountain mark (2026-10-10), replacing
       the emoji-style placeholder; `brandColor` #2f5d50, `brandColorDark`
       #7fbfa9.
-- [ ] Skills pass the automated scan. The setup skill shows the user exactly
-      one reviewed command to run in Terminal themselves,
-      `curl -fsSL https://olympusplugin.ai/install.sh | sh`, and never runs
-      commands itself (owner decision 2026-10-03: the 1.0 installer is a
-      script). If the scan rejects a `curl | sh` instruction in a skill, link
-      https://olympusplugin.ai/install/ instead and rescan.
+- [ ] Skills pass the automated scan. The scan flagged the setup skill's
+      `curl | sh` line (2026-10-11: "may download or execute code outside
+      the reviewed package"), so the skill now sends the user to
+      https://olympusplugin.ai/install/ and shows no commands.
+- [x] `mcp.json` declares `auth: {type: "oauth"}` with no `client` block:
+      the portal's Connect refused `client.mode: "cimd"` with "OAuth client
+      ID is required when using pre-defined OAuth client credentials"
+      (2026-10-11). Discovery still advertises
+      `client_id_metadata_document_supported`.
 
 Installer
 - [ ] The build under review is published to the site:
