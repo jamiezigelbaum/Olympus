@@ -5858,30 +5858,32 @@ class EnvCredentialBroker {
     }
     await lease?.assertOwned();
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
-    await this.withCurrentGrant(definition, capability, refreshToken, () => this.persistRefreshedOAuth2State({
-      definition,
-      capability,
-      refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
-      refreshTokenPinnedInEnv,
-      storedState,
-      spentRefreshToken: refreshToken,
-      returnedRefreshToken: tokenResponse.refreshToken,
-      scopes,
-      now,
-      lease
-    }));
-    const session = bearerSessionFromMintedToken({
-      definition,
-      capability,
-      accessToken: tokenResponse.accessToken,
-      scopes,
-      now,
-      expiresInSeconds: tokenResponse.expiresInSeconds
+    return this.withCurrentGrant(definition, capability, refreshToken, async () => {
+      await this.persistRefreshedOAuth2State({
+        definition,
+        capability,
+        refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
+        refreshTokenPinnedInEnv,
+        storedState,
+        spentRefreshToken: refreshToken,
+        returnedRefreshToken: tokenResponse.refreshToken,
+        scopes,
+        now,
+        lease
+      });
+      const session = bearerSessionFromMintedToken({
+        definition,
+        capability,
+        accessToken: tokenResponse.accessToken,
+        scopes,
+        now,
+        expiresInSeconds: tokenResponse.expiresInSeconds
+      });
+      if (isReusableMintedSession(session, now))
+        PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
+      PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
+      return session;
     });
-    if (isReusableMintedSession(session, now))
-      PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
-    PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
-    return session;
   }
   async withCurrentGrant(definition, capability, spentRefreshToken, commit) {
     const registryPath = this.connectedHandleRegistryPath;
@@ -23010,7 +23012,7 @@ var init_worker_service = __esm(() => {
 });
 
 // src/core/provider-account-identity.ts
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_CHARS;
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
 var init_provider_account_identity = __esm(() => {
   init_http_timeout();
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
@@ -23018,7 +23020,7 @@ var init_provider_account_identity = __esm(() => {
     gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
     google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
   };
-  IDENTITY_RESPONSE_LIMIT_CHARS = 64 * 1024;
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 });
 
 // src/core/source-account-binding.ts
@@ -30717,37 +30719,6 @@ var init_credential_degradation = __esm(() => {
   DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
 });
 
-// connect-relay/shared/tokens.ts
-var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
-var init_tokens = __esm(() => {
-  PATTERN = {
-    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
-  };
-});
-
-// src/core/remote-oauth-store.ts
-var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
-var init_remote_oauth_store = __esm(() => {
-  init_tokens();
-  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-});
-
-// src/core/remote-connections.ts
-var init_remote_connections = __esm(() => {
-  init_operation_error();
-  init_worker_auth();
-  init_operation_caller();
-  init_sqlite_migrations();
-  init_remote_oauth_store();
-});
-
 // src/core/owner-config-read.ts
 import { readFileSync as readFileSync12, statSync as statSync8 } from "node:fs";
 function ownerConfigStamp(path) {
@@ -33960,26 +33931,6 @@ init_provider_account_identity();
 init_source_account_binding();
 init_connected_handles();
 init_credential_broker();
-// src/data-lifecycle.ts
-init_atomic_file();
-init_operation_error();
-init_sqlite_migrations();
-init_remote_connections();
-init_source_ingestion_policy();
-init_dropbox_files();
-init_google_connectors();
-init_telegram_messages();
-init_readwise();
-init_tier_set2();
-init_x_bookmarks();
-init_tier_set3();
-init_sovereignty();
-init_public_source_capabilities();
-init_worker_service();
-init_media_cache();
-
-// src/workers/source-account-purge.ts
-init_source_account_binding();
 
 // src/workers/email-source/server.ts
 init_request_budget();

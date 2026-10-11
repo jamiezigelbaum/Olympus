@@ -5537,30 +5537,32 @@ class EnvCredentialBroker {
     }
     await lease?.assertOwned();
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
-    await this.withCurrentGrant(definition, capability, refreshToken, () => this.persistRefreshedOAuth2State({
-      definition,
-      capability,
-      refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
-      refreshTokenPinnedInEnv,
-      storedState,
-      spentRefreshToken: refreshToken,
-      returnedRefreshToken: tokenResponse.refreshToken,
-      scopes,
-      now,
-      lease
-    }));
-    const session = bearerSessionFromMintedToken({
-      definition,
-      capability,
-      accessToken: tokenResponse.accessToken,
-      scopes,
-      now,
-      expiresInSeconds: tokenResponse.expiresInSeconds
+    return this.withCurrentGrant(definition, capability, refreshToken, async () => {
+      await this.persistRefreshedOAuth2State({
+        definition,
+        capability,
+        refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
+        refreshTokenPinnedInEnv,
+        storedState,
+        spentRefreshToken: refreshToken,
+        returnedRefreshToken: tokenResponse.refreshToken,
+        scopes,
+        now,
+        lease
+      });
+      const session = bearerSessionFromMintedToken({
+        definition,
+        capability,
+        accessToken: tokenResponse.accessToken,
+        scopes,
+        now,
+        expiresInSeconds: tokenResponse.expiresInSeconds
+      });
+      if (isReusableMintedSession(session, now))
+        PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
+      PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
+      return session;
     });
-    if (isReusableMintedSession(session, now))
-      PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
-    PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
-    return session;
   }
   async withCurrentGrant(definition, capability, spentRefreshToken, commit) {
     const registryPath = this.connectedHandleRegistryPath;
@@ -17836,7 +17838,7 @@ var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
   gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
   google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
 };
-var IDENTITY_RESPONSE_LIMIT_CHARS = 64 * 1024;
+var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 // src/core/source-account-binding.ts
 init_atomic_file();

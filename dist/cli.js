@@ -3473,30 +3473,32 @@ class EnvCredentialBroker {
     }
     await lease?.assertOwned();
     const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : storedState?.scopes?.length ? storedState.scopes : oauth2.scopes ?? definition.scopes ?? [];
-    await this.withCurrentGrant(definition, capability, refreshToken, () => this.persistRefreshedOAuth2State({
-      definition,
-      capability,
-      refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
-      refreshTokenPinnedInEnv,
-      storedState,
-      spentRefreshToken: refreshToken,
-      returnedRefreshToken: tokenResponse.refreshToken,
-      scopes,
-      now,
-      lease
-    }));
-    const session = bearerSessionFromMintedToken({
-      definition,
-      capability,
-      accessToken: tokenResponse.accessToken,
-      scopes,
-      now,
-      expiresInSeconds: tokenResponse.expiresInSeconds
+    return this.withCurrentGrant(definition, capability, refreshToken, async () => {
+      await this.persistRefreshedOAuth2State({
+        definition,
+        capability,
+        refreshTokenSecretRef: oauth2.refreshTokenSecretRef,
+        refreshTokenPinnedInEnv,
+        storedState,
+        spentRefreshToken: refreshToken,
+        returnedRefreshToken: tokenResponse.refreshToken,
+        scopes,
+        now,
+        lease
+      });
+      const session = bearerSessionFromMintedToken({
+        definition,
+        capability,
+        accessToken: tokenResponse.accessToken,
+        scopes,
+        now,
+        expiresInSeconds: tokenResponse.expiresInSeconds
+      });
+      if (isReusableMintedSession(session, now))
+        PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
+      PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
+      return session;
     });
-    if (isReusableMintedSession(session, now))
-      PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
-    PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
-    return session;
   }
   async withCurrentGrant(definition, capability, spentRefreshToken, commit) {
     const registryPath = this.connectedHandleRegistryPath;
@@ -5527,8 +5529,7 @@ async function fetchProviderAccountId(options) {
   let response;
   let text;
   try {
-    response = await fetchWithTimeout(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, init, options.timeoutMs ?? 15000);
-    text = await response.text();
+    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, init, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
   } catch {
     throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not answer the account lookup.`);
   }
@@ -5537,8 +5538,6 @@ async function fetchProviderAccountId(options) {
   }
   let payload;
   try {
-    if (text.length > IDENTITY_RESPONSE_LIMIT_CHARS)
-      throw new Error("oversized");
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       throw new Error("not an object");
@@ -5561,7 +5560,7 @@ function accountIdFromIdentityPayload(provider, payload) {
 function providerLabel(provider) {
   return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : "Google Drive";
 }
-var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_CHARS, DROPBOX_ACCOUNT_ID, ProviderAccountIdentityError;
+var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, ProviderAccountIdentityError;
 var init_provider_account_identity = __esm(() => {
   init_http_timeout();
   ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive"];
@@ -5570,7 +5569,7 @@ var init_provider_account_identity = __esm(() => {
     gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
     google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
   };
-  IDENTITY_RESPONSE_LIMIT_CHARS = 64 * 1024;
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
   DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
   ProviderAccountIdentityError = class ProviderAccountIdentityError extends Error {
     constructor(message) {
@@ -5641,9 +5640,13 @@ function recordFileSourceConnect(input) {
   updateSourceAccountBinding(sourceAccountBindingsPath(input.registryPath), sourceId, (current) => {
     const at = input.now.toISOString();
     if (current?.purge_required) {
+      if (current.provider_account_id && current.provider_account_id === input.providerAccountId) {
+        outcome = "same_account";
+        const { purge_required: _lifted, reconnected_at: _settled, ...rest } = current;
+        return rest;
+      }
       outcome = "purge_required";
-      const { failed_at: _retried, ...purge } = current.purge_required;
-      return { ...current, purge_required: purge };
+      return current;
     }
     if (current?.provider_account_id && input.providerAccountId) {
       if (current.provider_account_id === input.providerAccountId) {
@@ -5668,6 +5671,8 @@ function decideSourceAccountAction(input) {
     write: id ? { provider_account_id: id, bound_at: input.now.toISOString() } : null
   });
   if (binding?.purge_required) {
+    if (binding.provider_account_id && token === binding.provider_account_id)
+      return bindTo(token);
     if (input.laneHoldsItems)
       return { action: "purge", reason: binding.purge_required.reason };
     return bindTo(token);
@@ -5702,7 +5707,7 @@ function normalizeBindings(value) {
       return { kind: "malformed" };
     const entry = raw;
     const purge = entry.purge_required;
-    if (purge !== undefined && (!purge || typeof purge !== "object" || purge.reason !== "account_changed" && purge.reason !== "previous_account_unknown" || typeof purge.detected_at !== "string" || purge.failed_at !== undefined && typeof purge.failed_at !== "string"))
+    if (purge !== undefined && (!purge || typeof purge !== "object" || purge.reason !== "account_changed" && purge.reason !== "previous_account_unknown" || typeof purge.detected_at !== "string"))
       return { kind: "malformed" };
     sources[key] = prune({
       ...typeof entry.provider_account_id === "string" && entry.provider_account_id.trim() ? { provider_account_id: entry.provider_account_id.trim() } : {},
@@ -5711,8 +5716,7 @@ function normalizeBindings(value) {
       ...purge ? {
         purge_required: {
           reason: purge.reason,
-          detected_at: purge.detected_at,
-          ...typeof purge.failed_at === "string" ? { failed_at: purge.failed_at } : {}
+          detected_at: purge.detected_at
         }
       } : {}
     });
@@ -6058,19 +6062,24 @@ async function completeOAuthSourceConnection(prepared, code) {
     fetchImpl: prepared.options.fetch ?? fetch,
     timeoutMs: prepared.tokenExchangeTimeoutMs
   }) : undefined;
-  const accountBoundHandle = prepared.definition.handles.find((definition) => isAccountBoundProvider(definition.provider));
-  const previousFileSourceAccountId = accountBoundProvider && accountBoundHandle ? await identifyReplacedGrantAccount({
-    registryPath: prepared.registryPath,
-    handle: accountBoundHandle.handle(prepared.accountRole),
-    provider: accountBoundProvider,
-    capability: accountBoundHandle.capability,
-    ...accountBoundHandle.trustDomain ? { trustDomain: accountBoundHandle.trustDomain } : {},
-    secretStore: prepared.secretStore,
-    oauth2StateStore: prepared.oauth2StateStore,
-    tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
-    fetchImpl: prepared.options.fetch ?? fetch,
-    timeoutMs: prepared.tokenExchangeTimeoutMs
-  }) : undefined;
+  const previousFileSourceAccountIds = new Map;
+  for (const definition of prepared.definition.handles) {
+    if (!isAccountBoundProvider(definition.provider))
+      continue;
+    const handle = definition.handle(prepared.accountRole);
+    previousFileSourceAccountIds.set(handle, await identifyReplacedGrantAccount({
+      registryPath: prepared.registryPath,
+      handle,
+      provider: definition.provider,
+      capability: definition.capability,
+      ...definition.trustDomain ? { trustDomain: definition.trustDomain } : {},
+      secretStore: prepared.secretStore,
+      oauth2StateStore: prepared.oauth2StateStore,
+      tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      fetchImpl: prepared.options.fetch ?? fetch,
+      timeoutMs: prepared.tokenExchangeTimeoutMs
+    }));
+  }
   return withConnectedHandleGrantCustody(prepared.registryPath, { expectedEpoch: prepared.grantEpoch }, async () => {
     const proposedHandles = prepared.definition.handles.map((definition) => ({
       handle: definition.handle(prepared.accountRole),
@@ -6083,7 +6092,7 @@ async function completeOAuthSourceConnection(prepared, code) {
       recordFileSourceConnectIntent({
         registryPath: prepared.registryPath,
         provider: handleDefinition.provider,
-        previousAccountId: previousFileSourceAccountId,
+        previousAccountId: previousFileSourceAccountIds.get(handleDefinition.handle(prepared.accountRole)),
         now: prepared.now()
       });
     }
@@ -6169,7 +6178,10 @@ async function completeOAuthSourceConnection(prepared, code) {
       registryPath: prepared.registryPath,
       oauth2StateWrite: prepared.oauth2StateStore ? "updated" : "not_configured",
       secretRefs: secretRefs.sort(),
-      ...sourceAccountPurgeRequired.length > 0 ? { sourceAccountPurgeRequired } : {}
+      ...sourceAccountPurgeRequired.length > 0 ? {
+        sourceAccountPurgeRequired,
+        sourceAccountNotice: `${sourceAccountPurgeRequired.join(", ")} now ${sourceAccountPurgeRequired.length === 1 ? "belongs" : "belong"} to a different account than the items already stored, so nothing syncs. ` + "To keep those items, reconnect the previous account. To replace them, Disconnect, run " + sourceAccountPurgeRequired.map((sourceId) => `\`olympus data delete --source ${sourceId}\``).join(" and ") + " (preview with --dry-run), then connect again."
+      } : {}
     };
   });
 }
@@ -48780,883 +48792,6 @@ var init_public_source_capabilities = __esm(() => {
     }
   ];
   CAPABILITIES_BY_SOURCE = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((capability) => [capability.source_id, capability]));
-});
-
-// src/data-lifecycle.ts
-import { createHash as createHash34, randomUUID as randomUUID14 } from "node:crypto";
-import {
-  closeSync as closeSync9,
-  existsSync as existsSync28,
-  fsyncSync as fsyncSync3,
-  lstatSync as lstatSync12,
-  mkdirSync as mkdirSync20,
-  openSync as openSync9,
-  readSync as readSync2,
-  readdirSync as readdirSync4,
-  readFileSync as readFileSync27,
-  renameSync as renameSync9,
-  rmSync as rmSync10,
-  statSync as statSync15
-} from "node:fs";
-import { homedir as homedir33 } from "node:os";
-import { basename as basename6, dirname as dirname30, join as join45, relative as relative5, resolve as resolve8, sep as sep5 } from "node:path";
-import { Database as Database7 } from "bun:sqlite";
-function lifecycleSourceSpecs() {
-  return [
-    {
-      sourceId: "gmail.email",
-      label: "Gmail connector stores",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: "email-index",
-      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_EMAIL_INDEX_DB_PATH", "email-index.sqlite"),
-      connectorStorePaths: (context) => [
-        defaultGmailConnectorStoreDbPath(envForContext(context)),
-        defaultGmailSecureConnectorStoreDbPath(envForContext(context)),
-        defaultGmailPublicConnectorStoreDbPath(envForContext(context))
-      ]
-    },
-    {
-      sourceId: "dropbox.files",
-      label: "Dropbox files connector store",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: "dropbox-files-index",
-      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH", "dropbox-files-index.sqlite"),
-      connectorStorePaths: (context) => dropboxTierConnectorStoreDbPaths(envForContext(context)),
-      policyPaths: (context) => [defaultDropboxIngestionPolicyPathForHome(context?.homeDir)]
-    },
-    {
-      sourceId: "google_drive.docs",
-      label: "Google Drive/Docs connector stores",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: "google-drive-docs-index",
-      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_SOURCE_INDEX_DRIVE_INDEX_DB_PATH", "google-drive-docs-index.sqlite"),
-      connectorStorePaths: (context) => [
-        defaultGoogleDriveConnectorStoreDbPath(envForContext(context)),
-        defaultGoogleDriveSecureConnectorStoreDbPath(envForContext(context)),
-        defaultGoogleDrivePublicConnectorStoreDbPath(envForContext(context))
-      ]
-    },
-    {
-      sourceId: "telegram.messages",
-      label: "Telegram messages connector stores",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: "telegram-messages-index",
-      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH", "telegram-messages-index.sqlite"),
-      connectorStorePaths: (context) => [
-        defaultInternalTelegramConnectorStoreDbPath(envForContext(context)),
-        defaultProtectedTelegramConnectorStoreDbPath(envForContext(context))
-      ],
-      preservationOnlyPaths: (context) => telegramPreservationOnlyPaths(envForContext(context))
-    },
-    {
-      sourceId: "readwise.library",
-      label: "Readwise library connector store",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: "readwise-index",
-      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_SOURCE_INDEX_READWISE_INDEX_DB_PATH", "readwise-index.sqlite"),
-      connectorStorePaths: (context) => [
-        defaultReadwiseConnectorStoreDbPath(envForContext(context)),
-        defaultReadwiseSecureConnectorStoreDbPath(envForContext(context))
-      ]
-    },
-    {
-      sourceId: "x.bookmarks",
-      label: "X bookmarks connector store",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [
-        defaultXBookmarksConnectorStoreDbPath(envForContext(context)),
-        defaultXBookmarksSecureConnectorStoreDbPath(envForContext(context))
-      ]
-    },
-    {
-      sourceId: "whatsapp.personal.messages",
-      sourceAliases: ["whatsapp.messages"],
-      label: "WhatsApp messages connector store",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [
-        defaultWhatsAppConnectorStoreDbPath(envForContext(context)),
-        defaultWhatsAppInternalConnectorStoreDbPath(envForContext(context))
-      ],
-      rawStatePaths: (context) => whatsappRawStatePaths(envForContext(context))
-    },
-    {
-      sourceId: "reflect.notes",
-      label: "Reflect notes connector store",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), "reflect-notes.sqlite")]
-    },
-    {
-      sourceId: "roam.notes",
-      label: "Roam notes connector store",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), "roam-notes.sqlite")]
-    }
-  ];
-}
-function mountedConnectorStoreDbPath(env, fileName) {
-  return olympusSharedDataFile(env, fileName);
-}
-function legacySourceIndexPath(env, overrideKey, fileName) {
-  return env[overrideKey]?.trim() || olympusSharedDataFile(env, fileName);
-}
-function olympusSharedDataFile(env, fileName) {
-  return join45(env.XDG_DATA_HOME?.trim() || join45(homedir33(), ".local", "share"), "openclaw", "olympus", fileName);
-}
-function whatsappStateDir2(env) {
-  return whatsappStateDir({ env });
-}
-function whatsappRawStatePaths(env) {
-  const stateDir = whatsappStateDir2(env);
-  const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join45(transcribeStateDir, "media") : undefined);
-  return [...new Set([
-    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join45(stateDir, "spool"),
-    ...whatsappPairingSessionPaths({ env }),
-    join45(stateDir, "media"),
-    ...transcribeMediaDir ? [transcribeMediaDir] : []
-  ])];
-}
-function telegramPreservationOnlyPaths(env) {
-  const home2 = env.HOME?.trim() || homedir33();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join45(home2, ".local", "share");
-  const stateHome = env.XDG_STATE_HOME?.trim() || join45(home2, ".local", "state");
-  const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join45(dataHome, "olympus", "telegram-capture", "spool");
-  const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join45(stateHome, "olympus", "telegram-capture-gateway");
-  const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim() || join45(stateHome, "olympus", "telegram-spool-drain");
-  const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim() || join45(drainStateDir, "cursor.json");
-  return [...new Set([
-    spoolDir,
-    cursorPath,
-    gatewayStateDir,
-    ...telegramPairingSessionPaths({ env })
-  ])];
-}
-function exportOlympusData(options) {
-  const destination = requirePath(options.destination, "--output");
-  const selected = selectSources(options.sourceId);
-  const durabilityBoundary = exportDurabilityBoundary(destination);
-  makeDurableDirectory(destination, durabilityBoundary);
-  rmSync10(join45(destination, "manifest.json"), { force: true });
-  syncDirectorySync2(destination);
-  const files = [];
-  const skipped = [];
-  const artifacts = [];
-  for (const source of selected) {
-    const sourceRoot = join45(destination, "sources", safePathSegment(source.sourceId));
-    makeDurableDirectory(sourceRoot, durabilityBoundary);
-    const legacyIndexPath = source.sqlitePath?.(options);
-    if (legacyIndexPath) {
-      exportSqliteStore({
-        sqlitePath: legacyIndexPath,
-        destinationRoot: sourceRoot,
-        exportRoot: destination,
-        sourceId: source.sourceId,
-        role: "legacy_store",
-        expectedStoreId: legacyStoreIdFor(source),
-        files,
-        skipped,
-        artifacts
-      });
-    }
-    for (const storePath of source.connectorStorePaths?.(options) ?? []) {
-      exportSqliteStore({
-        sqlitePath: storePath,
-        destinationRoot: sourceRoot,
-        exportRoot: destination,
-        sourceId: source.sourceId,
-        role: "connector_store",
-        expectedStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-        files,
-        skipped,
-        artifacts
-      });
-    }
-    for (const policyPath of source.policyPaths?.(options) ?? []) {
-      const destinationPath = join45(sourceRoot, basename6(policyPath));
-      if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped)) {
-        artifacts.push(fileArtifact(destination, destinationPath, source.sourceId, "sanitized_config"));
-      }
-    }
-    for (const statePath of source.rawStatePaths?.(options) ?? [])
-      skipped.push(statePath);
-    for (const statePath of source.preservationOnlyPaths?.(options) ?? [])
-      skipped.push(statePath);
-  }
-  if (options.sourceId === undefined) {
-    const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
-    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath)]) {
-      if (existsSync28(path))
-        skipped.push(path);
-    }
-  }
-  const configRoot = join45(destination, "config");
-  makeDurableDirectory(configRoot, durabilityBoundary);
-  for (const [sourcePath, destinationPath] of [
-    [join45(resolveHome(options.homeDir), ".olympus", "config.json"), join45(configRoot, "config.json")],
-    [defaultSovereigntyConfigPathForHome(options.homeDir), join45(configRoot, "sovereignty.json")]
-  ]) {
-    if (copySanitizedJsonIfPresent(sourcePath, destinationPath, files, skipped)) {
-      artifacts.push(fileArtifact(destination, destinationPath, "olympus.config", "sanitized_config"));
-    }
-  }
-  writePrivateFileAtomicSync(join45(destination, "manifest.json"), JSON.stringify({
-    kind: "olympus_data_export",
-    version: 2,
-    exported_at: new Date().toISOString(),
-    source_ids: selected.map((source) => source.sourceId),
-    secrets_excluded: true,
-    files,
-    skipped,
-    artifacts
-  }, null, 2));
-  files.push(join45(destination, "manifest.json"));
-  return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
-}
-function verifyOlympusDataExport(options) {
-  const destination = resolve8(requirePath(options.destination, "--input"));
-  const manifestPath = join45(destination, "manifest.json");
-  const parsed = JSON.parse(readFileSync27(manifestPath, "utf8"));
-  if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
-    throw new OperationError("source_index_error", "Olympus data export manifest is unsupported or incomplete.");
-  }
-  const verified = [];
-  for (const value of parsed.artifacts) {
-    const artifact = parseExportArtifact(value);
-    const path = resolve8(destination, artifact.relativePath);
-    if (!isSameOrInsidePath(path, destination) || path === destination) {
-      throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
-    }
-    const stats = lstatSync12(path);
-    if (stats.isSymbolicLink() || !stats.isFile() || stats.size !== artifact.bytes || sha256File2(path) !== artifact.sha256) {
-      throw new OperationError("source_index_error", `Olympus data export artifact failed verification: ${artifact.relativePath}`);
-    }
-    if (artifact.sqlite)
-      assertSqliteSnapshotIntact(path, artifact.relativePath);
-    verified.push({ relativePath: artifact.relativePath, bytes: artifact.bytes, sha256: artifact.sha256 });
-  }
-  return { ok: true, destination, artifactCount: verified.length, artifacts: verified };
-}
-function deleteOlympusData(options) {
-  if (options.all === true && options.sourceId) {
-    throw new OperationError("invalid_params", "Use either --all or --source, not both.");
-  }
-  if (options.all !== true && !options.sourceId) {
-    throw new OperationError("invalid_params", "Data delete requires --all or --source <id>.");
-  }
-  const selectedSource = options.all === true ? undefined : requireSource(options.sourceId);
-  const targets = options.all === true ? allDeleteTargets(options) : sourceDeleteTargets(selectedSource, options);
-  const removed = [];
-  const missing = [];
-  const uniqueDeleteTargets = uniqueTargets(targets);
-  for (const target of uniqueDeleteTargets) {
-    if (existsSync28(target.path))
-      assertDeleteTargetSafe(target);
-  }
-  const sourceMedia = selectedSource ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? []) : [];
-  for (const target of uniqueDeleteTargets) {
-    if (!existsSync28(target.path)) {
-      missing.push(target.path);
-      continue;
-    }
-    removed.push(target.path);
-    if (options.dryRun !== true) {
-      rmSync10(target.path, { recursive: target.allowRecursive, force: true });
-    }
-  }
-  removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
-  return {
-    ok: true,
-    mode: options.all === true ? "all" : "source",
-    ...selectedSource ? { sourceId: selectedSource.sourceId } : {},
-    dryRun: options.dryRun === true,
-    removed,
-    missing
-  };
-}
-function deleteOlympusDataWithCustody(options) {
-  const custody = dataDeleteCustody(options);
-  if (options.dryRun !== true && !custody.ready) {
-    throw new OperationError("invalid_params", custody.requirement === "source_disconnected" ? `Disconnect ${options.sourceId} before deleting its local data.` : custody.observed === "relay_running" ? "Turn remote access off before deleting local data: the relay process is still running." : custody.observed === "engine_loaded" ? "Stop the Olympus engine before deleting local data: launchd would start it again." : "Stop or uninstall the Olympus worker before deleting local data.", custody.next_action);
-  }
-  return {
-    ...deleteOlympusData(options),
-    custody
-  };
-}
-function dataDeleteCustody(options) {
-  if (options.all === true && options.sourceId) {
-    throw new OperationError("invalid_params", "Use either --all or --source, not both.");
-  }
-  if (options.all !== true && !options.sourceId) {
-    throw new OperationError("invalid_params", "Data delete requires --all or --source <id>.");
-  }
-  const source = options.sourceId ? requireSource(options.sourceId) : undefined;
-  const publicCapability = source ? V0_4_PUBLIC_SOURCE_CAPABILITIES.find((candidate) => candidate.source_id === source.sourceId || source.sourceAliases?.includes(candidate.source_id)) : undefined;
-  if (publicCapability) {
-    if (!options.connectedRegistry || (options.connectedRegistry.dropped?.length ?? 0) > 0) {
-      return {
-        requirement: "source_disconnected",
-        ready: false,
-        observed: "unknown_registry",
-        next_action: "Repair the Olympus connected-handle registry, then Disconnect this source and retry."
-      };
-    }
-    const connected = options.connectedRegistry.handles.some((handle) => handle.provider === publicCapability.doctor_lane.provider);
-    return connected ? {
-      requirement: "source_disconnected",
-      ready: false,
-      observed: "connected",
-      next_action: "Use Disconnect in the local dashboard, then rerun the CLI delete."
-    } : {
-      requirement: "source_disconnected",
-      ready: true,
-      observed: "disconnected"
-    };
-  }
-  if (options.engineLoaded === true) {
-    return {
-      requirement: "worker_inactive",
-      ready: false,
-      observed: "engine_loaded",
-      next_action: "Run olympus engine stop (it stays stopped until olympus engine start), check olympus engine status, then retry."
-    };
-  }
-  const workerState = options.workerState;
-  const ready = workerState === "inactive" || workerState === "missing";
-  if (ready && options.all === true && options.relayRunning === true) {
-    return {
-      requirement: "worker_inactive",
-      ready: false,
-      observed: "relay_running",
-      next_action: "Run openclaw config set plugins.entries.olympus.config.remote.enabled false (or stop the OpenClaw Gateway), check olympus connections status, then retry."
-    };
-  }
-  return {
-    requirement: "worker_inactive",
-    ready,
-    observed: workerState ?? "unknown",
-    ...!ready ? { next_action: "Run olympus worker stop (or olympus worker uninstall), verify status, then retry." } : {}
-  };
-}
-function validateDeleteAllConfirmations(first, second) {
-  if (first !== DELETE_CONFIRMATION_1 || second !== DELETE_CONFIRMATION_2) {
-    throw new OperationError("invalid_params", "delete --all requires both confirmation phrases.", `Type "${DELETE_CONFIRMATION_1}" and then "${DELETE_CONFIRMATION_2}", or use --yes-i-am-sure in automated tests.`);
-  }
-}
-function deleteAllConfirmationPrompts() {
-  return { first: DELETE_CONFIRMATION_1, second: DELETE_CONFIRMATION_2 };
-}
-function knownOlympusDataRoots(context = {}) {
-  return olympusDataRoots({ homeDir: resolveHome(context.homeDir) });
-}
-function allDeleteTargets(context) {
-  const home2 = resolveHome(context.homeDir);
-  return [
-    ...selectSources(undefined).flatMap((source) => sourceDeleteTargets(source, context)),
-    ...remoteConnectionsDeleteTargets(context),
-    ...mediaCacheDeleteTargets(context),
-    ...knownOlympusDataRoots(context).map((path) => ({
-      path,
-      kind: "known_root",
-      allowRecursive: true
-    })),
-    serviceUnitTarget(workerServicePaths("darwin", home2).unitPath),
-    serviceUnitTarget(workerServicePaths("linux", home2).unitPath),
-    ...globExisting(join45(home2, "Library", "LaunchAgents"), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/).map(serviceUnitTarget),
-    ...globExisting(join45(home2, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
-  ];
-}
-function mediaCacheDeleteTargets(context) {
-  try {
-    return [{ path: mediaCacheDir(envForContext(context)), kind: "known_root", allowRecursive: true }];
-  } catch {
-    return [];
-  }
-}
-function readSourceMedia(storePaths) {
-  const held = [];
-  for (const storePath of storePaths) {
-    if (storePath === ":memory:" || !existsSync28(storePath))
-      continue;
-    if (!looksLikeSqlite(storePath))
-      continue;
-    const unreadable = () => new OperationError("invalid_params", `Cannot read the picture references in ${storePath}; nothing was deleted.`, "Stop the Olympus worker (olympus worker stop) so the store is not busy, or repair the store, then retry.");
-    let rows = [];
-    let db;
-    try {
-      db = new Database7(storePath, { readonly: true });
-      db.exec("PRAGMA busy_timeout = 10000;");
-    } catch {
-      throw unreadable();
-    }
-    try {
-      const columns = db.query("PRAGMA table_info(chunks)").all().map((column) => column.name);
-      if (columns.includes("media_sha256")) {
-        rows = db.query(`
-          SELECT DISTINCT media_path, media_sha256 FROM chunks
-          WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
-        `).all();
-      }
-    } catch {
-      throw unreadable();
-    } finally {
-      closeSqliteStore(db);
-    }
-    held.push({ storePath, holder: mediaHolderName(storePath), rows });
-  }
-  return held;
-}
-function releaseSourceMedia(held, dryRun) {
-  const released = [];
-  for (const { storePath, holder, rows } of held) {
-    for (const row of rows) {
-      if (!isMediaCachePath(row.media_path, row.media_sha256))
-        continue;
-      if (dryRun) {
-        if (existsSync28(row.media_path))
-          released.push(row.media_path);
-      } else {
-        const removedByHolder = releaseMediaCacheFile(row.media_path, row.media_sha256, holder);
-        const removedBySpelling = holder !== storePath && releaseMediaCacheFile(row.media_path, row.media_sha256, storePath);
-        if (removedByHolder || removedBySpelling)
-          released.push(row.media_path);
-      }
-    }
-  }
-  return released;
-}
-function looksLikeSqlite(path) {
-  try {
-    const fd = openSync9(path, "r");
-    try {
-      const header = Buffer.alloc(16);
-      const read = readSync2(fd, header, 0, 16, 0);
-      return read === 16 && header.toString("latin1") === "SQLite format 3\x00";
-    } finally {
-      closeSync9(fd);
-    }
-  } catch {
-    return false;
-  }
-}
-function sourceDeleteTargets(source, context) {
-  const legacyIndexPath = source.sqlitePath?.(context);
-  return [
-    ...legacyIndexPath ? sqliteDeleteTargets(legacyIndexPath, legacyStoreIdFor(source), context) : [],
-    ...(source.connectorStorePaths?.(context) ?? []).flatMap((storePath) => [
-      ...sqliteDeleteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID, context),
-      ...storePath === ":memory:" ? [] : sqliteDeleteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID, context),
-      ...storePath === ":memory:" ? [] : sqliteDeleteTargets(secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID, context),
-      ...storePath === ":memory:" ? [] : sqliteDeleteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID, context)
-    ]),
-    ...(source.rawStatePaths?.(context) ?? []).map((path) => ({
-      path,
-      kind: "source_state_path",
-      allowRecursive: true,
-      externalSourcePath: !isInsideKnownOlympusRoot(path, context)
-    })),
-    ...(source.policyPaths?.(context) ?? []).map((path) => ({
-      path,
-      kind: "policy_file",
-      allowRecursive: false
-    }))
-  ];
-}
-function remoteConnectionsDeleteTargets(context) {
-  const dbPath = resolveRemoteConnectionsDbPath(envForContext(context));
-  const targets = sqliteDeleteTargets(dbPath, REMOTE_CONNECTIONS_STORE_ID, context);
-  return [...targets, { ...targets[1], path: remoteConnectionsPreV2BackupPath(dbPath) }];
-}
-function sqliteDeleteTargets(sqlitePath, sqliteStoreId, context) {
-  const externalSourcePath = !isInsideKnownOlympusRoot(sqlitePath, context);
-  return [
-    {
-      path: sqlitePath,
-      kind: "source_sqlite",
-      sqliteStoreId,
-      sqlitePrimaryPath: sqlitePath,
-      allowRecursive: false,
-      externalSourcePath
-    },
-    {
-      path: `${sqlitePath}-wal`,
-      kind: "source_sqlite_sidecar",
-      sqliteStoreId,
-      sqlitePrimaryPath: sqlitePath,
-      allowRecursive: false,
-      externalSourcePath
-    },
-    {
-      path: `${sqlitePath}-shm`,
-      kind: "source_sqlite_sidecar",
-      sqliteStoreId,
-      sqlitePrimaryPath: sqlitePath,
-      allowRecursive: false,
-      externalSourcePath
-    }
-  ];
-}
-function legacyStoreIdFor(source) {
-  return source.legacySqliteStoreId ?? source.sqliteStoreId;
-}
-function selectSources(sourceId) {
-  if (!sourceId)
-    return lifecycleSourceSpecs();
-  return [requireSource(sourceId)];
-}
-function requireSource(sourceId) {
-  const normalized = requirePath(sourceId, "--source");
-  const source = lifecycleSourceSpecs().find((entry) => entry.sourceId === normalized || entry.sourceAliases?.includes(normalized));
-  if (!source) {
-    throw new OperationError("invalid_params", `Unknown Olympus source id "${normalized}".`, `Use one of: ${lifecycleSourceSpecs().map((entry) => entry.sourceId).join(", ")}.`);
-  }
-  return source;
-}
-function exportSqliteStore(options) {
-  const { sqlitePath, destinationRoot, exportRoot, sourceId, role, expectedStoreId, files, skipped, artifacts } = options;
-  if (!existsSync28(sqlitePath)) {
-    for (const path of sqliteWithSidecars(sqlitePath))
-      skipped.push(path);
-    return;
-  }
-  const destination = join45(destinationRoot, basename6(sqlitePath));
-  const staging = `${destination}.${randomUUID14()}.partial`;
-  if (snapshotSqliteStore(sqlitePath, staging)) {
-    let sqlite;
-    try {
-      sqlite = inspectSqliteSnapshot(staging, sqlitePath, expectedStoreId);
-      syncFileSync(staging);
-      renameSync9(staging, destination);
-    } catch (error) {
-      rmSync10(staging, { force: true });
-      throw error;
-    }
-    syncDirectorySync2(dirname30(destination));
-    files.push(destination);
-    artifacts.push({
-      ...fileArtifact(exportRoot, destination, sourceId, role),
-      sqlite
-    });
-    return;
-  }
-  throw new OperationError("source_index_error", `Declared Olympus SQLite store is not a readable database: ${sqlitePath}`, "The export failed closed; repair or explicitly account for the store before transition.");
-}
-function snapshotSqliteStore(sqlitePath, staging) {
-  rmSync10(staging, { force: true });
-  let db;
-  try {
-    db = new Database7(sqlitePath, { readonly: true });
-  } catch {
-    return false;
-  }
-  try {
-    db.exec("PRAGMA busy_timeout = 10000;");
-    db.exec(`VACUUM INTO '${sqliteStringLiteral(staging)}'`);
-  } catch (error) {
-    rmSync10(staging, { force: true });
-    if (isUnreadableSqliteError(error))
-      return false;
-    throw new OperationError("source_index_error", `Failed to snapshot Olympus SQLite store for export: ${sqlitePath}`, "Retry the export once the store is readable; no partial snapshot was published.");
-  } finally {
-    closeSqliteStore(db);
-  }
-  return true;
-}
-function assertSqliteSnapshotIntact(snapshotPath, sqlitePath) {
-  inspectSqliteSnapshot(snapshotPath, sqlitePath, "unknown");
-}
-function inspectSqliteSnapshot(snapshotPath, sqlitePath, expectedStoreId) {
-  const db = new Database7(snapshotPath, { readonly: true });
-  try {
-    db.exec("PRAGMA busy_timeout = 10000;");
-    const rows = db.query("PRAGMA integrity_check").all();
-    if (rows.length !== 1 || rows[0]?.integrity_check !== "ok") {
-      throw new OperationError("source_index_error", `Olympus SQLite export snapshot failed its integrity check: ${sqlitePath}`, "The snapshot was discarded rather than published; retry the export.");
-    }
-    const foreignKeyRows = db.query("PRAGMA foreign_key_check").all();
-    if (foreignKeyRows.length > 0) {
-      throw new OperationError("source_index_error", `Olympus SQLite export snapshot failed its foreign-key check: ${sqlitePath}`, "The snapshot was discarded rather than published; repair the store before transition.");
-    }
-    const schemaVersion = expectedStoreId === "unknown" ? 0 : readSqliteSchemaVersion(db, expectedStoreId);
-    return {
-      integrityCheck: "ok",
-      foreignKeyViolations: foreignKeyRows.length,
-      expectedStoreId,
-      schemaVersion
-    };
-  } finally {
-    closeSqliteStore(db);
-  }
-}
-function fileArtifact(exportRoot, path, sourceId, role) {
-  const stats = statSync15(path);
-  return {
-    sourceId,
-    role,
-    relativePath: relative5(resolve8(exportRoot), resolve8(path)),
-    bytes: stats.size,
-    sha256: sha256File2(path)
-  };
-}
-function sha256File2(path) {
-  const hash = createHash34("sha256");
-  const descriptor = openSync9(path, "r");
-  const buffer = Buffer.allocUnsafe(1024 * 1024);
-  try {
-    for (;; ) {
-      const bytesRead = readSync2(descriptor, buffer, 0, buffer.length, null);
-      if (bytesRead === 0)
-        break;
-      hash.update(buffer.subarray(0, bytesRead));
-    }
-  } finally {
-    closeSync9(descriptor);
-  }
-  return hash.digest("hex");
-}
-function parseExportArtifact(value) {
-  if (!value || typeof value !== "object") {
-    throw new OperationError("source_index_error", "Olympus data export manifest contains an invalid artifact.");
-  }
-  const artifact = value;
-  if (typeof artifact.relativePath !== "string" || artifact.relativePath.length === 0 || typeof artifact.bytes !== "number" || !Number.isSafeInteger(artifact.bytes) || artifact.bytes < 0 || typeof artifact.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(artifact.sha256)) {
-    throw new OperationError("source_index_error", "Olympus data export manifest contains an invalid artifact.");
-  }
-  return artifact;
-}
-function sqliteStringLiteral(value) {
-  return value.replace(/'/g, "''");
-}
-function isUnreadableSqliteError(error) {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("not a database") || message.includes("file is encrypted");
-}
-function sqliteWithSidecars(sqlitePath) {
-  return [sqlitePath, `${sqlitePath}-wal`, `${sqlitePath}-shm`];
-}
-function copySanitizedJsonIfPresent(source, destination, files, skipped) {
-  if (!existsSync28(source)) {
-    skipped.push(source);
-    return false;
-  }
-  const parsed = JSON.parse(readFileSync27(source, "utf8"));
-  mkdirSync20(dirname30(destination), { recursive: true, mode: 448 });
-  writePrivateFileAtomicSync(destination, JSON.stringify(sanitizeForExport(parsed), null, 2));
-  files.push(destination);
-  return true;
-}
-function exportDurabilityBoundary(destination) {
-  let current = dirname30(resolve8(destination));
-  for (;; ) {
-    if (existsSync28(current))
-      return current;
-    const parent = dirname30(current);
-    if (parent === current)
-      return current;
-    current = parent;
-  }
-}
-function makeDurableDirectory(path, boundary) {
-  mkdirSync20(path, { recursive: true, mode: 448 });
-  let current = resolve8(path);
-  for (;; ) {
-    syncDirectorySync2(current);
-    if (current === boundary)
-      return;
-    const parent = dirname30(current);
-    if (parent === current)
-      return;
-    current = parent;
-  }
-}
-function syncFileSync(path) {
-  const descriptor = openSync9(path, "r");
-  try {
-    fsyncSync3(descriptor);
-  } finally {
-    closeSync9(descriptor);
-  }
-}
-function syncDirectorySync2(path) {
-  const descriptor = openSync9(path, "r");
-  try {
-    fsyncSync3(descriptor);
-  } catch (error) {
-    if (!isUnsupportedDirectorySyncError(error))
-      throw error;
-  } finally {
-    closeSync9(descriptor);
-  }
-}
-function sanitizeForExport(value) {
-  if (Array.isArray(value))
-    return value.map(sanitizeForExport);
-  if (typeof value === "string" && containsPrivateKeyBlock(value))
-    return "[redacted_secret]";
-  if (!value || typeof value !== "object")
-    return value;
-  const sanitized = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (isSecretKey(key))
-      continue;
-    sanitized[key] = sanitizeForExport(child);
-  }
-  return sanitized;
-}
-function isSecretKey(key) {
-  if (key === "secretRef")
-    return false;
-  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (normalized === "secret" || normalized === "token" || normalized === "authtoken" || normalized === "accesstoken" || normalized === "refreshtoken" || normalized === "apikey" || normalized === "clientsecret" || normalized === "password" || normalized === "privatekey" || normalized === "serviceaccountjson" || normalized === "credential" || normalized === "credentials") {
-    return true;
-  }
-  const lowered = key.toLowerCase();
-  return lowered === "secret" || lowered.includes("authtoken") || lowered.includes("access_token") || lowered.includes("refreshtoken") || lowered.includes("refresh_token") || lowered.includes("apikey") || lowered.includes("api_key") || lowered.includes("clientsecret") || lowered.includes("client_secret") || lowered.includes("password") || lowered === "token";
-}
-function containsPrivateKeyBlock(value) {
-  return /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value);
-}
-function globExisting(root, pattern) {
-  if (!existsSync28(root))
-    return [];
-  return readdirSync4(root).map((entry) => join45(root, entry)).filter((path) => {
-    const name = basename6(path);
-    return pattern.test(name) && statSync15(path).isFile();
-  });
-}
-function serviceUnitTarget(path) {
-  return {
-    path,
-    kind: "service_unit",
-    allowRecursive: false
-  };
-}
-function assertDeleteTargetSafe(target) {
-  if (target.kind === "source_state_path") {
-    if (target.externalSourcePath === true) {
-      throw new OperationError("invalid_params", `Refusing to delete source state outside an Olympus-owned root: ${target.path}`, "Check the configured state-directory value (OLYMPUS_WHATSAPP_STATE_DIR and its spool/media overrides), then remove that directory by hand.");
-    }
-    return;
-  }
-  if (target.kind === "known_root") {
-    if (!lstatSync12(target.path).isDirectory()) {
-      throw new OperationError("invalid_params", `Refusing to recursively delete non-directory Olympus root: ${target.path}`);
-    }
-    return;
-  }
-  assertRegularFileTarget(target.path);
-  if (target.externalSourcePath === true) {
-    const primaryPath = target.sqlitePrimaryPath ?? target.path;
-    assertVerifiedExternalSqliteStore(primaryPath, target.sqliteStoreId);
-  }
-}
-function assertRegularFileTarget(path) {
-  const stat3 = lstatSync12(path);
-  if (!stat3.isFile()) {
-    throw new OperationError("invalid_params", `Refusing to delete non-file target outside an Olympus-owned root: ${path}`);
-  }
-}
-function assertVerifiedExternalSqliteStore(path, storeId) {
-  if (!storeId) {
-    throw new OperationError("invalid_params", `Refusing to delete external SQLite path without a store id: ${path}`);
-  }
-  assertRegularFileTarget(path);
-  let db;
-  try {
-    db = new Database7(path, { readonly: true, create: false });
-    db.exec("PRAGMA busy_timeout = 10000;");
-  } catch {
-    throw new OperationError("invalid_params", `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`, "Check the configured OLYMPUS_*_DB_PATH value before retrying data deletion.");
-  }
-  try {
-    let schemaVersion = 0;
-    try {
-      schemaVersion = readSqliteSchemaVersion(db, storeId);
-    } catch {
-      throw new OperationError("invalid_params", `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`, "Check the configured OLYMPUS_*_DB_PATH value before retrying data deletion.");
-    }
-    if (schemaVersion <= 0) {
-      throw new OperationError("invalid_params", `Refusing to delete external SQLite store without Olympus schema marker "${storeId}": ${path}`, "Run data delete only after confirming the configured path belongs to Olympus.");
-    }
-  } finally {
-    closeSqliteStore(db);
-  }
-}
-function isInsideKnownOlympusRoot(path, context) {
-  return knownOlympusDataRoots(context).some((root) => isSameOrInsidePath(path, root));
-}
-function isSameOrInsidePath(path, root) {
-  const absolutePath = resolve8(path);
-  const absoluteRoot = resolve8(root);
-  return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep5}`);
-}
-function defaultSovereigntyConfigPathForHome(homeDir) {
-  if (!homeDir)
-    return defaultSovereigntyConfigPath();
-  return join45(homeDir, ".olympus", "sovereignty.json");
-}
-function defaultDropboxIngestionPolicyPathForHome(homeDir) {
-  if (!homeDir)
-    return defaultDropboxIngestionPolicyPath();
-  return join45(homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
-}
-function envForHome(homeDir) {
-  if (!homeDir)
-    return process.env;
-  return {
-    HOME: homeDir,
-    XDG_DATA_HOME: join45(homeDir, ".local", "share"),
-    XDG_STATE_HOME: join45(homeDir, ".local", "state")
-  };
-}
-function envForContext(context) {
-  if (!context?.env)
-    return envForHome(context?.homeDir);
-  if (!context.homeDir)
-    return context.env;
-  return { ...envForHome(context.homeDir), ...context.env };
-}
-function resolveHome(homeDir) {
-  return homeDir?.trim() || homedir33();
-}
-function requirePath(value, name) {
-  if (!value?.trim())
-    throw new OperationError("invalid_params", `${name} must be provided.`);
-  return value.trim();
-}
-function safePathSegment(value) {
-  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
-function uniqueTargets(values) {
-  const byPath = new Map;
-  for (const value of values) {
-    const existing = byPath.get(value.path);
-    if (!existing || existing.kind !== "known_root" && value.kind === "known_root") {
-      byPath.set(value.path, value);
-    }
-  }
-  return [...byPath.values()];
-}
-var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store", DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA", DELETE_CONFIRMATION_2 = "DELETE EVERYTHING";
-var init_data_lifecycle = __esm(() => {
-  init_atomic_file();
-  init_operation_error();
-  init_sqlite_migrations();
-  init_remote_connections();
-  init_source_ingestion_policy();
-  init_dropbox_files();
-  init_google_connectors();
-  init_telegram_messages();
-  init_readwise();
-  init_tier_set2();
-  init_x_bookmarks();
-  init_tier_set3();
-  init_whatsapp();
-  init_sovereignty();
-  init_pairing_session_paths();
-  init_public_source_capabilities();
-  init_worker_service();
-  init_media_cache();
 });
 
 // src/core/delphi.ts
@@ -110950,12 +110085,9 @@ function createEmailSourceWorker(options = {}) {
               if (dashboardOAuthAttempts.get(source) !== attempt) {
                 throw new Error("OAuth connection attempt is no longer active.");
               }
-              const connected = await attempt.pending.completeCallback({ state, code });
+              await attempt.pending.completeCallback({ state, code });
               clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
               markDashboardSourceConnected(source, dashboardDisconnectedSources);
-              if (connected.sourceAccountPurgeRequired?.length) {
-                sourceDashboard?.onSourceAccountPurgeRequired?.(connected.sourceAccountPurgeRequired);
-              }
               if (source !== "google-drive" && source !== "dropbox") {
                 await triggerDashboardPostConnectSync({
                   source,
@@ -117297,15 +116429,15 @@ function createSourceAccountGuard(options) {
       if (decision.action === "proceed" && decision.write === undefined)
         return;
       if (decision.action !== "refuse") {
-        updateSourceAccountBinding(bindingsPath, options.sourceId, (current2) => {
-          decision = decide(current2);
+        updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
+          decision = decide(current);
           if (decision.action === "proceed") {
-            return decision.write === undefined ? current2 : decision.write ?? undefined;
+            return decision.write === undefined ? current : decision.write ?? undefined;
           }
           if (decision.action === "purge") {
-            return current2?.purge_required ? current2 : { ...current2, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
+            return current?.purge_required ? current : { ...current, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
           }
-          return current2;
+          return current;
         });
       }
       if (decision.action === "proceed")
@@ -117318,13 +116450,7 @@ function createSourceAccountGuard(options) {
       if (decision.action === "refuse") {
         throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not confirm which account the credential belongs to; nothing was synced this run.`);
       }
-      const what = `${options.sourceId} was reconnected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the previous one"}. ` + "Nothing syncs until the previous account's stored items are removed; ";
-      const current = readSourceAccountBindings(bindingsPath);
-      if (current.kind === "ok" && current.bindings.sources[options.sourceId]?.purge_required?.failed_at) {
-        throw new SourceAccountChangedError("source_account_changed", `${what}removing them at start-up failed. Disconnect the source, run \`olympus data delete --source ${options.sourceId}\`, then connect again.`);
-      }
-      const restarting = options.requestPurgeRestart();
-      throw new SourceAccountChangedError("source_account_changed", what + (restarting ? "the worker is restarting to remove them." : "restart the Olympus worker to remove them."));
+      throw new SourceAccountChangedError("source_account_changed", `${options.sourceId} is now connected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the one its items came from"}, ` + "so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
     }
   };
 }
@@ -117354,42 +116480,6 @@ var init_source_account_guard = __esm(() => {
       this.code = code;
     }
   };
-});
-
-// src/workers/source-account-purge.ts
-function purgeSourcesAwaitingAccountChange(input) {
-  if (!input.registryPath)
-    return [];
-  const path = sourceAccountBindingsPath(input.registryPath);
-  const read = readSourceAccountBindings(path);
-  if (read.kind === "malformed")
-    return [];
-  const outcomes = [];
-  for (const sourceId of ACCOUNT_BOUND_SOURCE_IDS) {
-    if (!read.bindings.sources[sourceId]?.purge_required)
-      continue;
-    try {
-      const result = deleteOlympusData({
-        sourceId,
-        ...input.env ? { env: input.env } : {},
-        ...input.homeDir ? { homeDir: input.homeDir } : {}
-      });
-      updateSourceAccountBinding(path, sourceId, () => {
-        return;
-      });
-      outcomes.push({ sourceId, status: "purged", removedPaths: result.removed.length });
-    } catch {
-      try {
-        updateSourceAccountBinding(path, sourceId, (current) => current?.purge_required ? { ...current, purge_required: { ...current.purge_required, failed_at: new Date().toISOString() } } : current);
-      } catch {}
-      outcomes.push({ sourceId, status: "failed", removedPaths: 0 });
-    }
-  }
-  return outcomes;
-}
-var init_source_account_purge = __esm(() => {
-  init_data_lifecycle();
-  init_source_account_binding();
 });
 
 // src/workers/source-scope-browser.ts
@@ -130844,12 +129934,6 @@ async function startWorkerWithLaunch(launch) {
   await main();
 }
 async function main() {
-  for (const outcome of purgeSourcesAwaitingAccountChange({
-    registryPath: handleRegistryPathFromEnv(process.env, true),
-    env: process.env
-  })) {
-    console.log(outcome.status === "purged" ? `[source-account] ${outcome.sourceId}: removed the previous account's stored data (${outcome.removedPaths} paths) after a reconnect to a different account.` : `[source-account] ${outcome.sourceId}: could not remove the previous account's stored data; the source stays stopped.`);
-  }
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? "8010");
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
@@ -131997,8 +131081,7 @@ ${lane.handle}`;
         handle: lane.handle,
         capability: lane.capability,
         registryPath: connectedHandleRegistryPath,
-        laneHoldsItems: lane.laneHoldsItems,
-        requestPurgeRestart: () => requestModelReload()
+        laneHoldsItems: lane.laneHoldsItems
       });
       sourceAccountGuards.set(key, guard);
     }
@@ -132528,9 +131611,6 @@ ${lane.handle}`;
     ...sourceIndexReadEnabled ? {
       sourceDashboard: {
         sovereigntyEngine,
-        onSourceAccountPurgeRequired: () => {
-          requestModelReload();
-        },
         modelSetup: getModelSetup,
         checkModelSetup: () => modelSetup.checkLocalModels(),
         connectModelKey,
@@ -133692,7 +132772,6 @@ var init_server5 = __esm(async () => {
   init_source_scope_runtime();
   init_gmail_scope_browser();
   init_source_account_guard();
-  init_source_account_purge();
   init_request_budget();
   init_gmail();
   init_mail_source_scope();
@@ -134369,8 +133448,884 @@ function defaultExec(command, args) {
   };
 }
 
+// src/data-lifecycle.ts
+init_atomic_file();
+init_operation_error();
+init_sqlite_migrations();
+init_remote_connections();
+init_source_ingestion_policy();
+init_dropbox_files();
+init_google_connectors();
+init_telegram_messages();
+init_readwise();
+init_tier_set2();
+init_x_bookmarks();
+init_tier_set3();
+init_whatsapp();
+init_sovereignty();
+init_pairing_session_paths();
+init_public_source_capabilities();
+init_worker_service();
+init_media_cache();
+import { createHash as createHash34, randomUUID as randomUUID14 } from "node:crypto";
+import {
+  closeSync as closeSync9,
+  existsSync as existsSync28,
+  fsyncSync as fsyncSync3,
+  lstatSync as lstatSync12,
+  mkdirSync as mkdirSync20,
+  openSync as openSync9,
+  readSync as readSync2,
+  readdirSync as readdirSync4,
+  readFileSync as readFileSync27,
+  renameSync as renameSync9,
+  rmSync as rmSync10,
+  statSync as statSync15
+} from "node:fs";
+import { homedir as homedir33 } from "node:os";
+import { basename as basename6, dirname as dirname30, join as join45, relative as relative5, resolve as resolve8, sep as sep5 } from "node:path";
+import { Database as Database7 } from "bun:sqlite";
+var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store";
+var DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA";
+var DELETE_CONFIRMATION_2 = "DELETE EVERYTHING";
+function lifecycleSourceSpecs() {
+  return [
+    {
+      sourceId: "gmail.email",
+      label: "Gmail connector stores",
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      legacySqliteStoreId: "email-index",
+      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_EMAIL_INDEX_DB_PATH", "email-index.sqlite"),
+      connectorStorePaths: (context) => [
+        defaultGmailConnectorStoreDbPath(envForContext(context)),
+        defaultGmailSecureConnectorStoreDbPath(envForContext(context)),
+        defaultGmailPublicConnectorStoreDbPath(envForContext(context))
+      ]
+    },
+    {
+      sourceId: "dropbox.files",
+      label: "Dropbox files connector store",
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      legacySqliteStoreId: "dropbox-files-index",
+      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH", "dropbox-files-index.sqlite"),
+      connectorStorePaths: (context) => dropboxTierConnectorStoreDbPaths(envForContext(context)),
+      policyPaths: (context) => [defaultDropboxIngestionPolicyPathForHome(context?.homeDir)]
+    },
+    {
+      sourceId: "google_drive.docs",
+      label: "Google Drive/Docs connector stores",
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      legacySqliteStoreId: "google-drive-docs-index",
+      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_SOURCE_INDEX_DRIVE_INDEX_DB_PATH", "google-drive-docs-index.sqlite"),
+      connectorStorePaths: (context) => [
+        defaultGoogleDriveConnectorStoreDbPath(envForContext(context)),
+        defaultGoogleDriveSecureConnectorStoreDbPath(envForContext(context)),
+        defaultGoogleDrivePublicConnectorStoreDbPath(envForContext(context))
+      ]
+    },
+    {
+      sourceId: "telegram.messages",
+      label: "Telegram messages connector stores",
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      legacySqliteStoreId: "telegram-messages-index",
+      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH", "telegram-messages-index.sqlite"),
+      connectorStorePaths: (context) => [
+        defaultInternalTelegramConnectorStoreDbPath(envForContext(context)),
+        defaultProtectedTelegramConnectorStoreDbPath(envForContext(context))
+      ],
+      preservationOnlyPaths: (context) => telegramPreservationOnlyPaths(envForContext(context))
+    },
+    {
+      sourceId: "readwise.library",
+      label: "Readwise library connector store",
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      legacySqliteStoreId: "readwise-index",
+      sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_SOURCE_INDEX_READWISE_INDEX_DB_PATH", "readwise-index.sqlite"),
+      connectorStorePaths: (context) => [
+        defaultReadwiseConnectorStoreDbPath(envForContext(context)),
+        defaultReadwiseSecureConnectorStoreDbPath(envForContext(context))
+      ]
+    },
+    {
+      sourceId: "x.bookmarks",
+      label: "X bookmarks connector store",
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      connectorStorePaths: (context) => [
+        defaultXBookmarksConnectorStoreDbPath(envForContext(context)),
+        defaultXBookmarksSecureConnectorStoreDbPath(envForContext(context))
+      ]
+    },
+    {
+      sourceId: "whatsapp.personal.messages",
+      sourceAliases: ["whatsapp.messages"],
+      label: "WhatsApp messages connector store",
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      connectorStorePaths: (context) => [
+        defaultWhatsAppConnectorStoreDbPath(envForContext(context)),
+        defaultWhatsAppInternalConnectorStoreDbPath(envForContext(context))
+      ],
+      rawStatePaths: (context) => whatsappRawStatePaths(envForContext(context))
+    },
+    {
+      sourceId: "reflect.notes",
+      label: "Reflect notes connector store",
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), "reflect-notes.sqlite")]
+    },
+    {
+      sourceId: "roam.notes",
+      label: "Roam notes connector store",
+      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), "roam-notes.sqlite")]
+    }
+  ];
+}
+function mountedConnectorStoreDbPath(env, fileName) {
+  return olympusSharedDataFile(env, fileName);
+}
+function legacySourceIndexPath(env, overrideKey, fileName) {
+  return env[overrideKey]?.trim() || olympusSharedDataFile(env, fileName);
+}
+function olympusSharedDataFile(env, fileName) {
+  return join45(env.XDG_DATA_HOME?.trim() || join45(homedir33(), ".local", "share"), "openclaw", "olympus", fileName);
+}
+function whatsappStateDir2(env) {
+  return whatsappStateDir({ env });
+}
+function whatsappRawStatePaths(env) {
+  const stateDir = whatsappStateDir2(env);
+  const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
+  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join45(transcribeStateDir, "media") : undefined);
+  return [...new Set([
+    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join45(stateDir, "spool"),
+    ...whatsappPairingSessionPaths({ env }),
+    join45(stateDir, "media"),
+    ...transcribeMediaDir ? [transcribeMediaDir] : []
+  ])];
+}
+function telegramPreservationOnlyPaths(env) {
+  const home2 = env.HOME?.trim() || homedir33();
+  const dataHome = env.XDG_DATA_HOME?.trim() || join45(home2, ".local", "share");
+  const stateHome = env.XDG_STATE_HOME?.trim() || join45(home2, ".local", "state");
+  const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join45(dataHome, "olympus", "telegram-capture", "spool");
+  const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join45(stateHome, "olympus", "telegram-capture-gateway");
+  const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim() || join45(stateHome, "olympus", "telegram-spool-drain");
+  const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim() || join45(drainStateDir, "cursor.json");
+  return [...new Set([
+    spoolDir,
+    cursorPath,
+    gatewayStateDir,
+    ...telegramPairingSessionPaths({ env })
+  ])];
+}
+function exportOlympusData(options) {
+  const destination = requirePath(options.destination, "--output");
+  const selected = selectSources(options.sourceId);
+  const durabilityBoundary = exportDurabilityBoundary(destination);
+  makeDurableDirectory(destination, durabilityBoundary);
+  rmSync10(join45(destination, "manifest.json"), { force: true });
+  syncDirectorySync2(destination);
+  const files = [];
+  const skipped = [];
+  const artifacts = [];
+  for (const source of selected) {
+    const sourceRoot = join45(destination, "sources", safePathSegment(source.sourceId));
+    makeDurableDirectory(sourceRoot, durabilityBoundary);
+    const legacyIndexPath = source.sqlitePath?.(options);
+    if (legacyIndexPath) {
+      exportSqliteStore({
+        sqlitePath: legacyIndexPath,
+        destinationRoot: sourceRoot,
+        exportRoot: destination,
+        sourceId: source.sourceId,
+        role: "legacy_store",
+        expectedStoreId: legacyStoreIdFor(source),
+        files,
+        skipped,
+        artifacts
+      });
+    }
+    for (const storePath of source.connectorStorePaths?.(options) ?? []) {
+      exportSqliteStore({
+        sqlitePath: storePath,
+        destinationRoot: sourceRoot,
+        exportRoot: destination,
+        sourceId: source.sourceId,
+        role: "connector_store",
+        expectedStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
+        files,
+        skipped,
+        artifacts
+      });
+    }
+    for (const policyPath of source.policyPaths?.(options) ?? []) {
+      const destinationPath = join45(sourceRoot, basename6(policyPath));
+      if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped)) {
+        artifacts.push(fileArtifact(destination, destinationPath, source.sourceId, "sanitized_config"));
+      }
+    }
+    for (const statePath of source.rawStatePaths?.(options) ?? [])
+      skipped.push(statePath);
+    for (const statePath of source.preservationOnlyPaths?.(options) ?? [])
+      skipped.push(statePath);
+  }
+  if (options.sourceId === undefined) {
+    const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
+    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath)]) {
+      if (existsSync28(path))
+        skipped.push(path);
+    }
+  }
+  const configRoot = join45(destination, "config");
+  makeDurableDirectory(configRoot, durabilityBoundary);
+  for (const [sourcePath, destinationPath] of [
+    [join45(resolveHome(options.homeDir), ".olympus", "config.json"), join45(configRoot, "config.json")],
+    [defaultSovereigntyConfigPathForHome(options.homeDir), join45(configRoot, "sovereignty.json")]
+  ]) {
+    if (copySanitizedJsonIfPresent(sourcePath, destinationPath, files, skipped)) {
+      artifacts.push(fileArtifact(destination, destinationPath, "olympus.config", "sanitized_config"));
+    }
+  }
+  writePrivateFileAtomicSync(join45(destination, "manifest.json"), JSON.stringify({
+    kind: "olympus_data_export",
+    version: 2,
+    exported_at: new Date().toISOString(),
+    source_ids: selected.map((source) => source.sourceId),
+    secrets_excluded: true,
+    files,
+    skipped,
+    artifacts
+  }, null, 2));
+  files.push(join45(destination, "manifest.json"));
+  return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
+}
+function verifyOlympusDataExport(options) {
+  const destination = resolve8(requirePath(options.destination, "--input"));
+  const manifestPath = join45(destination, "manifest.json");
+  const parsed = JSON.parse(readFileSync27(manifestPath, "utf8"));
+  if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
+    throw new OperationError("source_index_error", "Olympus data export manifest is unsupported or incomplete.");
+  }
+  const verified = [];
+  for (const value of parsed.artifacts) {
+    const artifact = parseExportArtifact(value);
+    const path = resolve8(destination, artifact.relativePath);
+    if (!isSameOrInsidePath(path, destination) || path === destination) {
+      throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
+    }
+    const stats = lstatSync12(path);
+    if (stats.isSymbolicLink() || !stats.isFile() || stats.size !== artifact.bytes || sha256File2(path) !== artifact.sha256) {
+      throw new OperationError("source_index_error", `Olympus data export artifact failed verification: ${artifact.relativePath}`);
+    }
+    if (artifact.sqlite)
+      assertSqliteSnapshotIntact(path, artifact.relativePath);
+    verified.push({ relativePath: artifact.relativePath, bytes: artifact.bytes, sha256: artifact.sha256 });
+  }
+  return { ok: true, destination, artifactCount: verified.length, artifacts: verified };
+}
+function deleteOlympusData(options) {
+  if (options.all === true && options.sourceId) {
+    throw new OperationError("invalid_params", "Use either --all or --source, not both.");
+  }
+  if (options.all !== true && !options.sourceId) {
+    throw new OperationError("invalid_params", "Data delete requires --all or --source <id>.");
+  }
+  const selectedSource = options.all === true ? undefined : requireSource(options.sourceId);
+  const targets = options.all === true ? allDeleteTargets(options) : sourceDeleteTargets(selectedSource, options);
+  const removed = [];
+  const missing = [];
+  const uniqueDeleteTargets = uniqueTargets(targets);
+  for (const target of uniqueDeleteTargets) {
+    if (existsSync28(target.path))
+      assertDeleteTargetSafe(target);
+  }
+  const sourceMedia = selectedSource ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? []) : [];
+  for (const target of uniqueDeleteTargets) {
+    if (!existsSync28(target.path)) {
+      missing.push(target.path);
+      continue;
+    }
+    removed.push(target.path);
+    if (options.dryRun !== true) {
+      rmSync10(target.path, { recursive: target.allowRecursive, force: true });
+    }
+  }
+  removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
+  return {
+    ok: true,
+    mode: options.all === true ? "all" : "source",
+    ...selectedSource ? { sourceId: selectedSource.sourceId } : {},
+    dryRun: options.dryRun === true,
+    removed,
+    missing
+  };
+}
+function deleteOlympusDataWithCustody(options) {
+  const custody = dataDeleteCustody(options);
+  if (options.dryRun !== true && !custody.ready) {
+    throw new OperationError("invalid_params", custody.requirement === "source_disconnected" ? `Disconnect ${options.sourceId} before deleting its local data.` : custody.observed === "relay_running" ? "Turn remote access off before deleting local data: the relay process is still running." : custody.observed === "engine_loaded" ? "Stop the Olympus engine before deleting local data: launchd would start it again." : "Stop or uninstall the Olympus worker before deleting local data.", custody.next_action);
+  }
+  return {
+    ...deleteOlympusData(options),
+    custody
+  };
+}
+function dataDeleteCustody(options) {
+  if (options.all === true && options.sourceId) {
+    throw new OperationError("invalid_params", "Use either --all or --source, not both.");
+  }
+  if (options.all !== true && !options.sourceId) {
+    throw new OperationError("invalid_params", "Data delete requires --all or --source <id>.");
+  }
+  const source = options.sourceId ? requireSource(options.sourceId) : undefined;
+  const publicCapability = source ? V0_4_PUBLIC_SOURCE_CAPABILITIES.find((candidate) => candidate.source_id === source.sourceId || source.sourceAliases?.includes(candidate.source_id)) : undefined;
+  if (publicCapability) {
+    if (!options.connectedRegistry || (options.connectedRegistry.dropped?.length ?? 0) > 0) {
+      return {
+        requirement: "source_disconnected",
+        ready: false,
+        observed: "unknown_registry",
+        next_action: "Repair the Olympus connected-handle registry, then Disconnect this source and retry."
+      };
+    }
+    const connected = options.connectedRegistry.handles.some((handle) => handle.provider === publicCapability.doctor_lane.provider);
+    return connected ? {
+      requirement: "source_disconnected",
+      ready: false,
+      observed: "connected",
+      next_action: "Use Disconnect in the local dashboard, then rerun the CLI delete."
+    } : {
+      requirement: "source_disconnected",
+      ready: true,
+      observed: "disconnected"
+    };
+  }
+  if (options.engineLoaded === true) {
+    return {
+      requirement: "worker_inactive",
+      ready: false,
+      observed: "engine_loaded",
+      next_action: "Run olympus engine stop (it stays stopped until olympus engine start), check olympus engine status, then retry."
+    };
+  }
+  const workerState = options.workerState;
+  const ready = workerState === "inactive" || workerState === "missing";
+  if (ready && options.all === true && options.relayRunning === true) {
+    return {
+      requirement: "worker_inactive",
+      ready: false,
+      observed: "relay_running",
+      next_action: "Run openclaw config set plugins.entries.olympus.config.remote.enabled false (or stop the OpenClaw Gateway), check olympus connections status, then retry."
+    };
+  }
+  return {
+    requirement: "worker_inactive",
+    ready,
+    observed: workerState ?? "unknown",
+    ...!ready ? { next_action: "Run olympus worker stop (or olympus worker uninstall), verify status, then retry." } : {}
+  };
+}
+function validateDeleteAllConfirmations(first, second) {
+  if (first !== DELETE_CONFIRMATION_1 || second !== DELETE_CONFIRMATION_2) {
+    throw new OperationError("invalid_params", "delete --all requires both confirmation phrases.", `Type "${DELETE_CONFIRMATION_1}" and then "${DELETE_CONFIRMATION_2}", or use --yes-i-am-sure in automated tests.`);
+  }
+}
+function deleteAllConfirmationPrompts() {
+  return { first: DELETE_CONFIRMATION_1, second: DELETE_CONFIRMATION_2 };
+}
+function knownOlympusDataRoots(context = {}) {
+  return olympusDataRoots({ homeDir: resolveHome(context.homeDir) });
+}
+function allDeleteTargets(context) {
+  const home2 = resolveHome(context.homeDir);
+  return [
+    ...selectSources(undefined).flatMap((source) => sourceDeleteTargets(source, context)),
+    ...remoteConnectionsDeleteTargets(context),
+    ...mediaCacheDeleteTargets(context),
+    ...knownOlympusDataRoots(context).map((path) => ({
+      path,
+      kind: "known_root",
+      allowRecursive: true
+    })),
+    serviceUnitTarget(workerServicePaths("darwin", home2).unitPath),
+    serviceUnitTarget(workerServicePaths("linux", home2).unitPath),
+    ...globExisting(join45(home2, "Library", "LaunchAgents"), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/).map(serviceUnitTarget),
+    ...globExisting(join45(home2, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
+  ];
+}
+function mediaCacheDeleteTargets(context) {
+  try {
+    return [{ path: mediaCacheDir(envForContext(context)), kind: "known_root", allowRecursive: true }];
+  } catch {
+    return [];
+  }
+}
+function readSourceMedia(storePaths) {
+  const held = [];
+  for (const storePath of storePaths) {
+    if (storePath === ":memory:" || !existsSync28(storePath))
+      continue;
+    if (!looksLikeSqlite(storePath))
+      continue;
+    const unreadable = () => new OperationError("invalid_params", `Cannot read the picture references in ${storePath}; nothing was deleted.`, "Stop the Olympus worker (olympus worker stop) so the store is not busy, or repair the store, then retry.");
+    let rows = [];
+    let db;
+    try {
+      db = new Database7(storePath, { readonly: true });
+      db.exec("PRAGMA busy_timeout = 10000;");
+    } catch {
+      throw unreadable();
+    }
+    try {
+      const columns = db.query("PRAGMA table_info(chunks)").all().map((column) => column.name);
+      if (columns.includes("media_sha256")) {
+        rows = db.query(`
+          SELECT DISTINCT media_path, media_sha256 FROM chunks
+          WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
+        `).all();
+      }
+    } catch {
+      throw unreadable();
+    } finally {
+      closeSqliteStore(db);
+    }
+    held.push({ storePath, holder: mediaHolderName(storePath), rows });
+  }
+  return held;
+}
+function releaseSourceMedia(held, dryRun) {
+  const released = [];
+  for (const { storePath, holder, rows } of held) {
+    for (const row of rows) {
+      if (!isMediaCachePath(row.media_path, row.media_sha256))
+        continue;
+      if (dryRun) {
+        if (existsSync28(row.media_path))
+          released.push(row.media_path);
+      } else {
+        const removedByHolder = releaseMediaCacheFile(row.media_path, row.media_sha256, holder);
+        const removedBySpelling = holder !== storePath && releaseMediaCacheFile(row.media_path, row.media_sha256, storePath);
+        if (removedByHolder || removedBySpelling)
+          released.push(row.media_path);
+      }
+    }
+  }
+  return released;
+}
+function looksLikeSqlite(path) {
+  try {
+    const fd = openSync9(path, "r");
+    try {
+      const header = Buffer.alloc(16);
+      const read = readSync2(fd, header, 0, 16, 0);
+      return read === 16 && header.toString("latin1") === "SQLite format 3\x00";
+    } finally {
+      closeSync9(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+function sourceDeleteTargets(source, context) {
+  const legacyIndexPath = source.sqlitePath?.(context);
+  return [
+    ...legacyIndexPath ? sqliteDeleteTargets(legacyIndexPath, legacyStoreIdFor(source), context) : [],
+    ...(source.connectorStorePaths?.(context) ?? []).flatMap((storePath) => [
+      ...sqliteDeleteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID, context),
+      ...storePath === ":memory:" ? [] : sqliteDeleteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID, context),
+      ...storePath === ":memory:" ? [] : sqliteDeleteTargets(secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID, context),
+      ...storePath === ":memory:" ? [] : sqliteDeleteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID, context)
+    ]),
+    ...(source.rawStatePaths?.(context) ?? []).map((path) => ({
+      path,
+      kind: "source_state_path",
+      allowRecursive: true,
+      externalSourcePath: !isInsideKnownOlympusRoot(path, context)
+    })),
+    ...(source.policyPaths?.(context) ?? []).map((path) => ({
+      path,
+      kind: "policy_file",
+      allowRecursive: false
+    }))
+  ];
+}
+function remoteConnectionsDeleteTargets(context) {
+  const dbPath = resolveRemoteConnectionsDbPath(envForContext(context));
+  const targets = sqliteDeleteTargets(dbPath, REMOTE_CONNECTIONS_STORE_ID, context);
+  return [...targets, { ...targets[1], path: remoteConnectionsPreV2BackupPath(dbPath) }];
+}
+function sqliteDeleteTargets(sqlitePath, sqliteStoreId, context) {
+  const externalSourcePath = !isInsideKnownOlympusRoot(sqlitePath, context);
+  return [
+    {
+      path: sqlitePath,
+      kind: "source_sqlite",
+      sqliteStoreId,
+      sqlitePrimaryPath: sqlitePath,
+      allowRecursive: false,
+      externalSourcePath
+    },
+    {
+      path: `${sqlitePath}-wal`,
+      kind: "source_sqlite_sidecar",
+      sqliteStoreId,
+      sqlitePrimaryPath: sqlitePath,
+      allowRecursive: false,
+      externalSourcePath
+    },
+    {
+      path: `${sqlitePath}-shm`,
+      kind: "source_sqlite_sidecar",
+      sqliteStoreId,
+      sqlitePrimaryPath: sqlitePath,
+      allowRecursive: false,
+      externalSourcePath
+    }
+  ];
+}
+function legacyStoreIdFor(source) {
+  return source.legacySqliteStoreId ?? source.sqliteStoreId;
+}
+function selectSources(sourceId) {
+  if (!sourceId)
+    return lifecycleSourceSpecs();
+  return [requireSource(sourceId)];
+}
+function requireSource(sourceId) {
+  const normalized = requirePath(sourceId, "--source");
+  const source = lifecycleSourceSpecs().find((entry) => entry.sourceId === normalized || entry.sourceAliases?.includes(normalized));
+  if (!source) {
+    throw new OperationError("invalid_params", `Unknown Olympus source id "${normalized}".`, `Use one of: ${lifecycleSourceSpecs().map((entry) => entry.sourceId).join(", ")}.`);
+  }
+  return source;
+}
+function exportSqliteStore(options) {
+  const { sqlitePath, destinationRoot, exportRoot, sourceId, role, expectedStoreId, files, skipped, artifacts } = options;
+  if (!existsSync28(sqlitePath)) {
+    for (const path of sqliteWithSidecars(sqlitePath))
+      skipped.push(path);
+    return;
+  }
+  const destination = join45(destinationRoot, basename6(sqlitePath));
+  const staging = `${destination}.${randomUUID14()}.partial`;
+  if (snapshotSqliteStore(sqlitePath, staging)) {
+    let sqlite;
+    try {
+      sqlite = inspectSqliteSnapshot(staging, sqlitePath, expectedStoreId);
+      syncFileSync(staging);
+      renameSync9(staging, destination);
+    } catch (error) {
+      rmSync10(staging, { force: true });
+      throw error;
+    }
+    syncDirectorySync2(dirname30(destination));
+    files.push(destination);
+    artifacts.push({
+      ...fileArtifact(exportRoot, destination, sourceId, role),
+      sqlite
+    });
+    return;
+  }
+  throw new OperationError("source_index_error", `Declared Olympus SQLite store is not a readable database: ${sqlitePath}`, "The export failed closed; repair or explicitly account for the store before transition.");
+}
+function snapshotSqliteStore(sqlitePath, staging) {
+  rmSync10(staging, { force: true });
+  let db;
+  try {
+    db = new Database7(sqlitePath, { readonly: true });
+  } catch {
+    return false;
+  }
+  try {
+    db.exec("PRAGMA busy_timeout = 10000;");
+    db.exec(`VACUUM INTO '${sqliteStringLiteral(staging)}'`);
+  } catch (error) {
+    rmSync10(staging, { force: true });
+    if (isUnreadableSqliteError(error))
+      return false;
+    throw new OperationError("source_index_error", `Failed to snapshot Olympus SQLite store for export: ${sqlitePath}`, "Retry the export once the store is readable; no partial snapshot was published.");
+  } finally {
+    closeSqliteStore(db);
+  }
+  return true;
+}
+function assertSqliteSnapshotIntact(snapshotPath, sqlitePath) {
+  inspectSqliteSnapshot(snapshotPath, sqlitePath, "unknown");
+}
+function inspectSqliteSnapshot(snapshotPath, sqlitePath, expectedStoreId) {
+  const db = new Database7(snapshotPath, { readonly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 10000;");
+    const rows = db.query("PRAGMA integrity_check").all();
+    if (rows.length !== 1 || rows[0]?.integrity_check !== "ok") {
+      throw new OperationError("source_index_error", `Olympus SQLite export snapshot failed its integrity check: ${sqlitePath}`, "The snapshot was discarded rather than published; retry the export.");
+    }
+    const foreignKeyRows = db.query("PRAGMA foreign_key_check").all();
+    if (foreignKeyRows.length > 0) {
+      throw new OperationError("source_index_error", `Olympus SQLite export snapshot failed its foreign-key check: ${sqlitePath}`, "The snapshot was discarded rather than published; repair the store before transition.");
+    }
+    const schemaVersion = expectedStoreId === "unknown" ? 0 : readSqliteSchemaVersion(db, expectedStoreId);
+    return {
+      integrityCheck: "ok",
+      foreignKeyViolations: foreignKeyRows.length,
+      expectedStoreId,
+      schemaVersion
+    };
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function fileArtifact(exportRoot, path, sourceId, role) {
+  const stats = statSync15(path);
+  return {
+    sourceId,
+    role,
+    relativePath: relative5(resolve8(exportRoot), resolve8(path)),
+    bytes: stats.size,
+    sha256: sha256File2(path)
+  };
+}
+function sha256File2(path) {
+  const hash = createHash34("sha256");
+  const descriptor = openSync9(path, "r");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    for (;; ) {
+      const bytesRead = readSync2(descriptor, buffer, 0, buffer.length, null);
+      if (bytesRead === 0)
+        break;
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    closeSync9(descriptor);
+  }
+  return hash.digest("hex");
+}
+function parseExportArtifact(value) {
+  if (!value || typeof value !== "object") {
+    throw new OperationError("source_index_error", "Olympus data export manifest contains an invalid artifact.");
+  }
+  const artifact = value;
+  if (typeof artifact.relativePath !== "string" || artifact.relativePath.length === 0 || typeof artifact.bytes !== "number" || !Number.isSafeInteger(artifact.bytes) || artifact.bytes < 0 || typeof artifact.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(artifact.sha256)) {
+    throw new OperationError("source_index_error", "Olympus data export manifest contains an invalid artifact.");
+  }
+  return artifact;
+}
+function sqliteStringLiteral(value) {
+  return value.replace(/'/g, "''");
+}
+function isUnreadableSqliteError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("not a database") || message.includes("file is encrypted");
+}
+function sqliteWithSidecars(sqlitePath) {
+  return [sqlitePath, `${sqlitePath}-wal`, `${sqlitePath}-shm`];
+}
+function copySanitizedJsonIfPresent(source, destination, files, skipped) {
+  if (!existsSync28(source)) {
+    skipped.push(source);
+    return false;
+  }
+  const parsed = JSON.parse(readFileSync27(source, "utf8"));
+  mkdirSync20(dirname30(destination), { recursive: true, mode: 448 });
+  writePrivateFileAtomicSync(destination, JSON.stringify(sanitizeForExport(parsed), null, 2));
+  files.push(destination);
+  return true;
+}
+function exportDurabilityBoundary(destination) {
+  let current = dirname30(resolve8(destination));
+  for (;; ) {
+    if (existsSync28(current))
+      return current;
+    const parent = dirname30(current);
+    if (parent === current)
+      return current;
+    current = parent;
+  }
+}
+function makeDurableDirectory(path, boundary) {
+  mkdirSync20(path, { recursive: true, mode: 448 });
+  let current = resolve8(path);
+  for (;; ) {
+    syncDirectorySync2(current);
+    if (current === boundary)
+      return;
+    const parent = dirname30(current);
+    if (parent === current)
+      return;
+    current = parent;
+  }
+}
+function syncFileSync(path) {
+  const descriptor = openSync9(path, "r");
+  try {
+    fsyncSync3(descriptor);
+  } finally {
+    closeSync9(descriptor);
+  }
+}
+function syncDirectorySync2(path) {
+  const descriptor = openSync9(path, "r");
+  try {
+    fsyncSync3(descriptor);
+  } catch (error) {
+    if (!isUnsupportedDirectorySyncError(error))
+      throw error;
+  } finally {
+    closeSync9(descriptor);
+  }
+}
+function sanitizeForExport(value) {
+  if (Array.isArray(value))
+    return value.map(sanitizeForExport);
+  if (typeof value === "string" && containsPrivateKeyBlock(value))
+    return "[redacted_secret]";
+  if (!value || typeof value !== "object")
+    return value;
+  const sanitized = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (isSecretKey(key))
+      continue;
+    sanitized[key] = sanitizeForExport(child);
+  }
+  return sanitized;
+}
+function isSecretKey(key) {
+  if (key === "secretRef")
+    return false;
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (normalized === "secret" || normalized === "token" || normalized === "authtoken" || normalized === "accesstoken" || normalized === "refreshtoken" || normalized === "apikey" || normalized === "clientsecret" || normalized === "password" || normalized === "privatekey" || normalized === "serviceaccountjson" || normalized === "credential" || normalized === "credentials") {
+    return true;
+  }
+  const lowered = key.toLowerCase();
+  return lowered === "secret" || lowered.includes("authtoken") || lowered.includes("access_token") || lowered.includes("refreshtoken") || lowered.includes("refresh_token") || lowered.includes("apikey") || lowered.includes("api_key") || lowered.includes("clientsecret") || lowered.includes("client_secret") || lowered.includes("password") || lowered === "token";
+}
+function containsPrivateKeyBlock(value) {
+  return /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value);
+}
+function globExisting(root, pattern) {
+  if (!existsSync28(root))
+    return [];
+  return readdirSync4(root).map((entry) => join45(root, entry)).filter((path) => {
+    const name = basename6(path);
+    return pattern.test(name) && statSync15(path).isFile();
+  });
+}
+function serviceUnitTarget(path) {
+  return {
+    path,
+    kind: "service_unit",
+    allowRecursive: false
+  };
+}
+function assertDeleteTargetSafe(target) {
+  if (target.kind === "source_state_path") {
+    if (target.externalSourcePath === true) {
+      throw new OperationError("invalid_params", `Refusing to delete source state outside an Olympus-owned root: ${target.path}`, "Check the configured state-directory value (OLYMPUS_WHATSAPP_STATE_DIR and its spool/media overrides), then remove that directory by hand.");
+    }
+    return;
+  }
+  if (target.kind === "known_root") {
+    if (!lstatSync12(target.path).isDirectory()) {
+      throw new OperationError("invalid_params", `Refusing to recursively delete non-directory Olympus root: ${target.path}`);
+    }
+    return;
+  }
+  assertRegularFileTarget(target.path);
+  if (target.externalSourcePath === true) {
+    const primaryPath = target.sqlitePrimaryPath ?? target.path;
+    assertVerifiedExternalSqliteStore(primaryPath, target.sqliteStoreId);
+  }
+}
+function assertRegularFileTarget(path) {
+  const stat3 = lstatSync12(path);
+  if (!stat3.isFile()) {
+    throw new OperationError("invalid_params", `Refusing to delete non-file target outside an Olympus-owned root: ${path}`);
+  }
+}
+function assertVerifiedExternalSqliteStore(path, storeId) {
+  if (!storeId) {
+    throw new OperationError("invalid_params", `Refusing to delete external SQLite path without a store id: ${path}`);
+  }
+  assertRegularFileTarget(path);
+  let db;
+  try {
+    db = new Database7(path, { readonly: true, create: false });
+    db.exec("PRAGMA busy_timeout = 10000;");
+  } catch {
+    throw new OperationError("invalid_params", `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`, "Check the configured OLYMPUS_*_DB_PATH value before retrying data deletion.");
+  }
+  try {
+    let schemaVersion = 0;
+    try {
+      schemaVersion = readSqliteSchemaVersion(db, storeId);
+    } catch {
+      throw new OperationError("invalid_params", `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`, "Check the configured OLYMPUS_*_DB_PATH value before retrying data deletion.");
+    }
+    if (schemaVersion <= 0) {
+      throw new OperationError("invalid_params", `Refusing to delete external SQLite store without Olympus schema marker "${storeId}": ${path}`, "Run data delete only after confirming the configured path belongs to Olympus.");
+    }
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function isInsideKnownOlympusRoot(path, context) {
+  return knownOlympusDataRoots(context).some((root) => isSameOrInsidePath(path, root));
+}
+function isSameOrInsidePath(path, root) {
+  const absolutePath = resolve8(path);
+  const absoluteRoot = resolve8(root);
+  return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep5}`);
+}
+function defaultSovereigntyConfigPathForHome(homeDir) {
+  if (!homeDir)
+    return defaultSovereigntyConfigPath();
+  return join45(homeDir, ".olympus", "sovereignty.json");
+}
+function defaultDropboxIngestionPolicyPathForHome(homeDir) {
+  if (!homeDir)
+    return defaultDropboxIngestionPolicyPath();
+  return join45(homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
+}
+function envForHome(homeDir) {
+  if (!homeDir)
+    return process.env;
+  return {
+    HOME: homeDir,
+    XDG_DATA_HOME: join45(homeDir, ".local", "share"),
+    XDG_STATE_HOME: join45(homeDir, ".local", "state")
+  };
+}
+function envForContext(context) {
+  if (!context?.env)
+    return envForHome(context?.homeDir);
+  if (!context.homeDir)
+    return context.env;
+  return { ...envForHome(context.homeDir), ...context.env };
+}
+function resolveHome(homeDir) {
+  return homeDir?.trim() || homedir33();
+}
+function requirePath(value, name) {
+  if (!value?.trim())
+    throw new OperationError("invalid_params", `${name} must be provided.`);
+  return value.trim();
+}
+function safePathSegment(value) {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+function uniqueTargets(values) {
+  const byPath = new Map;
+  for (const value of values) {
+    const existing = byPath.get(value.path);
+    if (!existing || existing.kind !== "known_root" && value.kind === "known_root") {
+      byPath.set(value.path, value);
+    }
+  }
+  return [...byPath.values()];
+}
+
 // src/cli.ts
-init_data_lifecycle();
 init_delphi();
 init_email();
 init_operation_exposure();
@@ -135638,7 +135593,8 @@ init_secret_store();
 init_sovereignty();
 
 // src/workers/classification/tier-cli.ts
-init_data_lifecycle();
+import { Database as Database13 } from "bun:sqlite";
+import { existsSync as existsSync45 } from "node:fs";
 init_mail_source_scope();
 init_connected_handles();
 init_operation_error();
@@ -135651,8 +135607,6 @@ init_tier_classifier();
 init_tier_ledger();
 init_local_index();
 init_tier_rules();
-import { Database as Database13 } from "bun:sqlite";
-import { existsSync as existsSync45 } from "node:fs";
 var TIER_CLI_USAGE = {
   "tier set": "olympus tier set <locator> public|personal|private|secrets|not-secret|clear",
   "tier explain": "olympus tier explain <locator>",
