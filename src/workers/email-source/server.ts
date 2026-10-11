@@ -343,6 +343,14 @@ import {
   type FileSourceScopePolicyRef,
 } from '../source-scope-runtime.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
+import {
+  guardAccountBoundLanes,
+  createSourceAccountGuard,
+  type SourceAccountGuard,
+  type SourceAccountGuardOptions,
+} from '../source-account-guard.ts';
+import { dropboxOwnRootFolderIds, dropboxOwnsOneOfFolders, type AccountBoundProvider } from '../../core/provider-account-identity.ts';
+import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
 import { MAIL_SCOPE_WINDOW_LABELS, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
@@ -3040,6 +3048,9 @@ export async function main(): Promise<void> {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      assertScopeCurrent: () => {
+        fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+      },
       ...(gmailTierLane?.publicStore ? { publicStore: gmailTierLane.publicStore } : {}),
       ...(gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {}),
       // A fresh provider traversal is a bounded, resumable history walk.
@@ -3598,11 +3609,68 @@ export async function main(): Promise<void> {
     capability: 'readwise.sync',
     handles: readActiveConnectedHandles(process.env),
   }));
+  // One provider account per file source (source-account-guard.ts): every
+  // task of the Dropbox, Drive and Gmail lanes first checks that the token it
+  // reads with, the connected grant and the stored items name one account.
+  // Kept across scheduler rebuilds so a token is looked up once, not per pass.
+  const sourceAccountGuards = new Map<string, SourceAccountGuard>();
+  // The guards of the lanes being assembled, applied once every task of the
+  // lane is attached: an embedding sweep or watch task appended later writes
+  // the same stores and must not run past the guard (independent review
+  // round 10).
+  const laneGuards = new Map<string, SourceAccountGuard>();
+  const laneStores = (
+    stores: ReadonlyArray<LocalConnectorStore | undefined>,
+    onDemand: ReadonlyArray<OnDemandTierStore | undefined>,
+  ) => ({
+    laneHoldsItems: (): boolean => stores.some((store) => store?.holdsAnyItem() === true)
+      // A tier store not opened this run counts as holding items when its file
+      // exists: guessing "empty" could bind a new account over a previous
+      // account's rows.
+      || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
+    // A `data delete --source` while the worker stayed up leaves these
+    // handles on deleted files (PR review): only a restart reopens them.
+    laneStoresStale: (): boolean => stores.some((store) => store?.fileReplacedOrRemoved() === true)
+      || onDemand.some((leg) => leg?.current()?.fileReplacedOrRemoved() === true),
+  });
+  const withSourceAccountGuard = (
+    source: SourceSchedulerSource | undefined,
+    lane: {
+      sourceId: AccountBoundSourceId;
+      provider: AccountBoundProvider;
+      capability: string;
+      handle: string | undefined;
+      laneHoldsItems: () => boolean;
+      laneStoresStale: () => boolean;
+      ownAccountEvidence?: SourceAccountGuardOptions['ownAccountEvidence'];
+    },
+  ): SourceSchedulerSource | undefined => {
+    if (!source || !lane.handle || !connectedHandleRegistryPath) return source;
+    const key = `${lane.sourceId}\n${lane.handle}`;
+    let guard = sourceAccountGuards.get(key);
+    if (!guard) {
+      guard = createSourceAccountGuard({
+        sourceId: lane.sourceId,
+        provider: lane.provider,
+        handle: lane.handle,
+        capability: lane.capability,
+        registryPath: connectedHandleRegistryPath,
+        laneHoldsItems: lane.laneHoldsItems,
+        laneStoresStale: lane.laneStoresStale,
+        requestStoreReopen: () => requestModelReload(),
+        ...(lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}),
+      });
+      sourceAccountGuards.set(key, guard);
+    }
+    laneGuards.set(source.sourceId, guard);
+    return source;
+  };
   const schedulerSourcesForHandles = (handles: readonly ConnectedCredentialHandle[]): {
     sources: SourceSchedulerSource[];
     decisions: SourceSchedulerConstructionDecision[];
   } => {
     const decisions: SourceSchedulerConstructionDecision[] = [];
+    laneGuards.clear();
     // Every lane reports why it did or did not build. A constructed source is
     // recorded under its OWN sourceId rather than the id expected here, so an
     // id that cannot be selected is visible in the boot log instead of showing
@@ -3752,9 +3820,15 @@ export async function main(): Promise<void> {
           });
           // Keyed to the mail scope revision like the folder lanes: a new
           // revision is a new task id and so a fresh scheduler checkpoint.
-          return source && currentGmailScopeRef && fileSourceScopeAuthority
+          return withSourceAccountGuard(source && currentGmailScopeRef && fileSourceScopeAuthority
             ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentGmailScopeRef })
-            : undefined;
+            : undefined, {
+            sourceId: 'gmail.email',
+            provider: 'gmail',
+            capability: 'gmail.email.sync',
+            handle: currentGmailHandle?.handle,
+            ...laneStores([gmailInternalConnectorStore, gmailSecureConnectorStore], [gmailTierLane?.publicStore]),
+          });
         },
       ),
       recordLane(
@@ -3770,9 +3844,18 @@ export async function main(): Promise<void> {
           extractionAccountScope: currentGoogleDriveHandle?.accountRole?.trim()
             || accountFromGoogleHandle(currentGoogleDriveHandle?.handle),
           });
-          return source && currentGoogleDriveScopeRef && fileSourceScopeAuthority
+          return withSourceAccountGuard(source && currentGoogleDriveScopeRef && fileSourceScopeAuthority
             ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentGoogleDriveScopeRef })
-            : undefined;
+            : undefined, {
+            sourceId: 'google_drive.docs',
+            provider: 'google_drive',
+            capability: 'google_drive.docs.sync',
+            handle: currentGoogleDriveHandle?.handle,
+            ...laneStores(
+              [googleDriveInternalConnectorStore, googleDriveSecureConnectorStore],
+              [googleDriveTierLane?.publicStore],
+            ),
+          });
         },
       ),
       recordLane(
@@ -3807,9 +3890,24 @@ export async function main(): Promise<void> {
               }
             : {}),
           });
-          return source && currentDropboxScopeRef && fileSourceScopeAuthority
+          return withSourceAccountGuard(source && currentDropboxScopeRef && fileSourceScopeAuthority
             ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentDropboxScopeRef })
-            : undefined;
+            : undefined, {
+            sourceId: 'dropbox.files',
+            provider: 'dropbox',
+            capability: 'dropbox.files.sync',
+            handle: currentDropboxHandle?.handle,
+            ...laneStores(
+              [dropboxConnectorStore],
+              dropboxTierLane ? [dropboxTierLane.internal, dropboxTierLane.public] : [],
+            ),
+            // Grants from before account_info.read have no readable account;
+            // folders only that account can open stand in for it.
+            ownAccountEvidence: {
+              record: (accessToken) => dropboxOwnRootFolderIds({ accessToken }),
+              check: (accessToken, folderIds) => dropboxOwnsOneOfFolders({ accessToken, folderIds }),
+            },
+          });
         },
       ),
       recordLane(
@@ -3895,16 +3993,19 @@ export async function main(): Promise<void> {
       // A source with no store that embeds (a keyword-only lane) gets no sweep.
       return targets().length > 0 ? targets : undefined;
     });
+    // Guarded with its sweep; the watch task attached next rides on one host
+    // lane but serves every source, so it stays outside any one lane's guard.
+    const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
       decisions,
       sources: sourceWatchPass
         ? attachSourceWatchSchedulerTask({
-            sources: sweptSources,
+            sources: guardedSources,
             selectedSourceIds: olympusConfig.worker.scheduler.sourceIds,
             intervalMs: olympusConfig.worker.scheduler.syncIntervalSeconds * 1_000,
             pass: sourceWatchPass,
           })
-        : sweptSources,
+        : guardedSources,
     };
   };
   const schedulerAssembly = schedulerSourcesForHandles(connectedHandles);

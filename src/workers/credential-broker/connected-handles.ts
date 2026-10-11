@@ -459,6 +459,7 @@ export function deriveEnvCredentialHandlesFromRegistry(
       scopes: [...handle.scopes],
       tokenEnvNames: [],
       expiresInSeconds: 3600,
+      grantGeneration: `${handle.connectedAt}\n${handle.providerAccountId ?? ''}`,
     };
     if (handle.sessionKind) definition.sessionKind = handle.sessionKind;
     if (handle.accountRole) definition.accountRole = handle.accountRole;

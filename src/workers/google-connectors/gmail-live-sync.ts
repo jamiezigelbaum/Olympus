@@ -195,6 +195,15 @@ export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnect
    */
   scopeApproval?: { generation: string; revision: string };
   /**
+   * Re-check that approval against the live registry. Called after every
+   * provider answer and before it reaches a store, as the Dropbox and Drive
+   * lanes do per item: the task-entry check alone let a reconnect that landed
+   * mid-task list the new account's mailbox into the old account's stores
+   * (independent review round 4 on the account-binding change). Throws when
+   * the approval is no longer current.
+   */
+  assertScopeCurrent?: () => void;
+  /**
    * The lane's per-tier stores (tiered-store-set.ts). Omitted: a set over the
    * internal and secure stores, with the Public store below when given.
    */
@@ -275,7 +284,7 @@ export function createGmailConnectorStoreSyncHandler(
     // its first pass and replays it to the other legs, routes each NEW message
     // by its recorded tiers, and leaves every existing message on the lane's
     // own placement. Its resume point commits only after every leg did.
-    const traversal = scopedTraversal(input.connector, connectorId);
+    const traversal = scopedTraversal(input.connector, connectorId, options.assertScopeCurrent);
     const sync = {
       fetchContent: true,
       classification,
@@ -423,14 +432,42 @@ function gmailLegOf(run: TieredStoreSetRun, domain: 'public_safe' | 'internal' |
 }
 
 /** The connector under this lane's (scope-bound) cursor id. */
-function scopedTraversal(connector: SourceConnector, connectorId: string): SourceConnector {
+function scopedTraversal(
+  connector: SourceConnector,
+  connectorId: string,
+  assertScopeCurrent: (() => void) | undefined,
+): SourceConnector {
+  if (!assertScopeCurrent) {
+    return {
+      id: connectorId,
+      family: connector.family,
+      authenticate: () => connector.authenticate(),
+      fetchItem: (localItemId: string): Promise<RawItem> => connector.fetchItem(localItemId),
+      classificationSignals: (item: RawItem) => connector.classificationSignals(item),
+      listItems: (options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage> => connector.listItems(options),
+    };
+  }
   return {
     id: connectorId,
     family: connector.family,
-    authenticate: () => connector.authenticate(),
-    fetchItem: (localItemId: string): Promise<RawItem> => connector.fetchItem(localItemId),
+    authenticate: async () => {
+      await connector.authenticate();
+      assertScopeCurrent();
+    },
+    fetchItem: async (localItemId: string): Promise<RawItem> => {
+      const item = await connector.fetchItem(localItemId);
+      assertScopeCurrent();
+      return item;
+    },
     classificationSignals: (item: RawItem) => connector.classificationSignals(item),
-    listItems: (options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage> => connector.listItems(options),
+    listItems: (options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage> => ({
+      async *[Symbol.asyncIterator]() {
+        for await (const page of connector.listItems(options)) {
+          assertScopeCurrent();
+          yield page;
+        }
+      },
+    }),
   };
 }
 
