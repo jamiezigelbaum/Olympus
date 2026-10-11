@@ -11,6 +11,9 @@
  *   (authorize-bridge.ts);
  * - `/connect/demo/authorize`: reviewer sign-in, routed only to the one demo
  *   install the relay is configured with (none by default);
+ * - `POST /connect/register`: RFC 7591 registration for ChatGPT only, which
+ *   names an already pinned ChatGPT client and keeps nothing
+ *   (client-registration.ts);
  * - `POST /connect/token`, `POST /connect/revoke`, `/mcp` and `/openai/mcp`
  *   (the plugin directory's endpoint: the same tools narrowed to its
  *   allowlist, its own protected resource; shared/directory-tools.ts): routed
@@ -75,6 +78,7 @@ import {
   privateAnswerJobId,
 } from '../shared/private-answer.ts';
 import { authorizeBridge } from './authorize-bridge.ts';
+import { MAX_REGISTRATION_BYTES, registerChatGptClient } from './client-registration.ts';
 import {
   ConfirmedCredentials,
   DEFAULT_LIMITS,
@@ -581,6 +585,31 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     });
   };
 
+  /** `/connect/register`: ChatGPT only, answered here without state (client-registration.ts). */
+  const register = async (request: Request, ip: string): Promise<Response> => {
+    if (request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
+    if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) {
+      return json(400, { error: 'invalid_client_metadata', error_description: 'Registration must be application/json.' });
+    }
+    const read = await readBody(request, MAX_REGISTRATION_BYTES, ip);
+    if (!read.ok) {
+      return read.response.status === 413
+        ? json(413, { error: 'invalid_client_metadata', error_description: 'Registration is too large.' })
+        : read.response;
+    }
+    let text: string;
+    try {
+      text = new TextDecoder().decode(read.body);
+    } finally {
+      read.release();
+    }
+    const outcome = registerChatGptClient(text, Math.floor(now() / 1000));
+    log('client_registration', { ok: outcome.ok });
+    return outcome.ok
+      ? json(201, outcome.body)
+      : json(400, { error: outcome.error, error_description: outcome.description });
+  };
+
   /** `/connect/token` and `/connect/revoke`: routed by the credential in the form. */
   const oauthForm = async (request: Request, path: string, kind: 'token' | 'revoke', ip: string): Promise<Response> => {
     if (request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
@@ -931,6 +960,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           return authorizeBridge(url, bridge);
         case OAUTH_PATHS.demoAuthorize:
           return demoSignIn(request, `${OAUTH_PATHS.demoAuthorize}${url.search}`, ip);
+        case OAUTH_PATHS.register:
+          return register(request, ip);
         case OAUTH_PATHS.token:
           return oauthForm(request, OAUTH_PATHS.token, 'token', ip);
         case OAUTH_PATHS.revoke:

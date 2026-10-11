@@ -9,8 +9,9 @@
           "auth": {
             "type": "oauth",
             "client": {
-              "mode": "cimd"
-            }
+              "mode": "dcr"
+            },
+            "registrationUrl": "https://mcp.olympusplugin.ai/connect/register"
           }
         }
       }

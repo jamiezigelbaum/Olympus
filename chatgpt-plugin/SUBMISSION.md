@@ -181,14 +181,19 @@ Package
       `assets/icon.png` is the site's mountain mark (2026-10-10), replacing
       the emoji-style placeholder; `brandColor` #2f5d50, `brandColorDark`
       #7fbfa9.
-- [ ] Skills pass the automated scan. The setup skill shows the user exactly
-      one reviewed command to run in Terminal themselves,
-      `curl -fsSL https://olympusplugin.ai/install.sh | sh`, and never runs
-      commands itself (owner decision 2026-10-03: the 1.0 installer is a
-      script). If the scan rejects a `curl | sh` instruction in a skill, link
-      https://olympusplugin.ai/install/ instead and rescan.
-
-Installer
+- [ ] Skills pass the automated scan. The scan flagged the setup skill's
+      `curl | sh` line (2026-10-11: "may download or execute code outside
+      the reviewed package"), so the skill now sends the user to
+      https://olympusplugin.ai/install/ and shows no commands.
+- [x] `mcp.json` declares `auth: {type: "oauth", client: {mode: "dcr"},
+      registrationUrl: "https://mcp.olympusplugin.ai/connect/register"}`.
+      The portal's Connect (2026-10-11) flips a CIMD-only server to
+      "pre-defined client" before it has loaded the server's OAuth metadata,
+      then refuses it for lacking a client ID; a `provided` clientId in
+      mcp.json was dropped on upload. DCR is what the portal completes. The
+      relay answers registration itself, without state, only for ChatGPT
+      return addresses, with the ChatGPT client every engine already pins
+      (connect-relay/server/client-registration.ts).
 - [ ] The build under review is published to the site:
       `bun scripts/publish-release-to-site.ts` (packages the beta.11 Google
       Desktop client, the source default: owner decision 2026-10-03),

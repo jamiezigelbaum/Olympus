@@ -98,7 +98,9 @@ describe('chatgpt-plugin/mcp.json', () => {
     expect(servers[0]![1]).toEqual({
       type: 'streamable-http',
       url: 'https://mcp.olympusplugin.ai/openai/mcp',
-      extensions: { 'com.openai': { auth: { type: 'oauth', client: { mode: 'cimd' } } } },
+      // The portal's Connect completes only DCR; the relay answers it with the
+      // ChatGPT client the engines pin (connect-relay/server/client-registration.ts).
+      extensions: { 'com.openai': { auth: { type: 'oauth', client: { mode: 'dcr' }, registrationUrl: 'https://mcp.olympusplugin.ai/connect/register' } } },
     });
   });
 });
