@@ -6082,20 +6082,20 @@ async function completeOAuthSourceConnection(prepared, code) {
       });
     }
     const secretRefs = [];
+    const secretWrites = [];
     const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
     const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
-    await prepared.secretStore.set(clientIdKey, prepared.clientId);
-    await prepared.secretStore.set(refreshKey, refreshToken);
+    secretWrites.push([clientIdKey, prepared.clientId], [refreshKey, refreshToken]);
     secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
     if (prepared.options.clientIdSource !== undefined) {
       const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
-      await prepared.secretStore.set(clientIdSourceKey, prepared.options.clientIdSource);
+      secretWrites.push([clientIdSourceKey, prepared.options.clientIdSource]);
       secretRefs.push(`store:${clientIdSourceKey}`);
     }
     let clientSecretRef;
     if (!usesGooglePublisherExchange && clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
       const clientSecretKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_secret`;
-      await prepared.secretStore.set(clientSecretKey, clientSecret);
+      secretWrites.push([clientSecretKey, clientSecret]);
       clientSecretRef = `store:${clientSecretKey}`;
       secretRefs.push(clientSecretRef);
     }
@@ -6133,8 +6133,11 @@ async function completeOAuthSourceConnection(prepared, code) {
         connectedAt: connectedAt.toISOString(),
         ...providerAccountId ? { providerAccountId } : {}
       }, prepared.registryPath);
-      invalidateMintedCredentialSessions(handle);
     }
+    for (const [key, value] of secretWrites)
+      await prepared.secretStore.set(key, value);
+    for (const handle of handles)
+      invalidateMintedCredentialSessions(handle);
     const sourceAccountPurgeRequired = [];
     for (const handleDefinition of prepared.definition.handles) {
       if (!isAccountBoundProvider(handleDefinition.provider))
@@ -117265,7 +117268,7 @@ function createSourceAccountGuard(options) {
       if (decision.action === "refuse" && decision.reason === "token_account_mismatch") {
         invalidateMintedCredentialSessions(options.handle);
         verified.clear();
-        throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: the access token in use belongs to a different account than the connected credential; it was discarded and nothing was synced.`);
+        throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: the access token in use belongs to a different account than the connected credential; it was discarded and nothing was synced. If a Connect for this source just failed, connect it again.`);
       }
       if (decision.action === "refuse") {
         throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not confirm which account the credential belongs to; nothing was synced this run.`);

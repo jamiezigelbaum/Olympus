@@ -22,7 +22,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-async function dropboxServer(account: { tokenAccountId?: string; lookupAccountId?: string }) {
+async function dropboxServer(account: { tokenAccountId?: string; lookupAccountId?: string; refreshToken?: string }) {
   const authorizeScopes: string[] = [];
   const lookups: string[] = [];
   const server = createServer((request, response) => {
@@ -37,7 +37,7 @@ async function dropboxServer(account: { tokenAccountId?: string; lookupAccountId
     if (url.pathname === '/oauth2/token') {
       response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
         access_token: 'dropbox-access-token-fixture',
-        refresh_token: 'dropbox-refresh-token-fixture',
+        refresh_token: account.refreshToken ?? 'dropbox-refresh-token-fixture',
         expires_in: 14_400,
         ...(account.tokenAccountId ? { account_id: account.tokenAccountId } : {}),
       }));
@@ -250,6 +250,53 @@ describe('Dropbox connect records the account its grant belongs to', () => {
         provider_account_id: 'dbid:main-account',
         purge_required: { reason: 'account_changed' },
       });
+    } finally {
+      server.close();
+    }
+  });
+
+  test('the new refresh token is only ever on file under the new grant (Codex round 3)', async () => {
+    const install = installDir();
+    const account: { tokenAccountId?: string; refreshToken?: string } = {
+      tokenAccountId: 'dbid:main-account',
+      refreshToken: 'refresh-token-main',
+    };
+    const server = await dropboxServer(account);
+    try {
+      await connectDropbox(install, server.baseUrl);
+      account.tokenAccountId = 'dbid:demo-account';
+      account.refreshToken = 'refresh-token-demo';
+
+      // At the instant the new refresh token is written, the registry must
+      // already name the new grant: scope checks re-read it, so nothing the
+      // new token mints can pass as the old grant's.
+      const seenAtWrite: Array<string | undefined> = [];
+      const inner = install.secretStore;
+      const observing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
+        set: async (key: string, value: string) => {
+          if (key.endsWith('.oauth.refresh_token')) {
+            seenAtWrite.push(readConnectedHandleRegistry(install.registryPath).handles[0]?.providerAccountId);
+          }
+          return inner.set(key, value);
+        },
+      });
+      await connectDropbox({ ...install, secretStore: observing }, server.baseUrl);
+      expect(seenAtWrite).toEqual(['dbid:demo-account']);
+
+      // And a connect that fails at that write leaves the old token under the
+      // new generation, which the account guard refuses as a mismatch, rather
+      // than the new token under the old generation, which nothing could see.
+      account.tokenAccountId = 'dbid:third-account';
+      account.refreshToken = 'refresh-token-third';
+      const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
+        set: async (key: string, value: string) => {
+          if (key.endsWith('.oauth.refresh_token')) throw new Error('secret store unavailable');
+          return inner.set(key, value);
+        },
+      });
+      await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl)).rejects.toThrow();
+      expect(await inner.get('dropbox.personal.oauth.refresh_token')).toBe('refresh-token-demo');
+      expect(readConnectedHandleRegistry(install.registryPath).handles[0]?.providerAccountId).toBe('dbid:third-account');
     } finally {
       server.close();
     }

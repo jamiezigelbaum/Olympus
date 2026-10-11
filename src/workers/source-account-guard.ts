@@ -145,7 +145,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
         verified.clear();
         throw new SourceAccountChangedError(
           'source_account_token_mismatch',
-          `${options.sourceId}: the access token in use belongs to a different account than the connected credential; it was discarded and nothing was synced.`,
+          `${options.sourceId}: the access token in use belongs to a different account than the connected credential; it was discarded and nothing was synced. If a Connect for this source just failed, connect it again.`,
         );
       }
       if (decision.action === 'refuse') {

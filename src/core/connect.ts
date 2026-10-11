@@ -686,12 +686,19 @@ async function completeOAuthSourceConnection(
       }
 
       const secretRefs: string[] = [];
-      const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
-      const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
-      await prepared.secretStore.set(clientIdKey, prepared.clientId);
       // The refresh token and every handle publish under one cross-process
       // custody fence, so Disconnect can occur wholly before or after Connect.
-      await prepared.secretStore.set(refreshKey, refreshToken);
+      // The secrets are written LAST, after the registry entries (Codex round 3
+      // on this change): the registry entry is the commit point that changes
+      // the grant generation, and every scope check re-reads it. Written first,
+      // a connect that stopped between the two left the old generation in
+      // force over the new refresh token, so a token minted from the new
+      // account passed every check as the old one. In this order, nothing the
+      // new secret can mint predates the generation change.
+      const secretWrites: Array<[key: string, value: string]> = [];
+      const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
+      const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
+      secretWrites.push([clientIdKey, prepared.clientId], [refreshKey, refreshToken]);
       secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
       // Written only when the caller states it, which today means only the
       // dashboard's publisher-relay start route: the plain CLI connect path has
@@ -703,7 +710,7 @@ async function completeOAuthSourceConnection(
       // its next reauthentication (Codex round 3 on e75598f7).
       if (prepared.options.clientIdSource !== undefined) {
         const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
-        await prepared.secretStore.set(clientIdSourceKey, prepared.options.clientIdSource);
+        secretWrites.push([clientIdSourceKey, prepared.options.clientIdSource]);
         secretRefs.push(`store:${clientIdSourceKey}`);
       }
 
@@ -714,7 +721,7 @@ async function completeOAuthSourceConnection(
       // reintroduce a stored secret for a credential that has none.
       if (!usesGooglePublisherExchange && clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
         const clientSecretKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_secret`;
-        await prepared.secretStore.set(clientSecretKey, clientSecret);
+        secretWrites.push([clientSecretKey, clientSecret]);
         clientSecretRef = `store:${clientSecretKey}`;
         secretRefs.push(clientSecretRef);
       }
@@ -763,10 +770,11 @@ async function completeOAuthSourceConnection(
           connectedAt: connectedAt.toISOString(),
           ...(providerAccountId ? { providerAccountId } : {}),
         }, prepared.registryPath);
-        // The new grant is in place: no token minted from the old one may be
-        // handed out again by this process, whatever is left of its lifetime.
-        invalidateMintedCredentialSessions(handle);
       }
+      for (const [key, value] of secretWrites) await prepared.secretStore.set(key, value);
+      // The new grant is in place: no token minted from the old one may be
+      // handed out again by this process, whatever is left of its lifetime.
+      for (const handle of handles) invalidateMintedCredentialSessions(handle);
 
       // Only once the new grant is fully stored (Codex round 1 on 6475d315):
       // recorded first, a connect that then failed to store its credential left
