@@ -20,6 +20,7 @@ import {
 import {
   createEnvCredentialBroker,
   invalidateMintedCredentialSessions,
+  JsonCredentialOAuth2StateStore,
 } from '../src/workers/credential-broker/index.ts';
 
 const dirs: string[] = [];
@@ -350,6 +351,89 @@ describe('minted access tokens are bound to the grant that minted them', () => {
     const raced = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
     expect((raced as { code?: string }).code).toBe('credential_refresh_busy');
 
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+  });
+
+  test('a refresh discarded across a reconnect leaves no marker to latch the new grant for reauthorization', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const stateStore = new JsonCredentialOAuth2StateStore(join(registryPath, '..', 'broker-state.json'));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2StateStore: stateStore,
+      oauth2CacheNamespace: `reconnect-marker-${registryPath}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        calls += 1;
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        if (calls === 1) await gate;
+        return new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+
+    const inFlight = broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await stateStore.load('dropbox.personal'))?.pendingRefreshStartedAt).toBeDefined();
+    await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+    writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+    release();
+
+    expect(((await inFlight) as { code?: string }).code).toBe('credential_refresh_busy');
+    expect((await stateStore.load('dropbox.personal'))?.pendingRefreshStartedAt).toBeUndefined();
+    const next = await broker.issueSession(REQUEST);
+    expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+  });
+
+  test('a stale write-ahead marker never latches the grant that replaced it (independent review round 7)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const inner = new JsonCredentialOAuth2StateStore(join(registryPath, '..', 'broker-state.json'));
+    // A crashed refresh of grant A left its marker.
+    await inner.save('dropbox.personal', { pendingRefreshStartedAt: '2026-10-10T22:40:00.000Z' });
+    // The broker reads that marker; a reconnect to B (which clears it) lands
+    // before the broker acts on what it read.
+    let reconnected = false;
+    const racing = {
+      load: async (handle: string) => {
+        const snapshot = await inner.load(handle);
+        if (!reconnected) {
+          reconnected = true;
+          await inner.save(handle, { pendingRefreshStartedAt: undefined });
+          await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+          writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+        }
+        return snapshot;
+      },
+      save: (handle: string, state: Parameters<typeof inner.save>[1]) => inner.save(handle, state),
+      leaseTargetPath: (handle: string) => inner.leaseTargetPath(handle),
+    };
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2StateStore: racing,
+      oauth2CacheNamespace: `reconnect-stalemarker-${registryPath}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '';
+        return new Response(JSON.stringify({ access_token: `access-for-${refreshToken}`, expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+
+    const raced = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect((raced as { code?: string }).code).toBe('credential_refresh_busy');
+    expect(readConnectedHandleRegistry(registryPath).handles[0]?.backendState?.status).not.toBe('reauth_required');
+    expect((await inner.load('dropbox.personal'))?.status).not.toBe('reauth_required');
     const next = await broker.issueSession(REQUEST);
     expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
   });

@@ -94,14 +94,16 @@ function dropboxOptions(install: ReturnType<typeof installDir>, baseUrl: string)
   };
 }
 
-async function connectDropbox(install: ReturnType<typeof installDir>, baseUrl: string) {
+// `withStateStore: false` is the dashboard install's shape: no broker state
+// store, so the refresh token lives only in the secret store.
+async function connectDropbox(install: ReturnType<typeof installDir>, baseUrl: string, withStateStore = true) {
   return connectOAuthSource({
     source: 'dropbox',
     clientId: 'dropbox-client-id-fixture',
     authUrl: `${baseUrl}/authorize`,
     tokenUrl: `${baseUrl}/oauth2/token`,
     registryPath: install.registryPath,
-    oauth2StateStore: new JsonCredentialOAuth2StateStore(install.statePath),
+    ...(withStateStore ? { oauth2StateStore: new JsonCredentialOAuth2StateStore(install.statePath) } : {}),
     secretStore: install.secretStore,
     openBrowser: false,
     onAuthorizationUrl: async (url) => {
@@ -205,7 +207,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     });
     const server = await dropboxServer({ tokenAccountId: 'dbid:demo-account' });
     try {
-      await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl)).rejects.toThrow();
+      await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl, false)).rejects.toThrow();
       const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
       expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toEqual({ provider_account_id: 'dbid:main-account' });
     } finally {
@@ -233,7 +235,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     const install = installDir();
     const server = await dropboxServer({});
     try {
-      await connectDropbox(install, server.baseUrl);
+      await connectDropbox(install, server.baseUrl, false);
       rmSync(sourceAccountBindingsPath(install.registryPath), { force: true });
       const inner = install.secretStore;
       const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
@@ -242,7 +244,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
           return inner.set(key, value);
         },
       });
-      await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl)).rejects.toThrow();
+      await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl, false)).rejects.toThrow();
       const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
       expect(read.kind === 'ok' && read.bindings.sources['dropbox.files']).toBeUndefined();
     } finally {
@@ -276,6 +278,54 @@ describe('Dropbox connect records the account its grant belongs to', () => {
         laneHoldsItems: true,
         now: new Date('2026-10-11T00:00:00.000Z'),
       })).toEqual({ action: 'purge', reason: 'previous_account_unknown' });
+    } finally {
+      server.close();
+    }
+  });
+
+  test('with a broker state store, a failure after the state save keeps the marker (independent review round 7)', async () => {
+    // The broker falls back to the state store's refresh token, so B may be
+    // live as soon as that save lands, before any secret is written.
+    const install = installDir();
+    const server = await dropboxServer({});
+    try {
+      await connectDropbox(install, server.baseUrl);
+      rmSync(sourceAccountBindingsPath(install.registryPath), { force: true });
+      const inner = install.secretStore;
+      const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
+        set: async (key: string, value: string) => {
+          if (key.endsWith('.oauth.client_id')) throw new Error('secret store unavailable');
+          return inner.set(key, value);
+        },
+      });
+      await expect(connectDropbox({ ...install, secretStore: failing }, server.baseUrl)).rejects.toThrow();
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      const binding = read.kind === 'ok' ? read.bindings.sources['dropbox.files'] : undefined;
+      expect(binding?.reconnected_at).toBeTruthy();
+      expect(decideSourceAccountAction({
+        binding,
+        grantAccountId: undefined,
+        tokenAccountId: 'dbid:new-account',
+        laneHoldsItems: true,
+        now: new Date('2026-10-11T00:00:00.000Z'),
+      })).toEqual({ action: 'purge', reason: 'previous_account_unknown' });
+    } finally {
+      server.close();
+    }
+  });
+
+  test('a reconnect clears a write-ahead refresh marker left by the replaced grant (independent review round 7)', async () => {
+    const install = installDir();
+    const server = await dropboxServer({});
+    try {
+      await connectDropbox(install, server.baseUrl);
+      const store = new JsonCredentialOAuth2StateStore(install.statePath);
+      // A pending-only entry, as a refresh of a secret-store-held token
+      // leaves it, with no refresh token of its own in the state store.
+      rmSync(install.statePath, { force: true });
+      await store.save('dropbox.personal', { pendingRefreshStartedAt: '2026-10-10T22:41:30.000Z' });
+      await connectDropbox(install, server.baseUrl);
+      expect((await store.load('dropbox.personal'))?.pendingRefreshStartedAt).toBeUndefined();
     } finally {
       server.close();
     }

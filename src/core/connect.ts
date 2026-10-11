@@ -760,7 +760,11 @@ async function completeOAuthSourceConnection(
       // state store and leave handles.json metadata-only. Both writes remain
       // inside the same grant-custody fence.
       const registryOwnsOAuth = prepared.options.source !== 'x' || !prepared.oauth2StateStore;
-      let oldGrantIntact = true;
+      // A broker state store also holds the new refresh token, and the broker
+      // falls back to it when no secret names one, so once its save begins
+      // the new grant may be live: the markers stay from then on
+      // (independent review round 7).
+      let oldGrantIntact = !prepared.oauth2StateStore;
       try {
         for (const handleDefinition of prepared.definition.handles) {
           const handle = handleDefinition.handle(prepared.accountRole);
@@ -772,6 +776,11 @@ async function completeOAuthSourceConnection(
             scopes: handleDefinition.scopes,
             status: 'available',
             updatedAt: connectedAt.toISOString(),
+            // A write-ahead marker left by a refresh of the replaced grant is
+            // about that grant's token; carried forward, the new grant's
+            // first mint would latch reauthorization (independent review
+            // round 7).
+            pendingRefreshStartedAt: undefined,
             ...(providerAccountId ? { providerAccountId } : {}),
           });
           upsertConnectedHandle({
