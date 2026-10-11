@@ -30,6 +30,7 @@ import {
 import { engineChildrenPath, reapRecordedEngineChildren, type EngineChildReapDeps, type EngineChildReapResult } from './engine-children.ts';
 import { redactLogLine } from './log-redaction.ts';
 import { OperationError } from './operation-error.ts';
+import { openClawConfigPath } from './config.ts';
 import { olympusPackageRoot } from './package-root.ts';
 import { olympusDataDir, remoteAccessDir } from './remote-access.ts';
 import { loadSovereigntyPreset, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
@@ -842,13 +843,6 @@ export function engineSovereigntySeedBlocker(input: {
     if (openClawConfigHasOlympus(text, dirname(openclawConfig))) return `OpenClaw is configured to run Olympus (${openclawConfig}).`;
   }
   return undefined;
-}
-
-function openClawConfigPath(homeDir: string, env: Record<string, string | undefined>): string {
-  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
-  if (explicit && isAbsolute(explicit)) return explicit;
-  const stateDir = env.OPENCLAW_STATE_DIR?.trim();
-  return join(stateDir && isAbsolute(stateDir) ? stateDir : join(homeDir, '.openclaw'), 'openclaw.json');
 }
 
 /**

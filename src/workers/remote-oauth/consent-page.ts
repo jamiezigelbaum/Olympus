@@ -48,9 +48,14 @@ export function escapeHtml(value: string): string {
 /**
  * Security headers for every page the approval flow serves. `form-action`
  * names the client's redirect origin too, because browsers apply it to the
- * redirect that follows the form post.
+ * redirect that follows the form post. `referrerPolicy` is `no-referrer`
+ * except on the demo sign-in (see DEMO_REFERRER_POLICY).
  */
-export function consentSecurityHeaders(nonce: string, redirectOrigin?: string): Record<string, string> {
+export function consentSecurityHeaders(
+  nonce: string,
+  redirectOrigin?: string,
+  referrerPolicy: 'no-referrer' | typeof DEMO_REFERRER_POLICY = 'no-referrer',
+): Record<string, string> {
   const formAction = redirectOrigin ? `'self' ${redirectOrigin}` : "'self'";
   return {
     'Content-Type': 'text/html; charset=utf-8',
@@ -63,7 +68,7 @@ export function consentSecurityHeaders(nonce: string, redirectOrigin?: string): 
     ].join('; '),
     'X-Frame-Options': 'DENY',
     'X-Content-Type-Options': 'nosniff',
-    'Referrer-Policy': 'no-referrer',
+    'Referrer-Policy': referrerPolicy,
     'Cache-Control': 'no-store',
     'Cross-Origin-Opener-Policy': 'same-origin',
   };
@@ -218,6 +223,18 @@ ${input.loopbackRedirect
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 
+/**
+ * The demo sign-in's referrer policy. Under `no-referrer` browsers submit a
+ * page's own form with `Origin: null` (Fetch, "append a request Origin
+ * header"), and the demo POST requires the relay origin there because no
+ * cookie or Sec-Fetch-* header survives the relay (handler.ts demoPost);
+ * `same-origin` makes the browser send its real Origin, while a Referer
+ * still goes only to the relay itself, never to ChatGPT after the redirect.
+ * The meta tag repeats it because a meta referrer policy overrides the
+ * header, and the relay may still send its default `no-referrer`.
+ */
+export const DEMO_REFERRER_POLICY = 'same-origin';
+
 export interface DemoSignInPageInput {
   requestId: string;
   csrf: string;
@@ -241,7 +258,7 @@ export function renderDemoSignInPage(input: DemoSignInPageInput): { body: string
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="${DEMO_REFERRER_POLICY}">
 <title>Olympus demo sign-in</title>
 <style nonce="${nonce}">${CONSENT_PAGE_STYLE}</style>
 </head>
@@ -269,7 +286,7 @@ ${error}
 </main>
 </body>
 </html>`;
-  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
+  return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin, DEMO_REFERRER_POLICY) };
 }
 
 /** A terminal page for requests that cannot safely redirect back to the client. */

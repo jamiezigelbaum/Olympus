@@ -17,12 +17,14 @@
  * - `demo` (`/connect/demo/authorize`, routed only to the operator's demo
  *   install): the reviewer sign-in form, redirecting back to ChatGPT.
  *
- * Every install answer gets `X-Content-Type-Options: nosniff`,
- * `Referrer-Policy: no-referrer` and the relay's own Content-Security-Policy
- * in addition to the install's (browsers enforce both). `api` and `browser`
- * answers are sandboxed with no script and an opaque origin; the demo form
- * keeps its origin (the engine checks it, and its consent cookie is
- * SameSite=Strict) and may submit, but runs no script.
+ * Every install answer gets `X-Content-Type-Options: nosniff`, a
+ * `Referrer-Policy` and the relay's own Content-Security-Policy in addition
+ * to the install's (browsers enforce both). `api` and `browser` answers are
+ * sandboxed with no script and an opaque origin, and send no referrer; the
+ * demo form keeps its origin (the engine checks it) and may submit, but runs
+ * no script. Its referrer policy is `same-origin`, because under
+ * `no-referrer` browsers post a form with `Origin: null` and the engine
+ * refuses that (2026-10-11); a Referer still reaches only the relay.
  *
  * Header names and values are validated here, before anything is sent to the
  * caller: a value the platform would refuse fails the stream with a 502
@@ -42,6 +44,8 @@ export interface ResponsePolicy {
   redirectAllowed(target: URL): boolean;
   /** The relay's policy, sent beside the install's own. */
   readonly csp: string;
+  /** The `Referrer-Policy` the relay sets, whatever the install sent. */
+  readonly referrerPolicy: 'no-referrer' | 'same-origin';
 }
 
 /** Response headers an install may set on the public response; everything else is dropped. */
@@ -62,7 +66,7 @@ const RESPONSE_HEADER_ALLOWLIST = new Set([
 ]);
 
 /** Set by the relay on every install answer, whatever the install sent. */
-const RELAY_SET_HEADERS = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' } as const;
+const RELAY_SET_HEADERS = { 'x-content-type-options': 'nosniff' } as const;
 
 const SANDBOXED_CSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const DEMO_CSP = "sandbox allow-forms allow-same-origin; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
@@ -90,6 +94,7 @@ export function createResponsePolicies(input: { relayOrigin: string; enginePort:
       baseOrigin: relayOrigin,
       redirectAllowed: () => false,
       csp: SANDBOXED_CSP,
+      referrerPolicy: 'no-referrer',
     },
     browser: {
       kind: 'browser',
@@ -97,6 +102,7 @@ export function createResponsePolicies(input: { relayOrigin: string; enginePort:
       baseOrigin: relayOrigin,
       redirectAllowed: (target) => browserTargets.has(target.origin),
       csp: SANDBOXED_CSP,
+      referrerPolicy: 'no-referrer',
     },
     demo: {
       kind: 'demo',
@@ -107,6 +113,7 @@ export function createResponsePolicies(input: { relayOrigin: string; enginePort:
         || target.origin === relayOrigin
         || (target.protocol === 'http:' && LOOPBACK_HOSTS.has(target.hostname)),
       csp: DEMO_CSP,
+      referrerPolicy: 'same-origin',
     },
   };
 }
@@ -170,6 +177,7 @@ export function checkResponseHead(
     }
     if (contentTypes.length === 0 && !bodyless) headers.set('content-type', 'text/plain; charset=utf-8');
     for (const [name, value] of Object.entries(RELAY_SET_HEADERS)) headers.set(name, value);
+    headers.set('referrer-policy', policy.referrerPolicy);
     headers.append('content-security-policy', policy.csp);
   } catch {
     return { ok: false, reason: 'invalid_header' };

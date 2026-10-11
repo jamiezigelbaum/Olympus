@@ -364,7 +364,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   /**
    * The demo sign-in POST, which arrives through the relay: no cookie survives
    * the relay, so the page's request id and CSRF token carry the binding, and
-   * a browser's Origin, when sent, must be the relay origin.
+   * a browser's Origin, when sent, must be the relay origin. The page's
+   * referrer policy is what lets a browser send it (consent-page.ts
+   * DEMO_REFERRER_POLICY): under `no-referrer` it sends `Origin: null`.
    */
   const demoPost = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
     const settings = demoSettings(u);

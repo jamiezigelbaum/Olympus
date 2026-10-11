@@ -2574,8 +2574,7 @@ function loadConfig(env = process.env, options = {}) {
   if (engineConfig) {
     const config2 = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
     applyEnvironmentOverrides(config2, env);
-    if (options.nativeRemoteHandoff === true)
-      applyNativeRemoteHandoff(config2, env);
+    applyRemoteSource(config2, env, options);
     validateConfig(config2);
     return config2;
   }
@@ -2586,8 +2585,7 @@ function loadConfig(env = process.env, options = {}) {
     mergeConfig(config, raw);
   }
   applyEnvironmentOverrides(config, env);
-  if (options.nativeRemoteHandoff === true)
-    applyNativeRemoteHandoff(config, env);
+  applyRemoteSource(config, env, options);
   validateConfig(config);
   return config;
 }
@@ -2730,6 +2728,62 @@ function applyNativeRemoteHandoff(config, env) {
   if (!remote)
     throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
   config.remote = parseRemoteConfig(remote);
+}
+function openClawConfigPath(homeDir, env) {
+  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
+  if (explicit && isAbsolutePath(explicit))
+    return explicit;
+  const stateDir = env.OPENCLAW_STATE_DIR?.trim();
+  return join4(stateDir && isAbsolutePath(stateDir) ? stateDir : join4(homeDir, ".openclaw"), "openclaw.json");
+}
+function readOpenClawPluginRemote(env) {
+  const path = openClawConfigPath(env.HOME?.trim() || homedir3(), env);
+  let text;
+  try {
+    text = readFileSync5(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { hosted: false };
+    return { hosted: true, path, unreadable: true };
+  }
+  const parsed = parseOpenClawConfigText(text);
+  if (parsed === undefined)
+    return { hosted: true, path, unreadable: true };
+  const entries = asRecord4(asRecord4(asRecord4(parsed)?.plugins)?.entries);
+  const entry = entries && Object.hasOwn(entries, "olympus") ? asRecord4(entries.olympus) : undefined;
+  if (!entry || entry.enabled === false)
+    return { hosted: false };
+  return { hosted: true, path, remote: asRecord4(asRecord4(entry.config)?.remote) };
+}
+function parseOpenClawConfigText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const json5 = globalThis.Bun?.JSON5;
+    if (!json5)
+      return;
+    try {
+      return json5.parse(text);
+    } catch {
+      return;
+    }
+  }
+}
+function applyRemoteSource(config, env, options) {
+  if (options.nativeRemoteHandoff === true)
+    applyNativeRemoteHandoff(config, env);
+  else if (options.openClawPluginRemote === true)
+    applyOpenClawPluginRemote(config, env);
+}
+function applyOpenClawPluginRemote(config, env) {
+  const section = readOpenClawPluginRemote(env);
+  if (!section.hosted)
+    return;
+  if ("unreadable" in section || !section.remote) {
+    delete config.remote;
+    return;
+  }
+  config.remote = parseRemoteConfig(section.remote);
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
@@ -24300,8 +24354,9 @@ var init_provider_account_identity = __esm(() => {
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
     dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
     gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
-    x: "https://api.x.com/2/users/me"
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 });
@@ -24310,6 +24365,7 @@ var init_provider_account_identity = __esm(() => {
 var init_source_account_binding = __esm(() => {
   init_atomic_file();
   init_file_lease();
+  init_provider_account_identity();
 });
 
 // src/core/connect.ts
@@ -33728,7 +33784,13 @@ init_vocabulary();
 var CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
 var FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
 var SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "daemon_supervisor_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
-var TOOL_BLOCKERS = new Map([["daemon_not_found", "zkapi-clientd"], ["tor_not_found", "tor"]]);
+var TOOL_BLOCKERS = new Map([
+  ["daemon_not_found", "zkapi-clientd"],
+  ["tor_not_found", "tor"],
+  ["daemon_version_unsupported", "zkapi-clientd"],
+  ["daemon_supervisor_unsupported", "zkapi-clientd"]
+]);
+var OLD_DAEMON_BLOCKERS = new Set(["daemon_version_unsupported", "daemon_supervisor_unsupported"]);
 
 // src/workers/dashboard/host-page.ts
 init_dashboard_contract();

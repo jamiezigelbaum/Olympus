@@ -2,6 +2,14 @@
 
 ## 1.0.0-rc.3 - unreleased
 
+- **Anonymous answers work on a fresh install again.** The one-click install
+  of Tor and zkAPI now fetches zkAPI 0.1.6-olympus2, the Olympus build the
+  anonymous route requires, from its published, checksummed and attested
+  release, instead of upstream 0.1.6, which the route refuses. An existing
+  Olympus install of 0.1.6 shows **Update zkAPI** on the dashboard (or run
+  `olympus zkapi install-tools`); the update replaces it and removes the
+  old copy. A too-old zkAPI found elsewhere on the computer is named, with a
+  one-click install of Olympus's own build.
 - **One account per file source.** Reconnecting Dropbox, Google Drive or
   Gmail with a different account no longer keeps syncing the previous
   account on a cached access token: a reconnect retires every token minted
