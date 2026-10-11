@@ -89,7 +89,13 @@ export interface ManagedToolPin {
   readonly assets: Readonly<Partial<Record<ManagedToolPlatform, ManagedToolAsset>>>;
 }
 
-const ZKAPI_RELEASE = 'https://github.com/ethereum/zkapi/releases/download/clientd-v0.1.6';
+// The Olympus fork's release (docs/design/private-answers.md): upstream's
+// clientd-v0.1.6 bundle with zkapi-clientd rebuilt from the fork, which adds
+// the supervisor flags and companion custody the managed route requires
+// (an upstream daemon is refused with daemon_supervisor_unsupported).
+// zkapi-walletd and share/zkapi-clientd/ are upstream's bytes.
+const ZKAPI_VERSION = '0.1.6-olympus2';
+const ZKAPI_RELEASE = `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v${ZKAPI_VERSION}`;
 const ZKAPI_REQUIRED = [
   'bin/zkapi-clientd',
   'bin/zkapi-walletd',
@@ -127,9 +133,14 @@ function torLinuxAsset(name: string, sha256: string, bytes: number): ManagedTool
 }
 
 /**
- * The pinned builds. Verified 2026-10-07 (docs/design/private-answers.md):
- * zkapi-clientd hashes computed from the downloaded archives and matched to
- * the release's SHA256SUMS and GitHub's asset digests; Tor hashes computed and
+ * The pinned builds (docs/design/private-answers.md). zkapi-clientd, verified
+ * 2026-10-11: release clientd-v0.1.6-olympus2 of jamiezigelbaum/zkapi, built
+ * by its olympus-release workflow from fork commit 14fcba96; hashes computed
+ * from the downloaded archives and matched to the release's SHA256SUMS and
+ * GitHub's asset digests, each file's build-provenance attestation verified
+ * (`gh attestation verify`), and each bundle differs from upstream's
+ * clientd-v0.1.6 archive only in zkapi-clientd, VERSION, NOTICE-modified.md
+ * and share/zkapi-clientd/olympus-build.json. Tor, verified 2026-10-07: hashes computed and
  * matched to sha256sums-signed-build.txt, whose signature and each archive's
  * own .asc verified as good signatures by the Tor Browser Developers signing
  * key EF6E 286D DA85 EA2A 4BA7 DE68 4E2C 6E87 9329 8290 (subkey 022D A248 432D
@@ -151,13 +162,13 @@ export const MANAGED_TOOL_PINS: Readonly<Record<ManagedToolName, ManagedToolPin>
   'zkapi-clientd': {
     tool: 'zkapi-clientd',
     label: 'zkAPI',
-    version: '0.1.6',
-    versionLine: /^zkapi-clientd 0\.1\.6(\s|$)/,
+    version: ZKAPI_VERSION,
+    versionLine: /^zkapi-clientd 0\.1\.6-olympus2(\s|$)/,
     assets: {
-      'darwin-arm64': zkapiAsset('zkapi-clientd_0.1.6_darwin_arm64.tar.gz', '0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4', 22_904_346),
-      'darwin-x64': zkapiAsset('zkapi-clientd_0.1.6_darwin_amd64.tar.gz', 'ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12', 23_547_367),
-      'linux-x64': zkapiAsset('zkapi-clientd_0.1.6_linux_amd64.tar.gz', '41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95', 23_826_995),
-      'linux-arm64': zkapiAsset('zkapi-clientd_0.1.6_linux_arm64.tar.gz', '41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf', 23_612_951),
+      'darwin-arm64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz', '93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c', 23_233_212),
+      'darwin-x64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz', 'eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9', 23_924_127),
+      'linux-x64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz', '33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1', 24_179_427),
+      'linux-arm64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz', 'ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0', 23_914_142),
     },
   },
 };
@@ -345,6 +356,8 @@ export interface ManagedToolState {
   readonly offered: boolean;
   readonly installed: boolean;
   readonly executable?: string;
+  /** An earlier pinned build Olympus installed here, when the current pin is not installed: the install updates it. */
+  readonly outdatedVersion?: string;
 }
 
 /** Each tool's managed install state; probes files only. */
@@ -353,6 +366,7 @@ export function managedToolsState(host: ManagedToolsHost = {}): ManagedToolState
   return MANAGED_TOOL_ORDER.map((tool) => {
     const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
     const executable = managedToolExecutable(tool, host);
+    const outdated = executable ? undefined : earlierManagedVersions(tool, host)[0];
     return {
       tool,
       label: pin.label,
@@ -360,8 +374,45 @@ export function managedToolsState(host: ManagedToolsHost = {}): ManagedToolState
       offered: platformKey !== undefined && pin.assets[platformKey] !== undefined,
       installed: executable !== undefined,
       ...(executable ? { executable } : {}),
+      ...(outdated ? { outdatedVersion: outdated } : {}),
     };
   });
+}
+
+/**
+ * Version folders of `tool` other than the pinned one that hold Olympus's own
+ * manifest for this tool, version and platform (owner-only, as discovery
+ * requires): builds an earlier Olympus installed and a later pin replaced.
+ * Newest-named first. Read-only; nothing else in the folder counts.
+ */
+export function earlierManagedVersions(tool: ManagedToolName, host: ManagedToolsHost = {}): string[] {
+  const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
+  const platformKey = managedToolsPlatform(host.platform, host.arch);
+  const root = managedToolsRoot(host);
+  if (!pin || !platformKey || !root) return [];
+  const uid = currentUid(host);
+  const toolDir = join(root, tool);
+  let entries: string[];
+  try {
+    if (lstatSync(toolDir).isSymbolicLink() || !privatelyOwned(toolDir, uid, 'dir')) return [];
+    entries = readdirSync(toolDir);
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => !entry.startsWith('.') && entry !== pin.version)
+    .filter((entry) => {
+      const dir = join(toolDir, entry);
+      try {
+        if (lstatSync(dir).isSymbolicLink() || !privatelyOwned(dir, uid, 'dir')) return false;
+      } catch {
+        return false;
+      }
+      const manifest = readManifest(join(dir, MANIFEST_FILE), uid);
+      return manifest !== undefined && manifest.tool === tool && manifest.version === entry && manifest.platform === platformKey;
+    })
+    .sort()
+    .reverse();
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +452,8 @@ export interface ManagedToolResult {
   readonly version: string;
   readonly outcome: 'installed' | 'already_installed' | 'not_offered' | 'failed';
   readonly executable?: string;
+  /** Earlier Olympus-installed versions this install replaced and removed. */
+  readonly replaced?: readonly string[];
   readonly code?: ManagedToolsErrorCode;
   readonly message?: string;
 }
@@ -673,7 +726,16 @@ async function installOne(
     });
     const executable = managedToolExecutable(tool, host);
     if (!executable) throw new ManagedToolsError('install_failed', `${pin.label} was installed but could not be found afterwards.`, tool);
-    return { tool, version: pin.version, outcome: 'installed', executable };
+    // An update: the earlier builds this replaced are Olympus's own (manifest
+    // checked) and nothing resolves them any more, so they are removed. Only
+    // after the new one is found, so a failed update keeps the old folder.
+    const replaced = earlierManagedVersions(tool, host);
+    if (replaced.length > 0) {
+      await commit(async () => {
+        for (const version of replaced) rmSync(join(toolDir, version), { recursive: true, force: true });
+      });
+    }
+    return { tool, version: pin.version, outcome: 'installed', executable, ...(replaced.length > 0 ? { replaced } : {}) };
   } catch (error) {
     // Our own uniquely named scratch files: safe to remove without the lease
     // (no concurrent attempt can share the id), so a lost lease still leaves
