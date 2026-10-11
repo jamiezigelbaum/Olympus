@@ -71196,7 +71196,13 @@ async function migrateOne(lane, proposal, context2) {
   if (projectedCost > context2.remainingCost + 0.000001)
     return { kind: "cap", reason: "cost_cap" };
   try {
-    const moved = await moveTieredItem({ set, identity, decision, vectorIdentities });
+    const moved = await moveTieredItem({
+      set,
+      identity,
+      decision,
+      vectorIdentities,
+      ...record ? { expectedGeneration: record.generation } : {}
+    });
     const chunksToEmbed = {};
     for (const destination of moved.destinations) {
       if (destination.chunksToEmbed > 0 && vectorIdentities[destination.trustDomain]) {
