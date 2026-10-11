@@ -254,6 +254,8 @@ export function createXBookmarksConnectorStoreSyncHandler(
       });
       const probed = await connector.probe(request.checkpoint?.trim());
       if (!probed.changed) {
+        // The checkpoint is an old-grant post id once the grant is replaced.
+        connector.assertGrantCurrent();
         if (probed.checkpoint && probed.counts.headTruncationDeferrals === 0) {
           usageStore.recordHeadCheckpoint(account, probed.checkpoint, validAttemptedAt(undefined, now));
         } else if (probed.counts.headTruncationDeferrals > 0) {
@@ -282,6 +284,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
         ...(request.checkpoint?.trim() ? { cursor: request.checkpoint.trim() } : {}),
       });
       const status = connector.status();
+      connector.assertGrantCurrent();
       // A truncation deferral deliberately returns the already-stored
       // checkpoint. Re-recording that value with this run's later wall clock
       // would make the preserve look newer than a concurrently completed
