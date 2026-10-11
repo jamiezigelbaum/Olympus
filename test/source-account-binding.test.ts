@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   decideSourceAccountAction,
+  followFileSourceRename,
   readSourceAccountBindings,
   recordFileSourceConnect,
   recordFileSourceConnectIntent,
@@ -427,54 +428,30 @@ describe('Google accounts survive an address rename (immutable labels)', () => {
       .toBe(`${SUB}.${PERM}.${RENAMED}`);
   });
 
-  test('an address-only source renamed before it migrated is kept when the replaced grant\'s own token proves continuity (independent review P2)', () => {
+  test('an address-only binding follows its own grant\'s token only while it is exactly what was asked about', () => {
     const path = registryPath();
     const bindingsPath = sourceAccountBindingsPath(path);
     updateSourceAccountBinding(bindingsPath, 'gmail.email', () => ({ provider_account_id: OLD, bound_at: GRANTED }));
-    // The replaced grant recorded OLD; its own refresh token now reads RENAMED,
-    // the address the new grant (same subject) carries.
-    expect(recordFileSourceConnect({
-      registryPath: path,
-      provider: 'gmail',
-      providerAccountId: `${SUB}.${RENAMED}`,
-      replacedGrant: { recordedAccountId: OLD, currentAccountId: RENAMED },
-      now: NOW,
-    })).toBe('same_account');
-    const read = readSourceAccountBindings(bindingsPath);
-    expect(read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined)
-      .toEqual({ provider_account_id: `${SUB}.${RENAMED}`, bound_at: GRANTED });
+    followFileSourceRename({ registryPath: path, provider: 'gmail', expected: OLD, currentAccountId: RENAMED });
+    let read = readSourceAccountBindings(bindingsPath);
+    expect(read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined).toEqual({ provider_account_id: RENAMED, bound_at: GRANTED });
+    // Then a reconnect under the renamed address is the same account.
+    expect(recordFileSourceConnect({ registryPath: path, provider: 'gmail', providerAccountId: `${SUB}.${RENAMED}`, now: NOW })).toBe('same_account');
+    // A binding that moved meanwhile, or awaits removal, is left alone.
+    updateSourceAccountBinding(bindingsPath, 'gmail.email', () => ({
+      provider_account_id: OLD,
+      purge_required: { reason: 'account_changed', detected_at: GRANTED },
+    }));
+    followFileSourceRename({ registryPath: path, provider: 'gmail', expected: OLD, currentAccountId: RENAMED });
+    followFileSourceRename({ registryPath: path, provider: 'gmail', expected: googleAccountIdFromAddress('other@example.test'), currentAccountId: RENAMED });
+    read = readSourceAccountBindings(bindingsPath);
+    expect(read.kind === 'ok' ? read.bindings.sources['gmail.email']?.provider_account_id : undefined).toBe(OLD);
   });
 
-  test('without that proof, or when the replaced grant names another account, the change still fails closed', () => {
-    for (const replacedGrant of [
-      undefined,
-      // The replaced grant's token now reads another address than the new grant.
-      { recordedAccountId: OLD, currentAccountId: googleAccountIdFromAddress('someone-else@example.test') },
-      // The replaced grant was not the one the source was bound under.
-      { recordedAccountId: googleAccountIdFromAddress('other@example.test'), currentAccountId: RENAMED },
-    ]) {
-      const path = registryPath();
-      const bindingsPath = sourceAccountBindingsPath(path);
-      updateSourceAccountBinding(bindingsPath, 'gmail.email', () => ({ provider_account_id: OLD, bound_at: GRANTED }));
-      expect(recordFileSourceConnect({
-        registryPath: path,
-        provider: 'gmail',
-        providerAccountId: `${SUB}.${RENAMED}`,
-        ...(replacedGrant ? { replacedGrant } : {}),
-        now: NOW,
-      })).toBe('purge_required');
-    }
-    // A binding that knows its subject is never carried by the chain: the
-    // label decides.
+  test('an address-only binding that did not follow a rename still reads it as a change', () => {
     const path = registryPath();
-    updateSourceAccountBinding(sourceAccountBindingsPath(path), 'gmail.email', () => ({ provider_account_id: `${OTHER_SUB}.${OLD}` }));
-    expect(recordFileSourceConnect({
-      registryPath: path,
-      provider: 'gmail',
-      providerAccountId: `${SUB}.${RENAMED}`,
-      replacedGrant: { recordedAccountId: `${OTHER_SUB}.${OLD}`, currentAccountId: `${SUB}.${RENAMED}` },
-      now: NOW,
-    })).toBe('purge_required');
+    updateSourceAccountBinding(sourceAccountBindingsPath(path), 'gmail.email', () => ({ provider_account_id: OLD, bound_at: GRANTED }));
+    expect(recordFileSourceConnect({ registryPath: path, provider: 'gmail', providerAccountId: `${SUB}.${RENAMED}`, now: NOW })).toBe('purge_required');
   });
 
   test('bound_grant survives a read', () => {

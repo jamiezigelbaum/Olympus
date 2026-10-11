@@ -60,6 +60,7 @@ import {
   ACCOUNT_BOUND_SOURCE_IDS,
   accountBoundSourceIdForProvider,
   readSourceAccountBindings,
+  followFileSourceRename,
   recordFileSourceConnect,
   recordFileSourceConnectIntent,
   sourceAccountBindingsPath,
@@ -686,22 +687,18 @@ async function completeOAuthSourceConnection(
     }));
   }
   // A source bound by a Google address alone, whose address the new grant no
-  // longer shows (or could not be read), keeps its items only through the
-  // replaced grant's own token (renamedSinceBound). When that could not be
-  // asked for a passing reason, stop before anything is stored: replaced,
-  // the old grant could never be asked again, and a same-account rename
-  // would read as an account change for good (independent review round 2).
-  // Which sources keep their items only through that proof.
-  const renameProofNeeded = new Set<string>();
+  // longer shows (or could not be read), keeps its items only by following
+  // the replaced grant's own token (followFileSourceRename). When that token
+  // could not be asked for a passing reason, stop before anything is stored:
+  // replaced, the old grant could never be asked again, and a same-account
+  // rename would read as an account change for good (independent review
+  // round 2).
   for (const definition of prepared.definition.handles) {
     if (!isAccountBoundProvider(definition.provider)) continue;
-    const handle = definition.handle(prepared.accountRole);
-    const replaced = replacedGrants.get(handle);
-    if (!replaced?.addressOnlyBinding || replaced.ownGrantGone) continue;
+    const replaced = replacedGrants.get(definition.handle(prepared.accountRole));
+    if (!replaced?.addressOnlyBinding || replaced.ownGrantGone || replaced.ownAccountId) continue;
     const newAccount = fileSourceAccountIds.get(definition.provider);
     if (newAccount && compareProviderAccounts(replaced.addressOnlyBinding, newAccount) === 'same') continue;
-    renameProofNeeded.add(handle);
-    if (newAccount && replaced.ownAccountId) continue;
     throw new Error(
       `Olympus could not confirm that this is the same ${definition.provider === 'gmail' ? 'Gmail' : 'Google Drive'} account the source was filled from, because a provider lookup did not answer. `
         + 'No credentials were stored and nothing changed; connect again.',
@@ -715,18 +712,32 @@ async function completeOAuthSourceConnection(
       // The rename proof stands only for the grant it was asked of: a connect
       // that landed meanwhile replaced it, and the token minted may be that
       // connect's (independent review round 2).
-      // Where the proof is what keeps the source's items, stop before
-      // anything changes and let the owner connect again, so it is asked
-      // afresh (independent review round 3); nowhere else does it matter.
+      // A source bound by an address alone follows its grant's own token,
+      // before the intent marker and its rollback snapshot, so a failed
+      // connect puts back the followed binding (independent review round 4).
+      // Only when the grant asked is still the one in force: where following
+      // would change the binding, a connect that landed meanwhile stops this
+      // one before anything changes, so the owner's retry asks afresh
+      // (independent review round 3).
       const grantsNow = readConnectedHandleRegistry(prepared.registryPath).handles;
-      for (const [handle, replaced] of replacedGrants) {
+      for (const definition of prepared.definition.handles) {
+        if (!isAccountBoundProvider(definition.provider)) continue;
+        const handle = definition.handle(prepared.accountRole);
+        const replaced = replacedGrants.get(handle);
+        const bound = replaced?.addressOnlyBinding;
+        if (!bound || !replaced.ownAccountId || !replaced.recordedAccountId) continue;
+        if (compareProviderAccounts(bound, replaced.recordedAccountId) !== 'same') continue;
+        if (compareProviderAccounts(bound, replaced.ownAccountId) === 'same') continue;
         const now = grantsNow.find((entry) => entry.handle === handle);
-        if (replaced && (now?.connectedAt !== replaced.grantConnectedAt || now?.providerAccountId !== replaced.recordedAccountId)) {
-          if (renameProofNeeded.has(handle)) {
-            throw new Error('Another connection change landed while this one confirmed the account. No credentials were stored and nothing changed; connect again.');
-          }
-          replacedGrants.set(handle, { ...replaced, ownAccountId: undefined });
+        if (now?.connectedAt !== replaced.grantConnectedAt || now?.providerAccountId !== replaced.recordedAccountId) {
+          throw new Error('Another connection change landed while this one confirmed the account. No credentials were stored and nothing changed; connect again.');
         }
+        followFileSourceRename({
+          registryPath: prepared.registryPath,
+          provider: definition.provider,
+          expected: bound,
+          currentAccountId: replaced.ownAccountId,
+        });
       }
       const proposedHandles = prepared.definition.handles.map((definition) => ({
         handle: definition.handle(prepared.accountRole),
@@ -941,14 +952,10 @@ async function completeOAuthSourceConnection(
       const sourceAccountPurgeRequired: AccountBoundSourceId[] = [];
       for (const handleDefinition of prepared.definition.handles) {
         if (!isAccountBoundProvider(handleDefinition.provider)) continue;
-        const replaced = replacedGrants.get(handleDefinition.handle(prepared.accountRole));
         const outcome = recordFileSourceConnect({
           registryPath: prepared.registryPath,
           provider: handleDefinition.provider,
           providerAccountId: fileSourceAccountIds.get(handleDefinition.provider),
-          ...(replaced?.recordedAccountId && replaced.ownAccountId
-            ? { replacedGrant: { recordedAccountId: replaced.recordedAccountId, currentAccountId: replaced.ownAccountId } }
-            : {}),
           now: prepared.now(),
         });
         if (outcome === 'purge_required') {
@@ -2057,7 +2064,7 @@ interface ReplacedGrantAccount {
  *   credential the worker uses, environment tokens included.
  * - A source bound by a Google address alone learns what its grant's own
  *   refresh token names now, so a reconnect after that address was renamed
- *   is recognised (renamedSinceBound; independent review P2). Only the
+ *   is recognised (followFileSourceRename; independent review P2). Only the
  *   registry entry's credential counts here: an environment token may be
  *   another account.
  *
@@ -2105,9 +2112,11 @@ async function identifyReplacedGrantAccount(options: {
         purpose: 'Identify the account of the grant being replaced, so a same-account reconnect keeps the source\'s items.',
       });
     } catch (error) {
-      // Only a refresh that is busy or failed in passing is worth asking
-      // again; anything else needs the owner (independent review round 3).
-      return { gone: !(error instanceof CredentialBrokerError && error.retryable) };
+      // A broker refusal that only the owner can clear (missing or unusable
+      // credential, reauthorization) means the grant cannot be asked; a busy
+      // or failed refresh, or anything unclassified (a storage blip), is
+      // asked again (independent review rounds 3-4).
+      return { gone: error instanceof CredentialBrokerError && !error.retryable };
     }
     if (session.kind !== 'bearer_token') return { gone: true };
     const id = await lookupConnectedAccountId({

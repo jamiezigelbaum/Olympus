@@ -5888,7 +5888,7 @@ function recordFileSourceConnect(input) {
     }
     if (current?.provider_account_id && input.providerAccountId) {
       const match = compareProviderAccounts(current.provider_account_id, input.providerAccountId);
-      if (match === "same" || match === "different" && renamedSinceBound(current.provider_account_id, input)) {
+      if (match === "same") {
         outcome = "same_account";
         const { reconnected_at: _settled, ...rest } = current;
         return { ...rest, provider_account_id: mergeProviderAccountIds(current.provider_account_id, input.providerAccountId) };
@@ -5902,10 +5902,9 @@ function recordFileSourceConnect(input) {
   });
   return outcome;
 }
-function renamedSinceBound(bound, input) {
-  const recorded = input.replacedGrant?.recordedAccountId;
-  const current = input.replacedGrant?.currentAccountId;
-  return Boolean(input.providerAccountId && recorded && current && !hasImmutableAccountLabel(bound) && compareProviderAccounts(bound, recorded) === "same" && compareProviderAccounts(current, input.providerAccountId) === "same");
+function followFileSourceRename(input) {
+  const sourceId = accountBoundSourceIdForProvider(input.provider);
+  updateSourceAccountBinding(sourceAccountBindingsPath(input.registryPath), sourceId, (current) => current && current.provider_account_id === input.expected && !current.purge_required && !current.reconnected_at ? { ...current, provider_account_id: input.currentAccountId } : current);
 }
 function decideSourceAccountAction(input) {
   const { binding, grantAccountId, tokenAccountId: token } = input;
@@ -6361,32 +6360,41 @@ async function completeOAuthSourceConnection(prepared, code) {
       timeoutMs: prepared.tokenExchangeTimeoutMs
     }));
   }
-  const renameProofNeeded = new Set;
   for (const definition of prepared.definition.handles) {
     if (!isAccountBoundProvider(definition.provider))
       continue;
-    const handle = definition.handle(prepared.accountRole);
-    const replaced = replacedGrants.get(handle);
-    if (!replaced?.addressOnlyBinding || replaced.ownGrantGone)
+    const replaced = replacedGrants.get(definition.handle(prepared.accountRole));
+    if (!replaced?.addressOnlyBinding || replaced.ownGrantGone || replaced.ownAccountId)
       continue;
     const newAccount = fileSourceAccountIds.get(definition.provider);
     if (newAccount && compareProviderAccounts(replaced.addressOnlyBinding, newAccount) === "same")
-      continue;
-    renameProofNeeded.add(handle);
-    if (newAccount && replaced.ownAccountId)
       continue;
     throw new Error(`Olympus could not confirm that this is the same ${definition.provider === "gmail" ? "Gmail" : "Google Drive"} account the source was filled from, because a provider lookup did not answer. ` + "No credentials were stored and nothing changed; connect again.");
   }
   return withConnectedHandleGrantCustody(prepared.registryPath, { expectedEpoch: prepared.grantEpoch }, async () => {
     const grantsNow = readConnectedHandleRegistry(prepared.registryPath).handles;
-    for (const [handle, replaced] of replacedGrants) {
+    for (const definition of prepared.definition.handles) {
+      if (!isAccountBoundProvider(definition.provider))
+        continue;
+      const handle = definition.handle(prepared.accountRole);
+      const replaced = replacedGrants.get(handle);
+      const bound = replaced?.addressOnlyBinding;
+      if (!bound || !replaced.ownAccountId || !replaced.recordedAccountId)
+        continue;
+      if (compareProviderAccounts(bound, replaced.recordedAccountId) !== "same")
+        continue;
+      if (compareProviderAccounts(bound, replaced.ownAccountId) === "same")
+        continue;
       const now = grantsNow.find((entry) => entry.handle === handle);
-      if (replaced && (now?.connectedAt !== replaced.grantConnectedAt || now?.providerAccountId !== replaced.recordedAccountId)) {
-        if (renameProofNeeded.has(handle)) {
-          throw new Error("Another connection change landed while this one confirmed the account. No credentials were stored and nothing changed; connect again.");
-        }
-        replacedGrants.set(handle, { ...replaced, ownAccountId: undefined });
+      if (now?.connectedAt !== replaced.grantConnectedAt || now?.providerAccountId !== replaced.recordedAccountId) {
+        throw new Error("Another connection change landed while this one confirmed the account. No credentials were stored and nothing changed; connect again.");
       }
+      followFileSourceRename({
+        registryPath: prepared.registryPath,
+        provider: definition.provider,
+        expected: bound,
+        currentAccountId: replaced.ownAccountId
+      });
     }
     const proposedHandles = prepared.definition.handles.map((definition) => ({
       handle: definition.handle(prepared.accountRole),
@@ -6531,12 +6539,10 @@ async function completeOAuthSourceConnection(prepared, code) {
     for (const handleDefinition of prepared.definition.handles) {
       if (!isAccountBoundProvider(handleDefinition.provider))
         continue;
-      const replaced = replacedGrants.get(handleDefinition.handle(prepared.accountRole));
       const outcome = recordFileSourceConnect({
         registryPath: prepared.registryPath,
         provider: handleDefinition.provider,
         providerAccountId: fileSourceAccountIds.get(handleDefinition.provider),
-        ...replaced?.recordedAccountId && replaced.ownAccountId ? { replacedGrant: { recordedAccountId: replaced.recordedAccountId, currentAccountId: replaced.ownAccountId } } : {},
         now: prepared.now()
       });
       if (outcome === "purge_required") {
@@ -7127,7 +7133,7 @@ async function identifyReplacedGrantAccount(options) {
         purpose: "Identify the account of the grant being replaced, so a same-account reconnect keeps the source's items."
       });
     } catch (error) {
-      return { gone: !(error instanceof CredentialBrokerError && error.retryable) };
+      return { gone: error instanceof CredentialBrokerError && !error.retryable };
     }
     if (session.kind !== "bearer_token")
       return { gone: true };

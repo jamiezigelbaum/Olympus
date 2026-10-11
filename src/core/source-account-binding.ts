@@ -166,13 +166,6 @@ export function recordFileSourceConnect(input: {
   registryPath: string;
   provider: AccountBoundProvider;
   providerAccountId: string | undefined;
-  /**
-   * The grant this connect replaced: the account its registry entry recorded,
-   * and the account a token minted from its own refresh token names now.
-   * Together they carry a source bound by an address alone across a rename
-   * that happened before it learned an immutable label (independent review P2).
-   */
-  replacedGrant?: { recordedAccountId?: string; currentAccountId?: string };
   now: Date;
 }): FileSourceConnectOutcome {
   const sourceId = accountBoundSourceIdForProvider(input.provider)!;
@@ -193,7 +186,7 @@ export function recordFileSourceConnect(input: {
     }
     if (current?.provider_account_id && input.providerAccountId) {
       const match = compareProviderAccounts(current.provider_account_id, input.providerAccountId);
-      if (match === 'same' || (match === 'different' && renamedSinceBound(current.provider_account_id, input))) {
+      if (match === 'same') {
         outcome = 'same_account';
         const { reconnected_at: _settled, ...rest } = current;
         return { ...rest, provider_account_id: mergeProviderAccountIds(current.provider_account_id, input.providerAccountId) };
@@ -210,23 +203,27 @@ export function recordFileSourceConnect(input: {
 }
 
 /**
- * An address-only binding whose address no longer matches the new grant is
- * still the same account when the grant it was filled under says so: that
- * grant's record names the binding's account, and a token minted now from
- * that grant's own refresh token (a refresh token belongs to one account for
- * good) names the same account as the new grant. Never applied to a binding
- * that carries an immutable label: those decide by the label alone.
+ * Before a connect replaces the grant of a source bound by a Google address
+ * alone: follow that address to what a token minted now from the grant's own
+ * refresh token names (a refresh token belongs to one account for good), when
+ * the grant's record names the binding's account. A rename made before the
+ * source learned an immutable label is then the same account to the connect
+ * that follows, and an address since given to another account is not
+ * (independent review rounds 1-4). Kept even if the connect then fails: it is
+ * what the grant still in force says. Changes nothing unless the binding is
+ * still exactly `expected`.
  */
-function renamedSinceBound(
-  bound: string,
-  input: { providerAccountId: string | undefined; replacedGrant?: { recordedAccountId?: string; currentAccountId?: string } | undefined },
-): boolean {
-  const recorded = input.replacedGrant?.recordedAccountId;
-  const current = input.replacedGrant?.currentAccountId;
-  return Boolean(input.providerAccountId && recorded && current
-    && !hasImmutableAccountLabel(bound)
-    && compareProviderAccounts(bound, recorded) === 'same'
-    && compareProviderAccounts(current, input.providerAccountId) === 'same');
+export function followFileSourceRename(input: {
+  registryPath: string;
+  provider: AccountBoundProvider;
+  expected: string;
+  currentAccountId: string;
+}): void {
+  const sourceId = accountBoundSourceIdForProvider(input.provider)!;
+  updateSourceAccountBinding(sourceAccountBindingsPath(input.registryPath), sourceId, (current) =>
+    current && current.provider_account_id === input.expected && !current.purge_required && !current.reconnected_at
+      ? { ...current, provider_account_id: input.currentAccountId }
+      : current);
 }
 
 export type SourceAccountDecision =

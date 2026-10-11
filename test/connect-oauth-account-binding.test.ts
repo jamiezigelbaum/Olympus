@@ -834,7 +834,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     });
   }, 30_000);
 
-  describe('an address-only Gmail source renamed before it migrated: when the proof cannot stand (independent review round 3)', () => {
+  describe('an address-only Gmail source whose address changed before it migrated (independent review rounds 3-4)', () => {
     async function legacyGmail(options: { withClientId: boolean }) {
       const install = installDir();
       const handle = 'gmail.personal';
@@ -863,7 +863,13 @@ describe('Dropbox connect records the account its grant belongs to', () => {
       return install;
     }
 
-    function connectRenamed(install: ReturnType<typeof installDir>, onOldGrantLookup?: () => void) {
+    // The old grant's own token reads `oldAddress` now; the new grant reads
+    // `newAddress` with subject `newSubject`.
+    function connectGmail(
+      install: ReturnType<typeof installDir>,
+      accounts: { oldAddress: string; newAddress: string; newSubject: string },
+      options: { onOldGrantLookup?: () => void; secretStore?: typeof install.secretStore } = {},
+    ) {
       const bearer = (init: RequestInit | undefined) =>
         String(new Headers(init?.headers).get('authorization') ?? '').replace(/^Bearer /, '');
       return connectOAuthSource({
@@ -872,17 +878,18 @@ describe('Dropbox connect records the account its grant belongs to', () => {
         clientSecret: 'google-test-secret',
         registryPath: install.registryPath,
         oauth2StateStore: new JsonCredentialOAuth2StateStore(install.statePath),
-        secretStore: install.secretStore,
+        secretStore: options.secretStore ?? install.secretStore,
         openBrowser: false,
         fetch: async (input: URL | RequestInfo, init?: RequestInit) => {
           const url = String(input instanceof Request ? input.url : input);
+          const isNew = bearer(init) === 'new-access';
           if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail) {
-            return new Response(JSON.stringify({ emailAddress: 'renamed@example.test' }), { status: 200 });
+            return new Response(JSON.stringify({ emailAddress: isNew ? accounts.newAddress : accounts.oldAddress }), { status: 200 });
           }
           if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo) {
-            if (bearer(init) !== 'new-access') onOldGrantLookup?.();
-            return new Response(JSON.stringify(bearer(init) === 'new-access'
-              ? { sub: '109876543210987654321', scope: 'openid https://www.googleapis.com/auth/gmail.readonly' }
+            if (!isNew) options.onOldGrantLookup?.();
+            return new Response(JSON.stringify(isNew
+              ? { sub: accounts.newSubject, scope: 'openid https://www.googleapis.com/auth/gmail.readonly' }
               : { scope: 'https://www.googleapis.com/auth/gmail.readonly' }), { status: 200 });
           }
           const refresh = new URLSearchParams(String(init?.body ?? '')).get('refresh_token');
@@ -902,27 +909,83 @@ describe('Dropbox connect records the account its grant belongs to', () => {
         },
       });
     }
+    const RENAMED = { oldAddress: 'renamed@example.test', newAddress: 'renamed@example.test', newSubject: '109876543210987654321' };
+
+    function gmailBinding(install: ReturnType<typeof installDir>) {
+      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
+      return read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined;
+    }
+
+    test('the old address now held by another account: the old grant says where its account went, so the new one is a change', async () => {
+      const install = await legacyGmail({ withClientId: true });
+      const result = await connectGmail(install, {
+        oldAddress: 'renamed@example.test',
+        newAddress: 'owner@example.test',
+        newSubject: '100000000000000000001',
+      });
+      expect(result.sourceAccountPurgeRequired).toEqual(['gmail.email']);
+      expect(gmailBinding(install)).toMatchObject({
+        provider_account_id: googleAccountIdFromAddress('renamed@example.test'),
+        purge_required: { reason: 'account_changed' },
+      });
+    }, 30_000);
+
+    test('a connect that fails to store its credential keeps the followed address, so the retry is the same account', async () => {
+      const install = await legacyGmail({ withClientId: true });
+      const inner = install.secretStore;
+      const failing = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
+        set: async (key: string, value: string) => {
+          if (key.endsWith('.oauth.client_id')) throw new Error('secret store unavailable');
+          return inner.set(key, value);
+        },
+      });
+      await expect(connectGmail(install, RENAMED, { secretStore: failing })).rejects.toThrow();
+      expect(gmailBinding(install)).toEqual({ provider_account_id: googleAccountIdFromAddress('renamed@example.test') });
+      const result = await connectGmail(install, RENAMED);
+      expect(result.sourceAccountPurgeRequired).toBeUndefined();
+      expect(gmailBinding(install)).toEqual({
+        provider_account_id: `${googleSubjectLabel('109876543210987654321')}.${googleAccountIdFromAddress('renamed@example.test')}`,
+      });
+    }, 30_000);
+
+    test('a storage error reading the old grant once is asked again, not taken for a dead grant', async () => {
+      const install = await legacyGmail({ withClientId: true });
+      const inner = install.secretStore;
+      let failOnce = true;
+      const flaky = Object.assign(Object.create(Object.getPrototypeOf(inner)) as typeof inner, inner, {
+        get: async (key: string) => {
+          if (failOnce && key === 'gmail.personal.oauth.refresh_token') {
+            failOnce = false;
+            throw new Error('secret store unavailable');
+          }
+          return inner.get(key);
+        },
+      });
+      await expect(connectGmail(install, RENAMED, { secretStore: flaky })).rejects.toThrow('could not confirm');
+      expect(gmailBinding(install)).toEqual({ provider_account_id: googleAccountIdFromAddress('owner@example.test') });
+      const result = await connectGmail(install, RENAMED, { secretStore: flaky });
+      expect(result.sourceAccountPurgeRequired).toBeUndefined();
+    }, 30_000);
 
     test('an old grant whose credential is missing cannot be asked, so connect proceeds and fails closed instead of looping', async () => {
       const install = await legacyGmail({ withClientId: false });
-      const result = await connectRenamed(install);
+      const result = await connectGmail(install, RENAMED);
       expect(result.sourceAccountPurgeRequired).toEqual(['gmail.email']);
       expect(await install.secretStore.get('gmail.personal.oauth.refresh_token')).toBe('new-refresh');
     }, 30_000);
 
-    test('a connect landing while the proof was asked stops this one before anything changes', async () => {
+    test('a connect landing while the old grant was asked stops this one before anything changes', async () => {
       const install = await legacyGmail({ withClientId: true });
-      await expect(connectRenamed(install, () => {
-        // Another connect's registry entry lands meanwhile.
-        upsertConnectedHandle({
-          ...readConnectedHandleRegistry(install.registryPath).handles.find((entry) => entry.handle === 'gmail.personal')!,
-          connectedAt: '2026-10-11T00:00:00.000Z',
-        }, install.registryPath);
+      await expect(connectGmail(install, RENAMED, {
+        onOldGrantLookup: () => {
+          upsertConnectedHandle({
+            ...readConnectedHandleRegistry(install.registryPath).handles.find((entry) => entry.handle === 'gmail.personal')!,
+            connectedAt: '2026-10-11T00:00:00.000Z',
+          }, install.registryPath);
+        },
       })).rejects.toThrow('Another connection change landed');
       expect(await install.secretStore.get('gmail.personal.oauth.refresh_token')).toBe('gmail-old-refresh');
-      const read = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
-      expect(read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined)
-        .toEqual({ provider_account_id: googleAccountIdFromAddress('owner@example.test') });
+      expect(gmailBinding(install)).toEqual({ provider_account_id: googleAccountIdFromAddress('owner@example.test') });
     }, 30_000);
   });
 });
