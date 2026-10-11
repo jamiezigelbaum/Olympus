@@ -34,6 +34,8 @@ import { X_BOOKMARKS_STORE_PLACEMENT } from '../src/workers/x-bookmarks/connecto
 const HANDLE = 'x.bookmarks.personal';
 const ACCOUNT = 'personal';
 const USER_ID = '1000';
+// The account a reconnect switches to; a run built for it reads as this id.
+const USER_B = '2000';
 const NOW = new Date('2026-10-11T09:00:00.000Z');
 
 const dirs: string[] = [];
@@ -46,10 +48,10 @@ afterEach(() => {
 describe('X bookmarks grant fence', () => {
   test('a reconnect during the head fetch stores nothing, and the next run uses the new grant', async () => {
     const f = fixture();
-    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    f.writeGrant('2026-10-11T08:00:00.000Z', USER_ID);
     f.respond = (token) => {
       // Account B is connected while account A's page is on the wire.
-      f.reconnect('2026-10-11T08:30:00.000Z', 'x-user-b');
+      f.reconnect('2026-10-11T08:30:00.000Z', USER_B);
       return token === 'access-for-refresh-token-a' ? [post('201', 'account a private marker')] : [];
     };
 
@@ -61,7 +63,7 @@ describe('X bookmarks grant fence', () => {
     expect(f.usage.headCheckpoint(ACCOUNT)).toBeUndefined();
 
     f.respond = (token) => token === 'access-for-refresh-token-b' ? [post('301', 'account b marker')] : [];
-    await expect(handler.syncHead({ attempted_at: NOW.toISOString() })).resolves.toMatchObject({ status: 'progress' });
+    await expect(f.handler(undefined, USER_B).syncHead({ attempted_at: NOW.toISOString() })).resolves.toMatchObject({ status: 'progress' });
     expect(f.tokensUsed.at(-1)).toBe('access-for-refresh-token-b');
     expect(f.store.searchItems('account b marker', 5)[0]?.sourceItem.providerItemId).toBe('301');
     expect(f.store.searchItems('account a private marker', 5)).toHaveLength(0);
@@ -69,7 +71,7 @@ describe('X bookmarks grant fence', () => {
 
   test('a reconnect between acquisition and listing stores nothing', async () => {
     const f = fixture();
-    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    f.writeGrant('2026-10-11T08:00:00.000Z', USER_ID);
     f.respond = () => [post('201', 'account a private marker')];
     const connector = createXBookmarksApiSourceConnector({
       mode: 'incremental',
@@ -84,7 +86,7 @@ describe('X bookmarks grant fence', () => {
       fetch: f.xFetch,
     });
     await connector.probe();
-    f.reconnect('2026-10-11T08:30:00.000Z', 'x-user-b');
+    f.reconnect('2026-10-11T08:30:00.000Z', USER_B);
 
     await expect(syncAndEmbedFromConnector({
       store: f.store,
@@ -97,11 +99,11 @@ describe('X bookmarks grant fence', () => {
 
   test('a reconnect during reconciliation stores nothing and completes no snapshot', async () => {
     const f = fixture();
-    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    f.writeGrant('2026-10-11T08:00:00.000Z', USER_ID);
     let requests = 0;
     f.respond = () => {
       requests += 1;
-      if (requests === 1) f.reconnect('2026-10-11T08:30:00.000Z', 'x-user-b');
+      if (requests === 1) f.reconnect('2026-10-11T08:30:00.000Z', USER_B);
       return [post('201', 'account a private marker')];
     };
     const state = new LocalXBookmarksReconcileStateStore(':memory:');
@@ -116,7 +118,7 @@ describe('X bookmarks grant fence', () => {
 
   test('an unchanged grant syncs normally', async () => {
     const f = fixture();
-    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    f.writeGrant('2026-10-11T08:00:00.000Z', USER_ID);
     f.respond = () => [post('201', 'account a marker')];
     await expect(f.handler().syncHead({ attempted_at: NOW.toISOString() })).resolves.toMatchObject({ status: 'progress' });
     expect(f.store.searchItems('account a marker', 5)[0]?.sourceItem.providerItemId).toBe('201');
@@ -127,7 +129,7 @@ describe('X bookmarks grant fence', () => {
 describe('X bookmarks content recovery grant fence', () => {
   test('a reconnect during the lookup restores nothing, and the next run uses the new grant', async () => {
     const f = fixture();
-    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    f.writeGrant('2026-10-11T08:00:00.000Z', USER_ID);
     const store = createXBookmarksConnectorStore(join(f.dir, 'x-recovery.sqlite'));
     closers.push(() => store.close());
     // A bookmark stored by id only, waiting for its text.
@@ -136,11 +138,11 @@ describe('X bookmarks content recovery grant fence', () => {
       posts: [{ id: '2076846914813788163' }],
       fetchedAt: NOW.toISOString(),
     }), { fetchContent: true });
-    const recovery = createXBookmarksContentRecoveryHandler({
+    const recoveryAs = (userId: string) => createXBookmarksContentRecoveryHandler({
       store,
       usageStore: f.usage,
       account: ACCOUNT,
-      userId: USER_ID,
+      userId,
       credentialBroker: f.broker,
       credentialHandle: HANDLE,
       fetch: f.xFetch,
@@ -150,12 +152,12 @@ describe('X bookmarks content recovery grant fence', () => {
     });
 
     f.respond = (token) => {
-      f.reconnect('2026-10-11T08:30:00.000Z', 'x-user-b');
+      f.reconnect('2026-10-11T08:30:00.000Z', USER_B);
       return token === 'access-for-refresh-token-a'
         ? [post('2076846914813788163', 'zebraquill')]
         : [];
     };
-    const deferred = await recovery.recover({ execute: true });
+    const deferred = await recoveryAs(USER_ID).recover({ execute: true });
     expect(deferred).toMatchObject({
       status: 'deferred',
       counts: { api_requests: 1, items_recovered: 0, items_deferred: 1 },
@@ -166,7 +168,7 @@ describe('X bookmarks content recovery grant fence', () => {
     f.respond = (token) => token === 'access-for-refresh-token-b'
       ? [post('2076846914813788163', 'account b recovered text')]
       : [];
-    const completed = await recovery.recover({ execute: true });
+    const completed = await recoveryAs(USER_B).recover({ execute: true });
     expect(completed).toMatchObject({ status: 'completed', counts: { items_recovered: 1 } });
     expect(f.tokensUsed.at(-1)).toBe('access-for-refresh-token-b');
     expect(store.searchItems('account b recovered text', 5)).toHaveLength(1);
@@ -174,12 +176,64 @@ describe('X bookmarks content recovery grant fence', () => {
   });
 });
 
+describe('X runs read only as the account their grant is for', () => {
+  // The lane's account check runs at task entry, before the token is taken: a
+  // connect landing in between hands a run built for account A the grant of
+  // account B. Nothing may then be read or stored, including a completed
+  // reconcile snapshot replayed with no provider call (PR #264 review).
+  test('a sync built for account A with B already connected reads and stores nothing', async () => {
+    const f = fixture();
+    f.writeGrant('2026-10-11T08:30:00.000Z', USER_B);
+    f.respond = () => [post('201', 'account b private marker')];
+    const state = new LocalXBookmarksReconcileStateStore(':memory:');
+    closers.push(() => state.close());
+
+    const head = await f.handler(state).syncHead({ attempted_at: NOW.toISOString() }).catch((error: unknown) => error);
+    expect(head).toBeInstanceOf(XBookmarksGrantChangedError);
+    expect((head as XBookmarksGrantChangedError).code).toBe('x_bookmarks_grant_account_mismatch');
+    await expect(f.handler(state).reconcile({ attempted_at: NOW.toISOString() }))
+      .rejects.toBeInstanceOf(XBookmarksGrantChangedError);
+    expect(f.tokensUsed).toEqual([]);
+    expect(f.store.status().counts.items).toBe(0);
+    expect(state.completedSnapshot(ACCOUNT)).toBeUndefined();
+  });
+
+  test('content recovery built for account A with B already connected restores nothing', async () => {
+    const f = fixture();
+    f.writeGrant('2026-10-11T08:30:00.000Z', USER_B);
+    const store = createXBookmarksConnectorStore(join(f.dir, 'x-recovery.sqlite'));
+    closers.push(() => store.close());
+    await store.syncFromConnector(createXBookmarksSourceConnector({
+      account: ACCOUNT,
+      posts: [{ id: '2076846914813788163' }],
+      fetchedAt: NOW.toISOString(),
+    }), { fetchContent: true });
+    f.respond = () => [post('2076846914813788163', 'quokkaspire')];
+
+    const receipt = await createXBookmarksContentRecoveryHandler({
+      store,
+      usageStore: f.usage,
+      account: ACCOUNT,
+      userId: USER_ID,
+      credentialBroker: f.broker,
+      credentialHandle: HANDLE,
+      fetch: f.xFetch,
+      config: testConfig(),
+      receiptPath: join(f.dir, 'recovery-receipt.json'),
+      now: () => NOW,
+    }).recover({ execute: true });
+    expect(receipt).toMatchObject({ status: 'deferred', counts: { api_requests: 0, items_recovered: 0, items_deferred: 1 } });
+    expect(f.tokensUsed).toEqual([]);
+    expect(store.searchItems('quokkaspire', 5)).toHaveLength(0);
+  });
+});
+
 describe('X bookmarks window diagnostic grant fence', () => {
   test('a reconnect during the diagnostic writes no report', async () => {
     const f = fixture();
-    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    f.writeGrant('2026-10-11T08:00:00.000Z', USER_ID);
     f.respond = () => {
-      f.reconnect('2026-10-11T08:30:00.000Z', 'x-user-b');
+      f.reconnect('2026-10-11T08:30:00.000Z', USER_B);
       return [post('201', 'account a marker')];
     };
     const reportPath = join(f.dir, 'diagnostic.json');
@@ -200,7 +254,7 @@ describe('X bookmarks window diagnostic grant fence', () => {
 
   test('an unchanged grant writes the report', async () => {
     const f = fixture();
-    f.writeGrant('2026-10-11T08:00:00.000Z', 'x-user-a');
+    f.writeGrant('2026-10-11T08:00:00.000Z', USER_ID);
     f.respond = () => [post('201', 'account a marker')];
     const reportPath = join(f.dir, 'diagnostic.json');
     await runXBookmarksWindowDiagnostic({
@@ -295,7 +349,7 @@ function fixture() {
         meta: { result_count: posts.length },
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch,
-    handler(reconcileStateStore?: LocalXBookmarksReconcileStateStore) {
+    handler(reconcileStateStore?: LocalXBookmarksReconcileStateStore, userId = USER_ID) {
       return createXBookmarksConnectorStoreSyncHandler({
         store,
         usageStore: usage,
@@ -304,7 +358,7 @@ function fixture() {
         credentialBroker: broker,
         credentialHandle: HANDLE,
         account: ACCOUNT,
-        userId: USER_ID,
+        userId,
         fetch: state.xFetch,
         config: testConfig(),
         now: () => NOW,

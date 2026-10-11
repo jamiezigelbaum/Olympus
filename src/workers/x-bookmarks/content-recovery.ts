@@ -217,10 +217,15 @@ export function createXBookmarksContentRecoveryHandler(
           ...(options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {}),
           ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
         }));
-      } catch {
+      } catch (error) {
         options.usageStore.cancelUndispatchedRequest({ reservation });
         counts.items_deferred += requestedCandidates.length;
-        return writeReceipt(receiptPath, buildReceipt('failed', counts));
+        // A reconnect or another account's grant is not a failure: the next
+        // run reads under the connected account.
+        return writeReceipt(
+          receiptPath,
+          buildReceipt(error instanceof XBookmarksGrantChangedError ? 'deferred' : 'failed', counts),
+        );
       }
 
       let lookup: XBookmarkPostLookupResult;
@@ -431,6 +436,7 @@ async function authenticatedClient(input: {
     broker: input.broker,
     credentialHandle: input.credentialHandle,
     purpose: 'Recover missing content for already-indexed X bookmarks.',
+    readsAsAccountId: input.userId,
   });
   return {
     client: new XApiClient({

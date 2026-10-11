@@ -56,6 +56,11 @@ import { defaultReadwiseSecureConnectorStoreDbPath } from './workers/readwise/ti
 import { defaultXBookmarksConnectorStoreDbPath } from './workers/x-bookmarks/index.ts';
 import { defaultXBookmarksSecureConnectorStoreDbPath } from './workers/x-bookmarks/tier-set.ts';
 import {
+  defaultXBookmarksReconcileStateDbPath,
+  X_BOOKMARKS_RECONCILE_STATE_STORE_ID,
+} from './workers/x-bookmarks/reconcile-state.ts';
+import { defaultXBookmarksApiUsageDbPath } from './workers/x-bookmarks/live-control.ts';
+import {
   defaultWhatsAppConnectorStoreDbPath,
   defaultWhatsAppInternalConnectorStoreDbPath,
 } from './workers/whatsapp/index.ts';
@@ -126,6 +131,15 @@ export interface LifecycleSourceSpec {
    * rather than letting the manifest imply it took them.
    */
   rawStatePaths?(context?: LifecyclePathContext): string[];
+  /**
+   * SQLite state a family keeps beside its store about the provider account
+   * the store was filled from, deleted with the source and never exported.
+   * X keeps its reconciliation snapshots per X user id: left behind, a
+   * per-source delete before connecting a different X account stranded the
+   * new account's reconcile on "explicit account migration or state reset is
+   * required" (PR #264 review).
+   */
+  accountStateSqlite?(context?: LifecyclePathContext): Array<{ path: string; sqliteStoreId: string }>;
   /**
    * State that must be preserved before a source is stopped or removed, but
    * which the generic export intentionally does not copy. Unlike
@@ -305,6 +319,14 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
         defaultXBookmarksConnectorStoreDbPath(envForContext(context)),
         defaultXBookmarksSecureConnectorStoreDbPath(envForContext(context)),
       ],
+      // The API usage store stays: it is the quota ledger, not account data.
+      accountStateSqlite: (context) => {
+        const env = envForContext(context);
+        return [{
+          path: defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env)),
+          sqliteStoreId: X_BOOKMARKS_RECONCILE_STATE_STORE_ID,
+        }];
+      },
     },
     {
       // Connector-store only, like X: the WhatsApp corpus never had a legacy
@@ -515,6 +537,7 @@ export function exportOlympusData(options: {
     // manifest that omits them entirely is how the owner learns too late that
     // `delete --all` took something the export never had.
     for (const statePath of source.rawStatePaths?.(options) ?? []) skipped.push(statePath);
+    for (const state of source.accountStateSqlite?.(options) ?? []) skipped.push(state.path);
     for (const statePath of source.preservationOnlyPaths?.(options) ?? []) skipped.push(statePath);
   }
 
@@ -975,6 +998,9 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
         ? []
         : sqliteDeleteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID, context)),
     ]),
+    ...(source.accountStateSqlite?.(context) ?? []).flatMap((state) => state.path === ':memory:'
+      ? []
+      : sqliteDeleteTargets(state.path, state.sqliteStoreId, context)),
     ...(source.rawStatePaths?.(context) ?? []).map((path): DeleteTarget => ({
       path,
       kind: 'source_state_path',

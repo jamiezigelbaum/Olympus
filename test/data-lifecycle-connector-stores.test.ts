@@ -30,6 +30,14 @@ import {
   defaultProtectedTelegramConnectorStoreDbPath,
 } from '../src/workers/telegram-messages/index.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/index.ts';
+import {
+  defaultXBookmarksApiUsageDbPath,
+  LocalXBookmarksApiUsageStore,
+} from '../src/workers/x-bookmarks/live-control.ts';
+import {
+  defaultXBookmarksReconcileStateDbPath,
+  LocalXBookmarksReconcileStateStore,
+} from '../src/workers/x-bookmarks/reconcile-state.ts';
 
 // The path helpers are the oracle here, read independently of the lifecycle
 // inventory under test. Reflect and Roam have no worker helper to read, so
@@ -112,6 +120,31 @@ describe('lifecycle inventory covers the connector stores', () => {
       expect(result.removed).toContain(paths.xBookmarks);
       expect(existsSync(paths.xBookmarks)).toBe(false);
       expect(existsSync(paths.gmail)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('delete --source x.bookmarks takes the per-account reconcile state and keeps the quota ledger', () => {
+    // Left behind, the previous X account's reconcile snapshot stopped the
+    // next account's reconcile on "explicit account migration or state reset
+    // is required" after the documented delete (PR #264 review).
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-x-state-'));
+    const homeDir = join(dir, 'home');
+    try {
+      const paths = seedStores(homeDir);
+      const env = { HOME: homeDir, XDG_DATA_HOME: join(homeDir, '.local', 'share') };
+      const usagePath = defaultXBookmarksApiUsageDbPath(env);
+      const reconcilePath = defaultXBookmarksReconcileStateDbPath(env, usagePath);
+      new LocalXBookmarksApiUsageStore(usagePath).close();
+      new LocalXBookmarksReconcileStateStore(reconcilePath).close();
+
+      const result = deleteOlympusData({ sourceId: 'x.bookmarks', homeDir });
+
+      expect(result.removed).toContain(reconcilePath);
+      expect(existsSync(reconcilePath)).toBe(false);
+      expect(existsSync(paths.xBookmarks)).toBe(false);
+      expect(existsSync(usagePath)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

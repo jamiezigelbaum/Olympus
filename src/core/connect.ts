@@ -798,8 +798,14 @@ async function completeOAuthSourceConnection(
       // round 12). Rollback needs every route to stay where it was.
       const newRefreshRoute = registryOwnsOAuth ? `store:${refreshKey}` : undefined;
       let refreshRoutesUnchanged = false;
+      // The entries this connect replaces, put back with the markers when the
+      // previous grant still mints: left at the new account's grant over the
+      // old token, the worker would take the new account for the one the
+      // stores hold (PR #264 review).
+      let registryBefore: ConnectedCredentialHandle[] | undefined;
       try {
         const before = readConnectedHandleRegistry(prepared.registryPath).handles;
+        registryBefore = before;
         refreshRoutesUnchanged = handleNames.every((name) => {
           const entry = before.find((candidate) => candidate.handle === name);
           return entry !== undefined && entry.oauth2Refresh?.refreshTokenSecretRef === newRefreshRoute;
@@ -876,13 +882,20 @@ async function completeOAuthSourceConnection(
         tokenWritesAttempted += 1;
         await prepared.secretStore.set(refreshKey, refreshToken);
       } catch (error) {
-        if (await oldGrantStillMints()) {
+        if (registryBefore && await oldGrantStillMints()) {
           try {
+            const previous = registryBefore;
+            for (const name of handleNames) {
+              const entry = previous.find((candidate) => candidate.handle === name);
+              if (entry) upsertConnectedHandle(entry, prepared.registryPath);
+              else removeConnectedHandles([name], prepared.registryPath);
+            }
             for (const [sourceId, snapshot] of intentSnapshots) {
               updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
             }
           } catch {
-            // The marker stays; the worker then fails closed, never mixes.
+            // The marker stays (a registry restore that failed leaves it in
+            // place too); the worker then fails closed, never mixes.
           }
         }
         throw error;

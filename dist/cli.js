@@ -5095,6 +5095,15 @@ function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHan
     return true;
   });
 }
+function connectedGrantGeneration(connectedAt, providerAccountId) {
+  return `${connectedAt}
+${providerAccountId ?? ""}`;
+}
+function grantGenerationAccountId(generation) {
+  const newline = generation?.indexOf(`
+`) ?? -1;
+  return newline >= 0 ? generation.slice(newline + 1).trim() || undefined : undefined;
+}
 function deriveEnvCredentialHandlesFromRegistry(registry) {
   return registry.handles.map((handle) => {
     const definition = {
@@ -5104,8 +5113,7 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
       scopes: [...handle.scopes],
       tokenEnvNames: [],
       expiresInSeconds: 3600,
-      grantGeneration: `${handle.connectedAt}
-${handle.providerAccountId ?? ""}`
+      grantGeneration: connectedGrantGeneration(handle.connectedAt, handle.providerAccountId)
     };
     if (handle.sessionKind)
       definition.sessionKind = handle.sessionKind;
@@ -6270,8 +6278,10 @@ async function completeOAuthSourceConnection(prepared, code) {
     }
     const newRefreshRoute = registryOwnsOAuth ? `store:${refreshKey}` : undefined;
     let refreshRoutesUnchanged = false;
+    let registryBefore;
     try {
       const before = readConnectedHandleRegistry(prepared.registryPath).handles;
+      registryBefore = before;
       refreshRoutesUnchanged = handleNames.every((name) => {
         const entry = before.find((candidate) => candidate.handle === name);
         return entry !== undefined && entry.oauth2Refresh?.refreshTokenSecretRef === newRefreshRoute;
@@ -6339,8 +6349,16 @@ async function completeOAuthSourceConnection(prepared, code) {
       tokenWritesAttempted += 1;
       await prepared.secretStore.set(refreshKey, refreshToken);
     } catch (error) {
-      if (await oldGrantStillMints()) {
+      if (registryBefore && await oldGrantStillMints()) {
         try {
+          const previous = registryBefore;
+          for (const name of handleNames) {
+            const entry = previous.find((candidate) => candidate.handle === name);
+            if (entry)
+              upsertConnectedHandle(entry, prepared.registryPath);
+            else
+              removeConnectedHandles([name], prepared.registryPath);
+          }
           for (const [sourceId, snapshot] of intentSnapshots) {
             updateSourceAccountBinding(bindingsPath, sourceId, () => snapshot);
           }
@@ -44070,9 +44088,14 @@ async function issueGrantFencedXSession(input) {
     trustDomain: "internal",
     purpose: input.purpose
   }), credentialHandle);
+  const grantAccount = grantGenerationAccountId(generation);
+  const readsAs = input.readsAsAccountId?.trim();
   const assertGrantCurrent = () => {
     if (broker.grantGeneration && broker.grantGeneration(credentialHandle) !== generation) {
       throw new XBookmarksGrantChangedError;
+    }
+    if (grantAccount && readsAs && grantAccount !== readsAs) {
+      throw new XBookmarksGrantChangedError("other_account");
     }
   };
   assertGrantCurrent();
@@ -44081,11 +44104,13 @@ async function issueGrantFencedXSession(input) {
 var XBookmarksGrantChangedError;
 var init_grant_fence = __esm(() => {
   init_credential_broker();
+  init_connected_handles();
   XBookmarksGrantChangedError = class XBookmarksGrantChangedError extends Error {
-    code = "x_bookmarks_grant_changed";
-    constructor() {
-      super("The X bookmarks credential was reconnected during this run; nothing from the previous grant was stored.");
+    code;
+    constructor(reason = "reconnected") {
+      super(reason === "other_account" ? "The connected X credential is for a different X account than this run reads; nothing was stored. The next run reads the connected account." : "The X bookmarks credential was reconnected during this run; nothing from the previous grant was stored.");
       this.name = "XBookmarksGrantChangedError";
+      this.code = reason === "other_account" ? "x_bookmarks_grant_account_mismatch" : "x_bookmarks_grant_changed";
     }
   };
 });
@@ -47464,7 +47489,8 @@ function createXBookmarksApiSourceConnector(options) {
       const session = await issueGrantFencedXSession({
         broker,
         credentialHandle,
-        purpose: "Synchronize X bookmarks into the Olympus shared connector store."
+        purpose: "Synchronize X bookmarks into the Olympus shared connector store.",
+        readsAsAccountId: userId
       });
       assertGrantCurrent = session.assertGrantCurrent;
       client = grantFencedClient(new XApiClient({
@@ -48444,7 +48470,8 @@ async function diagnosticClient(options, env) {
   const session = await issueGrantFencedXSession({
     broker,
     credentialHandle,
-    purpose: "Run the bounded content-free X bookmarks window diagnostic."
+    purpose: "Run the bounded content-free X bookmarks window diagnostic.",
+    readsAsAccountId: userId
   });
   return {
     client: new XApiClient({
@@ -49117,10 +49144,10 @@ function createXBookmarksContentRecoveryHandler(options) {
             ...options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {},
             ...options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}
           }));
-      } catch {
+      } catch (error) {
         options.usageStore.cancelUndispatchedRequest({ reservation });
         counts.items_deferred += requestedCandidates.length;
-        return writeReceipt(receiptPath, buildReceipt("failed", counts));
+        return writeReceipt(receiptPath, buildReceipt(error instanceof XBookmarksGrantChangedError ? "deferred" : "failed", counts));
       }
       let lookup3;
       let dispatched = false;
@@ -49253,7 +49280,8 @@ async function authenticatedClient(input) {
   const session = await issueGrantFencedXSession({
     broker: input.broker,
     credentialHandle: input.credentialHandle,
-    purpose: "Recover missing content for already-indexed X bookmarks."
+    purpose: "Recover missing content for already-indexed X bookmarks.",
+    readsAsAccountId: input.userId
   });
   return {
     client: new XApiClient({
@@ -132977,8 +133005,7 @@ async function main() {
     if (!runtime)
       return;
     connectorStoreAccountScopes.set(runtime.store.corpusId, sourceIndexAccount?.trim() || handle?.accountRole?.trim() || "personal");
-    xBookmarksLaneReadAccount = runtime.providerUserId;
-    const guard = sourceAccountGuardFor(xBookmarksGuardLane(handle?.handle));
+    const guard = sourceAccountGuardFor(xBookmarksGuardLane(handle?.handle, runtime.providerUserId));
     return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle) => {
@@ -132997,7 +133024,6 @@ async function main() {
     handles: readActiveConnectedHandles(process.env)
   }));
   const sourceAccountGuards = new Map;
-  let xBookmarksLaneReadAccount;
   const laneGuards = new Map;
   const laneStores = (stores, onDemand) => ({
     laneHoldsItems: () => stores.some((store) => store?.holdsAnyItem() === true) || onDemand.some((leg) => leg ? leg.current()?.holdsAnyItem() ?? leg.exists() : false),
@@ -133007,7 +133033,8 @@ async function main() {
     if (!lane.handle || !connectedHandleRegistryPath)
       return;
     const key2 = `${lane.sourceId}
-${lane.handle}`;
+${lane.handle}${lane.readsAs ? `
+${lane.readsAs.accountId ?? ""}` : ""}`;
     let guard = sourceAccountGuards.get(key2);
     if (!guard) {
       guard = createSourceAccountGuard({
@@ -133020,7 +133047,7 @@ ${lane.handle}`;
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
         ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {},
-        ...lane.readAccountId ? { readAccountId: lane.readAccountId } : {}
+        ...lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId } : {}
       });
       sourceAccountGuards.set(key2, guard);
     }
@@ -133034,13 +133061,13 @@ ${lane.handle}`;
       laneGuards.set(source.sourceId, guard);
     return source;
   };
-  const xBookmarksGuardLane = (handle) => ({
+  const xBookmarksGuardLane = (handle, readsAs) => ({
     sourceId: "x.bookmarks",
     provider: "x",
     capability: "x.bookmarks.sync",
     handle,
     ...laneStores(refreshableXBookmarksRuntime ? [refreshableXBookmarksRuntime.store] : [], xBookmarksTierStores),
-    readAccountId: () => xBookmarksLaneReadAccount
+    readsAs: { accountId: readsAs }
   });
   const schedulerSourcesForHandles = (handles) => {
     const decisions = [];
@@ -133124,7 +133151,6 @@ ${lane.handle}`;
       ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef) } : {}
     }) : undefined;
     const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime?.runtimeForHandle(currentXBookmarksHandle);
-    xBookmarksLaneReadAccount = currentXBookmarksConnectorStoreRuntime?.providerUserId;
     if (currentXBookmarksConnectorStoreRuntime) {
       connectorStoreAccountScopes.set(currentXBookmarksConnectorStoreRuntime.store.corpusId, sourceIndexAccount?.trim() || currentXBookmarksHandle?.accountRole?.trim() || "personal");
     }
@@ -133206,7 +133232,7 @@ ${lane.handle}`;
       recordLane(SCHEDULER_SOURCE_IDS.xBookmarks, xBookmarksSkipReason, () => withSourceAccountGuard(currentXBookmarksConnectorStoreRuntime ? createXBookmarksSchedulerSource({
         config: olympusConfig,
         liveSync: currentXBookmarksConnectorStoreRuntime.sync
-      }) : undefined, xBookmarksGuardLane(currentXBookmarksHandle?.handle))),
+      }) : undefined, xBookmarksGuardLane(currentXBookmarksHandle?.handle, currentXBookmarksConnectorStoreRuntime?.providerUserId))),
       recordLane(SCHEDULER_SOURCE_IDS.telegram, !currentTelegramHandle ? "no_handle" : !telegramConnectorStoreSync ? "no_store_sync" : undefined, () => createTelegramSchedulerSource({
         config: olympusConfig,
         ...telegramConnectorStoreSync ? { sync: telegramConnectorStoreSync } : {},
@@ -135452,6 +135478,8 @@ init_readwise();
 init_tier_set2();
 init_x_bookmarks();
 init_tier_set3();
+init_reconcile_state();
+init_live_control2();
 init_whatsapp();
 init_sovereignty();
 init_pairing_session_paths();
@@ -135544,7 +135572,14 @@ function lifecycleSourceSpecs() {
       connectorStorePaths: (context2) => [
         defaultXBookmarksConnectorStoreDbPath(envForContext(context2)),
         defaultXBookmarksSecureConnectorStoreDbPath(envForContext(context2))
-      ]
+      ],
+      accountStateSqlite: (context2) => {
+        const env = envForContext(context2);
+        return [{
+          path: defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env)),
+          sqliteStoreId: X_BOOKMARKS_RECONCILE_STATE_STORE_ID
+        }];
+      }
     },
     {
       sourceId: "whatsapp.personal.messages",
@@ -135657,6 +135692,8 @@ function exportOlympusData(options) {
     }
     for (const statePath of source.rawStatePaths?.(options) ?? [])
       skipped.push(statePath);
+    for (const state of source.accountStateSqlite?.(options) ?? [])
+      skipped.push(state.path);
     for (const statePath of source.preservationOnlyPaths?.(options) ?? [])
       skipped.push(statePath);
   }
@@ -135927,6 +135964,7 @@ function sourceDeleteTargets(source, context2) {
       ...storePath === ":memory:" ? [] : sqliteDeleteTargets(secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID, context2),
       ...storePath === ":memory:" ? [] : sqliteDeleteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID, context2)
     ]),
+    ...(source.accountStateSqlite?.(context2) ?? []).flatMap((state) => state.path === ":memory:" ? [] : sqliteDeleteTargets(state.path, state.sqliteStoreId, context2)),
     ...(source.rawStatePaths?.(context2) ?? []).map((path) => ({
       path,
       kind: "source_state_path",

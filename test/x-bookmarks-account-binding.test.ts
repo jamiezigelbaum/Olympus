@@ -18,8 +18,12 @@ import {
   sourceAccountBindingsPath,
   updateSourceAccountBinding,
 } from '../src/core/source-account-binding.ts';
-import { upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
-import { JsonCredentialOAuth2StateStore, type CredentialBroker } from '../src/workers/credential-broker/index.ts';
+import { readConnectedHandleRegistry, upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
+import {
+  JsonCredentialOAuth2StateStore,
+  type CredentialBroker,
+  type CredentialOAuth2StateStore,
+} from '../src/workers/credential-broker/index.ts';
 import { EmailSourceWorkerError } from '../src/workers/email-source/index.ts';
 import {
   accountCheckedXBookmarksRuntime,
@@ -78,7 +82,7 @@ async function xServer(state: { userId: string }) {
   return { baseUrl: `http://127.0.0.1:${address.port}`, grantTypes, close: () => server.close() };
 }
 
-function connectX(dir: string, baseUrl: string) {
+function connectX(dir: string, baseUrl: string, oauth2StateStore?: CredentialOAuth2StateStore) {
   return connectOAuthSource({
     source: 'x',
     clientId: 'x-client-id-fixture',
@@ -86,7 +90,7 @@ function connectX(dir: string, baseUrl: string) {
     authUrl: `${baseUrl}/authorize`,
     tokenUrl: `${baseUrl}/token`,
     registryPath: join(dir, 'handles.json'),
-    oauth2StateStore: new JsonCredentialOAuth2StateStore(join(dir, 'oauth-state.json')),
+    oauth2StateStore: oauth2StateStore ?? new JsonCredentialOAuth2StateStore(join(dir, 'oauth-state.json')),
     secretStore: new EncryptedFileSecretStore({
       encryptedFilePath: join(dir, 'secrets.enc'),
       keyFilePath: join(dir, 'secrets.key'),
@@ -166,6 +170,47 @@ describe('X connect records the account its grant belongs to', () => {
       expect(back.sourceAccountPurgeRequired).toBeUndefined();
       expect(bindingOf(registryPath)?.purge_required).toBeUndefined();
       expect(bindingOf(registryPath)?.provider_account_id).toBe('1001');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('a failed X reconnect leaves the previous grant as it was', () => {
+  test('a state save that never lands restores the registry entry with the binding', async () => {
+    // X keeps its rotating token in the OAuth state store, so the registry
+    // entry is written first. Left at the new account's grant over the old
+    // token, the worker would read the new account as the one the stores hold
+    // (PR #264 review).
+    const dir = tempDir();
+    const registryPath = join(dir, 'handles.json');
+    const state = { userId: '1001' };
+    const server = await xServer(state);
+    try {
+      await connectX(dir, server.baseUrl);
+      updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'x.bookmarks', () => ({
+        provider_account_id: '1001',
+        bound_at: '2026-10-11T08:00:00.000Z',
+      }));
+      const entryBefore = readConnectedHandleRegistry(registryPath).handles
+        .find((entry) => entry.handle === 'x.bookmarks.personal');
+      const bindingBefore = bindingOf(registryPath);
+      expect(entryBefore?.providerAccountId).toBe('1001');
+
+      const real = new JsonCredentialOAuth2StateStore(join(dir, 'oauth-state.json'));
+      const failingSave: CredentialOAuth2StateStore = {
+        load: (handle) => real.load(handle),
+        save: async () => { throw new Error('disk full'); },
+        ...(real.leaseTargetPath ? { leaseTargetPath: (handle: string) => real.leaseTargetPath!(handle) } : {}),
+      };
+      state.userId = '2002';
+      await expect(connectX(dir, server.baseUrl, failingSave)).rejects.toThrow('disk full');
+
+      const entryAfter = readConnectedHandleRegistry(registryPath).handles
+        .find((entry) => entry.handle === 'x.bookmarks.personal');
+      expect(entryAfter?.providerAccountId).toBe('1001');
+      expect(entryAfter?.connectedAt).toBe(entryBefore!.connectedAt);
+      expect(bindingOf(registryPath)).toEqual(bindingBefore);
     } finally {
       server.close();
     }

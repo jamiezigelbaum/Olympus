@@ -448,6 +448,21 @@ export function markConnectedHandleExchangeVia(
   });
 }
 
+/**
+ * A registry grant's generation: when it was connected and the provider
+ * account it authorizes. Any reconnect changes it, and it names the account,
+ * so a consumer that reads as one account can tell a grant for another.
+ */
+export function connectedGrantGeneration(connectedAt: string, providerAccountId: string | undefined): string {
+  return `${connectedAt}\n${providerAccountId ?? ''}`;
+}
+
+/** The provider account a grant generation authorizes; undefined when the grant recorded none. */
+export function grantGenerationAccountId(generation: string | undefined): string | undefined {
+  const newline = generation?.indexOf('\n') ?? -1;
+  return newline >= 0 ? generation!.slice(newline + 1).trim() || undefined : undefined;
+}
+
 export function deriveEnvCredentialHandlesFromRegistry(
   registry: ConnectedHandleRegistry,
 ): EnvCredentialHandleDefinition[] {
@@ -459,7 +474,7 @@ export function deriveEnvCredentialHandlesFromRegistry(
       scopes: [...handle.scopes],
       tokenEnvNames: [],
       expiresInSeconds: 3600,
-      grantGeneration: `${handle.connectedAt}\n${handle.providerAccountId ?? ''}`,
+      grantGeneration: connectedGrantGeneration(handle.connectedAt, handle.providerAccountId),
     };
     if (handle.sessionKind) definition.sessionKind = handle.sessionKind;
     if (handle.accountRole) definition.accountRole = handle.accountRole;

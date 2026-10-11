@@ -3595,10 +3595,9 @@ export async function main(): Promise<void> {
       runtime.store.corpusId,
       sourceIndexAccount?.trim() || handle?.accountRole?.trim() || 'personal',
     );
-    xBookmarksLaneReadAccount = runtime.providerUserId;
     // The operator routes reach the runtime without the scheduler, so they
     // pass the same account check its lane does before reading or writing.
-    const guard = sourceAccountGuardFor(xBookmarksGuardLane(handle?.handle));
+    const guard = sourceAccountGuardFor(xBookmarksGuardLane(handle?.handle, runtime.providerUserId));
     return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle: ConnectedCredentialHandle | undefined) => {
@@ -3624,8 +3623,6 @@ export async function main(): Promise<void> {
   // reads with, the connected grant and the stored items name one account.
   // Kept across scheduler rebuilds so a token is looked up once, not per pass.
   const sourceAccountGuards = new Map<string, SourceAccountGuard>();
-  // The X user id the current X lane reads as, refreshed on every build.
-  let xBookmarksLaneReadAccount: string | undefined;
   // The guards of the lanes being assembled, applied once every task of the
   // lane is attached: an embedding sweep or watch task appended later writes
   // the same stores and must not run past the guard (independent review
@@ -3653,11 +3650,15 @@ export async function main(): Promise<void> {
     laneHoldsItems: () => boolean;
     laneStoresStale: () => boolean;
     ownAccountEvidence?: SourceAccountGuardOptions['ownAccountEvidence'];
-    readAccountId?: SourceAccountGuardOptions['readAccountId'];
+    // For a lane that reads as a fixed account id (X): the id this task's
+    // runtime reads as. Part of the guard's key, so a task is always checked
+    // against the runtime it holds, never one an operator route built since
+    // (PR #264 review).
+    readsAs?: { accountId: string | undefined };
   };
   const sourceAccountGuardFor = (lane: AccountGuardLane): SourceAccountGuard | undefined => {
     if (!lane.handle || !connectedHandleRegistryPath) return undefined;
-    const key = `${lane.sourceId}\n${lane.handle}`;
+    const key = `${lane.sourceId}\n${lane.handle}${lane.readsAs ? `\n${lane.readsAs.accountId ?? ''}` : ''}`;
     let guard = sourceAccountGuards.get(key);
     if (!guard) {
       guard = createSourceAccountGuard({
@@ -3670,7 +3671,7 @@ export async function main(): Promise<void> {
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
         ...(lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}),
-        ...(lane.readAccountId ? { readAccountId: lane.readAccountId } : {}),
+        ...(lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId } : {}),
       });
       sourceAccountGuards.set(key, guard);
     }
@@ -3689,7 +3690,7 @@ export async function main(): Promise<void> {
   // the operator routes (Sync now, content recovery) that call the runtime
   // directly. Every X bookmarks read is addressed to the runtime's user id,
   // and X refuses it for another account's token: no identity call needed.
-  const xBookmarksGuardLane = (handle: string | undefined): AccountGuardLane => ({
+  const xBookmarksGuardLane = (handle: string | undefined, readsAs: string | undefined): AccountGuardLane => ({
     sourceId: 'x.bookmarks',
     provider: 'x',
     capability: 'x.bookmarks.sync',
@@ -3698,7 +3699,7 @@ export async function main(): Promise<void> {
       refreshableXBookmarksRuntime ? [refreshableXBookmarksRuntime.store] : [],
       xBookmarksTierStores,
     ),
-    readAccountId: () => xBookmarksLaneReadAccount,
+    readsAs: { accountId: readsAs },
   });
   const schedulerSourcesForHandles = (handles: readonly ConnectedCredentialHandle[]): {
     sources: SourceSchedulerSource[];
@@ -3816,7 +3817,6 @@ export async function main(): Promise<void> {
       : undefined;
     const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime
       ?.runtimeForHandle(currentXBookmarksHandle);
-    xBookmarksLaneReadAccount = currentXBookmarksConnectorStoreRuntime?.providerUserId;
     if (currentXBookmarksConnectorStoreRuntime) {
       connectorStoreAccountScopes.set(
         currentXBookmarksConnectorStoreRuntime.store.corpusId,
@@ -3967,7 +3967,10 @@ export async function main(): Promise<void> {
             config: olympusConfig,
             liveSync: currentXBookmarksConnectorStoreRuntime.sync,
           })
-          : undefined, xBookmarksGuardLane(currentXBookmarksHandle?.handle)),
+          : undefined, xBookmarksGuardLane(
+            currentXBookmarksHandle?.handle,
+            currentXBookmarksConnectorStoreRuntime?.providerUserId,
+          )),
       ),
       recordLane(
         SCHEDULER_SOURCE_IDS.telegram,

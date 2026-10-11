@@ -222,6 +222,7 @@ async function diagnosticClient(
     broker,
     credentialHandle,
     purpose: 'Run the bounded content-free X bookmarks window diagnostic.',
+    readsAsAccountId: userId,
   });
   return {
     client: new XApiClient({
