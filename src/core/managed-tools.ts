@@ -101,9 +101,9 @@ export interface ManagedToolPin {
 // (an upstream daemon is refused with daemon_supervisor_unsupported).
 // zkapi-walletd and share/zkapi-clientd/ are upstream's bytes.
 const ZKAPI_VERSION = '0.1.6-olympus2';
-// A plain literal: the packaged-bundle scan exempts exactly this public
-// download address (scripts/owner-identifier-patterns.ts).
-const ZKAPI_RELEASE = 'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2';
+// Each asset's full URL is written out as one literal: the packaged-bundle
+// scan exempts exactly these four public download addresses
+// (scripts/owner-identifier-patterns.ts), and a composed URL would not match.
 const ZKAPI_REQUIRED = [
   'bin/zkapi-clientd',
   'bin/zkapi-walletd',
@@ -118,8 +118,8 @@ const ZKAPI_REQUIRED = [
 // to bin/ beside share/, which is where the daemon looks for its proof files.
 const ZKAPI_RENAME = { 'zkapi-clientd': 'bin/zkapi-clientd', 'zkapi-walletd': 'bin/zkapi-walletd' } as const;
 
-function zkapiAsset(name: string, sha256: string, bytes: number): ManagedToolAsset {
-  return { url: `${ZKAPI_RELEASE}/${name}`, sha256, bytes, executable: 'bin/zkapi-clientd', required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
+function zkapiAsset(url: string, sha256: string, bytes: number): ManagedToolAsset {
+  return { url, sha256, bytes, executable: 'bin/zkapi-clientd', required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
 }
 
 const TOR_RELEASE = 'https://dist.torproject.org/torbrowser/15.0.24';
@@ -142,7 +142,7 @@ function torLinuxAsset(name: string, sha256: string, bytes: number): ManagedTool
 
 /**
  * The pinned builds (docs/design/private-answers.md). zkapi-clientd, verified
- * 2026-10-11: release clientd-v0.1.6-olympus2 of the Olympus fork (ZKAPI_RELEASE), built
+ * 2026-10-11: release clientd-v0.1.6-olympus2 of the Olympus fork (the asset URLs), built
  * by its olympus-release workflow from fork commit 14fcba96; hashes computed
  * from the downloaded archives and matched to the release's SHA256SUMS and
  * GitHub's asset digests, each file's build-provenance attestation verified
@@ -173,10 +173,10 @@ export const MANAGED_TOOL_PINS: Readonly<Record<ManagedToolName, ManagedToolPin>
     version: ZKAPI_VERSION,
     versionLine: /^zkapi-clientd 0\.1\.6-olympus2(\s|$)/,
     assets: {
-      'darwin-arm64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz', '93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c', 23_233_212),
-      'darwin-x64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz', 'eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9', 23_924_127),
-      'linux-x64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz', '33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1', 24_179_427),
-      'linux-arm64': zkapiAsset('zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz', 'ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0', 23_914_142),
+      'darwin-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz', '93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c', 23_233_212),
+      'darwin-x64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz', 'eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9', 23_924_127),
+      'linux-x64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz', '33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1', 24_179_427),
+      'linux-arm64': zkapiAsset('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz', 'ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0', 23_914_142),
     },
     // Upstream clientd-v0.1.6, pinned 2026-10-07 until this release.
     replaces: {

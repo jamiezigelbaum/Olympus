@@ -16654,7 +16654,6 @@ import { homedir as homedir8 } from "node:os";
 import { dirname as dirname10, isAbsolute as isAbsolute10, join as join15, posix, sep as sep3 } from "node:path";
 init_file_lease();
 var ZKAPI_VERSION = "0.1.6-olympus2";
-var ZKAPI_RELEASE = "https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2";
 var ZKAPI_REQUIRED = [
   "bin/zkapi-clientd",
   "bin/zkapi-walletd",
@@ -16666,8 +16665,8 @@ var ZKAPI_REQUIRED = [
   "share/zkapi-clientd/proof-setup/withdrawal.vk"
 ];
 var ZKAPI_RENAME = { "zkapi-clientd": "bin/zkapi-clientd", "zkapi-walletd": "bin/zkapi-walletd" };
-function zkapiAsset(name, sha256, bytes) {
-  return { url: `${ZKAPI_RELEASE}/${name}`, sha256, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
+function zkapiAsset(url, sha256, bytes) {
+  return { url, sha256, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
 }
 var TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24";
 function torMacAsset(name, sha256, bytes, adhocSign) {
@@ -16703,10 +16702,10 @@ var MANAGED_TOOL_PINS = {
     version: ZKAPI_VERSION,
     versionLine: /^zkapi-clientd 0\.1\.6-olympus2(\s|$)/,
     assets: {
-      "darwin-arm64": zkapiAsset("zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz", "93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c", 23233212),
-      "darwin-x64": zkapiAsset("zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz", "eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9", 23924127),
-      "linux-x64": zkapiAsset("zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz", "33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1", 24179427),
-      "linux-arm64": zkapiAsset("zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz", "ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0", 23914142)
+      "darwin-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz", "93817938e5115ba4e73b6f9524ece30c7127b564649475cd7aa62896796c399c", 23233212),
+      "darwin-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz", "eec5c1e1d7fb42b52939b8da2b92b497b050d0f95ebc329a48edf50f99ceb2f9", 23924127),
+      "linux-x64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz", "33b7144041690c1a32e616077daeb8a25760697db470c0e984ddf605603f92e1", 24179427),
+      "linux-arm64": zkapiAsset("https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz", "ac4ad433d5e92e01c8130344afdff878b9dcc549144895fbda46165afaf18ae0", 23914142)
     },
     replaces: {
       "0.1.6": {

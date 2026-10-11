@@ -184,8 +184,8 @@ const PUBLIC_INSTALL_URLS = new Set([
 
 /**
  * The pinned zkAPI download (src/core/managed-tools.ts): the Olympus fork's
- * public release, which the shipped installer must name. Exact base URL, as a
- * quoted literal, in the managed-tools source and the two bundles built from it.
+ * public release, which the shipped installer must name. The four exact asset
+ * URLs, each a quoted literal, in the managed-tools source and its two bundles.
  */
 const PUBLIC_DOWNLOAD_URL_FILES = new Set([
   'src/core/managed-tools.ts',
@@ -193,7 +193,10 @@ const PUBLIC_DOWNLOAD_URL_FILES = new Set([
   'dist/index.js',
 ]);
 const PUBLIC_DOWNLOAD_URLS = new Set([
-  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_amd64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_amd64.tar.gz',
+  'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_linux_arm64.tar.gz',
 ]);
 
 export function scannableText(relativePath: string, text: string): string {

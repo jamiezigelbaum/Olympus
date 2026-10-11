@@ -139,12 +139,12 @@ describe('public flip owner-identifier scan', () => {
     }
   });
 
-  test('only the exact quoted zkAPI release URL is exempt, and only in the installer and its bundles', () => {
-    const url = 'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2';
+  test('only the exact quoted zkAPI release URLs are exempt, and only in the installer and its bundles', () => {
+    const url = 'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/zkapi-clientd_0.1.6-olympus2_darwin_arm64.tar.gz';
     for (const path of ['src/core/managed-tools.ts', 'dist/cli.js', 'dist/index.js']) {
       const clean = fixtureTree({ [path]: `const a = '${url}';\nconst b = "${url}";\n` });
       expect(scanTree(clean.root, clean.paths).blockers).toHaveLength(0);
-      for (const invalid of [`'${url}/private'`, `'${url}-x'`, `'${url.replace('/zkapi/', '/other/')}'`, `// ${url}`, `\`${url}/\${name}\``]) {
+      for (const invalid of [`'${url}/private'`, `'${url}.sig'`, `'${url.replace('/zkapi/', '/other/')}'`, `// ${url}`, `\`${url}/\${name}\``]) {
         const tree = fixtureTree({ [path]: invalid });
         expect(scanTree(tree.root, tree.paths).blockers.map((hit) => hit.match)).toContain('jamiezigelbaum');
       }
