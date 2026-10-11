@@ -7,7 +7,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { connectOAuthSource } from '../src/core/connect.ts';
+import { connectOAuthSource, readDetachedOAuthState, runDetachedOAuthLifecycle } from '../src/core/connect.ts';
 import { EncryptedFileSecretStore } from '../src/core/secret-store.ts';
 import {
   decideSourceAccountAction,
@@ -187,6 +187,30 @@ describe('Dropbox connect records the account its grant belongs to', () => {
       });
     } finally {
       second.close();
+    }
+  });
+
+  test('a detached connect that changes the account keeps the notice for connect status (PR review)', async () => {
+    const install = installDir();
+    updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'dropbox.files', () => ({
+      provider_account_id: 'dbid:main-account',
+    }));
+    const server = await dropboxServer({ tokenAccountId: 'dbid:demo-account' });
+    try {
+      const statePath = join(install.registryPath, '..', 'detached', 'dropbox.json');
+      const final = await runDetachedOAuthLifecycle({
+        ...dropboxOptions(install, server.baseUrl),
+        statePath,
+        logPath: join(install.registryPath, '..', 'detached', 'dropbox.log'),
+        pid: 12345,
+      });
+      expect(final.status).toBe('connected');
+      const persisted = readDetachedOAuthState(statePath);
+      expect(persisted?.sourceAccountPurgeRequired).toEqual(['dropbox.files']);
+      expect(persisted?.sourceAccountNotice).toContain('olympus data delete --source dropbox.files');
+      expect(persisted?.sourceAccountNotice).toContain('reconnect the previous account');
+    } finally {
+      server.close();
     }
   });
 

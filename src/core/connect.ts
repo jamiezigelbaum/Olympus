@@ -51,6 +51,7 @@ import {
   type AccountBoundProvider,
 } from './provider-account-identity.ts';
 import {
+  ACCOUNT_BOUND_SOURCE_IDS,
   accountBoundSourceIdForProvider,
   readSourceAccountBindings,
   recordFileSourceConnect,
@@ -170,6 +171,11 @@ export interface DetachedOAuthState {
   errorCode?: string;
   retryable?: boolean;
   retryAt?: string;
+  /** Carried from the ConnectResult: a detached child prints nothing, so
+   * `connect status` is where the owner learns sync is blocked and how to
+   * resume it (PR review). */
+  sourceAccountPurgeRequired?: AccountBoundSourceId[];
+  sourceAccountNotice?: string;
 }
 
 export interface DetachedOAuthConnectResult {
@@ -392,6 +398,8 @@ export async function runDetachedOAuthLifecycle(options: ConnectOAuthOptions & {
       handles: result.handles,
       ...(result.handles[0] ? { handleId: result.handles[0] } : {}),
       ...(result.registryPath ? { registryPath: result.registryPath } : {}),
+      ...(result.sourceAccountPurgeRequired ? { sourceAccountPurgeRequired: result.sourceAccountPurgeRequired } : {}),
+      ...(result.sourceAccountNotice ? { sourceAccountNotice: result.sourceAccountNotice } : {}),
     };
     writeDetachedOAuthState(options.statePath, connected);
     return connected;
@@ -2243,6 +2251,15 @@ function sanitizeDetachedOAuthState(input: DetachedOAuthState): DetachedOAuthSta
       : {}),
     ...(input.retryable === true ? { retryable: true } : {}),
     ...(input.retryAt && Number.isFinite(Date.parse(input.retryAt)) ? { retryAt: input.retryAt } : {}),
+    ...(Array.isArray(input.sourceAccountPurgeRequired)
+      ? (() => {
+          const ids = input.sourceAccountPurgeRequired.filter((id) => (ACCOUNT_BOUND_SOURCE_IDS as readonly string[]).includes(id));
+          return ids.length > 0 ? { sourceAccountPurgeRequired: ids } : {};
+        })()
+      : {}),
+    ...(typeof input.sourceAccountNotice === 'string' && input.sourceAccountNotice
+      ? { sourceAccountNotice: input.sourceAccountNotice.slice(0, 2_000) }
+      : {}),
   };
   return state;
 }

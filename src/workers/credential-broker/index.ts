@@ -265,6 +265,13 @@ export interface CredentialOAuth2HandleState {
    * dead. Passing `undefined` through `save` clears it.
    */
   pendingRefreshStartedAt?: string | undefined;
+  /**
+   * The grant generation the in-flight marker was written under. A marker
+   * from a replaced generation is about a token no longer on file and never
+   * latches the grant that replaced it. Markers written before this field
+   * existed carry none and are treated as the current grant's.
+   */
+  pendingRefreshGrantGeneration?: string | undefined;
 }
 
 export interface CredentialOAuth2StateStore {
@@ -471,13 +478,6 @@ export class CredentialBrokerError extends Error {
     if (code === 'credential_refresh_busy') {
       this.retryAfterMs = CREDENTIAL_REFRESH_BUSY_RETRY_MS;
     }
-  }
-}
-
-/** A refresh whose grant was replaced while it ran; callers see a plain busy. */
-class CredentialGrantSupersededError extends CredentialBrokerError {
-  constructor(message: string, options: { handle: string; capability?: string }) {
-    super('credential_refresh_busy', message, options);
   }
 }
 
@@ -954,6 +954,7 @@ export class JsonCredentialOAuth2StateStore implements CredentialOAuth2StateStor
       ) {
         merged.pendingRefreshStartedAt = undefined;
       }
+      if (merged.pendingRefreshStartedAt === undefined) merged.pendingRefreshGrantGeneration = undefined;
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
         await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
@@ -1258,14 +1259,12 @@ export class EnvCredentialBroker implements CredentialBroker {
   ): Promise<CredentialSession> {
     const leaseTargetPath = this.oauth2StateStore?.leaseTargetPath?.(definition.handle);
     if (!leaseTargetPath) {
-      return this.issueFreshOAuth2RefreshSessionWithLease(definition, capability, cacheKey)
-        .catch((error: unknown) => this.retireSupersededRefreshMarker(definition, error));
+      return this.issueFreshOAuth2RefreshSessionWithLease(definition, capability, cacheKey);
     }
     try {
       return await withFileLease(
         leaseTargetPath,
-        (lease) => this.issueFreshOAuth2RefreshSessionWithLease(definition, capability, cacheKey, lease)
-          .catch((error: unknown) => this.retireSupersededRefreshMarker(definition, error, lease)),
+        (lease) => this.issueFreshOAuth2RefreshSessionWithLease(definition, capability, cacheKey, lease),
         this.oauth2LeaseOptions,
       );
     } catch (error) {
@@ -1288,20 +1287,24 @@ export class EnvCredentialBroker implements CredentialBroker {
     if (!oauth2) throw missingCredentialError(definition.handle, capability);
 
     const now = this.now();
-    const storedState = await this.oauth2StateStore?.load(definition.handle);
+    let storedState = await this.oauth2StateStore?.load(definition.handle);
     if (storedState?.pendingRefreshStartedAt) {
-      // Latched only under grant custody, and only while the marker is still
-      // on file for the grant this mint read: a reconnect landing since the
-      // read installed a new grant and cleared the marker, and latching from
-      // the stale snapshot would mark that new grant (independent review
-      // round 7).
-      await this.withCurrentGrant(definition, capability, undefined, async () => {
+      // Decided under grant custody against a fresh read, for the grant this
+      // mint is for (independent review rounds 7 and 8). A marker the
+      // reconnect cleared since the first read is gone; a marker written
+      // under a replaced generation is about a token no longer on file and is
+      // cleared, never latched onto the grant that replaced it. Only a marker
+      // of this grant (or one too old to say) latches. Nothing here clears a
+      // marker another attempt of this grant still owns.
+      const pending = storedState.pendingRefreshStartedAt;
+      const resolved = await this.withCurrentGrant(definition, capability, undefined, async () => {
         const latest = await this.oauth2StateStore?.load(definition.handle);
-        if (!latest?.pendingRefreshStartedAt) {
-          throw new CredentialGrantSupersededError(
-            `Credential handle ${definition.handle} was reconnected while its refresh state was read. Retry to use the new grant.`,
-            { handle: definition.handle, capability },
-          );
+        if (!latest?.pendingRefreshStartedAt) return { latched: false as const, state: latest };
+        if (latest.pendingRefreshGrantGeneration !== undefined
+          && latest.pendingRefreshGrantGeneration !== definition.grantGeneration) {
+          const cleared = { ...latest, pendingRefreshStartedAt: undefined, pendingRefreshGrantGeneration: undefined };
+          await commitFileLease(lease, () => this.oauth2StateStore!.save(definition.handle, cleared));
+          return { latched: false as const, state: cleared };
         }
         await commitFileLease(lease, async () => {
           await this.oauth2StateStore?.save(definition.handle, {
@@ -1312,12 +1315,16 @@ export class EnvCredentialBroker implements CredentialBroker {
           });
           this.markRegistryHandleReauthRequired(definition.handle, now);
         });
+        return { latched: true as const };
       });
-      throw new CredentialBrokerError(
-        'credential_reauth_required',
-        `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${storedState.pendingRefreshStartedAt} did not record its outcome, so the stored refresh token may already be spent.`,
-        { handle: definition.handle, capability },
-      );
+      if (resolved.latched) {
+        throw new CredentialBrokerError(
+          'credential_reauth_required',
+          `Credential handle ${definition.handle} requires OAuth reauthorization; a refresh started at ${pending} did not record its outcome, so the stored refresh token may already be spent.`,
+          { handle: definition.handle, capability },
+        );
+      }
+      storedState = resolved.state;
     }
     const clientId = await this.resolveFirstSecret(
       oauth2.clientIdEnvNames,
@@ -1513,31 +1520,6 @@ export class EnvCredentialBroker implements CredentialBroker {
   }
 
   /**
-   * A refresh discarded because its grant was replaced leaves its write-ahead
-   * marker behind, and that marker is about the replaced grant's token. Left
-   * standing, the new grant's first mint would read it as its own lost
-   * outcome and latch reauthorization on a grant that was just authorized.
-   * The per-handle refresh lease is still held, so no mint of the new grant
-   * can own a marker yet. A custody timeout is not a replacement (the old
-   * grant may still be current), so its marker stays.
-   */
-  private async retireSupersededRefreshMarker(
-    definition: EnvCredentialHandleDefinition,
-    error: unknown,
-    lease?: FileLease,
-  ): Promise<never> {
-    if (error instanceof CredentialGrantSupersededError && this.oauth2StateStore) {
-      try {
-        await commitFileLease(lease, () => this.oauth2StateStore!.save(definition.handle, { pendingRefreshStartedAt: undefined }));
-      } catch {
-        // Unclearable: the marker stays and the next mint asks for
-        // reauthorization, the conservative outcome.
-      }
-    }
-    throw error;
-  }
-
-  /**
    * The registry still names the grant this mint was for, and the refresh
    * token on file is still the one it spent (when it has spent one).
    */
@@ -1550,7 +1532,8 @@ export class EnvCredentialBroker implements CredentialBroker {
     const current = this.findHandle(definition.handle);
     if (spentRefreshToken === undefined) {
       if (current?.grantGeneration === definition.grantGeneration) return;
-      throw new CredentialGrantSupersededError(
+      throw new CredentialBrokerError(
+        'credential_refresh_busy',
         `Credential handle ${definition.handle} was reconnected; retry to use the new grant.`,
         { handle: definition.handle, capability },
       );
@@ -1562,7 +1545,8 @@ export class EnvCredentialBroker implements CredentialBroker {
         ) ?? (await this.oauth2StateStore?.load(definition.handle))?.refreshToken?.trim()
       : undefined;
     if (current?.grantGeneration === definition.grantGeneration && onFile === spentRefreshToken) return;
-    throw new CredentialGrantSupersededError(
+    throw new CredentialBrokerError(
+      'credential_refresh_busy',
       `Credential handle ${definition.handle} was reconnected while a refresh was in flight; that refresh was discarded. Retry to use the new grant.`,
       { handle: definition.handle, capability },
     );
@@ -1583,6 +1567,7 @@ export class EnvCredentialBroker implements CredentialBroker {
       await this.oauth2StateStore.save(definition.handle, {
         ...storedState,
         pendingRefreshStartedAt: now.toISOString(),
+        pendingRefreshGrantGeneration: definition.grantGeneration,
       });
     } catch (error) {
       if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
@@ -2807,6 +2792,10 @@ function normalizeOAuth2HandleState(value: unknown, handle: string): CredentialO
   const status = record.status as CredentialOAuth2HandleState['status'];
   const updatedAt = optionalString(record.updatedAt);
   const pendingRefreshStartedAt = optionalString(record.pendingRefreshStartedAt);
+  // Compared exactly against the registry's generation, so never trimmed.
+  const pendingRefreshGrantGeneration = typeof record.pendingRefreshGrantGeneration === 'string' && record.pendingRefreshGrantGeneration
+    ? record.pendingRefreshGrantGeneration
+    : undefined;
   const scopes = Array.isArray(record.scopes)
     ? record.scopes.map((item) => optionalString(item)).filter((item): item is string => !!item)
     : undefined;
@@ -2817,6 +2806,7 @@ function normalizeOAuth2HandleState(value: unknown, handle: string): CredentialO
     ...(status ? { status } : {}),
     ...(updatedAt ? { updatedAt } : {}),
     ...(pendingRefreshStartedAt ? { pendingRefreshStartedAt } : {}),
+    ...(pendingRefreshStartedAt && pendingRefreshGrantGeneration ? { pendingRefreshGrantGeneration } : {}),
   };
 }
 

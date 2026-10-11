@@ -355,7 +355,7 @@ describe('minted access tokens are bound to the grant that minted them', () => {
     expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
   });
 
-  test('a refresh discarded across a reconnect leaves no marker to latch the new grant for reauthorization', async () => {
+  test('a refresh discarded across a reconnect never latches the new grant for reauthorization (independent review rounds 7 and 8)', async () => {
     const { registryPath, secretStore } = grantFixture();
     const stateStore = new JsonCredentialOAuth2StateStore(join(registryPath, '..', 'broker-state.json'));
     let release!: () => void;
@@ -387,9 +387,61 @@ describe('minted access tokens are bound to the grant that minted them', () => {
     release();
 
     expect(((await inFlight) as { code?: string }).code).toBe('credential_refresh_busy');
-    expect((await stateStore.load('dropbox.personal'))?.pendingRefreshStartedAt).toBeUndefined();
+    // The marker is left as it was: it names grant A, so it is not B's.
+    expect((await stateStore.load('dropbox.personal'))?.pendingRefreshGrantGeneration)
+      .toBe('2026-10-10T22:41:00.000Z\ndbid:account-a');
     const next = await broker.issueSession(REQUEST);
     expect(next.kind === 'bearer_token' && next.token).toBe('access-for-refresh-token-account-b');
+    expect(readConnectedHandleRegistry(registryPath).handles[0]?.backendState?.status).not.toBe('reauth_required');
+  });
+
+  test('a request holding a replaced grant never clears the current grant\'s unresolved marker (independent review round 8)', async () => {
+    const { registryPath, secretStore } = grantFixture();
+    const inner = new JsonCredentialOAuth2StateStore(join(registryPath, '..', 'broker-state.json'));
+    const markerOfB = {
+      pendingRefreshStartedAt: '2026-10-10T22:42:30.000Z',
+      pendingRefreshGrantGeneration: '2026-10-10T22:42:00.000Z\ndbid:account-b',
+    };
+    // This request read grant A's definition. Before it looks at the state,
+    // B was connected and a refresh of B started, left its marker, and died.
+    let raced = false;
+    const racing = {
+      load: async (handle: string) => {
+        if (!raced) {
+          raced = true;
+          await secretStore.set('dropbox.personal.oauth.refresh_token', 'refresh-token-account-b');
+          writeDropboxGrant(registryPath, '2026-10-10T22:42:00.000Z', 'dbid:account-b');
+          await inner.save(handle, markerOfB);
+        }
+        return inner.load(handle);
+      },
+      save: (handle: string, state: Parameters<typeof inner.save>[1]) => inner.save(handle, state),
+      leaseTargetPath: (handle: string) => inner.leaseTargetPath(handle),
+    };
+    const sent: string[] = [];
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2StateStore: racing,
+      oauth2CacheNamespace: `reconnect-ownmarker-${registryPath}`,
+      now: () => new Date('2026-10-10T22:41:00.000Z'),
+      fetch: async (_url, init) => {
+        sent.push(new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '');
+        return new Response(JSON.stringify({ access_token: 'unused', expires_in: 14_400 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+
+    const stale = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect((stale as { code?: string }).code).toBe('credential_refresh_busy');
+    expect(await inner.load('dropbox.personal')).toMatchObject(markerOfB);
+    // B's own unresolved refresh is still what decides B: it latches.
+    const forB = await broker.issueSession(REQUEST).catch((reason: unknown) => reason);
+    expect((forB as { code?: string }).code).toBe('credential_reauth_required');
+    expect(sent).toEqual([]);
   });
 
   test('a stale write-ahead marker never latches the grant that replaced it (independent review round 7)', async () => {
