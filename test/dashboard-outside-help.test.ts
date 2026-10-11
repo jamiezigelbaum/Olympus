@@ -244,7 +244,7 @@ describe('the Outside help page: states and copy', () => {
     const more = html.slice(html.indexOf('data-outside-disclosure-more'));
     const fuller = visibleText(more.slice(0, more.indexOf('</ul>')));
     for (const needle of ['only when you ask your agent to use Olympus zkAPI', 'counts each question at the amount held for its model', 'no daily limit unless you set one', 'There is no top-up', 'estimates the 30-day date',
-      'fee buffer', 'require an API key', 'key reuse is on', 'pause deposits and withdrawals', 'proof setup', 'cannot yet confirm the network route is anonymous']) expect(fuller).toContain(needle);
+      'fee buffer', 'require an API key', 'key reuse is on', 'pause deposits and withdrawals', 'proof setup', 'confirm the Tor route for each completed session', 'only when every check passes', 'does not hide identifying details']) expect(fuller).toContain(needle);
     // And the setup steps name the exact commands.
     for (const needle of ['--key-reuse-window-seconds 0', '--require-api-key', 'balance estimated to expire']) expect(text).toContain(needle);
     // Before you turn this on: two short lines; the fuller detail ("Everything to know first") inside Details.
