@@ -88,6 +88,7 @@ import {
 import { credentialInstallId } from '../../../connect-relay/shared/tokens.ts';
 import {
   PRIVATE_ANSWER_META_KEY,
+  PRIVATE_ANSWER_NONE_META,
   PRIVATE_MATCH_COUNT_CAP,
   type PrivateAnswerMetaV1,
   type PrivateAnswerPanelState,
@@ -713,6 +714,17 @@ export function withPrivateAnswerMeta(
   if (!panel) return result;
   const meta = typeof result._meta === 'object' && result._meta !== null ? result._meta as Record<string, unknown> : {};
   return { ...result, _meta: { ...meta, [PRIVATE_ANSWER_META_KEY]: panel } };
+}
+
+/**
+ * Marks a panel-rendering tool's result as final with no private match when
+ * it carries no match: the panel closes on this explicit outcome only, never
+ * on an absent key (a re-delivery without our key is no news).
+ */
+export function withPrivateAnswerOutcome(result: ChatGptToolResult): ChatGptToolResult {
+  const meta = typeof result._meta === 'object' && result._meta !== null ? result._meta as Record<string, unknown> : {};
+  if (meta[PRIVATE_ANSWER_META_KEY] !== undefined) return result;
+  return { ...result, _meta: { ...meta, [PRIVATE_ANSWER_META_KEY]: { ...PRIVATE_ANSWER_NONE_META } } };
 }
 
 /* ------------------------------------------------------------------ */

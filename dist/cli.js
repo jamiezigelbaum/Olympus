@@ -122054,9 +122054,10 @@ async function checkPrivateEvidence(guard, items) {
     return items.map(() => false);
   return answer.map((value) => value === true);
 }
-var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50, NoPrivateEvidenceError;
+var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_MATCH_COUNT_CAP = 50, PRIVATE_ANSWER_NONE_META, NoPrivateEvidenceError;
 var init_private_answer_contract = __esm(() => {
   PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
+  PRIVATE_ANSWER_NONE_META = Object.freeze({ v: 1, count: 0, state: "none" });
   NoPrivateEvidenceError = class NoPrivateEvidenceError extends Error {
     constructor() {
       super("no private evidence may be read");
@@ -122405,6 +122406,7 @@ function chatgptPrivateAnswerProgram(config2) {
       render();
   });
   let zeroResent = false;
+  let closeRequested = false;
   function accept(meta2, quiet, landed) {
     const value = meta2 && typeof meta2 === "object" ? meta2[config2.metaKey] : undefined;
     if (value === undefined && info)
@@ -122419,6 +122421,19 @@ function chatgptPrivateAnswerProgram(config2) {
         percent: value.state === "model_downloading" ? percent : -1,
         full: value.detail === "full"
       };
+    }
+    if (value && typeof value === "object" && value.v === 1 && value.state === "none" && value.count === 0) {
+      if (!info && !closeRequested) {
+        closeRequested = true;
+        reportHeight(true);
+        const host = openai();
+        if (host && typeof host.requestClose === "function") {
+          try {
+            host.requestClose();
+          } catch {}
+        }
+      }
+      return;
     }
     const same = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
     if (!info && !next && landed && !zeroResent) {
@@ -125012,6 +125027,12 @@ function withPrivateAnswerMeta(result, match) {
   const meta2 = typeof result._meta === "object" && result._meta !== null ? result._meta : {};
   return { ...result, _meta: { ...meta2, [PRIVATE_ANSWER_META_KEY]: panel } };
 }
+function withPrivateAnswerOutcome(result) {
+  const meta2 = typeof result._meta === "object" && result._meta !== null ? result._meta : {};
+  if (meta2[PRIVATE_ANSWER_META_KEY] !== undefined)
+    return result;
+  return { ...result, _meta: { ...meta2, [PRIVATE_ANSWER_META_KEY]: { ...PRIVATE_ANSWER_NONE_META } } };
+}
 function searchToolResult(raw, options = {}) {
   const record3 = asRecord16(raw);
   if (!record3 || !Array.isArray(record3.evidence)) {
@@ -126403,6 +126424,10 @@ function askToolListed(ctx) {
   return operation !== undefined && shouldExposeOperation(operation, { config: ctx.config, surface: "remote" });
 }
 async function callChatGptTool(name, args, ctx, options, signal, detachedContext) {
+  const result = await runChatGptTool(name, args, ctx, options, signal, detachedContext);
+  return PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result;
+}
+async function runChatGptTool(name, args, ctx, options, signal, detachedContext) {
   const later = detachedContext ?? (() => ctx);
   try {
     if (options.readOnly && !CHATGPT_TOOLS.some((tool) => tool.name === name && readOnlyGrantMayUse(tool))) {
@@ -126710,7 +126735,7 @@ function createChatGptMcpServer(makeOperationContext, options, makeDetachedConte
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
   return server;
 }
-var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, READ_ONLY_GRANT_EXCEPTIONS, CHATGPT_TOOLS, defaultProbeLog = (line) => {
+var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, READ_ONLY_GRANT_EXCEPTIONS, CHATGPT_TOOLS, PANEL_TOOL_NAMES2, defaultProbeLog = (line) => {
   console.warn(line);
 }, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS2 = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
@@ -126910,6 +126935,7 @@ var init_mcp_surface = __esm(() => {
     OPEN_PRIVATE_QUESTION_TOOL,
     ...SETUP_TOOLS
   ];
+  PANEL_TOOL_NAMES2 = new Set(CHATGPT_TOOLS.filter((tool) => tool._meta?.["openai/outputTemplate"] === answerToolMeta()["openai/outputTemplate"]).map((tool) => tool.name));
   privateMatchByJob = new Map;
   PRIVATE_MATCH_TTL_MS = 30 * 60000;
   CHATGPT_RESOURCES = [DASHBOARD_RESOURCE, PRIVATE_ANSWER_RESOURCE, PRIVATE_QUESTION_RESOURCE];

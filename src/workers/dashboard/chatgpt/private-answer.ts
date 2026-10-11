@@ -5,9 +5,10 @@
  * It renders nothing (zero height) unless the result's widget-only `_meta`
  * says Private items match (private-answer-contract.ts); a delivered result
  * without a match re-sends that zero height, so the host sizes the frame
- * after the result lands (live 2026-10-11: an empty frame about 200px tall
- * under a reply with no Private match). It never closes itself: an empty or
- * pending result is not final, and a match may still arrive. Then it is one
+ * after the result lands. ChatGPT still kept the frame about 150px tall
+ * (live 2026-10-11), so on the server's explicit "none" outcome, and only
+ * then, it asks the host to close it: an empty or pending result is not
+ * final, and a match may still arrive. Then it is one
  * compact card that collects the answer straight from the relay as soon as it
  * renders, sealed to a key that exists only on this device, and shows it as
  * text inside the card ("Hide" folds it away; "Show" brings it back from
@@ -196,11 +197,12 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   // ---- the tool result ---------------------------------------------------
   let zeroResent = false;
+  let closeRequested = false;
   /**
    * Reads `_meta[metaKey]`; anything unexpected renders nothing. `landed`: a
    * delivered tool result, so with no match the zero height is sent again
-   * (forced) for the host to size the frame by. Nothing is ever closed: a
-   * match arriving later still shows the panel.
+   * (forced) for the host to size the frame by. Only an explicit "none"
+   * closes the frame; a bare result without our key never does.
    */
   function accept(meta: Any, quiet?: boolean, landed?: boolean): void {
     const value = meta && typeof meta === 'object' ? meta[config.metaKey] : undefined;
@@ -222,6 +224,20 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         percent: value.state === 'model_downloading' ? percent : -1,
         full: value.detail === 'full',
       };
+    }
+    // The server's explicit outcome: this result is final and nothing
+    // Private matches. Close the empty frame (once); a panel already showing
+    // a match ignores it.
+    if (value && typeof value === 'object' && value.v === 1 && value.state === 'none' && value.count === 0) {
+      if (!info && !closeRequested) {
+        closeRequested = true;
+        reportHeight(true);
+        const host = openai();
+        if (host && typeof host.requestClose === 'function') {
+          try { host.requestClose(); } catch { /* host refused: zero height stands */ }
+        }
+      }
+      return;
     }
     const same = !!info && !!next && info.count === next.count && info.state === next.state
       && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;

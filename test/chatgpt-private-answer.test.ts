@@ -844,16 +844,17 @@ describe('a handed-off answer starts its private panel job only for its own conn
       const handed = await owner.callTool({ name: 'source_answer', arguments: { question: 'When does the lease end?' } }) as Record<string, unknown>;
       const jobId = (handed.structuredContent as { job_id?: string }).job_id!;
       expect((handed.structuredContent as { status?: string }).status).toBe('working');
-      expect(handed._meta).toBeUndefined();
+      expect(handed._meta).toEqual({ [PRIVATE_ANSWER_META_KEY]: { v: 1, count: 0, state: 'none' } });
 
       // Another connection naming this job: an error, and no panel job for it.
       const stolen = await other.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
       expect(stolen.isError).toBe(true);
-      expect(stolen._meta).toBeUndefined();
-      // Still working for its owner: no panel job yet, and the match is kept.
+      expect(stolen._meta).toEqual({ [PRIVATE_ANSWER_META_KEY]: { v: 1, count: 0, state: 'none' } });
+      // Still working for its owner: no panel job yet (the explicit "none"
+      // closes this call's empty panel), and the match is kept.
       const working = await owner.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
       expect((working.structuredContent as { status?: string }).status).toBe('working');
-      expect(working._meta).toBeUndefined();
+      expect(working._meta).toEqual({ [PRIVATE_ANSWER_META_KEY]: { v: 1, count: 0, state: 'none' } });
 
       release();
       await Bun.sleep(50);
@@ -864,7 +865,7 @@ describe('a handed-off answer starts its private panel job only for its own conn
       expect(String(meta.jobId)).toMatch(/^oly2p\./);
       // Collected once: a second collection starts no second panel job.
       const again = await owner.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
-      expect(again._meta).toBeUndefined();
+      expect(again._meta).toEqual({ [PRIVATE_ANSWER_META_KEY]: { v: 1, count: 0, state: 'none' } });
     } finally {
       await owner.close();
       await other.close();
