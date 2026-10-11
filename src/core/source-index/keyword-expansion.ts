@@ -111,20 +111,32 @@ export function parseKeywordExpansion(text: string, sources: readonly string[], 
     if (!languages.includes(language) || !terms || typeof terms !== 'object' || Array.isArray(terms)) continue;
     let used = 0;
     const entries = Object.entries(terms).slice(0,24).filter(([source, values]) => allowedSources.has(source) && Array.isArray(values));
-    // One alternative for each concept before spending the remaining budget
-    // on second choices. Repeated output never consumes the budget.
-    for (let choice = 0; choice < MAX_TERMS_PER_LANGUAGE && used < MAX_TERMS_PER_LANGUAGE; choice += 1) {
-      for (const [source, values] of entries) {
-        if (used >= MAX_TERMS_PER_LANGUAGE) break;
-        const raw = (values as unknown[])[choice];
-        if (typeof raw !== 'string') continue;
-        const alternative = raw.normalize('NFC').trim().toLowerCase();
-        if (alternative === source || alternative.length > 64 || !/^[\p{L}]+(?:[ -][\p{L}]+){0,2}$/u.test(alternative)) continue;
-        const alternatives = result.get(source) ?? [];
-        if (alternatives.includes(alternative)) continue;
-        used += 1;
-        alternatives.push(alternative);
-        result.set(source, alternatives);
+    // Preserve each primary choice, then spend the bounded backup budget on
+    // single words before extra phrases. Round-robin within each class keeps
+    // one concept's long list from starving the others.
+    const choices = entries.map(([source, values]) => {
+      const alternatives = (values as unknown[]).slice(0, MAX_TERMS_PER_LANGUAGE);
+      const backups = alternatives.slice(1);
+      return {source, phases: [
+        alternatives.slice(0, 1),
+        backups.filter(raw => typeof raw === 'string' && !/[ -]/.test(raw.trim())),
+        backups.filter(raw => typeof raw === 'string' && /[ -]/.test(raw.trim())),
+      ]};
+    });
+    for (let phase = 0; phase < 3 && used < MAX_TERMS_PER_LANGUAGE; phase += 1) {
+      for (let choice = 0; choice < MAX_TERMS_PER_LANGUAGE && used < MAX_TERMS_PER_LANGUAGE; choice += 1) {
+        for (const {source, phases} of choices) {
+          if (used >= MAX_TERMS_PER_LANGUAGE) break;
+          const raw = phases[phase]![choice];
+          if (typeof raw !== 'string') continue;
+          const alternative = raw.normalize('NFC').trim().toLowerCase();
+          if (alternative === source || alternative.length > 64 || !/^[\p{L}]+(?:[ -][\p{L}]+){0,2}$/u.test(alternative)) continue;
+          const alternatives = result.get(source) ?? [];
+          if (alternatives.includes(alternative)) continue;
+          used += 1;
+          alternatives.push(alternative);
+          result.set(source, alternatives);
+        }
       }
     }
   }

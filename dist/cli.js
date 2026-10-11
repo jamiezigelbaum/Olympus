@@ -19765,11 +19765,14 @@ function sourceIndexFtsTermGroups(query, options = {}) {
     return longer.some((_, start) => start + shorter.length <= longer.length && shorter.every((word, index) => index === shorter.length - 1 ? longer[start + index].startsWith(word) : longer[start + index] === word));
   };
   const owned = new Map(groups.flatMap((group) => group.map((term) => [lexicalKey(term), group])));
-  for (const [source, alternatives] of keywordAlternatives(query) ?? []) {
-    const group = groupOf.get(source);
-    if (!group)
-      continue;
-    for (const term of alternatives) {
+  const translations = [...keywordAlternatives(query) ?? []];
+  const choices = Math.max(0, ...translations.map(([, alternatives]) => alternatives.length));
+  for (let choice = 0;choice < choices; choice += 1) {
+    for (const [source, alternatives] of translations) {
+      const group = groupOf.get(source);
+      const term = alternatives[choice];
+      if (!group || !term)
+        continue;
       const key2 = lexicalKey(term);
       if (!key2 || [...owned].some(([existing, owner]) => owner !== group && (overlaps(key2, existing) || overlaps(existing, key2))))
         continue;
@@ -20159,22 +20162,33 @@ function parseKeywordExpansion(text, sources, languages) {
       continue;
     let used = 0;
     const entries = Object.entries(terms).slice(0, 24).filter(([source, values]) => allowedSources.has(source) && Array.isArray(values));
-    for (let choice = 0;choice < MAX_TERMS_PER_LANGUAGE && used < MAX_TERMS_PER_LANGUAGE; choice += 1) {
-      for (const [source, values] of entries) {
-        if (used >= MAX_TERMS_PER_LANGUAGE)
-          break;
-        const raw = values[choice];
-        if (typeof raw !== "string")
-          continue;
-        const alternative = raw.normalize("NFC").trim().toLowerCase();
-        if (alternative === source || alternative.length > 64 || !/^[\p{L}]+(?:[ -][\p{L}]+){0,2}$/u.test(alternative))
-          continue;
-        const alternatives = result.get(source) ?? [];
-        if (alternatives.includes(alternative))
-          continue;
-        used += 1;
-        alternatives.push(alternative);
-        result.set(source, alternatives);
+    const choices = entries.map(([source, values]) => {
+      const alternatives = values.slice(0, MAX_TERMS_PER_LANGUAGE);
+      const backups = alternatives.slice(1);
+      return { source, phases: [
+        alternatives.slice(0, 1),
+        backups.filter((raw) => typeof raw === "string" && !/[ -]/.test(raw.trim())),
+        backups.filter((raw) => typeof raw === "string" && /[ -]/.test(raw.trim()))
+      ] };
+    });
+    for (let phase = 0;phase < 3 && used < MAX_TERMS_PER_LANGUAGE; phase += 1) {
+      for (let choice = 0;choice < MAX_TERMS_PER_LANGUAGE && used < MAX_TERMS_PER_LANGUAGE; choice += 1) {
+        for (const { source, phases } of choices) {
+          if (used >= MAX_TERMS_PER_LANGUAGE)
+            break;
+          const raw = phases[phase][choice];
+          if (typeof raw !== "string")
+            continue;
+          const alternative = raw.normalize("NFC").trim().toLowerCase();
+          if (alternative === source || alternative.length > 64 || !/^[\p{L}]+(?:[ -][\p{L}]+){0,2}$/u.test(alternative))
+            continue;
+          const alternatives = result.get(source) ?? [];
+          if (alternatives.includes(alternative))
+            continue;
+          used += 1;
+          alternatives.push(alternative);
+          result.set(source, alternatives);
+        }
       }
     }
   }

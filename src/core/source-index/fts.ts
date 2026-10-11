@@ -223,10 +223,15 @@ export function sourceIndexFtsTermGroups(
         ? longer[start + index]!.startsWith(word) : longer[start + index] === word));
   };
   const owned = new Map(groups.flatMap(group => group.map(term => [lexicalKey(term), group] as const)));
-  for (const [source, alternatives] of keywordAlternatives(query) ?? []) {
-    const group = groupOf.get(source);
-    if (!group) continue;
-    for (const term of alternatives) {
+  const translations = [...(keywordAlternatives(query) ?? [])];
+  const choices = Math.max(0, ...translations.map(([, alternatives]) => alternatives.length));
+  // Every concept claims its primary translation before any backup can take it.
+  // The same collision predicate applies to every choice.
+  for (let choice = 0; choice < choices; choice += 1) {
+    for (const [source, alternatives] of translations) {
+      const group = groupOf.get(source);
+      const term = alternatives[choice];
+      if (!group || !term) continue;
       const key = lexicalKey(term);
       if (!key || [...owned].some(([existing, owner]) => owner !== group && (overlaps(key, existing) || overlaps(existing, key)))) continue;
       owned.set(key, group);

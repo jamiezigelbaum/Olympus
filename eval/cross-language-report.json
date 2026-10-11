@@ -52,8 +52,8 @@
   "answerable": 26,
   "gapCases": 6,
   "baseline": 3,
-  "expanded": 14,
-  "passages": 14,
+  "expanded": 16,
+  "passages": 16,
   "baselineGapReads": 0,
   "expandedGapReads": 1,
   "results": [
@@ -84,10 +84,10 @@
     {
       "ordinal": 3,
       "before": false,
-      "after": false,
-      "passage": false,
+      "after": true,
+      "passage": true,
       "beforeReads": 0,
-      "afterReads": 0
+      "afterReads": 1
     },
     {
       "ordinal": 4,
@@ -132,10 +132,10 @@
     {
       "ordinal": 9,
       "before": false,
-      "after": false,
-      "passage": false,
+      "after": true,
+      "passage": true,
       "beforeReads": 0,
-      "afterReads": 0
+      "afterReads": 1
     },
     {
       "ordinal": 10,

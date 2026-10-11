@@ -12428,11 +12428,14 @@ function sourceIndexFtsTermGroups(query, options = {}) {
     return longer.some((_, start) => start + shorter.length <= longer.length && shorter.every((word, index) => index === shorter.length - 1 ? longer[start + index].startsWith(word) : longer[start + index] === word));
   };
   const owned = new Map(groups.flatMap((group) => group.map((term) => [lexicalKey(term), group])));
-  for (const [source, alternatives] of keywordAlternatives(query) ?? []) {
-    const group = groupOf.get(source);
-    if (!group)
-      continue;
-    for (const term of alternatives) {
+  const translations = [...keywordAlternatives(query) ?? []];
+  const choices = Math.max(0, ...translations.map(([, alternatives]) => alternatives.length));
+  for (let choice = 0;choice < choices; choice += 1) {
+    for (const [source, alternatives] of translations) {
+      const group = groupOf.get(source);
+      const term = alternatives[choice];
+      if (!group || !term)
+        continue;
       const key2 = lexicalKey(term);
       if (!key2 || [...owned].some(([existing, owner]) => owner !== group && (overlaps(key2, existing) || overlaps(existing, key2))))
         continue;
