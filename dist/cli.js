@@ -60486,6 +60486,9 @@ var init_vocabulary = __esm(() => {
     linkExpired: "link expired",
     howOnComputer: "Do this on your computer",
     howOnComputerFix: "Fix this on your computer",
+    moreOnComputer: "More controls on your computer: Private answers, anonymous answers, keys and agents",
+    moreOnComputerOpen: "Open",
+    moreOnComputerOpenLabel: "Open Olympus on your computer",
     remote: {
       title: "Olympus runs on a server, so this opens on your computer through a secure tunnel.",
       askLine: "Ask your assistant:",
@@ -109604,7 +109607,24 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(page, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data2.progress, true));
     add(page, modelsSection(data2.models));
     add(page, computerSection());
+    add(page, moreOnComputer());
     return page;
+  }
+  function moreOnComputer() {
+    if (onComputer() || GLOBAL_STATES.indexOf(connectionState()) >= 0)
+      return null;
+    const href = helpHref(state.data.computerControls && state.data.computerControls.href);
+    if (!href)
+      return null;
+    const key2 = "more-on-computer";
+    const line = add(el("div", "section more-on-computer"), el("p", "muted", P.moreOnComputer));
+    const remote = remoteMode();
+    const open7 = button(P.moreOnComputerOpen, key2, remote ? () => toggleRemote(key2) : () => openLink(href), "plain");
+    open7.className = "btn link";
+    open7.setAttribute("aria-label", P.moreOnComputerOpenLabel);
+    if (remote)
+      open7.setAttribute("aria-expanded", state.open["remote:" + key2] ? "true" : "false");
+    return add(line, open7, remote ? remoteBox(key2, href) : null);
   }
   function computerSection() {
     if (!onComputer())
@@ -112493,6 +112513,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
 .remote-box{flex-basis:100%;margin-top:0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.375rem;font-size:0.875rem}
 .remote-box p{margin:0}
+.more-on-computer{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .remote-line{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 .remote-line code{flex:1 1 16rem;min-width:0;padding:0.25rem 0.5rem;border:1px solid var(--line);border-radius:0.375rem;background:var(--bg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;overflow-wrap:anywhere;user-select:all}
 .strong{font-weight:600}
@@ -125322,6 +125343,7 @@ function buildChatGptDashboardViewModel(view2, options = {}) {
       }
     } : {},
     ...options.remote ? { remote: options.remote } : {},
+    computerControls: { href: openPageUrl({ kind: "dashboard" }) },
     generatedAt: isoOrNow(view2.generated_at, now)
   };
 }
@@ -128723,6 +128745,9 @@ function copyDashboardViewModel(view2) {
       agent: remote.agent === true
     };
   }
+  const controlsHref = safeHref2(view2.computerControls?.href);
+  if (controlsHref)
+    out.computerControls = { href: controlsHref };
   const progress = view2.progress;
   if (progress) {
     out.progress = {
@@ -134686,7 +134711,7 @@ function createLocalPrivateAnswers(options) {
       const action = body.action;
       if (action === "ask") {
         const question = typeof body.question === "string" ? body.question.trim() : "";
-        if (!question || question.length > MAX_QUESTION_CHARS2)
+        if (!question || question.length > MAX_QUESTION_CHARS3)
           return refused(400, "invalid_params", "Type a question first.");
         const detail = body.detail === "full" ? "full" : "summary";
         return exclusive(async () => ({ status: 200, body: { ok: true, ...answerBody(await answerFor({ question, detail }), session) } }));
@@ -134783,7 +134808,7 @@ function createLocalPrivateAnswers(options) {
     }
   };
 }
-var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS2 = 2000, TOKEN_PATTERN3;
+var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS3 = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
   init_analyst_built_in();
   init_private_answer_model();

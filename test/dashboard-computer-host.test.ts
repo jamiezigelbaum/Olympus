@@ -512,7 +512,7 @@ const C = DASHBOARD_COMPUTER_PANEL_COPY;
 
 describe('the panel on the computer', () => {
   test('asks for the dashboard itself and ends with On this computer: Keys, Agents, Outside help, Build a connector', async () => {
-    const page = await onHost(COMPUTER, model(), { indexFaster: { on: false } });
+    const page = await onHost(COMPUTER, model({ computerControls: { href: `${OPEN_BASE}dashboard/` } }), { indexFaster: { on: false } });
     const asked = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name);
     expect(asked).toEqual([DASHBOARD_TOOL_NAME]);
     const section = page.win.document.querySelector('section.on-computer')!;
@@ -523,6 +523,8 @@ describe('the panel on the computer', () => {
     // It is the last section on the page.
     const sections = Array.from(page.win.document.querySelectorAll('#app section'));
     expect(sections[sections.length - 1]).toBe(section);
+    // The section itself is here, so the line that points at it from ChatGPT is not.
+    expect(page.win.document.querySelector('.more-on-computer')).toBeNull();
 
     const open = Array.from(section.querySelectorAll('button')).find((node) => node.getAttribute('aria-label') === `${C.open} ${C.rows.agents.title}`)!;
     open.click();
@@ -718,6 +720,15 @@ describe('the same panel in ChatGPT', () => {
     expect(page.button('Change').disabled).toBe(true);
     expect(page.text()).toContain('Change models in Olympus on your computer.');
     expect(page.text()).not.toContain(C.section);
+  });
+
+  test('ends with one line pointing at the computer\'s own controls, whose Open opens Olympus there', async () => {
+    const page = await onHost(undefined, model({ computerControls: { href: `${OPEN_BASE}dashboard/` } }));
+    const line = page.win.document.querySelector('.more-on-computer')!;
+    expect(line).not.toBeNull();
+    expect(page.win.document.querySelector('#app main')!.lastElementChild).toBe(line);
+    line.querySelector('button')!.click();
+    expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([`${OPEN_BASE}dashboard/`]);
   });
 
   test('a paired chat app\'s row offers nothing it cannot do there: no Unpair, even if a result carried the computer\'s facts', async () => {

@@ -313,6 +313,14 @@ export interface DashboardViewModelV1 {
    * open it for them ("Ask your assistant"); otherwise only the by-hand lines.
    */
   remote?: DashboardRemoteMode;
+  /**
+   * Contract v1 addition (2026-10-12): the olympusplugin.ai page that opens
+   * Olympus on the computer (open/dashboard/; core/open-targets.ts), where
+   * the On this computer section lives (Private answers, Keys, Agents, Build
+   * a connector). Away from the computer the panel ends with one line naming
+   * them, whose Open opens this page.
+   */
+  computerControls?: { href: string };
   generatedAt: string;
 }
 
