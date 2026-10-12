@@ -32,9 +32,14 @@
 
       <h2>Before you start</h2>
       <ul>
-        <li>OpenClaw 2026.7.1 or later, on macOS or Linux.</li>
+        <li>OpenClaw 2026.7.1 or later, on macOS or Linux. On Linux, Olympus is tested on Omarchy (Arch, x86_64).</li>
         <li>A Node version your OpenClaw supports, and Bun 1.2 or later.</li>
       </ul>
+
+      <h2 id="linux">On Linux</h2>
+      <p>On Linux, Olympus runs as this OpenClaw plugin; the one-line install and ChatGPT's one-click approval are Mac only for now. So that Olympus can read scans and pictures of text, search photos by what is in them and transcribe voice notes, install these first (on Omarchy):</p>
+      <pre><code>sudo pacman -S --needed tesseract tesseract-data-eng poppler libvips libheif ffmpeg</code></pre>
+      <p>Apple Messages and anonymous answers are Mac only.</p>
 
       <h2>Install</h2>
       <p>The easy way is to ask an agent. Paste this into OpenClaw, or any agent that can use a terminal:</p>
