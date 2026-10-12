@@ -164,6 +164,7 @@ ${error}
 }
 
 export interface LoopbackConsentPageInput {
+  platform?: NodeJS.Platform;
   requestId: string;
   csrf: string;
   clientName: string;
@@ -182,6 +183,7 @@ export interface LoopbackConsentPageInput {
 export function renderLoopbackConsentPage(input: LoopbackConsentPageInput): { body: string; headers: Record<string, string> } {
   const nonce = randomBytes(16).toString('base64');
   const name = escapeHtml(input.clientName);
+  const computer = (input.platform ?? process.platform) === 'linux' ? 'computer' : 'Mac';
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -204,9 +206,9 @@ ${input.verifiedHost
 ${input.loopbackRedirect
     ? `<div class="warn">This app returns to <strong>${escapeHtml(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>`
     : ''}
-<p><strong>Connecting links Olympus on this Mac to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
+<p><strong>Connecting links Olympus on this ${computer} to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
 <p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
-<p><strong>${name} never sees the text of your Private items or any Secret.</strong> For Private items it gets only answers that Venice or a model on this Mac reasoned out, with each item's title and source.</p>
+<p><strong>${name} never sees the text of your Private items or any Secret.</strong> For Private items it gets only answers that Venice or a model on this ${computer} reasoned out, with each item's title and source.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
@@ -216,7 +218,7 @@ ${input.loopbackRedirect
 <button class="deny" type="submit" name="action" value="deny">Cancel</button>
 </div>
 </form>
-<p class="small">This page is served by Olympus on this Mac, and only here.</p>
+<p class="small">This page is served by Olympus on this ${computer}, and only here.</p>
 </main>
 </body>
 </html>`;

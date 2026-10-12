@@ -65,6 +65,7 @@ const ALLOWED_DOCS = new Set([
   'docs/V0_4_BASELINE.md',
   'docs/V0_4_RELEASE.md',
   'docs/design/linux-engine-service.md',
+  'docs/design/linux-agents.md',
   'docs/design/linux-parity.md',
   'docs/design/per-item-four-tier-classification.md',
   'docs/design/photo-embeddings.md',

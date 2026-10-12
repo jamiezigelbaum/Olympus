@@ -358,7 +358,7 @@ describe('remote access follows the relay status', () => {
 
 function render(access: DashboardRemoteAccess, store?: RemoteConnectionStore): string {
   const view = store ? dashboardAgentsView(backend(store, access)) : { remoteAccess: access, connections: [] };
-  return renderDashboardAgentsSection({ view, now: NOW });
+  return renderDashboardAgentsSection({ platform: 'darwin', view, now: NOW });
 }
 
 describe('the panel', () => {
@@ -462,7 +462,7 @@ describe('the panel', () => {
 
   test('a hostile connection name is escaped in the list', () => {
     const hostile = '<img src=x onerror="alert(1)">\'"&';
-    const html = renderDashboardAgentsSection({
+    const html = renderDashboardAgentsSection({ platform: 'darwin',
       view: { remoteAccess: REMOTE_ON, connections: [{ id: 'e'.repeat(18), name: hostile, kind: 'bearer', createdAt: NOW.toISOString(), lastUsedAt: null }] },
       now: NOW,
     });
@@ -478,14 +478,14 @@ describe('the panel', () => {
     // And through the store, as the worker renders it.
     const store = fixtureStore();
     store.create(hostile);
-    const viaStore = renderDashboardAgentsSection({ view: dashboardAgentsView(backend(store)), now: NOW });
+    const viaStore = renderDashboardAgentsSection({ platform: 'darwin', view: dashboardAgentsView(backend(store)), now: NOW });
     expect(viaStore).not.toContain('<img');
   });
 
   test('an unreadable connection list is not shown as empty', () => {
     const view = dashboardAgentsView({ store: () => { throw new Error('locked'); }, remoteAccess: () => REMOTE_ON });
     expect(view.unavailable).toBe(true);
-    expect(renderDashboardAgentsSection({ view, now: NOW })).toContain('could not read its list');
+    expect(renderDashboardAgentsSection({ platform: 'darwin', view, now: NOW })).toContain('could not read its list');
   });
 });
 
@@ -523,7 +523,7 @@ describe('the controller shows a secret once', () => {
 
   function mount(control: (params: OlympusDashboardControlParams) => Promise<OlympusDashboardControlResult>) {
     const root = document.createElement('div');
-    root.innerHTML = renderDashboardAgentsSection({ view: { remoteAccess: REMOTE_TUNNEL, connections: [] }, now: NOW });
+    root.innerHTML = renderDashboardAgentsSection({ platform: 'darwin', view: { remoteAccess: REMOTE_TUNNEL, connections: [] }, now: NOW });
     document.body.append(root);
     const abort = new AbortController();
     let refreshes = 0;
@@ -591,11 +591,11 @@ describe('the controller shows a secret once', () => {
 
   test('after Create key the list is refreshed while the key stays on screen', async () => {
     const root = document.createElement('div');
-    root.innerHTML = renderDashboardAgentsSection({ view: { remoteAccess: REMOTE_TUNNEL, connections: [] }, now: NOW });
+    root.innerHTML = renderDashboardAgentsSection({ platform: 'darwin', view: { remoteAccess: REMOTE_TUNNEL, connections: [] }, now: NOW });
     document.body.append(root);
     const abort = new AbortController();
     cleanups.push(() => abort.abort());
-    const refreshed = renderDashboardAgentsSection({
+    const refreshed = renderDashboardAgentsSection({ platform: 'darwin',
       view: { remoteAccess: REMOTE_TUNNEL, connections: [{ id: 'f'.repeat(18), name: 'Muse', kind: 'bearer', createdAt: NOW.toISOString(), lastUsedAt: null }] },
       now: NOW,
     });
@@ -622,7 +622,7 @@ describe('the controller shows a secret once', () => {
   test('Revoke asks first and does nothing when declined', async () => {
     const calls: OlympusDashboardControlParams[] = [];
     const root = document.createElement('div');
-    root.innerHTML = renderDashboardAgentsSection({
+    root.innerHTML = renderDashboardAgentsSection({ platform: 'darwin',
       view: { remoteAccess: REMOTE_ON, connections: [{ id: 'd'.repeat(18), name: 'Muse', kind: 'bearer', createdAt: NOW.toISOString(), lastUsedAt: null }] },
       now: NOW,
     });
