@@ -37,6 +37,10 @@ import {
   remoteConnectionsPreV2BackupPath,
   resolveRemoteConnectionsDbPath,
 } from './core/remote-connections.ts';
+import {
+  WAITING_PRIVATE_QUESTIONS_STORE_ID,
+  waitingPrivateQuestionsDbPath,
+} from './core/waiting-private-questions.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import {
@@ -569,9 +573,11 @@ export function exportOlympusData(options: {
 
   // Remote-agent connections are credentials (token digests), which an export
   // leaves behind like every other secret. Named, so the manifest says so.
+  // Waiting private questions are Private-derived questions kept only until
+  // answered on this computer: never exported, named like the connections.
   if (options.sourceId === undefined) {
     const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
-    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath)]) {
+    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath), waitingPrivateQuestionsDbPath(connectionsPath)]) {
       if (existsSync(path)) skipped.push(path);
     }
   }
@@ -1047,11 +1053,19 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
   ];
 }
 
-/** The connection database, its sidecars, and its pre-migration backup. */
+/**
+ * The connection database, its sidecars, and its pre-migration backup; and
+ * the waiting private questions beside it (core/waiting-private-questions.ts),
+ * which name those connections.
+ */
 function remoteConnectionsDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
   const dbPath = resolveRemoteConnectionsDbPath(envForContext(context));
   const targets = sqliteDeleteTargets(dbPath, REMOTE_CONNECTIONS_STORE_ID, context);
-  return [...targets, { ...targets[1]!, path: remoteConnectionsPreV2BackupPath(dbPath) }];
+  return [
+    ...targets,
+    { ...targets[1]!, path: remoteConnectionsPreV2BackupPath(dbPath) },
+    ...sqliteDeleteTargets(waitingPrivateQuestionsDbPath(dbPath), WAITING_PRIVATE_QUESTIONS_STORE_ID, context),
+  ];
 }
 
 function sqliteDeleteTargets(
