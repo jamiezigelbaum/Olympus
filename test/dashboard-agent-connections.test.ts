@@ -41,6 +41,8 @@ const ROOT = join(import.meta.dir, '..');
 const ORIGIN = 'http://127.0.0.1:17777';
 const PUBLIC = 'https://abc123.connect.olympusplugin.ai';
 const REMOTE_ON: DashboardRemoteAccess = { state: 'on', mcpUrl: `${PUBLIC}/mcp`, openapiUrl: `${PUBLIC}/openapi.json` };
+/** On through a tunnel the owner runs (`remote.publicBaseUrl`), not the relay. */
+const REMOTE_TUNNEL: DashboardRemoteAccess = { ...REMOTE_ON, ownTunnel: true };
 const NOW = new Date('2026-09-24T12:00:00.000Z');
 
 const cleanups: Array<() => void> = [];
@@ -298,6 +300,10 @@ describe('remote access follows the relay status', () => {
   test('on means the worker is serving a public address now', () => {
     expect(remoteAccessFromStatus({ live: live.enabled ? live.urls : undefined, status: status({}) })).toEqual(REMOTE_ON);
   });
+  test('an address from remote.publicBaseUrl is the owner\'s own tunnel', () => {
+    expect(remoteAccessFromStatus({ live: live.enabled ? live.urls : undefined, status: status({ mode: 'manual', public_base_url_source: 'config' }) }))
+      .toEqual(REMOTE_TUNNEL);
+  });
   test('a relay that is enabled but not yet serving is not connected, with its next step', () => {
     expect(remoteAccessFromStatus({ live: undefined, status: status({ next_step: 'Olympus is obtaining its certificate.' }) }))
       .toEqual({ state: 'not_connected', detail: 'Olympus is obtaining its certificate.' });
@@ -317,11 +323,13 @@ function render(access: DashboardRemoteAccess, store?: RemoteConnectionStore): s
 }
 
 describe('the panel', () => {
-  test('offers every agent with its own method when remote access is on', () => {
-    const html = render(REMOTE_ON);
-    for (const label of ['Claude', 'ChatGPT', 'Grok or Grok Bot', 'Muse', 'Grok API', 'Claude Code or Codex', 'Other']) {
+  test('through your own tunnel, offers every agent with its own method', () => {
+    const html = render(REMOTE_TUNNEL);
+    for (const label of ['Claude', 'ChatGPT', 'Grok or Grok Bot', 'Grok API', 'Claude Code or Codex', 'Other']) {
       expect(html).toContain(`<span class="name">${label}</span>`);
     }
+    // Muse waits for a Meta catalog connector (owner decision, 2026-10-12).
+    expect(html).not.toContain('Muse');
     const doc = new Window().document;
     doc.body.innerHTML = html;
     const agent = (id: string) => doc.querySelector(`[data-agent="${id}"]`)!;
@@ -330,11 +338,9 @@ describe('the panel', () => {
       expect(agent(id).querySelector('form[data-agent-kind="key"]')).toBeNull();
       expect(agent(id).textContent).toContain(`${PUBLIC}/mcp`);
     }
-    expect(agent('muse').querySelector('form[data-agent-kind="key"]')).not.toBeNull();
-    expect(agent('muse').textContent).toContain(`${PUBLIC}/openapi.json`);
     expect(agent('grok-api').querySelector('form[data-agent-kind="key"]')).not.toBeNull();
     expect(agent('grok-api').textContent).toContain(`${PUBLIC}/mcp`);
-    expect(agent('local').textContent).toContain('olympus serve');
+    expect(agent('local').textContent).toContain('<olympus path> serve');
     expect(agent('local').querySelector('form')).toBeNull();
     // Every copy button points at something that exists, and every agent can
     // copy the when-to-ask instructions.
@@ -354,6 +360,37 @@ describe('the panel', () => {
     expect(html).not.toMatch(/\d+%/);
   });
 
+  test('through the relay, ChatGPT is one click on this computer and the others say they need your own tunnel', () => {
+    const doc = new Window().document;
+    doc.body.innerHTML = render(REMOTE_ON);
+    const agent = (id: string) => doc.querySelector(`[data-agent="${id}"]`)!;
+    const chatgpt = agent('chatgpt');
+    expect(chatgpt.textContent).toContain(`${PUBLIC}/mcp`);
+    expect(chatgpt.textContent).toContain('choose Connect');
+    expect(chatgpt.textContent).not.toContain('pairing code');
+    expect(chatgpt.querySelector('form')).toBeNull();
+    expect(chatgpt.querySelector('[data-agent-needs-tunnel]')).toBeNull();
+    for (const id of ['claude', 'grok', 'grok-api', 'other']) {
+      expect(agent(id).querySelector('[data-agent-needs-tunnel]')).not.toBeNull();
+      expect(agent(id).querySelector('summary')!.textContent).toContain('needs your own tunnel');
+      expect(agent(id).querySelector('form')).toBeNull();
+      expect(agent(id).textContent).not.toContain(PUBLIC);
+      expect(doc.querySelector(`#agent-${id}-instructions`)?.textContent).toBe(AGENT_INSTRUCTION_TEXT);
+    }
+    expect(agent('local').querySelector('[data-agent-needs-tunnel]')).toBeNull();
+    expect(doc.body.innerHTML).not.toContain('data-agent-kind="pair"');
+    expect(doc.body.innerHTML).not.toContain('data-agent-kind="key"');
+  });
+
+  test('the local prompt works with or without OpenClaw', () => {
+    const doc = new Window().document;
+    doc.body.innerHTML = render(REMOTE_ON);
+    const prompt = doc.querySelector('#agent-local-prompt')!.textContent!;
+    expect(prompt).toContain('openclaw plugins inspect olympus --json');
+    expect(prompt).toContain('$HOME/.local/bin/olympus');
+    expect(prompt).toContain('claude mcp add olympus -- <olympus path> serve');
+  });
+
   test('says plainly when remote access is off, and still offers local agents', () => {
     for (const access of [{ state: 'off' }, { state: 'not_connected' }, { state: 'invalid', detail: 'OLYMPUS_PUBLIC_BASE_URL must use https.' }] as DashboardRemoteAccess[]) {
       const html = render(access);
@@ -361,7 +398,7 @@ describe('the panel', () => {
       expect(html).toContain('data-remote-unavailable');
       expect(html).not.toContain('data-agent-kind="pair"');
       expect(html).not.toContain('data-agent-kind="key"');
-      expect(html).toContain('olympus serve');
+      expect(html).toContain('&lt;olympus path&gt; serve');
     }
     expect(render({ state: 'off' })).toContain('Off. Only agents on this computer can ask Olympus.');
   });
@@ -442,7 +479,7 @@ describe('the controller shows a secret once', () => {
 
   function mount(control: (params: OlympusDashboardControlParams) => Promise<OlympusDashboardControlResult>) {
     const root = document.createElement('div');
-    root.innerHTML = renderDashboardAgentsSection({ view: { remoteAccess: REMOTE_ON, connections: [] }, now: NOW });
+    root.innerHTML = renderDashboardAgentsSection({ view: { remoteAccess: REMOTE_TUNNEL, connections: [] }, now: NOW });
     document.body.append(root);
     const abort = new AbortController();
     let refreshes = 0;
@@ -490,14 +527,14 @@ describe('the controller shows a secret once', () => {
         ? { status: 409, body: { ok: false, error: { message: 'Remote access is off.' } } }
         : { status: 200, body: { ok: true, token: 'olympus_conn_secret' } };
     });
-    const muse = root.querySelector<HTMLElement>('[data-agent="muse"]')!;
-    const form = muse.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!;
+    const grokApi = root.querySelector<HTMLElement>('[data-agent="grok-api"]')!;
+    const form = grokApi.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!;
     form.requestSubmit();
     await Bun.sleep(0);
     await Bun.sleep(0);
-    expect(calls[0]).toEqual({ action: 'create_agent_key', name: 'Muse' });
-    expect(muse.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
-    expect(muse.querySelector('[data-agent-secret-note]')!.textContent).toContain('cannot show it again');
+    expect(calls[0]).toEqual({ action: 'create_agent_key', name: 'Grok API' });
+    expect(grokApi.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
+    expect(grokApi.querySelector('[data-agent-secret-note]')!.textContent).toContain('cannot show it again');
     refuse = true;
     const claude = root.querySelector<HTMLElement>('[data-agent="claude"]')!;
     claude.querySelector<HTMLFormElement>('form[data-agent-kind="pair"]')!.requestSubmit();
@@ -509,12 +546,12 @@ describe('the controller shows a secret once', () => {
 
   test('after Create key the list is refreshed while the key stays on screen', async () => {
     const root = document.createElement('div');
-    root.innerHTML = renderDashboardAgentsSection({ view: { remoteAccess: REMOTE_ON, connections: [] }, now: NOW });
+    root.innerHTML = renderDashboardAgentsSection({ view: { remoteAccess: REMOTE_TUNNEL, connections: [] }, now: NOW });
     document.body.append(root);
     const abort = new AbortController();
     cleanups.push(() => abort.abort());
     const refreshed = renderDashboardAgentsSection({
-      view: { remoteAccess: REMOTE_ON, connections: [{ id: 'f'.repeat(18), name: 'Muse', kind: 'bearer', createdAt: NOW.toISOString(), lastUsedAt: null }] },
+      view: { remoteAccess: REMOTE_TUNNEL, connections: [{ id: 'f'.repeat(18), name: 'Muse', kind: 'bearer', createdAt: NOW.toISOString(), lastUsedAt: null }] },
       now: NOW,
     });
     mountDashboardController({
@@ -529,11 +566,11 @@ describe('the controller shows a secret once', () => {
     });
     // The sheet is open with fields in it: a full refresh would be held off.
     root.querySelector<HTMLElement>('[data-sheet-toggle="#agent-connect"]')!.click();
-    const muse = root.querySelector<HTMLElement>('[data-agent="muse"]')!;
-    muse.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!.requestSubmit();
+    const grokApi = root.querySelector<HTMLElement>('[data-agent="grok-api"]')!;
+    grokApi.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!.requestSubmit();
     for (let tick = 0; tick < 5; tick++) await Bun.sleep(0);
     expect(root.querySelector('[data-agent-connection]')?.getAttribute('data-agent-connection')).toBe('f'.repeat(18));
-    expect(muse.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
+    expect(grokApi.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
     expect(root.querySelector('#agent-connect')!.classList.contains('on')).toBe(true);
   });
 

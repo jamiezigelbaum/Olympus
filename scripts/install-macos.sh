@@ -557,7 +557,7 @@ finish() {
   say ""
   say "Next, in ChatGPT:"
   say "  In ChatGPT desktop, add the Olympus plugin and ask: Connect Olympus"
-  say "  A page opens in your browser on this Mac. Click Approve."
+  say "  A page opens in your browser on this Mac asking to connect ChatGPT. Click Connect."
   say ""
   say "Olympus now downloads its built-in models in the background (about"
   say "225 MB, then 1.3 to 2.7 GB for its private answer model)."

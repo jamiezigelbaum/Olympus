@@ -2086,12 +2086,19 @@ the step is DONE, not broken.
 
 Only when the operator asks for it. Do not offer it as part of installation.
 
-- Send the operator to the dashboard's Setup page, **Connect an agent**. The
-  panel carries each agent's exact steps; do not paraphrase them into chat.
-- Pairing codes and connection keys are minted by the operator in that panel
-  (or `olympus connections pair` / `olympus connections add <name>`, run by
-  its resolved plugin path). Never ask the operator to paste a key or code back
-  to you, and never print one into chat or a log.
+- Send the operator to the dashboard on this computer (`olympus dashboard`):
+  under **On this computer**, **Open** next to **Agents**, then **Connect an
+  agent**. The panel carries each agent's exact steps; do not paraphrase them
+  into chat.
+- Through the relay (the default) only ChatGPT connects, approved with one
+  click on a page Olympus serves on this computer, with no pairing code.
+  Claude, Grok, the Grok API and other cloud agents need the operator's
+  own tunnel (`remote.publicBaseUrl`); the panel says so.
+- Under the operator's own tunnel, pairing codes and connection keys are
+  minted by the operator in that panel (or `olympus connections pair` /
+  `olympus connections add <name>`, run by its resolved plugin path). Never
+  ask the operator to paste a key or code back to you, and never print one
+  into chat or a log.
 - Agents in a vendor's cloud need remote access. If the panel says remote
   access is off, say so plainly and send the operator to **Turn on remote
   access** in the same Agents section. That button is the normal path: it
@@ -2107,6 +2114,8 @@ Only when the operator asks for it. Do not offer it as part of installation.
   reached.
 - For Claude Code or Codex on the same machine, the local command is
   `<rootDir>/bin/olympus serve` (rootDir from
-  `openclaw plugins inspect olympus --json`). Adding it to another agent's MCP
+  `openclaw plugins inspect olympus --json`); on a Mac set up with the
+  Olympus installer and no OpenClaw, it is `$HOME/.local/bin/olympus serve`
+  with `$HOME` written out. Adding it to another agent's MCP
   configuration is its own consent (Rule one).
 - Revoke with the panel's **Revoke** or `olympus connections revoke <id>`.
