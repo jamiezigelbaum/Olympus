@@ -1,10 +1,11 @@
 # Linux confinement for the zkAPI private lane (workstream W4)
 
-Status: design and feasibility prototype, revision 2, 2026-10-12. Nothing here
+Status: design and feasibility prototype, revision 3, 2026-10-12. Nothing here
 ships. No production code path changes with this document; the prototype lives
 in `tools/zkapi-confine-prototype/` and is not wired into the engine. Revision 2
-closes the eight findings of the independent design review of revision 1
-(commit `3bf77d51`, section 1.2). Every critical step of the plan in section 9
+closed the eight findings of the independent design review of revision 1
+(commit `3bf77d51`); revision 3 closes the five findings of the review of
+revision 2 (commit `0e2e0e1e`), all in section 1.2. Every critical step of the plan in section 9
 is reviewed before it lands, and nothing turns the confinement on for users
 until the integrated boundary has passed real-route qualification and an
 integrated review (`docs/ENGINEERING_PROCESS.md`).
@@ -56,11 +57,12 @@ Review of `3bf77d51` (Codex, read-only): verdict "proceed with changes".
 |---|---|---|---|
 | P1-1 | The Tor bridge re-resolved `tor.sock` per connection; the same-uid daemon could re-point it at a host stream socket (ABI 4-8). API identity by pathname is not proof. | Tor: no pathname at all (D6, 4.3). API: descriptor passing plus mutual HMAC handshake keyed by a secret the daemon never has (D5, 4.3); a path swap yields a refused request with zero bytes sent to the decoy. | Matrix section "Tor bridge ... API path swapped": `apiPathSwapped` verdict `refused`, decoy saw 0 bytes, no HTTP. Wrong-peer and `torHostDown` rows. A.1 |
 | P1-2 | `socketpair(AF_UNIX, SOCK_DGRAM)` was allowed; a datagram socket can be re-pointed at `/dev/log` and carries `SCM_RIGHTS`. | `socketpair` is allowed only for `AF_UNIX`, `SOCK_STREAM`, protocol 0, and only in the profile the daemon runs under (4.1). | Rows `socketpair_unix_dgram`, `_seqpacket` EPERM; `pair_dgram_connect_host_path` / `_sendto_host_path` cannot even create the socket (`no_socket`), at ABI 9 and at emulated ABI 4. Stream-pair rows `pair_stream_*` hit EISCONN (ABI 4) or EACCES (ABI 9 Landlock). A host datagram decoy counted: unconfined control landed 1 datagram, confined 0. A.1, A.2 |
-| P2-3 | `setsid`/`setpgid` escape the group; parent-death signals are not recursive. | PID namespace as lifetime boundary, stage1 as reaping init (D8, 4.1). | Escapers (setsid, setpgid, double fork, 4 per run) started in the daemon: all die on daemon exit, on group kill, on stage0 SIGKILL, on stage1 SIGKILL, on daemon SIGKILL and on a watchdog stand-in SIGKILL; with the PID namespace ablated the same escapers survive a group kill (4 survivors), so the test can see the failure. A.1 |
+| P2-3 | `setsid`/`setpgid` escape the group; parent-death signals are not recursive. Round 2: cleanup does not survive a taken-over stage1, which can clear its own parent-death signal and leave the group. | PID namespace as lifetime boundary, stage1 as reaping init (D8, 4.1). Round 2: seccomp freezes the parent-death signal at SIGKILL in every stage and in everything below them (`prctl(PR_SET_PDEATHSIG, x)` is refused unless x is SIGKILL). `setsid`/`setpgid` stay allowed, deliberately: the daemon inherits stage1's filter and its children may legitimately need them, and with the signal frozen leaving the group gains nothing (4.1). | Escapers (setsid, setpgid, double fork, 4 per run) started in the daemon die on daemon exit, group kill, stage0 SIGKILL, stage1 SIGKILL, daemon SIGKILL and a watchdog stand-in SIGKILL; with the PID namespace ablated they survive a group kill (4 survivors). Round 2, adversarial init stand-in: a stage1 that sets SIGKILL (ok), tries to soften (EPERM) and clear (EPERM) its parent-death signal and calls `setsid` (leaves the group), then stage0 is SIGKILLed: nothing survives; with the seccomp layer ablated the same init clears the signal and survives. A.1 |
 | P2-4 | An unbound `listen()` gets an ephemeral port Landlock's bind hook never sees; the wildcard-bind test used a forbidden port. | Accepted residual with detection, not claimed as parity (4.5, 5): the listener exists only inside the namespace, reachable by nothing outside; the supervisor's strict listener-set check (exactly the expected listeners) refuses a session that has an extra one. Wildcard bind of a *permitted* port is probed separately and documented. | Rows `listen_unbound` (listening, ephemeral port), `bind_wildcard_forbidden_port` EACCES, `bind_wildcard_permitted_port` bound; section "unbound listen()": the extra listener is detected by the strict set check and refused from the host with ECONNREFUSED. A.1 |
 | P2-5 | The matrix exited 0 despite failed controls, cleanup, refusals and inspection. | Fail-closed harness (6): every control, probe row, identity check, lifecycle result, refusal and ablation is an assertion; a missing probe row is a failure; cleanup asserts the group kill removed every process; the exit code is the failure count. Adversarial probes added for findings 1-4. | Harness reports `RESULT: PASS (0 failures)`; before the last fixes the same harness returned 8 failures and exit 1 on real defects (a stray decoy helper, one wrong expectation), i.e. it fails when it should. |
-| P2-6 | Stage0 hardening was neither acknowledged nor fail-closed; descriptor sanitising failed silently. | Stage1 waits for a `go` message that stage0 sends only after its own hardening succeeded; failure kills stage1 and refuses `launcher_hardening_failed`; `ready` carries `stage0Layers`. Descriptor sanitising failures refuse `descriptor_sanitize_failed` in every stage (4.1). | Fault injection: `harden-stage0`, `cloexec`, `cloexec1` each exit 78 with the named refusal and no daemon; `ready.stage0Layers` asserted; `check` reports stage0 layers. A.1 |
-| P2-7 | The private status descriptor was not plumbed through the supervisor/watchdog spawn boundaries (`consult-transport-zkapi.ts:1109`, `:1152`); PIDs not bound to instances. | Section 4.4 specifies both spawn boundaries and makes the private channel mandatory (the launcher refuses to start without `--status-fd 3`). Section 4.5 binds every reported pid to a process instance (start time, parentage, nested PID namespace identity). | Rows: `noStatusFd` (exit 64), `silentLauncher` (no ready event, nothing left), forged event on the daemon's stdout never accepted (`eventsAfterForge: ["ready"]`), write to fd 3 from the daemon cannot reach the status channel, and four negative instance bindings (pid reuse, unrelated pid, launcher reuse, wrong parent) each rejected. A.1 |
+| P2-6 | Stage0 hardening was neither acknowledged nor fail-closed; descriptor sanitising failed silently. Round 2: the `/proc/self/fd` fallback still used unchecked `CloseOnExec`. | Stage1 waits for a `go` message that stage0 sends only after its own hardening succeeded; failure kills stage1 and refuses `launcher_hardening_failed`; `ready` carries `stage0Layers`. Descriptor sanitising failures refuse `descriptor_sanitize_failed` in every stage, **including the fallback, which now uses `fcntl(F_SETFD)` and checks every call** (4.1). | Fault injection: `harden-stage0`, `cloexec`, `cloexec1` and, round 2, `cloexec-fb-fail` (the fallback's first `fcntl` fails) each exit 78 with the named refusal and no daemon; a forced healthy fallback (`cloexec-fb`) reaches `ready` and exits 0; `ready.stage0Layers` asserted. A.1 |
+| P2-7 | The private status descriptor was not plumbed through the supervisor/watchdog spawn boundaries (`consult-transport-zkapi.ts:1109`, `:1152`); PIDs not bound to instances. Round 2: the instance check required stage1's parent to be the watchdog, but it is stage0. | Section 4.4 specifies both spawn boundaries and makes the private channel mandatory. Section 4.5 binds the **whole chain watchdog -> stage0 -> stage1 -> daemon**, every link by pid and start time, by parentage and by PID-namespace depth; the ready event carries `stage0Pid/Start`, `stage1Pid/Start`, `daemonPid/Start`. | The matrix now starts every session through a watchdog stand-in that passes the status pipe as fd 3 and closes its copy, and verifies the full chain; nine negative bindings are each rejected (pid reuse, unrelated pid, stage0 reuse, stage1 reuse, wrong watchdog, watchdog reuse, stage0 replaced by the watchdog, **stage1 reparented** to the real daemon and **stage1 replaced by an unrelated process**; the reparented case is refused for its parentage). Also `noStatusFd` (exit 64), `silentLauncher`, forged stdout events never accepted, fd 3 unreachable from the daemon. A.1 |
+| R2-A | (round 2) A malformed daemon response can freeze the supervisor: `Content-Length: nope` becomes `NaN` and the body loop spins. | The client parses Content-Length and chunk sizes strictly (digits only; hex digits only, at most 8; bounded; no sign, exponent or prefix), rejects conflicting or duplicate-inconsistent lengths, Content-Length together with chunked, unsupported transfer-encodings, malformed header lines, an unterminated or over-long chunk-size line and a chunk not ending in CRLF, and marks the exchange failed so later bytes are ignored (4.4). | `framing.cjs`: 24 cases, each in its own subprocess timed from outside (8 s, SIGKILL): 3 valid controls read correctly, 21 malformed cases all rejected. The previous parser run against `cl-nope` hangs and is killed by the external timer, so the test sees the defect. A.1 |
 | P2-8 | The landing sequence activated the boundary before review and qualification; a reopened weaker-mode question. | Section 9 reordered: reviews before each critical merge, activation as the last, single change; section 10 has no weaker-mode question. | Section 9, 10 |
 
 ## 2. What the Mac does today (the contract to match)
@@ -165,6 +167,22 @@ stage1. When stage1 dies, for any reason, the kernel kills every process in
 the namespace; when stage0 or the watchdog dies, parent-death signals kill
 stage1 (and so the namespace). Process groups and sessions play no part, so
 `setsid()`, `setpgid()` and double forks do not escape (A.1, lifecycle).
+The parent-death signal is the link in that chain, so it is **frozen**:
+seccomp refuses `prctl(PR_SET_PDEATHSIG, x)` in every stage (and so for the
+daemon and everything it starts) unless `x` is SIGKILL, because stage1 and
+stage2 are created with SIGKILL and a process that could clear or soften it
+could outlive stage0. A taken-over stage1 therefore cannot decouple itself;
+when stage0 or the watchdog dies it dies, and the kernel takes the namespace
+with it. The option is read as an `int`, so the filter compares exactly the
+low word the kernel uses; a signal argument with high bits set is invalid to
+the kernel. The cost: a descendant of the daemon cannot request a catchable
+parent-death signal (it gets `EPERM`); the real companion and Tor are
+checked for this in qualification (section 9, step 5). `setsid` and
+`setpgid` are **not** denied: the daemon inherits stage1's filter, its
+children may legitimately need them, and with the signal frozen they gain
+nothing against cleanup. Stage0 and stage1 pin the main goroutine to the
+main thread (`runtime.LockOSThread` in `init`), because the kernel ties
+the signal to the thread that created the child.
 `CLONE_NEWPID` also removes the launcher and the watchdog from the daemon's
 view: from inside, their host pids do not resolve (`signal_launcher` and
 `signal_stage0` give `ESRCH`, and `ptrace` of stage1, the namespace's init,
@@ -222,9 +240,11 @@ which rows each one carries):
      `EPERM`. `clone3` returns `ENOSYS`: `clone3` flags live in memory that a
      filter cannot inspect, and libc and Go fall back to `clone`.
 6. **Inherited descriptors**: every stage marks every descriptor above stderr
-   close-on-exec (`close_range` with the cloexec flag, `/proc/self/fd`
-   fallback) **and reports failure**: the launcher refuses with
-   `descriptor_sanitize_failed`; a failed sanitising pass is never ignored.
+   close-on-exec (`close_range` with the cloexec flag, else `/proc/self/fd`
+   with a checked `fcntl(F_SETFD)` per descriptor, tolerating only the
+   already-closed directory descriptor) **and reports failure**: the launcher
+   refuses with `descriptor_sanitize_failed`; a failed sanitising pass is
+   never ignored, on either path.
    Stage2 reports on a pipe that closes at exec. The daemon starts with
    stdin, stdout and stderr only.
 7. **Events on a private descriptor**: `--status-fd 3` is **mandatory**. The
@@ -379,7 +399,13 @@ implementation and every Mac test stay as they are.
   HTTP/1.1 client over `node:net`: connect to `api.sock`, run the handshake,
   write one request per connection (`Connection: close`, fixed or no body
   length), and parse the response (length-delimited, chunked or
-  close-delimited, streaming body, abort, no redirect following). The
+  close-delimited, streaming body, abort, no redirect following) with
+  **strict framing**: the response comes from the daemon and is hostile
+  input. Content-Length is digits only and bounded; a chunk size is 1 to 8 hex
+  digits and bounded; conflicting lengths, a length with chunked, unsupported
+  transfer-encodings, malformed header lines, an over-long size line and a
+  chunk without its CRLF are errors that fail the exchange before any body
+  byte is trusted, through the stream's error path (never an unhandled event). The
   prototype's `unix-fetch.cjs` is that client and is proven under Bun 1.3.14
   and Node 26 (A.1: status, headers, request and response bodies, abort,
   4 MiB intact). `origin` stays `http://127.0.0.1:<daemon port>`; the adapter
@@ -400,22 +426,30 @@ The host's `/proc/net/tcp*` does not contain the namespace's listeners (A.1:
 itself, a claim. The supervisor therefore binds every pid it uses to a
 **process instance** and checks the namespaces, not just the pid.
 
-1. **Instance identity.** The `ready` event carries `launcherPid`,
-   `launcherStart`, `daemonPid`, `daemonStart` (the `starttime` field of
-   `/proc/<pid>/stat`). The daemon's host pid is computed by stage0 from
-   `/proc` as the process whose `PPid` is stage1 and whose `NSpid` ends in
-   the daemon's namespace pid; it is never taken from the daemon.
+1. **Instance identity.** The `ready` event carries `stage0Pid`,
+   `stage0Start`, `stage1Pid`, `stage1Start`, `daemonPid`, `daemonStart`
+   (the `starttime` field of `/proc/<pid>/stat`). The daemon's host pid is
+   computed by stage0 from `/proc` as the process whose `PPid` is stage1 and
+   whose `NSpid` ends in the daemon's namespace pid; it is never taken from
+   the daemon. The fourth link, the watchdog, is not reported by anything: it
+   is the process the supervisor itself spawned, and the supervisor records its
+   pid and start time at spawn (`processInstanceIdentity`).
 2. **`verifyInstance(event)`** (run by the supervisor on the event and before
-   every key-bearing step) requires all of: the launcher's start time equals
-   the event's, and its parent is the watchdog process the supervisor spawned
-   (pid and recorded start time); the launcher's `NSpid` shows it as init
-   (pid 1) of a nested PID namespace; the daemon's start time equals the
-   event's, its parent is the launcher, and its `NSpid` is nested; the
-   daemon's PID and network namespaces differ from the supervisor's own. A
-   reused pid fails the start-time check; an unrelated pid fails parentage
-   and the namespace checks. The matrix runs four negative cases (`pidReuse`,
-   `unrelatedPid`, `launcherReuse`, `wrongParent`) and requires each to be
-   rejected (A.1).
+   every key-bearing step) binds the chain **watchdog -> stage0 -> stage1 ->
+   daemon**, each link by pid and start time and by its parent: the watchdog's
+   start time equals the supervisor's record; stage0's start time equals the
+   event's and **its parent is the watchdog**; stage1's start time equals the
+   event's and **its parent is stage0**; the daemon's start time equals the
+   event's and **its parent is stage1**; the four are distinct processes.
+   PID-namespace depth is checked on the same chain: stage0 has a single
+   `NSpid` entry (host namespace), stage1's `NSpid` is `[host pid, 1]` (init
+   of a nested namespace), the daemon's is nested, and the daemon's PID and
+   network namespaces differ from the supervisor's own. (Stage1 is non-dumpable,
+   so its namespace links are not readable; the daemon's are.) A reused pid
+   fails a start-time check; an unrelated pid or a reparented stage1 fails
+   parentage and depth. The matrix, which starts every session through the
+   watchdog stand-in, runs nine negative cases (A.1) and requires each to be
+   rejected.
 3. **Which table.** Read `/proc/<daemon pid>/net/tcp*` (the daemon's own
    network namespace) instead of the host's table. The supervisor can read it
    (proven), and it shows the namespace's listeners.
@@ -551,6 +585,13 @@ acknowledged its own.
   launcher's memory; the launcher is non-dumpable, so this is closed. The
   prototype could not turn Yama off to prove the non-dumpable layer alone
   (Unproven; the `dumpable` ablation shows no failing row on this host).
+- **Cleanup assumes stage1 and stage0 are not both compromised.** A
+  compromised stage1 cannot clear its parent-death signal (frozen at SIGKILL),
+  so stage0 or the watchdog dying still ends the namespace. The signal is also
+  frozen for stage0 itself, but stage0 is the process the watchdog's group kill
+  reaches directly; a compromise of stage0 is out of scope here (it holds the
+  host dial and the API listener, and is non-dumpable, Landlock- and
+  seccomp-confined, outside the daemon's PID namespace).
 - **Kernel attack surface** is not zero: namespaces, netlink route sockets
   and the allowed syscalls remain reachable to the daemon. We removed the
   well-known unprivileged-kernel-bug surfaces (`io_uring`, `bpf`,
@@ -576,9 +617,15 @@ datagram `socketpair` re-pointed at a host datagram socket, a stream pair
 `connect`/`sendto`, an `api.sock` swapped for a symlink to a host stream
 socket, a Tor host side taken away, an unbound `listen()`, a wildcard bind of
 a forbidden and of a permitted port, escapers that `setsid`, `setpgid` and
-double-fork, stage0 and stage1 and daemon and watchdog killed with SIGKILL,
-forged events on stdout, a write to descriptor 3, pid reuse, an unrelated
-pid, injected hardening and cloexec faults, and a silent launcher.
+double-fork, stage0 and stage1 and daemon and watchdog killed with SIGKILL, an
+adversarial init that tries to clear its parent-death signal and leave its
+group, forged events on stdout, a write to descriptor 3, nine forged
+instance bindings against the watchdog -> stage0 -> stage1 -> daemon chain,
+injected hardening and cloexec faults (the fallback path included), malformed
+HTTP framing from the daemon (one subprocess per case, timed from outside), and
+a silent launcher. Every session is started the way the supervisor's watchdog
+starts the launcher (`shim.cjs`: the status pipe passed as fd 3 and closed in
+the watchdog).
 
 Build (through the remote-build lane; the Mac has no Linux toolchain use):
 
@@ -761,11 +808,12 @@ Governing rules (review finding 8):
    the watchdog (4.4), the HTTP/1.1 fetch adapter with the handshake,
    `verifyInstance` and namespace-aware inspection with the strict listener
    set (4.5), the new `confinement_unavailable` code, doctor line, receipt
-   field, the printed admin step, the Linux self-test (4.6). Mac code paths
-   untouched; Linux selection stays dark. *Acceptance:* existing Mac and
+   field, the printed admin step, the Linux self-test (4.6), the strict-framing client (4.4).
+   Mac code paths untouched; Linux selection stays dark. *Acceptance:* existing Mac and
    fake-confinement tests pass unchanged; new unit tests with injected fakes
    cover every refusal row of 4.7, forged stdout events, a missing status
-   channel and pid reuse; an integration test runs the real launcher with a
+   channel, the nine forged chain bindings of 4.5 and the malformed framing
+   cases of A.1, driven through a real watchdog spawn; an integration test runs the real launcher with a
    stand-in daemon on a Linux runner and fails if a layer is removed
    (ablation inverted into assertions). *Review before merge.*
 5. **Real-route qualification (Omarchy).** The real daemon, managed
@@ -774,7 +822,8 @@ Governing rules (review finding 8):
    session reaches `ready`, one private answer end to end, and the full
    matrix (lifecycle and fault injection included) against the actual
    pinned binary. *Acceptance:* companion and Tor run under the filter
-   without false refusals; receipt shows `loopback_filtered` with the backend
+   without false refusals (in particular that neither needs a parent-death
+   signal other than SIGKILL, section 4.1); receipt shows `loopback_filtered` with the backend
    detail; raw output attached to the change. Hosts other than Omarchy are
    not qualified (owner decision) and rely on the per-session self-test.
 6. **Integrated independent review.** Scope: the whole boundary as
@@ -817,7 +866,7 @@ the per-session cost of the self-test.
 ## Appendix A. Raw evidence
 
 Binary under test: `zkapi-confine` for `linux/amd64`, SHA-256
-`63a79b6f63e42bfd709fac0b64a46162091c9f8b907c23fa842bb6ca45c755ba` (computed with `sha256sum` on the laptop after the final build),
+`c5078e3732bb82336de6605b92ff19a3c6382666946801b41f47eb38211806a3` (computed with `sha256sum` on the laptop after the final build),
 built through the remote-build lane with a Go 1.25 toolchain in an official
 container, run from a scratch directory.
 
@@ -852,7 +901,7 @@ host: {"kernel":"7.1.9-arch1-2","runtime":"bun 1.3.14","check":{"landlockAbi":9,
 [control] unexpected rows: 0; datagrams the probe landed on the host decoy: 1
 
 == confined session: matrix
-[confined] ready event: {"apiToken":"(redacted)","bridgesExpose":["api"],"bridgesReach":["40263"],"daemonPid":78533,"daemonStart":"1247090","event":"ready","landlockAbi":9,"launcherPid":78523,"launcherStart":"1247089","layers":["netns","pidns","ipv6-off","caps","nnp","launcher-undumpable","launcher-landlock","launcher-seccomp","nnp","landlock-net","landlock-unix","landlock-scope","seccomp"],"stage0Layers":["nnp","launcher-undumpable","launcher-landlock","launcher-seccomp"]}
+[confined] ready event: {"apiToken":"(redacted)","bridgesExpose":["api"],"bridgesReach":["34293"],"daemonPid":91658,"daemonStart":"1342335","event":"ready","landlockAbi":9,"layers":["netns","pidns","ipv6-off","caps","nnp","launcher-undumpable","launcher-landlock","launcher-seccomp","nnp","landlock-net","landlock-unix","landlock-scope","seccomp"],"stage0Layers":["nnp","launcher-undumpable","launcher-landlock","launcher-seccomp"],"stage0Pid":91638,"stage0Start":"1342334","stage1Pid":91645,"stage1Start":"1342334"}
 [confined] rows (parent | exec'd child) with the unconfined control:
   inherited_decoy_fds            outside=2                    parent=0                    child=0
   caps                           outside=nonzero              parent=zero                 child=zero
@@ -902,7 +951,7 @@ host: {"kernel":"7.1.9-arch1-2","runtime":"bun 1.3.14","check":{"landlockAbi":9,
   pair_dgram_connect_host_path         outside=ok                 confined=no_socket
   pair_dgram_sendto_host_path          outside=ok                 confined=no_socket
   inet_connect_unix_addr               outside=EAFNOSUPPORT       confined=EAFNOSUPPORT
-  listen_unbound                       outside=listening:35649    confined=listening:52917
+  listen_unbound                       outside=listening:48291    confined=listening:34061
   ptrace_attach_launcher               outside=EPERM              confined=EPERM
   ptrace_attach_stage0                 outside=EPERM              confined=EPERM
   ptrace_attach_ns_init                outside=EPERM              confined=EPERM
@@ -929,31 +978,60 @@ host: {"kernel":"7.1.9-arch1-2","runtime":"bun 1.3.14","check":{"landlockAbi":9,
 == instance binding, inspection, private status channel
 {
   "instanceProblems": [],
+  "chain": {
+    "watchdog": 91632,
+    "stage0": 91638,
+    "stage1": 91645,
+    "daemon": 91658
+  },
   "negativeBindings": {
     "pidReuse": [
       "daemon start time does not match its pid"
     ],
     "unrelatedPid": [
-      "daemon is not a child of the launcher",
+      "daemon is not a child of stage1",
       "daemon is not in a nested PID namespace",
       "daemon shares our PID namespace",
       "daemon shares our network namespace"
     ],
-    "launcherReuse": [
-      "launcher start time does not match its pid"
+    "stage0Reuse": [
+      "stage0 start time does not match its pid"
     ],
-    "wrongParent": [
-      "launcher is not a child of the process we started"
+    "stage1Reuse": [
+      "stage1 start time does not match its pid"
+    ],
+    "wrongWatchdog": [
+      "stage0 is not a child of the watchdog we started"
+    ],
+    "watchdogReuse": [
+      "watchdog start time does not match the instance we spawned"
+    ],
+    "stage0IsTheWatchdog": [
+      "stage0 is not a child of the watchdog we started",
+      "stage1 is not a child of stage0",
+      "chain links are not distinct processes"
+    ],
+    "stage1Reparented": [
+      "stage1 is not a child of stage0",
+      "daemon is not a child of stage1",
+      "chain links are not distinct processes",
+      "stage1 is not PID 1 of a nested PID namespace"
+    ],
+    "stage1Unrelated": [
+      "stage1 is not a child of stage0",
+      "daemon is not a child of stage1",
+      "stage1 is not PID 1 of a nested PID namespace"
     ]
   },
   "processGroup": [
+    "bun",
     "zkapi-confine",
     "exe",
     "bun"
   ],
   "nsListeners": [
-    40263,
-    42919
+    34293,
+    40625
   ],
   "hostProcNetTcpListsApiPort": false,
   "apiSockOwnerUidIsOurs": true,
@@ -964,13 +1042,13 @@ host: {"kernel":"7.1.9-arch1-2","runtime":"bun 1.3.14","check":{"landlockAbi":9,
     "us": 1000
   },
   "launcher": {
-    "pid": 78523,
+    "pid": 91645,
     "NoNewPrivs": "1",
     "Seccomp": "2",
     "CapEff": "0000000000000000"
   },
   "daemon": {
-    "pid": 78533,
+    "pid": 91658,
     "NoNewPrivs": "1",
     "Seccomp": "2",
     "CapEff": "0000000000000000"
@@ -986,10 +1064,10 @@ host: {"kernel":"7.1.9-arch1-2","runtime":"bun 1.3.14","check":{"landlockAbi":9,
 }
 
 == unbound listen() (finding: listener policy)
-  extra namespace listener 51601 (unbound listen) detected by the strict set check; unreachable from the host: ECONNREFUSED
+  extra namespace listener 49867 (unbound listen) detected by the strict set check; unreachable from the host: ECONNREFUSED
 
 == cost of the bridge and the launcher
-{"sessionUpToProbeMs":377,"apiBridgeRoundTripMs":1.18,"checkWallMs":[514,514,514,513,514]}
+{"sessionUpToProbeMs":429,"apiBridgeRoundTripMs":1.18,"checkWallMs":[514,514,513,514,514]}
 
 == Go stand-in daemon
 {"bind_ipv6":"denied","bind_other_port":"denied","connect_other_port":"failed_fast","connect_remote_testnet":"failed_fast","dns_lookup":"failed","ipv6_loopback":"failed_fast","tor_bridge_echo":"TOR-HOST:probe","udp_dial":"failed_fast"}
@@ -1048,6 +1126,24 @@ host: {"kernel":"7.1.9-arch1-2","runtime":"bun 1.3.14","check":{"landlockAbi":9,
   "shim-sigkill": {
     "aliveBefore": 8,
     "allGone": true
+  },
+  "init-escape": {
+    "esc": {
+      "keep": "ok",
+      "soften": "EPERM",
+      "clear": "EPERM",
+      "setsid": "ok"
+    },
+    "allGone": true
+  },
+  "init-escape-without-seccomp": {
+    "esc": {
+      "keep": "ok",
+      "soften": "ok",
+      "clear": "ok",
+      "setsid": "ok"
+    },
+    "allGone": false
   }
 }
 
@@ -1091,19 +1187,60 @@ host: {"kernel":"7.1.9-arch1-2","runtime":"bun 1.3.14","check":{"landlockAbi":9,
       "refused:descriptor_sanitize_failed"
     ]
   },
+  "cloexecFallbackFails": {
+    "code": 78,
+    "events": [
+      "refused:descriptor_sanitize_failed"
+    ]
+  },
+  "cloexecFallbackWorks": {
+    "code": 0,
+    "events": [
+      "ready"
+    ]
+  },
   "silentLauncher": {
     "readyEvent": false,
     "allGone": true
   }
 }
 
+== malformed daemon responses (supervisor client)
+{
+  "ok-content-length": "ok:OK",
+  "ok-chunked": "ok:OK",
+  "ok-close-delimited": "ok:hi",
+  "cl-nope": "rejected",
+  "cl-negative": "rejected",
+  "cl-exponent": "rejected",
+  "cl-hex-prefix": "rejected",
+  "cl-space-inside": "rejected",
+  "cl-huge": "rejected",
+  "cl-over-bound": "rejected",
+  "cl-conflicting": "rejected",
+  "cl-and-chunked": "rejected",
+  "te-unsupported": "rejected",
+  "chunk-nonhex": "rejected",
+  "chunk-empty-size": "rejected",
+  "chunk-trailing-junk": "rejected",
+  "chunk-negative": "rejected",
+  "chunk-huge": "rejected",
+  "chunk-over-bound": "rejected",
+  "chunk-missing-crlf": "rejected",
+  "chunk-line-unterminated": "rejected",
+  "header-no-colon": "rejected",
+  "header-empty-name": "rejected",
+  "status-garbage": "rejected"
+}
+  previous parser, cl-nope: hung_killed_externally
+
 == ablations
-  ablate netns: refused ({"code":"bridge_unavailable","detail":"listen tcp4 127.0.0.1:45123: bind: address already in use","event":"refused"})
+  ablate netns: refused ({"code":"bridge_unavailable","detail":"listen tcp4 127.0.0.1:35833: bind: address already in use","event":"refused"})
 {
   "netns": {
     "refused": {
       "code": "bridge_unavailable",
-      "detail": "listen tcp4 127.0.0.1:45123: bind: address already in use",
+      "detail": "listen tcp4 127.0.0.1:35833: bind: address already in use",
       "event": "refused"
     }
   },
@@ -1193,7 +1330,7 @@ are not applied). Selected lines:
 ```
 host: {"kernel":"7.1.9-arch1-2","runtime":"bun 1.3.14","check":{"landlockAbi":4,"layers":["netns","pidns","ipv6-off","caps","nnp","launcher-undumpable","launcher-seccomp","nnp","landlock-net","seccomp"],"ok":true,"stage0Layers":["nnp","launcher-undumpable","launcher-seccomp"]}}
 [control] unexpected rows: 0; datagrams the probe landed on the host decoy: 1
-[confined] ready event: {"apiToken":"(redacted)","bridgesExpose":["api"],"bridgesReach":["46381"],"daemonPid":80100,"daemonStart":"1251393","event":"ready","landlockAbi":4,"launcherPid":80091,"launcherStart":"1251393","layers":["netns","pidns","ipv6-off","caps","nnp","launcher-undumpable","launcher-seccomp","nnp","landlock-net","seccomp"],"stage0Layers":["nnp","launcher-undumpable","launcher-seccomp"]}
+[confined] ready event: {"apiToken":"(redacted)","bridgesExpose":["api"],"bridgesReach":["45561"],"daemonPid":93616,"daemonStart":"1347297","event":"ready","landlockAbi":4,"layers":["netns","pidns","ipv6-off","caps","nnp","launcher-undumpable","launcher-seccomp","nnp","landlock-net","seccomp"],"stage0Layers":["nnp","launcher-undumpable","launcher-seccomp"],"stage0Pid":93599,"stage0Start":"1347297","stage1Pid":93606,"stage1Start":"1347297"}
   unix_host_path                 outside=connected            parent=failed_fast          child=failed_fast
   unix_host_abstract             outside=connected            parent=failed_fast          child=failed_fast
   bind_other_port                outside=bound                parent=denied:EACCES        child=denied:EACCES
@@ -1207,7 +1344,7 @@ host: {"kernel":"7.1.9-arch1-2","runtime":"bun 1.3.14","check":{"landlockAbi":4,
   pair_stream_connect_after_shutdown   outside=EISCONN            confined=EISCONN
   pair_dgram_connect_host_path         outside=ok                 confined=no_socket
   pair_dgram_sendto_host_path          outside=ok                 confined=no_socket
-  listen_unbound                       outside=listening:51565    confined=listening:59203
+  listen_unbound                       outside=listening:55107    confined=listening:57291
   signal_launcher                      outside=ok                 confined=ESRCH
   signal_stage0                        outside=ok                 confined=ESRCH
   signal_ns_init_sigkill               outside=EPERM              confined=ok
@@ -1246,6 +1383,13 @@ catching them (ablations) or controls behaving the opposite way:
   as independent layers for older kernels and for hosts with Yama off.
 - PID namespace off: the escapers (`setsid`, `setpgid`, double fork) survive a
   group kill (4 survivors), which is what the revision-1 design allowed.
+- Seccomp off, adversarial init (`init-escape-without-seccomp`): the stand-in
+  init clears its parent-death signal (`clear: ok`), leaves the group, and
+  survives the death of stage0 (`allGone: false`); with the filter on the
+  same init gets `EPERM` for both softening and clearing and nothing survives.
+- Previous HTTP parser (`--old-fetch`, the revision-2 `unix-fetch.cjs`) on the
+  `cl-nope` case: `hung_killed_externally`. The current parser rejects all 21
+  malformed cases in bounded time.
 
 ### A.4 Cleanup and leftovers
 

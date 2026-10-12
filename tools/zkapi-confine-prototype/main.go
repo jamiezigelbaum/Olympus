@@ -48,6 +48,13 @@ const prototype = true
 
 func init() { runtime.LockOSThread() }
 
+func errnoOrNil(e syscall.Errno) error {
+	if e == 0 {
+		return nil
+	}
+	return e
+}
+
 func ablated(layer string) bool {
 	if !prototype {
 		return false
@@ -353,8 +360,12 @@ func completeReady(ev map[string]any, stage1Pid int, stage0Layers []string, toke
 			out[k] = v
 		}
 	}
-	out["launcherPid"] = stage1Pid
-	out["launcherStart"] = startTime(stage1Pid)
+	// The chain the supervisor binds, each link by pid and start time:
+	// watchdog (its own record) -> stage0 -> stage1 -> daemon.
+	out["stage0Pid"] = os.Getpid()
+	out["stage0Start"] = startTime(os.Getpid())
+	out["stage1Pid"] = stage1Pid
+	out["stage1Start"] = startTime(stage1Pid)
 	out["daemonPid"] = daemonHost
 	out["daemonStart"] = startTime(daemonHost)
 	out["stage0Layers"] = stage0Layers
@@ -497,6 +508,21 @@ func stage1(args []string) int {
 		return refuse("launcher_hardening_failed", err)
 	}
 	layers = append(layers, hl...)
+	if fault("init-escape") {
+		// An adversarial init stand-in: a compromised stage1 trying to outlive
+		// its parent. It reports what the filter let it do; the matrix then
+		// kills stage0 and requires that nothing survives.
+		res := map[string]any{"event": "init_escape"}
+		_, _, e := syscall.RawSyscall(syscall.SYS_PRCTL, prSetPdeathsig, uintptr(syscall.SIGKILL), 0)
+		res["keepPdeathsig"] = errName(errnoOrNil(e))
+		_, _, e = syscall.RawSyscall(syscall.SYS_PRCTL, prSetPdeathsig, uintptr(syscall.SIGTERM), 0)
+		res["softenPdeathsig"] = errName(errnoOrNil(e))
+		_, _, e = syscall.RawSyscall(syscall.SYS_PRCTL, prSetPdeathsig, 0, 0)
+		res["clearPdeathsig"] = errName(errnoOrNil(e))
+		_, serr := syscall.Setsid()
+		res["setsid"] = errName(serr)
+		emitFn(res)
+	}
 
 	r, w, err := os.Pipe()
 	if err != nil {

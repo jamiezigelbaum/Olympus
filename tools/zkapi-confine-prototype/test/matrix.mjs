@@ -154,19 +154,28 @@ const killAll = (needles) => { for (const p of procsMatching(needles)) { try { p
 
 // The supervisor's binding of a ready event to process instances: pid AND start
 // time, parentage, and PID-namespace identity. Returns a list of problems.
-function verifyInstance(ev, { stage0Pid } = {}) {
+// The chain is watchdog -> stage0 -> stage1 -> daemon, every link bound by pid
+// and start time (the watchdog's from the supervisor's own record of what it
+// spawned), by parentage, and by PID-namespace depth: stage0 is in the host
+// namespace, stage1 is init of a nested one, the daemon is inside it.
+function verifyInstance(ev, { watchdogPid, watchdogStart } = {}) {
   const errs = [];
   const need = (c, m) => { if (!c) errs.push(m); };
-  const launcherSt = statOf(ev.launcherPid); const daemon = statOf(ev.daemonPid);
-  need(launcherSt && launcherSt.start === ev.launcherStart, 'launcher start time does not match its pid');
+  const nsLevels = (pid) => { const m = /NSpid:\s*(.*)/.exec(statusOf(pid) || ''); return m ? m[1].trim().split(/\s+/) : []; };
+  const wd = statOf(watchdogPid); const s0 = statOf(ev.stage0Pid); const s1 = statOf(ev.stage1Pid); const daemon = statOf(ev.daemonPid);
+  need(wd && wd.start === watchdogStart, 'watchdog start time does not match the instance we spawned');
+  need(s0 && s0.start === ev.stage0Start, 'stage0 start time does not match its pid');
+  need(s1 && s1.start === ev.stage1Start, 'stage1 start time does not match its pid');
   need(daemon && daemon.start === ev.daemonStart, 'daemon start time does not match its pid');
-  if (daemon && launcherSt) {
-    need(daemon.ppid === ev.launcherPid, 'daemon is not a child of the launcher');
-    if (stage0Pid !== undefined) need(launcherSt.ppid === stage0Pid, 'launcher is not a child of the process we started');
-    const ds = statusOf(ev.daemonPid) || ''; const ls = statusOf(ev.launcherPid) || '';
-    const dn = /NSpid:\s*(.*)/.exec(ds); const ln = /NSpid:\s*(.*)/.exec(ls);
-    need(dn && dn[1].trim().split(/\s+/).length >= 2, 'daemon is not in a nested PID namespace');
-    need(ln && ln[1].trim().split(/\s+/).length === 2 && ln[1].trim().split(/\s+/)[1] === '1', 'launcher is not PID 1 of its namespace');
+  if (wd && s0 && s1 && daemon) {
+    need(s0.ppid === watchdogPid, 'stage0 is not a child of the watchdog we started');
+    need(s1.ppid === ev.stage0Pid, 'stage1 is not a child of stage0');
+    need(daemon.ppid === ev.stage1Pid, 'daemon is not a child of stage1');
+    need(ev.stage0Pid !== ev.stage1Pid && ev.stage1Pid !== ev.daemonPid && ev.stage0Pid !== watchdogPid, 'chain links are not distinct processes');
+    need(nsLevels(ev.stage0Pid).length === 1, 'stage0 is not in the host PID namespace');
+    const l1 = nsLevels(ev.stage1Pid);
+    need(l1.length === 2 && l1[1] === '1', 'stage1 is not PID 1 of a nested PID namespace');
+    need(nsLevels(ev.daemonPid).length >= 2, 'daemon is not in a nested PID namespace');
     let dns; try { dns = fs.readlinkSync(`/proc/${ev.daemonPid}/ns/pid`); } catch { dns = undefined; }
     need(dns !== undefined && dns !== fs.readlinkSync('/proc/self/ns/pid'), 'daemon shares our PID namespace');
     let dnet; try { dnet = fs.readlinkSync(`/proc/${ev.daemonPid}/ns/net`); } catch { dnet = undefined; }
@@ -190,7 +199,12 @@ function launchArgs(t, workDir, program, programArgs, { status = true } = {}) {
 }
 function launch({ t, workDir, extraEnv = {}, inherit = [], program, programArgs, status = true }) {
   const args = launchArgs(t, workDir, program, programArgs, { status });
-  const child = spawn(launcher, args, { detached: true, env: { ...process.env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe', 'pipe', ...inherit] });
+  // The launcher is started the way the supervisor's watchdog starts it: by a
+  // watchdog stand-in that leads a new process group and passes the private
+  // status pipe (its fd 3) and the decoy descriptors through.
+  const spec = { argv: [launcher, ...args], extraFds: inherit.map((_, i) => 4 + i) };
+  const child = spawn(process.execPath, [path.join(here, 'shim.cjs'), JSON.stringify(spec)], { detached: true, env: { ...process.env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe', 'pipe', ...inherit] });
+  const watchdogStart = (statOf(child.pid) || {}).start;
   const events = []; const out = []; const err = [];
   let buf = '';
   child.stdout.setEncoding('utf8'); child.stdout.on('data', (d) => { out.push(d); });
@@ -206,7 +220,7 @@ function launch({ t, workDir, extraEnv = {}, inherit = [], program, programArgs,
     }
   });
   const exited = new Promise((r) => child.on('exit', (code, signal) => r({ code, signal })));
-  return { child, events, out, err, exited, pgid: child.pid };
+  return { child, events, out, err, exited, pgid: child.pid, watchdogPid: child.pid, watchdogStart };
 }
 const eventOf = (run, ms) => waitFor(() => run.events.find((e) => e.event === 'ready' || e.event === 'refused'), ms);
 
@@ -418,19 +432,33 @@ await section('instance binding, inspection, private status channel', async () =
   const ev = baseReady;
   const sock = base.t.apiSock;
   const facts = {};
-  const errs = verifyInstance(ev, { stage0Pid: base.run.child.pid });
-  ok('ready event binds to the process instances', errs.length === 0, errs.join('; '));
+  const wd = { watchdogPid: base.run.watchdogPid, watchdogStart: base.run.watchdogStart };
+  const errs = verifyInstance(ev, wd);
+  ok('ready event binds the whole chain watchdog -> stage0 -> stage1 -> daemon', errs.length === 0, errs.join('; '));
   facts.instanceProblems = errs;
-  // Negative cases the supervisor must refuse: wrong start time (pid reuse), a
-  // pid that is not ours at all, a pid whose parent is not the launcher.
+  facts.chain = { watchdog: wd.watchdogPid, stage0: ev.stage0Pid, stage1: ev.stage1Pid, daemon: ev.daemonPid };
+  // Negative cases the supervisor must refuse, one per link of the chain.
   const own = statOf(process.pid);
+  const helper = spawn('sleep', ['30'], { stdio: 'ignore' }); // a process of ours, unrelated to the launcher
+  await sleep(50);
+  const helperSt = statOf(helper.pid);
   const neg = {
-    pidReuse: verifyInstance({ ...ev, daemonStart: '1' }, { stage0Pid: base.run.child.pid }),
-    unrelatedPid: verifyInstance({ ...ev, daemonPid: process.pid, daemonStart: own.start }, { stage0Pid: base.run.child.pid }),
-    launcherReuse: verifyInstance({ ...ev, launcherStart: '1' }, { stage0Pid: base.run.child.pid }),
-    wrongParent: verifyInstance(ev, { stage0Pid: process.pid }),
+    pidReuse: verifyInstance({ ...ev, daemonStart: '1' }, wd),
+    unrelatedPid: verifyInstance({ ...ev, daemonPid: process.pid, daemonStart: own.start }, wd),
+    stage0Reuse: verifyInstance({ ...ev, stage0Start: '1' }, wd),
+    stage1Reuse: verifyInstance({ ...ev, stage1Start: '1' }, wd),
+    wrongWatchdog: verifyInstance(ev, { watchdogPid: process.pid, watchdogStart: own.start }),
+    watchdogReuse: verifyInstance(ev, { ...wd, watchdogStart: '1' }),
+    // the shape revision 2 of the design wrongly required: stage0 skipped
+    stage0IsTheWatchdog: verifyInstance({ ...ev, stage0Pid: wd.watchdogPid, stage0Start: wd.watchdogStart }, wd),
+    // stage1 replaced by a process whose parent is not stage0: another real
+    // launcher process (the daemon), and an unrelated process of ours
+    stage1Reparented: verifyInstance({ ...ev, stage1Pid: ev.daemonPid, stage1Start: statOf(ev.daemonPid).start }, wd),
+    stage1Unrelated: verifyInstance({ ...ev, stage1Pid: helper.pid, stage1Start: helperSt.start }, wd),
   };
+  try { helper.kill('SIGKILL'); } catch {}
   for (const [k, v] of Object.entries(neg)) ok(`supervisor refuses ${k}`, v.length > 0, 'accepted a forged binding');
+  ok('stage1Reparented is refused for its parentage, not only its depth', neg.stage1Reparented.some((m) => m.includes('stage1 is not a child of stage0')), JSON.stringify(neg.stage1Reparented));
   facts.negativeBindings = Object.fromEntries(Object.entries(neg).map(([k, v]) => [k, v]));
   facts.processGroup = processGroup(base.run.pgid).map((p) => p.comm);
   // listeners: read in the namespace, expect exactly the API port and the Tor bridge
@@ -446,14 +474,14 @@ await section('instance binding, inspection, private status channel', async () =
   ok('api socket is a socket owned by us', facts.apiSockOwnerUidIsOurs && fs.lstatSync(sock).isSocket());
   facts.apiSockMode = (fs.lstatSync(sock).mode & 0o777).toString(8);
   expect('api socket mode', facts.apiSockMode, '600');
-  facts.procOwnerUid = { launcher: fs.statSync(`/proc/${ev.launcherPid}`).uid, daemon: fs.statSync(`/proc/${ev.daemonPid}`).uid, us: process.getuid() };
-  for (const [name, pid] of [['launcher', ev.launcherPid], ['daemon', ev.daemonPid]]) {
+  facts.procOwnerUid = { launcher: fs.statSync(`/proc/${ev.stage1Pid}`).uid, daemon: fs.statSync(`/proc/${ev.daemonPid}`).uid, us: process.getuid() };
+  for (const [name, pid] of [['launcher', ev.stage1Pid], ['daemon', ev.daemonPid]]) {
     const st = statusOf(pid);
     facts[name] = { pid, NoNewPrivs: /NoNewPrivs:\s*(\d)/.exec(st)[1], Seccomp: /Seccomp:\s*(\d)/.exec(st)[1], CapEff: /CapEff:\s*(\w+)/.exec(st)[1] };
     expect(`${name} NoNewPrivs`, facts[name].NoNewPrivs, '1'); expect(`${name} Seccomp`, facts[name].Seccomp, '2'); expect(`${name} CapEff`, facts[name].CapEff, '0000000000000000');
   }
   // The stage0 (our child) is hardened too, and acknowledged in the ready event.
-  const s0 = statusOf(base.run.child.pid);
+  const s0 = statusOf(ev.stage0Pid);
   facts.stage0 = { NoNewPrivs: /NoNewPrivs:\s*(\d)/.exec(s0)[1], Seccomp: /Seccomp:\s*(\d)/.exec(s0)[1] };
   expect('stage0 NoNewPrivs', facts.stage0.NoNewPrivs, '1'); expect('stage0 Seccomp', facts.stage0.Seccomp, '2');
   // A daemon cannot reach the private status descriptor, and what it prints is not an event.
@@ -582,14 +610,14 @@ await section('lifecycle: the session ends with every descendant', async () => {
     ok('supervisor-group-kill: no descendant survives a plain group kill', gone, JSON.stringify(procsMatching(s.needles)));
     return { allGone: gone };
   });
-  await withEscapers('stage0-sigkill', async (s) => {
-    process.kill(s.run.child.pid, 'SIGKILL');
+  await withEscapers('stage0-sigkill', async (s, ev) => {
+    process.kill(ev.stage0Pid, 'SIGKILL');
     const gone = await waitGone(s.needles, 4000);
     ok('stage0-sigkill: no descendant survives', gone, JSON.stringify(procsMatching(s.needles)));
     return { allGone: gone };
   });
   await withEscapers('stage1-sigkill', async (s, ev) => {
-    process.kill(ev.launcherPid, 'SIGKILL');
+    process.kill(ev.stage1Pid, 'SIGKILL');
     const exit = await Promise.race([s.run.exited, sleep(5000).then(() => 'hung')]);
     const gone = await waitGone(s.needles, 4000);
     ok('stage1-sigkill: stage0 exited', exit !== 'hung', JSON.stringify(exit));
@@ -623,6 +651,32 @@ await section('lifecycle: the session ends with every descendant', async () => {
     ok('shim-sigkill: nothing survives the parent being killed', gone, JSON.stringify(procsMatching(needles)));
     results['shim-sigkill'] = { aliveBefore: alive, allGone: gone };
     killAll(needles); fx.close(); fs.rmSync(workDir, { recursive: true, force: true });
+  }
+  // An adversarial init (a compromised stage1): it tries to keep a parent-death
+  // signal that is not SIGKILL, clear it, and leave the recorded group. Then
+  // stage0 alone is killed; nothing may survive. Without the seccomp layer the
+  // same init does survive, so the row can see the failure it guards.
+  for (const [label, ablation] of [['init-escape', ''], ['init-escape-without-seccomp', 'seccomp']]) {
+    const s = await session({ ablation, label, extraEnv: { ZKAPI_CONFINE_PROTOTYPE_FAULT: 'init-escape' }, withDecoyFds: false, allowSurvivors: ablation !== '' });
+    const ev = await eventOf(s.run, 10000);
+    const esc = await waitFor(() => s.run.events.find((e) => e.event === 'init_escape'), 5000);
+    if (!ev || ev.event !== 'ready' || !esc) { fail(`${label}: no ready/init_escape event: ${JSON.stringify(s.run.events)}`); await s.cleanup(); continue; }
+    ok(`${label}: the init stand-in left the recorded process group`, (statOf(ev.stage1Pid) || {}).pgrp !== s.run.pgid, JSON.stringify(statOf(ev.stage1Pid)));
+    expect(`${label}: setting SIGKILL`, esc.keepPdeathsig, 'ok');
+    if (!ablation) {
+      expect(`${label}: softening the parent-death signal`, esc.softenPdeathsig, 'EPERM');
+      expect(`${label}: clearing the parent-death signal`, esc.clearPdeathsig, 'EPERM');
+    } else {
+      expect(`${label}: softening (no filter)`, esc.softenPdeathsig, 'ok');
+      expect(`${label}: clearing (no filter)`, esc.clearPdeathsig, 'ok');
+    }
+    process.kill(ev.stage0Pid, 'SIGKILL');
+    const gone = await waitGone(s.needles, 4000);
+    if (!ablation) ok(`${label}: stage0 killed, nothing survives`, gone, JSON.stringify(procsMatching(s.needles)));
+    else ok(`${label}: without the filter the init survives (the row detects the failure)`, !gone);
+    results[label] = { esc: { keep: esc.keepPdeathsig, soften: esc.softenPdeathsig, clear: esc.clearPdeathsig, setsid: esc.setsid }, allGone: gone };
+    killAll(s.needles);
+    await s.cleanup();
   }
   report.scenarios.lifecycle = results;
   log(JSON.stringify(results, null, 2));
@@ -660,6 +714,7 @@ await section('refusals and fail-closed behaviour', async () => {
     ['stage0Hardening', { ZKAPI_CONFINE_PROTOTYPE_FAULT: 'harden-stage0' }, 'launcher_hardening_failed'],
     ['stage0Cloexec', { ZKAPI_CONFINE_PROTOTYPE_FAULT: 'cloexec' }, 'descriptor_sanitize_failed'],
     ['stage1Cloexec', { ZKAPI_CONFINE_PROTOTYPE_FAULT: 'cloexec1' }, 'descriptor_sanitize_failed'],
+    ['cloexecFallbackFails', { ZKAPI_CONFINE_PROTOTYPE_FAULT: 'cloexec-fb-fail' }, 'descriptor_sanitize_failed'],
   ];
   for (const [name, env, code] of faultCases) {
     const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'zc-f-')); fs.chmodSync(wd, 0o700);
@@ -673,6 +728,14 @@ await section('refusals and fail-closed behaviour', async () => {
     ok(`${name}: the daemon never started`, !fs.existsSync(started) && procsMatching([mk]).length === 0);
     fs.rmSync(wd, { recursive: true, force: true });
   }
+  // the /proc/self/fd fallback, forced, works when nothing fails
+  {
+    const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'zc-f-')); fs.chmodSync(wd, 0o700);
+    const r = await runTo(['run', '--dir', wd, '--status-fd', '3', '--connect-port', '1', '--', process.execPath, '-e', '0'], daemonEnv({ ZKAPI_CONFINE_PROTOTYPE_FAULT: 'cloexec-fb' }), { status: true });
+    refusals.cloexecFallbackWorks = { code: r.code, events: r.status.map((e) => e.event) };
+    ok('cloexec fallback (forced) lets a healthy session reach ready', r.status.some((e) => e.event === 'ready') && r.code === 0, JSON.stringify(refusals.cloexecFallbackWorks));
+    fs.rmSync(wd, { recursive: true, force: true });
+  }
   // missing events: the supervisor's rule is "no ready event in time => kill the session and refuse"
   {
     const s = await session({ label: 'silent', extraEnv: { ZKAPI_CONFINE_PROTOTYPE_FAULT: 'silent' }, withDecoyFds: false });
@@ -683,6 +746,38 @@ await section('refusals and fail-closed behaviour', async () => {
   }
   report.scenarios.refusals = refusals;
   log(JSON.stringify(refusals, null, 2));
+});
+
+// ---- 5b. a hostile daemon's malformed HTTP framing must be refused, in bounded time
+await section('malformed daemon responses (supervisor client)', async () => {
+  const oneCase = (name, impl) => new Promise((resolve) => {
+    const c = spawn(process.execPath, [path.join(here, 'framing.cjs'), name], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, ...(impl ? { FETCH_IMPL: impl } : {}) } });
+    let o = '';
+    c.stdout.on('data', (d) => { o += d; });
+    // timed from OUTSIDE: a parser that spins cannot be stopped by its own timers
+    const timer = setTimeout(() => { c.kill('SIGKILL'); resolve({ outcome: 'hung_killed_externally' }); }, 8000);
+    c.on('exit', () => { clearTimeout(timer); try { resolve(JSON.parse(o.trim().split('\n').pop())); } catch { resolve({ outcome: 'no_result' }); } });
+  });
+  const list = await new Promise((resolve) => {
+    const c = spawn(process.execPath, [path.join(here, 'framing.cjs'), '--list'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let o = ''; c.stdout.on('data', (d) => { o += d; }); c.on('exit', () => resolve(JSON.parse(o)));
+  });
+  const wantOk = { 'ok-content-length': 'ok:OK', 'ok-chunked': 'ok:OK', 'ok-close-delimited': 'ok:hi' };
+  const results = {};
+  for (const name of list) {
+    const r = await oneCase(name);
+    results[name] = r.outcome;
+    expect(`framing ${name}`, r.outcome, wantOk[name] || 'rejected');
+  }
+  report.scenarios.framing = results;
+  log(JSON.stringify(results, null, 2));
+  const old = arg('old-fetch', '');
+  if (old) { // optional self-check: the previous parser must NOT pass the same cases
+    const r = await oneCase('cl-nope', old);
+    report.scenarios.framingOldParser = r.outcome;
+    ok('the previous parser fails the malformed-length case (the test can see the defect)', r.outcome !== 'rejected', r.outcome);
+    log('  previous parser, cl-nope: ' + r.outcome);
+  }
 });
 
 // ---- 6. ablations: what each layer is for, and proof the probes can detect it

@@ -48,7 +48,7 @@ type sockFprog struct {
 
 // Syscall numbers, cross-checked against golang.org/x/sys/unix zsysnum files.
 var sysNums = map[string][2]uint32{ // {amd64, arm64}
-	"socket": {41, 198}, "socketpair": {53, 199}, "ptrace": {101, 117},
+	"socket": {41, 198}, "prctl": {157, 167}, "socketpair": {53, 199}, "ptrace": {101, 117},
 	"process_vm_readv": {310, 270}, "process_vm_writev": {311, 271}, "pidfd_getfd": {438, 438},
 	"kcmp": {312, 272}, "unshare": {272, 97}, "setns": {308, 268}, "clone": {56, 220}, "clone3": {435, 435},
 	"io_uring_setup": {425, 425}, "io_uring_enter": {426, 426}, "io_uring_register": {427, 427},
@@ -154,7 +154,21 @@ func buildFilter(p profile) ([]sockFilter, error) {
 	a.jump(bpfJeqK, num("socket", arch), "sock", "")
 	a.jump(bpfJeqK, num("socketpair", arch), "pair", "")
 	a.jump(bpfJeqK, num("clone", arch), "clone", "")
+	a.jump(bpfJeqK, num("prctl", arch), "prctl", "")
 	a.ret(retAllow) // nothing named matched
+
+	// The parent-death signal is the launcher's link to the session's lifetime:
+	// stage0 and stage1 (and so everything below them) die with the watchdog
+	// because it is SIGKILL. A process that could clear or soften it could
+	// outlive its parent, so PR_SET_PDEATHSIG is allowed only with SIGKILL.
+	// The option is an int (the low word is what the kernel reads); the signal
+	// is an unsigned long, and a value with high bits is invalid there.
+	a.label("prctl")
+	a.ld(16)
+	a.jump(bpfJeqK, prSetPdeathsig, "prctl_pd", "allow")
+	a.label("prctl_pd")
+	a.ld(24)
+	a.jump(bpfJeqK, uint32(syscall.SIGKILL), "allow", "deny")
 
 	a.label("clone")
 	a.ld(16)

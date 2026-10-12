@@ -43,19 +43,33 @@ func allThreads(trap, a1, a2, a3 uintptr) error {
 // the caller must turn into a refusal: a descriptor left open is a way out.
 func markCloexec() error {
 	const closeRangeCloexec = 4
-	if _, _, e := syscall.RawSyscall(sysCloseRange, 3, ^uintptr(0), closeRangeCloexec); e == 0 {
-		return nil
+	forceFallback := fault("cloexec-fb") || fault("cloexec-fb-fail")
+	if !forceFallback {
+		if _, _, e := syscall.RawSyscall(sysCloseRange, 3, ^uintptr(0), closeRangeCloexec); e == 0 {
+			return nil
+		}
 	}
 	entries, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
 		return fmt.Errorf("cannot sanitize inherited descriptors: %w", err)
 	}
+	injected := fault("cloexec-fb-fail")
 	for _, ent := range entries {
 		fd, err := strconv.Atoi(ent.Name())
 		if err != nil || fd <= 2 {
 			continue
 		}
-		syscall.CloseOnExec(fd)
+		var e syscall.Errno
+		if injected {
+			e, injected = syscall.EPERM, false
+		} else if _, _, e2 := syscall.RawSyscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, syscall.FD_CLOEXEC); e2 != 0 {
+			e = e2
+		}
+		// EBADF: the descriptor ReadDir itself used, already closed. Anything
+		// else leaves a descriptor open across exec, which is a way out.
+		if e != 0 && e != syscall.EBADF {
+			return fmt.Errorf("cannot mark descriptor %d close-on-exec: %w", fd, e)
+		}
 	}
 	return nil
 }
