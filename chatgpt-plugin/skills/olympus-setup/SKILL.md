@@ -48,8 +48,8 @@ Ask whether Olympus is already installed on their Mac.
 
 To connect, ChatGPT asks the user to connect Olympus (sign in) the first time
 a tool needs it. The page that opens must be in a browser on the Mac running
-Olympus: it asks to connect ChatGPT, and the user clicks **Approve**. That
-click on their own Mac is the only proof of ownership: there is no code to
+Olympus: it asks "Connect ChatGPT to Olympus?", and the user clicks
+**Connect**. That click on their own Mac is the only proof of ownership: there is no code to
 copy and no account to create.
 
 ## 3. Confirm

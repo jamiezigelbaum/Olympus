@@ -109563,7 +109563,8 @@ function remoteAccessFromStatus(input) {
   }
   const relayDown = status?.mode === "relay" && status.relay !== undefined && status.relay.state !== "online";
   if (input.live && !relayDown) {
-    return { state: "on", mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json` };
+    const ownTunnel = status?.mode === "manual" || status?.public_base_url_source === "config";
+    return { state: "on", mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json`, ...ownTunnel ? { ownTunnel: true } : {} };
   }
   if (status?.error)
     return { state: "invalid", detail: status.error };
@@ -109846,14 +109847,26 @@ function connectSheet(access) {
   return `<div class="sheet" id="${AGENT_CONNECT_SHEET_ID}" aria-hidden="true">` + `<h4>Connect an agent</h4>` + `<p>Pick the agent you use. It never sees Private source text or Secrets. For Private items it receives only answers that Venice or a local model reasoned out, with each item's title, path, source and author.</p>` + `<div class="agentpick">${choices}</div>` + `</div>`;
 }
 function agentChoice(agent, access) {
-  const detail = agent.detail ? ` <span class="hint">${escapeHtml2(agent.detail)}</span>` : "";
+  const hints = [agent.detail, needsOwnTunnel(agent, access) ? "needs your own tunnel" : undefined].filter(Boolean).join(" · ");
+  const detail = hints ? ` <span class="hint">${escapeHtml2(hints)}</span>` : "";
   return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml2(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access)}</div>` + `</details>`;
+}
+function ownTunnel(access) {
+  return access.state === "on" && (access.ownTunnel === true || access.setBy === "worker_env");
+}
+function needsOwnTunnel(agent, access) {
+  return agent.method !== "local" && !agent.viaRelay && !ownTunnel(access);
 }
 function agentBody(agent, access) {
   if (agent.method === "local")
     return localBody(agent);
+  if (needsOwnTunnel(agent, access))
+    return tunnelNeeded() + instructionsStep(agent, false);
   if (access.state !== "on")
     return remoteUnavailable(access) + instructionsStep(agent, false);
+  if (agent.method === "oauth" && !ownTunnel(access) && agent.approveViaRelay) {
+    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${escapeHtml2(agent.approveViaRelay)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+  }
   if (agent.method === "oauth") {
     return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${escapeHtml2(agent.approve ?? "")}</li>` + `<li data-agent-step>On that page, type a pairing code from here.${pairForm(agent.id)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
@@ -109864,7 +109877,11 @@ function agentBody(agent, access) {
   return `<p>If the agent can add a connector that signs in, use the connector address and a pairing code. If it takes an address and a key, create a key.</p>` + `<ol class="steps">` + `<li>Connector (MCP) address:${copyBox("agent-other-url", access.mcpUrl, "Copy address")}` + `OpenAPI address, for agents that read an API description:${copyBox("agent-other-openapi", access.openapiUrl, "Copy address")}</li>` + `<li data-agent-step>Approve a connector with a pairing code.${pairForm(agent.id)}</li>` + `<li data-agent-step>Or create a key and give it to the agent as a bearer token.${keyForm(agent.id, "Agent")}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
 }
 function localBody(agent) {
-  return `<p>These run on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>` + copyBox("agent-local-prompt", LOCAL_AGENT_PROMPT, "Copy prompt", true) + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>` + `<p>The plugin folder is the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>` + copyBox("agent-local-claude", CLAUDE_CODE_SNIPPET, "Copy command") + `<p>For Codex, add this to ~/.codex/config.toml:</p>` + copyBox("agent-local-codex", CODEX_SNIPPET, "Copy snippet") + `</details>` + instructionsStep(agent, false);
+  return `<p>These run on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>` + copyBox("agent-local-prompt", LOCAL_AGENT_PROMPT, "Copy prompt", true) + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>` + `<p>The olympus path is the full path of the olympus command. On a Mac set up with the Olympus installer it is <b>~/.local/bin/olympus</b>, written out from your home folder. With OpenClaw it is <b>bin/olympus</b> inside the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>` + copyBox("agent-local-claude", CLAUDE_CODE_SNIPPET, "Copy command") + `<p>For Codex, add this to ~/.codex/config.toml:</p>` + copyBox("agent-local-codex", CODEX_SNIPPET, "Copy snippet") + `</details>` + instructionsStep(agent, false);
+}
+function tunnelNeeded() {
+  const text2 = "Olympus's relay connects only ChatGPT, so this agent needs a tunnel you run yourself. " + "Advanced: set remote.publicBaseUrl in Olympus's settings to your tunnel's https address and turn on remote access; this agent's steps then appear here. " + "Claude Code and Codex on this computer need no tunnel.";
+  return `<p class="why" data-agent-needs-tunnel>${escapeHtml2(text2)}</p>`;
 }
 function remoteUnavailable(access) {
   const text2 = access.state === "not_connected" ? "Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.";
@@ -109935,7 +109952,7 @@ function hostOf(url) {
     return url;
   }
 }
-var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <plugin folder>/bin/olympus serve", CODEX_SNIPPET, MONTHS2;
+var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, MONTHS2;
 var init_agents = __esm(() => {
   init_agent_connections();
   init_agent_instructions();
@@ -109956,7 +109973,9 @@ var init_agents = __esm(() => {
       method: "oauth",
       add: "In ChatGPT, open Settings, then Apps, and turn on Developer mode under Advanced settings. Then create a connector, name it Olympus, choose OAuth, and paste this address as the URL:",
       approve: "Choose Create. An Olympus approval page opens.",
-      instructionsWhere: "Paste this into a ChatGPT project's instructions, or into your custom instructions."
+      approveViaRelay: "Choose Create. An Olympus page opens in this computer's browser asking to connect ChatGPT to Olympus: choose Connect. Do this in ChatGPT on this computer; the page opens only here.",
+      instructionsWhere: "Paste this into a ChatGPT project's instructions, or into your custom instructions.",
+      viaRelay: true
     },
     {
       id: "grok",
@@ -110003,16 +110022,18 @@ var init_agents = __esm(() => {
   ];
   LOCAL_AGENT_PROMPT = [
     "Add Olympus to this coding agent as a local MCP server.",
-    "Find the installed plugin with `openclaw plugins inspect olympus --json` and take `plugin.rootDir`.",
+    "First find the full path of the olympus command:",
+    "- If `openclaw plugins inspect olympus --json` finds the plugin, it is `<plugin.rootDir>/bin/olympus`.",
+    "- Otherwise Olympus was installed with its Mac installer, and it is `$HOME/.local/bin/olympus` with $HOME written out. Check that the file exists.",
     "Then run the one command for this tool:",
-    "- Claude Code: `claude mcp add olympus -- <rootDir>/bin/olympus serve`",
-    "- Codex: `codex mcp add olympus -- <rootDir>/bin/olympus serve`",
+    "- Claude Code: `claude mcp add olympus -- <olympus path> serve`",
+    "- Codex: `codex mcp add olympus -- <olympus path> serve`",
     "Do not change any other configuration. Afterwards, list the Olympus tools to confirm source_answer is there."
   ].join(`
 `);
   CODEX_SNIPPET = [
     "[mcp_servers.olympus]",
-    'command = "<plugin folder>/bin/olympus"',
+    'command = "<olympus path>"',
     'args = ["serve"]'
   ].join(`
 `);
@@ -140502,7 +140523,7 @@ var COMMAND_GROUP_HELP = {
     "Usage: olympus connections <command>",
     "Commands:",
     "  olympus connections add <name>      Approve a remote agent; prints its URL and token once",
-    "  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok",
+    "  olympus connections pair            Print a one-time code to approve an agent through your own tunnel",
     "  olympus connections list",
     "  olympus connections revoke <id>",
     "  olympus connections status          Remote access: relay session and public URLs"

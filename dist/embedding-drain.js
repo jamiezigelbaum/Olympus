@@ -33866,16 +33866,18 @@ var AGENT_INSTRUCTION_TEXT = [
 // src/workers/dashboard/agents.ts
 var LOCAL_AGENT_PROMPT = [
   "Add Olympus to this coding agent as a local MCP server.",
-  "Find the installed plugin with `openclaw plugins inspect olympus --json` and take `plugin.rootDir`.",
+  "First find the full path of the olympus command:",
+  "- If `openclaw plugins inspect olympus --json` finds the plugin, it is `<plugin.rootDir>/bin/olympus`.",
+  "- Otherwise Olympus was installed with its Mac installer, and it is `$HOME/.local/bin/olympus` with $HOME written out. Check that the file exists.",
   "Then run the one command for this tool:",
-  "- Claude Code: `claude mcp add olympus -- <rootDir>/bin/olympus serve`",
-  "- Codex: `codex mcp add olympus -- <rootDir>/bin/olympus serve`",
+  "- Claude Code: `claude mcp add olympus -- <olympus path> serve`",
+  "- Codex: `codex mcp add olympus -- <olympus path> serve`",
   "Do not change any other configuration. Afterwards, list the Olympus tools to confirm source_answer is there."
 ].join(`
 `);
 var CODEX_SNIPPET = [
   "[mcp_servers.olympus]",
-  'command = "<plugin folder>/bin/olympus"',
+  'command = "<olympus path>"',
   'args = ["serve"]'
 ].join(`
 `);
