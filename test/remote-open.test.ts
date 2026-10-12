@@ -42,12 +42,22 @@ describe('the engine declares remote mode', () => {
     expect(resolveServerMode({ env: { OLYMPUS_SERVER_MODE: 'on' }, platform: 'darwin' })).toMatchObject({ remote: true, setting: 'on', basis: 'declared' });
     expect(resolveServerMode({ env: { OLYMPUS_SERVER_MODE: 'off' }, platform: 'linux' })).toMatchObject({ remote: false, basis: 'declared' });
     expect(resolveServerMode({ env: {}, platform: 'linux' })).toMatchObject({ remote: true, setting: 'auto', basis: 'no_desktop_session' });
-    expect(resolveServerMode({ env: { DISPLAY: ':0' }, platform: 'linux' })).toMatchObject({ remote: false, basis: 'desktop_session' });
-    expect(resolveServerMode({ env: { WAYLAND_DISPLAY: 'wayland-0' }, platform: 'linux' })).toMatchObject({ remote: false });
+    expect(resolveServerMode({ env: { DISPLAY: ':0' }, platform: 'linux', desktopReady: () => true })).toMatchObject({ remote: false, basis: 'desktop_session' });
+    expect(resolveServerMode({ env: { WAYLAND_DISPLAY: 'wayland-0' }, platform: 'linux', desktopReady: () => true })).toMatchObject({ remote: false });
     expect(resolveServerMode({ env: {}, platform: 'darwin' })).toMatchObject({ remote: false, basis: 'desktop_platform' });
     expect(resolveServerMode({ env: {}, platform: 'win32' })).toMatchObject({ remote: false });
     // Anything else is auto, never a silent "on".
     expect(resolveServerMode({ env: { OLYMPUS_SERVER_MODE: 'yes please' }, platform: 'darwin' }).remote).toBe(false);
+  });
+
+  test('Linux ignores stale boot displays and re-reads graphical readiness', () => {
+    let ready = false;
+    const input = { env: { WAYLAND_DISPLAY: 'stale' }, platform: 'linux', desktopReady: () => ready };
+    expect(resolveServerMode(input).remote).toBe(true);
+    ready = true;
+    expect(resolveServerMode(input).remote).toBe(false);
+    ready = false;
+    expect(resolveServerMode(input).remote).toBe(true);
   });
 
   test('worker.env, read fresh, outranks the environment the worker started with', () => {
@@ -201,7 +211,7 @@ describe('olympus_open_remote', () => {
   const serverDeps = (calls: string[], fileEnv: Record<string, string> = { OLYMPUS_SERVER_MODE: 'on', OLYMPUS_SERVER_SSH_TARGET: 'jamie@sparta' }) => ({
     env: {},
     fileEnv: () => fileEnv,
-    platform: 'linux',
+    platform: 'darwin',
     fetchImpl: mintFetch(calls),
     token: () => TOKEN,
   });
@@ -234,6 +244,17 @@ describe('olympus_open_remote', () => {
     const windows = await openRemote({ config: config(), ownerAgentSession: true }, { target: 'dashboard', computer: 'windows' }, serverDeps([]));
     expect(windows.tunnel_in_background).toBe(true);
     expect(String(windows.open).startsWith('cmd /c start "" "')).toBe(true);
+  });
+
+  test('Linux agent handoff uses the runtime socket, never a remote TCP port', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'opener-remote-'));
+    try {
+      const result = await openRemote({ config: config(), ownerAgentSession: true }, { target: 'dashboard', computer: 'linux' }, {
+        ...serverDeps([], { OLYMPUS_SERVER_MODE: 'on', OLYMPUS_SERVER_SSH_TARGET: 'owner@engine' }), platform: 'linux', env: { XDG_RUNTIME_DIR: dir },
+      });
+      expect(String(result.tunnel)).toContain(`:8123:${dir}/olympus/worker.sock`);
+      expect((result.by_hand as { onComputer: string }).onComputer).toBe(`ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8123:${dir}/olympus/worker.sock owner@engine`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   test('without a known SSH name, says so and leaves the placeholder to replace', async () => {
@@ -358,6 +379,16 @@ describe('the panel in remote mode', () => {
     expect(box.textContent).toContain('Keep 8123 on both sides');
     expect(box.textContent).not.toMatch(/\bMac\b/);
     expect(Array.from(box.querySelectorAll('button')).map((node) => node.textContent)).toEqual([R.copy, R.copy, R.copy]);
+  });
+
+  test('Linux browser handoff prints the owner socket transport', () => {
+    const socketPath = '/run/user/1000/olympus/worker.sock';
+    const model = copyDashboardViewModel(remoteModel({ port: 8010, socketPath, agent: false }));
+    const { win, buttons } = mount(model);
+    hosts.push(win);
+    buttons().find(node => node.textContent === 'Connect')!.click();
+    const lines = Array.from(win.document.querySelectorAll('.remote-box code')).map(node => node.textContent);
+    expect(lines[0]).toBe('ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:/run/user/1000/olympus/worker.sock you@your-server');
   });
 
   test('without the agent route (Hermes, a hand-run worker): only the two lines, with the placeholder', () => {

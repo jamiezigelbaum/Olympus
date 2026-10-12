@@ -319,6 +319,8 @@ export interface DashboardViewModelV1 {
 export interface DashboardRemoteMode {
   port: number;
   sshTarget?: string;
+  /** Linux worker transport only; absent retains the legacy Mac TCP handoff. */
+  socketPath?: string;
   agent: boolean;
 }
 

@@ -591,6 +591,63 @@ until proven. Publication is a separate explicitly authorized
 action after review closure. Runtime pin qualification and schema compatibility
 are engineering proof tasks; finding 1 was decided by the owner on 2026-10-12.
 
+### PR 4 implementation handoff (OPENER, 2026-10-12)
+
+The backend implementation is in `src/core/worker-transport.ts` and
+`src/core/linux-desktop-opener.ts`. Qualification is still pending; this does
+not enable or publish Linux source-open controls under the legacy `kind: mac`
+payload. PR 5 must adapt that payload/decoder before wiring
+`openLinuxDesktopPath({ path, roots, revalidateEligibility })` into the private
+and unreadable controls. Its result distinguishes file from folder opening.
+Both existing capability owners now supply an eligibility callback that the
+adapter must call after its awaited probes, immediately before dispatch.
+
+The worker binds only the Unix socket on Linux. The CLI, health, relay and
+legacy worker readiness probe use that transport; the browser's HTTP origin
+stays unchanged for cookies and CSRF. The relay preserves manual redirects
+without following them. `workerSocketPath`/`validateWorkerSocket` are the
+lifecycle seam: pass the resolved `XDG_RUNTIME_DIR` to every engine child and
+CLI invocation. They refuse missing/unsafe runtime directories and occupied
+socket paths; they never remove an old socket or start a TCP alternative.
+Crash recovery of a retained socket requires custody proof from the lifecycle
+track before removal. The standalone clients use Bun's Unix fetch support;
+a non-Bun Linux caller refuses rather than falling back to TCP.
+
+The remote model adds optional `socketPath`; existing Mac payloads and command
+text keep their old form. CLI and panel print the validated equivalent of:
+
+```text
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:<socket> <target>
+```
+
+The frontend transport addition is required to prevent the old instructions
+from forwarding to an unrelated Linux TCP process. It changes no listing,
+demo configuration or public deployment. Linux private-source controls stay
+disabled until the PR 5 host-neutral capability lands. A browser on the Linux
+engine host likewise needs the socket-forward route; no local TCP bridge is
+created automatically.
+
+Real-host qualification remains: second-UID denial (the isolated build runner
+cannot change UID), PID-1/cgroup viewer survival across engine restart,
+Hyprland login/logout and MIME resolver behavior, and OAuth plus a real tool
+call from a second computer. The second-UID regression is executable in a
+privileged disposable Linux test environment and skips explicitly otherwise.
+Mac regressions here exercise preserved transport/argv contracts in fixtures;
+this is not native Mac GUI qualification. zkAPI activation is outside OPENER
+and remains disabled for Linux launch.
+
+Focused OPENER validation: remote build and TypeScript check passed, followed
+by 158 tests passing with one explicit second-UID skip across
+`worker-transport`, `linux-desktop-opener`, `remote-open`,
+`chatgpt-private-open`, `unreadable-files`, `local-private-answers`,
+`architecture-guard`, `public-surface-guard` and `private-ops-disposition`.
+The independent critical review found no remaining actionable P1/P2 after
+manual-redirect preservation, browser socket handoff and viewer stdio fixes.
+Required hosted CI and real-host qualification remain unrun in this local-only
+handoff. The existing Mac open argv and remote handoff fixtures passed. Additional
+CLI and native-worker/native-relay regressions exercise Linux socket health
+and handoff end to end while retaining explicit TCP lifecycle fixtures.
+
 ### Deferred copy inventory (PR 5 only)
 
 | Surface | Change after review closes |

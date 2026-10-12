@@ -22,7 +22,7 @@
  * `_meta` reaches only the UI, never the model, but it still leaves the Mac
  * and passes through OpenAI, so it gets the same treatment.
  */
-import { isValidPort, isValidSshTarget } from '../../core/remote-open.ts';
+import { isValidPort, isValidSshTarget, isSshWorkerSocketPath } from '../../core/remote-open.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
@@ -224,10 +224,11 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     };
   }
   const remote = view.remote;
-  if (remote && isValidPort(remote.port)) {
+  if (remote && isValidPort(remote.port) && (remote.socketPath === undefined || isSshWorkerSocketPath(remote.socketPath))) {
     // The port and the owner's own SSH name, each checked; nothing else.
     out.remote = {
       port: remote.port,
+      ...(isSshWorkerSocketPath(remote.socketPath) ? { socketPath: remote.socketPath } : {}),
       ...(isValidSshTarget(remote.sshTarget) ? { sshTarget: remote.sshTarget.trim() } : {}),
       agent: remote.agent === true,
     };

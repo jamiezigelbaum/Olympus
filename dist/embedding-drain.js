@@ -24941,6 +24941,9 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
+// src/core/worker-transport.ts
+var init_worker_transport = () => {};
+
 // src/workers/google-connectors/classification.ts
 function accountFromGoogleHandle(handle, fallback = "personal") {
   const trimmed = handle?.trim();
@@ -25040,6 +25043,108 @@ var init_connect = __esm(() => {
   ]);
 });
 
+// src/workers/dropbox-files/open-target.ts
+var OPENABLE_EXTENSIONS;
+var init_open_target = __esm(() => {
+  OPENABLE_EXTENSIONS = new Set([
+    "pdf",
+    "txt",
+    "md",
+    "markdown",
+    "rtf",
+    "csv",
+    "tsv",
+    "epub",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "odt",
+    "ods",
+    "odp",
+    "pages",
+    "numbers",
+    "key",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "heic",
+    "heif",
+    "tif",
+    "tiff",
+    "bmp",
+    "webp",
+    "mp3",
+    "m4a",
+    "aac",
+    "wav",
+    "aiff",
+    "aif",
+    "flac",
+    "mp4",
+    "m4v",
+    "mov"
+  ]);
+});
+
+// src/core/linux-desktop-opener.ts
+function mime(...values) {
+  return new Set(values);
+}
+var EXPECTED_MIME_TYPES;
+var init_linux_desktop_opener = __esm(() => {
+  init_open_target();
+  EXPECTED_MIME_TYPES = Object.freeze({
+    pdf: mime("application/pdf"),
+    txt: mime("text/plain"),
+    md: mime("text/markdown", "text/plain"),
+    markdown: mime("text/markdown", "text/plain"),
+    rtf: mime("application/rtf", "text/rtf"),
+    csv: mime("text/csv", "text/plain"),
+    tsv: mime("text/tab-separated-values", "text/plain"),
+    epub: mime("application/epub+zip"),
+    doc: mime("application/msword"),
+    docx: mime("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    xls: mime("application/vnd.ms-excel"),
+    xlsx: mime("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    ppt: mime("application/vnd.ms-powerpoint"),
+    pptx: mime("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    odt: mime("application/vnd.oasis.opendocument.text"),
+    ods: mime("application/vnd.oasis.opendocument.spreadsheet"),
+    odp: mime("application/vnd.oasis.opendocument.presentation"),
+    pages: mime("application/vnd.apple.pages", "application/x-iwork-pages-sffpages"),
+    numbers: mime("application/vnd.apple.numbers", "application/x-iwork-numbers-sffnumbers"),
+    key: mime("application/vnd.apple.keynote", "application/x-iwork-keynote-sffkey"),
+    png: mime("image/png"),
+    jpg: mime("image/jpeg"),
+    jpeg: mime("image/jpeg"),
+    gif: mime("image/gif"),
+    heic: mime("image/heic", "image/heif"),
+    heif: mime("image/heif", "image/heic"),
+    tif: mime("image/tiff"),
+    tiff: mime("image/tiff"),
+    bmp: mime("image/bmp", "image/x-ms-bmp"),
+    webp: mime("image/webp"),
+    mp3: mime("audio/mpeg"),
+    m4a: mime("audio/mp4", "audio/x-m4a"),
+    aac: mime("audio/aac", "audio/x-aac"),
+    wav: mime("audio/wav", "audio/x-wav"),
+    aiff: mime("audio/aiff", "audio/x-aiff"),
+    aif: mime("audio/aiff", "audio/x-aiff"),
+    flac: mime("audio/flac", "audio/x-flac"),
+    mp4: mime("video/mp4"),
+    m4v: mime("video/x-m4v", "video/mp4"),
+    mov: mime("video/quicktime")
+  });
+  for (const extension of OPENABLE_EXTENSIONS) {
+    if (!EXPECTED_MIME_TYPES[extension])
+      throw new Error(`Missing Linux MIME contract for .${extension}`);
+  }
+});
+
 // src/core/open-targets.ts
 function allOpenTargets() {
   return [
@@ -25100,6 +25205,7 @@ var init_open_targets = __esm(() => {
 
 // src/core/remote-open.ts
 var init_remote_open = __esm(() => {
+  init_linux_desktop_opener();
   init_open_targets();
 });
 
@@ -25662,10 +25768,10 @@ function normalizeDriveFile(record) {
   };
 }
 function isDownloadableTextMime(mimeType, name) {
-  const mime = mimeType?.toLowerCase() ?? "";
-  if (mime.startsWith("text/"))
+  const mime2 = mimeType?.toLowerCase() ?? "";
+  if (mime2.startsWith("text/"))
     return true;
-  if (["application/json", "application/xml", "application/csv", "text/csv"].includes(mime))
+  if (["application/json", "application/xml", "application/csv", "text/csv"].includes(mime2))
     return true;
   const lower = name?.toLowerCase() ?? "";
   return [".md", ".txt", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml"].some((suffix) => lower.endsWith(suffix));
@@ -28557,7 +28663,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const target = typeof remote.sshTarget === "string" && /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,190}$/.test(remote.sshTarget) ? remote.sshTarget : "you@your-server";
     const path = openPath(href);
     return {
-      onComputer: "ssh -N -L " + port + ":127.0.0.1:" + port + " " + target,
+      onComputer: typeof remote.socketPath === "string" && /^\/[A-Za-z0-9_./-]+\/olympus\/worker\.sock$/.test(remote.socketPath) && !remote.socketPath.split("/").some((part) => part === ".." || part === ".") ? "ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:" + port + ":" + remote.socketPath + " " + target : "ssh -N -L " + port + ":127.0.0.1:" + port + " " + target,
       onServer: "olympus dashboard --no-open" + (path ? " --target " + path : ""),
       port
     };
@@ -32504,8 +32610,9 @@ var init_dashboard_resource = __esm(() => {
 });
 
 // src/core/request-peer.ts
-var peers;
+var ownerSockets, peers;
 var init_request_peer = __esm(() => {
+  ownerSockets = new WeakSet;
   peers = new WeakMap;
 });
 
@@ -33330,6 +33437,7 @@ import { existsSync as existsSync15, lstatSync as lstatSync4, mkdirSync as mkdir
 import { dirname as dirname20, isAbsolute as isAbsolute6 } from "node:path";
 
 // src/workers/email-source/server.ts
+init_worker_transport();
 init_package_root();
 
 // src/core/messaging-capture.ts
@@ -33344,6 +33452,7 @@ init_secret_store();
 init_connect();
 
 // src/core/native-worker-service.ts
+init_worker_transport();
 init_config();
 init_worker_auth();
 

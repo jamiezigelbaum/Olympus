@@ -848,11 +848,14 @@ describe('CLI tool surface', () => {
         '',
       ].join('\n'));
       chmodSync(join(binDir, 'systemctl'), 0o755);
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const linux = process.platform === 'linux';
+      const socket = join(dir, 'olympus', 'worker.sock');
+      if (linux) mkdirSync(join(dir, 'olympus'), { mode: 0o700 });
+      await new Promise<void>((resolve) => linux ? server.listen(socket, resolve) : server.listen(0, '127.0.0.1', resolve));
+      if (linux) chmodSync(socket, 0o600);
       serverOpen = true;
       const address = server.address();
-      if (!address || typeof address === 'string') throw new Error('Missing test server address');
-      const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+      const baseUrl = linux ? 'http://127.0.0.1:8010/v1' : `http://127.0.0.1:${(address as { port: number }).port}/v1`;
 
       const online = await runSourceCli([
         'worker',
@@ -862,6 +865,7 @@ describe('CLI tool surface', () => {
         '--home',
         home,
       ], {
+        XDG_RUNTIME_DIR: dir,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
         OLYMPUS_EMAIL_BASE_URL: baseUrl,
@@ -903,6 +907,7 @@ describe('CLI tool surface', () => {
         '--home',
         home,
       ], {
+        XDG_RUNTIME_DIR: dir,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
         OLYMPUS_EMAIL_BASE_URL: baseUrl,
@@ -937,6 +942,7 @@ describe('CLI tool surface', () => {
       });
       try {
         const result = await runDashboardCommand({
+          platform: 'darwin',
           fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
           openImpl: () => true,
         });
@@ -1006,6 +1012,7 @@ describe('CLI tool surface', () => {
         });
         try {
           const error = await runDashboardCommand({
+          platform: 'darwin',
             fetchImpl: fetcher,
             openImpl: () => true,
           }).catch((failure: unknown) => failure);
@@ -1036,6 +1043,7 @@ describe('CLI tool surface', () => {
     try {
       let requestSignal: AbortSignal | null | undefined;
       const error = await runDashboardCommand({
+          platform: 'darwin',
         fetchImpl: (async (_input, init) => {
           requestSignal = init?.signal;
           throw new Error(rawError);
@@ -1075,6 +1083,7 @@ describe('CLI tool surface', () => {
     let openerCalls = 0;
     try {
       const result = await runDashboardCommand({
+          platform: 'darwin',
         fetchImpl,
         noOpen: true,
         openImpl: () => { openerCalls += 1; return true; },
@@ -1125,12 +1134,16 @@ describe('CLI tool surface', () => {
         writeFileSync(join(binDir, opener), openerScript);
         chmodSync(join(binDir, opener), 0o755);
       }
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const linux = process.platform === 'linux';
+      const socket = join(dir, 'olympus', 'worker.sock');
+      if (linux) mkdirSync(join(dir, 'olympus'), { mode: 0o700 });
+      await new Promise<void>((resolve) => linux ? server.listen(socket, resolve) : server.listen(0, '127.0.0.1', resolve));
+      if (linux) chmodSync(socket, 0o600);
       serverOpen = true;
       const address = server.address();
-      if (!address || typeof address === 'string') throw new Error('Missing test server address');
-      const workerOrigin = `http://127.0.0.1:${address.port}`;
+      const workerOrigin = linux ? 'http://127.0.0.1:8010' : `http://127.0.0.1:${(address as { port: number }).port}`;
       const cliEnv = {
+        XDG_RUNTIME_DIR: dir,
         HOME: dir,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
@@ -1147,21 +1160,26 @@ describe('CLI tool surface', () => {
         authorization: `Bearer ${workerToken}`,
         origin: workerOrigin,
       }]);
-      expect(output).toMatchObject({ url: expectedUrl, opened: true });
-      expect(output.hint).toContain('single-use 15-minute ticket');
-      expect(output.hint).toContain('dashboard --read-only');
-      expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
+      expect(output).toMatchObject({ url: expectedUrl, opened: !linux });
+      if (linux) {
+        expect(output.hint).toContain(`ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:${socket}`);
+        expect(existsSync(openerLog)).toBe(false);
+      } else {
+        expect(output.hint).toContain('single-use 15-minute ticket');
+        expect(output.hint).toContain('dashboard --read-only');
+        expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
+      }
       expect(new URL(output.url).search).toBe('');
       expect(output.url).not.toContain('dash_');
-      for (const surfaced of [stdout, stderr, readFileSync(openerLog, 'utf8')]) {
+      for (const surfaced of [stdout, stderr, ...(linux ? [] : [readFileSync(openerLog, 'utf8')])]) {
         expect(surfaced).not.toContain(workerToken);
       }
 
       const handoff = await runSourceCli(['dashboard', '--no-open'], cliEnv);
       const handoffOutput = JSON.parse(handoff.stdout) as { url: string; opened: boolean; hint: string };
       expect(handoffOutput).toMatchObject({ url: expectedUrl, opened: false });
-      expect(handoffOutput.hint).toContain('not opened locally');
-      expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
+      expect(handoffOutput.hint).toContain(linux ? 'ssh -N -o ExitOnForwardFailure=yes' : 'not opened locally');
+      if (!linux) expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
       expect(requests).toHaveLength(2);
 
       const help = await runSourceCli(['dashboard', '--help']);
@@ -1209,6 +1227,7 @@ describe('CLI tool surface', () => {
       try {
         // The mint request was never answered at all.
         const unreachable = await runDashboardCommand({
+          platform: 'darwin',
           fetchImpl: async () => { throw new TypeError('fetch failed'); },
           openImpl: (url) => { openedUrls.push(url); return true; },
         }).catch((error: unknown) => error);
@@ -1219,6 +1238,8 @@ describe('CLI tool surface', () => {
         // A real worker endpoint that refuses the bearer. The body can carry
         // arbitrary server prose, so only the status is safe to surface.
         const refused = await runDashboardCommand({
+          platform: 'darwin',
+          fetchImpl: fetch,
           openImpl: (url) => { openedUrls.push(url); return true; },
         }).catch((error: unknown) => error);
         expect(refused).toBeInstanceOf(OperationError);
@@ -1231,6 +1252,8 @@ describe('CLI tool surface', () => {
         // never contacted and the browser is never opened.
         responseMode = 'redirect';
         const redirected = await runDashboardCommand({
+          platform: 'darwin',
+          fetchImpl: fetch,
           openImpl: (url) => { openedUrls.push(url); return true; },
         }).catch((error: unknown) => error);
         expect(redirected).toBeInstanceOf(OperationError);
@@ -1241,6 +1264,7 @@ describe('CLI tool surface', () => {
         // A worker that predates the handoff answers 200 with no ticket; that is
         // a refusal with its own remedy, not a URL to open.
         const legacyWorker = await runDashboardCommand({
+          platform: 'darwin',
           fetchImpl: async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
           openImpl: (url) => { openedUrls.push(url); return true; },
         }).catch((error: unknown) => error);
@@ -1281,6 +1305,7 @@ describe('CLI tool surface', () => {
       });
       try {
         const { stdout } = await runSourceCli(['dashboard', '--read-only', '--no-open'], {
+          XDG_RUNTIME_DIR: dir,
           PATH: `${binDir}:${process.env.PATH ?? ''}`,
           OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
           OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
@@ -1290,8 +1315,8 @@ describe('CLI tool surface', () => {
         const expectedToken = dashboardQueryTokenFromWorkerAuthToken('read-only-view-worker-token');
         expect(output.url).toBe(`http://127.0.0.1:8010/dashboard?token=${encodeURIComponent(expectedToken!)}`);
         expect(output.opened).toBe(false);
-        expect(output.hint).toContain('read-only view link');
-        expect(output.hint).toContain('not opened locally');
+        expect(output.hint).toContain(process.platform === 'linux' ? 'ssh -N -o ExitOnForwardFailure=yes' : 'read-only view link');
+        if (process.platform !== 'linux') expect(output.hint).toContain('not opened locally');
         expect(existsSync(openerLog)).toBe(false);
         expect(output.url).not.toContain('read-only-view-worker-token');
       } finally {

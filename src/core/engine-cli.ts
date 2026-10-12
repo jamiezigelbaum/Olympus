@@ -1,3 +1,4 @@
+import { workerFetch } from './worker-transport.ts';
 /**
  * `olympus engine install|uninstall|status|start|stop|restart|rollback|logs`: the standalone
  * macOS engine's command surface. Mechanics live in engine-service.ts; this
@@ -172,7 +173,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const relayStatus = readRemoteAccessStatus(relayDir);
   const relayRunning = relayProcessRunning(relayDir);
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
-  const worker = await probeWorker(deps.fetchImpl ?? fetch, baseUrl);
+  const worker = await probeWorker(deps.fetchImpl ?? workerFetch, baseUrl);
   const missing: string[] = [];
   if (!agent.installed) missing.push('The engine agent is not installed: run olympus engine install.');
   else if (agent.state === 'not_loaded') missing.push('The engine agent is installed but not loaded: run olympus engine install.');

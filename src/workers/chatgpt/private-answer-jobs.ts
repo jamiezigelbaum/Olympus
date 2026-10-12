@@ -196,7 +196,7 @@ export interface PrivateAnswerJobsOptions {
    * it, sources carry no open token. Called only with a path this engine
    * resolved for an item the answer cites, never one from a request.
    */
-  openFile?: (path: string) => Promise<void>;
+  openFile?: (path: string, eligible: () => Promise<boolean>) => Promise<void>;
   /** Open requests per job (burst, refill per second). */
   openRate?: { capacity: number; refillPerSecond: number };
   /** Open requests across all jobs (burst, refill per second). */
@@ -658,7 +658,11 @@ export class PrivateAnswerJobs {
     }
     if (!isFile) return gone();
     try {
-      await this.options.openFile(path);
+      await this.options.openFile(path, async () => {
+        if (!(await this.stillReleasable(job))) return false;
+        return this.jobs.get(jobId) === job && job.expiresAt > this.now()
+          && privateAnswerInstallId(jobId) === this.options.installId() && job.opens?.get(token) === path;
+      });
     } catch {
       return { status: 200, body: { status: 'failed' } };
     }

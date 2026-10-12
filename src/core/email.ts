@@ -1,3 +1,4 @@
+import { workerFetch } from './worker-transport.ts';
 import { isSourceIndexReadSurfaceEnabled, type OlympusConfig } from './config.ts';
 import { assertNoRawEmailFields } from './email-policy.ts';
 import { fetchWithTimeout, isAbortError } from './http-timeout.ts';
@@ -733,7 +734,7 @@ export function createEmailTransport(config: OlympusConfig): EmailTransport {
       },
     };
   }
-  return new DirectHttpEmailTransport(fetch, workerAuthTokenProvider(config), config.email.requestTimeoutSeconds * 1000);
+  return new DirectHttpEmailTransport(workerFetch, workerAuthTokenProvider(config), config.email.requestTimeoutSeconds * 1000);
 }
 
 // Ceiling for the private-lane fetch timer inside the OpenClaw Gateway. On

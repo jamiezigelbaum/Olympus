@@ -1,3 +1,4 @@
+import { createWorkerFetch } from './worker-transport.ts';
 /**
  * The relay child: what `olympus __relay-service-run` runs under the Gateway's
  * native relay service (`native-relay-service.ts`).
@@ -39,6 +40,8 @@ export const RELAY_TARGET_ENV = 'OLYMPUS_RELAY_TARGET';
 
 export interface RelayRuntimeOptions {
   env: Record<string, string | undefined>;
+  /** Transport seam for tests using a deliberate TCP worker fixture. */
+  fetch?: typeof fetch;
   instanceId: string;
   /** Test seam: the full session URL (a local relay over ws://). */
   relayUrl?: string;
@@ -104,6 +107,7 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
     ...(options.relayUrl ? { relayUrl: options.relayUrl } : {}),
     identity,
     target,
+    fetch: options.fetch ?? createWorkerFetch({ env: options.env }),
     relaySecret,
     // A demo install also forwards reviewer sign-in; every other install never does.
     forwardedPaths: demoInstallMarked(dir) ? [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH] : FORWARDED_PATHS,

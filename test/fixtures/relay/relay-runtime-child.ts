@@ -8,6 +8,7 @@ import { runRelayRuntimeProcess } from '../../../src/core/remote-relay-runtime.t
 const [command, instanceId] = process.argv.slice(2);
 if (command !== '__relay-service-run' || !instanceId) throw new Error('unexpected relay child arguments');
 await runRelayRuntimeProcess(instanceId, {
+  fetch, // This lifecycle fixture deliberately runs a TCP worker.
   relayUrl: `ws://127.0.0.1:${Number(process.env.TEST_RELAY_PORT)}/v2/connect`,
   heartbeatMs: 1_000,
   backoff: { minMs: 50, maxMs: 200 },

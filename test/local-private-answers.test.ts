@@ -672,6 +672,24 @@ describe('Answer and Dismiss on a waiting question', () => {
     expect(opened).toHaveLength(1);
   });
 
+  test('local private open rechecks eligibility after desktop preparation', async () => {
+    let readable = true;
+    const read = [{ corpusId: 'secure_local.x', trustDomain: 'secure_local' }] as never;
+    const controller = createLocalPrivateAnswers({
+      answer: async () => ({ status: 'answered', answer: 'A.', citations: [{ localPath: import.meta.path }], unanswered: [], leftOut: [], read }),
+      store: () => undefined,
+      eligible: async items => items.map(() => readable),
+      openFile: async (_path, eligible) => {
+        readable = false;
+        expect(await eligible()).toBe(false);
+        throw new Error('revoked');
+      },
+    });
+    const answered = await controller.handle({ action: 'ask', question: 'Source?' }, 'session:owner');
+    const token = (answered.body.citations as Array<{ open: string }>)[0]!.open;
+    expect((await controller.handle({ action: 'open', token }, 'session:owner')).status).toBe(500);
+  });
+
   test('one answer at a time: a second waits its turn', async () => {
     let release: () => void = () => undefined;
     const controller = createLocalPrivateAnswers({

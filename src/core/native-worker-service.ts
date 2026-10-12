@@ -1,3 +1,4 @@
+import { workerFetch } from './worker-transport.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
@@ -81,7 +82,7 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
   let proofGeneration = 0;
   let lifecycleGeneration = 0;
   const invalidate = () => { proofGeneration += 1; readyChild = undefined; };
-  const fetchWorker = options.fetch ?? globalThis.fetch;
+  const fetchWorker = options.fetch ?? workerFetch;
   const service = createNativeProcessService<WorkerLaunchSettings>({
     id: SERVICE_ID,
     label: SERVICE_LABEL,

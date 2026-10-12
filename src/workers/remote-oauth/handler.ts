@@ -61,7 +61,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mintCredential } from '../../../connect-relay/shared/tokens.ts';
 import { sanitizeCallerDisplayName } from '../../core/operation-caller.ts';
 import { carriesRelayMarker } from '../../core/remote-access.ts';
-import { isLoopbackAddress, requestPeerAddress } from '../../core/request-peer.ts';
+import { isLoopbackAddress, requestPeerAddress, requestFromOwnerSocket } from '../../core/request-peer.ts';
 import type { RemoteConnectionStore } from '../../core/remote-connections.ts';
 import { normalizePairingCode } from '../../core/remote-oauth-store.ts';
 import type { McpSurface } from '../../../connect-relay/shared/directory-tools.ts';
@@ -127,6 +127,7 @@ export interface RemoteOAuthHandlerOptions {
    */
   isRelayed?: (request: Request) => boolean;
   /** The request's network peer (default: what the server recorded, core/request-peer.ts). */
+  requireOwnerSocket?: boolean;
   peerAddress?: (request: Request) => string | undefined;
   /** Active demo sign-in settings, asked per request; undefined on every real install. */
   demoConsent?: () => DemoConsentSettings | undefined;
@@ -276,13 +277,13 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
    * docs/design/chatgpt-plugin.md, "Open decision: an owner-held approval".
    */
   const directLoopback = (request: Request): boolean =>
-    !isRelayed(request) && loopbackHost(request) && isLoopbackAddress(peerAddress(request));
+    !isRelayed(request) && loopbackHost(request) && (requestFromOwnerSocket(request) || (!options.requireOwnerSocket && isLoopbackAddress(peerAddress(request))));
   const notOnThisMac = (): Response =>
     errorPage(403, 'Approve on the Mac where Olympus runs: open the link from ChatGPT on that Mac.');
 
   const authorizeGet = async (request: Request, u: RemotePublicUrls, demo = false): Promise<Response> => {
     if (demo && !demoSettings(u)) return jsonResponse(404, { error: 'not_found' });
-    if (!demo && u.installId && !directLoopback(request)) return notOnThisMac();
+    if (!demo && (u.installId || options.requireOwnerSocket) && !directLoopback(request)) return notOnThisMac();
     const params = new URL(request.url).searchParams;
     const single = singleParams(params);
     if (!single) return errorPage(400, 'The request repeated a parameter.');
@@ -446,7 +447,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
   };
 
   const authorizePost = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
-    if (u.installId && !directLoopback(request)) return notOnThisMac();
+    if ((u.installId || options.requireOwnerSocket) && !directLoopback(request)) return notOnThisMac();
     // Relay mode approves with one click, so the click must be a browser's own
     // navigation from the page (Sec-Fetch-*); a tunnel's page also needs a pairing code.
     if (!(u.installId ? browserNavigationPost(request) : sameOriginFormPost(request))) {
@@ -572,7 +573,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
 
   const register = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
     // Relay mode: registration is for local development clients, from this Mac.
-    if (u.installId && !directLoopback(request)) return oauthError(403, 'access_denied', 'Registration is available only on this Mac.');
+    if ((u.installId || options.requireOwnerSocket) && !directLoopback(request)) return oauthError(403, 'access_denied', 'Registration is available only on this Mac.');
     if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) {
       return oauthError(400, 'invalid_client_metadata', 'Registration must be application/json.');
     }
