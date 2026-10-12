@@ -1071,7 +1071,16 @@ the laptop. Verify it with your SSH client first. The browser computer must
 be trusted and must have port 8010 available. For a browser on the laptop,
 use an SSH configuration that authenticates back to the owner's local account;
 there is still no engine TCP approval listener. If SSH service setup is needed,
-use the distro's documented SSH setup before continuing.
+on Omarchy install/start OpenSSH explicitly (these are host-administration
+steps, not actions performed by the Olympus installer):
+
+```sh
+sudo pacman -S --needed openssh
+sudo systemctl enable --now sshd
+```
+
+Use your normal owner SSH key authentication and verify it from the browser
+computer before continuing.
 
 On the laptop:
 
@@ -1215,7 +1224,7 @@ final logout/reboot; check again after that teardown for full-removal proof.
 
 ### Integration proof and remaining qualification
 
-Local remote-build proof: **748 passed, 0 failed, 4 skipped across 35 focused
+Local remote-build proof: **819 passed, 0 failed, 4 skipped across 37 focused
 files**, including architecture, public-surface and private-ops guards. The
 canonical documentation inventory is 48 files. Build and
 `bunx tsc --noEmit -p .` passed; a subsequent `--artifact dist` rebuild returned
@@ -1260,3 +1269,9 @@ Implementation details that supersede the earlier track seams:
   receipt. The desktop entry invokes the managed launcher, which exports the
   recorded roots and enters the trusted package directory. Environment-only
   setup preflight does not initialize an unused credential backend.
+
+
+The generated relay dashboard resource and its tool resource URI were rebuilt
+with the socket handoff branch (the Mac/TCP branch is unchanged). An additional
+71 panel/relay-contract tests passed. These files are local repository build
+outputs; no hosted relay assets, listing, demo or service were published.

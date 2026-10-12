@@ -164,7 +164,7 @@ testers have exercised the normal product journey without custom engineering.
   Grok API key routing are integrated. Install recovery and Bun-free,
   receipt-bound removal replace the track drafts. The local-tarball bundle
   uses the real pinned installer; public Linux publication remains blocked
-  pending qualification. Local proof passed 748 focused tests, the three guards, build and typecheck,
+  pending qualification. Local proof passed 819 focused tests, the three guards, build and typecheck,
   with four platform/live skips and a rebuilt dist. The exact owner-run
   laptop procedure and validation limits live in `docs/design/linux-engine-service.md`, under
   “W5 integration handoff” and “Omarchy acceptance runbook”. Real systemd,
