@@ -63,11 +63,11 @@ pre { background: var(--paper-raised); border: 1.5px solid var(--rule); padding:
 pre code { background: none; border: 0; padding: 0; font-size: 1em; overflow-wrap: normal; }
 
 .note, .draft {
-  background: var(--paper-raised); border: 1.5px solid var(--rule); border-left: 4px solid var(--clay);
-  padding: 14px 18px; border-radius: var(--radius-paper); margin: 0 0 20px;
+  background: var(--paper-raised); border: 1.5px solid var(--rule);
+  padding: 14px 18px; border-radius: var(--radius-panel); margin: 0 0 20px;
 }
 .note > :last-child, .draft > :last-child { margin-bottom: 0; }
-.draft { border-left-color: var(--red); }
+.draft { border-color: var(--red); }
 .draft strong:first-child { display: block; font-size: 1.05em; }
 .confirm { font-weight: 600; color: var(--red); }
 
