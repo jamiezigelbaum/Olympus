@@ -138969,7 +138969,7 @@ async function runSetupWizard(options) {
       url: "http://127.0.0.1:8010/dashboard",
       url_scope: "worker_local",
       handoff_required: true,
-      next: "Before declaring installation complete, include a verified operator-reachable dashboard link in your final reply. For native OpenClaw, use /plugin?plugin=olympus&id=dashboard on the operator’s Gateway origin; for standalone access, run olympus dashboard --no-open and hand over the fresh opening link. Explain: Setup connects sources and scopes, Home shows readiness and attention, Background monitors syncing/extraction/embeddings. Invite the operator to return to this chat for help. The worker-local URL alone is not a verified operator link."
+      next: "Before declaring installation complete, include a verified operator-reachable dashboard link in your final reply. For native OpenClaw, use /plugin?plugin=olympus&id=dashboard on the operator’s Gateway origin; for standalone access, run olympus dashboard --no-open and hand over the fresh opening link. Explain: Sources connects sources and sets their scope, Needs you and each source row show readiness and attention, Progress (with Details) shows reading and indexing, and model keys go on Keys (under On this computer, or through Change under Models). Invite the operator to return to this chat for help. The worker-local URL alone is not a verified operator link."
     }
   };
 }

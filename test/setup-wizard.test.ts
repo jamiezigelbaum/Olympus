@@ -62,7 +62,7 @@ describe('olympus setup wizard', () => {
       expect(result.dashboard.url_scope).toBe('worker_local');
       expect(result.dashboard.handoff_required).toBe(true);
       expect(result.dashboard.next).toContain('operator-reachable dashboard link');
-      expect(result.dashboard.next).toContain('Background monitors');
+      expect(result.dashboard.next).toContain('Progress (with Details) shows reading and indexing');
       expect(existsSync(sovereigntyPath)).toBe(true);
       expect(JSON.parse(readFileSync(sovereigntyPath, 'utf8')).routes.secure_local.mode).toBe('disabled');
       expect(readFileSync(join(dir, '.config', 'olympus', 'worker.env'), 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=test-worker-token');

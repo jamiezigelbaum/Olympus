@@ -171,9 +171,10 @@ user systemd unit on Linux) and writes its environment file, so macOS shows a
 "Background Items Added" notification when you run it. Step 3 checks that
 worker rather than installing a second one.
 
-If setup reports missing model keys, finish base activation and open Setup.
-The Models section accepts the required Gemini/Venice keys and applies them;
-source connections unlock when it is ready. Existing local models use the
+If setup reports missing model keys, finish base activation and open the
+dashboard. Its **Keys** page (under **On this computer**, or through **Change**
+under **Models**) accepts the required Gemini/Venice keys and applies them;
+source connections unlock when models are ready. Existing local models use the
 agent-assisted starting point and Check readiness. No local model software is
 installed or maintained by Olympus.
 
@@ -420,11 +421,12 @@ dashboard, so that link is required. The agent
 must resolve the address for your browser and verify dashboard access, rather
 than giving you a host-only localhost URL or another terminal command.
 
-Open **Setup**, finish the required **Models** cards at the top, then connect
-sources below and choose their scope. **Home** shows source
-readiness and anything needing attention. **Background** shows syncing,
-extraction, and embedding progress. Return to the same agent chat if you need
-help connecting a source or understanding its progress.
+If the dashboard asks for a model key, add it on **Keys** first (under
+**On this computer**, or through **Change** under **Models**). Then connect
+sources under **Sources** and choose their scope. **Needs you** lists anything
+waiting on you, each source's row shows its readiness, and **Progress** shows
+reading and indexing, stage by stage under **Details**. Return to the same agent
+chat if you need help connecting a source or understanding its progress.
 
 For native OpenClaw access, the dashboard page is
 `/plugin?plugin=olympus&id=dashboard` on the Gateway origin you already use.
@@ -603,8 +605,8 @@ instead: `Email worker is not reachable at http://127.0.0.1:8010/v1:`
 followed by the underlying connection error.
 
 To let other agents ask Olympus (Claude, ChatGPT, Grok, Muse, or Claude Code
-and Codex on this computer), open the dashboard's Setup page and press
-**Connect an agent** — see the README's "Connect other agents" section. Agents
+and Codex on this computer), open **Agents** under the dashboard's
+**On this computer** and press **Connect an agent** — see the README's "Connect other agents" section. Agents
 in the cloud also need remote access: press **Turn on remote access** in the
 same Agents section, and Olympus connects through the Olympus relay
 (`mcp.olympusplugin.ai`) with no account, tunnel or certificate agreement to
