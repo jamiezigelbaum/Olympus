@@ -111,8 +111,8 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
         rendered_from_commit: '72230e74afe9298f9be87bc4c014960e187d98a5',
         pending_review: {
           requested_on: '2026-10-12',
-          reason: "The pasted agent instructions now lead with olympus_search (Claude, Grok and Grok Bot answer from Olympus search on installs with no answer model); this render awaits Jamie's re-approval.",
-          candidate_rendered_html_sha256: 'e8d05abf2980aeadad64659531a4bdaac5d3eaac936c8d9b371cf1e280d6bc9b',
+          reason: "The pasted agent instructions now use olympus_search when the agent lists it and fall back to source_answer (Claude, Grok and Grok Bot answer from Olympus search on installs with no answer model); this render awaits Jamie's re-approval.",
+          candidate_rendered_html_sha256: '92ea699d1507f2ee3a8804cfbe5d455bbc0b79bdb38df665e44fffcad80675b7',
         },
         // The earlier approval (2026-10-12 morning, relay-only ChatGPT steps), superseded by this one.
         prior_approval: {

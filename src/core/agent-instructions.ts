@@ -11,9 +11,11 @@
  *
  * It names only the remote tools (`olympus_search`, `source_answer`,
  * `source_answer_result`, `source_index_status`) and promises nothing the
- * privacy rules do not already enforce. `olympus_search` comes first because
- * every install has it; source_answer is listed only where an answer model
- * runs on the computer (workers/remote-search.ts).
+ * privacy rules do not already enforce. Agents reaching `/mcp` from outside
+ * get `olympus_search` (workers/remote-search.ts), and source_answer only
+ * where an answer model runs on the computer; agents on the computer (stdio
+ * MCP, the skill) have source_answer and no search. So the text names the
+ * search conditionally and falls back to source_answer.
  */
 
 export const AGENT_SKILL_NAME = 'ask-olympus';
@@ -23,19 +25,21 @@ export const AGENT_SKILL_DESCRIPTION = 'Ask Olympus, the owner\'s private search
   + 'messages, notes and saved reading, whenever a question may be answered from their own records.';
 
 export const AGENT_INSTRUCTION_TEXT = [
-  'Olympus is my private search over my own email, files, messages, notes, bookmarks and saved reading. '
-    + 'Search it with its olympus_search tool, which returns matching excerpts from my records for you to answer from.',
+  'Olympus is my private search over my own email, files, messages, notes, bookmarks and saved reading.',
   '',
-  'Search Olympus whenever my question might be answered from my own records: what someone told me, '
+  'Use it whenever my question might be answered from my own records: what someone told me, '
     + 'what a document or contract says, or when something happened. '
-    + 'If you are not sure, search anyway. You do not need me to mention Olympus.',
+    + 'If you are not sure, use it anyway. You do not need me to mention Olympus.',
   '',
-  'Answer only from what Olympus returns, with its citations, and say plainly what it could not find. '
-    + 'Do not guess past it or fill gaps from memory. If the first search misses, try once more with different words.',
+  'If Olympus lists an olympus_search tool, search with it: it returns matching excerpts from my records for you to answer from. '
+    + 'If the first search misses, try once more with different words.',
   '',
-  'If Olympus also lists a source_answer tool, you may ask it a question instead and pass on its answer. '
+  'Otherwise ask its source_answer tool, one question at a time, and pass on its answer. '
     + 'Answers can take a few minutes. If it says it is still working and gives you a job_id, '
     + 'call source_answer_result with that job_id, again while it says working. Do not ask the same question again.',
+  '',
+  'Answer only from what Olympus returns, with its citations, and say plainly what it could not find. '
+    + 'Do not guess past it or fill gaps from memory.',
   '',
   'Use source_index_status only to check which of my sources are ready.',
 ].join('\n');
