@@ -270,6 +270,106 @@ describe('no starvation, no stranded waiter', () => {
   });
 });
 
+describe('review fixes', () => {
+  test('a queued call whose connection was revoked never starts: checked at its turn', async () => {
+    const owner = interactiveWork();
+    const revoked = new Set<string>();
+    const jobs = new SourceAnswerJobRegistry({
+      limits: { handoffMs: 5_000, resultWaitMs: 0, maxRunningGlobal: 3, maxRunningPerOwner: 3 },
+      isOwnerRevoked: (key) => revoked.has(key),
+      priority: { isBackground: BACKGROUND, interactive: owner },
+    });
+    const log: string[] = [];
+    const held = heldWork(log);
+    owner.start();
+    const first = jobs.run(scope(jobs, 'remote:agent-a'), held.work('a1'));
+    const second = jobs.run(scope(jobs, 'remote:agent-a'), held.work('a2'));
+    const other = jobs.run(scope(jobs, 'remote:agent-b'), held.work('b1'));
+    await settle();
+    const outcomes = Promise.allSettled([first, second]);
+    revoked.add('remote:agent-a');
+    owner.stop();
+    const settled = await outcomes;
+    expect(settled.map((outcome) => outcome.status)).toEqual(['rejected', 'rejected']);
+    for (const outcome of settled) expect((outcome as PromiseRejectedResult).reason).toMatchObject({ name: 'AbortError' });
+    await settle();
+    // The revoked connection's whole queue went at once; the other connection's call took the turn.
+    expect(log).toEqual(['start b1']);
+    held.finish('b1');
+    expect(await other).toBe('answer b1');
+  });
+
+  test('a sweep drops a revoked connection\'s queued calls before hand-off', async () => {
+    const owner = interactiveWork();
+    const revoked = new Set<string>();
+    const jobs = new SourceAnswerJobRegistry({
+      limits: { handoffMs: 5_000, resultWaitMs: 0 },
+      isOwnerRevoked: (key) => revoked.has(key),
+      priority: { isBackground: BACKGROUND, interactive: owner },
+    });
+    const log: string[] = [];
+    owner.start();
+    const queued = jobs.run(scope(jobs, 'remote:agent-a'), heldWork(log).work('a1'));
+    await settle();
+    expect(jobs.queued()).toBe(1);
+    revoked.add('remote:agent-a');
+    jobs.sweep();
+    await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
+    expect(jobs.queued()).toBe(0);
+    owner.stop();
+    await settle();
+    expect(log).toEqual([]);
+  });
+
+  for (const maxRunningGlobal of [1, 2]) {
+    test(`an owner slot freed after the owner's activity went idle still wakes the queue (capacity ${maxRunningGlobal})`, async () => {
+      const owner = interactiveWork();
+      const jobs = registry(owner, { maxRunningGlobal });
+      const log: string[] = [];
+      const held = heldWork(log);
+      owner.start();
+      const chatgpt = jobs.run(scope(jobs, 'remote:chatgpt'), held.work('chatgpt'));
+      const extra = maxRunningGlobal === 2 ? jobs.run(scope(jobs, 'remote:chatgpt'), held.work('chatgpt-2')) : undefined;
+      const background = jobs.run(scope(jobs, 'remote:agent-a'), held.work('a1'));
+      await settle();
+      expect(jobs.queued()).toBe(1);
+      // The owner's activity ends before the registry frees the owner's slots.
+      owner.stop();
+      await settle();
+      held.finish('chatgpt');
+      await chatgpt;
+      if (extra) {
+        held.finish('chatgpt-2');
+        await extra;
+      }
+      await settle();
+      expect(log.at(-1)).toBe('start a1');
+      held.finish('a1');
+      expect(await background).toBe('answer a1');
+    });
+  }
+
+  test('at capacity one, the owner\'s ChatGPT waits its turn ahead of the next background answer instead of being refused', async () => {
+    const jobs = registry(interactiveWork(), { maxRunningGlobal: 1, maxRunningPerOwner: 1 });
+    const log: string[] = [];
+    const held = heldWork(log);
+    const a = jobs.run(scope(jobs, 'remote:agent-a'), held.work('a1'));
+    await settle();
+    const b = jobs.run(scope(jobs, 'remote:agent-b'), held.work('b1'));
+    const chatgpt = jobs.run(scope(jobs, 'remote:chatgpt'), held.work('chatgpt'));
+    await settle();
+    expect(log).toEqual(['start a1']);
+    held.finish('a1');
+    await settle();
+    expect(log).toEqual(['start a1', 'start chatgpt']);
+    held.finish('chatgpt');
+    await settle();
+    expect(log).toEqual(['start a1', 'start chatgpt', 'start b1']);
+    held.finish('b1');
+    expect(await Promise.all([a, chatgpt, b])).toEqual(['answer a1', 'answer chatgpt', 'answer b1']);
+  });
+});
+
 describe('answer activity kinds', () => {
   test('background leases are busy for the sniffer but not owner work; idle is said once the owner\'s last ends', async () => {
     let preempts = 0;
