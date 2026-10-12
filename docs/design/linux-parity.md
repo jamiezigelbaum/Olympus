@@ -123,24 +123,23 @@ for a PDF and an image, on Ubuntu 24.04; Mac unchanged.
 
 Owner decision 2026-10-12: Linux uses the same built-in models as the Mac
 (Qwen3.5 for private answers, sized by memory as on the Mac; Qwen3-ASR for
-transcription, on the same llama.cpp runtime), on by default. The
-measurements below confirm they are usable and set the floor below which a
-machine is told it is too small, rather than deciding whether to ship them.
+transcription, same llama.cpp runtime), on by default. No speed floor: a
+user whose machine is slow can switch to a cloud lane or a smaller model
+themselves. The Omarchy laptop is a compatibility check, not a design
+target.
 
-1. Measure on Sparta with production thread limits, cold and warm, while
-   indexing runs: private-answer time to first token, total time for a
-   typical consult, peak memory; transcription real-time factor on a
-   5-minute voice note; download size and disk. Repeat on one smaller Linux
-   host (4 cores, 8 GB) so a threshold is not set from one machine.
-2. Separate capability rules: private model = pinned runtime, available
-   memory (cgroup-aware) above the floor, latency threshold met;
-   transcription = the same plus a working `ffmpeg`, with its own real-time
-   threshold. Env `on`/`off` still wins.
-3. Out of scope: Vulkan/ROCm builds for integrated GPUs, unless CPU fails.
+1. Replace the `darwin-arm64` defaults with capability rules: private model
+   = pinned runtime for the platform and enough memory (cgroup-aware) for
+   the memory-sized model; transcription = the same plus a working
+   `ffmpeg`. Env `on`/`off` still wins.
+2. Measured 2026-10-12 for the record (CPU, production threads, 3,000-token
+   prompt plus 300 tokens out): Sparta (Ryzen, 4 threads) 4B ≈ 110 s, 2B ≈
+   45 s; Omarchy laptop (i7-7567U, 2 threads) 4B ≈ 3.4 min, 2B ≈ 80 s. A
+   Vulkan build on the laptop's Intel iGPU was no faster. GPU builds stay
+   out of scope.
 
-Acceptance: unit tests for each rule; measurements recorded here; Sparta
-and Omarchy answer a Private question and transcribe a voice note with no
-env settings.
+Acceptance: unit tests for each rule; on Omarchy and Sparta a Private
+question is answered and a voice note transcribed with no env settings.
 
 ### W3. Photos searchable on Linux (medium; Sparta stage 2)
 
