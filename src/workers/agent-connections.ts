@@ -64,6 +64,15 @@ export type DashboardRemoteAccess =
        * panel offers no Turn off and says where the address comes from.
        */
       setBy?: 'worker_env';
+      /**
+       * The address is `remote.publicBaseUrl`, a tunnel the owner runs, rather
+       * than the Olympus relay. Through the relay ChatGPT, Claude, Grok, and
+       * Grok Bot or Cursor connect, and approval is one click on this
+       * computer; through a tunnel the approval
+       * page asks for a pairing code, and keys work. A worker.env address
+       * (`setBy`) is a tunnel too.
+       */
+      ownTunnel?: true;
     }
   | { state: 'off' }
   | {
@@ -135,7 +144,8 @@ export function remoteAccessFromStatus(input: {
   }
   const relayDown = status?.mode === 'relay' && status.relay !== undefined && status.relay.state !== 'online';
   if (input.live && !relayDown) {
-    return { state: 'on', mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json` };
+    const ownTunnel = status?.mode === 'manual' || status?.public_base_url_source === 'config';
+    return { state: 'on', mcpUrl: input.live.resource, openapiUrl: `${input.live.origin}/openapi.json`, ...(ownTunnel ? { ownTunnel: true } : {}) };
   }
   if (status?.error) return { state: 'invalid', detail: status.error };
   if (status && status.mode !== 'off' && status.remote_enabled) {
@@ -233,7 +243,7 @@ export async function handleDashboardAgentRequest(
     const unknown = Object.keys(body).filter((key) => key !== 'name');
     if (unknown.length > 0) return refusal(400, 'invalid_request', 'A key takes only a name.');
     const name = sanitizeCallerDisplayName(body.name);
-    if (!name) return refusal(400, 'invalid_request', 'Give the connection a name, for example Muse.');
+    if (!name) return refusal(400, 'invalid_request', 'Give the connection a name, for example Grok API.');
     const store = openStore(backend);
     if (!store) return storeUnavailable();
     const created = store.create(name);

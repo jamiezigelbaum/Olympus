@@ -8,7 +8,7 @@
 
 *A private knowledge engine on your Mac for ChatGPT, and a sovereignty-aware source brain for [OpenClaw](https://openclaw.ai) agents.*
 
-[![version](https://img.shields.io/badge/version-1.0.0--rc.5-534AB7)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.0.0--rc.6-534AB7)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-0F6E56)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-3400%2B%20passing-1D9E75)](CONTRIBUTING.md)
 [![openclaw](https://img.shields.io/badge/OpenClaw-2026.7.1%2B-378ADD)](https://openclaw.ai)
@@ -85,9 +85,10 @@ supported. You do not need OpenClaw, Tailscale, an API key or a new account.
 ### 2. Approve ChatGPT on your Mac
 
 The first time ChatGPT connects to Olympus, an Olympus page opens in your
-Mac's browser asking to connect ChatGPT. Click **Approve**. That click, on your own Mac, is how
-Olympus knows the Mac is yours: there is no code to copy and no account to
-create. To check on it later, run `olympus engine status` in Terminal.
+Mac's browser asking *Connect ChatGPT to Olympus?* Click **Connect**. (If a
+page saying *Approve ChatGPT on your Mac* comes first, click **Continue on
+this Mac**.) Clicking Connect on your own Mac is how Olympus knows the Mac is
+yours: there is no code to copy and no account to create. To check on it later, run `olympus engine status` in Terminal.
 
 ### 3. Connect Dropbox and choose folders
 
@@ -311,7 +312,7 @@ starting with the automatic download and existing-install checks. Its install
 command for a clean machine is:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.0-rc.5.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.0-rc.6.tgz --force --accept-capabilities
 # On OpenClaw 2026.7.1, omit both flags for a clean install.
 # On newer hosts, --force also overwrites an existing plugin: check first.
 openclaw plugins enable olympus
@@ -465,42 +466,58 @@ linked device in place at the provider for you to remove there.
 
 ### Connect other agents
 
-Open the dashboard's **Setup** page and press **Connect an agent**. Pick the
-agent you use and follow its steps; every address and snippet has a copy
-button.
+Open the dashboard on this computer (`olympus dashboard`). Under **On this
+computer**, choose **Open** next to **Agents**, then press **Connect an
+agent**. Pick the agent you use and follow its steps; every address and
+snippet has a copy button.
 
 - **ChatGPT**: add the Olympus plugin in ChatGPT (see
-  [Olympus for ChatGPT](#olympus-for-chatgpt)), then approve it with one
-  click on the page that opens on this computer.
-- **Muse** and the **Grok API**: paste the address, then press **Create key**
-  and give the agent the key. The key is shown once.
+  [Olympus for ChatGPT](#olympus-for-chatgpt)), then click **Connect** on the
+  page that opens in this computer's browser.
 - **Claude Code** and **Codex** on this computer: copy the prompt (or the
   `olympus serve` command) into the agent. This works without remote access.
+- **Claude** (web, desktop and phone) and **Grok** (grok.com): add Olympus
+  as a connector with the address the panel shows, then click **Connect** on
+  the page that opens in this computer's browser.
+- **Grok Bot**: add Olympus as a custom server in Grok Bot and click
+  **Connect** on the same page. Grok Bot signs in as Cursor's cloud agents
+  do, so the page names it **Grok Bot or Cursor**.
+- The **Grok API** and other agents in the cloud need a tunnel you run
+  yourself (below); the panel says so until remote access runs through one.
 
 Agents in the cloud reach Olympus only when remote access is on; the Agents
-section says whether it is. To turn it on, press **Turn on remote access** in
-that section. Olympus then connects through the Olympus relay
+page says whether it is. To turn it on, press **Turn on remote access**
+there. Olympus then connects through the Olympus relay
 (`mcp.olympusplugin.ai`): you create no account and run no tunnel. The relay
-passes requests between the agent and this computer; it stores and logs no
+passes requests between your agents and this computer; it stores and logs no
 questions, answers or tokens, but like any HTTPS endpoint it handles them in
-transit. Approving an agent such as ChatGPT happens on this computer only, with
-one click on a page Olympus serves locally. **Turn off remote access** turns it
-off again. If the
-relay cannot be reached, the section says **Olympus relay unavailable** and
+transit. The relay connects ChatGPT, Claude, Grok (grok.com) and Grok Bot,
+and approving one happens on this computer only, with one click on a page
+Olympus serves locally; there is no pairing code. A Claude connector
+approved on this computer then works in Claude on your phone too.
+**Turn off remote access** turns it off again. If the
+relay cannot be reached, the page says **Olympus relay unavailable** and
 Olympus keeps retrying on its own; agents on this computer are unaffected.
+
 Advanced: to use a tunnel you run yourself instead of the relay, set
 `plugins.entries.olympus.config.remote.publicBaseUrl` to its https origin
-(`openclaw config set …`) and turn remote access on. Every connected agent gets the same privacy rules
+(`openclaw config set …`) and turn remote access on. Through your own tunnel,
+Claude, ChatGPT and Grok approve Olympus on its approval page with a one-time
+pairing code from the Agents page, and the Grok API takes an address plus a
+key from **Create key** (shown once).
+
+Every connected agent gets the same privacy rules
 as your OpenClaw agent. It never sees Private source text or Secrets. For
 Private items it receives only answers that Venice or a local model reasoned
-out, with each item's title, path, source and author. The same
-section lists connected agents with when each was added and last used, and
+out, with each item's title, path, source and author. The Agents page
+lists connected agents with when each was added and last used, and
 **Revoke** removes one. `olympus connections list|revoke|pair|add` does the
 same from a terminal.
 
 Each agent's steps end with a short instruction that tells it when to ask
-Olympus. Paste it into Claude project instructions, Grok Bot skills or Muse
-instructions, or load the packaged Agent Skills folder
+Olympus. Paste it into Claude project instructions, Grok's custom
+instructions or Grok Bot's skills, or
+load the packaged Agent Skills folder
 [`integrations/agent-skills/ask-olympus/`](integrations/agent-skills/ask-olympus/SKILL.md).
 
 ### Using Olympus from other agents (MCP)

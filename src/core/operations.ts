@@ -1,5 +1,6 @@
 import { DelphiClient } from './delphi.ts';
 import { defaultDoctorHostProbe, runDoctor, type DoctorHostFacts } from './doctor.ts';
+import { checkOcrReadiness, type OcrReadiness } from './ocr-readiness.ts';
 import { EmailClient, type SourceAnswerSelectedItemOption, CONSULT_ASK_CLIENT_TIMEOUT_MS } from './email.ts';
 import { defaultConfig, type OlympusConfig } from './config.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
@@ -16,6 +17,8 @@ import { OPEN_REMOTE_DESCRIPTION, OPEN_REMOTE_PARAMS, OPEN_REMOTE_TOOL_NAME, ope
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
 import type { OperationCaller } from './operation-caller.ts';
 import type { SourceAnswerJobScope, SourceAnswerPending } from './source-answer-jobs.ts';
+import type { ReleaseCheck } from './release-manifest.ts';
+import type { RemotePrivatePart } from './remote-private-part.ts';
 
 type SourceIndexAnswerCorpusId = string;
 type SourceIndexStatusCorpusId = string;
@@ -61,6 +64,22 @@ export interface OperationContext {
   ownerAgentSession?: boolean;
   /** Test seam for olympus_doctor's host check; production probes this machine. */
   doctorHostProbe?: () => DoctorHostFacts;
+  /** Test seam for olympus_doctor's OCR check; production probes this machine's OCR commands. */
+  doctorOcrProbe?: () => OcrReadiness | Promise<OcrReadiness>;
+  /**
+   * The worker's current tiers and release rules, set by the worker for its
+   * remote surface (email-source/server.ts). The remote output boundary
+   * (core/remote-result.ts) revalidates a source answer's release manifest
+   * with it when the answer is collected; no operation handler reads it.
+   */
+  releaseCheck?: ReleaseCheck;
+  /**
+   * The Private part of a remote agent's source answer
+   * (core/remote-private-part.ts), set by the worker for its remote surface
+   * only: a fallback answer whose Private items match is recorded as a
+   * waiting question on this computer. No operation handler reads it.
+   */
+  remotePrivatePart?: RemotePrivatePart;
 }
 
 export interface Operation {
@@ -589,7 +608,7 @@ export const operations: Operation[] = [
     mutating: false,
     nativeExposure: 'always',
     cliHints: { name: 'doctor' },
-    handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === 'native' })) }),
+    handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, ocrProbe: ctx.doctorOcrProbe ?? (() => checkOcrReadiness()), hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === 'native' })) }),
   },
   {
     name: 'ask_anonymously',

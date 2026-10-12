@@ -50,9 +50,16 @@ import {
   mediaCacheDir,
   releaseMediaCacheFile,
   retainMediaCacheFile,
-  stillImagePreparationAvailable,
   sweepMediaCache,
 } from '../../core/media-cache.ts';
+import { readyStillImageFormats } from '../../core/still-image-readiness.ts';
+import {
+  STILL_IMAGE_FORMATS,
+  stillImageFormatForMimeType,
+  stillImageMimeTypes,
+  type StillImageFormat,
+} from '../../core/still-image-formats.ts';
+import { resolveStillImageFormats, type StillImagesRead } from '../../core/source-ingestion-policy.ts';
 import {
   assertSqliteSchemaCanOpen,
   currentStoreMigrations,
@@ -542,11 +549,12 @@ export interface LocalConnectorStoreOptions {
   /** Opens an existing store without migrations, WAL changes, or writes. */
   readOnly?: boolean;
   /**
-   * Whether this machine reads pictures for media search (defaults to
-   * `stillImagePreparationAvailable()`); decides whether an image read
-   * before pictures were is listed for extraction once more.
+   * Which still-image formats this machine reads for media search: a yes or
+   * no for every format, or a list. Defaults to the machine's own per-format
+   * probe, asked each time; decides whether an image read before pictures
+   * were is listed for extraction once more.
    */
-  stillImagesRead?: boolean;
+  stillImagesRead?: StillImagesRead;
   /** Clock for owner observations compared with provider snapshot cutoffs. */
   now?: () => Date;
   /**
@@ -1586,6 +1594,11 @@ export interface ConnectorStoreSearchRow {
   rank: number;
   /** Offset-level match locator. Absent when no lane could pin one down. */
   chunk?: ConnectorStoreChunkMatch;
+  /**
+   * Set by a metadata-only search in place of `chunk`: the row matched in its
+   * text, and no chunk was read to say where.
+   */
+  contentMatched?: true;
 }
 
 export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
@@ -2400,7 +2413,7 @@ export class LocalConnectorStore {
   private mediaJudgmentsPresent = false;
   /** This store's name in the media cache's reference markers. */
   private readonly mediaHolder: string;
-  private readonly stillImagesRead: boolean;
+  private readonly stillImageFormatsRead: () => ReadonlySet<StillImageFormat>;
   // The four-tier ledger. Declared without an initializer on purpose (see the
   // tree-shaking note on trustReconciliationReadyCursors).
   private tierLedgerHandle: TierLedger | undefined;
@@ -2426,7 +2439,8 @@ export class LocalConnectorStore {
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
     this.mediaHolder = this.dbPath === ':memory:' ? `memory:${randomUUID()}` : this.dbPath;
-    this.stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
+    const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
+    this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
     this.family = options.family;
     this.trustDomain = options.trustDomain;
     this.now = options.now ?? (() => new Date());
@@ -4397,9 +4411,19 @@ export class LocalConnectorStore {
     // version. Every image reading stored since records a row, so an image
     // that ends without a picture (a tiny one, a dropped one) is not listed
     // again pass after pass.
-    const imagesWithoutPicture = this.imageMediaReadsPresent
-      && this.trustDomain === 'secure_local'
-      && this.stillImagesRead;
+    const readFormats = this.imageMediaReadsPresent && this.trustDomain === 'secure_local'
+      ? this.stillImageFormatsRead()
+      : new Set<StillImageFormat>();
+    const imagesWithoutPicture = readFormats.size > 0;
+    // Every format read: any image. Some: only those (a format this machine
+    // cannot prepare is not listed again and again to be refused).
+    const imageMimeSql = readFormats.size === STILL_IMAGE_FORMATS.length
+      ? "LOWER(i.mime_type) LIKE 'image/%'"
+      : `LOWER(i.mime_type) IN (${STILL_IMAGE_FORMATS
+        .filter((format) => readFormats.has(format))
+        .flatMap((format) => [...stillImageMimeTypes(format)])
+        .map((mimeType) => `'${mimeType}'`)
+        .join(', ')})`;
     // With no media-type filter every scanned row is a match, so one query of
     // exactly `limit` rows is enough. With a filter the scan has to be able to
     // run past non-matching rows, hence a wider window.
@@ -4418,7 +4442,7 @@ export class LocalConnectorStore {
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
           ${imagesWithoutPicture ? `OR (
-            LOWER(i.mime_type) LIKE 'image/%'
+            ${imageMimeSql}
             AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
             AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk AND c.media_sha256 IS NOT NULL)
           )` : ''})
@@ -4480,6 +4504,18 @@ export class LocalConnectorStore {
       ...(skippedByDisposition > 0 ? { skippedByDisposition } : {}),
       ...(exhausted ? {} : { nextCursor: String(lastExaminedPk) }),
     };
+  }
+
+  /**
+   * Whether an image of this media type was read with its picture considered
+   * on this machine: its format can be prepared here. An image this machine
+   * could not prepare (a HEIC without a decoder) is read as text alone, and
+   * that reading must not be recorded as "the picture was considered", or
+   * the photo would never be listed again once the decoder arrives.
+   */
+  private imageFormatReadsPictures(mimeType: string | undefined): boolean {
+    const format = stillImageFormatForMimeType(mimeType);
+    return format === undefined || this.stillImageFormatsRead().has(format);
   }
 
   itemOwnerPresent(
@@ -4998,7 +5034,7 @@ export class LocalConnectorStore {
         if (this.itemRepresentationCoverage(record.expectation).complete) {
           // Read again with nothing new (a tiny picture's same text): still a
           // reading, so the image is not listed for one more.
-          if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+          if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
             this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
               .run(existing.item_pk, this.now().toISOString());
           }
@@ -5025,7 +5061,7 @@ export class LocalConnectorStore {
         );
         this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars, record.media);
         this.refreshFtsForItem(upsert.itemPk);
-        if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+        if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
           this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
             .run(upsert.itemPk, this.now().toISOString());
         }
@@ -9210,6 +9246,9 @@ export class LocalConnectorStore {
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
     deadlineAtMs?: number,
+    // locate: false is the metadata-only mode: no chunk text is read to place
+    // the match, and the row says only that its text matched.
+    laneOptions: { locate?: boolean } = {},
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
     const vectorFilters = connectorStoreVectorScopeFilters(filters);
@@ -9249,6 +9288,7 @@ export class LocalConnectorStore {
       ...(accountScope !== undefined ? { accountScope } : {}),
       ...(vectorFilters ? { filters: vectorFilters } : {}),
       ...(deadlineAtMs !== undefined ? { deadlineAtMs } : {}),
+      locate: laneOptions.locate !== false,
     });
   }
 
@@ -9265,6 +9305,7 @@ export class LocalConnectorStore {
     accountScope?: string;
     filters?: ConnectorStoreSearchFilters;
     deadlineAtMs?: number;
+    locate: boolean;
   }): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     const { provider, queryVector, maxResults, accountScope, filters, deadlineAtMs } = input;
     if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
@@ -9370,6 +9411,7 @@ export class LocalConnectorStore {
     ).flatMap((row) => {
       const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
       if (winner === undefined) return [];
+      if (!input.locate) return [{ ...row, contentMatched: true as const, bestCosine: winner.bestCosine }];
       const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, 'semantic');
       return [{ ...row, ...(chunk ? { chunk } : {}), bestCosine: winner.bestCosine }];
     });
@@ -9570,7 +9612,9 @@ export class LocalConnectorStore {
     maxResults: number,
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
-    ftsOptions: { prefix?: boolean; contentOnly?: boolean } = {},
+    // locate: false is the metadata-only mode: a text match is reported as
+    // such, and no chunk text is read to place it.
+    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean } = {},
   ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
@@ -9675,6 +9719,9 @@ export class LocalConnectorStore {
     return {
       rows: kept.map((row) => {
         const base = searchRowFromItemRow(row);
+        if (ftsOptions.locate === false) {
+          return row.chunk_pk === null || row.chunk_pk === undefined ? base : { ...base, contentMatched: true as const };
+        }
         const chunk = row.chunk_pk === null || row.chunk_pk === undefined
           ? undefined
           : this.chunkMatchForChunkPk(row.chunk_pk, 'keyword', spanTerms);
@@ -9849,6 +9896,37 @@ export class LocalConnectorStore {
       })),
       ...(resume < top ? { next: resume } : {}),
     };
+  }
+
+  /**
+   * Whether an item a caller selected by identity is this store's item and
+   * served now under the given scope: its full identity (provider, account,
+   * provider item id and conversation) names a live row here, the row matches
+   * the account scope and filters, and its content is served now
+   * (contentServedNow below). Item, chunk-existence and tier-ledger reads
+   * only; no chunk text is loaded. Fails closed.
+   */
+  selectedItemServable(
+    identity: Pick<SourceItemIdentity, 'localItemId' | 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    accountScope: string | undefined,
+    filters: ConnectorStoreSearchFilters | undefined,
+  ): boolean {
+    try {
+      const localItemId = typeof identity.localItemId === 'string' ? identity.localItemId.trim() : '';
+      if (!localItemId) return false;
+      const row = this.activeLocalItemRow(localItemId);
+      if (!row) return false;
+      if (
+        row.identity.provider !== identity.provider
+        || row.identity.accountScope !== identity.accountScope
+        || row.identity.providerItemId !== identity.providerItemId
+        || normalizeConversationId(row.identity.providerConversationId) !== normalizeConversationId(identity.providerConversationId)
+      ) return false;
+      if (!this.itemMatchesSearchFilters(localItemId, normalizeOptionalAccountScope(accountScope), filters)) return false;
+      return this.contentServedNow(localItemId);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -10693,10 +10771,72 @@ export function createConnectorStoreCorpusAdapter(
       rawExposed: false,
     };
   };
+  // Metadata-only matching (router.ts metadataMatches): the items that match
+  // the query, lexically or above the semantic relevance bar, as identity-only
+  // hits. No chunk text is read (both lanes run with locate: false), no
+  // recency lane or pin (they are not matches), and no result projection.
+  const metadataMatches = async (request: SourceIndexCorpusSearchRequest): Promise<SourceIndexCorpusSearchResponse> => {
+    const startedAt = Date.now();
+    const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
+    const hybrid = embeddingProvider !== undefined
+      && (options.retrievalMode ?? 'hybrid') === 'hybrid'
+      && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
+      && store.hasEmbeddings(embeddingProvider.modelId);
+    const keywordLane = connectorStoreKeywordLaneRows(
+      store,
+      request.query,
+      maxResults,
+      options.accountScope,
+      filters,
+      hybrid ? { prefix: false, locate: false } : { locate: false },
+    );
+    const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows];
+    let semanticOnly = 0;
+    // A semantic lane that should have run and did not (query embedding
+    // outage, vectors unreadable or of the wrong width, the deadline): what
+    // it would have matched is unknown, and the response says so.
+    let incomplete = false;
+    if (hybrid) {
+      const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
+      if (bar !== undefined) {
+        const lane = await store.vectorSearchLane(
+          request.query,
+          embeddingProvider,
+          maxResults,
+          options.accountScope,
+          filters,
+          request.deadlineAtMs,
+          { locate: false },
+        );
+        if (lane.skippedReason !== undefined) incomplete = true;
+        for (const row of lane.rows) {
+          if (row.bestCosine < bar || keywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
+          rows.push(row);
+          semanticOnly += 1;
+        }
+      }
+    }
+    return {
+      hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
+      latencyMs: Date.now() - startedAt,
+      matchCount: {
+        ...keywordLane.matchCount,
+        matchedItems: keywordLane.matchCount.matchedItems + semanticOnly,
+        contentMatchedItems: keywordLane.matchCount.contentMatchedItems + semanticOnly,
+      },
+      ...(incomplete ? { incomplete: true } : {}),
+      rawExposed: false,
+    };
+  };
   const expanded: SourceIndexCorpusSearchAdapter = (request) => {
     assertConnectorStoreCorpusRequest(store, request);
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request), store);
   };
+  expanded.metadataMatches = (request) => {
+    assertConnectorStoreCorpusRequest(store, request);
+    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
+  };
+  expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
@@ -11009,7 +11149,7 @@ function connectorStoreKeywordLaneRows(
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
-  ftsOptions: { prefix?: boolean } = {},
+  ftsOptions: { prefix?: boolean; locate?: boolean } = {},
 ): {
   rows: ConnectorStoreSearchRow[];
   matchCount: SourceIndexCorpusMatchCount;
@@ -11073,7 +11213,7 @@ function connectorStoreKeywordLaneRows(
 // (or its scope is metadata-only), so a chunk-less keyword row is a title-only
 // or metadata-only item.
 function connectorStoreRowHasContent(row: ConnectorStoreSearchRow): boolean {
-  return row.chunk !== undefined;
+  return row.chunk !== undefined || row.contentMatched === true;
 }
 
 // A row's own tier, which is the tier its content is served at; the store's

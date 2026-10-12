@@ -11,9 +11,9 @@
  *   (authorize-bridge.ts);
  * - `/connect/demo/authorize`: reviewer sign-in, routed only to the one demo
  *   install the relay is configured with (none by default);
- * - `POST /connect/register`: RFC 7591 registration for ChatGPT only, which
- *   names an already pinned ChatGPT client and keeps nothing
- *   (client-registration.ts);
+ * - `POST /connect/register`: RFC 7591 registration for the pinned hosted
+ *   agents only (ChatGPT, Claude, Grok), which names an already pinned client
+ *   and keeps nothing (client-registration.ts);
  * - `POST /connect/token`, `POST /connect/revoke`, `/mcp` and `/openai/mcp`
  *   (the plugin directory's endpoint: the same tools narrowed to its
  *   allowlist, its own protected resource; shared/directory-tools.ts): routed
@@ -36,9 +36,10 @@
  *   until the job expires), never open anything else.
  *
  * The relay mints, validates and stores no token: the install does. A caller
- * with no token, and an authorized request for an install that is registered
- * but offline, get the relay's own small MCP answers (relay-mcp.ts); neither
- * ever reaches an engine.
+ * with no token gets the standard challenge on `/mcp` and the relay's own
+ * small MCP answers on `/openai/mcp`; an authorized request for an install
+ * that is registered but offline gets the relay's offline answers
+ * (relay-mcp.ts). Neither ever reaches an engine.
  *
  * Logging follows log.ts: no bodies, tokens, query strings or addresses.
  */
@@ -78,7 +79,7 @@ import {
   privateAnswerJobId,
 } from '../shared/private-answer.ts';
 import { authorizeBridge } from './authorize-bridge.ts';
-import { MAX_REGISTRATION_BYTES, registerChatGptClient } from './client-registration.ts';
+import { MAX_REGISTRATION_BYTES, registerPinnedClient, refusedRegistrationSummary } from './client-registration.ts';
 import {
   ConfirmedCredentials,
   DEFAULT_LIMITS,
@@ -494,9 +495,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           return false;
         },
         onRefused: (reason) => log('request_refused', { install: installTag(installId), reason: `response_${reason}` }),
-        onHead: (_status, authenticated) => {
+        onHead: (_status, authenticated, surface) => {
           if (authenticated) {
-            if (input.credentialKey) confirmed.add(input.credentialKey);
+            if (input.credentialKey) confirmed.add(input.credentialKey, surface);
             return;
           }
           admitted.refund();
@@ -528,6 +529,13 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const authorization = request.headers.get('authorization');
     // No credential at all: the relay's own not-connected surface. A caller
     // without a token never reaches an engine.
+    // No credential on `/mcp`: the standard challenge, which is how Claude,
+    // Grok and ChatGPT developer-mode connectors start signing in (a client
+    // that gets an answer instead treats the server as needing no sign-in).
+    // Only the plugin directory's endpoint answers without a token: ChatGPT
+    // lists its tools first and links per tool (relay-mcp.ts).
+    // (Already charged to the caller's address before routing.)
+    if (authorization === null && surface === 'default') return unauthorized(origin, undefined, surface);
     if (authorization === null) {
       const anonymous = await readBody(request, Math.min(limits.maxAnonymousRequestBodyBytes, limits.maxRequestBodyBytes), ip);
       if (!anonymous.ok) return anonymous.response;
@@ -582,12 +590,15 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         state: 'mac_offline',
         lastSeenAt: registry.get(installId)?.lastSeenAt,
         surface,
+        // Which tools this credential gets, as its engine last said; the
+        // directory endpoint serves ChatGPT only.
+        credentialSurface: surface === 'directory' ? 'chatgpt' : confirmed.surface(key),
       }),
       unknown: refuse,
     });
   };
 
-  /** `/connect/register`: ChatGPT only, answered here without state (client-registration.ts). */
+  /** `/connect/register`: pinned clients only (ChatGPT, Claude, Grok), answered here without state (client-registration.ts). */
   const register = async (request: Request, ip: string): Promise<Response> => {
     if (request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
     if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) {
@@ -605,8 +616,11 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     } finally {
       read.release();
     }
-    const outcome = registerChatGptClient(text, Math.floor(now() / 1000));
-    log('client_registration', { ok: outcome.ok });
+    const outcome = registerPinnedClient(text, Math.floor(now() / 1000));
+    const refused = !outcome.ok && outcome.error === 'invalid_redirect_uri' ? refusedRegistrationSummary(text) : undefined;
+    log('client_registration', refused
+      ? { ok: outcome.ok, redirects: refused.redirects.join(' | '), ...(refused.client_name ? { client_name: refused.client_name } : {}) }
+      : { ok: outcome.ok });
     return outcome.ok
       ? json(201, outcome.body)
       : json(400, { error: outcome.error, error_description: outcome.description });

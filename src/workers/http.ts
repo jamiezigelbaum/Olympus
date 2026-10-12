@@ -244,9 +244,9 @@ export function withWorkerBearerAuth(
       return fetchHandler(request);
     }
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
-      // Outside help: control session only, never the bearer (see
-      // DASHBOARD_CONSULT_CONTROL_PATHS).
-      if (isDashboardConsultControlRoute(request)) return dashboardConsultMacOnlyResponse();
+      // Outside help and Private answers: control session only, never the
+      // bearer (see DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH).
+      if (isDashboardLocalGradeRoute(request)) return dashboardLocalGradeRefusal(request);
       // The Gateway bridge holds the bearer for every operator it serves, so
       // its mints share one budget.
       if (isAgentMintRoute(request) && !agentMintAllowed('bearer')) return agentMintLimitedResponse();
@@ -287,8 +287,8 @@ export function withWorkerBearerAuth(
         // refuses without this header, and nothing else can set it.
         // A local-grade session only: never one a bearer minted, nor one a
         // bearer's launch ticket redeemed.
-        if (isDashboardConsultControlRoute(request)) {
-          if (authorization.grade !== 'local') return dashboardConsultMacOnlyResponse();
+        if (isDashboardLocalGradeRoute(request)) {
+          if (authorization.grade !== 'local') return dashboardLocalGradeRefusal(request);
           return withRenewedDashboardControlCookie(
             await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)),
             authorization,
@@ -575,6 +575,38 @@ export function isDashboardConsultControlRoute(request: Request): boolean {
   return request.method === 'POST' && DASHBOARD_CONSULT_CONTROL_PATHS.includes(new URL(request.url).pathname);
 }
 
+/**
+ * The Private answers page's one route (email-source/local-private-answers.ts):
+ * waiting questions, and answers written from Private and Personal items on
+ * this computer. Held to the consult routes' grade: a local control session
+ * only, never the worker bearer (the Gateway holds it for every operator it
+ * serves) nor any session a bearer minted.
+ */
+export const DASHBOARD_PRIVATE_ANSWERS_PATH = '/dashboard/private-answers';
+
+function isDashboardPrivateAnswersRoute(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_PRIVATE_ANSWERS_PATH;
+}
+
+/** Routes only a local-grade control session reaches: Outside help, and Private answers. */
+function isDashboardLocalGradeRoute(request: Request): boolean {
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request);
+}
+
+function dashboardLocalGradeRefusal(request: Request): Response {
+  if (!isDashboardPrivateAnswersRoute(request)) return dashboardConsultMacOnlyResponse();
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: 'mac_dashboard_only',
+      message: 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
+    },
+  }), {
+    status: 403,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
+
 function dashboardConsultMacOnlyResponse(): Response {
   return new Response(JSON.stringify({
     ok: false,
@@ -594,7 +626,7 @@ function isDashboardToolsCallRoute(request: Request): boolean {
 
 function isDashboardControlRoute(request: Request): boolean {
   if (request.method !== 'POST') return false;
-  if (isDashboardConsultControlRoute(request)) return true;
+  if (isDashboardLocalGradeRoute(request)) return true;
   return new Set([
     '/dashboard/dispositions',
     '/dashboard/connect/oauth/start',

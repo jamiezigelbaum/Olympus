@@ -78,8 +78,8 @@ Use the [pilot download procedure](../INSTALL_FOR_AGENTS.md#pilot-download)
 to obtain the designated package from GitHub. It retrieves the SHA-256 and
 byte count automatically from the release asset metadata; there is no separate
 receipt to request. For a manual download, open the
-[pilot release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.0.0-rc.5)
-and choose `olympus-1.0.0-rc.5.tgz` under Assets, not a source-code archive. Compare
+[pilot release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.0.0-rc.6)
+and choose `olympus-1.0.0-rc.6.tgz` under Assets, not a source-code archive. Compare
 its SHA-256 and byte count with the pin in the linked download procedure and
 record the release tag, asset ID, digest, and size with your install results.
 Stop if the download is
@@ -87,8 +87,8 @@ unavailable or either value differs. Do not build a replacement or substitute
 a Git checkout.
 
 ```bash
-shasum -a 256 /absolute/path/to/olympus-1.0.0-rc.5.tgz
-wc -c < /absolute/path/to/olympus-1.0.0-rc.5.tgz
+shasum -a 256 /absolute/path/to/olympus-1.0.0-rc.6.tgz
+wc -c < /absolute/path/to/olympus-1.0.0-rc.6.tgz
 ```
 
 Check for an existing installation with `openclaw plugins inspect olympus
@@ -97,7 +97,7 @@ If Olympus is already installed or has saved state, follow that guide's
 existing-install procedure before continuing. On a clean machine:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.0-rc.5.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.0-rc.6.tgz --force --accept-capabilities
 # ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
 #   there only overwrites an existing plugin — re-run with no flags
 openclaw plugins enable olympus
@@ -171,9 +171,10 @@ user systemd unit on Linux) and writes its environment file, so macOS shows a
 "Background Items Added" notification when you run it. Step 3 checks that
 worker rather than installing a second one.
 
-If setup reports missing model keys, finish base activation and open Setup.
-The Models section accepts the required Gemini/Venice keys and applies them;
-source connections unlock when it is ready. Existing local models use the
+If setup reports missing model keys, finish base activation and open the
+dashboard. Its **Keys** page (under **On this computer**, or through **Change**
+under **Models**) accepts the required Gemini/Venice keys and applies them;
+source connections unlock when models are ready. Existing local models use the
 agent-assisted starting point and Check readiness. No local model software is
 installed or maintained by Olympus.
 
@@ -327,7 +328,7 @@ olympus worker install      # idempotent; also the repair for an interrupted ins
 olympus worker start
 olympus worker stop
 olympus worker restart
-olympus worker upgrade --artifact /absolute/path/to/olympus-1.0.0-rc.5.tgz
+olympus worker upgrade --artifact /absolute/path/to/olympus-1.0.0-rc.6.tgz
 olympus worker uninstall
 ```
 
@@ -420,11 +421,12 @@ dashboard, so that link is required. The agent
 must resolve the address for your browser and verify dashboard access, rather
 than giving you a host-only localhost URL or another terminal command.
 
-Open **Setup**, finish the required **Models** cards at the top, then connect
-sources below and choose their scope. **Home** shows source
-readiness and anything needing attention. **Background** shows syncing,
-extraction, and embedding progress. Return to the same agent chat if you need
-help connecting a source or understanding its progress.
+If the dashboard asks for a model key, add it on **Keys** first (under
+**On this computer**, or through **Change** under **Models**). Then connect
+sources under **Sources** and choose their scope. **Needs you** lists anything
+waiting on you, each source's row shows its readiness, and **Progress** shows
+reading and indexing, stage by stage under **Details**. Return to the same agent
+chat if you need help connecting a source or understanding its progress.
 
 For native OpenClaw access, the dashboard page is
 `/plugin?plugin=olympus&id=dashboard` on the Gateway origin you already use.
@@ -602,14 +604,17 @@ then `olympus worker install`). A worker that simply is not running says so
 instead: `Email worker is not reachable at http://127.0.0.1:8010/v1:`
 followed by the underlying connection error.
 
-To let other agents ask Olympus (Claude, ChatGPT, Grok, Muse, or Claude Code
-and Codex on this computer), open the dashboard's Setup page and press
-**Connect an agent** — see the README's "Connect other agents" section. Agents
-in the cloud also need remote access: press **Turn on remote access** in the
-same Agents section, and Olympus connects through the Olympus relay
-(`mcp.olympusplugin.ai`) with no account, tunnel or certificate agreement to
-set up. ChatGPT itself uses the Olympus plugin instead: see the README's
-[Olympus for ChatGPT](../README.md#olympus-for-chatgpt). (Advanced: a tunnel of your own goes in `remote.publicBaseUrl`.)
+To let other agents ask Olympus (ChatGPT, or Claude Code and Codex on this
+computer), open the dashboard on this computer (`olympus dashboard`), choose
+**Open** next to **Agents** under **On this computer**, and press **Connect an
+agent** — see the README's "Connect other agents" section. Agents in the cloud
+also need remote access: press **Turn on remote access** on the same page, and
+Olympus connects through the Olympus relay (`mcp.olympusplugin.ai`) with no
+account, tunnel or certificate agreement to set up. The relay connects ChatGPT
+only; ChatGPT itself uses the Olympus plugin: see the README's
+[Olympus for ChatGPT](../README.md#olympus-for-chatgpt). (Advanced: Claude,
+Grok, the Grok API and other cloud agents need a tunnel of your own in
+`remote.publicBaseUrl`, approved with a pairing code or a key.)
 
 ## Anytime
 

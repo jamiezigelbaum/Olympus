@@ -46,6 +46,7 @@ export type OpenUnreadableSource = keyof typeof OPEN_UNREADABLE_SOURCES;
 
 export type OpenTarget =
   | { kind: 'dashboard' }
+  | { kind: 'private_answers' }
   | { kind: 'connect'; source: OpenConnectSource }
   | { kind: 'fix'; section: OpenFixSection }
   | { kind: 'unreadable'; source: OpenUnreadableSource };
@@ -57,6 +58,7 @@ export const OPEN_URL_MAX_LENGTH = 128;
 export function allOpenTargets(): OpenTarget[] {
   return [
     { kind: 'dashboard' },
+    { kind: 'private_answers' },
     ...(Object.keys(OPEN_CONNECT_SOURCES) as OpenConnectSource[]).map((source) => ({ kind: 'connect' as const, source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: 'fix' as const, section })),
     ...(Object.keys(OPEN_UNREADABLE_SOURCES) as OpenUnreadableSource[]).map((source) => ({ kind: 'unreadable' as const, source })),
@@ -65,6 +67,8 @@ export function allOpenTargets(): OpenTarget[] {
 
 /** `dashboard`, `connect/x`, `fix/models`: the path after `olympus://open/` and `/open/`. */
 export function openTargetPath(target: OpenTarget): string {
+  // The computer's Private answers page: a fixed address, never a question or a capability.
+  if (target.kind === 'private_answers') return 'private';
   if (target.kind === 'connect') return `connect/${target.source}`;
   if (target.kind === 'fix') return `fix/${target.section}`;
   if (target.kind === 'unreadable') return `unreadable/${target.source}`;
@@ -119,6 +123,7 @@ export function parseOlympusOpenUrl(raw: unknown): (OpenTarget & { fallback?: tr
  * for the plain dashboard.
  */
 export function openTargetToken(target: OpenTarget): string | undefined {
+  if (target.kind === 'private_answers') return 'page.private';
   if (target.kind === 'connect') return `connect.${target.source}`;
   if (target.kind === 'fix') return `fix.${target.section}`;
   if (target.kind === 'unreadable') return `unreadable.${target.source}`;
@@ -146,6 +151,11 @@ export function isKeysOpenTarget(target: OpenTarget): boolean {
 export function keysOpenTargetTokenPattern(): string {
   const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token): token is string => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace('.', '\\.')).join('|')})$`;
+}
+
+/** The Private answers page's token, as one anchored pattern source (see openTargetTokenPattern). */
+export function privateAnswersOpenTargetTokenPattern(): string {
+  return `^${openTargetToken({ kind: 'private_answers' })!.replace('.', '\\.')}$`;
 }
 
 /**

@@ -24,9 +24,77 @@ is given; it asks for no privacy permission.
 | Host | Engine |
 |---|---|
 | macOS (default, `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE` unset or `auto`) | Vision via the packaged script |
-| macOS, Vision unavailable (no script, old macOS, framework missing) | `ocrmypdf` / `tesseract` if installed, else names-only (`ocr_required`) |
-| macOS with `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE=tesseract` | `ocrmypdf` / `tesseract` |
-| Linux and everywhere else | `ocrmypdf` / `tesseract`, as before |
+| macOS, Vision unavailable (no script, old macOS, framework missing) | the probed command engines below, else names-only (`ocr_required`) |
+| macOS with `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE=tesseract` | `ocrmypdf` run directly, no probe, no fallback engine |
+| Linux and everywhere else | the probed command engines below |
+
+### Command engines are probed, not presumed
+
+Where Vision does not read, the text lane runs each command once on a tiny
+generated fixture (`extractors/ocr-capability.ts`): the word OLYMPUS as a
+picture, wrapped in a one-page PDF with no text layer. A command that exists
+but cannot read it is not an engine. The answer picks the engine:
+
+| Scanned PDF | When |
+|---|---|
+| `ocrmypdf` | its real command, `--clean` included, reads the fixture PDF |
+| `pdftoppm` pages read by `tesseract` | otherwise, when both pass (Arch and Omarchy have no `ocrmypdf` in their repositories) |
+| not read | otherwise: the PDF stays `ocr_required` |
+
+A picture is read by `tesseract` when it reads the fixture picture, and is
+otherwise names-only. The raster engine renders grayscale PNG pages at 200 dpi
+in ranges of eight pages, lowering the resolution of each page from that page's
+own size so every page's long edge stays within the same 3,000-pixel cap as
+Vision. The bound is the renderer's: each render passes `-scale-to <pixels>`
+(the Letter-at-200-dpi size, never above the cap, or 2,400 px when `pdfinfo`
+cannot describe the document) and `-cropbox`, the box `pdfinfo` measures, so
+a wrong size changes the resolution and never the cap. It reads each page with `tesseract
+--psm 3`, and keeps Vision's bounds: 100 pages, the text cap, a 600-second
+whole-file deadline, each cut recorded as a warning. It marks its text
+`ocr_engine_tesseract`. A PDF `pdftoppm` refuses settles with the lane's
+`ocrmypdf_pdf_encrypted` / `ocrmypdf_pdf_invalid` kinds.
+
+The probe result is cached: ten minutes while a scanned-PDF engine works, one
+minute while none does (pictures alone count as none, as an install is still
+expected), so an install is noticed without a process per file.
+
+### Recovery
+
+* A scan or picture the text lane could not read because no OCR engine ran
+  settles `metadata_only` with `ocr_required` and a marker for its kind
+  (`ocr_unavailable_pdf` / `ocr_unavailable_image`) on its derivation; the job
+  keeps its identity. The text extractor carries the runner's `reread` policy
+  (`notReadyWarnings` are the markers): when the probe says that kind's reader
+  works, the item is requeued and read. Readiness is per kind
+  (`readyWarnings()`): tesseract alone reads waiting pictures while PDFs wait
+  for `ocrmypdf` or `pdftoppm`. An item carrying a marker was never read, so it
+  stays eligible until it is; only scans settled before the markers existed
+  spend the once-ever requeue.
+* The decision uses a FRESH probe answer only (an expired "ready" starts a
+  probe and answers `pending`), and a command found missing when it is run
+  forgets the cached answer, so a stale answer cannot spend a recovery.
+* A picture settled names-only before the markers existed carries nothing the
+  policy can find, so on a host where a command engine (not Vision, not a
+  preparation) reads pictures the image job version gets one fixed suffix
+  (`.image-ocr-2026-10-12`, independent of what is installed): those pictures
+  are queued once more, and pictures already read are untouched. The registry
+  omits it on a Mac (Vision or the preparation already reads them) and when
+  pinned to `tesseract`.
+* With the engine pinned to `tesseract`, pictures are not read in the text lane
+  and are not marked, as before.
+* A scan that was only partly read settles with its cut recorded
+  (`ocr_pdf_pages_capped`, `ocr_pdf_time_capped`, `ocr_pdf_page_unreadable`),
+  also when no page yielded text; a command failure that left nothing read is a
+  retryable failure, not an empty scan.
+
+`olympus doctor` (`ocr_reading`) and `olympus setup` (an optional `ocr`
+finding) report the engines, or one install command by distribution from
+`/etc/os-release` and honour `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE`
+(pinned to `tesseract`, the report says what that engine reads and the one
+remedy is the setting): `sudo pacman -S --needed tesseract tesseract-data-eng
+poppler` (Arch, Omarchy), `sudo apt install tesseract-ocr poppler-utils`
+(Debian, Ubuntu), `sudo dnf install tesseract poppler-utils` (Fedora), else the
+package names. `ocrmypdf` is never required. Olympus does not bundle tesseract.
 
 The lane keeps its `local_ocr_tesseract` kind and `ocr-v1` version: stored
 jobs, terminal-reclassification rules and operator tooling key on them. The
@@ -38,9 +106,10 @@ engine that read a file is recorded on its derivation as the
 There is no new lane. The shared text lane already hands a PDF with no usable
 text layer (empty, or text the inline decoder cannot decode) to the OCR lane's
 PDF reader; it now also hands every image to the OCR lane's image reader. Both
-use the built-in engine when it is selected. Off macOS the image hook answers
-nothing and images stay names-only in the text lane exactly as before; the
-explicit OCR lane still reads them with tesseract when a job asks for it.
+use the built-in engine when it is selected, else the probed command engines.
+With no working tesseract the image hook answers nothing and images stay
+names-only in the text lane; the explicit OCR lane still runs the commands
+directly when a job asks for it.
 
 Recognized text is ordinary extracted text. It goes through the same sink, the
 same bounded-text cap and the same per-item four-tier classification (the

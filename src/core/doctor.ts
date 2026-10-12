@@ -32,6 +32,7 @@ import {
   type SovereigntyEngine,
 } from './sovereignty.ts';
 import { setupPreflight } from './setup-preflight.ts';
+import { checkOcrReadiness, type OcrReadiness } from './ocr-readiness.ts';
 import {
   credentialConfigFingerprint,
   type WorkerCredentialReadiness,
@@ -68,6 +69,8 @@ import {
   consultVocabularyFileStatus,
   type ConsultVocabularyFileStatus,
 } from './consult-gate.ts';
+import { photoSearchStatus } from './photo-search-status.ts';
+import { stillImageReadiness, type StillImageReadiness } from './still-image-readiness.ts';
 import {
   consultGateOptionsFromSettings,
   readConsultSettings,
@@ -107,11 +110,27 @@ export interface DoctorDeps {
   /** The consult vocabulary pack states; defaults to hashing the installed packs. */
   consultVocabularyStatus?: () => readonly ConsultVocabularyFileStatus[];
   /**
+   * Which still-image formats this machine can read for photo search. Defaults
+   * to the machine's own probe (a tiny real picture per format); a test passes
+   * a fixed answer so it never runs a tool.
+   */
+  photoSearchReadiness?: () => StillImageReadiness;
+  /** The text of `/etc/os-release`, for the family-specific remedy. Defaults to reading it. */
+  osRelease?: () => string | undefined;
+  /** The platform the remedy is written for; defaults to this process's. */
+  platform?: NodeJS.Platform;
+  /**
    * What hosts the engine on this machine. Optional so a test never inspects
    * the developer's own launchd; the `olympus doctor` operation passes
    * `defaultDoctorHostProbe`.
    */
   hostProbe?: () => DoctorHostFacts | Promise<DoctorHostFacts>;
+  /**
+   * Whether this computer reads scans and pictures of text. Optional so a
+   * test never runs the developer's own OCR commands; the `olympus doctor`
+   * operation passes `checkOcrReadiness`.
+   */
+  ocrProbe?: () => OcrReadiness | Promise<OcrReadiness>;
 }
 
 export interface DoctorHostFacts {
@@ -188,6 +207,7 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
   const checks = [
     ...(deps.hostProbe ? [await safeCheck('host', () => hostCheck(deps))] : []),
     await safeCheck('dependencies', () => dependencyCheck(deps)),
+    ...(deps.ocrProbe ? [await safeCheck('ocr_reading', () => ocrReadingCheck(deps))] : []),
     await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck('sovereignty_prerequisites', () => sovereigntyPrerequisiteCheck(deps)),
     await safeCheck('credential_handles', () => credentialHandleCheck(deps)),
@@ -202,6 +222,7 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     await safeCheck('email_worker', () => emailWorkerCheck(deps)),
     await safeCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
     await safeCheck('dropbox_content_extraction_throughput', () => dropboxContentExtractionThroughputCheck(deps)),
+    await safeCheck('photo_search', () => photoSearchCheck(deps)),
     await safeCheck('source_index_status', () => sourceIndexStatusCheck(deps)),
     await safeCheck('source_scheduler_status', () => sourceSchedulerStatusCheck(deps)),
     await safeCheck('source_ingestion_health', () => sourceIngestionHealthCheck(deps)),
@@ -210,6 +231,33 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     ok: checks.every((check) => check.ok),
     checks,
   };
+}
+
+/**
+ * Whether photos can be searched by what is in them on this machine: ready,
+ * partly ready (naming the formats that are not), or missing, with the one
+ * command that fixes it. Informational: a machine with no photos to search is
+ * not unhealthy, so a gap never fails the walk, but it is always named.
+ */
+async function photoSearchCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const status = photoSearchStatus((deps.photoSearchReadiness ?? stillImageReadiness)(), {
+    osRelease: (deps.osRelease ?? defaultOsRelease)(),
+    ...(deps.platform ? { platform: deps.platform } : {}),
+  });
+  return {
+    name: 'photo_search',
+    ok: true,
+    detail: status.summary,
+    ...(status.remedy ? { hint: status.remedy } : {}),
+  };
+}
+
+function defaultOsRelease(): string | undefined {
+  try {
+    return readFileSync('/etc/os-release', 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 async function sourceCapabilityCatalogCheck(deps: DoctorDeps): Promise<DoctorCheck> {
@@ -440,6 +488,24 @@ async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     name: 'dependencies',
     ok: true,
     detail: `Required dependencies are present. Optional dependency gaps: ${optionalMissing.join(', ') || 'none'}.`,
+  };
+}
+
+/**
+ * Whether scans and pictures of text are read on this computer, and if not the
+ * one command that fixes it. Files that were left unread for want of it are
+ * read automatically once it works, so the hint says so.
+ */
+async function ocrReadingCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const readiness = await deps.ocrProbe!();
+  if (readiness.state === 'ready') {
+    return { name: 'ocr_reading', ok: true, detail: readiness.detail };
+  }
+  return {
+    name: 'ocr_reading',
+    ok: false,
+    detail: readiness.detail,
+    hint: `${readiness.remedy ?? 'Install tesseract and poppler.'} Scans and pictures left unread are read again automatically once it is installed.`,
   };
 }
 

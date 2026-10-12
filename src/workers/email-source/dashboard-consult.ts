@@ -1,6 +1,6 @@
 /**
  * The local dashboard's Outside help adapter: the worker side of the Outside
- * help card (dashboard/pages/outside-help.ts), and the one caller of the
+ * help card (dashboard/pages/private-answers.ts), and the one caller of the
  * outside-help settings writer (core/consult-settings-writer.ts). Design
  * docs/design/frontier-consult-lane.md §A.9, §A.10, §A.14 (stage C5).
  *

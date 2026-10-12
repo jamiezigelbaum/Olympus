@@ -62,12 +62,45 @@ describe('olympus setup wizard', () => {
       expect(result.dashboard.url_scope).toBe('worker_local');
       expect(result.dashboard.handoff_required).toBe(true);
       expect(result.dashboard.next).toContain('operator-reachable dashboard link');
-      expect(result.dashboard.next).toContain('Background monitors');
+      expect(result.dashboard.next).toContain('Progress (with Details) shows reading and indexing');
       expect(existsSync(sovereigntyPath)).toBe(true);
       expect(JSON.parse(readFileSync(sovereigntyPath, 'utf8')).routes.secure_local.mode).toBe('disabled');
       expect(readFileSync(join(dir, '.config', 'olympus', 'worker.env'), 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=test-worker-token');
       expect(workerAuthTokenFromConfig(defaultConfig(), { env: { HOME: dir } })).toBe('test-worker-token');
       expect(JSON.stringify(result)).not.toContain('test-worker-token');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('reports whether scans and pictures of text are read as an optional finding that never blocks setup', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-ocr-test-'));
+    try {
+      const result = await runIsolatedSetupWizard({
+        preset: 'no-sensitive',
+        yes: true,
+        sovereigntyPath: join(dir, 'sovereignty.json'),
+        platform: 'linux',
+        homeDir: dir,
+        olympusBin: '/usr/local/bin/olympus',
+        workingDirectory: dir,
+        tokenGenerator: () => 'test-worker-token',
+        dependencyCheck: healthyDependencyCheck,
+        ocrReadiness: () => ({
+          state: 'missing',
+          detail: 'Scans and pictures of text are not read yet: tesseract is not installed.',
+          remedy: 'sudo pacman -S --needed tesseract tesseract-data-eng poppler',
+        }),
+      });
+      expect(result.ok).toBe(true);
+      expect(result.dependencyCheck.ok).toBe(true);
+      expect(result.dependencyCheck.checks.find((check) => check.id === 'ocr')).toMatchObject({
+        required: false,
+        ok: false,
+        repairHint: 'sudo pacman -S --needed tesseract tesseract-data-eng poppler',
+      });
+      // The dependency check itself runs no OCR probe: the finding exists only when asked for.
+      expect(healthyDependencyCheck().checks.some((check) => check.id === 'ocr')).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -47,6 +47,7 @@ import {
   createAnalystSourceIndexAnswerHandler,
   readPrivateEvidenceItem,
   checkPrivateEvidenceItems,
+  probePrivateMatch,
   searchPrivateEvidence,
   searchReleasedEvidence,
   type AnalystAnswerLanes,
@@ -212,14 +213,13 @@ import {
   DEFAULT_SEMANTIC_RELEVANCE_BAR,
   LocalConnectorStore,
   connectorStoreFilterCapabilityRegistry,
-  createConnectorStoreContentProvider,
-  createConnectorStoreCorpusAdapter,
   defineConnectorCorpus,
   type ConnectorStoreConversationTitleCandidates,
   type ConnectorStoreFilterCapabilityRegistry,
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
+import { createSourceAnswerLanes } from './source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import {
   onDemandTierStore,
@@ -238,14 +238,13 @@ import {
   createXBookmarksTierLane,
   defaultXBookmarksSecureConnectorStoreDbPath,
 } from '../x-bookmarks/tier-set.ts';
-import { createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
+import { createReleaseTierCheck, createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
 import {
   withSourceIndexHybridAvailability,
-  type SourceIndexCorpusSearchAdapter,
 } from '../../core/source-index/router.ts';
 import {
   isSecureSensitivity,
@@ -266,9 +265,9 @@ import {
   DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION,
   DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL,
   VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
+  builtInEmbeddingOnly,
   GeminiSourceEmbeddingProvider,
   isApprovedSecureSourceEmbeddingProvider,
-  memoizeQueryEmbeddings,
   OpenAICompatibleSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -276,6 +275,7 @@ import { canonicalEmbeddingDimension } from '../source-index/embedding-identity.
 import {
   BuiltInSourceEmbeddingProvider,
   builtInEmbeddingDashboardState,
+  loadedBuiltInEmbedding,
   sharedBuiltInSourceEmbeddingProvider,
 } from '../source-index/built-in-embedding/provider.ts';
 import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
@@ -2752,7 +2752,7 @@ export async function main(): Promise<void> {
     },
     extractors: {
       // An owner-configured command wins; otherwise audio is read by the
-      // built-in on-device transcriber where it runs (Apple silicon by default).
+      // built-in on-device transcriber where it runs (Mac and Linux by default).
       ...(process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim()
         ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } }
         : sharedBuiltInTranscriber(process.env)
@@ -3177,7 +3177,9 @@ export async function main(): Promise<void> {
   const secureDerivativeDefault = parseSecureDerivativeDefault(
     process.env.OLYMPUS_SECURE_DERIVATIVE_DEFAULT,
   );
-  let sourceAnswerLanes: ((request: SourceIndexAnswerRequest) => AnalystAnswerLanes) | undefined;
+  // `embedding: 'built_in_only'` builds the same lanes for answers on this
+  // computer alone (source-index/local-answer.ts, source-answer-lanes.ts).
+  let sourceAnswerLanes: ((request: SourceIndexAnswerRequest, embedding?: 'built_in_only') => AnalystAnswerLanes) | undefined;
   const analystSourceAnswer = sourceIndexAnswerEnabled
     ? await (async () => {
       const analystLane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
@@ -3325,119 +3327,25 @@ export async function main(): Promise<void> {
         // real bounded content. A registered corpus without a mounted adapter
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
-        lanes: sourceAnswerLanes = (request) => {
-          // The scope each corpus is searched under in THIS request, so the
-          // Secret locations released beside the answer are confined to it.
-          const searchScopes = new Map<string, { accountScope?: string; filters?: ConnectorStoreSearchFilters }>();
-          // Each store's embedding provider for THIS request, memoized so the
-          // vector lane and passage ranking embed the query once between them.
-          const requestEmbeddings = new Map<string, SourceEmbeddingProvider | undefined>();
-          const requestEmbedding = (store: LocalConnectorStore): SourceEmbeddingProvider | undefined => {
-            if (!requestEmbeddings.has(store.corpusId)) {
-              const provider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
-              requestEmbeddings.set(
-                store.corpusId,
-                provider && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(provider))
-                  ? memoizeQueryEmbeddings(provider)
-                  : undefined,
-              );
-            }
-            return requestEmbeddings.get(store.corpusId);
-          };
-          const connectorStoreAdapter = (
-            store: LocalConnectorStore,
-          ): SourceIndexCorpusSearchAdapter | undefined => {
-            const mandatoryScope = connectorStoreReadScope(store);
-            if (!mandatoryScope.allowed) return undefined;
+        lanes: sourceAnswerLanes = createSourceAnswerLanes({
+          stores: () => readConnectorStores,
+          registry: () => buildSourceIndexCorpusRegistry(
+            sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions)
+              .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
+          ),
+          embeddingProvider: (store) => connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider,
+          localEmbedding: loadedBuiltInEmbedding,
+          readScope: connectorStoreReadScope,
+          answerScope: (store, request) => {
             const principal = connectorStorePrincipals.get(store.corpusId);
-            const scope = connectorStoreAnswerScope({
-              store,
-              request,
-              ...(principal ? { principal } : {}),
-            });
-            if (scope.kind === 'skip') return undefined;
-            const connectorStoreEmbedding = requestEmbedding(store);
-            const connectorStoreAccount = scope.accountScope
-              ?? mandatoryScope.accountScope
-              ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
-            searchScopes.set(store.corpusId, {
-              ...(connectorStoreAccount ? { accountScope: connectorStoreAccount } : {}),
-              ...(scope.filters || mandatoryScope.filters
-                ? { filters: { ...scope.filters, ...mandatoryScope.filters } }
-                : {}),
-            });
-            return createConnectorStoreCorpusAdapter({
-              store,
-              retrievalMode: request.retrieval_mode ?? 'keyword',
-              ...(store.corpusId === X_BOOKMARKS_CORPUS_ID
-                ? { semanticRelevanceBar: xBookmarksSemanticRelevanceBar }
-                : {}),
-              ...(connectorStoreAccount ? { accountScope: connectorStoreAccount } : {}),
-              ...(scope.filters || mandatoryScope.filters
-                ? { filters: { ...scope.filters, ...mandatoryScope.filters } }
-                : {}),
-              ...(connectorStoreEmbedding ? { embeddingProvider: connectorStoreEmbedding } : {}),
-            });
-          };
-          return {
-            registry: buildSourceIndexCorpusRegistry(
-              sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions)
-                .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
-            ),
-            visibilityGate: tierVisibilityGate,
-            secretLocations: (query: string, searchedCorpora: readonly string[]) => tierSecretLocations(
-              query,
-              searchedCorpora.flatMap((corpusId) => {
-                const scope = searchScopes.get(corpusId);
-                return scope ? [{ corpusId, ...scope }] : [];
-              }),
-            ),
-            classificationCoverage: (searchedCorpora: readonly string[]) => searchedCorpora.flatMap((corpusId) => {
-              const lane = tierLanes.find((candidate) => candidate.corpusIds.has(corpusId));
-              if (!lane) return [];
-              try {
-                const held = lane.ledger.corpusCopyCounts(corpusId).held;
-                return held > 0 ? [{ corpusId, pendingClassificationItems: held }] : [];
-              } catch {
-                return [];
-              }
-            }),
-            adapters: {
-              ...Object.fromEntries(
-                readConnectorStores
-                  .flatMap((store) => {
-                    const adapter = connectorStoreAdapter(store);
-                    return adapter ? [[store.corpusId, adapter] as const] : [];
-                  }),
-              ),
-            },
-            contentProviders: {
-              ...Object.fromEntries(
-                readConnectorStores
-                  .flatMap((store) => {
-                    const mandatoryScope = connectorStoreReadScope(store);
-                    // Built whenever names are searchable, even with no
-                    // content scope at all: an item in a Names-only folder
-                    // then reports as kept unread by choice, not unreadable.
-                    // Passage ranking by embedding rides only a hybrid
-                    // request, where the vector lane already embedded the
-                    // query (memoized), so it costs no second forward pass.
-                    const passageEmbedding = request.retrieval_mode === 'hybrid' ? requestEmbedding(store) : undefined;
-                    return mandatoryScope.allowed
-                      ? [[store.corpusId, createConnectorStoreContentProvider({
-                          store,
-                          ...(passageEmbedding ? { embeddingProvider: passageEmbedding } : {}),
-                          ...(mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {}),
-                          ...(mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {}),
-                          ...(mandatoryScope.filters ? { metadataFilters: mandatoryScope.filters } : {}),
-                          contentAllowed: mandatoryScope.contentAllowed !== false,
-                        })] as const]
-                      : [];
-                  }),
-              ),
-            },
-          };
-        },
+            return connectorStoreAnswerScope({ store, request, ...(principal ? { principal } : {}) });
+          },
+          accountScope: (store) => connectorStoreAccountScopes.get(store.corpusId),
+          semanticRelevanceBar: (store) => (store.corpusId === X_BOOKMARKS_CORPUS_ID ? xBookmarksSemanticRelevanceBar : undefined),
+          visibilityGate: tierVisibilityGate,
+          secretLocations: tierSecretLocations,
+          heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0,
+        }),
       });
     })()
     : undefined;
@@ -4398,6 +4306,9 @@ export async function main(): Promise<void> {
   // Built further down, once the ChatGPT surface exists; the worker only
   // calls it per request.
   let dashboardPanelTools: DashboardPanelTools | undefined;
+  // Private answers on this computer (local-private-answers.ts); built below,
+  // beside the waiting-question store and the built-in model.
+  let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
@@ -4475,6 +4386,18 @@ export async function main(): Promise<void> {
                 return dashboardPanelTools.call(name, args, context);
               },
             },
+            // Private answers on this computer; bound late like the panel's tools.
+            ...(sourceAnswerLanes
+              ? {
+                  privateAnswers: {
+                    waiting: () => localPrivateAnswers?.waiting(),
+                    waitingCount: () => localPrivateAnswers?.waitingCount() ?? 0,
+                    handle: (body, session) => (localPrivateAnswers
+                      ? localPrivateAnswers.handle(body, session)
+                      : Promise.resolve({ status: 503, body: { ok: false, error: { code: 'unavailable', message: 'Olympus is still starting. Try again in a moment.' } } })),
+                  },
+                }
+              : {}),
             // Outside help (consults): the Mac dashboard card's backend, the
             // one caller of the settings writer; bound late like the panel's tools.
             consult: {
@@ -4554,6 +4477,7 @@ export async function main(): Promise<void> {
     createInProcessOperationContext,
     createRemoteMcpHandler,
     lazyRemoteConnectionStore,
+    withRemoteFailureBoundary,
     withRemoteMcpRoute,
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
@@ -4582,6 +4506,41 @@ export async function main(): Promise<void> {
     openRemoteConnectionStore,
   );
   dashboardAgentStore = remoteConnections;
+  // Questions waiting on a Private answer (core/waiting-private-questions.ts):
+  // beside the connection store, owner-only, opened on first use (retried a
+  // minute after a failed open). The connection store is the authority on
+  // which connections are active: a recording for any other is refused, and
+  // records of a connection revoked while this worker was down, or whose
+  // revoking process could not clean up, are dropped on open and on every
+  // re-check pass.
+  const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
+  const connectionActive = (connectionId: string): boolean => {
+    const connections = remoteConnections();
+    if (!connections) throw new Error('remote connection store unavailable');
+    return connections.list().some((connection) => connection.id === connectionId && connection.revokedAt === null);
+  };
+  let waitingStore: import('../../core/waiting-private-questions.ts').WaitingQuestionStore | undefined;
+  let waitingStoreRetryAt = 0;
+  let waitingStoreClosed = false;
+  const waitingQuestionStore = () => {
+    if (waitingStore || waitingStoreClosed || Date.now() < waitingStoreRetryAt) return waitingStore;
+    try {
+      const store = openWaitingPrivateQuestionStore(
+        waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(process.env)),
+        { isActive: connectionActive },
+      );
+      try {
+        store.reconcileConnections(connectionActive);
+      } catch {
+        // Retried on the next re-check pass.
+      }
+      waitingStore = store;
+    } catch {
+      waitingStoreRetryAt = Date.now() + 60_000;
+      console.warn('[olympus] waiting private questions store unavailable');
+    }
+    return waitingStore;
+  };
   // The panel's remote-access line: the address this worker serves right now,
   // explained by the relay status `olympus connections status` prints.
   const { demoInstallMarked, readRemoteAccessStatus, remoteAccessDir, remoteAccessStatusView, resolveRemoteAccessUrls } = await import('../../core/remote-access.ts');
@@ -4661,6 +4620,20 @@ export async function main(): Promise<void> {
   const privateEvidenceEligible = async (items: readonly Readonly<Record<string, unknown>>[]) => (sourceAnswerLanes
     ? checkPrivateEvidenceItems({ lanes: sourceAnswerLanes, items })
     : items.map(() => false));
+  // "Open on this Mac" for a cited file: macOS `open`, on a path this engine
+  // resolved for a cited source (never a path from the request), checked
+  // again now: no symlink, still inside a Dropbox folder, and only a
+  // document type opens; anything else is revealed in Finder.
+  const openCitedFile = process.platform === 'darwin'
+    ? (path: string) => new Promise<void>((resolve, reject) => {
+        const args = localOpenArguments(path, localDropboxRoots());
+        if (!args) {
+          reject(new Error('open refused'));
+          return;
+        }
+        execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+      })
+    : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: workerBuiltInModel?.model,
     eligible: privateEvidenceEligible,
@@ -4697,23 +4670,50 @@ export async function main(): Promise<void> {
     // While an analysis runs (from the search) and from a claim to
     // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
-    // The panel's "open on this Mac": macOS `open`, on a path this engine
-    // resolved for a cited source (never a path from the request), checked
-    // again now: no symlink, still inside a Dropbox folder, and only a
-    // document type opens; anything else is revealed in Finder.
-    ...(process.platform === 'darwin'
-      ? {
-          openFile: (path: string) => new Promise<void>((resolve, reject) => {
-            const args = localOpenArguments(path, localDropboxRoots());
-            if (!args) {
-              reject(new Error('open refused'));
-              return;
-            }
-            execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
-          }),
-        }
-      : {}),
+    // The panel's seen ack clears the waiting question it answered (same
+    // id, generation and connection; a re-asked question survives).
+    acknowledge: (ref) => {
+      waitingQuestionStore()?.acknowledge(ref);
+    },
+    ...(openCitedFile ? { openFile: openCitedFile } : {}),
   });
+  // Private answers on this computer (design background-agents.md, section
+  // B): Ask privately, and Answer on a question waiting here. Planning none,
+  // retrieval through the same scoped adapters with only the built-in
+  // embedding model, synthesis by the built-in model; no connector query, no
+  // cloud route, and never zkAPI.
+  if (sourceAnswerLanes) {
+    const { createLocalAnswerPath, createLocalPrivateAnswers } = await import('./local-private-answers.ts');
+    const { DASHBOARD_SUPPORTED_SOURCES } = await import('../source-dashboard.ts');
+    // "Left out: Gmail": a corpus named by the dashboard card it belongs to.
+    const sourceName = (corpusId: string): string | undefined => {
+      const sourceId = sourceCorpusRegistry.list().find((corpus) => corpus.corpusId === corpusId)?.sourceId;
+      if (!sourceId) return undefined;
+      return DASHBOARD_SUPPORTED_SOURCES.find((source) => source.corpus_source_ids.includes(sourceId))?.label;
+    };
+    const local = createLocalAnswerPath({
+      lanes: sourceAnswerLanes,
+      model: workerBuiltInModel?.model,
+      available: () => workerBuiltInModel?.available() ?? false,
+      relevanceEmbedding: () => builtInEmbeddingOnly(secureLocalPolicyEmbeddingProvider ?? sourceIndexEmbeddingProvider, loadedBuiltInEmbedding),
+      sourceLinks: (item) => {
+        const provenance = item.provenance as { sourceItem?: { provider?: unknown }; citation?: { uri?: unknown } } | undefined;
+        const provider = provenance?.sourceItem?.provider;
+        const locator = provenance?.citation?.uri;
+        if (typeof provider !== 'string' || typeof locator !== 'string') return undefined;
+        return Object.hasOwn(sourceOpenTargets, provider) ? sourceOpenTargets[provider]!(locator) : undefined;
+      },
+      sourceName,
+    });
+    localPrivateAnswers = createLocalPrivateAnswers({
+      // The built-in model serves one question at once: an answer preempts the sniffer.
+      answer: (input) => answerActivity.run(() => local.answer(input)),
+      store: waitingQuestionStore,
+      connectionName: (connectionId) => remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
+      eligible: local.eligible,
+      ...(openCitedFile ? { openFile: openCitedFile } : {}),
+    });
+  }
   // The private question panel's jobs (chatgpt/private-question-jobs.ts):
   // the sealed question runs the same ask lane as the ask_anonymously tool,
   // with the caller placed as OpenAI-hosted, since ChatGPT opened the panel.
@@ -4852,16 +4852,47 @@ export async function main(): Promise<void> {
       };
     }
   }
+  // The same ledgers and the same derivative posture the answer handler
+  // uses, read when a remote agent collects an answer: an item the answer
+  // read that was reclassified since it was written is caught there.
+  const remoteReleaseCheck = createReleaseTierCheck(
+    () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+    () => secureDerivativeDefault ?? 'allow',
+  );
+  // The Private part of a remote agent's answer (core/remote-private-part.ts):
+  // when the answer left Private out, a metadata-only local probe over the
+  // same selectors decides whether the question waits on this computer.
+  // "Couldn't check yet" records are re-probed here every ten minutes.
+  const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
+  const remotePrivateParts = createRemotePrivateParts({
+    probe: (request, timeoutMs) => (sourceAnswerLanes
+      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs })
+      : Promise.resolve('unknown' as const)),
+    store: waitingQuestionStore,
+    isActive: connectionActive,
+  });
+  const uncheckedRetry = setInterval(() => {
+    void remotePrivateParts.retryUnchecked().catch(() => undefined);
+  }, 10 * 60_000);
+  uncheckedRetry.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
-    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => createInProcessOperationContext({
-      config: olympusConfig,
-      sourceIndexReadEnabled,
-      workerFetch: worker.fetch,
-      caller,
-      signal,
-      sourceAnswerJobs,
+    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
+      ...createInProcessOperationContext({
+        config: olympusConfig,
+        sourceIndexReadEnabled,
+        workerFetch: worker.fetch,
+        caller,
+        signal,
+        sourceAnswerJobs,
+      }),
+      // The remote output boundary revalidates a collected answer's release
+      // manifest against the tier ledgers and release rules as they are now
+      // (core/remote-result.ts).
+      releaseCheck: remoteReleaseCheck,
+      // Summary-rule agents only: the ChatGPT surface records through its own path (chatgpt/mcp-surface.ts).
+      ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
     }),
   };
   // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as
@@ -5010,6 +5041,16 @@ export async function main(): Promise<void> {
         });
       }
     : undefined;
+  // The same search for every other remote agent, with the tiers read once
+  // more right before the result leaves (workers/remote-search.ts).
+  const remoteEvidenceSearch = sourceAnswerLanes
+    ? async (input: { question: string; limit?: number }) => searchReleasedEvidence({
+        lanes: sourceAnswerLanes!,
+        question: input.question,
+        ...(input.limit ? { maxResults: input.limit } : {}),
+        releaseCheck: remoteReleaseCheck,
+      })
+    : undefined;
   // Which Private items match, for the private answer panel: the shared
   // EvidencePack build over Private corpora only, so each item carries its
   // own passages, read from the local store. The candidates go only to the
@@ -5078,6 +5119,7 @@ export async function main(): Promise<void> {
     setup: chatgptSetup,
     ...(chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {}),
     ...(chatgptPrivateMatchProbe ? { privateMatchProbe: chatgptPrivateMatchProbe } : {}),
+    waitingQuestions: waitingQuestionStore,
     answerModelAvailable: chatgptAnswerModelAvailable,
     embedding: chatgptEmbeddingState,
     privateModel: chatgptPrivateModelState,
@@ -5111,6 +5153,7 @@ export async function main(): Promise<void> {
       return runtime.state === 'unknown' ? undefined : runtime.overrideOn;
     },
     unreadableFiles: () => unreadableFiles,
+    waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
   });
 
   const server = Bun.serve({
@@ -5141,8 +5184,11 @@ export async function main(): Promise<void> {
         demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,
       }),
-      withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(
-        createRemoteMcpHandler({
+      // Each remote agent route sits inside its own exception boundary, so a
+      // failure there is a fixed JSON error, never the runtime's error page;
+      // the worker-bearer routes keep their own handling.
+      withRemoteOpenApiRoutes(withRemoteFailureBoundary(remoteOpenApi), withRemoteMcpRoute(
+        withRemoteFailureBoundary(createRemoteMcpHandler({
           ...remoteAgentOptions,
           // Relayed requests get the ChatGPT surface (docs/design/chatgpt-plugin.md):
           // the hosted relay is the ChatGPT path, and the relay marker must
@@ -5151,12 +5197,18 @@ export async function main(): Promise<void> {
           // self-registered connections keep the remote operation surface; a
           // demo sign-in grant gets the read-only tools. The dashboard tool
           // reads the view `/dashboard.json` serves, in-process.
+          // Every other caller (Claude, Grok, Grok Bot or Cursor, keys)
+          // gets the same evidence search, so it can answer on an install
+          // with no answer model (workers/remote-search.ts).
+          ...(remoteEvidenceSearch
+            ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } }
+            : {}),
           chatgpt: {
             servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),
             readOnlyFor: isDemoGrant,
             ...chatgptSurface,
           },
-        }),
+        })),
         withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),
       )),
     )))),
@@ -5228,6 +5280,12 @@ export async function main(): Promise<void> {
     // The built-in transcriber's server, if this process started one.
     stopBuiltInModelOnShutdown(runningBuiltInTranscriber());
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
+    // The re-check timer, any pass or settle in flight, then the store.
+    clearInterval(uncheckedRetry);
+    remotePrivateParts.close();
+    waitingStoreClosed = true;
+    waitingStore?.close();
+    waitingStore = undefined;
     worker.close();
     sourceScheduler?.stop();
     void server.stop();

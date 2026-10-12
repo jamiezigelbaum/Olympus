@@ -5,6 +5,7 @@
  */
 import type { BucketSpec } from '../shared/rate-limit.ts';
 import { KeyedCounter, KeyedTokenBuckets } from '../shared/rate-limit.ts';
+import type { CredentialSurface } from '../shared/tokens.ts';
 
 export interface RelayLimits {
   /** New install registrations per address (IPv6 by /48; burst, refill). */
@@ -351,10 +352,12 @@ export function createInstallAdmission(limits: RelayLimits, now?: () => number):
 
 /**
  * Credentials an install's engine has confirmed, by digest, for a bounded
- * time. Only an admission hint: the engine still checks every request.
+ * time, with the tool surface the engine named for each. Only an admission
+ * hint and the choice of offline answers: the engine still checks every
+ * request.
  */
 export class ConfirmedCredentials {
-  private readonly entries = new Map<string, number>();
+  private readonly entries = new Map<string, { expiresAt: number; surface: CredentialSurface | undefined }>();
 
   constructor(
     private readonly ttlMs: number,
@@ -363,24 +366,33 @@ export class ConfirmedCredentials {
   ) {}
 
   has(key: string): boolean {
-    const expiresAt = this.entries.get(key);
-    if (expiresAt === undefined) return false;
-    if (expiresAt <= this.now()) {
-      this.entries.delete(key);
-      return false;
-    }
-    return true;
+    return this.live(key) !== undefined;
   }
 
-  add(key: string): void {
+  /** The surface the engine named for a live confirmed credential, if any. */
+  surface(key: string): CredentialSurface | undefined {
+    return this.live(key)?.surface;
+  }
+
+  add(key: string, surface?: CredentialSurface): void {
     this.entries.delete(key);
-    this.entries.set(key, this.now() + this.ttlMs);
+    this.entries.set(key, { expiresAt: this.now() + this.ttlMs, surface });
     // Map order is insertion order: the first entry is the oldest.
     while (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value!);
   }
 
   delete(key: string): void {
     this.entries.delete(key);
+  }
+
+  private live(key: string): { expiresAt: number; surface: CredentialSurface | undefined } | undefined {
+    const entry = this.entries.get(key);
+    if (entry === undefined) return undefined;
+    if (entry.expiresAt <= this.now()) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return entry;
   }
 }
 

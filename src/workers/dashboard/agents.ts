@@ -1,16 +1,27 @@
 /**
- * Setup's Agents section: remote access (with Turn on and Turn off),
- * "Connect an agent", and the agents already connected.
+ * The Agents page on this computer (On this computer → Agents): remote access
+ * (with Turn on and Turn off), "Connect an agent", and the agents already
+ * connected.
  *
  * Written for the owner, not a developer (owner ruling, 2026-09-03): the owner
  * picks the agent they use and gets that agent's own steps, with every address
  * and snippet behind a copy button. The method follows the agent:
  *
- * - Claude, ChatGPT and Grok add Olympus as a connector and approve it on the
- *   Olympus approval page with a one-time pairing code minted right here.
- * - Muse and the Grok API take an address plus a key; Create key shows the key
- *   once.
+ * - Through the Olympus relay (the default) ChatGPT, Claude and Grok connect:
+ *   the relay registers only their pinned clients and routes no keys.
+ *   Approval is one click on Olympus's page in this computer's browser, with
+ *   no pairing code.
+ * - Through a tunnel the owner runs (`remote.publicBaseUrl`), Claude, ChatGPT
+ *   and Grok add Olympus as a connector and approve it on the Olympus approval
+ *   page with a one-time pairing code minted right here; the Grok API takes
+ *   an address plus a key, and Create key shows the key once. Under the
+ *   relay the Grok API and other agents say they need such a tunnel, and show
+ *   no steps that cannot work.
  * - Claude Code and Codex on this computer run `olympus serve` locally.
+ *
+ * Muse is not offered (owner decision, 2026-10-12): consumer Muse adds
+ * connectors only from Meta's catalog, so it waits for an Olympus catalog
+ * connector (docs/design/background-agents.md, build step 5).
  *
  * Pairing codes and keys never enter this markup. The controller puts them
  * into a read-only field after the control route answers, and clears it on
@@ -48,6 +59,10 @@ interface AgentChoice {
   keyUse?: string;
   /** Where the when-to-ask instructions go for this agent. */
   instructionsWhere: string;
+  /** Connects through the Olympus relay: ChatGPT, Claude and Grok only (connect-relay/server/client-registration.ts). */
+  viaRelay?: true;
+  /** Relay oauth agents: what happens after the address is saved; approval is one click, with no pairing code. */
+  approveViaRelay?: string;
 }
 
 const AGENTS: readonly AgentChoice[] = [
@@ -58,7 +73,9 @@ const AGENTS: readonly AgentChoice[] = [
     method: 'oauth',
     add: 'In Claude, open Customize, then Connectors. Choose +, then Add custom connector, name it Olympus, and paste this address as the URL:',
     approve: 'Choose Add, then Connect on the Olympus connector. An Olympus approval page opens, on your phone too.',
+    approveViaRelay: 'Choose Add, then Connect on the Olympus connector. An Olympus page opens in this computer\'s browser asking to connect Claude to Olympus: choose Connect. Do this in Claude on this computer; the page opens only here. After that, Olympus works in Claude on your phone too.',
     instructionsWhere: 'Paste this into a Claude project\'s instructions.',
+    viaRelay: true,
   },
   {
     id: 'chatgpt',
@@ -66,25 +83,20 @@ const AGENTS: readonly AgentChoice[] = [
     method: 'oauth',
     add: 'In ChatGPT, open Settings, then Apps, and turn on Developer mode under Advanced settings. Then create a connector, name it Olympus, choose OAuth, and paste this address as the URL:',
     approve: 'Choose Create. An Olympus approval page opens.',
+    approveViaRelay: 'Choose Create. An Olympus page opens in this computer\'s browser asking to connect ChatGPT to Olympus: choose Connect. Do this in ChatGPT on this computer; the page opens only here.',
     instructionsWhere: 'Paste this into a ChatGPT project\'s instructions, or into your custom instructions.',
+    viaRelay: true,
   },
   {
     id: 'grok',
-    label: 'Grok or Grok Bot',
+    label: 'Grok',
+    detail: 'grok.com',
     method: 'oauth',
     add: 'In Grok, go to grok.com/connectors, choose New Connector, then Custom, and paste this address as the MCP server URL:',
     approve: 'Continue to sign in. An Olympus approval page opens.',
-    instructionsWhere: 'Paste this into your Grok Bot\'s skills or into Grok\'s custom instructions.',
-  },
-  {
-    id: 'muse',
-    label: 'Muse',
-    method: 'key',
-    keyName: 'Muse',
-    address: 'openapi',
-    add: 'In Muse, ask it to create a custom connector for Olympus, and give it this OpenAPI address:',
-    keyUse: 'When Muse asks for credentials, give it the key as a bearer token.',
-    instructionsWhere: 'Paste this into Muse\'s instructions for the Olympus connector.',
+    approveViaRelay: 'Continue to sign in. An Olympus page opens in this computer\'s browser asking to connect Grok to Olympus: choose Connect. Do this on grok.com on this computer; the page opens only here.',
+    instructionsWhere: 'Paste this into Grok\'s custom instructions.',
+    viaRelay: true,
   },
   {
     id: 'grok-api',
@@ -114,17 +126,19 @@ const AGENTS: readonly AgentChoice[] = [
 
 const LOCAL_AGENT_PROMPT = [
   'Add Olympus to this coding agent as a local MCP server.',
-  'Find the installed plugin with `openclaw plugins inspect olympus --json` and take `plugin.rootDir`.',
+  'First find the full path of the olympus command:',
+  '- If `openclaw plugins inspect olympus --json` finds the plugin, it is `<plugin.rootDir>/bin/olympus`.',
+  '- Otherwise Olympus was installed with its Mac installer, and it is `$HOME/.local/bin/olympus` with $HOME written out. Check that the file exists.',
   'Then run the one command for this tool:',
-  '- Claude Code: `claude mcp add olympus -- <rootDir>/bin/olympus serve`',
-  '- Codex: `codex mcp add olympus -- <rootDir>/bin/olympus serve`',
+  '- Claude Code: `claude mcp add olympus -- <olympus path> serve`',
+  '- Codex: `codex mcp add olympus -- <olympus path> serve`',
   'Do not change any other configuration. Afterwards, list the Olympus tools to confirm source_answer is there.',
 ].join('\n');
 
-const CLAUDE_CODE_SNIPPET = 'claude mcp add olympus -- <plugin folder>/bin/olympus serve';
+const CLAUDE_CODE_SNIPPET = 'claude mcp add olympus -- <olympus path> serve';
 const CODEX_SNIPPET = [
   '[mcp_servers.olympus]',
-  'command = "<plugin folder>/bin/olympus"',
+  'command = "<olympus path>"',
   'args = ["serve"]',
 ].join('\n');
 
@@ -141,7 +155,7 @@ export function renderDashboardAgentsSection(input: DashboardAgentsSectionInput)
     remoteAccessRow(view.remoteAccess),
     setupRow({
       label: 'Connect an agent',
-      blurb: 'Let Claude, ChatGPT, Grok, Muse or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.',
+      blurb: 'Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.',
       action: { label: 'Connect an agent', kind: 'none', sheet: AGENT_CONNECT_SHEET_ID, primary: true },
     }),
     connectSheet(view.remoteAccess),
@@ -220,16 +234,35 @@ function connectSheet(access: DashboardRemoteAccess): string {
 }
 
 function agentChoice(agent: AgentChoice, access: DashboardRemoteAccess): string {
-  const detail = agent.detail ? ` <span class="hint">${escapeHtml(agent.detail)}</span>` : '';
+  const hints = [agent.detail, needsOwnTunnel(agent, access) ? 'needs your own tunnel' : undefined].filter(Boolean).join(' · ');
+  const detail = hints ? ` <span class="hint">${escapeHtml(hints)}</span>` : '';
   return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">`
     + `<summary><span class="name">${escapeHtml(agent.label)}</span>${detail}</summary>`
     + `<div class="agentbody">${agentBody(agent, access)}</div>`
     + `</details>`;
 }
 
+/** Remote access runs through a tunnel the owner runs, not the Olympus relay. */
+function ownTunnel(access: DashboardRemoteAccess): boolean {
+  return access.state === 'on' && (access.ownTunnel === true || access.setBy === 'worker_env');
+}
+
+/** A cloud agent the relay cannot serve, while remote access is not through the owner's own tunnel. */
+function needsOwnTunnel(agent: AgentChoice, access: DashboardRemoteAccess): boolean {
+  return agent.method !== 'local' && !agent.viaRelay && !ownTunnel(access);
+}
+
 function agentBody(agent: AgentChoice, access: DashboardRemoteAccess): string {
   if (agent.method === 'local') return localBody(agent);
+  if (needsOwnTunnel(agent, access)) return tunnelNeeded() + instructionsStep(agent, false);
   if (access.state !== 'on') return remoteUnavailable(access) + instructionsStep(agent, false);
+  if (agent.method === 'oauth' && !ownTunnel(access) && agent.approveViaRelay) {
+    return `<ol class="steps">`
+      + `<li>${escapeHtml(agent.add ?? '')}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, 'Copy address')}</li>`
+      + `<li>${escapeHtml(agent.approveViaRelay)}</li>`
+      + `<li>${instructionsStep(agent, true)}</li>`
+      + `</ol>`;
+  }
   if (agent.method === 'oauth') {
     return `<ol class="steps">`
       + `<li>${escapeHtml(agent.add ?? '')}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, 'Copy address')}</li>`
@@ -260,12 +293,20 @@ function localBody(agent: AgentChoice): string {
   return `<p>These run on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>`
     + copyBox('agent-local-prompt', LOCAL_AGENT_PROMPT, 'Copy prompt', true)
     + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>`
-    + `<p>The plugin folder is the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>`
+    + `<p>The olympus path is the full path of the olympus command. On a Mac set up with the Olympus installer it is <b>~/.local/bin/olympus</b>, written out from your home folder. With OpenClaw it is <b>bin/olympus</b> inside the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>`
     + copyBox('agent-local-claude', CLAUDE_CODE_SNIPPET, 'Copy command')
     + `<p>For Codex, add this to ~/.codex/config.toml:</p>`
     + copyBox('agent-local-codex', CODEX_SNIPPET, 'Copy snippet')
     + `</details>`
     + instructionsStep(agent, false);
+}
+
+/** For agents the relay cannot serve. Remote access may be on (through the relay), off, or not connected. */
+function tunnelNeeded(): string {
+  const text = 'Olympus\'s relay connects only ChatGPT, Claude and Grok, so this agent needs a tunnel you run yourself. '
+    + 'Advanced: set remote.publicBaseUrl in Olympus\'s settings to your tunnel\'s https address and turn on remote access; this agent\'s steps then appear here. '
+    + 'Claude Code and Codex on this computer need no tunnel.';
+  return `<p class="why" data-agent-needs-tunnel>${escapeHtml(text)}</p>`;
 }
 
 function remoteUnavailable(access: DashboardRemoteAccess): string {

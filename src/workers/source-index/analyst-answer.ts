@@ -53,13 +53,17 @@ import {
   type ReleaseDecision,
   type StructuredEvidenceFact,
 } from '../../core/opsec.ts';
+import { recordReleaseManifest, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
+import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
-import type {
-  SourceIndexCorpusSearchAdapter,
-  SourceIndexRouterAdapterMap,
-  SourceIndexSkippedCorpus,
-  SourceIndexVisibilityGate,
+import {
+  routeSourceIndexSearch,
+  type SourceIndexCorpusSearchAdapter,
+  type SourceIndexRoutedSearchHit,
+  type SourceIndexRouterAdapterMap,
+  type SourceIndexSkippedCorpus,
+  type SourceIndexVisibilityGate,
 } from '../../core/source-index/router.ts';
 import { mergeRetrievalDegradations } from '../../core/source-index/retrieval.ts';
 import {
@@ -123,6 +127,13 @@ export interface AnalystAnswerLanes {
   visibilityGate?: SourceIndexVisibilityGate;
   secretLocations?: (query: string, searchedCorpora: readonly string[]) => readonly SecretLocationNote[];
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
+  /**
+   * Registered corpora this request leaves without an adapter on purpose: the
+   * owner's read scope is off for them, or the request's own scope excludes
+   * them. Any other registered corpus without an adapter is unavailable
+   * retrieval, and probePrivateMatch reads it as not checked.
+   */
+  excludedCorpusIds?: ReadonlySet<string>;
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
@@ -284,6 +295,12 @@ export function createAnalystSourceIndexAnswerHandler(
       const includeInternal = request.include_internal !== false;
       const releaseSecureContent = request.include_secure_local_content === true
         || (options.secureDerivativeDefault ?? 'allow') === 'allow';
+      // The rules this answer is released under, recorded with its inputs for
+      // a caller that collects it later (core/release-manifest.ts).
+      const releaseConstraints: ReleaseConstraints = {
+        secureDerivativeDefault: options.secureDerivativeDefault ?? 'allow',
+        includeSecureLocalContent: request.include_secure_local_content === true,
+      };
 
       const laneSetupStartedAt = Date.now();
       // Hybrid is the shared product default: an adapter with approved current
@@ -331,6 +348,8 @@ export function createAnalystSourceIndexAnswerHandler(
         };
         recordSourceAnswerPhaseTimings(phaseTimings);
         recordSourceAnswerReleaseDecision(decision.decision);
+        // Nothing was read: the answer is the fixed approval sentence.
+        recordReleaseManifest({ inputs: [], constraints: releaseConstraints });
         return {
           answer: answerForReleaseDecision(decision),
           evidence: [],
@@ -589,6 +608,8 @@ export function createAnalystSourceIndexAnswerHandler(
         total_ms: totalLatencyMs,
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
+      // Every item the analysed pack held, cited or not.
+      recordReleaseManifest({ inputs: releaseInputs(detail), constraints: releaseConstraints });
       return {
         answer,
         evidence: released
@@ -681,6 +702,23 @@ export function createAnalystSourceIndexAnswerHandler(
       };
     },
   };
+}
+
+/**
+ * The analysed pack's items, each with its account and whether it was Private.
+ */
+function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
+  return detail.pack.candidates.map((candidate, index) => {
+    const item = candidate.provenance.sourceItem;
+    return {
+      corpusId: detail.candidateCorpusIds[index] ?? '',
+      provider: item.provider,
+      accountScope: item.accountScope ?? '',
+      providerItemId: item.providerItemId,
+      ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
+      privateAtAnswer: isSecureSensitivity(candidate),
+    };
+  });
 }
 
 /**
@@ -1050,7 +1088,7 @@ function createOptionalVeniceAnalyst(
   }
 }
 
-function selectedEvidenceItemsFromRequest(request: SourceIndexAnswerRequest): SelectedEvidenceItem[] {
+export function selectedEvidenceItemsFromRequest(request: SourceIndexAnswerRequest): SelectedEvidenceItem[] {
   return (request.selected_items ?? []).map((item) => {
     const selected: SelectedEvidenceItem = {
       // selected_items carries its own request-supplied corpus id, and the
@@ -2082,9 +2120,7 @@ function classificationCoverageNotes(detail: EvidencePackBuildDetail): string[] 
 function secretLocationCoverageNotes(detail: EvidencePackBuildDetail): string[] {
   const count = detail.secretLocations?.length ?? 0;
   if (count === 0) return [];
-  return [
-    `${count} Secret(s) matched by location only; their contents are never read into an answer.`,
-  ];
+  return [secretLocationCoverageNote(count)];
 }
 
 function composeReleasedAnswer(answer: string, unanswered: readonly string[]): string {
@@ -2524,6 +2560,36 @@ export interface ReleasedEvidenceResult {
 
 const RELEASED_EXCERPT_MAX_CHARS = 1_500;
 
+/**
+ * Keeps only the items still Public or Personal now: one read of the current
+ * tiers for every listed item. Private, Secrets, gone and unprovable items are
+ * withheld (counted). A check that throws, or answers for the wrong number of
+ * items, fails closed.
+ */
+function recheckReleasedEvidence(
+  evidence: readonly ReleasedEvidenceItem[],
+  identities: readonly ReleaseInput[],
+  check: ReleaseCheck,
+): { evidence: ReleasedEvidenceItem[]; withheld: number } {
+  if (evidence.length === 0) return { evidence: [], withheld: 0 };
+  let verdicts: ReturnType<ReleaseCheck['inputs']>;
+  try {
+    verdicts = check.inputs(identities);
+  } catch (error) {
+    console.error(`[olympus:search] release_check_failed error_message=${JSON.stringify((error instanceof Error ? error.message : String(error)).slice(0, 200))}`);
+    throw new OperationError('source_index_policy_violation', 'The current tiers could not be read.');
+  }
+  if (verdicts.length !== identities.length) {
+    throw new OperationError('source_index_policy_violation', 'The tier check answered for the wrong number of items.');
+  }
+  const kept: ReleasedEvidenceItem[] = [];
+  evidence.forEach((item, index) => {
+    const verdict = verdicts[index]!;
+    if (!verdict.gone && (verdict.tier === 'public_or_personal' || verdict.tier === 'legacy')) kept.push(item);
+  });
+  return { evidence: kept, withheld: evidence.length - kept.length };
+}
+
 export async function searchReleasedEvidence(input: {
   lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
   question: string;
@@ -2531,6 +2597,14 @@ export async function searchReleasedEvidence(input: {
   maxCharsPerCandidate?: number;
   evidenceByteBudget?: number;
   laneTimeoutMs?: number;
+  /**
+   * The current tiers, read once more after every item is read and right
+   * before the result is returned: an item moved to Private or Secrets (or
+   * gone) while the search ran is withheld, and so is one whose tier cannot
+   * be proven. A check that cannot be read fails the whole search. Absent:
+   * the tiers seen when each item was selected (the ChatGPT surface).
+   */
+  releaseCheck?: ReleaseCheck;
 }): Promise<ReleasedEvidenceResult> {
   const question = input.question.trim();
   if (!question) throw new OperationError('invalid_params', 'A question is required.');
@@ -2560,6 +2634,8 @@ export async function searchReleasedEvidence(input: {
   });
   assertEvidencePackModelEligible(detail.pack);
   const evidence: ReleasedEvidenceItem[] = [];
+  // Each listed item's identity, account included, for the final tier check.
+  const identities: ReleaseInput[] = [];
   let withheld = 0;
   const seen = new Set<string>();
   // A match whose name is Personal but whose contents are tiered Private is
@@ -2603,6 +2679,14 @@ export async function searchReleasedEvidence(input: {
       withheld += 1;
       return;
     }
+    identities.push({
+      corpusId,
+      provider: item.provider,
+      accountScope: item.accountScope ?? '',
+      providerItemId: item.providerItemId,
+      ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
+      privateAtAnswer: false,
+    });
     evidence.push(withoutSecretLikeLabels({
       corpus_id: corpusId,
       trust_domain: candidate.trustDomain,
@@ -2618,9 +2702,11 @@ export async function searchReleasedEvidence(input: {
       ...(fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true as const } : {}),
     }));
   });
+  const released = input.releaseCheck ? recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  withheld += released.withheld;
   const coverage = detail.pack.coverage;
   return {
-    evidence,
+    evidence: released.evidence,
     withheld,
     coverage: {
       searched_corpora: coverage.searchedCorpora.length,
@@ -2758,6 +2844,123 @@ async function privateNeighbours(
     }).slice(0, PRIVATE_NEIGHBOURS_MAX).map((candidate) => ({ ...candidate, neighbour: true as const }));
   } catch {
     return [];
+  }
+}
+
+/**
+ * Whether anything Private matches a request, for a remote agent's answer
+ * that left Private out (the owner's policy, an approval it needs, or an
+ * unavailable private route): see core/remote-private-part.ts. Metadata only,
+ * under the request's own selectors (corpora, query, and the account and
+ * filters its scoped lanes apply), restricted to Private (secure_local)
+ * corpora:
+ * - a search runs through each adapter's metadataMatches (router.ts), which
+ *   reads no item text, then the tier visibility gate;
+ * - selected items are resolved through each adapter's selectedItemServable
+ *   (the item is that corpus's live item, in scope, with its content served
+ *   at its current tier), then the same gate; a caller-supplied identity
+ *   alone never matches.
+ * The retrieval mode is the request's effective one, as the answer handler
+ * resolves it: hybrid unless the request pinned keyword.
+ * No content provider is used, nothing reaches a model and no query leaves
+ * this computer. `unknown` when a Private corpus in scope was not checked
+ * (no adapter that the lanes did not exclude on purpose, an adapter that
+ * cannot match without reading text, a lane timeout, or a semantic lane that
+ * should have run and did not) and nothing matched elsewhere, and on a
+ * timeout or any failure. A caller must never treat
+ * `unknown` as a match. The verdict goes only to the local waiting record.
+ */
+export async function probePrivateMatch(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  request: SourceIndexAnswerRequest;
+  timeoutMs: number;
+}): Promise<'match' | 'no_match' | 'unknown'> {
+  const question = typeof input.request.question === 'string' ? input.request.question.trim() : '';
+  if (!question) return 'no_match';
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const run = async (): Promise<'match' | 'no_match' | 'unknown'> => {
+    const request: SourceIndexAnswerRequest = {
+      ...input.request,
+      question,
+      // The answer's own effective mode: hybrid unless the request pinned one.
+      retrieval_mode: input.request.retrieval_mode ?? 'hybrid',
+      include_internal: false,
+      include_secure_local: true,
+      include_secure_local_content: false,
+    };
+    const lanes = input.lanes(request);
+    const corpusIds = sourceAnswerCorpusIds(request);
+    const excluded = lanes.excludedCorpusIds ?? new Set<string>();
+    const gate = (hits: SourceIndexRoutedSearchHit[]) => (lanes.visibilityGate ? lanes.visibilityGate(hits) : hits);
+    if (request.selected_items?.length) {
+      let unchecked = false;
+      const hits: SourceIndexRoutedSearchHit[] = [];
+      for (const selected of selectedEvidenceItemsFromRequest(request)) {
+        const corpus = lanes.registry.get(selected.corpusId);
+        if (!corpus || corpus.trustDomain !== 'secure_local') continue;
+        if (corpusIds && !corpusIds.includes(corpus.corpusId)) continue;
+        const adapter = lanes.adapters[corpus.corpusId];
+        if (!adapter) {
+          if (!excluded.has(corpus.corpusId)) unchecked = true;
+          continue;
+        }
+        if (!adapter.selectedItemServable) {
+          unchecked = true;
+          continue;
+        }
+        if (!adapter.selectedItemServable(selected.sourceItem)) continue;
+        hits.push({
+          corpusId: corpus.corpusId,
+          trustDomain: corpus.trustDomain,
+          sourceItem: selected.sourceItem,
+          provenance: { sourceItem: selected.sourceItem },
+          score: 1,
+          rawExposed: false,
+        });
+      }
+      if (hits.length > 0 && gate(hits).length > 0) return 'match';
+      return unchecked ? 'unknown' : 'no_match';
+    }
+    const routed = await routeSourceIndexSearch({
+      registry: lanes.registry,
+      adapters: lanes.adapters,
+      request: {
+        query: request.query?.trim() || question,
+        maxResults: PRIVATE_EVIDENCE_MAX_RESULTS,
+        context: {
+          allowedTrustDomains: ['secure_local'],
+          allowCloudQueries: false,
+          metadataOnly: true,
+          ...(corpusIds ? { allowedCorpusIds: corpusIds } : {}),
+        },
+        ...(corpusIds ? { corpusIds } : {}),
+      },
+      ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+      laneTimeoutMs: input.timeoutMs,
+    });
+    if (routed.hits.some((hit) => hit.trustDomain === 'secure_local')) return 'match';
+    // A Private corpus in scope that was not searched, or searched with a lane
+    // that should have run and did not, is not a "no".
+    const unchecked = (routed.incompleteCorpora?.length ?? 0) > 0
+      || routed.skippedCorpora.some((skip) => skip.trustDomain === 'secure_local' && (
+        skip.reason === 'lane_timeout'
+        || skip.reason === 'metadata_search_unsupported'
+        || (skip.reason === 'no_adapter' && !excluded.has(skip.corpusId))
+      ));
+    return unchecked ? 'unknown' : 'no_match';
+  };
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<'unknown'>((resolve) => {
+        timer = setTimeout(() => resolve('unknown'), input.timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    return 'unknown';
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

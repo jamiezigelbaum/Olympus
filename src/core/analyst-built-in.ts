@@ -54,7 +54,7 @@ import {
 
 /** The analyst name the Private lane and the dashboard use for this model. */
 export const BUILT_IN_ANALYST_NAME = 'built_in';
-/** `on`, `off`, or unset (on for Apple-silicon Macs, off elsewhere). */
+/** `on`, `off`, or unset (on wherever a runtime is pinned: Apple-silicon Macs and Linux). */
 export const BUILT_IN_ANALYST_ENV = 'OLYMPUS_BUILT_IN_ANALYST';
 /** `auto` (default), `small`, `standard`, `large`, or an exact model id. */
 export const BUILT_IN_ANALYST_MODEL_ENV = 'OLYMPUS_BUILT_IN_ANALYST_MODEL';
@@ -100,8 +100,10 @@ export interface BuiltInAnalystModel extends AnalystModel {
 
 /**
  * Whether the built-in analyst may be offered on this machine: explicitly on
- * or off by env, otherwise on for Apple silicon (the Metal build) only, so a
- * Linux host never starts a multi-gigabyte download it did not ask for.
+ * or off by env, otherwise on wherever a llama.cpp runtime is pinned (Metal on
+ * Apple silicon, CPU on Linux). Memory decides the model size, or that there
+ * is none (`resolveBuiltInReasoningModel`); speed is the owner's call (owner
+ * decision 2026-10-12).
  */
 export function builtInAnalystEnabled(
   env: Record<string, string | undefined> = process.env,
@@ -110,8 +112,7 @@ export function builtInAnalystEnabled(
   const raw = env[BUILT_IN_ANALYST_ENV]?.trim().toLowerCase();
   if (raw === 'off' || raw === 'false' || raw === '0' || raw === 'no') return false;
   if (!runtimeArchiveFor(platform)) return false;
-  if (raw === 'on' || raw === 'true' || raw === '1' || raw === 'yes') return true;
-  return platform === 'darwin-arm64';
+  return true;
 }
 
 /** The model this machine gets, or undefined when it has too little memory. */

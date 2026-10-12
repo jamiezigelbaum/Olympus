@@ -263,6 +263,10 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/consult/writer' },
   { method: 'POST', path: '/dashboard/consult/writer/test' },
   { method: 'POST', path: '/dashboard/consult/standard' },
+  // Private answers (design background-agents.md, B): Ask privately, and
+  // Answer or Dismiss on a waiting question. Local control session only, as
+  // above (workers/http.ts DASHBOARD_PRIVATE_ANSWERS_PATH).
+  { method: 'POST', path: '/dashboard/private-answers' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [

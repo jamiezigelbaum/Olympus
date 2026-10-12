@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import { runDoctor } from '../src/core/doctor.ts';
+import { stillImageReadinessOf } from '../src/core/still-image-readiness.ts';
 import type { DoctorCheck, DoctorDeps } from '../src/core/doctor.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import {
@@ -189,6 +190,8 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
     ingestionHealthStatePath: join(stateRoot, 'source-ingestion-doctor-state.json'),
     // Never the developer's own pending OAuth connections (~/.olympus/pending-oauth).
     oauthStateDir: join(stateRoot, 'pending-oauth'),
+    // Never the host's own image tools: a fixed, fully ready answer.
+    photoSearchReadiness: () => stillImageReadinessOf(true),
     ...overrides,
   };
 }
@@ -323,6 +326,7 @@ describe('runDoctor', () => {
       'email_worker',
       'worker_credential_lanes',
       'dropbox_content_extraction_throughput',
+      'photo_search',
       'source_index_status',
       'source_scheduler_status',
       'source_ingestion_health',
@@ -1103,6 +1107,33 @@ describe('runDoctor', () => {
     expect(check.ok).toBe(true);
     expect(check.detail).toContain('WARNING');
     expect(check.detail).toContain('warning at half of 6h');
+  });
+
+  test('ocr_reading: ready names the engines; missing is red with the one command and says files are read later', async () => {
+    const run = (ocrProbe: DoctorDeps['ocrProbe']) => runDoctor(doctorDeps({
+      config: defaultConfig(),
+      delphi: healthyDelphi(),
+      ...(ocrProbe ? { ocrProbe } : {}),
+    }));
+    const ready = checkByName((await run(() => ({
+      state: 'ready', pdfEngine: 'pdftoppm + tesseract', imageEngine: 'tesseract',
+      detail: 'Scans and pictures of text are read: scanned PDFs with pdftoppm + tesseract, pictures with tesseract.',
+    }))).checks, 'ocr_reading');
+    expect(ready).toMatchObject({ ok: true });
+    expect(ready.detail).toContain('pdftoppm + tesseract');
+    expect(ready.hint).toBeUndefined();
+
+    const missing = checkByName((await run(async () => ({
+      state: 'missing',
+      detail: 'Scans and pictures of text are not read yet: tesseract is not installed.',
+      remedy: 'sudo pacman -S --needed tesseract tesseract-data-eng poppler',
+    }))).checks, 'ocr_reading');
+    expect(missing.ok).toBe(false);
+    expect(missing.hint).toContain('sudo pacman -S --needed tesseract tesseract-data-eng poppler');
+    expect(missing.hint).toContain('read again automatically');
+
+    // A deps object with no probe (every other test) runs no OCR check at all.
+    expect((await run(undefined)).checks.some((check) => check.name === 'ocr_reading')).toBe(false);
   });
 
   test('flags missing required dependencies with public repair hints', async () => {
@@ -2385,3 +2416,56 @@ async function makeDetachedOAuthStateFixture(): Promise<string> {
   process.on('exit', () => rmSync(root, { recursive: true, force: true }));
   return stateDir;
 }
+
+describe('runDoctor: photo search', () => {
+  const ARCH = 'NAME="Arch Linux"\nID=arch\n';
+  const all = ['jpeg', 'png', 'heic', 'webp', 'gif', 'tiff', 'bmp'] as const;
+
+  test('ready: said plainly, with nothing to do', async () => {
+    const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(), photoSearchReadiness: () => stillImageReadinessOf(true), osRelease: () => ARCH, platform: 'linux' }));
+    const check = checkByName(result.checks, 'photo_search');
+    expect(check.ok).toBe(true);
+    expect(check.detail).toContain('ready');
+    expect(check.hint).toBeUndefined();
+  });
+
+  test('partly ready: names the formats that stay names-only and the one command for this distro; never fails the walk', async () => {
+    const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(),
+      photoSearchReadiness: () => stillImageReadinessOf(all.filter((format) => format !== 'heic')),
+      osRelease: () => ARCH,
+      platform: 'linux',
+    }));
+    const check = checkByName(result.checks, 'photo_search');
+    expect(check.ok).toBe(true);
+    expect(check.detail).toContain('partly ready');
+    expect(check.detail).toContain('HEIC');
+    expect(check.hint).toContain('sudo pacman -S --needed libvips libheif');
+  });
+
+  test('missing: says so, with the command for a Debian machine', async () => {
+    const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(),
+      photoSearchReadiness: () => stillImageReadinessOf(false),
+      osRelease: () => 'ID=ubuntu\nID_LIKE=debian\n',
+      platform: 'linux',
+    }));
+    const check = checkByName(result.checks, 'photo_search');
+    expect(check.ok).toBe(true);
+    expect(check.detail).toContain('not available');
+    expect(check.hint).toContain('sudo apt install libvips-tools libheif-plugin-libde265');
+  });
+
+  test('a model whose image encoder did not start is reported as that, not as a missing package', async () => {
+    const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(),
+      photoSearchReadiness: () => stillImageReadinessOf(false, {
+        tool: 'vips',
+        vision: 'unavailable',
+        formats: Object.fromEntries(all.map((format) => [format, { ready: false, reason: 'vision_unavailable' }])) as never,
+      }),
+      osRelease: () => ARCH,
+      platform: 'linux',
+    }));
+    const check = checkByName(result.checks, 'photo_search');
+    expect(check.detail).toContain('image encoder');
+    expect(check.hint).not.toContain('pacman');
+  });
+});

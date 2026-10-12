@@ -138,10 +138,10 @@ describe('the relay\'s own answers on /openai/mcp', () => {
     expect(answer.result.isError).toBe(true);
     expect(answer.result._meta['mcp/www_authenticate']).toEqual(challengeFor(DIRECTORY_METADATA));
 
-    // /mcp is unchanged: its own challenge, the full list.
-    const onMcp = await (await post(relay, '/mcp', rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
-    expect(onMcp.result._meta['mcp/www_authenticate']).toEqual(challengeFor(MCP_METADATA));
-    expect((await (await post(relay, '/mcp', rpc('tools/list'))).json()).result.tools).toEqual(generatedSurface.tools);
+    // /mcp without a token answers nothing: the standard challenge, naming its own resource.
+    const onMcp = await post(relay, '/mcp', rpc('tools/list'));
+    expect(onMcp.status).toBe(401);
+    expect(onMcp.headers.get('www-authenticate')).toBe(`Bearer realm="olympus", resource_metadata="${MCP_METADATA}"`);
   });
 
   test('its own protected-resource document, same authorization server; a 401 points at it', async () => {

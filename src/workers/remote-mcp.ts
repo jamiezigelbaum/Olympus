@@ -23,7 +23,10 @@
  * (chatgpt/directory-surface.ts). `/mcp` is unchanged.
  *
  * The tool list is the `remote` operation surface (the Hermes list:
- * source_answer, source_answer_result and source_index_status). Each request is served statelessly:
+ * source_answer, source_answer_result, source_index_status and
+ * ask_anonymously), plus the evidence search `olympus_search` when the worker
+ * supplies one (workers/remote-search.ts), which also hides source_answer
+ * while no answer model is set up. Each request is served statelessly:
  * one MCP server and transport per HTTP request, JSON responses, no session.
  * The connection's identity is set as the caller by the worker, never taken
  * from the client, and lands on the answer's audit ledger entry.
@@ -34,7 +37,7 @@ import type { OlympusConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../core/email.ts';
 import { callerProviderFromLabel, markInProcessRemoteRequest, type OperationCaller } from '../core/operation-caller.ts';
-import { isChatGptGrant } from './remote-oauth/pinned-clients.ts';
+import { pinnedGrantProvider } from './remote-oauth/pinned-clients.ts';
 import type { OperationContext } from '../core/operations.ts';
 import {
   isWellFormedRemoteConnectionToken,
@@ -48,9 +51,11 @@ import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/sour
 import { createOlympusMcpServer } from '../mcp/server.ts';
 import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mcp-surface.ts';
 import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts';
+import { remoteSearchExtension, type RemoteSearchOptions } from './remote-search.ts';
 import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
-import { AUTHENTICATED_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
+import { remoteErrorOutput, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
 /** The ChatGPT plugin directory's endpoint. */
@@ -87,6 +92,11 @@ export interface RemoteMcpHandlerOptions {
     /** Whether this connection gets only the surface's read-only tools (a demo grant). */
     readOnlyFor?: (connection: RemoteMcpConnection) => boolean;
   };
+  /**
+   * The evidence search for every caller not served the ChatGPT surface
+   * (workers/remote-search.ts). Absent: the operation list alone.
+   */
+  search?: RemoteSearchOptions;
   /** Builds the directory endpoint's server (default createChatGptDirectoryMcpServer; tests narrow its allowlist). */
   directoryServer?: typeof createChatGptDirectoryMcpServer;
 }
@@ -120,12 +130,21 @@ export function withRemoteMcpRoute(
 export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (request: Request) => Promise<Response> {
   const isRelayed = options.isRelayed ?? isRelayedRequest;
   return async (request: Request): Promise<Response> => {
-    const surface = remoteMcpSurface(request) ?? 'default';
-    const verification = authenticateRemoteRequest(request, options, surface);
-    if (!verification.ok) return verification.response;
-    const response = await serveAuthenticated(request, verification, surface);
-    // Only the relay reads the mark; a direct caller never sees it.
-    return isRelayed(request) ? markAuthenticated(response) : response;
+    try {
+      const surface = remoteMcpSurface(request) ?? 'default';
+      const verification = authenticateRemoteRequest(request, options, surface);
+      if (!verification.ok) return verification.response;
+      const response = await serveAuthenticated(request, verification, surface);
+      // Only the relay reads the mark; a direct caller never sees it.
+      if (!isRelayed(request)) return response;
+      return markAuthenticated(response, options.chatgpt?.servesRequest(request, verification.connection) === true ? 'chatgpt' : 'remote');
+    } catch (error) {
+      // Anything thrown before or around the MCP transport (building the
+      // operation context, the surface choice, the transport itself) is a
+      // fixed JSON error, never the runtime's default page with the exception
+      // in it, and never carries the relay's authenticated mark.
+      return remoteFailureResponse(error);
+    }
   };
 
   async function serveAuthenticated(
@@ -136,14 +155,14 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     if (request.method !== 'POST') {
       // Stateless server: no standalone SSE stream (GET) and no session to end
       // (DELETE). A 405 is how Streamable HTTP says so.
-      return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
+      return jsonResponse(405, remoteSurfaceErrorOutput('method_not_allowed'), { Allow: 'POST' });
     }
     // Bounded read: the SDK's own `req.json()` would buffer any size of body.
     const body = await readBoundedRequestText(request);
     if (!body.ok) {
       return body.reason === 'too_large'
-        ? jsonResponse(413, { error: 'payload_too_large' })
-        : jsonResponse(400, { error: 'invalid_request' });
+        ? jsonResponse(413, remoteSurfaceErrorOutput('payload_too_large'))
+        : jsonResponse(400, remoteSurfaceErrorOutput('invalid_request'));
     }
     let parsedBody: unknown;
     try {
@@ -157,13 +176,15 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true }
       : undefined;
     // The directory endpoint serves the ChatGPT surface only.
-    if (surface === 'directory' && !chatgpt) return jsonResponse(404, { error: 'not_found' });
+    if (surface === 'directory' && !chatgpt) return jsonResponse(404, remoteSurfaceErrorOutput('not_found'));
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const server = chatgpt
       ? surface === 'directory'
         ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached)
         : createChatGptMcpServer(() => ctx, chatgpt, detached)
-      : createOlympusMcpServer('remote', () => ctx);
+      : createOlympusMcpServer('remote', () => ctx, options.search
+        ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface))
+        : undefined);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
@@ -183,11 +204,15 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
  * relay uses the mark only to keep that credential's later requests in the
  * owner's admission lane, so forged secrets cannot spend the owner's budget
  * (connect-relay/server/limits.ts); it grants nothing. Only relayed requests
- * get it, and the relay drops it before its public response.
+ * get it, and the relay drops it before its public response. The surface
+ * mark tells the relay which tool list this credential gets, so its own
+ * answers while the Mac is offline never show one client another's tools
+ * (connect-relay/server/relay-mcp.ts).
  */
-function markAuthenticated(response: Response): Response {
+function markAuthenticated(response: Response, surface: 'chatgpt' | 'remote'): Response {
   const headers = new Headers(response.headers);
   headers.set(AUTHENTICATED_RESPONSE_HEADER, '1');
+  headers.set(SURFACE_RESPONSE_HEADER, surface);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -219,16 +244,61 @@ export function authenticateRemoteRequest(
   try {
     store = options.connections();
   } catch {
-    return { ok: false, response: jsonResponse(503, { error: 'remote_connections_unavailable' }) };
+    return connectionsUnavailable();
   }
   if (!store) return refuse('invalid_token');
-  if (oauthToken) {
-    // Audience binding: only a token issued for this resource opens it.
-    const verification = store.oauth.verifyAccessToken(token, endpoint!.resource);
-    return verification.ok ? { ok: true, connection: verification.connection } : refuse('invalid_token');
+  let verification: ReturnType<RemoteConnectionStore['verifyToken']> | ReturnType<RemoteConnectionStore['oauth']['verifyAccessToken']>;
+  try {
+    // Audience binding: only an OAuth token issued for this resource opens it.
+    verification = oauthToken ? store.oauth.verifyAccessToken(token, endpoint!.resource) : store.verifyToken(token);
+  } catch {
+    // A store that cannot be read (closed, locked, corrupt) refuses with a
+    // fixed 503; the exception's text never reaches the caller.
+    return connectionsUnavailable();
   }
-  const verification = store.verifyToken(token);
   return verification.ok ? { ok: true, connection: verification.connection } : refuse('invalid_token');
+}
+
+/**
+ * The request's credential verified again (the remote search, before it
+ * releases evidence): `active` only for the same connection, still valid.
+ */
+function stillAuthorized(
+  request: Request,
+  connection: RemoteMcpConnection,
+  options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
+  surface: McpSurface,
+): 'active' | 'revoked' | 'unavailable' {
+  const again = authenticateRemoteRequest(request, options, surface);
+  if (again.ok) return again.connection.id === connection.id ? 'active' : 'revoked';
+  return again.response.status === 503 ? 'unavailable' : 'revoked';
+}
+
+function connectionsUnavailable(): { ok: false; response: Response } {
+  return { ok: false, response: jsonResponse(503, remoteSurfaceErrorOutput('remote_connections_unavailable')) };
+}
+
+/** A thrown failure on a remote agent route: a fixed internal_error body with a log ref, never marked. */
+export function remoteFailureResponse(error: unknown): Response {
+  return jsonResponse(500, remoteErrorOutput(error));
+}
+
+/**
+ * The outer exception boundary for a remote agent route (`/mcp`,
+ * `/openai/mcp`, the OpenAPI tool paths), applied where the server composes
+ * them: whatever escapes the route's own handling becomes a fixed JSON error
+ * rather than reaching the runtime's default error page.
+ */
+export function withRemoteFailureBoundary(
+  handler: (request: Request) => Promise<Response>,
+): (request: Request) => Promise<Response> {
+  return async (request) => {
+    try {
+      return await handler(request);
+    } catch (error) {
+      return remoteFailureResponse(error);
+    }
+  };
 }
 
 export function lazyRemoteConnectionStore(
@@ -249,11 +319,12 @@ export function lazyRemoteConnectionStore(
 }
 
 /**
- * The remote caller: a ChatGPT grant (pinned client id) is OpenAI-hosted;
- * any other connection is placed by the name it was approved under.
+ * The remote caller: a pinned client's grant is placed by its client id
+ * (ChatGPT → OpenAI, Claude → Anthropic, Grok → xAI); any other connection
+ * by the name it was approved under.
  */
 export function remoteOperationCaller(connection: RemoteMcpConnection): OperationCaller {
-  const provider = isChatGptGrant(connection) ? 'openai' : callerProviderFromLabel(connection.displayName);
+  const provider = pinnedGrantProvider(connection) ?? callerProviderFromLabel(connection.displayName);
   return { surface: 'remote', connectionId: connection.id, displayName: connection.displayName, ...(provider ? { provider } : {}) };
 }
 

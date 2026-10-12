@@ -30,6 +30,10 @@
  *   gets the names alone. Past the first page, `olympus_unreadable_files
  *   {source_id, after}` lists the next (a keyset cursor, so a file judged
  *   Secrets between pages moves nothing), so every file is reachable.
+ * - for a local-grade control session (the computer's own browser), the meta
+ *   also counts the private questions waiting here (`waitingPrivateQuestions`),
+ *   the computer's one Needs you line. Never for the Gateway bearer, a session
+ *   the bearer minted or a launch ticket redeemed, and never to ChatGPT.
  */
 import {
   COMPUTER_HOST_TOOL_NAMES,
@@ -65,6 +69,12 @@ export interface DashboardPanelCallContext {
    * or the worker bearer. Absent (a locked dash_ reader): names, no tokens.
    */
   opener?: string;
+  /**
+   * True only for a local-grade control session (minted from this computer's
+   * own browser): the grade workers/http.ts injects after the cookie checked
+   * out. A bearer-minted or launch-ticket session, and the bearer, are never local.
+   */
+  localSession?: boolean;
 }
 
 export interface DashboardPanelTools {
@@ -86,6 +96,14 @@ export interface DashboardPanelToolsOptions {
   indexFasterState: () => Promise<boolean | undefined>;
   /** Which files can't be read, and opening one; absent without the extraction factory. */
   unreadableFiles?: () => UnreadableFiles | undefined;
+  /**
+   * How many private questions wait for this computer (core/
+   * waiting-private-questions.ts), for the computer's one Needs you line.
+   * Put in the computer meta only for a local-grade control session, never
+   * for the Gateway bearer (the OpenClaw tab), a bearer-minted or launch-ticket
+   * session, or a locked reader, and never in anything ChatGPT receives.
+   */
+  waitingPrivateQuestions?: () => number;
 }
 
 function refused(text: string, code: string): ChatGptToolResult {
@@ -281,6 +299,16 @@ export function computerUnpairEntries(view: SourceDashboardViewModel | undefined
   });
 }
 
+/** The waiting count, or 0 when it cannot be read: the line is a nudge, never a failure. */
+function waitingCount(options: DashboardPanelToolsOptions): number {
+  try {
+    const count = options.waitingPrivateQuestions?.() ?? 0;
+    return Number.isInteger(count) && count > 0 ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export function createDashboardPanelTools(options: DashboardPanelToolsOptions): DashboardPanelTools {
   const allowed = new Set(COMPUTER_HOST_TOOL_NAMES);
   const privacyConfirmationScope = {};
@@ -306,11 +334,13 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       const on = await options.indexFasterState().catch(() => undefined);
       const unpair = computerUnpairEntries(view);
       const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context.opener);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0) return result;
+      const waiting = context.localSession === true ? waitingCount(options) : 0;
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0) return result;
       const meta: ComputerDashboardMeta = {
         ...(on !== undefined ? { indexFaster: { on } } : {}),
         ...(unpair.length > 0 ? { unpair } : {}),
         ...(unreadable.length > 0 ? { unreadable } : {}),
+        ...(waiting > 0 ? { waitingPrivateQuestions: waiting } : {}),
       };
       const existing = result._meta && typeof result._meta === 'object' ? result._meta as Record<string, unknown> : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta } };

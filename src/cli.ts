@@ -77,6 +77,7 @@ import {
   runSetupWizard,
   type SetupCloudLane,
 } from './core/setup.ts';
+import { checkOcrReadiness } from './core/ocr-readiness.ts';
 import {
   applyWorkerSetupEnv,
   dashboardQueryTokenFromWorkerAuthToken,
@@ -265,6 +266,8 @@ async function main(): Promise<void> {
       const result = await runSetupWizard(parseSetupArgs(args.slice(1)));
       console.log(JSON.stringify(result, null, 2));
       if (!result.ok) process.exitCode = 1;
+      const ocr = result.dependencyCheck.checks.find((check) => check.id === 'ocr');
+      if (ocr && !ocr.ok) console.error(`${ocr.label}: ${ocr.detail}\nRun: ${ocr.repairHint}`);
       if (result.unmet_prerequisites.length > 0) {
         console.error('Unmet preset prerequisites:');
         for (const item of result.unmet_prerequisites) {
@@ -1426,7 +1429,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Usage: olympus connections <command>',
     'Commands:',
     '  olympus connections add <name>      Approve a remote agent; prints its URL and token once',
-    '  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok',
+    '  olympus connections pair            Print a one-time code to approve an agent through your own tunnel',
     '  olympus connections list',
     '  olympus connections revoke <id>',
     '  olympus connections status          Remote access: relay session and public URLs',
@@ -2137,6 +2140,7 @@ function parseSetupArgs(args: string[]): Parameters<typeof runSetupWizard>[0] {
     ...(olympusBin ? { olympusBin } : {}),
     ...(workingDirectory ? { workingDirectory } : {}),
     ...(envPath ? { envPath } : {}),
+    ocrReadiness: () => checkOcrReadiness(),
   };
 }
 

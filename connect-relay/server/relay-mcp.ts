@@ -1,8 +1,10 @@
 /**
  * The MCP answers the relay gives itself, without reaching any engine:
  *
- * - `not_connected`: a caller with no bearer token (ChatGPT before the owner
- *   connects Olympus, or a directory reviewer). The relay cannot tell whether
+ * - `not_connected`: a caller with no bearer token on the plugin directory's
+ *   endpoint (ChatGPT before the owner connects Olympus, or a directory
+ *   reviewer); on `/mcp` the relay answers the standard 401 challenge instead
+ *   (relay.ts). The relay cannot tell whether
  *   Olympus is on that owner's Mac, so the dashboard tool offers Connect (with
  *   the install link beside it); every tool, the dashboard included, carries
  *   `_meta["mcp/www_authenticate"]`, which starts ChatGPT's account linking.
@@ -12,6 +14,11 @@
  *   other tool returns a plain "Your Mac is offline" error. The relay cannot
  *   check the credential (only the engine can), so nothing here reveals more
  *   than "this install exists and was last seen at about this minute".
+ *   ChatGPT's tools are listed only to a credential its engine last marked
+ *   as ChatGPT's (or on the directory endpoint); any other credential
+ *   (Claude, Grok, a key, or one the engine has not marked) gets a plain
+ *   offline error for every request, so a client never caches a tool list
+ *   that is not its own.
  *
  * Both list the engine's full ChatGPT tool set and serve the engine's own
  * dashboard bundle, from files scripts/build-chatgpt-relay-assets.ts generates
@@ -26,6 +33,7 @@
  * allowlist; a call to any other tool there is answered as an unknown tool.
  */
 import { toolCallableOn, toolsForSurface, type McpSurface } from '../shared/directory-tools.ts';
+import type { CredentialSurface } from '../shared/tokens.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notConnectedDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
 import DASHBOARD_RESOURCE_READ from './generated/chatgpt-dashboard.json';
 import PRIVATE_ANSWER_RESOURCE_READ from './generated/chatgpt-private-answer.json';
@@ -59,7 +67,7 @@ if (!DASHBOARD_TOOL) throw new Error('generated ChatGPT tool manifest has no das
 
 export type RelayMcpState =
   | { state: 'not_connected'; installUrl: string; protectedResourceMetadataUrl: string }
-  | { state: 'mac_offline'; lastSeenAt: number | undefined };
+  | { state: 'mac_offline'; lastSeenAt: number | undefined; credentialSurface?: CredentialSurface | undefined };
 
 type JsonRpcId = string | number;
 
@@ -95,6 +103,8 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
   if (typeof id !== 'string' && typeof id !== 'number') return rpcError(null, -32600, 'Invalid request');
   const args = params && typeof params === 'object' && !Array.isArray(params) ? (params as Record<string, unknown>) : {};
   const notice = input.state === 'mac_offline' ? MAC_OFFLINE_MESSAGE : NOT_CONNECTED_MESSAGE;
+  // Offline, for a credential not known to be ChatGPT's: no tool list at all.
+  if (input.state === 'mac_offline' && input.credentialSurface !== 'chatgpt') return rpcError(id, -32000, MAC_OFFLINE_MESSAGE);
 
   switch (method) {
     case 'initialize': {

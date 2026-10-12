@@ -453,19 +453,19 @@ export const NO_SOURCES_CONNECTED_TEXT = 'No sources are connected to Olympus ye
 
 /**
  * The one note the model gets about a Private match. Fixed text: no
- * count, no title, no content. It tells the model the answer is the user's,
- * in the panel, and steers it to a short reply that says so: no commentary
- * on other results that do not answer the question, no coverage, unread
- * items or file names (a name-only match is not a finding), no folder
- * advice for items that are Private on purpose, and no request to upload or
- * paste the files; and that a follow-up is answered in the panel the same
- * way, from a self-contained search (the panel sees only the search's
- * question, not the conversation).
+ * count, no title, no content. Host-neutral (design background-agents.md, A):
+ * the answer is the user's, in a panel if the app shows one (a dot may not)
+ * and always in Olympus on their computer, where the question waits. It
+ * steers the model to a short reply that says so: no commentary on other
+ * results that do not answer the question, no coverage, unread items or file
+ * names (a name-only match is not a finding), no folder advice for items
+ * that are Private on purpose, and no request to upload or paste the files;
+ * and a follow-up is answered privately the same way, from a self-contained
+ * search (the panel sees only the search's question, not the conversation).
  */
 function privatePanelNote(wait: string): string {
   return PRIVATE_PANEL_LEAD
-    + 'Keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; '
-    + `it'll appear in the panel above, visible only to you (${wait}).” `
+    + `Keep your reply short, along the lines of: “${privateReplyLine(wait)}” `
     + 'Don\'t comment on other search results unless they actually answer the question, '
     + 'and don\'t mention coverage counts, unread items or file names. '
     + PRIVATE_PANEL_RULES;
@@ -477,22 +477,29 @@ function privatePanelNote(wait: string): string {
  * question (live 2026-10-11: a budget question got a tax note in the panel
  * and no answer from the budget note and email ChatGPT held). So the model
  * answers from its evidence as usual and adds one short line about the
- * panel, without presenting the panel as the answer.
+ * private answer, without presenting it as the answer.
  */
 function privatePanelWithEvidenceNote(wait: string): string {
   return PRIVATE_PANEL_LEAD
     + 'Answer the question from the evidence above as usual, using only the items that actually answer it and citing them. '
-    + 'Then add one short line, along the lines of: “Olympus may also add a private answer in the panel above, '
-    + `visible only to you (${wait}).” `
+    + 'Then add one short line, along the lines of: “Olympus may also answer this privately from your Private items, '
+    + `in a panel here if one appears and in Olympus on your computer (${wait}).” `
     + 'If none of the evidence above answers the question, don\'t answer from it or comment on it; '
-    + 'instead keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; '
-    + `it'll appear in the panel above, visible only to you (${wait}).” `
+    + `instead keep your reply short, along the lines of: “${privateReplyLine(wait)}” `
     + 'Don\'t mention coverage counts, unread items, or any file name other than those of the evidence you cite. '
     + PRIVATE_PANEL_RULES;
 }
-const PRIVATE_PANEL_LEAD = 'Some items matching this question are marked Private in Olympus. '
-  + 'Olympus is answering from them privately on the user\'s computer, in the private answer panel above, '
-  + 'visible only to the user; you can\'t see that answer. ';
+/** The short reply the model is steered to: where the private answer appears, on any host. */
+function privateReplyLine(wait: string): string {
+  return 'Olympus is answering this privately from your Private items on your computer: '
+    + `in a panel here if one appears, and in Olympus on your computer (${wait}).`;
+}
+/** The design's host-neutral note, verbatim (background-agents.md, "The model's note"). */
+const PRIVATE_PANEL_LEAD = 'Some matching items are Private in Olympus. '
+  + 'Their contents stay on the user\'s computer and are never shown to you. '
+  + 'Olympus answers from them privately: in a panel below this reply if the app shows one, '
+  + 'and always in Olympus on the user\'s computer. '
+  + 'Say that briefly; don\'t guess at the private part. ';
 const PRIVATE_PANEL_RULES = 'Don\'t suggest changing folder settings for those items. '
   + 'Don\'t ask the user to upload, attach or paste those files: Olympus already has them. '
   + 'Follow-up questions about them are answered privately in the panel the same way: '
@@ -507,10 +514,11 @@ export const PRIVATE_MATCH_PANEL_FULL_NOTE = privatePanelNote(PANEL_FULL_WAIT);
 export const PRIVATE_MATCH_PANEL_EVIDENCE_NOTE = privatePanelWithEvidenceNote(PANEL_WAIT);
 /** The same, for a full-detail panel read. */
 export const PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE = privatePanelWithEvidenceNote(PANEL_FULL_WAIT);
-/** The same bit while the panel cannot answer yet (no private model, or it is still downloading). */
+/** The same bit while the panel cannot answer yet (no private model, or it is still downloading). Host-neutral, like the lead. */
 export const PRIVATE_MATCH_PANEL_SETUP_NOTE = 'Some items matching this question are marked Private in Olympus. '
-  + 'Their contents stay on the user\'s computer and are never shown to you; the private answer panel above '
-  + 'tells the user how to get an answer from them there. Don\'t suggest changing folder settings for those items.';
+  + 'Their contents stay on the user\'s computer and are never shown to you; Olympus tells the user how to get an answer from them, '
+  + 'in a panel below this reply if the app shows one and in Olympus on the user\'s computer. '
+  + 'Don\'t suggest changing folder settings for those items.';
 /** The same bit when no panel accompanies this result (the Private search did not finish in time). */
 export const PRIVATE_MATCH_NOTE = 'Some items matching this question are marked Private in Olympus. '
   + 'Their contents stay on the user\'s computer and are never shown to you. '

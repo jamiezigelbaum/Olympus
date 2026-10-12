@@ -22,8 +22,8 @@ describe('pilot installation entry points', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const download = install.slice(install.indexOf('### Pilot download'), install.indexOf('Success looks like'))
       .replace(/\s+/g, ' ');
-    expect(download).toContain('https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.0.0-rc.5');
-    expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v1.0.0-rc.5/olympus-1.0.0-rc.5.tgz');
+    expect(download).toContain('https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.0.0-rc.6');
+    expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v1.0.0-rc.6/olympus-1.0.0-rc.6.tgz');
     expect(download).toContain('without authentication');
     expect(download).toContain('Select exactly one uploaded asset');
     const selectedAsset = /Select exactly one uploaded asset named `([^`]+)`/.exec(install)?.[1];
@@ -31,8 +31,8 @@ describe('pilot installation entry points', () => {
     const manualAsset = /choose `([^`]+)` under Assets/.exec(readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8'))?.[1];
     expect(manualAsset).toBe(selectedAsset);
     expect(download).toContain('Do not use `/releases/latest`');
-    expect(download).toContain('06e5b022fd2b805633228b8d9ea6d115553301ea9625d9bd0adf9a696be89f8f');
-    expect(download).toContain('Byte count: `15557767`');
+    expect(download).toContain('45f40690871702feb4126d188ba52ab4c49f1bd3830c6d574494c5fa4b3510f9');
+    expect(download).toContain('Byte count: `15560626`');
     expect(download).toContain("metadata's digest and size to match the pinned values");
     expect(download).toContain('Do not extract, execute, or install an archive unless both match');
     expect(download).toContain('missing digest, ambiguous asset, or checksum/size mismatch stops installation');
@@ -122,7 +122,7 @@ describe('pilot installation entry points', () => {
     expect(document).toContain('dashboard\nhandoff that lets them choose is required');
     expect(document).toContain('/plugin?plugin=olympus&id=dashboard');
     expect(document).toContain('> Olympus is as useful as the sources you give it.');
-    expect(document).toContain('**Background** shows syncing, extraction, and embeddings');
+    expect(document).toContain('**Progress** shows reading and indexing');
     expect(document).toContain('Come back here if');
   });
 
@@ -135,7 +135,7 @@ describe('pilot installation entry points', () => {
     expect(step3).toContain('**Model keys are entered in the dashboard, not collected by you.**');
     expect(step3).toContain("not through OpenClaw's own secret prompt or store");
     expect(document).toContain('Gemini API key (only when the operator opted into Gemini embeddings instead\n  of the built-in model; headless fallback only)');
-    expect(document).toContain('report\nit as "finished in the dashboard\'s Models section" and continue');
+    expect(document).toContain('report\nit as "finished on the dashboard\'s Keys page" and continue');
   });
 
   test('the agent guide requires the gateway restart and gates the private classifier', () => {

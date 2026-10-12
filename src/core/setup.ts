@@ -20,6 +20,7 @@ import {
   type SovereigntyPresetName,
 } from './sovereignty.ts';
 import { setupPreflight, type SetupPrerequisite } from './setup-preflight.ts';
+import type { OcrReadiness } from './ocr-readiness.ts';
 import type { SecretStore } from './secret-store.ts';
 import type { ConnectSource } from './connect.ts';
 import { workerSetupEnvPath } from './worker-auth.ts';
@@ -62,6 +63,13 @@ export interface SetupWizardOptions {
   connectSources?: ConnectSource[];
   connectSource?: (source: ConnectSource) => Promise<unknown>;
   dependencyCheck?: () => SetupDependencyCheck;
+  /**
+   * Whether this computer reads scans and pictures of text (a real probe of
+   * the OCR commands). Optional so a test never runs the developer's own;
+   * the `olympus setup` command passes `checkOcrReadiness`. Never required:
+   * setup continues without it and reports the one command that adds it.
+   */
+  ocrReadiness?: () => OcrReadiness | Promise<OcrReadiness>;
   env?: Record<string, string | undefined>;
   secretStore?: Pick<SecretStore, 'get' | 'getSync'>;
   tokenGenerator?: () => string;
@@ -206,8 +214,11 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
     );
   }
 
-  const dependencyCheck = options.dependencyCheck?.() ?? runSetupDependencyCheck();
-  assertSetupDependenciesOk(dependencyCheck);
+  const requiredCheck = options.dependencyCheck?.() ?? runSetupDependencyCheck();
+  assertSetupDependenciesOk(requiredCheck);
+  const dependencyCheck: SetupDependencyCheck = options.ocrReadiness
+    ? { ...requiredCheck, checks: [...requiredCheck.checks, ocrDependencyFinding(await options.ocrReadiness())] }
+    : requiredCheck;
   const cloudLane = options.cloudLane ?? 'subscription';
   const presetConfig = applyCloudLane(loadSovereigntyPreset(options.preset), cloudLane);
   const unmetPrerequisites = await setupPreflight({
@@ -296,7 +307,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
       url: 'http://127.0.0.1:8010/dashboard',
       url_scope: 'worker_local',
       handoff_required: true,
-      next: 'Before declaring installation complete, include a verified operator-reachable dashboard link in your final reply. For native OpenClaw, use /plugin?plugin=olympus&id=dashboard on the operator’s Gateway origin; for standalone access, run olympus dashboard --no-open and hand over the fresh opening link. Explain: Setup connects sources and scopes, Home shows readiness and attention, Background monitors syncing/extraction/embeddings. Invite the operator to return to this chat for help. The worker-local URL alone is not a verified operator link.',
+      next: 'Before declaring installation complete, include a verified operator-reachable dashboard link in your final reply. For native OpenClaw, use /plugin?plugin=olympus&id=dashboard on the operator’s Gateway origin; for standalone access, run olympus dashboard --no-open and hand over the fresh opening link. Explain: Sources connects sources and sets their scope, Needs you and each source row show readiness and attention, Progress (with Details) shows reading and indexing, and model keys go on Keys (under On this computer, or through Change under Models). Invite the operator to return to this chat for help. The worker-local URL alone is not a verified operator link.',
     },
   };
 }
@@ -358,6 +369,21 @@ function secureTierDecisionForPreset(preset: SovereigntyPresetName): SetupSecure
 
 function dependencyFinding(input: SetupDependencyFinding): SetupDependencyFinding {
   return input;
+}
+
+/**
+ * OCR as a setup finding: optional, ready with the engine named, or missing
+ * with the one command for this distribution.
+ */
+export function ocrDependencyFinding(readiness: OcrReadiness): SetupDependencyFinding {
+  return dependencyFinding({
+    id: 'ocr',
+    label: 'Reading scans and pictures of text',
+    required: false,
+    ok: readiness.state === 'ready',
+    detail: readiness.detail,
+    repairHint: readiness.state === 'ready' ? '' : readiness.remedy ?? '',
+  });
 }
 
 function normalizeSetupPlatform(platform: NodeJS.Platform): SetupDependencyCheck['platform'] {

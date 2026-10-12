@@ -24,6 +24,18 @@ Secret items are never answered from. No API key is ever entered in ChatGPT,
 nothing else needs installing (no Tailscale, no OpenClaw), and the only new
 account they may ever create is an optional Venice account.
 
+**Claude and Grok (owner decision 2026-10-12).** Claude custom connectors
+(claude.ai on the web, desktop and phone) and Grok connectors (grok.com) are
+in scope for 1.0 through the same relay, with the same one-click approval in
+a browser on the Mac and no pairing code. They connect at
+`https://mcp.olympusplugin.ai/mcp` by pinned OAuth clients (exact client ids
+and return addresses, never fetched; `src/workers/remote-oauth/pinned-clients.ts`
+and the relay's registration, `connect-relay/server/client-registration.ts`)
+and get the remote tool set (`source_answer`, `source_answer_result`,
+`source_index_status`, `ask_anonymously`), never the ChatGPT surface, the
+private answer panel or `/openai/mcp`. Muse, Grok Bot and the Grok API key
+path stay after 1.0.
+
 ### Delivered (branch `claude/chatgpt-plugin`)
 
 - **Standalone engine on the Mac.** `olympus engine
@@ -97,6 +109,7 @@ waits for a calendar slot.
 | 5c | Legal review of the privacy policy and terms drafts, then remove their Draft banners. | Owner, with counsel | None |
 | 5d | Listing text (long description, capabilities) moved from the kit into `plugin.json`; the panel's CORS origins confirmed against a live panel; the 5 positive and 3 negative test cases pass on the demo engine from a fresh ChatGPT account, desktop and mobile. | A session | 5b |
 | 5e | Demo video, recorded last from the tested build. | Owner | 5a-5d done |
+| 6 | **Claude and Grok through the relay.** Engine and relay pins, the standard 401 on tokenless `/mcp`, offline answers per credential surface. Then: fresh critical review, relay deploy, an engine release, and a live test on a Mac with real accounts (Claude web on the Mac and then its phone app, Grok on grok.com, plus a ChatGPT developer-mode and plugin regression). | A session; the owner provides the Claude and Grok accounts | Critical review; relay deploy authorized (given 2026-10-12) |
 
 ### Deferred to after 1.0
 
@@ -110,7 +123,8 @@ waits for a calendar slot.
   the relay-v1 terms panel, which nothing triggers since relay v2
   (`needsTerms`, `LETS_ENCRYPT_REPOSITORY_URL` in
   `src/workers/agent-connections.ts`); delete it with the dashboard lane.
-- **Hosted agents beyond ChatGPT** (Claude, Grok, Muse) stay out of scope.
+- **Hosted agents beyond ChatGPT, Claude and Grok** (Muse, Grok Bot, the Grok API key
+  path) stay out of scope. Claude and Grok moved into 1.0 on 2026-10-12.
 - **Authenticating the Mac's key to the panel.** A compromised relay could
   swap keys (a residual risk stated in the design); accepted for 1.0.
 - **Outside help on the private answer panel** (frontier consult over
@@ -143,6 +157,31 @@ and Linux installations, every source's actual limits are documented, and beta
 testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
+
+- **2026-10-12 — Linux parity, Omarchy first.** Owner decision: Olympus
+  itself runs on Linux with the Mac's capabilities (scan and image text,
+  photo content, transcription, built-in private model, confined zkAPI lane,
+  and the standalone engine without OpenClaw); where the AI client runs does
+  not matter. Omarchy is the first target; Ubuntu may be dropped if it proves
+  disproportionately hard, and the owner's Linux host may move to Omarchy. Built-in models
+  are on by default on Linux, sized by memory as on the Mac, with no speed
+  floor. Photos in formats the host cannot decode are
+  reported and the rest indexed. The zkAPI lane on a host that cannot run
+  the network-namespace confinement is refused, with a one-time admin step
+  offered; there is no weaker mode. Plan: `docs/design/linux-parity.md`.
+  The demo box and the ChatGPT listing stay unchanged until OpenAI's review
+  closes.
+- **2026-10-12 — Claude and Grok are in 1.0.** Owner decision: Claude custom
+  connectors (web, desktop, phone) and Grok connectors (grok.com) connect
+  through the default relay with the same one-click approval on the Mac that
+  ChatGPT uses. The ChatGPT path stays as it is: `/openai/mcp`, its pinned
+  clients and the plugin package. Claude and Grok are pinned the same way
+  (exact client ids and return addresses, never fetched) but are not
+  ChatGPT: they get the remote tool set on `/mcp` only. Tokenless `/mcp` at
+  the relay answers the standard 401 (how these clients start signing in);
+  `/openai/mcp` keeps its tokenless ChatGPT answers. Grok counts as xAI for
+  anonymous answers, so its questions never go to an xAI model. Muse, Grok
+  Bot and the Grok API key path stay after 1.0.
 
 - **2026-10-08 — Ordinary photos are Personal; only sensitive photos are
   Private.** Owner decision, replacing the 2026-10-07 interim rule below.
@@ -219,7 +258,8 @@ testers have exercised the normal product journey without custom engineering.
   optional host. No extra installs and no new accounts except an optional
   Venice account. ChatGPT reaches each Mac through one hosted relay at
   `mcp.olympusplugin.ai` (Hetzner `olympus-relay-1`); consent happens on the
-  Mac's loopback page. Claude, Grok and Muse are out of scope for now. No
+  Mac's loopback page. Claude, Grok and Muse are out of scope for now
+  (Claude and Grok moved into 1.0 on 2026-10-12, Decisions). No
   pre-submission contact with OpenAI. Design and build plan:
   [`design/chatgpt-plugin.md`](design/chatgpt-plugin.md); it supersedes the
   hosted-relay parts of `design/hosted-agent-compatibility.md`. The OpenClaw

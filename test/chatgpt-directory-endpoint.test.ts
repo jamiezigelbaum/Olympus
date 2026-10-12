@@ -12,6 +12,9 @@
 // - A Private match found through /openai/mcp is collected by the private
 //   answer panel exactly as through /mcp: the job id names the install, not
 //   the endpoint.
+// - Claude and Grok are pinned too, but are not ChatGPT: one-click on the
+//   Mac, exact return addresses, `/mcp` only, the remote operation surface,
+//   never the demo sign-in.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -44,7 +47,7 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler, withRemoteMcpRoute } from '../src/workers/remote-mcp.ts';
 import { isDemoGrant, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
 import { createRemoteOAuthHandler, protectedResourceMetadata, withRemoteOAuthRoutes } from '../src/workers/remote-oauth/handler.ts';
-import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, isChatGptGrant } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, GROK_CLIENT_ID, GROK_REDIRECT_URIS, isChatGptGrant, CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 
 const RELAY_HOST = 'mcp.olympus.test';
@@ -506,5 +509,134 @@ describe('the private answer panel through /openai/mcp', () => {
     expect(sealed.status).toBe('ready');
     const opened = JSON.parse(await openPrivateAnswer(meta.jobId, panel.privateKey, sealed)) as { answer: string };
     expect(opened.answer).toStartWith('The lease ends on 31 May 2027.');
+  });
+});
+
+describe('Claude, Grok, and Grok Bot or Cursor: pinned clients, /mcp only, the remote surface', () => {
+  const HOSTS = [
+    { name: 'Claude', clientId: CLAUDE_CLIENT_ID, redirectUri: CLAUDE_REDIRECT_URI },
+    { name: 'Grok', clientId: GROK_CLIENT_ID, redirectUri: GROK_REDIRECT_URIS[0]! },
+    { name: 'Grok', clientId: GROK_CLIENT_ID, redirectUri: GROK_REDIRECT_URIS[1]! },
+    { name: 'Grok Bot or Cursor', clientId: CURSOR_CLIENT_ID, redirectUri: CURSOR_REDIRECT_URI },
+  ] as const;
+
+  const hostAuthorizeUrl = (path: string, clientId: string, redirectUri: string, challenge: string, resource?: string) => {
+    const url = new URL(`${base}${path}`);
+    url.search = new URLSearchParams({
+      response_type: 'code', client_id: clientId, redirect_uri: redirectUri,
+      code_challenge: challenge, code_challenge_method: 'S256', state: 's',
+      ...(resource ? { resource } : {}),
+    }).toString();
+    return url;
+  };
+
+  /** The owner on this Mac approving one hosted agent; returns the page and the callback. */
+  const approveHost = async (clientId: string, redirectUri: string, challenge: string, resource?: string) => {
+    const page = await fetch(hostAuthorizeUrl('/connect/authorize', clientId, redirectUri, challenge, resource), { redirect: 'manual' });
+    const html = await page.text();
+    expect(page.status).toBe(200);
+    const requestId = /name="request_id" value="([^"]+)"/.exec(html)![1]!;
+    const csrf = /name="csrf" value="([^"]+)"/.exec(html)![1]!;
+    const cookie = (page.headers.get('set-cookie') ?? '').split(';')[0]!;
+    const approved = await fetch(`${base}/connect/authorize`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie, Origin: base, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'navigate' },
+      body: new URLSearchParams({ request_id: requestId, csrf, action: 'approve' }).toString(),
+    });
+    expect(approved.status).toBe(303);
+    return { html, callback: new URL(approved.headers.get('location')!) };
+  };
+
+  const hostGrant = async (clientId: string, redirectUri: string, resource = MCP_RESOURCE) => {
+    const { verifier, challenge } = pkce();
+    const { html, callback } = await approveHost(clientId, redirectUri, challenge, resource);
+    const response = await tokenRequest({
+      grant_type: 'authorization_code', client_id: clientId, redirect_uri: redirectUri,
+      code: callback.searchParams.get('code')!, code_verifier: verifier, resource,
+    });
+    expect(response.status).toBe(200);
+    return { html, callback, tokens: await response.json() as { access_token: string; refresh_token: string } };
+  };
+
+  test('each connects with one click on the Mac, returns exactly to its own address, and gets the remote tools on /mcp', async () => {
+    for (const host of HOSTS) {
+      const { html, callback, tokens } = await hostGrant(host.clientId, host.redirectUri);
+      expect(html).toContain(`Connect ${host.name} to Olympus?`);
+      expect(html).not.toContain('pairing_code');
+      expect(`${callback.origin}${callback.pathname}`).toBe(host.redirectUri);
+      expect(callback.searchParams.get('iss')).toBe(RELAY_ORIGIN);
+      expect(credentialInstallId('access', tokens.access_token)).toBe(INSTALL_ID);
+      const listed = names((await result(await rpc('/mcp', tokens.access_token, 'tools/list'))).tools);
+      // The operation surface, never ChatGPT's (no dashboard, setup or private panel tools).
+      expect(listed).toContain('source_answer');
+      expect(listed).toContain('source_index_status');
+      expect(listed).not.toContain('olympus_dashboard');
+      expect(listed).not.toContain('olympus_search');
+      expect(listed).not.toContain('olympus_connect_source');
+      // And never the directory endpoint.
+      expect((await rpc(DIRECTORY_MCP_PATH, tokens.access_token, 'tools/list')).status).toBe(401);
+    }
+    const grants = store.list().filter((connection) => connection.kind === 'oauth');
+    expect(grants.map((connection) => connection.displayName)).toEqual(['Claude', 'Grok', 'Grok', 'Grok Bot or Cursor']);
+    for (const connection of grants) {
+      expect(isChatGptGrant(connection)).toBe(false);
+      expect(isDemoGrant(connection)).toBe(false);
+    }
+    expect(isDemoGrant({ clientId: CLAUDE_CLIENT_ID, displayName: 'Claude (demo sign-in)' })).toBe(false);
+  });
+
+  test('asking for the directory resource is refused back to the app; refresh cannot reach it either', async () => {
+    for (const host of HOSTS) {
+      const asked = await fetch(hostAuthorizeUrl('/connect/authorize', host.clientId, host.redirectUri, pkce().challenge, DIRECTORY_RESOURCE), { redirect: 'manual' });
+      expect(asked.status).toBe(303);
+      const back = new URL(asked.headers.get('location')!);
+      expect(`${back.origin}${back.pathname}`).toBe(host.redirectUri);
+      expect(back.searchParams.get('error')).toBe('invalid_target');
+    }
+    const { tokens } = await hostGrant(CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI);
+    const widened = await tokenRequest({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: CLAUDE_CLIENT_ID, resource: DIRECTORY_RESOURCE });
+    expect(widened.status).toBe(400);
+    const rotated = await tokenRequest({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: CLAUDE_CLIENT_ID });
+    expect(rotated.status).toBe(200);
+    const pair = await rotated.json() as { access_token: string };
+    expect((await rpc('/mcp', pair.access_token, 'tools/list')).status).toBe(200);
+    expect((await rpc(DIRECTORY_MCP_PATH, pair.access_token, 'tools/list')).status).toBe(401);
+  });
+
+  test('a return address that is not exactly the published one stays on an error page', async () => {
+    for (const [clientId, redirectUri] of [
+      [CLAUDE_CLIENT_ID, 'https://claude.com/api/mcp/auth_callback'],
+      [CLAUDE_CLIENT_ID, 'https://claude.ai/api/mcp/auth_callback/'],
+      [CLAUDE_CLIENT_ID, GROK_REDIRECT_URIS[0]!],
+      [GROK_CLIENT_ID, 'https://grok.com/connectors-oauth-exchange-code'],
+      [GROK_CLIENT_ID, 'https://grok.com/connectors/oauth/callback'],
+      [GROK_CLIENT_ID, CLAUDE_REDIRECT_URI],
+      [GROK_CLIENT_ID, CHATGPT_REDIRECT_URI],
+      // Cursor's document also lists loopback and other addresses; only its cloud agents' address is pinned.
+      [CURSOR_CLIENT_ID, 'http://localhost:8787/callback'],
+      [CURSOR_CLIENT_ID, 'http://127.0.0.1:8787/callback'],
+      [CURSOR_CLIENT_ID, 'https://www.cursor.com/bot/mcp/oauth/callback'],
+      [CURSOR_CLIENT_ID, 'https://grok.com/connectors-oauth-exchange-code/'],
+      [CURSOR_CLIENT_ID, 'cursor://anysphere.cursor-mcp/oauth/callback'],
+    ] as const) {
+      const response = await fetch(hostAuthorizeUrl('/connect/authorize', clientId, redirectUri, pkce().challenge), { redirect: 'manual' });
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain('The return address is not one this app registered.');
+    }
+    // A look-alike metadata URL is not the pinned client, and nothing is fetched.
+    const lookalike = await fetch(hostAuthorizeUrl('/connect/authorize', 'https://claude.ai/oauth/mcp-oauth-client-metadata/', CLAUDE_REDIRECT_URI, pkce().challenge), { redirect: 'manual' });
+    expect(lookalike.status).toBe(400);
+    expect(await lookalike.text()).toContain('does not recognize this app');
+  });
+
+  test('the reviewer demo sign-in connects ChatGPT only', async () => {
+    for (const host of HOSTS) {
+      const response = await fetch(hostAuthorizeUrl('/connect/demo/authorize', host.clientId, host.redirectUri, pkce().challenge), { redirect: 'manual', headers: { 'x-olympus-relay': 'per-boot' } });
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain('The demo connects ChatGPT only.');
+    }
+    // ChatGPT still can.
+    expect((await grant(undefined, 'demo')).access_token).toBeTruthy();
   });
 });

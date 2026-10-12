@@ -14,8 +14,9 @@
 // held one of its hits) is hidden, never mistaken for legacy. A set whose
 // ledger cannot be read fails closed for its own stores only.
 
+import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
-import { tierLedgerIdentityKey, type TierLedger } from '../classification/tier-ledger.ts';
+import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 
 export interface TierVisibilityScope {
   ledger: TierLedger;
@@ -53,5 +54,68 @@ export function createTierVisibilityGate(scopes: () => readonly TierVisibilitySc
       }
     }
     return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
+  };
+}
+
+/**
+ * The current tiers of the items an answer was written from (its release
+ * manifest, core/release-manifest.ts), read when a remote agent collects the
+ * answer: a delayed answer may have been written before an item it read was
+ * reclassified.
+ *
+ * Each input is read by its exact identity, account included, from the ledger
+ * that governs its corpus: one batched read per ledger, so every input is
+ * judged against one snapshot. A row at Secrets (or moving there) is
+ * `secret`; at Private (or moving there) `private`; anything else classified
+ * is `public_or_personal`; a routed item with no current copy left is also
+ * `gone`. An item
+ * no ledger governs, or one its ledger never classified (ledger rows are never
+ * deleted, so no row means never classified), is `legacy`: its tier is still
+ * its corpus's. An input in a governed corpus without an account cannot be
+ * read and is `unknown`. A ledger that cannot be read throws; the caller
+ * withholds.
+ */
+export function createReleaseTierCheck(
+  scopes: () => readonly TierVisibilityScope[],
+  secureDerivativeDefault: () => 'allow' | 'approval',
+): ReleaseCheck {
+  return {
+    secureDerivativeDefault,
+    inputs: (inputs) => {
+      const verdicts: ReleaseInputVerdict[] = inputs.map(() => ({ tier: 'legacy', gone: false }));
+      if (inputs.length === 0) return verdicts;
+      for (const scope of scopes()) {
+        const governed: Array<{ index: number; identity: TierLedgerIdentity }> = [];
+        inputs.forEach((input, index) => {
+          if (!scope.corpusIds.has(input.corpusId)) return;
+          if (!input.accountScope || !input.provider || !input.providerItemId) {
+            verdicts[index] = { tier: 'unknown', gone: false };
+            return;
+          }
+          governed.push({
+            index,
+            identity: {
+              provider: input.provider,
+              accountScope: input.accountScope,
+              providerItemId: input.providerItemId,
+              ...(input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}),
+            },
+          });
+        });
+        if (governed.length === 0) continue;
+        const states = scope.ledger.itemStatesForMany(governed.map(({ identity }) => identity));
+        for (const { index, identity } of governed) {
+          const state = states.get(tierLedgerIdentityKey(identity));
+          if (!state) continue;
+          const { record, copies } = state;
+          const tiers = [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+          verdicts[index] = {
+            tier: tiers.includes('secrets') ? 'secret' : tiers.includes('secure') ? 'private' : 'public_or_personal',
+            gone: record.routed && !copies.some((copy) => copy.state === 'current'),
+          };
+        }
+      }
+      return verdicts;
+    },
   };
 }

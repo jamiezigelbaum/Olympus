@@ -139,6 +139,8 @@ describe('Ask anonymously', () => {
     // The dashboard switch off, or no settings file yet: refused before anything is prepared, and no Strict/Standard choice is asked.
     const off = deps(settings({ enabled: false }));
     expect(await askAnonymously(q('x'), off.value)).toEqual({ ok: false, code: 'anonymous_answers_off', message: CONSULT_ASK_MESSAGES.off });
+    // It names the exact page that turns them on, so the agent never guesses one (2026-10-12: it sent the user to Models).
+    expect(CONSULT_ASK_MESSAGES.off).toContain('https://olympusplugin.ai/open/private/');
     expect(off.calls.prepare).toHaveLength(0);
     expect(off.calls.send).toHaveLength(0);
     const absent = deps({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
@@ -281,6 +283,33 @@ describe('Ask anonymously', () => {
     const allowed = chosen();
     expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'anthropic', model: 'google/some-model' }, allowed.value)).toMatchObject({ ok: true, model: 'google/some-model' });
     expect(await askAnonymously({ question: 'What is a deposit?', model: 'openai/gpt-5.5' }, allowed.value)).toMatchObject({ ok: true, model: 'openai/gpt-5.5' });
+  });
+
+  test('Grok (xAI) takes the ChatGPT setting, never an xAI model: one-off or configured', async () => {
+    const fromGrok = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai' }, fromGrok.value)).toMatchObject({ ok: true, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai', model: 'x-ai/grok-5' }, fromGrok.value)).toMatchObject({ code: 'model_same_provider' });
+    // An xAI model set for ChatGPT questions is refused for Grok before any work, and still used for ChatGPT.
+    const xaiChosen = () => deps(settings({ standardMode: 'as_written', levelChosen: true, chatgptFrontierModel: 'x-ai/grok-5' }));
+    const refused = xaiChosen();
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai' }, refused.value))
+      .toEqual({ ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.configuredModelSameProvider });
+    expect(refused.calls.send).toEqual([]);
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'openai' }, xaiChosen().value)).toMatchObject({ ok: true, model: 'x-ai/grok-5' });
+  });
+
+  test('a model change that lands between remember and the send cannot route Grok\'s question to xAI (Codex review of PR #289)', async () => {
+    let current = settings({ standardMode: 'as_written' });
+    const d = deps(current);
+    const value: ConsultAskDependencies = {
+      ...d.value,
+      settings: () => current,
+      // The remembered level and cleanup, plus another writer's model change.
+      remember: async () => { current = settings({ standardMode: 'as_written', levelChosen: true, revision: 4, chatgptFrontierModel: 'x-ai/grok-5' }); return { ok: true }; },
+    };
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai', level: 'standard', cleanup: 'as_written', remember: true }, value))
+      .toEqual({ ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.configuredModelSameProvider });
+    expect(d.calls.send).toEqual([]);
   });
 
   test('remember stores the choice through the writer before the send and reports it; without a writer the question still goes, once', async () => {

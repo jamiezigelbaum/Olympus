@@ -434,7 +434,7 @@ export interface OlympusHostContext {
   /** The local dashboard controls are locked: every control is disabled with the locked reason. */
   readOnly?: boolean;
   /** Computer only: the local pages the "On this computer" section opens. */
-  links?: Partial<Record<'keys' | 'agents' | 'outsideHelp' | 'connector', string>>;
+  links?: Partial<Record<'keys' | 'agents' | 'privateAnswers' | 'connector', string>>;
   /**
    * Computer only, in the first `ui/initialize` answer only: the source an
    * open link asked to land on (core/open-targets.ts `unreadable/<source>`).
@@ -469,6 +469,13 @@ export interface ComputerDashboardMeta {
    * where it opens (never a path in the browser).
    */
   unreadable?: ComputerUnreadableEntry[];
+  /**
+   * How many private questions wait for this computer (design
+   * background-agents.md, "Dashboard changes" 2): the computer's one Needs
+   * you line, linking to Private answers. Only for a local control session,
+   * never the Gateway bearer; absent when none wait.
+   */
+  waitingPrivateQuestions?: number;
 }
 
 export interface ComputerUnpairEntry {

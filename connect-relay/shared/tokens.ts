@@ -38,6 +38,16 @@ import { randomBytes } from 'node:crypto';
  */
 export const AUTHENTICATED_RESPONSE_HEADER = 'x-olympus-authenticated';
 
+/**
+ * Set by the engine beside the authenticated marker on an MCP answer: which
+ * tool surface that credential gets, `chatgpt` (a pinned ChatGPT grant) or
+ * `remote` (Claude, Grok and every other connection). The relay keeps it with
+ * the confirmed credential only to choose its own answers while the Mac is
+ * offline (server/relay-mcp.ts); it grants nothing and never leaves the relay.
+ */
+export const SURFACE_RESPONSE_HEADER = 'x-olympus-surface';
+export type CredentialSurface = 'chatgpt' | 'remote';
+
 export type CredentialKind = 'access' | 'refresh' | 'code' | 'handoff' | 'private';
 
 const PREFIX: Record<CredentialKind, string> = { access: 'oly2', refresh: 'oly2r', code: 'oly2c', handoff: 'oly2g', private: 'oly2p' };

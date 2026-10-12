@@ -30,6 +30,7 @@ import {
 } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
 import { createRemoteOAuthStore, remoteOAuthSchemaMigration, type RemoteOAuthStore } from './remote-oauth-store.ts';
+import { revokeWaitingPrivateQuestions } from './waiting-private-questions.ts';
 
 export const REMOTE_CONNECTIONS_STORE_ID = 'remote-connections';
 export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 2;
@@ -263,6 +264,15 @@ export function openRemoteConnectionStore(
       // CLI revokes from its own). In this process, also drop any refresh
       // grace entry, so no successor pair stays cached in memory.
       if (row.kind === 'oauth') oauth.revokeGrant(id);
+      // Its waiting private questions go too, and a recording in flight for
+      // it is refused (core/waiting-private-questions.ts). Never at the cost
+      // of the revocation: the worker reconciles that store against this
+      // one before serving it.
+      try {
+        revokeWaitingPrivateQuestions(dbPath, id);
+      } catch {
+        console.warn('[olympus] waiting private questions: could not remove a revoked connection\'s questions now; they are removed before the list is next shown');
+      }
       return toRecord(row);
     },
 

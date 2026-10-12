@@ -24,6 +24,11 @@
  * - Open a source on the Mac: `POST <relayOrigin>/private/<jobId>/open` with
  *   `{"v":1,"open":"<token from a citation>"}` → 204 (opened), 410 `gone`
  *   (unknown/expired job or token), 429 `rate_limited`, 403 `forbidden`.
+ * - Seen: after decrypting and rendering, the panel posts the plaintext's
+ *   `ack` to `POST <relayOrigin>/private/<jobId>` as
+ *   `{"v":1,"publicKey","ack"}` → 200 `acknowledged`, or 410 `gone` (spent,
+ *   another job's, or no sealed answer). The relay forwards this body
+ *   unchanged, like a claim.
  * - The answer is bounded on every install (private-answer-payload.ts):
  *   at most 2,700 UTF-16 units, 4 citations and 4 gaps.
  */
@@ -129,6 +134,16 @@ export interface PrivateAnswerPlaintextV1 {
   citations: PrivateAnswerCitation[];
   /** What the private items could not answer: complete sentences, none when the answer is complete. */
   unanswered?: string[];
+  /**
+   * The seen acknowledgment: a single-use capability (32 random bytes,
+   * base64url) for this job. After it has decrypted and rendered the answer,
+   * the panel POSTs `{"v":1,"publicKey","ack"}` to `<relayOrigin>/private/<jobId>`
+   * (200 `acknowledged`; 410 when spent, unknown or another job's). The
+   * computer then removes the waiting question this answer belongs to, if no
+   * newer duplicate replaced it. It proves decryption plus the panel's own
+   * render claim, not that a person read it.
+   */
+  ack?: string;
 }
 
 /** One Private search hit as the worker returned it. Opaque here: only the private model reads it. */
@@ -141,9 +156,11 @@ export type PrivateEvidenceItem = Readonly<Record<string, unknown>>;
 export interface PrivateAnswerObserver {
   /**
    * The evidence the model reads: items kept, items without readable text,
-   * their text bytes, and (`used`) which input items it reads, as indexes
-   * into the evidence passed in. The claim-time check revalidates exactly
-   * those; without `used`, every input item is revalidated.
+   * their text bytes, and (`used`) every input item that can reach the
+   * output, as indexes into the evidence passed in: the items it reads and
+   * any item an auxiliary note names (another version's date). The final
+   * check before an answer is shown or sealed revalidates exactly those;
+   * without `used`, every input item is revalidated.
    */
   evidence?(stats: { items: number; unreadable: number; bytes: number; used?: readonly number[] }): void;
   /** One model call finished (or failed). */

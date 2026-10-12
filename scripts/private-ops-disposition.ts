@@ -33,6 +33,7 @@ const RETAINED_PATHS = new Set([
 const ALLOWED_DOCS = new Set([
   'docs/CONTRACTS.md',
   'docs/CREATE_CONNECTOR.md',
+  'docs/design/background-agents.md',
   'docs/design/built-in-scan-reading.md',
   'docs/design/built-in-transcription.md',
   'docs/design/categorization-precision.md',
@@ -62,6 +63,7 @@ const ALLOWED_DOCS = new Set([
   'docs/UNINSTALL.md',
   'docs/V0_4_BASELINE.md',
   'docs/V0_4_RELEASE.md',
+  'docs/design/linux-parity.md',
   'docs/design/per-item-four-tier-classification.md',
   'docs/design/photo-embeddings.md',
   'docs/design/private-answers.md',

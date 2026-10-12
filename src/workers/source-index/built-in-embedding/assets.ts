@@ -179,6 +179,59 @@ export function readBuiltInEmbeddingStatus(
 }
 
 /**
+ * Whether the model's image encoder started the last time the model loaded:
+ * `ready`, `unavailable` (it started text-only, so no picture can be read), or
+ * `unknown` (never loaded, or nothing recorded for this model). Never throws.
+ * Photos are admitted for media search only while this is not `unavailable`.
+ */
+export function readBuiltInEmbeddingVision(
+  env: Record<string, string | undefined> = process.env,
+  model: BuiltInEmbeddingModelSpec = BUILT_IN_EMBEDDING_MODEL,
+): 'ready' | 'unavailable' | 'unknown' {
+  if (!model.vision) return 'unknown';
+  try {
+    const parsed = JSON.parse(readFileSync(join(builtInEmbeddingPaths(env, model).root, 'vision.json'), 'utf8')) as {
+      modelId?: unknown;
+      vision?: unknown;
+    };
+    if (parsed.modelId !== model.modelId || typeof parsed.vision !== 'boolean') return 'unknown';
+    return parsed.vision ? 'ready' : 'unavailable';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Records whether the image encoder started when the model loaded, beside the
+ * install status, so every process that decides about photos reads the same
+ * fact. A failed write is dropped: the record is a courtesy to other
+ * processes, never a condition of embedding.
+ */
+export function reportBuiltInEmbeddingVision(
+  vision: boolean,
+  options: { env?: Record<string, string | undefined>; model?: BuiltInEmbeddingModelSpec; now?: () => Date } = {},
+): void {
+  const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
+  if (!model.vision) return;
+  let temporary: string | undefined;
+  try {
+    const root = builtInEmbeddingPaths(options.env, model).root;
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const path = join(root, 'vision.json');
+    temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify({
+      modelId: model.modelId,
+      vision,
+      checkedAt: (options.now?.() ?? new Date()).toISOString(),
+    })}\n`, { mode: 0o600 });
+    renameSync(temporary, path);
+  } catch {
+    // Recording is best effort; leave no half-written file behind.
+    if (temporary) rmSync(temporary, { force: true });
+  }
+}
+
+/**
  * Ensures the model and runtime are on disk and verified, downloading what is
  * missing. Safe to call from several processes: one installs, the others wait.
  */
