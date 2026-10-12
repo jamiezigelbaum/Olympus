@@ -695,7 +695,9 @@ export function createAnalystSourceIndexAnswerHandler(
   };
 }
 
-/** The analysed pack's items, each with its account and whether it was Private. */
+/**
+ * The analysed pack's items, each with its account and whether it was Private.
+ */
 function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
   return detail.pack.candidates.map((candidate, index) => {
     const item = candidate.provenance.sourceItem;
