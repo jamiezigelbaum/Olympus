@@ -686,3 +686,147 @@ it runs Ubuntu jobs without the proposed PID-1/linger harness. The new tests
 and harness are implementation obligations, not results claimed by this doc.
 The missing-host hint citation is corrected to `src/core/doctor.ts:495`;
 `:481` only appends the installed engine to the host list.
+
+## W5 PINS implementation handoff (2026-10-12)
+
+Scope: PR 3a runtime/publisher; PR 3b and 3c **drafts**, for rc.7.
+No listing, Mac download route, live deployment or Linux qualification is changed.
+
+### Runtime evidence
+
+The Mac bootstrap (`scripts/install-macos.sh`) pins only Bun 1.3.14.
+The Linux bootstrap uses that version's **x64 baseline** build. On 2026-10-12:
+
+- [GitHub release API](https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.3.14)
+  reports `bun-linux-x64-baseline.zip`, 35,595,658 bytes, SHA-256
+  `a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7`.
+- [Bun SHASUMS256.txt](https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/SHASUMS256.txt)
+  agrees. An independently downloaded archive matched both size and digest.
+- Its sole program, `bun-linux-x64-baseline/bun`, is 91,802,480 bytes, SHA-256
+  `a8f9ebd1770ddc8e55dab7a68d4ec1ec1eebf374bb97cc65cf2c3cb373fc6791`.
+- [Versioned upstream requirements](https://github.com/oven-sh/bun/blob/bun-v1.3.14/docs/installation.mdx)
+  specify glibc >=2.17 and Nehalem/SSE4.2 for this baseline. These are upstream
+  floors, not a claim that we tested a physical Nehalem or glibc 2.17 host.
+
+A remote-build isolated Linux x86_64 container independently fetched those
+bytes, verified both digests, then ran `bun --version` (1.3.14), JavaScript and
+an in-memory SQLite query successfully on glibc 2.36. This is actual execution,
+not physical-host or minimum-floor qualification.
+
+`config/linux-runtime-pins.json` is the pin authority. It deliberately records
+`pending-omarchy`; asset publication refuses until qualification is recorded.
+arm64 is absent and refused. No Linux Tor/zkAPI capability is enabled here.
+Existing model runtime authorities are unchanged: llama.cpp b11320 in
+`src/workers/source-index/built-in-reasoning/manifest.ts`, LiteRT-LM 0.18.0
+in `src/workers/source-index/built-in-embedding/manifest.ts`. They are not
+additional runtimes downloaded or pinned by the Mac bootstrap.
+
+### SVC seams: drafts, not an implemented transaction protocol
+
+The shell does preflight and verified private staging only. It does not swap
+active packages, write service units, select a secret backend or implement
+another recovery journal. SVC must implement these dependencies before the
+drafts become a qualified installer:
+
+1. **Install:** verified scratch Bun invokes
+   `engine install --from-checkout <verified-package> --bun <verified-bun> --restart`.
+   The same command with `--dry-run` (instead of `--restart`) runs first under
+   custody and must reject unsupported capabilities, unsafe/existing data and
+   paths without mutation, before linger changes. These flag spellings already exist in `src/core/engine-cli.ts`. On Linux the
+   implementation must copy both inputs into durable immutable generations
+   before returning; scratch is removed on exit. It must validate package build,
+   layout, receipt, existing-data refusal, file-secret selection, zkAPI-off and
+   owner-only worker socket. Durable prepare/switch/commit/recovery, exact-build
+   health, same-release repair, rollback and cleanup belong to SVC, not these
+   shell drafts. Nonzero means failure, including failed health or recovery.
+2. **Lock:** `${XDG_RUNTIME_DIR}/olympus/lifecycle.lock`, same owner, mode 0600.
+   Installer runs `flock --nonblock --close <lock> /bin/sh <private-helper> ...`;
+   the helper runs read-only admission, linger, install and status while locked.
+   Uninstaller runs the verified Bun command directly under that supervisor.
+   CLI lifecycle operations must recognize actual util-linux supervisor custody
+   (verified ancestry/identity, not an environment flag) and avoid reacquiring.
+   Direct CLI install/rollback/uninstall must acquire that same lock. Check
+   paths and receipt again under custody. Ordinary HUP/INT/TERM is ignored
+   until the mutation returns so cleanup cannot overtake it; no claim is made
+   that killing the supervisor with SIGKILL is safe. CLI/service descendants
+   must not inherit the descriptor. Never unlink the lock.
+3. **Linger:** under the same lifecycle lock, bootstrap probes and enables only the current account without
+   a password agent, then re-reads the state. `OLYMPUS_LINGER_BEFORE=yes|no`
+   conveys the observation for a fresh receipt; an existing receipt's original
+   state wins on repair. SVC must persist it before active mutation. Failures
+   disclose it; neither draft disables account-wide linger automatically.
+4. **Status:** `engine status` emits JSON with a boolean `ok`. The draft checks
+   that value; a zero exit by itself is insufficient (current Mac status can
+   return `ok:false` with exit zero). Install owns exact-build health proof;
+   status adds diagnostics, not a replacement for that proof.
+5. **Removal receipt:** SVC atomically writes a 0600, owner-owned non-executable
+   projection at `$XDG_CONFIG_HOME/olympus/uninstall-receipt.tsv`. Exactly eleven
+   tab-separated key/value lines, unique keys, no control characters:
+
+   ```text
+   schema          olympus.linux-uninstall.v1
+   uid             <decimal owner uid>
+   bun             <absolute immutable engine runtime executable>
+   bun_sha256      <executable SHA-256>
+   cli             <absolute immutable engine generation>/dist/cli.js
+   cli_sha256      <bundled CLI SHA-256>
+   config_root     <resolved XDG config root>
+   data_root       <resolved XDG data root>
+   state_root      <resolved XDG state root>
+   cache_root      <resolved XDG cache root>
+   linger_before   yes|no
+   ```
+
+   The illustration uses spaces for readability; the actual delimiter is one
+   tab. This projection is a proposed seam, not the canonical receipt schema.
+   The shell validates it, ancestry and executable hashes, then calls
+   `engine uninstall` under the same lock. SVC must revalidate its canonical
+   receipt, require maintenance/cgroup/listener release, remove only enumerated
+   owned machinery, preserve replacements and all personal data by default,
+   keep recovery evidence until finished, and return nonzero for incomplete
+   removal. The draft does no guessed recursive deletion.
+
+### Explicit remaining work
+
+PR 3b is deferred beyond the tested shell draft: no claim of durable
+transaction/recovery proof, fault injection at SVC's durable boundaries,
+backoff directive verification, direct-CLI lock interoperability, or PID-1
+activation proof. The bootstrap disk check covers scratch only; SVC must
+check destination generation headroom before mutation.
+
+PR 3c is deferred beyond the tested receipt/CLI draft: **missing or corrupt
+Bun/app refuses and preserves everything**. The design requires system-tools-only
+removal in that situation; that implementation, explicit purge inventory and
+consent, profile/MIME/link cleanup, resumable removal and optional linger
+restoration still need SVC's final receipt/custody contract. The current draft
+rejects purge flags instead of claiming full removal. Its fake-CLI tests prove
+argument/custody/verification boundaries, not the deletion algorithm.
+
+Before Linux publication, run on the owner's Omarchy laptop: pinned CPU/glibc
+loadability; systemd PID-1/user-manager activation; missing-tool and denied-linger
+refusal; logout/reboot/unattended startup; real socket ownership; install/rollback/
+uninstall contention and SIGKILL/power-loss recovery; same-release repair; exact
+build health; Bun-free removal/purge/replacements; runtime-directory teardown
+and explicit linger restoration. Ubuntu is not qualified by the container run;
+its unsupported capabilities must refuse. Mac scripts remain byte-for-byte
+identical; real native Mac regression remains separate from Linux shell mocks.
+
+### PINS validation receipt
+
+The PINS working snapshot passed 89 tests across
+`install-linux-script`, `publish-release-to-site`, `architecture-guard`,
+`public-surface-guard` and `private-ops-disposition` via remote-build.
+One existing rsync deployment simulation was skipped because the isolated
+image lacks rsync; publisher asset-preservation fixtures ran and passed.
+Both `/bin/sh` and dash ran the new scripts. ShellCheck 0.10.0 checked both
+scripts and the generated activation helper. Tests exercise actual util-linux
+flock contention across install/uninstall and process-group SIGTERM; lifecycle
+commands remain fakes, so they do not qualify SVC or real systemd behavior.
+Mac bootstrap/uninstaller SHA-256 fixtures match the original bytes.
+
+`bun run build && bunx tsc --noEmit -p .` passed through remote-build.
+No built-in-reasoning installer tests were run. Independent static review
+found and closed two P2s before this proof: linger observed outside lifecycle
+custody, and the Mac publisher overwriting an archive already pinned by Linux.
+The final reviewed implementation had no remaining P1/P2 findings; that is
+not a substitute for the deferred host qualification above.
