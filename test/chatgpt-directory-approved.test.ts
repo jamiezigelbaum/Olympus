@@ -503,6 +503,36 @@ function recordingBackend(recorded: Recorded[]): ChatGptSetupBackend {
   }) as ChatGptSetupBackend;
 }
 
+interface Leaf { path: Array<string | number>; value: unknown }
+
+function leaves(value: unknown, path: Array<string | number> = []): Leaf[] {
+  if (Array.isArray(value)) return value.flatMap((item, index) => leaves(item, [...path, index]));
+  if (typeof value === 'object' && value !== null) return Object.entries(value).flatMap(([key, item]) => leaves(item, [...path, key]));
+  return [{ path, value }];
+}
+
+/**
+ * The enumerated values in `sent` that did not reach the operation where they
+ * were sent. A nested value must arrive at the same place: the same field
+ * names and array positions below the top-level argument (the operation may
+ * rename that, as mail becomes draft), each received value used once. A
+ * top-level value may arrive anywhere, once.
+ */
+function undelivered(sent: Record<string, unknown>, received: unknown[], options: ReadonlySet<unknown>, skip: readonly string[] = []): string[] {
+  const wanted = leaves(sent).filter((leaf) => options.has(leaf.value) && !skip.includes(String(leaf.path[0])));
+  const available = leaves(received);
+  const used = new Set<Leaf>();
+  const lost: string[] = [];
+  for (const leaf of [...wanted].sort((a, b) => b.path.length - a.path.length)) {
+    const below = leaf.path.slice(1);
+    const match = available.find((candidate) => !used.has(candidate) && candidate.value === leaf.value
+      && (below.length === 0 || (candidate.path.length > below.length && below.every((segment, index) => candidate.path[candidate.path.length - below.length + index] === segment))));
+    if (match) used.add(match);
+    else lost.push(`${leaf.path.join('.')}=${String(leaf.value)}`);
+  }
+  return lost;
+}
+
 /**
  * Sends every argument set `tools`' schemas allow to the directory endpoint:
  * the required arguments alone, then the variants. A setup tool passes only
@@ -548,10 +578,8 @@ async function sweep(tools: readonly Tool[]): Promise<{ failures: string[]; sent
         failures.push(`${label}: ${error ?? 'answered'} before ${operation.source}`);
         continue;
       }
-      const received = JSON.stringify(ran.args);
       // Gmail's own operations take no source id: the route is the value.
-      const lost = enumerated(schema).filter((option) => JSON.stringify(args).includes(JSON.stringify(option)) && !received.includes(JSON.stringify(option)))
-        .filter((option) => !(option === args.source_id && /Mail$/.test(ran.method)));
+      const lost = undelivered(args, ran.args, new Set(enumerated(schema)), /Mail$/.test(ran.method) ? ['source_id'] : []);
       if (lost.length) failures.push(`${label}: ${ran.method} never received ${lost.join(', ')}`);
     }
   }
@@ -597,6 +625,23 @@ describe('the current handlers honour the submitted contract', () => {
     const { failures, sent } = await sweep((APPROVED_TOOLS as unknown as Tool[]).filter((tool) => !operations.has(tool.name)));
     expect(failures).toEqual([]);
     expect(sent).toBeGreaterThan(80);
+  });
+
+  test('the delivery check finds a value lost from one place although the same value arrived elsewhere', () => {
+    const rules = [
+      { kind: 'label', source_id: 'gmail.email', key: 'Label_7', value: 'Lawyer' },
+      { kind: 'sender', source_id: 'gmail.email', value: 'doctor@example.com' },
+    ];
+    const options = new Set(['label', 'sender', 'gmail.email', 'dropbox']);
+    expect(undelivered({ rules }, [{ description: 'x', rules }], options)).toEqual([]);
+    const dropped = [{ kind: 'label', key: 'Label_7', value: 'Lawyer' }, rules[1]];
+    expect(undelivered({ rules }, [{ rules: dropped }], options)).toEqual(['rules.0.source_id=gmail.email']);
+    const swapped = [{ ...rules[0], kind: 'sender' }, rules[1]];
+    expect(undelivered({ rules }, [{ rules: swapped }], options)).toEqual(['rules.0.kind=label']);
+    // A top-level value may arrive under another name, but must arrive.
+    expect(undelivered({ source: 'dropbox' }, ['dropbox'], options)).toEqual([]);
+    expect(undelivered({ source: 'dropbox' }, ['google-drive'], options)).toEqual(['source=dropbox']);
+    expect(undelivered({ source_id: 'gmail.email' }, [{}], options, ['source_id'])).toEqual([]);
   });
 
   test('the sweep fails when a handler refuses a value the submitted schema allows, at any depth', async () => {
