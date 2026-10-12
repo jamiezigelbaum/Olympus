@@ -28,8 +28,7 @@ import type {
   FileExtractionStatus,
 } from '../../core/source-family.ts';
 import { dropboxOutOfContentScopeSql } from './content-scope-policy.ts';
-import { stillImagePreparationAvailable } from '../../core/media-cache.ts';
-import { DEFAULT_STILL_IMAGE_EXTENSIONS } from '../../core/source-ingestion-policy.ts';
+import { unreadStillImageMatch, type StillImagesRead } from '../../core/source-ingestion-policy.ts';
 
 /**
  * Content the store deliberately does not read: video and the shelf, and still
@@ -155,13 +154,16 @@ export function minimumUsefulExtractionCharsSql(entryAlias: string): string {
  * ladder's own `mime_type_lower` / `path_lower` columns.
  */
 export function defaultDeferredContentReadinessSql(
-  stillImagesRead: boolean = stillImagePreparationAvailable(),
+  stillImagesRead?: StillImagesRead,
 ): string {
+  // The same per-format answer the ingestion policy reads: a format this
+  // machine cannot prepare is deferred (names-only) here too.
+  const unread = unreadStillImageMatch(stillImagesRead);
   return [
     "mime_type_lower LIKE 'video/%'",
-    ...(stillImagesRead ? [] : ["mime_type_lower LIKE 'image/%'"]),
+    ...unread.mimePrefixes.map((prefix) => `mime_type_lower LIKE '${prefix}%'`),
     ...DROPBOX_DEFAULT_DEFERRED_MEDIA_EXTENSIONS.map((extension) => `path_lower LIKE '%.${extension}'`),
-    ...(stillImagesRead ? [] : DEFAULT_STILL_IMAGE_EXTENSIONS.map((extension) => `path_lower LIKE '%.${extension}'`)),
+    ...unread.extensions.sort().map((extension) => `path_lower LIKE '%.${extension}'`),
     ...DROPBOX_DEFAULT_DEFERRED_BOOK_EXTENSIONS.map((extension) => `path_lower LIKE '%.${extension}'`),
     ...DROPBOX_DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS.map((segment) => `path_lower LIKE '%/${segment}/%'`),
   ].join('\n                OR ');

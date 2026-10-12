@@ -91,6 +91,7 @@ import type {
   ExtractionSink,
   ExtractionTerminalStatus,
   Extractor,
+  ExtractorRereadPolicy,
   ExtractorInput,
   ExtractorOutput,
   ExtractorRegistry,
@@ -451,6 +452,10 @@ export interface FileExtractionRunner {
 
 // --- the runner ------------------------------------------------------------
 
+function rereadPoliciesOf(extractor: Extractor): readonly ExtractorRereadPolicy[] {
+  return [...(extractor.reread ? [extractor.reread] : []), ...(extractor.extraReread ?? [])];
+}
+
 export function createFileExtractionRunner(
   options: FileExtractionRunnerOptions,
 ): FileExtractionRunner {
@@ -539,34 +544,36 @@ export function createFileExtractionRunner(
   function rereadUnread(lane: ExtractionLaneKey): number {
     let requeued = 0;
     for (const extractor of registry.list()) {
-      const policy = extractor.reread;
-      if (!policy) continue;
-      const request = {
-        ...lane,
-        extractorKind: extractor.kind,
-        warnings: policy.unreadWarnings,
-        terminalErrorKinds: policy.unreadTerminalErrorKinds,
-        ...(policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}),
-      };
-      try {
-        if (jobs.unreadJobCount(request) === 0) continue;
-        if (policy.prepare() !== 'ready') continue;
-        // A lane with several readers requeues only the items whose reader is ready.
-        const ready = policy.readyWarnings ? new Set(policy.readyWarnings()) : undefined;
-        const readyRequest = ready
-          ? {
-              ...request,
-              warnings: request.warnings.filter((warning) => ready.has(warning)),
-              ...(request.notReadyWarnings
-                ? { notReadyWarnings: request.notReadyWarnings.filter((warning) => ready.has(warning)) }
-                : {}),
-            }
-          : request;
-        if (readyRequest.warnings.length === 0 && readyRequest.terminalErrorKinds.length === 0) continue;
-        requeued += jobs.requeueUnread({ ...readyRequest, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
-      } catch (error) {
-        // Never a reason to stop the run: the jobs simply wait for the next one.
-        console.error(`Extraction reread check failed for ${extractor.kind}: ${error instanceof Error ? error.message : String(error)}`);
+      for (const policy of rereadPoliciesOf(extractor)) {
+        // Lists are read now, not once: a policy may name only the markers
+        // whose reader is ready at this moment.
+        const request = {
+          ...lane,
+          extractorKind: extractor.kind,
+          warnings: policy.unreadWarnings,
+          terminalErrorKinds: policy.unreadTerminalErrorKinds,
+          ...(policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}),
+        };
+        try {
+          if (jobs.unreadJobCount(request) === 0) continue;
+          if (policy.prepare() !== 'ready') continue;
+          // A lane with several readers requeues only the items whose reader is ready.
+          const ready = policy.readyWarnings ? new Set(policy.readyWarnings()) : undefined;
+          const readyRequest = ready
+            ? {
+                ...request,
+                warnings: request.warnings.filter((warning) => ready.has(warning)),
+                ...(request.notReadyWarnings
+                  ? { notReadyWarnings: request.notReadyWarnings.filter((warning) => ready.has(warning)) }
+                  : {}),
+              }
+            : request;
+          if (readyRequest.warnings.length === 0 && readyRequest.terminalErrorKinds.length === 0) continue;
+          requeued += jobs.requeueUnread({ ...readyRequest, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
+        } catch (error) {
+          // Never a reason to stop the run: the jobs simply wait for the next one.
+          console.error(`Extraction reread check failed for ${extractor.kind}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }
     return requeued;
@@ -580,23 +587,23 @@ export function createFileExtractionRunner(
   ): string[] {
     const asked: string[] = [];
     for (const extractor of registry.list()) {
-      const policy = extractor.reread;
-      if (!policy) continue;
-      try {
-        const waiting = 'queuedKinds' in work
-          ? work.queuedKinds.has(extractor.kind)
-          : work.lanes.some((lane) => jobs.hasWorkWaitingForReader({
-            ...lane,
-            extractorKind: extractor.kind,
-            warnings: policy.unreadWarnings,
-            terminalErrorKinds: policy.unreadTerminalErrorKinds,
-            ...(policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}),
-          }));
-        if (!waiting) continue;
-        policy.prepare();
-        asked.push(extractor.kind);
-      } catch (error) {
-        console.error(`Extraction reader check failed for ${extractor.kind}: ${error instanceof Error ? error.message : String(error)}`);
+      for (const policy of rereadPoliciesOf(extractor)) {
+        try {
+          const waiting = 'queuedKinds' in work
+            ? work.queuedKinds.has(extractor.kind)
+            : work.lanes.some((lane) => jobs.hasWorkWaitingForReader({
+              ...lane,
+              extractorKind: extractor.kind,
+              warnings: policy.unreadWarnings,
+              terminalErrorKinds: policy.unreadTerminalErrorKinds,
+              ...(policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}),
+            }));
+          if (!waiting) continue;
+          policy.prepare();
+          if (!asked.includes(extractor.kind)) asked.push(extractor.kind);
+        } catch (error) {
+          console.error(`Extraction reader check failed for ${extractor.kind}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }
     return asked;

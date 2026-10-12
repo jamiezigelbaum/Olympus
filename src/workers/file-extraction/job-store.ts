@@ -320,7 +320,7 @@ export interface JanitorRequeueExtractionJobsResult {
 }
 
 /**
- * Jobs a lane settled unread for want of a reader: `metadata_only` with one of
+ * Jobs a lane settled wholly or partly unread: `metadata_only` or `indexed` with one of
  * `warnings` on a derivation of that job, or `failed_terminal` with one of
  * `terminalErrorKinds` as its last error kind.
  */
@@ -1340,15 +1340,22 @@ export class LocalFileExtractionJobStore {
     const limit = clampInteger(request.limit ?? DEFAULT_JANITOR_LIMIT, 1, MAX_JANITOR_LIMIT);
     const { sql, params } = this.unreadJobsQuery(request);
     const now = nowIso();
-    let matched: Array<{ job_id: string }> = [];
+    let matched: Array<{ job_id: string; not_ready: number }> = [];
+    const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken(warning, 'notReadyWarning'));
+    // Waiting for an independent capability must not spend the attempted-read
+    // budget. Only this policy's ready markers count, not another reader's.
+    const pendingSql = notReady.length > 0 ? `EXISTS (
+      SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
+      WHERE a.job_id = j.job_id AND w.value IN (${notReady.map(() => '?').join(', ')})
+    )` : '0';
     let requeued = 0;
     this.db.transaction(() => {
       matched = this.db.query(`
-        SELECT j.job_id FROM extraction_jobs j
+        SELECT j.job_id, ${pendingSql} AS not_ready FROM extraction_jobs j
         WHERE ${sql}
         ORDER BY j.updated_at ASC, j.job_id ASC
         LIMIT ?
-      `).all(...params, limit) as Array<{ job_id: string }>;
+      `).all(...notReady, ...params, limit) as Array<{ job_id: string; not_ready: number }>;
       const update = this.db.query(`
         UPDATE extraction_jobs
         SET status = 'queued',
@@ -1360,15 +1367,15 @@ export class LocalFileExtractionJobStore {
             last_error_kind = ?,
             next_retry_at = NULL,
             janitor_requeue_count = COALESCE(janitor_requeue_count, 0) + 1,
-            janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1,
+            janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + ?,
             janitor_requeued_at = ?,
             janitor_requeue_reason = ?,
             updated_at = ?
         WHERE job_id = ?
-          AND status IN ('metadata_only', 'failed_terminal')
+          AND status IN ('metadata_only', 'indexed', 'failed_terminal')
       `);
       for (const row of matched) {
-        requeued += update.run(JANITOR_TERMINAL_ERROR_KIND, now, reason, now, row.job_id).changes;
+        requeued += update.run(JANITOR_TERMINAL_ERROR_KIND, row.not_ready ? 0 : 1, now, reason, now, row.job_id).changes;
       }
     })();
     return { matchedJobs: matched.length, jobsRequeued: requeued };
@@ -1415,7 +1422,7 @@ export class LocalFileExtractionJobStore {
     const onceGuard = 'COALESCE(j.janitor_terminal_requeue_count, 0) < 1';
     if (warnings.length > 0) {
       // Once ever, unless the job was settled while its reader was not ready.
-      clauses.push(`(j.status = 'metadata_only' AND ${hasWarning(warnings)} AND (${onceGuard}${
+      clauses.push(`(j.status IN ('metadata_only', 'indexed') AND ${hasWarning(warnings)} AND (${onceGuard}${
         notReady.length > 0 ? ` OR ${hasWarning(notReady)}` : ''}))`);
       params.push(...warnings, ...notReady);
     }

@@ -44,10 +44,12 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { olympusDataDir } from './remote-access.ts';
+import { SIPS_PATH } from '../workers/file-extraction/extractors/image-preparers.ts';
+import { readyStillImageFormats } from './still-image-readiness.ts';
 
 export const MEDIA_CACHE_DIR_ENV = 'OLYMPUS_MEDIA_CACHE_DIR';
-/** The tool still images are prepared with; it ships with macOS only. */
-export const SIPS_PATH = '/usr/bin/sips';
+/** The tool still images are prepared with on a Mac; it ships with macOS only. */
+export { SIPS_PATH };
 /** A file nothing holds is removed once it is older than this. */
 export const MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60_000;
 
@@ -61,12 +63,15 @@ export interface MediaCacheFile {
 }
 
 /**
- * Whether this machine can prepare still images for media search. Mac first:
- * the preparation tool ships with macOS. A capability, not a source: every
- * lane that reads pictures asks the same question.
+ * Whether this machine can prepare at least one still-image format for media
+ * search. A capability, not a source or an operating system: the tool that
+ * prepares pictures is whichever one this machine has, and each format is
+ * proven by preparing a real picture of it (`still-image-readiness.ts`).
+ * Every lane that asks "can pictures be read here" gets the same answer from
+ * the same per-format probe; a caller that cares which formats asks for them.
  */
-export function stillImagePreparationAvailable(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === 'darwin' && existsSync(SIPS_PATH);
+export function stillImagePreparationAvailable(): boolean {
+  return readyStillImageFormats().size > 0;
 }
 
 /**

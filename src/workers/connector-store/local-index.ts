@@ -50,9 +50,16 @@ import {
   mediaCacheDir,
   releaseMediaCacheFile,
   retainMediaCacheFile,
-  stillImagePreparationAvailable,
   sweepMediaCache,
 } from '../../core/media-cache.ts';
+import { readyStillImageFormats } from '../../core/still-image-readiness.ts';
+import {
+  STILL_IMAGE_FORMATS,
+  stillImageFormatForMimeType,
+  stillImageMimeTypes,
+  type StillImageFormat,
+} from '../../core/still-image-formats.ts';
+import { resolveStillImageFormats, type StillImagesRead } from '../../core/source-ingestion-policy.ts';
 import {
   assertSqliteSchemaCanOpen,
   currentStoreMigrations,
@@ -542,11 +549,12 @@ export interface LocalConnectorStoreOptions {
   /** Opens an existing store without migrations, WAL changes, or writes. */
   readOnly?: boolean;
   /**
-   * Whether this machine reads pictures for media search (defaults to
-   * `stillImagePreparationAvailable()`); decides whether an image read
-   * before pictures were is listed for extraction once more.
+   * Which still-image formats this machine reads for media search: a yes or
+   * no for every format, or a list. Defaults to the machine's own per-format
+   * probe, asked each time; decides whether an image read before pictures
+   * were is listed for extraction once more.
    */
-  stillImagesRead?: boolean;
+  stillImagesRead?: StillImagesRead;
   /** Clock for owner observations compared with provider snapshot cutoffs. */
   now?: () => Date;
   /**
@@ -2405,7 +2413,7 @@ export class LocalConnectorStore {
   private mediaJudgmentsPresent = false;
   /** This store's name in the media cache's reference markers. */
   private readonly mediaHolder: string;
-  private readonly stillImagesRead: boolean;
+  private readonly stillImageFormatsRead: () => ReadonlySet<StillImageFormat>;
   // The four-tier ledger. Declared without an initializer on purpose (see the
   // tree-shaking note on trustReconciliationReadyCursors).
   private tierLedgerHandle: TierLedger | undefined;
@@ -2431,7 +2439,8 @@ export class LocalConnectorStore {
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
     this.mediaHolder = this.dbPath === ':memory:' ? `memory:${randomUUID()}` : this.dbPath;
-    this.stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
+    const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
+    this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
     this.family = options.family;
     this.trustDomain = options.trustDomain;
     this.now = options.now ?? (() => new Date());
@@ -4402,9 +4411,19 @@ export class LocalConnectorStore {
     // version. Every image reading stored since records a row, so an image
     // that ends without a picture (a tiny one, a dropped one) is not listed
     // again pass after pass.
-    const imagesWithoutPicture = this.imageMediaReadsPresent
-      && this.trustDomain === 'secure_local'
-      && this.stillImagesRead;
+    const readFormats = this.imageMediaReadsPresent && this.trustDomain === 'secure_local'
+      ? this.stillImageFormatsRead()
+      : new Set<StillImageFormat>();
+    const imagesWithoutPicture = readFormats.size > 0;
+    // Every format read: any image. Some: only those (a format this machine
+    // cannot prepare is not listed again and again to be refused).
+    const imageMimeSql = readFormats.size === STILL_IMAGE_FORMATS.length
+      ? "LOWER(i.mime_type) LIKE 'image/%'"
+      : `LOWER(i.mime_type) IN (${STILL_IMAGE_FORMATS
+        .filter((format) => readFormats.has(format))
+        .flatMap((format) => [...stillImageMimeTypes(format)])
+        .map((mimeType) => `'${mimeType}'`)
+        .join(', ')})`;
     // With no media-type filter every scanned row is a match, so one query of
     // exactly `limit` rows is enough. With a filter the scan has to be able to
     // run past non-matching rows, hence a wider window.
@@ -4423,7 +4442,7 @@ export class LocalConnectorStore {
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
           ${imagesWithoutPicture ? `OR (
-            LOWER(i.mime_type) LIKE 'image/%'
+            ${imageMimeSql}
             AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
             AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk AND c.media_sha256 IS NOT NULL)
           )` : ''})
@@ -4485,6 +4504,18 @@ export class LocalConnectorStore {
       ...(skippedByDisposition > 0 ? { skippedByDisposition } : {}),
       ...(exhausted ? {} : { nextCursor: String(lastExaminedPk) }),
     };
+  }
+
+  /**
+   * Whether an image of this media type was read with its picture considered
+   * on this machine: its format can be prepared here. An image this machine
+   * could not prepare (a HEIC without a decoder) is read as text alone, and
+   * that reading must not be recorded as "the picture was considered", or
+   * the photo would never be listed again once the decoder arrives.
+   */
+  private imageFormatReadsPictures(mimeType: string | undefined): boolean {
+    const format = stillImageFormatForMimeType(mimeType);
+    return format === undefined || this.stillImageFormatsRead().has(format);
   }
 
   itemOwnerPresent(
@@ -5003,7 +5034,7 @@ export class LocalConnectorStore {
         if (this.itemRepresentationCoverage(record.expectation).complete) {
           // Read again with nothing new (a tiny picture's same text): still a
           // reading, so the image is not listed for one more.
-          if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+          if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
             this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
               .run(existing.item_pk, this.now().toISOString());
           }
@@ -5030,7 +5061,7 @@ export class LocalConnectorStore {
         );
         this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars, record.media);
         this.refreshFtsForItem(upsert.itemPk);
-        if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+        if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
           this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
             .run(upsert.itemPk, this.now().toISOString());
         }

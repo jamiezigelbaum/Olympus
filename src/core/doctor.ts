@@ -69,6 +69,8 @@ import {
   consultVocabularyFileStatus,
   type ConsultVocabularyFileStatus,
 } from './consult-gate.ts';
+import { photoSearchStatus } from './photo-search-status.ts';
+import { stillImageReadiness, type StillImageReadiness } from './still-image-readiness.ts';
 import {
   consultGateOptionsFromSettings,
   readConsultSettings,
@@ -107,6 +109,16 @@ export interface DoctorDeps {
   zkapiStatePath?: string;
   /** The consult vocabulary pack states; defaults to hashing the installed packs. */
   consultVocabularyStatus?: () => readonly ConsultVocabularyFileStatus[];
+  /**
+   * Which still-image formats this machine can read for photo search. Defaults
+   * to the machine's own probe (a tiny real picture per format); a test passes
+   * a fixed answer so it never runs a tool.
+   */
+  photoSearchReadiness?: () => StillImageReadiness;
+  /** The text of `/etc/os-release`, for the family-specific remedy. Defaults to reading it. */
+  osRelease?: () => string | undefined;
+  /** The platform the remedy is written for; defaults to this process's. */
+  platform?: NodeJS.Platform;
   /**
    * What hosts the engine on this machine. Optional so a test never inspects
    * the developer's own launchd; the `olympus doctor` operation passes
@@ -210,6 +222,7 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     await safeCheck('email_worker', () => emailWorkerCheck(deps)),
     await safeCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
     await safeCheck('dropbox_content_extraction_throughput', () => dropboxContentExtractionThroughputCheck(deps)),
+    await safeCheck('photo_search', () => photoSearchCheck(deps)),
     await safeCheck('source_index_status', () => sourceIndexStatusCheck(deps)),
     await safeCheck('source_scheduler_status', () => sourceSchedulerStatusCheck(deps)),
     await safeCheck('source_ingestion_health', () => sourceIngestionHealthCheck(deps)),
@@ -218,6 +231,33 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     ok: checks.every((check) => check.ok),
     checks,
   };
+}
+
+/**
+ * Whether photos can be searched by what is in them on this machine: ready,
+ * partly ready (naming the formats that are not), or missing, with the one
+ * command that fixes it. Informational: a machine with no photos to search is
+ * not unhealthy, so a gap never fails the walk, but it is always named.
+ */
+async function photoSearchCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const status = photoSearchStatus((deps.photoSearchReadiness ?? stillImageReadiness)(), {
+    osRelease: (deps.osRelease ?? defaultOsRelease)(),
+    ...(deps.platform ? { platform: deps.platform } : {}),
+  });
+  return {
+    name: 'photo_search',
+    ok: true,
+    detail: status.summary,
+    ...(status.remedy ? { hint: status.remedy } : {}),
+  };
+}
+
+function defaultOsRelease(): string | undefined {
+  try {
+    return readFileSync('/etc/os-release', 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 async function sourceCapabilityCatalogCheck(deps: DoctorDeps): Promise<DoctorCheck> {
