@@ -34,22 +34,11 @@ Use Olympus tools rather than calling local model endpoints directly.
 
 ## Lane Choice
 
-Use `fast` by default for interactive work:
-
-- ordinary local reasoning
-- quick summaries
-- short classification
-- low-latency routing checks
-
-Use `deep` for slower or more careful work:
-
-- document analysis
-- S4 boundary checks
-- sensitive review
-- cases where caution matters more than latency
-
-If you are unsure, start with `fast` for low-stakes work and `deep` for
-sensitive or consequence-heavy work.
+Use `fast` (the default) for all Argus work. Both lanes resolve to the same
+healthy Delphi model pool; `deep` is a legacy alias kept for old callers, not
+a slower or more careful model, so choosing it changes nothing. For careful or
+sensitive work, give the prompt more context and ask for the reasoning you
+need instead of switching lanes.
 
 ## Privacy Posture
 
