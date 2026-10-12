@@ -3,8 +3,10 @@
  * 4, owner decision 2026-10-09: the ChatGPT panel is the only dashboard).
  *
  * - `/dashboard` is the computer's host page around the panel (host-page.ts).
- * - `?keys`, `?agents`, `?outside-help`, `?connector` are the computer's own
- *   pages, still rendered here (pages/local.ts, pages/outside-help.ts).
+ * - `?keys`, `?agents`, `?private-answers`, `?connector` are the computer's
+ *   own pages, still rendered here (pages/local.ts, pages/private-answers.ts).
+ *   `?outside-help`, the Anonymous answers page Private answers absorbed
+ *   (2026-10-12), redirects there with that section open.
  * - `?panel-read` is the dashboard tool's result for a locked (dash_) reader.
  * - Every older page's address (`?source=`, `?background`, `?sensitivity`,
  *   `?setup`, `?privacy`, `?embedding-ledger`) redirects to /dashboard.
@@ -21,6 +23,7 @@ import {
   DASHBOARD_LOCAL_PAGES,
   DASHBOARD_PANEL_READ_QUERY_PARAM,
   dashboardHomeHref,
+  dashboardLocalPageHref,
 } from './host-page.ts';
 import {
   renderDashboardAgentsPage,
@@ -28,7 +31,7 @@ import {
   renderDashboardKeysPage,
   type DashboardPageOptions,
 } from './pages/local.ts';
-import { renderDashboardOutsideHelpPage } from './pages/outside-help.ts';
+import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, renderDashboardPrivateAnswersPage } from './pages/private-answers.ts';
 
 export { DASHBOARD_HTML_PATH };
 
@@ -38,7 +41,7 @@ export { DASHBOARD_HTML_PATH };
  */
 export const DASHBOARD_LEGACY_QUERY_PARAMS = ['source', 'background', 'sensitivity', 'setup', 'privacy', 'embedding-ledger'] as const;
 
-export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'agents' | 'outside_help' | 'connector' | 'legacy';
+export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'agents' | 'private_answers' | 'outside_help_moved' | 'connector' | 'legacy';
 
 export function isDashboardHtmlRoute(url: URL): boolean {
   return url.pathname === DASHBOARD_HTML_PATH;
@@ -51,7 +54,8 @@ export function dashboardHtmlRoutePage(url: URL): DashboardHtmlRoutePage {
   if (params.has(DASHBOARD_PANEL_READ_QUERY_PARAM)) return 'panel_read';
   if (params.has(DASHBOARD_LOCAL_PAGES.keys)) return 'keys';
   if (params.has(DASHBOARD_LOCAL_PAGES.agents)) return 'agents';
-  if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM)) return 'outside_help';
+  if (params.has(DASHBOARD_LOCAL_PAGES.privateAnswers)) return 'private_answers';
+  if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM)) return 'outside_help_moved';
   if (params.has(DASHBOARD_LOCAL_PAGES.connector)) return 'connector';
   return 'host';
 }
@@ -67,9 +71,17 @@ export function dashboardLegacyRedirect(url: URL): string {
   return dashboardHomeHref(dashboardReadToken(url));
 }
 
+/**
+ * Where the Anonymous answers page's old address goes: Private answers, with
+ * the Anonymous answers section open, keeping a dash_ reader's token.
+ */
+export function dashboardOutsideHelpRedirect(url: URL): string {
+  return `${dashboardLocalPageHref('privateAnswers', dashboardReadToken(url))}#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`;
+}
+
 /** The computer's local pages. `view` is needed by Keys only. */
 export function renderDashboardLocalPage(
-  page: 'keys' | 'agents' | 'outside_help' | 'connector',
+  page: 'keys' | 'agents' | 'private_answers' | 'connector',
   input: { url: URL; view?: SourceDashboardViewModel; options?: DashboardPageOptions },
 ): string {
   const options: DashboardPageOptions = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
@@ -79,8 +91,8 @@ export function renderDashboardLocalPage(
       return renderDashboardKeysPage(input.view, options);
     case 'agents':
       return renderDashboardAgentsPage(options);
-    case 'outside_help':
-      return renderDashboardOutsideHelpPage(options);
+    case 'private_answers':
+      return renderDashboardPrivateAnswersPage(options);
     case 'connector':
       return renderDashboardConnectorPage(options);
   }

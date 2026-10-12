@@ -179,6 +179,7 @@ describe('operations', () => {
     expect(result.checks.map((check) => check.name)).toEqual([
       'host',
       'dependencies',
+      'ocr_reading',
       'source_capability_catalog',
       'sovereignty_prerequisites',
       'credential_handles',

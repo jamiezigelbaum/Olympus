@@ -597,7 +597,7 @@ describe('multi-source source dashboard', () => {
 
   test('the query-addressed pages stay reachable with only the read-only dash_ token', async () => {
     // isDashboardQueryTokenRequest allowlists by pathname, which is why
-    // keys/agents/outside-help/connector are query flags rather than
+    // keys/agents/private-answers/connector are query flags rather than
     // paths of their own. A future move to /dashboard/<id> would 401 exactly
     // the reader these pages exist for — this pins the whole reason.
     const workerBearerToken = 'dashboard-secret-query-token-must-not-leak';
@@ -615,7 +615,7 @@ describe('multi-source source dashboard', () => {
     const fetch = withWorkerBearerAuth(worker.fetch, { authToken: workerBearerToken });
     const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(workerBearerToken);
 
-    for (const page of ['keys', 'agents', 'outside-help', 'connector']) {
+    for (const page of ['keys', 'agents', 'private-answers', 'connector']) {
       const response = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}&${page}`));
       expect(response.status).toBe(200);
       const html = await response.text();

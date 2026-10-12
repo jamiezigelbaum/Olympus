@@ -557,7 +557,19 @@ export function createFileExtractionRunner(
         try {
           if (jobs.unreadJobCount(request) === 0) continue;
           if (policy.prepare() !== 'ready') continue;
-          requeued += jobs.requeueUnread({ ...request, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
+          // A lane with several readers requeues only the items whose reader is ready.
+          const ready = policy.readyWarnings ? new Set(policy.readyWarnings()) : undefined;
+          const readyRequest = ready
+            ? {
+                ...request,
+                warnings: request.warnings.filter((warning) => ready.has(warning)),
+                ...(request.notReadyWarnings
+                  ? { notReadyWarnings: request.notReadyWarnings.filter((warning) => ready.has(warning)) }
+                  : {}),
+              }
+            : request;
+          if (readyRequest.warnings.length === 0 && readyRequest.terminalErrorKinds.length === 0) continue;
+          requeued += jobs.requeueUnread({ ...readyRequest, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
         } catch (error) {
           // Never a reason to stop the run: the jobs simply wait for the next one.
           console.error(`Extraction reread check failed for ${extractor.kind}: ${error instanceof Error ? error.message : String(error)}`);

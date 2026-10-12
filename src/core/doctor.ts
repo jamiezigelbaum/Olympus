@@ -32,6 +32,7 @@ import {
   type SovereigntyEngine,
 } from './sovereignty.ts';
 import { setupPreflight } from './setup-preflight.ts';
+import { checkOcrReadiness, type OcrReadiness } from './ocr-readiness.ts';
 import {
   credentialConfigFingerprint,
   type WorkerCredentialReadiness,
@@ -124,6 +125,12 @@ export interface DoctorDeps {
    * `defaultDoctorHostProbe`.
    */
   hostProbe?: () => DoctorHostFacts | Promise<DoctorHostFacts>;
+  /**
+   * Whether this computer reads scans and pictures of text. Optional so a
+   * test never runs the developer's own OCR commands; the `olympus doctor`
+   * operation passes `checkOcrReadiness`.
+   */
+  ocrProbe?: () => OcrReadiness | Promise<OcrReadiness>;
 }
 
 export interface DoctorHostFacts {
@@ -200,6 +207,7 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
   const checks = [
     ...(deps.hostProbe ? [await safeCheck('host', () => hostCheck(deps))] : []),
     await safeCheck('dependencies', () => dependencyCheck(deps)),
+    ...(deps.ocrProbe ? [await safeCheck('ocr_reading', () => ocrReadingCheck(deps))] : []),
     await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck('sovereignty_prerequisites', () => sovereigntyPrerequisiteCheck(deps)),
     await safeCheck('credential_handles', () => credentialHandleCheck(deps)),
@@ -480,6 +488,24 @@ async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     name: 'dependencies',
     ok: true,
     detail: `Required dependencies are present. Optional dependency gaps: ${optionalMissing.join(', ') || 'none'}.`,
+  };
+}
+
+/**
+ * Whether scans and pictures of text are read on this computer, and if not the
+ * one command that fixes it. Files that were left unread for want of it are
+ * read automatically once it works, so the hint says so.
+ */
+async function ocrReadingCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const readiness = await deps.ocrProbe!();
+  if (readiness.state === 'ready') {
+    return { name: 'ocr_reading', ok: true, detail: readiness.detail };
+  }
+  return {
+    name: 'ocr_reading',
+    ok: false,
+    detail: readiness.detail,
+    hint: `${readiness.remedy ?? 'Install tesseract and poppler.'} Scans and pictures left unread are read again automatically once it is installed.`,
   };
 }
 

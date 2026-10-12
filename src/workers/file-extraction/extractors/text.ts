@@ -20,7 +20,14 @@
  * decoders live in `document-formats.ts` and this file has none of its own.
  */
 
-import type { ExtractedMedia, ExtractionDerivation, Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
+import type {
+  ExtractedMedia,
+  ExtractionDerivation,
+  Extractor,
+  ExtractorInput,
+  ExtractorOutput,
+  ExtractorRereadPolicy,
+} from '../types.ts';
 import {
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   DEFAULT_MAX_TABLE_SAMPLE_COLUMNS,
@@ -117,6 +124,20 @@ export interface TextExtractorOptions {
    */
   imageOcr?: ImageOcr;
   /**
+   * When items left unread for want of OCR are read again: the policy the
+   * runner asks (`Extractor.reread`). Injected by the registry with the OCR
+   * capability probe, like `pdfOcr`. A scanned PDF or a picture settled
+   * `ocr_required` while no OCR engine worked is read again when one does
+   * (see `OCR_UNAVAILABLE_PDF_WARNING`).
+   */
+  ocrReread?: ExtractorRereadPolicy;
+  /**
+   * Queue images under `IMAGE_OCR_VERSION_SUFFIX`, once, so pictures settled
+   * names-only before a command engine read them are read now. Set by the
+   * registry only where Vision does not read pictures.
+   */
+  imageOcrVersion?: boolean;
+  /**
    * Prepares an image for media search (a JPEG copy in the media cache).
    * Injected by the registry on macOS; absent elsewhere, which leaves images
    * exactly as they were. With it, an image is indexed: a short descriptor
@@ -170,6 +191,7 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   const pdfOcr = options.pdfOcr;
   const imageOcr = options.imageOcr;
   const imagePreparation = options.imagePreparation;
+  const imageOcrVersion = options.imageOcrVersion === true;
   return {
     kind,
     version,
@@ -179,19 +201,24 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
     // Only for a format this machine can prepare: one it cannot keeps the
     // version it had, so it is queued under the suffix when it becomes
     // preparable, and not before.
-    ...(imagePreparation
+    ...(imagePreparation || imageOcrVersion
       ? {
         versionFor(mimeType: string | undefined): string {
           const normalized = normalizeMimeType(mimeType);
-          return normalized && IMAGE_MIME_TYPES.has(normalized) && (imagePreparation.ready?.(normalized) ?? true)
-            ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}`
-            : version;
+          if (!normalized || !IMAGE_MIME_TYPES.has(normalized)) return version;
+          if (imagePreparation) {
+            return (imagePreparation.ready?.(normalized) ?? true)
+              ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}`
+              : version;
+          }
+          return imageOcrVersion ? `${version}${IMAGE_OCR_VERSION_SUFFIX}` : version;
         },
       }
       : {}),
     // Pictures left unread for want of an image decoder are read again when
     // the decoder appears (see `imageDecoderUnavailableWarning`).
     ...(imagePreparation?.rereadPolicy ? { extraReread: [imagePreparation.rereadPolicy] } : {}),
+    ...(options.ocrReread ? { reread: options.ocrReread } : {}),
     egress: 'local',
     accepts(mimeType) {
       return textLaneAccepts(mimeType);
@@ -264,7 +291,12 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
             warnings: [imageDecoderUnavailableWarning(prepared.format)],
           });
         }
-        if (!imageMediaDescriptor) {
+        // An OCR reader exists in this lane but did not run (no engine works
+        // here yet): the picture is marked as waiting for it, so the reread
+        // policy reads it when OCR works. A lane with no reader at all has
+        // nothing to wait for and settles as it always did.
+        const waitingForOcr = imageOcr !== undefined;
+        if (!imageMediaDescriptor && !waitingForOcr) {
           return { status: 'metadata_only' };
         }
         return mediaDescriptorOutput({
@@ -273,7 +305,7 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
           maxBoundedTextChars,
           kind: 'image',
           label: 'image file',
-          warnings: ['ocr_required', 'image_only'],
+          warnings: ['ocr_required', 'image_only', ...(waitingForOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : [])],
         });
       }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
@@ -325,6 +357,17 @@ export const IMAGE_MEDIA_DESCRIPTOR = 'Photo';
  * that met a picture throw, stopping the whole lane.
  */
 export const IMAGE_MEDIA_VERSION_SUFFIX = '.image-media-2026-10-07';
+
+/**
+ * Appended to the text lane's version for images on a host where a command
+ * engine (not Vision) reads pictures and no preparation does (2026-10-12).
+ * Pictures settled names-only before OCR could read them carry no marker, so
+ * they are queued once more under this version. It is fixed, not tied to what
+ * is installed, so it never changes again and cannot duplicate or strand a job;
+ * the registry omits it wherever Vision reads pictures, so nothing read on a
+ * Mac is read again. Same character rule as the media suffix.
+ */
+export const IMAGE_OCR_VERSION_SUFFIX = '.image-ocr-2026-10-12';
 
 /**
  * An image prepared for media search: indexed, with the prepared copy as
@@ -627,6 +670,17 @@ async function extractPdfTextWithCommand(input: {
   }
 }
 
+/**
+ * Mark an item the text lane left unread because its OCR reader did not run
+ * (no engine works on this host yet), as opposed to one that ran and found
+ * nothing. The item was never read, so the reread policy
+ * (`ExtractorRereadPolicy.notReadyWarnings`) reads it whenever its reader
+ * works, without spending the once-ever requeue. A scanned PDF and a picture
+ * need different readers, so each has its own marker.
+ */
+export const OCR_UNAVAILABLE_PDF_WARNING = 'ocr_unavailable_pdf';
+export const OCR_UNAVAILABLE_IMAGE_WARNING = 'ocr_unavailable_image';
+
 export function isCommandMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
 }
@@ -652,7 +706,12 @@ async function pdfTextExtractionResult(input: {
         maxBoundedTextChars: input.context.maxBoundedTextChars,
         kind: 'media',
         label: 'scanned or image-only pdf',
-        warnings: ['ocr_required', 'pdf_image_only', 'no_selectable_text_layer'],
+        warnings: [
+          'ocr_required',
+          'pdf_image_only',
+          'no_selectable_text_layer',
+          ...(input.ocr ? [OCR_UNAVAILABLE_PDF_WARNING] : []),
+        ],
       });
     }
     return { status: 'empty_output' };

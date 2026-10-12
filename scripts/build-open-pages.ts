@@ -42,6 +42,9 @@ function handStep(target: OpenTarget): string | undefined {
       case 'models': return 'Open <strong>Models</strong>.';
     }
   }
+  if (target.kind === 'private_answers') {
+    return 'Under <strong>On this computer</strong>, open <strong>Private answers</strong>.';
+  }
   if (target.kind === 'unreadable') {
     return `Under <strong>Sources</strong>, open <strong>See why</strong> under <strong>${OPEN_UNREADABLE_SOURCES[target.source].label}</strong>. It lists every file that can't be read, and each one opens.`;
   }

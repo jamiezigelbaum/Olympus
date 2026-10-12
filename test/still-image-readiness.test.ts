@@ -66,7 +66,9 @@ import {
   type StillImagePreparer,
 } from '../src/workers/file-extraction/extractors/image-preparers.ts';
 import { jpegMetadataSegments } from '../src/workers/file-extraction/extractors/jpeg-metadata.ts';
-import { IMAGE_MEDIA_VERSION_SUFFIX, createTextExtractor } from '../src/workers/file-extraction/extractors/text.ts';
+import { createOcrRereadPolicy } from '../src/workers/file-extraction/extractors/ocr.ts';
+import type { OcrCapabilitySnapshot } from '../src/workers/file-extraction/extractors/ocr-capability.ts';
+import { IMAGE_MEDIA_VERSION_SUFFIX, IMAGE_OCR_VERSION_SUFFIX, createTextExtractor, type TextExtractorOptions } from '../src/workers/file-extraction/extractors/text.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { buildExtractorRegistry, createDefaultExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
 import { createFileExtractionRunner } from '../src/workers/file-extraction/runner.ts';
@@ -751,10 +753,12 @@ describe('the model\'s image encoder state is never cached for ever', () => {
 describe('a photo left unread for want of a decoder is read again when the decoder appears', () => {
   const LANE = { corpusId: 'secure_local.fake.files', provider: 'fake', accountScope: 'personal', approvedScopeKey: 'fake.personal:/Photos' };
 
-  function setup(files: Record<string, Uint8Array>, ready: Set<StillImageFormat>) {
+  function setup(files: Record<string, Uint8Array>, ready: Set<StillImageFormat>, options: TextExtractorOptions = {}) {
     const jobs = new LocalFileExtractionJobStore(':memory:');
     const calls: string[][] = [];
+    const fetched: string[] = [];
     const extractor = createTextExtractor({
+      ...options,
       imagePreparation: createImagePreparation({
         cacheDir: join(temporaryDir(), 'media-cache'),
         preparer: createVipsPreparer({ path: '/fake/vipsthumbnail' }),
@@ -772,7 +776,10 @@ describe('a photo left unread for want of a decoder is read again when the decod
         source: {
           id: 'fake', corpusId: LANE.corpusId, provider: LANE.provider,
           async listCandidates() { return { candidates: [], done: true }; },
-          async fetch(ref: ExtractionItemRef) { return { bytes: files[ref.providerItemId]!, mimeType: 'image/jpeg' }; },
+          async fetch(ref: ExtractionItemRef) {
+            fetched.push(ref.providerItemId);
+            return { bytes: files[ref.providerItemId]!, mimeType: 'image/jpeg' };
+          },
         },
         sink: {
           async accept(request) {
@@ -790,8 +797,61 @@ describe('a photo left unread for want of a decoder is read again when the decod
       extractorVersion: extractor.versionFor!('image/jpeg'),
       policyDecision: 'index_allowed',
     });
-    return { jobs, runner, calls, accepted, extractor };
+    return { jobs, runner, calls, accepted, fetched, extractor };
   }
+
+  for (const first of ['ocr', 'decoder'] as const) {
+    test(`OCR and decoder markers recover independently, once each (${first} ready first)`, async () => {
+      const ready = new Set<StillImageFormat>(['webp']);
+      let ocrReady = false;
+      const snapshot = (): OcrCapabilitySnapshot => ({
+        tesseract: ocrReady ? 'ok' : 'missing', pdftoppm: 'missing', ocrmypdf: 'missing',
+        imageEngine: ocrReady ? 'tesseract' : undefined, pdfEngine: undefined, checkedAt: 1,
+      });
+      const lane = setup({
+        'ocr-picture': imageFixture('quadrants.jpg'),
+        'decoder-photo': imageFixture('orientation-1.heic'),
+      }, ready, {
+        imageOcr: async () => ocrReady ? { status: 'indexed', text: 'text in the picture', derivations: [] } : undefined,
+        ocrReread: createOcrRereadPolicy({ capability: {
+          snapshot: async () => snapshot(), peek: snapshot, peekFresh: snapshot,
+          warm() {}, invalidate() {},
+        } }),
+      });
+      try {
+        expect((await lane.runner.run({ ...LANE })).counts.metadata_only).toBe(2);
+        expect(lane.jobs.artifacts(LANE.corpusId, 'personal:ocr-picture')[0]?.derivation.warnings)
+          .toContain('ocr_unavailable_image');
+        expect(lane.jobs.artifacts(LANE.corpusId, 'personal:decoder-photo')[0]?.derivation.warnings)
+          .toEqual([imageDecoderUnavailableWarning('heic')]);
+        expect((await lane.runner.run({ ...LANE })).rereadRequeued).toBeUndefined();
+        for (const reader of [first, first === 'ocr' ? 'decoder' : 'ocr']) {
+          if (reader === 'ocr') ocrReady = true;
+          else ready.add('heic');
+          const before = lane.fetched.length;
+          const result = await lane.runner.run({ ...LANE });
+          expect(result.rereadRequeued).toBe(1);
+          expect(result.counts.indexed).toBe(1);
+          expect(lane.fetched.slice(before)).toEqual([reader === 'ocr' ? 'ocr-picture' : 'decoder-photo']);
+          expect((await lane.runner.run({ ...LANE })).rereadRequeued).toBeUndefined();
+        }
+        expect(lane.accepted.sort()).toEqual(['decoder-photo', 'ocr-picture']);
+        expect(lane.fetched.filter((id) => id === 'ocr-picture')).toHaveLength(2);
+        expect(lane.fetched.filter((id) => id === 'decoder-photo')).toHaveLength(2);
+      } finally {
+        lane.jobs.close();
+      }
+    });
+  }
+
+  test('Linux photo preparation owns the picture version even when command OCR is enabled', () => {
+    const text = createDefaultExtractorRegistry({
+      media: { cacheDir: join(temporaryDir(), 'media-cache'), readiness: stillImageReadinessOf(true) },
+      ocr: { platform: 'linux' },
+    }).get('local_text')!;
+    expect(text.versionFor!('image/jpeg')).toBe(`${text.version}${IMAGE_MEDIA_VERSION_SUFFIX}`);
+    expect(text.versionFor!('image/jpeg')).not.toContain(IMAGE_OCR_VERSION_SUFFIX);
+  });
 
   test('HEIC bytes served as image/jpeg wait for HEIC specifically, and are read when it is ready', async () => {
     const ready = new Set<StillImageFormat>(withoutHeic);

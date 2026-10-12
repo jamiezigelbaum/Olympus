@@ -239,7 +239,7 @@ export function chatgptDashboardClient(
     state.hostReadOnly = value.readOnly === true;
     const links: Record<string, string> = {};
     const given = value.links && typeof value.links === 'object' ? value.links : {};
-    for (const key of ['keys', 'agents', 'outsideHelp', 'connector']) {
+    for (const key of ['keys', 'agents', 'privateAnswers', 'connector']) {
       const href = given[key];
       if (typeof href === 'string' && /^https?:\/\//.test(href)) links[key] = href;
     }
@@ -927,9 +927,11 @@ export function chatgptDashboardClient(
   }
 
   function needsYouSection(items: Any[]): HTMLElement | null {
-    if (!items.length) return null;
+    const waiting = waitingRow();
+    if (!items.length && !waiting) return null;
     const section = add(el('section', 'section'), el('h2', '', P.needsYou));
     const list = el('ul', 'rows');
+    add(list, waiting);
     items.forEach((item, index) => {
       const key = 'need:' + String(item.id || index);
       // A warm box with an orange edge carries the state, so the row has no dot.
@@ -937,6 +939,27 @@ export function chatgptDashboardClient(
       add(list, add(el('li', 'row need'), body));
     });
     return add(section, list);
+  }
+
+  /**
+   * Computer only: one line while private questions wait, opening Private
+   * answers. The count comes only from the computer meta, which ChatGPT never
+   * receives, so this row can never appear there.
+   */
+  function waitingRow(): HTMLElement | null {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta) return null;
+    const count = meta.waitingPrivateQuestions;
+    const href = state.hostLinks.privateAnswers;
+    if (typeof count !== 'number' || !isFinite(count) || count < 1 || !href) return null;
+    const W = H.copy;
+    const sentence = count === 1 ? W.waiting.one : fill(W.waiting.many, { count: Math.floor(count) });
+    const open = button(W.open, 'need:waiting', () => openLink(href), 'warn');
+    open.setAttribute('aria-label', W.open + ' ' + W.rows.privateAnswers.title);
+    const body = add(el('div', 'need-body'), el('p', 'row-text', sentence), add(el('span', 'fix'), open));
+    const row = add(el('li', 'row need'), body);
+    row.setAttribute('data-waiting-private', String(Math.floor(count)));
+    return row;
   }
 
   /** The Needs-you item about this source (`source:<id>`), which then lives in the source's own row. */
@@ -1700,7 +1723,7 @@ export function chatgptDashboardClient(
   function computerSection(): HTMLElement | null {
     if (!onComputer()) return null;
     const W = H.copy;
-    const keys = ['keys', 'agents', 'outsideHelp', 'connector'].filter((key) => !!state.hostLinks[key]);
+    const keys = ['keys', 'agents', 'privateAnswers', 'connector'].filter((key) => !!state.hostLinks[key]);
     if (!keys.length) return null;
     const heading = add(el('h2'), doc.createTextNode(W.section + ' '), el('span', 'tag', W.onlyHere));
     const section = add(el('section', 'section on-computer'), heading);

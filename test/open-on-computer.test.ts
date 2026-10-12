@@ -44,6 +44,7 @@ import {
 import { LANDED_HIGHLIGHT_MS, mountDashboardController } from '../src/control-ui/browser-controller.ts';
 import { DASHBOARD_THEME_CSS } from '../src/workers/dashboard/theme.ts';
 import { connectSetupSheet, setupRow } from '../src/workers/dashboard/components.ts';
+import { computerOpenTargets } from '../src/workers/dashboard/host-page.ts';
 import { expectedOpenPages } from '../scripts/build-open-pages.ts';
 
 const REPO = join(import.meta.dir, '..');
@@ -55,6 +56,7 @@ describe('olympus:// targets', () => {
     const paths = allOpenTargets().map(openTargetPath);
     expect(paths).toEqual([
       'dashboard',
+      'private',
       'connect/x', 'connect/readwise', 'connect/telegram', 'connect/whatsapp',
       'fix/connect', 'fix/reconnect', 'fix/answers', 'fix/search', 'fix/models',
       'unreadable/dropbox', 'unreadable/drive', 'unreadable/whatsapp',
@@ -240,6 +242,20 @@ describe('the opening page carries only an allowlisted target', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(landed).toEqual(['/dashboard#olympus-open=unreadable.drive']);
     expect(hostile).toEqual(['/dashboard']);
+  });
+
+  test('the Private answers target lands on that page, carrying nothing; a look-alike lands on the dashboard', async () => {
+    const ticket = 'A'.repeat(43);
+    const landed = run(`#olympus_launch_ticket=${ticket}&olympus_open=page.private`);
+    const hostile = [
+      run(`#olympus_launch_ticket=${ticket}&olympus_open=page.privateX`),
+      run(`#olympus_launch_ticket=${ticket}&olympus_open=${encodeURIComponent('page.private?question=x')}`),
+    ];
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(landed).toEqual(['/dashboard?private-answers']);
+    for (const navigated of hostile) expect(navigated).toEqual(['/dashboard']);
+    expect(parseOlympusOpenUrl('olympus://open/private')).toEqual({ kind: 'private_answers' });
+    expect(computerOpenTargets('http://127.0.0.1:8010').private).toBe('http://127.0.0.1:8010/dashboard?private-answers');
   });
 
   test('only a Keys target (Connect, a model fix) lands on Keys; a reconnect or connect fix lands on the dashboard', async () => {
