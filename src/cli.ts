@@ -12,9 +12,9 @@ import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
 import { mintDashboardOpeningUrl, olympusCommandHint as olympusCommandHintFor, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
 
-/** How the CLI names itself in hints: plain `olympus` on PATH, else this install's own bin/olympus (src/ and dist/ both sit one level under the root). */
+/** How the CLI names itself in hints: plain `olympus` on PATH, else this install's own bin/olympus. */
 export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
-  return olympusCommandHintFor({ ...input, pluginBin: input.pluginBin ?? resolve(import.meta.dir, '..', 'bin', 'olympus') });
+  return olympusCommandHintFor({ ...input, pluginBin: input.pluginBin ?? resolve(olympusPackageRoot(), 'bin', 'olympus') });
 }
 import { allOpenTargets, openTargetFromPath, openTargetPath, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
 import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenHandlerResult } from './core/open-handler.ts';
