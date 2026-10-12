@@ -33928,7 +33928,9 @@ var AGENT_INSTRUCTION_TEXT = [
   "",
   "Answer only from what Olympus returns, with its citations, and say plainly what it could not find. " + "Do not guess past it or fill gaps from memory.",
   "",
-  "Use source_index_status only to check which of my sources are ready."
+  "Use source_index_status only to check which of my sources are ready.",
+  "",
+  "Use ask_anonymously only when I ask you to send a question anonymously."
 ].join(`
 `);
 

@@ -103,24 +103,19 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
         // rendered_from_commit; the screenshot Jamie viewed (sent in chat) was
         // rendered from screenshot_commit.
         id: 'setup_agents',
-        rendered_html_sha256: 'c0929533c4e4da58b8b1d64627111d9027eb5d861060c04d1f68fe227de82ea3',
+        rendered_html_sha256: '1a44deec951d151d91b11e3aac34ec2691c40eed9f19003335ad310d4832afe1',
         approved_by: 'jamie',
         approved_on: '2026-10-12',
-        approval: 'In chat: yes approved, merge it (Agents page through the relay: Claude and Grok one click on this computer like ChatGPT, Claude works on the phone after, label Grok (grok.com); screenshot sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).',
-        screenshot_commit: '72230e74afe9298f9be87bc4c014960e187d98a5',
-        rendered_from_commit: '72230e74afe9298f9be87bc4c014960e187d98a5',
-        pending_review: {
-          requested_on: '2026-10-12',
-          reason: "The pasted agent instructions now use olympus_search when the agent lists it and fall back to source_answer (Claude, Grok and Grok Bot answer from Olympus search on installs with no answer model); this render awaits Jamie's re-approval.",
-          candidate_rendered_html_sha256: '1a44deec951d151d91b11e3aac34ec2691c40eed9f19003335ad310d4832afe1',
-        },
-        // The earlier approval (2026-10-12 morning, relay-only ChatGPT steps), superseded by this one.
+        approval: 'In chat: yes add the line, and approved (Agents page: pasted instructions search with olympus_search when listed, else source_answer, and ask anonymously only when asked; screenshot sent in chat, plus the ask_anonymously line Jamie approved adding; rendered by scripts/dashboard-preview.ts at rendered_from_commit).',
+        screenshot_commit: '35ebddaf8e19751c5452354b1b026cd44de630c2',
+        rendered_from_commit: '35ebddaf8e19751c5452354b1b026cd44de630c2',
+        // The earlier approval (2026-10-12 midday, Claude and Grok one click through the relay), superseded by this one.
         prior_approval: {
-          rendered_html_sha256: '053b0b6e802ae5f78030771b5dc80f465066884b68f1757b9d8d49d1d18201a2',
+          rendered_html_sha256: 'c0929533c4e4da58b8b1d64627111d9027eb5d861060c04d1f68fe227de82ea3',
           approved_on: '2026-10-12',
-          approval: "In chat: I approve that page (Agents page: relay-only ChatGPT steps, tunnel notes for the others, local prompt for both installs). The preview viewed then still listed Muse, which Jamie had just asked to remove; the approved render is without it.",
-          screenshot_commit: '3824b59ab7ff6d4eb65283bcf33c02874201880c',
-          rendered_from_commit: '3824b59ab7ff6d4eb65283bcf33c02874201880c',
+          approval: 'In chat: yes approved, merge it (Agents page through the relay: Claude and Grok one click on this computer like ChatGPT, Claude works on the phone after, label Grok (grok.com); screenshot sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).',
+          screenshot_commit: '72230e74afe9298f9be87bc4c014960e187d98a5',
+          rendered_from_commit: '72230e74afe9298f9be87bc4c014960e187d98a5',
         },
       },
     ],
