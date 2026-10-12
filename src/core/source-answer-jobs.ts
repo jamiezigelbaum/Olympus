@@ -31,6 +31,7 @@ import {
   createReleaseManifestSink,
   currentReleaseManifestSink,
   runWithReleaseManifestSink,
+  type ReleaseManifest,
   type ReleaseManifestSink,
 } from './release-manifest.ts';
 import type { OperationCaller } from './operation-caller.ts';
@@ -274,6 +275,29 @@ export class SourceAnswerJobRegistry {
       return job.outcome.value;
     }
     throw job.outcome.error;
+  }
+
+  /**
+   * Resolves once a handed-off job finishes, with its outcome and the job's
+   * own release manifests, without collecting it: no result wait, and no
+   * manifests handed to the current call. For work that must happen when the
+   * job ends whether or not anyone collects it (the remote Private part,
+   * core/remote-private-part.ts). Undefined for an unknown, expired or another
+   * owner's job; a job that failed, hit its deadline or was dropped resolves
+   * as not ok.
+   */
+  whenFinished(
+    owner: string,
+    jobId: unknown,
+  ): Promise<{ ok: true; value: unknown; releaseManifests: readonly ReleaseManifest[] } | { ok: false }> | undefined {
+    const job = typeof jobId === 'string' && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
+    if (!job || !sameOwner(job.owner, owner)) return undefined;
+    return job.done.then(() => {
+      const outcome = job.outcome;
+      return outcome?.ok
+        ? { ok: true as const, value: outcome.value, releaseManifests: [...(job.releaseManifests?.manifests ?? [])] }
+        : { ok: false as const };
+    });
   }
 
   /**

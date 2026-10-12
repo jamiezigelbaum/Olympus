@@ -7,16 +7,17 @@
  * the count, in the tool result's widget-only `_meta`. The private answer
  * panel collects the answer itself, directly from the relay:
  *
- * 1. Search time: the job's private analysis starts at once (a precompute),
- *    from the search-time Private evidence, while ChatGPT is still writing its
- *    own reply. The plaintext answer stays in this engine's memory only.
- *    ChatGPT often searches several times in one turn: a newer job from the
- *    same caller supersedes the older jobs' precomputes (they are cancelled),
- *    an identical question within PRIVATE_ANSWER_DEDUPE_MS shares one
- *    analysis, and a precompute that has not started within
- *    PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS of its search, unclaimed, is
- *    abandoned. Claimed work always runs before precomputes, the newest
- *    precompute first.
+ * 1. Claim time, not search time (design background-agents.md, A: no
+ *    Private synthesis runs for nobody): the job's private analysis starts
+ *    when a panel first claims it, from the search-time Private evidence,
+ *    while the claim re-reads the evidence. A job no panel claims (a dot, or
+ *    a host without panels) never runs the model; its question waits on the
+ *    computer instead (core/waiting-private-questions.ts). The plaintext
+ *    answer stays in this engine's memory only. An identical question within
+ *    PRIVATE_ANSWER_DEDUPE_MS shares one analysis. (The `precompute` option
+ *    true starts it at job creation instead, as before 2026-10-12, and the
+ *    scheduler's supersede and abandon rules below apply to those runs; the
+ *    worker never sets it.)
  * 2. The panel POSTs an ephemeral ECDH public key. The first key to arrive
  *    claims the job. Another key gets 409 `claimed`: the panel says the
  *    answer was already opened elsewhere, and this Mac writes a content-free
@@ -49,6 +50,15 @@
  *    the same sealed bytes again until the job expires, so a replay of the
  *    panel's request (by anyone who saw it) is harmless and cannot consume
  *    the answer: only the holder of the panel's private key can open it.
+ * 5. Seen: the sealed plaintext carries `ack`, a random single-use
+ *    capability minted for this job, bound here to the job and, when the
+ *    question waits on the computer, to that record's id, generation and
+ *    connection. The panel posts it back (`{"v":1,"publicKey","ack"}` to the
+ *    same `/private/<id>`) only after it has decrypted and rendered the
+ *    answer; the waiting record is deleted only if its generation still
+ *    matches. It proves decryption plus the panel's own claim that it
+ *    rendered, not that a person read it. A lost acknowledgment leaves the
+ *    question waiting; a replayed one, or one for another job, is refused.
  *
  * A hard deadline, counted from the claim, settles every claimed job as
  * ready or failed. Each analysis has its own deadline from its start, which
@@ -67,8 +77,9 @@
  * behavior above.
  *
  * Pending polls by the claiming key are rate limited per job (429), never
- * destructive. Unknown, expired (ten minutes from creation) and
- * wrong-install jobs answer 410 `gone`: the endpoint is no oracle for which
+ * destructive. Unknown, expired (ten minutes from creation when unclaimed;
+ * a claim extends that to at least its own deadline plus a five-minute
+ * collect and acknowledgment window) and wrong-install jobs answer 410 `gone`: the endpoint is no oracle for which
  * ids existed.
  * Analyses run one at a time, and after a deadline the next one waits for
  * the model's reset (bounded). Claims of live jobs are rate limited; a claim
@@ -76,7 +87,7 @@
  * restart forgets every job and every answer; an expired job's answer is
  * dropped with it.
  */
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import {
   privateAnswerMaxRequestBytes,
@@ -144,8 +155,20 @@ export interface PrivateAnswerJobsOptions {
   analysisTimeoutMs?: number;
   /** The same bound for a `detail: "full"` job (default PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS). */
   fullAnalysisTimeoutMs?: number;
-  /** Start each job's analysis when the job is created (default true). */
+  /**
+   * When a job's analysis from its search-time evidence starts. Default
+   * (unset): at the first claim, so no Private synthesis runs for a job no
+   * panel claims (design background-agents.md, A). `true`: when the job is
+   * created (before 2026-10-12; the worker no longer sets it). `false`:
+   * never; a claim computes from its own re-read evidence alone.
+   */
   precompute?: boolean;
+  /**
+   * The waiting record a panel acknowledges (core/waiting-private-questions.ts
+   * `acknowledge`): deletes it only if its generation still matches. Without
+   * it an acknowledgment is accepted and does nothing.
+   */
+  acknowledge?: (ref: PrivateAnswerWaitingRef) => void;
   /**
    * The claiming POST waits up to this long for the answer before it
    * answers 202 (default PRIVATE_ANSWER_CLAIM_HOLD_MS), so a precomputed
@@ -287,7 +310,12 @@ interface Analysis {
 interface Job {
   readonly id: string;
   readonly createdAt: number;
-  readonly expiresAt: number;
+  /**
+   * Unclaimed: creation plus the job TTL. A claim extends it to at least the
+   * claim's own bounded lifetime (claimLifetimeFor), so a claim made just
+   * before the TTL still synthesizes, is collected and is acknowledged.
+   */
+  expiresAt: number;
   readonly caller: string | undefined;
   readonly detail: PrivateAnswerDetail;
   question: string | undefined;
@@ -317,6 +345,19 @@ interface Job {
   opens?: Map<string, string> | undefined;
   openTokens: number;
   openRefilledAt: number;
+  /** The waiting record this job answers, when the question was recorded. */
+  readonly waiting: PrivateAnswerWaitingRef | undefined;
+  /** The single-use acknowledgment capability, minted when the answer is sealed; spent on use. */
+  ack?: string | undefined;
+  /** The analysis this job's own claim started (not one that existed before it): its answer is not "precomputed". */
+  claimStarted?: Analysis | undefined;
+}
+
+/** A waiting question at one generation (core/waiting-private-questions.ts WaitingQuestionRef). */
+export interface PrivateAnswerWaitingRef {
+  readonly id: string;
+  readonly generation: number;
+  readonly connectionId: string;
 }
 
 export interface ClaimResponse {
@@ -328,6 +369,8 @@ export interface ClaimResponse {
 const MAX_QUESTION_CHARS = 4_000;
 /** A source-open token: 32 random bytes, base64url. */
 const OPEN_TOKEN_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${PRIVATE_ANSWER_PAYLOAD_LIMITS.openTokenChars}}$`);
+/** An acknowledgment capability: 32 random bytes, base64url, like an open token. */
+const ACK_TOKEN_PATTERN = OPEN_TOKEN_PATTERN;
 const MAX_EVIDENCE_ITEMS = 50;
 const PENDING_RETRY_SECONDS = 2;
 /**
@@ -350,6 +393,12 @@ export const PRIVATE_ANSWER_DEDUPE_MS = 3 * 60_000;
 export const PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60_000;
 /** How long the claiming POST holds for a ready answer (refresh and seal) before it answers 202. */
 export const PRIVATE_ANSWER_CLAIM_HOLD_MS = 1_500;
+/**
+ * After a claim's deadline, how long its sealed answer stays collectable and
+ * acknowledgeable: the panel's last pending poll, the collect and the seen
+ * acknowledgment. A claimed job lives at least its deadline plus this.
+ */
+export const PRIVATE_ANSWER_CLAIM_COLLECT_MS = 5 * 60_000;
 
 const defaultAudit = (event: PrivateAnswerAuditEvent) => {
   console.warn(`[olympus] private answer audit: ${event === 'claimed_by_other_key'
@@ -469,7 +518,8 @@ export class PrivateAnswerJobs {
    * ready and this engine has a relay install id. Counts and state only
    * otherwise. `count` is capped at PRIVATE_MATCH_COUNT_CAP. Call it as the
    * tool result is built, so the id is valid only from then on. The job's
-   * analysis starts now, from `evidence` (Private-eligible items only).
+   * analysis starts when a panel claims it, from `evidence` (Private-eligible
+   * items only).
    * `refresh` is the same Private search again, at claim time: it proposes
    * the current evidence (the live guard decides what may be read). `caller` (the
    * connection) lets a newer job supersede that caller's older precomputes.
@@ -482,6 +532,8 @@ export class PrivateAnswerJobs {
     caller?: string;
     /** `full` reads the leading items in depth (slower); `summary` by default. */
     detail?: PrivateAnswerDetail;
+    /** The waiting record a rendered answer acknowledges. */
+    waiting?: PrivateAnswerWaitingRef;
   }): PrivateMatchSummary & { jobId?: string } {
     const count = Math.max(0, Math.min(PRIVATE_MATCH_COUNT_CAP, Math.floor(input.count)));
     const status = this.options.model().status();
@@ -519,9 +571,10 @@ export class PrivateAnswerJobs {
       pollRefilledAt: at,
       openTokens: this.openRate.capacity,
       openRefilledAt: at,
+      waiting: input.waiting,
     };
     this.jobs.set(id, job);
-    if (this.options.precompute !== false) this.precompute(job);
+    if (this.options.precompute === true) this.precompute(job);
     return { count, panelState: 'ready', jobId: id, ...(job.detail === 'full' ? { detail: 'full' as const } : {}) };
   }
 
@@ -543,6 +596,15 @@ export class PrivateAnswerJobs {
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
+      // Expiry of an unclaimed job does not end a claim: the claim gets its
+      // own bounded lifetime for synthesis, collection and acknowledgment.
+      job.expiresAt = Math.max(job.expiresAt, this.now() + this.claimLifetimeFor(job.detail));
+      // Synthesis starts now, at the first claim, never for a job no panel claims.
+      if (job.analysis === undefined && this.options.precompute !== false) {
+        const before = new Set(this.shared.values());
+        this.precompute(job);
+        if (job.analysis && !before.has(job.analysis)) job.claimStarted = job.analysis;
+      }
       const settled = this.startClaim(job, panel.key);
       // A precomputed answer needs only the evidence re-read and the seal:
       // wait briefly so the panel gets it in this response.
@@ -604,6 +666,38 @@ export class PrivateAnswerJobs {
   }
 
   /**
+   * The panel's acknowledgment that it decrypted and rendered this job's
+   * answer: `ack` is the single-use capability from inside the sealed
+   * plaintext, posted with the claiming key. Spent on first use; a replay, a
+   * token from another job, another key, or a job with no sealed answer gets
+   * 410 like an unknown job. A valid one deletes the job's waiting record
+   * only if its generation still matches (core/waiting-private-questions.ts
+   * `acknowledge`). This proves decryption plus the panel's own render claim,
+   * not that a person read the answer.
+   */
+  async acknowledge(jobId: string, publicKey: unknown, ack: unknown): Promise<ClaimResponse> {
+    this.sweep();
+    const job = this.jobs.get(jobId);
+    if (!job || privateAnswerInstallId(jobId) !== this.options.installId()) return gone();
+    if (typeof ack !== 'string' || !ACK_TOKEN_PATTERN.test(ack) || typeof publicKey !== 'string') {
+      return { status: 400, body: { status: 'invalid' } };
+    }
+    if (!this.takePoll(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    const expected = job.ack;
+    if (expected === undefined || job.outcome?.kind !== 'sealed' || job.claimKey !== publicKey) return gone();
+    if (!timingSafeEqual(Buffer.from(expected), Buffer.from(ack))) return gone();
+    job.ack = undefined;
+    if (job.waiting) {
+      try {
+        this.options.acknowledge?.(job.waiting);
+      } catch {
+        // A store that cannot be written keeps the question waiting: a duplicate is better than a loss.
+      }
+    }
+    return { status: 200, body: { status: 'acknowledged' } };
+  }
+
+  /**
    * Whether a sealed answer may still be handed out: every item it read
    * passes the live guard now. If not, the answer is withdrawn for good: the
    * sealed bytes, the items and the source-open tokens are dropped and the
@@ -643,6 +737,8 @@ export class PrivateAnswerJobs {
     job.outcome = undefined;
     job.opens = undefined;
     job.sealedItems = undefined;
+    job.ack = undefined;
+    job.claimStarted = undefined;
     this.jobs.delete(id);
   }
 
@@ -1022,7 +1118,9 @@ export class PrivateAnswerJobs {
           && (await checkPrivateEvidence(this.options.eligible, result.usedItems)).every(Boolean);
         if (result && (!precomputed || stillEligible(result.usedKeys, current)) && await stillReadable()) {
           if (settled) return;
-          const plaintext = this.withOpenTokens(job, result.plaintext, result.localPaths);
+          // A fresh acknowledgment capability for this job's sealed answer only.
+          const ack = randomBytes(32).toString('base64url');
+          const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
           // The payload contract is enforced here, before first delivery, on
           // every job: the limits and byte budgets in private-answer-payload.ts.
           const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
@@ -1030,9 +1128,10 @@ export class PrivateAnswerJobs {
           if (settled) return;
           if (await stillReadable()) {
             if (settled) return;
-            timing.precomputed = precomputed;
+            timing.precomputed = precomputed && analysis !== job.claimStarted;
             timing.waitAtClaimMs = this.now() - claimedAt;
             job.sealedItems = result.usedItems;
+            job.ack = ack;
             settle(outcome);
             return;
           }
@@ -1056,6 +1155,11 @@ export class PrivateAnswerJobs {
       settle({ kind: 'failed' }, 'error');
     });
     return done;
+  }
+
+  /** A claim's bounded lifetime: its deadline, then the collect and acknowledgment window. */
+  private claimLifetimeFor(detail: PrivateAnswerDetail): number {
+    return this.timeoutFor(detail) + PRIVATE_ANSWER_CLAIM_COLLECT_MS;
   }
 
   /** The hard deadline for an analysis (and a claim) of this detail. */
@@ -1322,6 +1426,8 @@ export function createPrivateAnswerHandler(options: PrivateAnswerHandlerOptions)
       return reply(route.action === 'open' ? { status: 410, body: { status: 'gone' } } : await options.questions.collect(jobId, record.publicKey));
     }
     if (route.action === 'open') return reply(await options.jobs.open(jobId, record.open));
+    // The panel's seen acknowledgment rides the collection path's body, which the relay forwards as is.
+    if (record.ack !== undefined) return reply(await options.jobs.acknowledge(jobId, record.publicKey, record.ack));
     // A `cap` field from an older cached panel is ignored: every claim gets the sealed answer.
     return reply(await options.jobs.claim(jobId, record.publicKey));
   };

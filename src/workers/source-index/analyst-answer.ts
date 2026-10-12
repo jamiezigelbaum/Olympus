@@ -57,11 +57,13 @@ import { recordReleaseManifest, type ReleaseConstraints, type ReleaseInput } fro
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
-import type {
-  SourceIndexCorpusSearchAdapter,
-  SourceIndexRouterAdapterMap,
-  SourceIndexSkippedCorpus,
-  SourceIndexVisibilityGate,
+import {
+  routeSourceIndexSearch,
+  type SourceIndexCorpusSearchAdapter,
+  type SourceIndexRoutedSearchHit,
+  type SourceIndexRouterAdapterMap,
+  type SourceIndexSkippedCorpus,
+  type SourceIndexVisibilityGate,
 } from '../../core/source-index/router.ts';
 import { mergeRetrievalDegradations } from '../../core/source-index/retrieval.ts';
 import {
@@ -125,6 +127,13 @@ export interface AnalystAnswerLanes {
   visibilityGate?: SourceIndexVisibilityGate;
   secretLocations?: (query: string, searchedCorpora: readonly string[]) => readonly SecretLocationNote[];
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
+  /**
+   * Registered corpora this request leaves without an adapter on purpose: the
+   * owner's read scope is off for them, or the request's own scope excludes
+   * them. Any other registered corpus without an adapter is unavailable
+   * retrieval, and probePrivateMatch reads it as not checked.
+   */
+  excludedCorpusIds?: ReadonlySet<string>;
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
@@ -2785,6 +2794,123 @@ async function privateNeighbours(
     }).slice(0, PRIVATE_NEIGHBOURS_MAX).map((candidate) => ({ ...candidate, neighbour: true as const }));
   } catch {
     return [];
+  }
+}
+
+/**
+ * Whether anything Private matches a request, for a remote agent's answer
+ * that left Private out (the owner's policy, an approval it needs, or an
+ * unavailable private route): see core/remote-private-part.ts. Metadata only,
+ * under the request's own selectors (corpora, query, and the account and
+ * filters its scoped lanes apply), restricted to Private (secure_local)
+ * corpora:
+ * - a search runs through each adapter's metadataMatches (router.ts), which
+ *   reads no item text, then the tier visibility gate;
+ * - selected items are resolved through each adapter's selectedItemServable
+ *   (the item is that corpus's live item, in scope, with its content served
+ *   at its current tier), then the same gate; a caller-supplied identity
+ *   alone never matches.
+ * The retrieval mode is the request's effective one, as the answer handler
+ * resolves it: hybrid unless the request pinned keyword.
+ * No content provider is used, nothing reaches a model and no query leaves
+ * this computer. `unknown` when a Private corpus in scope was not checked
+ * (no adapter that the lanes did not exclude on purpose, an adapter that
+ * cannot match without reading text, a lane timeout, or a semantic lane that
+ * should have run and did not) and nothing matched elsewhere, and on a
+ * timeout or any failure. A caller must never treat
+ * `unknown` as a match. The verdict goes only to the local waiting record.
+ */
+export async function probePrivateMatch(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  request: SourceIndexAnswerRequest;
+  timeoutMs: number;
+}): Promise<'match' | 'no_match' | 'unknown'> {
+  const question = typeof input.request.question === 'string' ? input.request.question.trim() : '';
+  if (!question) return 'no_match';
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const run = async (): Promise<'match' | 'no_match' | 'unknown'> => {
+    const request: SourceIndexAnswerRequest = {
+      ...input.request,
+      question,
+      // The answer's own effective mode: hybrid unless the request pinned one.
+      retrieval_mode: input.request.retrieval_mode ?? 'hybrid',
+      include_internal: false,
+      include_secure_local: true,
+      include_secure_local_content: false,
+    };
+    const lanes = input.lanes(request);
+    const corpusIds = sourceAnswerCorpusIds(request);
+    const excluded = lanes.excludedCorpusIds ?? new Set<string>();
+    const gate = (hits: SourceIndexRoutedSearchHit[]) => (lanes.visibilityGate ? lanes.visibilityGate(hits) : hits);
+    if (request.selected_items?.length) {
+      let unchecked = false;
+      const hits: SourceIndexRoutedSearchHit[] = [];
+      for (const selected of selectedEvidenceItemsFromRequest(request)) {
+        const corpus = lanes.registry.get(selected.corpusId);
+        if (!corpus || corpus.trustDomain !== 'secure_local') continue;
+        if (corpusIds && !corpusIds.includes(corpus.corpusId)) continue;
+        const adapter = lanes.adapters[corpus.corpusId];
+        if (!adapter) {
+          if (!excluded.has(corpus.corpusId)) unchecked = true;
+          continue;
+        }
+        if (!adapter.selectedItemServable) {
+          unchecked = true;
+          continue;
+        }
+        if (!adapter.selectedItemServable(selected.sourceItem)) continue;
+        hits.push({
+          corpusId: corpus.corpusId,
+          trustDomain: corpus.trustDomain,
+          sourceItem: selected.sourceItem,
+          provenance: { sourceItem: selected.sourceItem },
+          score: 1,
+          rawExposed: false,
+        });
+      }
+      if (hits.length > 0 && gate(hits).length > 0) return 'match';
+      return unchecked ? 'unknown' : 'no_match';
+    }
+    const routed = await routeSourceIndexSearch({
+      registry: lanes.registry,
+      adapters: lanes.adapters,
+      request: {
+        query: request.query?.trim() || question,
+        maxResults: PRIVATE_EVIDENCE_MAX_RESULTS,
+        context: {
+          allowedTrustDomains: ['secure_local'],
+          allowCloudQueries: false,
+          metadataOnly: true,
+          ...(corpusIds ? { allowedCorpusIds: corpusIds } : {}),
+        },
+        ...(corpusIds ? { corpusIds } : {}),
+      },
+      ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+      laneTimeoutMs: input.timeoutMs,
+    });
+    if (routed.hits.some((hit) => hit.trustDomain === 'secure_local')) return 'match';
+    // A Private corpus in scope that was not searched, or searched with a lane
+    // that should have run and did not, is not a "no".
+    const unchecked = (routed.incompleteCorpora?.length ?? 0) > 0
+      || routed.skippedCorpora.some((skip) => skip.trustDomain === 'secure_local' && (
+        skip.reason === 'lane_timeout'
+        || skip.reason === 'metadata_search_unsupported'
+        || (skip.reason === 'no_adapter' && !excluded.has(skip.corpusId))
+      ));
+    return unchecked ? 'unknown' : 'no_match';
+  };
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<'unknown'>((resolve) => {
+        timer = setTimeout(() => resolve('unknown'), input.timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    return 'unknown';
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

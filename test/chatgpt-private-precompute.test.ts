@@ -75,6 +75,8 @@ function makeJobs(model: PrivateAnswerModel, extra: Partial<ConstructorParameter
     log: (line) => lines.push(line),
     activity,
     audit: () => {},
+    // This file holds the search-time precompute (opt-in since claim-time synthesis became the default).
+    precompute: true,
     ...extra,
   });
   return { jobs, lines, activity };

@@ -318,7 +318,8 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
 
   test('it flows into the private job, the job\'s _meta says detail "full", and the same question in each detail is a separate answer', async () => {
     const { model, calls } = recordingModel();
-    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
+    // Search-time precompute (opt-in), so both details run without a panel.
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0, precompute: true });
     const options: ChatGptSurfaceOptions = {
       dashboardView: async () => ({}) as never,
       evidenceSearch: async () => ({ evidence: [], coverage: {} }),

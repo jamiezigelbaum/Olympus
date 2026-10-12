@@ -47,6 +47,7 @@ import {
   createAnalystSourceIndexAnswerHandler,
   readPrivateEvidenceItem,
   checkPrivateEvidenceItems,
+  probePrivateMatch,
   searchPrivateEvidence,
   searchReleasedEvidence,
   type AnalystAnswerLanes,
@@ -3344,18 +3345,28 @@ export async function main(): Promise<void> {
             }
             return requestEmbeddings.get(store.corpusId);
           };
+          // Stores left without an adapter on purpose (the owner's read scope
+          // is off, or this request's scope excludes them), as distinct from a
+          // registered corpus nothing could search.
+          const excludedCorpusIds = new Set<string>();
           const connectorStoreAdapter = (
             store: LocalConnectorStore,
           ): SourceIndexCorpusSearchAdapter | undefined => {
             const mandatoryScope = connectorStoreReadScope(store);
-            if (!mandatoryScope.allowed) return undefined;
+            if (!mandatoryScope.allowed) {
+              excludedCorpusIds.add(store.corpusId);
+              return undefined;
+            }
             const principal = connectorStorePrincipals.get(store.corpusId);
             const scope = connectorStoreAnswerScope({
               store,
               request,
               ...(principal ? { principal } : {}),
             });
-            if (scope.kind === 'skip') return undefined;
+            if (scope.kind === 'skip') {
+              excludedCorpusIds.add(store.corpusId);
+              return undefined;
+            }
             const connectorStoreEmbedding = requestEmbedding(store);
             const connectorStoreAccount = scope.accountScope
               ?? mandatoryScope.accountScope
@@ -3411,6 +3422,7 @@ export async function main(): Promise<void> {
                   }),
               ),
             },
+            excludedCorpusIds,
             contentProviders: {
               ...Object.fromEntries(
                 readConnectorStores
@@ -4583,6 +4595,41 @@ export async function main(): Promise<void> {
     openRemoteConnectionStore,
   );
   dashboardAgentStore = remoteConnections;
+  // Questions waiting on a Private answer (core/waiting-private-questions.ts):
+  // beside the connection store, owner-only, opened on first use (retried a
+  // minute after a failed open). The connection store is the authority on
+  // which connections are active: a recording for any other is refused, and
+  // records of a connection revoked while this worker was down, or whose
+  // revoking process could not clean up, are dropped on open and on every
+  // re-check pass.
+  const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
+  const connectionActive = (connectionId: string): boolean => {
+    const connections = remoteConnections();
+    if (!connections) throw new Error('remote connection store unavailable');
+    return connections.list().some((connection) => connection.id === connectionId && connection.revokedAt === null);
+  };
+  let waitingStore: import('../../core/waiting-private-questions.ts').WaitingQuestionStore | undefined;
+  let waitingStoreRetryAt = 0;
+  let waitingStoreClosed = false;
+  const waitingQuestionStore = () => {
+    if (waitingStore || waitingStoreClosed || Date.now() < waitingStoreRetryAt) return waitingStore;
+    try {
+      const store = openWaitingPrivateQuestionStore(
+        waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(process.env)),
+        { isActive: connectionActive },
+      );
+      try {
+        store.reconcileConnections(connectionActive);
+      } catch {
+        // Retried on the next re-check pass.
+      }
+      waitingStore = store;
+    } catch {
+      waitingStoreRetryAt = Date.now() + 60_000;
+      console.warn('[olympus] waiting private questions store unavailable');
+    }
+    return waitingStore;
+  };
   // The panel's remote-access line: the address this worker serves right now,
   // explained by the relay status `olympus connections status` prints.
   const { demoInstallMarked, readRemoteAccessStatus, remoteAccessDir, remoteAccessStatusView, resolveRemoteAccessUrls } = await import('../../core/remote-access.ts');
@@ -4698,6 +4745,11 @@ export async function main(): Promise<void> {
     // While an analysis runs (from the search) and from a claim to
     // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
+    // The panel's seen ack clears the waiting question it answered (same
+    // id, generation and connection; a re-asked question survives).
+    acknowledge: (ref) => {
+      waitingQuestionStore()?.acknowledge(ref);
+    },
     // The panel's "open on this Mac": macOS `open`, on a path this engine
     // resolved for a cited source (never a path from the request), checked
     // again now: no symlink, still inside a Dropbox folder, and only a
@@ -4860,6 +4912,22 @@ export async function main(): Promise<void> {
     () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
     () => secureDerivativeDefault ?? 'allow',
   );
+  // The Private part of a remote agent's answer (core/remote-private-part.ts):
+  // when the answer left Private out, a metadata-only local probe over the
+  // same selectors decides whether the question waits on this computer.
+  // "Couldn't check yet" records are re-probed here every ten minutes.
+  const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
+  const remotePrivateParts = createRemotePrivateParts({
+    probe: (request, timeoutMs) => (sourceAnswerLanes
+      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs })
+      : Promise.resolve('unknown' as const)),
+    store: waitingQuestionStore,
+    isActive: connectionActive,
+  });
+  const uncheckedRetry = setInterval(() => {
+    void remotePrivateParts.retryUnchecked().catch(() => undefined);
+  }, 10 * 60_000);
+  uncheckedRetry.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -4876,6 +4944,8 @@ export async function main(): Promise<void> {
       // manifest against the tier ledgers and release rules as they are now
       // (core/remote-result.ts).
       releaseCheck: remoteReleaseCheck,
+      // Summary-rule agents only: the ChatGPT surface records through its own path (chatgpt/mcp-surface.ts).
+      ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
     }),
   };
   // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as
@@ -5092,6 +5162,7 @@ export async function main(): Promise<void> {
     setup: chatgptSetup,
     ...(chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {}),
     ...(chatgptPrivateMatchProbe ? { privateMatchProbe: chatgptPrivateMatchProbe } : {}),
+    waitingQuestions: waitingQuestionStore,
     answerModelAvailable: chatgptAnswerModelAvailable,
     embedding: chatgptEmbeddingState,
     privateModel: chatgptPrivateModelState,
@@ -5245,6 +5316,12 @@ export async function main(): Promise<void> {
     // The built-in transcriber's server, if this process started one.
     stopBuiltInModelOnShutdown(runningBuiltInTranscriber());
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
+    // The re-check timer, any pass or settle in flight, then the store.
+    clearInterval(uncheckedRetry);
+    remotePrivateParts.close();
+    waitingStoreClosed = true;
+    waitingStore?.close();
+    waitingStore = undefined;
     worker.close();
     sourceScheduler?.stop();
     void server.stop();

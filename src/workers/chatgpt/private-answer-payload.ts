@@ -13,6 +13,7 @@
  *   date         ≤ 32 units             (unchanged)
  *   web URL      ≤ 2,048 characters, the normalized https form (unchanged)
  *   Mac token    43 characters          (unchanged)
+ *   seen ack     43 characters          (added 2026-10-12)
  *   unanswered   ≤ 4 × 300 units        (was 10 × 300; 3 model gaps + 1 note)
  *
  * Nothing shown today is cut: the production model is constructed without a
@@ -245,9 +246,12 @@ export function fitFirstAnswer(answer: { answer: string; citations: readonly Pri
 }
 
 /**
- * The plaintext (`{v, answer, citations, unanswered?}`) serialized under the
- * contract's limits and byte budgets. Every job seals this, bucket-padded.
+ * The plaintext (`{v, answer, citations, unanswered?, ack?}`) serialized under
+ * the contract's limits and byte budgets. Every job seals this, bucket-padded.
+ * `ack` is kept only in its exact shape (43 base64url characters).
  */
 export function serializePrivateAnswerPlaintext(plaintext: PrivateAnswerPlaintextV1): string {
-  return JSON.stringify({ v: 1, ...fitFirstAnswer(plaintext) });
+  const ack = typeof plaintext.ack === 'string' && ACK_PATTERN.test(plaintext.ack) ? plaintext.ack : undefined;
+  return JSON.stringify({ v: 1, ...fitFirstAnswer(plaintext), ...(ack ? { ack } : {}) });
 }
+const ACK_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${PRIVATE_ANSWER_PAYLOAD_LIMITS.openTokenChars}}$`);

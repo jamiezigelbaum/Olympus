@@ -19737,7 +19737,7 @@ var init_local_index = __esm(() => {
       const lane = await this.vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs);
       return lane.rows;
     }
-    async vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
+    async vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs, laneOptions = {}) {
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
       const vectorFilters = connectorStoreVectorScopeFilters(filters);
       const trimmed = query.trim();
@@ -19767,7 +19767,8 @@ var init_local_index = __esm(() => {
         maxResults,
         ...accountScope !== undefined ? { accountScope } : {},
         ...vectorFilters ? { filters: vectorFilters } : {},
-        ...deadlineAtMs !== undefined ? { deadlineAtMs } : {}
+        ...deadlineAtMs !== undefined ? { deadlineAtMs } : {},
+        locate: laneOptions.locate !== false
       });
     }
     async scoreVectorLaneSnapshot(input) {
@@ -19842,6 +19843,8 @@ var init_local_index = __esm(() => {
         const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
         if (winner === undefined)
           return [];
+        if (!input.locate)
+          return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
         const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, "semantic");
         return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
       });
@@ -20023,6 +20026,9 @@ var init_local_index = __esm(() => {
       return {
         rows: kept.map((row) => {
           const base = searchRowFromItemRow(row);
+          if (ftsOptions.locate === false) {
+            return row.chunk_pk === null || row.chunk_pk === undefined ? base : { ...base, contentMatched: true };
+          }
           const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : this.chunkMatchForChunkPk(row.chunk_pk, "keyword", spanTerms);
           return chunk ? { ...base, chunk } : base;
         }),
@@ -20116,6 +20122,23 @@ var init_local_index = __esm(() => {
         })),
         ...resume < top ? { next: resume } : {}
       };
+    }
+    selectedItemServable(identity, accountScope, filters) {
+      try {
+        const localItemId = typeof identity.localItemId === "string" ? identity.localItemId.trim() : "";
+        if (!localItemId)
+          return false;
+        const row = this.activeLocalItemRow(localItemId);
+        if (!row)
+          return false;
+        if (row.identity.provider !== identity.provider || row.identity.accountScope !== identity.accountScope || row.identity.providerItemId !== identity.providerItemId || normalizeConversationId(row.identity.providerConversationId) !== normalizeConversationId(identity.providerConversationId))
+          return false;
+        if (!this.itemMatchesSearchFilters(localItemId, normalizeOptionalAccountScope(accountScope), filters))
+          return false;
+        return this.contentServedNow(localItemId);
+      } catch {
+        return false;
+      }
     }
     contentServedNow(localItemId) {
       const row = this.db.query(`
@@ -24308,6 +24331,7 @@ var init_analyst_answer = __esm(() => {
   init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
+  init_router();
   init_source_model_policy();
   init_sovereignty();
   init_types();
