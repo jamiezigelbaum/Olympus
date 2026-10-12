@@ -29,6 +29,7 @@ import {
   REMOTE_ERROR_SCHEMA,
   remoteDeclaredParams,
   remoteErrorOutput,
+  remoteRetryAfterSeconds,
   remoteOperationOutput,
   withRemotePrivateNote,
   remoteOutputSchema,
@@ -228,7 +229,8 @@ async function readParams(
 }
 
 function failure(status: number, body: RemoteErrorBody, headers: Record<string, string> = {}): Response {
-  return jsonResponse(status, body, headers);
+  const retryAfter = remoteRetryAfterSeconds(body);
+  return jsonResponse(status, body, retryAfter === undefined ? headers : { ...headers, 'Retry-After': String(retryAfter) });
 }
 
 /**
