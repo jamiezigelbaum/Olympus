@@ -2,7 +2,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { OperationError } from './operation-error.ts';
-import { stillImagePreparationAvailable } from './media-cache.ts';
+import { readyStillImageFormats } from './still-image-readiness.ts';
+import {
+  STILL_IMAGE_FORMATS,
+  stillImageExtensions,
+  stillImageMimeTypes,
+  type StillImageFormat,
+} from './still-image-formats.ts';
 
 export const SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1;
 
@@ -52,8 +58,9 @@ export interface SourceIngestionPolicyLoadOptions {
 
 const DEFAULT_DROPBOX_ROOT = '/';
 // Video stays names-only. Still images are read by default since 2026-10-07
-// where this machine can prepare them for the built-in model's image encoder
-// (macOS first; docs/design/photo-embeddings.md); elsewhere they stay
+// in each format this machine can prepare for the built-in model's image
+// encoder (a per-format probe, not an operating-system test;
+// docs/design/photo-embeddings.md); a format it cannot prepare stays
 // names-only, as before, so no picture is downloaded for nothing.
 const DEFAULT_DEFERRED_VIDEO_EXTENSIONS = [
   '3gp', 'avi', 'm4v', 'mov', 'mp4', 'mpeg', 'mpg', 'webm',
@@ -79,10 +86,67 @@ export function defaultDropboxIngestionPolicyPath(): string {
   return join(homedir(), '.olympus', 'sources', 'dropbox.personal.ingestion.json');
 }
 
+/**
+ * The formats a caller says this machine reads: a plain yes or no (every
+ * format, or none), a list, or - absent - the machine's own per-format probe.
+ */
+export type StillImagesRead = boolean | Iterable<StillImageFormat>;
+
+export function resolveStillImageFormats(read?: StillImagesRead): ReadonlySet<StillImageFormat> {
+  if (read === undefined) return readyStillImageFormats();
+  if (read === true) return new Set(STILL_IMAGE_FORMATS);
+  if (read === false) return new Set();
+  return new Set(read);
+}
+
+/**
+ * The media types and extensions of the formats NOT read, which the default
+ * rule keeps names-only. Every format read: none. No format read: all of
+ * `image/` (so nothing is downloaded for pictures that cannot be prepared).
+ */
+export function unreadStillImageMatch(read?: StillImagesRead): { mimePrefixes: string[]; extensions: string[] } {
+  const formats = resolveStillImageFormats(read);
+  const unread = STILL_IMAGE_FORMATS.filter((format) => !formats.has(format));
+  if (unread.length === 0) return { mimePrefixes: [], extensions: [] };
+  return {
+    mimePrefixes: unread.length === STILL_IMAGE_FORMATS.length
+      ? ['image/']
+      : unread.flatMap((format) => [...stillImageMimeTypes(format)]).sort(),
+    extensions: unread.flatMap((format) => [...stillImageExtensions(format)]),
+  };
+}
+
+/**
+ * Default policies built from the machine's own readiness (no formats given):
+ * their still-image rule goes stale when readiness changes, so whoever holds
+ * one for long builds its gate from `defaultDropboxIngestionPolicy()` again
+ * when `readyStillImageFormats()` changes. A policy an owner wrote, or one
+ * built for a fixed set of formats, is never in here.
+ */
+const READINESS_FOLLOWING_POLICIES = new WeakMap<SourceIngestionPolicy, SourceIngestionRule[]>();
+
+/**
+ * True while the policy still carries the rules it was built with: a caller
+ * that replaces them has written its own policy, which is never rebuilt.
+ */
+export function followsStillImageReadiness(policy: SourceIngestionPolicy): boolean {
+  return READINESS_FOLLOWING_POLICIES.get(policy) === policy.rules;
+}
+
 export function defaultDropboxIngestionPolicy(
-  options: { stillImagesRead?: boolean } = {},
+  options: { stillImagesRead?: StillImagesRead; stillImageFormats?: StillImagesRead } = {},
 ): SourceIngestionPolicy {
-  const stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
+  const policy = buildDefaultDropboxIngestionPolicy(options);
+  if (options.stillImagesRead === undefined && options.stillImageFormats === undefined) {
+    READINESS_FOLLOWING_POLICIES.set(policy, policy.rules);
+  }
+  return policy;
+}
+
+function buildDefaultDropboxIngestionPolicy(
+  options: { stillImagesRead?: StillImagesRead; stillImageFormats?: StillImagesRead },
+): SourceIngestionPolicy {
+  const unread = unreadStillImageMatch(options.stillImageFormats ?? options.stillImagesRead);
   return {
     schemaVersion: SOURCE_INGESTION_POLICY_SCHEMA_VERSION,
     source: 'dropbox.personal',
@@ -95,11 +159,8 @@ export function defaultDropboxIngestionPolicy(
     rules: [
       {
         match: {
-          mime_type_prefixes: stillImagesRead ? ['video/'] : ['image/', 'video/'],
-          extensions: [
-            ...DEFAULT_DEFERRED_VIDEO_EXTENSIONS,
-            ...(stillImagesRead ? [] : DEFAULT_STILL_IMAGE_EXTENSIONS),
-          ].sort(),
+          mime_type_prefixes: [...unread.mimePrefixes, 'video/'],
+          extensions: [...DEFAULT_DEFERRED_VIDEO_EXTENSIONS, ...unread.extensions].sort(),
         },
         action: 'metadata_only',
         reason: 'media_default_metadata_only',

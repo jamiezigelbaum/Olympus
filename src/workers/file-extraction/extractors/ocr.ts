@@ -55,6 +55,7 @@ import {
   isCommandMissing,
   missingBytesFailure,
   OCR_UNAVAILABLE_IMAGE_WARNING,
+  OCR_FAILED_IMAGE_WARNING,
   OCR_UNAVAILABLE_PDF_WARNING,
   textLaneAccepts,
   type ImageOcr,
@@ -279,7 +280,7 @@ export function createOcrRereadPolicy(options: {
       : { pdf: seen.pdfEngine !== undefined, image: seen.imageEngine !== undefined };
   };
   return {
-    unreadWarnings: ['ocr_required', OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
+    unreadWarnings: ['ocr_required', OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING, OCR_FAILED_IMAGE_WARNING],
     unreadTerminalErrorKinds: [],
     notReadyWarnings: [OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
     prepare() {
@@ -295,7 +296,7 @@ export function createOcrRereadPolicy(options: {
       return [
         // Legacy scans carry only `ocr_required`; they are PDFs.
         ...(ready?.pdf ? ['ocr_required', OCR_UNAVAILABLE_PDF_WARNING] : []),
-        ...(ready?.image ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []),
+        ...(ready?.image ? [OCR_UNAVAILABLE_IMAGE_WARNING, OCR_FAILED_IMAGE_WARNING] : []),
       ];
     },
   };
@@ -417,14 +418,23 @@ export function createImageOcr(options: {
     timeoutMs,
     maxBoundedTextChars,
   });
-  return async ({ bytes, mimeType, sizeBytes }) => {
+  return async ({ bytes, mimeType, sizeBytes, preparedImage }) => {
     if (!engine.vision && engine.pinned) return undefined;
     const laneInput = commandLaneInput({
       bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs, capability: engine.capability,
     });
     try {
-      return await runOcrLane(async () => await withVision(engine, (vision) => visionImage(laneInput, vision))
-        ?? await commandImageOcr(engine, laneInput));
+      return await runOcrLane(async () => {
+        // Vision's native decoder reads HEIC and keeps the original resolution.
+        const vision = await withVision(engine, (reader) => visionImage(laneInput, reader));
+        if (vision) return vision;
+        // Command engines cannot read every original format (notably HEIC).
+        // Use the already decoded JPEG, including when Vision fell back.
+        const decoded = preparedImage ? await readFile(preparedImage.path) : undefined;
+        return commandImageOcr(engine, decoded
+          ? { ...laneInput, bytes: decoded, mimeType: 'image/jpeg', sizeBytes: decoded.byteLength }
+          : laneInput);
+      });
     } catch (error) {
       if (error instanceof OcrUnavailableError) return undefined;
       throw error;

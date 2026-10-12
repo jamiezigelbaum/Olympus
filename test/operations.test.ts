@@ -194,6 +194,7 @@ describe('operations', () => {
       'email_worker',
       'worker_credential_lanes',
       'dropbox_content_extraction_throughput',
+      'photo_search',
       'source_index_status',
       'source_scheduler_status',
       'source_ingestion_health',

@@ -23,7 +23,10 @@
  * (chatgpt/directory-surface.ts). `/mcp` is unchanged.
  *
  * The tool list is the `remote` operation surface (the Hermes list:
- * source_answer, source_answer_result and source_index_status). Each request is served statelessly:
+ * source_answer, source_answer_result, source_index_status and
+ * ask_anonymously), plus the evidence search `olympus_search` when the worker
+ * supplies one (workers/remote-search.ts), which also hides source_answer
+ * while no answer model is set up. Each request is served statelessly:
  * one MCP server and transport per HTTP request, JSON responses, no session.
  * The connection's identity is set as the caller by the worker, never taken
  * from the client, and lands on the answer's audit ledger entry.
@@ -47,6 +50,7 @@ import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/sour
 import { createOlympusMcpServer } from '../mcp/server.ts';
 import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mcp-surface.ts';
 import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts';
+import { remoteSearchExtension, type RemoteSearchOptions } from './remote-search.ts';
 import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 import { remoteErrorOutput, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
@@ -87,6 +91,11 @@ export interface RemoteMcpHandlerOptions {
     /** Whether this connection gets only the surface's read-only tools (a demo grant). */
     readOnlyFor?: (connection: RemoteMcpConnection) => boolean;
   };
+  /**
+   * The evidence search for every caller not served the ChatGPT surface
+   * (workers/remote-search.ts). Absent: the operation list alone.
+   */
+  search?: RemoteSearchOptions;
   /** Builds the directory endpoint's server (default createChatGptDirectoryMcpServer; tests narrow its allowlist). */
   directoryServer?: typeof createChatGptDirectoryMcpServer;
 }
@@ -175,7 +184,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       ? surface === 'directory'
         ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached)
         : createChatGptMcpServer(() => ctx, chatgpt, detached)
-      : createOlympusMcpServer('remote', () => ctx);
+      : createOlympusMcpServer('remote', () => ctx, options.search
+        ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface))
+        : undefined);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
@@ -248,6 +259,21 @@ export function authenticateRemoteRequest(
     return connectionsUnavailable();
   }
   return verification.ok ? { ok: true, connection: verification.connection } : refuse('invalid_token');
+}
+
+/**
+ * The request's credential verified again (the remote search, before it
+ * releases evidence): `active` only for the same connection, still valid.
+ */
+function stillAuthorized(
+  request: Request,
+  connection: RemoteMcpConnection,
+  options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
+  surface: McpSurface,
+): 'active' | 'revoked' | 'unavailable' {
+  const again = authenticateRemoteRequest(request, options, surface);
+  if (again.ok) return again.connection.id === connection.id ? 'active' : 'revoked';
+  return again.response.status === 503 ? 'unavailable' : 'revoked';
 }
 
 function connectionsUnavailable(): { ok: false; response: Response } {

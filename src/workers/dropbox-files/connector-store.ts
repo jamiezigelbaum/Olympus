@@ -27,7 +27,10 @@ import {
   type SourceExclusionItemFacts,
   type SourceExclusionMatcher,
 } from '../../core/source-ingestion-exclusions.ts';
+import { readyStillImageFormats } from '../../core/still-image-readiness.ts';
 import {
+  defaultDropboxIngestionPolicy,
+  followsStillImageReadiness,
   loadDropboxIngestionPolicy,
   type SourceIngestionPolicy,
   type SourceIngestionRule,
@@ -155,6 +158,44 @@ export function dropboxIngestionExclusionMatcher(
 export function dropboxCanonicalIngestionMatcher(
   policy: SourceIngestionPolicy,
   env: Record<string, string | undefined> = process.env,
+): SourceExclusionMatcher {
+  if (!followsStillImageReadiness(policy)) return buildDropboxCanonicalIngestionMatcher(policy, env);
+  // The default policy's still-image rule is the machine's per-format
+  // readiness, which can change while a worker runs (the model's image
+  // encoder finishes loading, a probe is refreshed). The gate is built again
+  // whenever the set of formats read changes, so admission follows it.
+  let formatsKey: string | undefined;
+  let built: SourceExclusionMatcher | undefined;
+  const current = (): SourceExclusionMatcher => {
+    if (!followsStillImageReadiness(policy)) {
+      built = buildDropboxCanonicalIngestionMatcher(policy, env);
+      formatsKey = undefined;
+      return built;
+    }
+    const ready = readyStillImageFormats();
+    const key = [...ready].sort().join(',');
+    if (built === undefined || key !== formatsKey) {
+      formatsKey = key;
+      built = buildDropboxCanonicalIngestionMatcher({ ...policy, rules: defaultDropboxIngestionPolicy({ stillImagesRead: ready }).rules }, env);
+    }
+    return built;
+  };
+  return {
+    get active() { return current().active; },
+    get pathActive() { return current().pathActive; },
+    get identityActive() { return current().identityActive; },
+    get mediaActive() { return current().mediaActive; },
+    get unenforceableRuleIds() { return current().unenforceableRuleIds; },
+    get criteria() { return current().criteria; },
+    evaluatePath: (path) => current().evaluatePath(path),
+    evaluateMetadata: (metadata) => current().evaluateMetadata(metadata),
+    evaluateItem: (facts) => current().evaluateItem(facts),
+  };
+}
+
+function buildDropboxCanonicalIngestionMatcher(
+  policy: SourceIngestionPolicy,
+  env: Record<string, string | undefined>,
 ): SourceExclusionMatcher {
   const standing = dropboxIngestionExclusionMatcher(env);
   const policyRules = policy.rules.filter((rule) => rule.action !== 'full_extract');
