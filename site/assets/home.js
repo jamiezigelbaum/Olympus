@@ -30,32 +30,50 @@
   if ("ResizeObserver" in window) new ResizeObserver(fit).observe(document.querySelector(".reel"));
   else window.addEventListener("resize", fit);
 
-  // One clock for every scene: the page's own animation frames seek each scene's timeline, so no scene depends on
-  // its frame's timers (a scene once stalled halfway, 2026-10-12). A scene asked to play before it has loaded
-  // starts the moment it is ready.
-  var playing = [];
-  var running = false;
-  function play(scene) {
-    playing.push({ frame: frames.get(scene), t0: null });
-    if (!running) { running = true; requestAnimationFrame(tick); }
+  // One clock for every scene. A card arrives (rises into its stage) once the stage scrolls into view, and holds its
+  // first frame; once it reaches the middle of the screen its time runs to its end. Every animation frame moves each scene's time toward its
+  // target at real speed and seeks its timeline there, so no scene depends on its frame's own timers (one stalled
+  // halfway, 2026-10-12), and a scene asked to play before it has loaded starts the moment it is ready.
+  var state = new Map();   // scene -> { arrived, played, t, e }
+  var running = false, last = 0;
+  var ENTER = 0.6;         // seconds for the stand-in entry (film/scene.html)
+
+  function want(scene, step) {
+    var st = state.get(scene);
+    if (!st) state.set(scene, st = { arrived: false, played: false, t: null, e: 0 });
+    if (step === "arrive") st.arrived = true;
+    if (step === "play") st.arrived = st.played = true;
+    if (!running) { running = true; last = 0; requestAnimationFrame(tick); }
   }
+
   function tick(now) {
-    playing = playing.filter(function (p) {
-      var sc = p.frame.contentWindow && p.frame.contentWindow.olympusScene;
-      if (!sc) return true;
-      if (p.t0 == null) p.t0 = now;
-      var t = Math.min((now - p.t0) / 1000, sc.end);
-      sc.tl.seek(t, false);
-      return t < sc.end;
+    var dt = last ? Math.min((now - last) / 1000, 0.1) : 0;
+    last = now;
+    var busy = false;
+    state.forEach(function (st, scene) {
+      var sc = frames.get(scene).contentWindow && frames.get(scene).contentWindow.olympusScene;
+      if (!sc) { busy = true; return; }
+      if (sc.enter && st.arrived && st.e < ENTER) {
+        st.e = Math.min(st.e + dt, ENTER);
+        sc.enter.progress(st.e / ENTER);
+      }
+      if (st.t == null) st.t = sc.start;
+      if (st.played && !st.released) { st.released = true; sc.release(); }
+      var target = st.played ? sc.end : sc.start;
+      if (st.t < target) {
+        st.t = Math.min(st.t + dt, target);
+        sc.tl.seek(st.t, false);
+      }
+      if (st.t < target || (sc.enter && st.arrived && st.e < ENTER)) busy = true;
     });
-    if (playing.length) requestAnimationFrame(tick);
+    if (busy) requestAnimationFrame(tick);
     else running = false;
   }
 
   if (motion) {
-    // A scene plays when its middle reaches the middle of the screen. Tall stages count only their first 70% of a
-    // screen. The first plays on arrival, any already scrolled past plays at once, and at the very bottom every scene
-    // in view plays.
+    // Arrive: the stage's top has come a little way into the screen. Play: the stage's middle (tall stages count only
+    // their first 70% of a screen) has reached the middle of the screen. The first scene does both on load; a scene
+    // already scrolled past does both at once; at the very bottom every scene in view does both.
     var pending = scenes.filter(function (s) { return frames.has(s); });
     var ticking = false;
     var check = function () {
@@ -66,9 +84,10 @@
         var r = scene.querySelector(".stage").getBoundingClientRect();
         var mid = r.top + Math.min(r.height, vh * 0.7) / 2;
         if (scene === scenes[0] || mid <= vh / 2 || r.bottom < 0 || (atBottom && r.top < vh)) {
-          play(scene);
+          want(scene, "play");
           return false;
         }
+        if (r.top < vh * 0.9) want(scene, "arrive");
         return true;
       });
       if (!pending.length) {
