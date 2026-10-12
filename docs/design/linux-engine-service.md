@@ -1275,3 +1275,26 @@ The generated relay dashboard resource and its tool resource URI were rebuilt
 with the socket handoff branch (the Mac/TCP branch is unchanged). An additional
 71 panel/relay-contract tests passed. These files are local repository build
 outputs; no hosted relay assets, listing, demo or service were published.
+
+
+### Local acceptance artifact receipt
+
+The verified archive is `release-artifacts/olympus-omarchy-acceptance.tar.gz`.
+It contains `omarchy-baseline`, `omarchy-acceptance`, the verified pinned Bun
+archive, `OMARCHY-RUNBOOK.md`, `UPGRADE-REHEARSAL.md`, and
+`ACCEPTANCE-BUILDS.json`. The two local builds have different engine identities
+so the laptop can exercise an actual generation upgrade and rollback. Both
+retain the current rc.6 manifest version; this is acceptance material for the
+rc.7 work, not a published release.
+
+Archive SHA-256:
+
+```text
+6c963b51f864181a6b399372692454f454d8327087e6b0827d5662bd0315b73d
+```
+
+The ordinary release-artifact checks passed, including dist consistency and
+public-package checks. The extracted public CLI ran with the exact verified
+Linux Bun (`--version` and Linux `engine --help`); that Bun also passed a
+JavaScript/SQLite smoke. Local returned archive and constituent checksums match.
+No service was installed on a live host by this work.
