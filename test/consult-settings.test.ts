@@ -133,6 +133,18 @@ describe('parseConsultSettings', () => {
     expect(consultModelProvider('xAI/grok-5')).toBe('xai');
     expect(consultModelProvider('constructor/x')).toBeUndefined();
     expect(consultModelProvider('no-slash')).toBeUndefined();
+    // Bare and re-routed aliases still name their family's provider.
+    expect(consultModelProvider('gpt-5.5')).toBe('openai');
+    expect(consultModelProvider('GPT-4o')).toBe('openai');
+    expect(consultModelProvider('o3')).toBe('openai');
+    expect(consultModelProvider('o4-mini')).toBe('openai');
+    expect(consultModelProvider('claude-sonnet-5.5')).toBe('anthropic');
+    expect(consultModelProvider('grok-5')).toBe('xai');
+    expect(consultModelProvider('llama-4-maverick')).toBe('meta');
+    expect(consultModelProvider('some-router/claude-opus-5')).toBe('anthropic');
+    expect(consultModelProvider('google/gemini-3')).toBeUndefined();
+    expect(consultModelProvider('deepseek-r2')).toBeUndefined();
+    expect(consultModelProvider('olmo-3')).toBeUndefined();
   });
 
   test('a file written before the places and technical keys stays valid, with both on; unknown keys still reject', () => {

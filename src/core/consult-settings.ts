@@ -233,14 +233,29 @@ export function consultFrontierModelFor(settings: ConsultSettings, provider: Con
   return provider === 'anthropic' ? consultClaudeFrontierModel(settings) : consultChatgptFrontierModel(settings);
 }
 
+/* Bare model names (no provider prefix) that still name a hosting provider's
+   own family, so an alias like `gpt-5.5` or `claude-sonnet-5` cannot slip past
+   the cross-provider rule. */
+const CONSULT_BARE_MODEL_FAMILIES: ReadonlyArray<readonly [RegExp, Exclude<ConsultCallerProvider, 'other'>]> = [
+  [/^(?:gpt|chatgpt|o\d)(?:[-.]|$)/, 'openai'],
+  [/^claude(?:[-.]|$)/, 'anthropic'],
+  [/^grok(?:[-.]|$)/, 'xai'],
+  [/^(?:llama|meta-llama)(?:[-.\d]|$)/, 'meta'],
+];
+
 /**
  * The provider a zkAPI model id names (`openai/gpt-5.5` → `openai`,
- * `x-ai/grok-5` → `xai`), for the cross-provider rule; undefined when the id
- * names none of the hosting providers.
+ * `x-ai/grok-5` → `xai`, a bare `gpt-5.5` → `openai`), for the cross-provider
+ * rule; undefined when the id names none of the hosting providers.
  */
 export function consultModelProvider(model: string): Exclude<ConsultCallerProvider, 'other'> | undefined {
   const prefix = model.slice(0, model.indexOf('/')).toLowerCase();
-  return Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix) ? CONSULT_MODEL_PREFIXES[prefix] : undefined;
+  if (Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix)) return CONSULT_MODEL_PREFIXES[prefix];
+  const name = model.slice(model.lastIndexOf('/') + 1).trim().toLowerCase();
+  for (const [family, provider] of CONSULT_BARE_MODEL_FAMILIES) {
+    if (family.test(name)) return provider;
+  }
+  return undefined;
 }
 
 /**
