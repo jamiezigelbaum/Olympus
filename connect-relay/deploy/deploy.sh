@@ -71,17 +71,26 @@ echo "Copying to ${TARGET}:${REMOTE_DIR}"
 ssh "${SSH_OPTS[@]}" "$TARGET" "rm -rf ${REMOTE_DIR} && mkdir -m 700 ${REMOTE_DIR}"
 scp "${SSH_OPTS[@]}" "$BUILD_DIR"/* "$TARGET:${REMOTE_DIR}/"
 echo "Installing"
-ssh "${SSH_OPTS[@]}" "$TARGET" "sudo bash ${REMOTE_DIR}/remote-install.sh ${REMOTE_DIR} ${SHORT}"
+# remote-install.sh switches the symlink before it restarts and checks the
+# relay, so a failure there (or a dropped connection) may leave the new build
+# active: every failure from here on goes back to the build it replaced.
+roll_back() {
+  echo "$1; rolling back to ${PREVIOUS}" >&2
+  if ssh "${SSH_OPTS[@]}" "$TARGET" "sudo ln -sfn '${PREVIOUS}' /usr/local/bin/olympus-relay && sudo systemctl restart olympus-relay.service && for i in 1 2 3 4 5 6 7 8 9 10; do curl -fsS http://127.0.0.1:8787/healthz >/dev/null && exit 0; sleep 1; done; exit 1" \
+    && reviewer_check --wait 90; then
+    echo "Rolled back to ${PREVIOUS}; the reviewer path passes again." >&2
+  else
+    echo "Rolled back to ${PREVIOUS}, but the relay or the reviewer path still fails: look now." >&2
+  fi
+  exit 1
+}
+
+if ! ssh "${SSH_OPTS[@]}" "$TARGET" "sudo bash ${REMOTE_DIR}/remote-install.sh ${REMOTE_DIR} ${SHORT}"; then
+  roll_back "Installing olympus-relay ${SHORT} failed or did not confirm"
+fi
 
 echo "Checking the reviewer path on the new build"
 if ! reviewer_check --wait 90; then
-  echo "olympus-relay ${SHORT} changes or breaks the reviewer path; rolling back to ${PREVIOUS}" >&2
-  ssh "${SSH_OPTS[@]}" "$TARGET" "sudo ln -sfn '${PREVIOUS}' /usr/local/bin/olympus-relay && sudo systemctl restart olympus-relay.service"
-  if reviewer_check --wait 90; then
-    echo "Rolled back to ${PREVIOUS}; the reviewer path passes again." >&2
-  else
-    echo "Rolled back to ${PREVIOUS}, but the reviewer path still fails: look now." >&2
-  fi
-  exit 1
+  roll_back "olympus-relay ${SHORT} changes or breaks the reviewer path"
 fi
 echo "Deployed olympus-relay ${SHORT}"
