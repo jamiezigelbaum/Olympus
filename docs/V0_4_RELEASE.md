@@ -158,6 +158,16 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-12 — First Omarchy install follow-up.** The owner proved per-user
+  install, linger, service and socket isolation, and relay operation. Local
+  follow-up fixes doctor runtime/socket wording and adds content-free Linux
+  model readiness to engine status and the local dashboard. The desktop
+  bridge remains blocked on the browser-origin decision documented in
+  `docs/design/linux-engine-service.md`: fixed-origin port squatting can retain
+  a hostile browser execution context. No new listener is shipped while that
+  consequential defect remains. The listing and plugin bundle remain frozen.
+
+
 - **2026-10-12 — W5 integration for rc.7.** The five local tracks are merged
   in the integration worktree. Shared receipt paths, owner-only socket
   transport, the outbound relay, Linux agent approval instructions and

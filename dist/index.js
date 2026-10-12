@@ -22088,7 +22088,7 @@ async function argusProfileCheck(deps, profile) {
 }
 async function dependencyCheck(deps) {
   const commandExists = deps.commandExists ?? defaultCommandExists;
-  const bun = await commandExists("bun");
+  const bun = await commandExists("bun") || (deps.platform ?? process.platform) === "linux" && (deps.runningBun ?? typeof Bun !== "undefined");
   const node = await commandExists("node");
   const openclaw = await commandExists("openclaw");
   const gog = await commandExists("gog");
@@ -22171,7 +22171,7 @@ async function hostCheck(deps) {
     return {
       name: "host",
       ok: true,
-      detail: `Hosted by ${hosts.join(", ")}. ${openclaw}. No answer model runs on this Mac: ChatGPT answers from Olympus search.`
+      detail: (deps.platform ?? process.platform) === "linux" ? `Hosted by ${hosts.join(", ")}. ${openclaw}. ChatGPT answers Personal questions from Olympus search. Built-in Private model readiness is reported separately in the dashboard.` : `Hosted by ${hosts.join(", ")}. ${openclaw}. No answer model runs on this Mac: ChatGPT answers from Olympus search.`
     };
   }
   if (cloudViaOpenClaw && !hasOpenClaw) {
@@ -22436,6 +22436,7 @@ function workerReadinessMatchesProfile(engine, profileId, readiness) {
 async function emailWorkerCheck(deps) {
   const name = "email_worker";
   const baseUrl = deps.config.email.baseUrl;
+  const address = (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env ?? process.env).workerSocketPath || "the owner Unix socket (XDG_RUNTIME_DIR unavailable)" : baseUrl;
   if (!deps.config.email.enabled) {
     return {
       name,
@@ -22450,7 +22451,7 @@ async function emailWorkerCheck(deps) {
     return {
       name,
       ok: false,
-      detail: `Email worker is not reachable at ${baseUrl}: ${errorDetail(error)}`,
+      detail: `Email worker is not reachable at ${address}: ${errorDetail(error)}`,
       hint: EMAIL_WORKER_HINT
     };
   }
@@ -22458,7 +22459,7 @@ async function emailWorkerCheck(deps) {
     return {
       name,
       ok: false,
-      detail: `Email worker /health at ${baseUrl} returned HTTP ${response.status}.`,
+      detail: `Email worker /health at ${address} returned HTTP ${response.status}.`,
       hint: EMAIL_WORKER_HINT
     };
   }
@@ -22476,14 +22477,14 @@ async function emailWorkerCheck(deps) {
     return {
       name,
       ok: false,
-      detail: `Source worker at ${baseUrl} reported unhealthy /health (status=${typeof health.status === "string" ? health.status : "unknown"}, reachable=${health.reachable !== false}).`,
+      detail: `Source worker at ${address} reported unhealthy /health (status=${typeof health.status === "string" ? health.status : "unknown"}, reachable=${health.reachable !== false}).`,
       hint: EMAIL_WORKER_HINT
     };
   }
   return {
     name,
     ok: true,
-    detail: `Source worker at ${baseUrl} answered /health; no worker health or credential failures reported.`
+    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.`
   };
 }
 async function sourceIndexStatusCheck(deps) {

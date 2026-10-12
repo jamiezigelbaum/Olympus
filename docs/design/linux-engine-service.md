@@ -1298,3 +1298,109 @@ public-package checks. The extracted public CLI ran with the exact verified
 Linux Bun (`--version` and Linux `engine --help`); that Bun also passed a
 JavaScript/SQLite smoke. Local returned archive and constituent checksums match.
 No service was installed on a live host by this work.
+
+
+### First Omarchy install: standalone models and doctor (2026-10-12)
+
+The owner's first laptop run proved passwordless per-user installation,
+verified linger, an active/enabled unit, the private 0700/0600 worker socket,
+second-UID refusal, online relay, and `desktop_session` with remote false.
+The quoted `WorkingDirectory` defect was already fixed at `aa488298`.
+The missing desktop browser route is a separate approval-transport defect;
+it does not invalidate those observed socket/service results.
+
+Fresh standalone Linux uses the same `no-sensitive` preset and built-in model
+capability gates as Mac. EmbeddingGemma 2 warms at worker boot. The private
+Qwen model is enabled by W2 wherever the pinned runtime and memory permit it;
+its first download starts when private work/classification needs it.
+Transcription starts its download only when audio is selected and requires
+`ffmpeg` on Linux. No credentials or paid model service are required for these
+built-ins. The source privacy policy remains separate: `no-sensitive` does
+not silently make metadata-only Private sources answerable.
+
+Pinned Linux x86_64 downloads (decimal bytes, model/runtime manifests; these
+are expected payloads, not a claim that this work downloaded model weights):
+
+| Component | Bytes | Start condition |
+|---|---:|---|
+| EmbeddingGemma 2 | 484,622,336 | First worker boot |
+| LiteRT-LM runtime wheel | 47,051,760 | Embedding installation |
+| Qwen3.5 4B Q4_K_M, 16 GiB+ memory | 2,740,937,888 | Private model first use |
+| Qwen3.5 2B, smaller supported memory | 1,280,835,840 | Alternative memory-selected private model |
+| Qwen3-ASR 0.6B plus projector | 1,019,141,728 | Audio first use |
+| Shared llama.cpp runtime | 17,544,875 | First reasoning/transcription install, downloaded once |
+
+With the 4B choice, all model files plus these runtime archives total
+4,309,298,587 bytes (4.31 GB); with 2B, 2,849,196,539 bytes (2.85 GB).
+Unpacked runtimes, caches and working memory need additional space. The
+managed Bun/runtime and Olympus archive are separate installer payloads.
+Linux arm64 has model pins but is not qualified by the x86_64 laptop bundle.
+
+`engine status` includes content-free model readiness from the worker health
+response. The Linux computer dashboard adds a local built-in-model summary,
+including insufficient memory and the missing-ffmpeg remedy, outside the
+frozen ChatGPT panel. Its normal model cards retain their existing live
+progress. Status reads never start a download. Doctor accepts the running
+Bun interpreter when the managed pinned runtime is absent from PATH, names
+the owner socket, and avoids the incorrect Linux claim that no private model
+runs. The frozen listing and plugin skill bundle are unchanged.
+
+W2 seam: this track consumes its existing model enablement, sizing and status
+functions, without replacing policy or model selection. W2's planned
+cgroup-aware memory sizing remains with that track; present selection uses
+host total memory. Verify native model loading, actual disk use and CPU
+latency on the laptop. Do not treat a healthy engine as a ready model.
+
+
+### Desktop bridge security disposition (2026-10-12)
+
+**Deferred pending an owner decision on the browser origin.** The real laptop
+proved that `olympus dashboard` printed a non-listening TCP URL on a desktop.
+The fixed-origin bridge prototype was withheld from the acceptance candidate;
+the shipping path remains the existing Unix socket and SSH handoff.
+
+Independent review and a real isolated Chromium reproduction found:
+
+1. A cookie for `127.0.0.1` is shared across ports. A malicious local OAuth
+   callback can receive it before consent, including on an OAuth error redirect.
+2. An additional origin-bound credential blocks cookie-only replay, but a
+   same-port squatter can plant a persistent service worker during downtime.
+3. A private file can clear that service worker before navigation, but clearing
+   storage does not terminate an already-running hostile same-origin tab.
+   The tab retains authority over new browser storage. Chromium reproduced
+   that surviving execution context; `Clear-Site-Data: executionContexts` did
+   not terminate it. Per-process cookie rotation alone does not fix this.
+
+The proposed fix uses a fresh unguessable loopback browser origin for every
+engine/desktop-listener epoch, retaining `127.0.0.1:8010` as the public entry
+point and the private Unix socket as the worker transport. It needs explicit
+owner acceptance because the work order specified the fixed `127.0.0.1`
+proof URL. Do not enable the fixed-origin prototype or treat its passing
+cookie/replay tests as proof against persistent browser-origin compromise.
+The private ticket/CSRF checks, graphical-only listener, nuisance limits,
+collision reporting and headless SSH path remain acceptance requirements for
+that revised implementation. No desktop-bridge claim is made by this bundle.
+
+
+### Doctor/model acceptance candidate proof
+
+The shipped follow-up passed **218 focused tests, zero failures**, across
+`doctor`, `linux-model-readiness`, `dashboard-computer-host`, `engine-service`,
+`architecture-guard`, `public-surface-guard` and `private-ops-disposition`.
+Build and `bunx tsc --noEmit -p .` passed, followed by a returned `dist` rebuild.
+Three Mac host-page cases (locked, control session, read-only token) were
+rendered against the original HEAD and compared byte-for-byte. Existing Mac
+engine fixtures also passed. The ChatGPT plugin directory and hosted relay
+assets have no changes. All builds and tests ran in the isolated remote lane;
+no native Mac, live systemd, model-weight download or laptop proof is implied.
+The built-in-reasoning installer tests were not run.
+
+The follow-up local bundle is prepared at
+`release-artifacts/omarchy-doctor-models-20261012`. It deliberately retains the
+socket/SSH-only approval path and the rc.6 manifest version while rc.7 work
+continues. Re-run the installer, `olympus doctor` and `olympus engine status`;
+use the existing owner SSH socket forward to inspect the new local model
+summary. Compare the reported model states with actual first-use downloads,
+install `ffmpeg` when prompted, and confirm native model loading on the laptop.
+The desktop approval row is deferred for the origin decision above, not
+reported as passed by these tests or this bundle.

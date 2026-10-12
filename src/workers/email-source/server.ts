@@ -1,3 +1,4 @@
+import { linuxModelReadiness } from '../../core/linux-model-readiness.ts';
 import { withEngineWorkerAdmission, EngineMaintenanceInProgressError } from '../../core/engine-maintenance.ts';
 import { prepareWorkerSocket, bindWorkerSocket, workerSocketPath } from '../../core/worker-transport.ts';
 import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
@@ -4318,6 +4319,7 @@ export async function main(): Promise<void> {
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
   const worker = createEmailSourceWorker({
+    ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
     agentConnectHost: () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port }),
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
@@ -5265,7 +5267,13 @@ export async function main(): Promise<void> {
   const startServer = () => socketPath
     ? Bun.serve({ unix: socketPath, fetch(request, server) {
         server.timeout(request, 0);
-        return serverOptions.fetch(request, server);
+        const response = serverOptions.fetch(request, server);
+        const path = new URL(request.url).pathname;
+        if (path === '/v1/health' || path === '/health') return Promise.resolve(response).then(async value => {
+          if (!value.ok) return value;
+          return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env) }, { status: value.status, headers: value.headers });
+        });
+        return response;
       } })
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();

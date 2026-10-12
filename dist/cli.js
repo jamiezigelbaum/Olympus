@@ -71569,7 +71569,7 @@ async function argusProfileCheck(deps, profile) {
 }
 async function dependencyCheck(deps) {
   const commandExists = deps.commandExists ?? defaultCommandExists;
-  const bun = await commandExists("bun");
+  const bun = await commandExists("bun") || (deps.platform ?? process.platform) === "linux" && (deps.runningBun ?? typeof Bun !== "undefined");
   const node = await commandExists("node");
   const openclaw = await commandExists("openclaw");
   const gog = await commandExists("gog");
@@ -71652,7 +71652,7 @@ async function hostCheck(deps) {
     return {
       name: "host",
       ok: true,
-      detail: `Hosted by ${hosts.join(", ")}. ${openclaw}. No answer model runs on this Mac: ChatGPT answers from Olympus search.`
+      detail: (deps.platform ?? process.platform) === "linux" ? `Hosted by ${hosts.join(", ")}. ${openclaw}. ChatGPT answers Personal questions from Olympus search. Built-in Private model readiness is reported separately in the dashboard.` : `Hosted by ${hosts.join(", ")}. ${openclaw}. No answer model runs on this Mac: ChatGPT answers from Olympus search.`
     };
   }
   if (cloudViaOpenClaw && !hasOpenClaw) {
@@ -71917,6 +71917,7 @@ function workerReadinessMatchesProfile(engine, profileId, readiness) {
 async function emailWorkerCheck(deps) {
   const name = "email_worker";
   const baseUrl = deps.config.email.baseUrl;
+  const address = (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env ?? process.env).workerSocketPath || "the owner Unix socket (XDG_RUNTIME_DIR unavailable)" : baseUrl;
   if (!deps.config.email.enabled) {
     return {
       name,
@@ -71931,7 +71932,7 @@ async function emailWorkerCheck(deps) {
     return {
       name,
       ok: false,
-      detail: `Email worker is not reachable at ${baseUrl}: ${errorDetail2(error)}`,
+      detail: `Email worker is not reachable at ${address}: ${errorDetail2(error)}`,
       hint: EMAIL_WORKER_HINT
     };
   }
@@ -71939,7 +71940,7 @@ async function emailWorkerCheck(deps) {
     return {
       name,
       ok: false,
-      detail: `Email worker /health at ${baseUrl} returned HTTP ${response.status}.`,
+      detail: `Email worker /health at ${address} returned HTTP ${response.status}.`,
       hint: EMAIL_WORKER_HINT
     };
   }
@@ -71957,14 +71958,14 @@ async function emailWorkerCheck(deps) {
     return {
       name,
       ok: false,
-      detail: `Source worker at ${baseUrl} reported unhealthy /health (status=${typeof health.status === "string" ? health.status : "unknown"}, reachable=${health.reachable !== false}).`,
+      detail: `Source worker at ${address} reported unhealthy /health (status=${typeof health.status === "string" ? health.status : "unknown"}, reachable=${health.reachable !== false}).`,
       hint: EMAIL_WORKER_HINT
     };
   }
   return {
     name,
     ok: true,
-    detail: `Source worker at ${baseUrl} answered /health; no worker health or credential failures reported.`
+    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.`
   };
 }
 async function sourceIndexStatusCheck(deps) {
@@ -98260,6 +98261,1559 @@ var init_remote_relay_runtime = __esm(() => {
   init_remote_access();
 });
 
+// src/workers/source-index/built-in-reasoning/manifest.ts
+function unslothQwen(size, revision, bytes, sha2565) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256: sha2565
+  };
+}
+function ggmlOrgAsrFile(name, bytes, sha2565) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256: sha2565
+  };
+}
+function pickBuiltInReasoningModel(totalMemoryBytes, choice = "auto", models = BUILT_IN_REASONING_MODELS) {
+  const wanted = choice.trim().toLowerCase() || "auto";
+  const exact = models.find((model) => model.modelId === wanted);
+  if (exact)
+    return totalMemoryBytes >= exact.minimumMemoryBytes ? exact : undefined;
+  if (wanted === "small" || wanted === "standard" || wanted === "large") {
+    const sized = models.find((model) => model.sizeClass === wanted);
+    return sized && totalMemoryBytes >= sized.minimumMemoryBytes ? sized : undefined;
+  }
+  if (wanted !== "auto")
+    return;
+  const standard = models.find((model) => model.sizeClass === "standard");
+  if (standard && totalMemoryBytes >= standard.minimumMemoryBytes)
+    return standard;
+  const small = models.find((model) => model.sizeClass === "small");
+  if (small && totalMemoryBytes >= small.minimumMemoryBytes)
+    return small;
+  return;
+}
+function runtimeArchiveFor(platform2, runtime = LLAMA_SERVER_RUNTIME) {
+  return runtime.archives.find((archive) => archive.platform === platform2);
+}
+var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, BUILT_IN_REASONING_MODELS, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
+var init_manifest2 = __esm(() => {
+  GIB = 1024 ** 3;
+  QWEN35_2B = {
+    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+    displayName: "Qwen3.5 2B",
+    sizeClass: "small",
+    baseRepository: "Qwen/Qwen3.5-2B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-2B-GGUF",
+    revision: QWEN35_2B_REVISION,
+    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_4B = {
+    modelId: "qwen3.5-4b-q4_k_m-e87f176",
+    displayName: "Qwen3.5 4B",
+    sizeClass: "standard",
+    baseRepository: "Qwen/Qwen3.5-4B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-4B-GGUF",
+    revision: QWEN35_4B_REVISION,
+    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_9B = {
+    modelId: "qwen3.5-9b-q4_k_m-3885219",
+    displayName: "Qwen3.5 9B",
+    sizeClass: "large",
+    baseRepository: "Qwen/Qwen3.5-9B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-9B-GGUF",
+    revision: QWEN35_9B_REVISION,
+    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  BUILT_IN_REASONING_MODELS = [QWEN35_2B, QWEN35_4B, QWEN35_9B];
+  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+  LLAMA_SERVER_RUNTIME = {
+    release: LLAMA_CPP_RELEASE,
+    license: "MIT",
+    archives: [
+      {
+        platform: "darwin-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        bytes: 11827796,
+        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+        gpu: true
+      },
+      {
+        platform: "linux-x64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        bytes: 17544875,
+        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+        gpu: false
+      },
+      {
+        platform: "linux-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        bytes: 13590823,
+        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+        gpu: false
+      }
+    ]
+  };
+  QWEN3_ASR_06B = {
+    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+    displayName: "Qwen3-ASR 0.6B",
+    baseRepository: "Qwen/Qwen3-ASR-0.6B",
+    license: "Apache-2.0",
+    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+    revision: QWEN3_ASR_06B_REVISION,
+    files: [
+      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+    ],
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 4096
+  };
+});
+
+// src/workers/source-index/built-in-reasoning/install.ts
+import { spawnSync as spawnSync15 } from "node:child_process";
+import { createHash as createHash53, randomUUID as randomUUID23 } from "node:crypto";
+import {
+  closeSync as closeSync14,
+  createReadStream as createReadStream2,
+  existsSync as existsSync53,
+  mkdirSync as mkdirSync42,
+  openSync as openSync14,
+  readFileSync as readFileSync53,
+  readdirSync as readdirSync12,
+  renameSync as renameSync16,
+  rmSync as rmSync18,
+  statSync as statSync27,
+  statfsSync,
+  writeFileSync as writeFileSync18,
+  writeSync as writeSync3
+} from "node:fs";
+import { homedir as homedir54 } from "node:os";
+import { dirname as dirname59, isAbsolute as isAbsolute22, join as join83 } from "node:path";
+function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
+  const root = builtInReasoningRoot(env);
+  return {
+    root,
+    modelDir: join83(root, model.modelId),
+    runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
+    statusPath: join83(root, "status.json"),
+    lockPath: join83(root, "install.lock"),
+    runtimeLockPath: join83(root, "runtime.lock")
+  };
+}
+function builtInReasoningRoot(env) {
+  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join83(olympusModelsDir(env), "built-in-reasoning");
+  if (!isAbsolute22(root))
+    throw new TypeError("The built-in reasoning directory must be an absolute path.");
+  return root;
+}
+function olympusModelsDir(env = process.env) {
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join83(env.HOME?.trim() || homedir54(), ".local", "share");
+  return join83(dataRoot, "openclaw", "olympus", "models");
+}
+function llamaServerRuntimeDir(env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
+  return join83(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
+}
+function llamaServerRuntimeLockPath(env = process.env) {
+  return join83(builtInReasoningRoot(env), "runtime.lock");
+}
+function currentPlatform2() {
+  return `${process.platform}-${process.arch}`;
+}
+function readBuiltInReasoningStatus(model, env = process.env) {
+  return readPinnedModelStatus(builtInReasoningPaths(model, env).statusPath, model.modelId, REASONING_NOUN);
+}
+function readPinnedModelStatus(statusPath, modelId, noun) {
+  const fallback = {
+    state: "not_started",
+    modelId,
+    percent: 0,
+    label: `${capitalize2(noun)} not downloaded yet`,
+    bytesDone: 0,
+    bytesTotal: 0,
+    updatedAt: new Date(0).toISOString()
+  };
+  try {
+    const parsed = JSON.parse(readFileSync53(statusPath, "utf8"));
+    return parsed && typeof parsed === "object" && parsed.modelId === modelId ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+async function installBuiltInReasoning(options) {
+  const { model, ...tuning } = options;
+  const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
+  const platform2 = options.platform ?? currentPlatform2();
+  const installed = await installPinnedModel({
+    ...tuning,
+    bundle: { modelId: model.modelId, displayName: model.displayName, files: [model.file] },
+    layout: { ...builtInReasoningPaths(model, options.env, runtime, platform2), noun: REASONING_NOUN }
+  });
+  return { modelPath: installed.filePaths[0], serverPath: installed.serverPath, gpu: installed.gpu };
+}
+async function installPinnedModel(options) {
+  const { bundle, layout: paths } = options;
+  const noun = paths.noun;
+  const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
+  const platform2 = options.platform ?? currentPlatform2();
+  const reporter = new ProgressReporter2(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
+  const files = bundle.files.map((file) => ({ file, path: join83(paths.modelDir, file.name) }));
+  const filesPresent = () => files.every(({ path }) => existsSync53(path));
+  const log = options.log ?? ((line) => console.log(line));
+  const timing = {
+    downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS2,
+    verifyTimeoutMs: options.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS
+  };
+  const lockWaitMs = options.lockWaitMs ?? STALE_LOCK_MS2;
+  const lockRefreshMs = options.lockRefreshMs ?? LOCK_REFRESH_MS;
+  const stage = async (name, run) => {
+    const started = Date.now();
+    log(`${LOG_PREFIX} model=${bundle.modelId} stage=${name} started`);
+    try {
+      const result = await run();
+      log(`${LOG_PREFIX} model=${bundle.modelId} stage=${name} done ms=${Date.now() - started}`);
+      return result;
+    } catch (error2) {
+      const reason = error2 instanceof BuiltInReasoningInstallError ? error2.reason : "disk_write_failed";
+      log(`${LOG_PREFIX} model=${bundle.modelId} stage=${name} failed reason=${reason} ms=${Date.now() - started}`);
+      throw error2;
+    }
+  };
+  const verifyAll = async () => {
+    for (const { file, path } of files)
+      await verifyPinnedFile(path, file, noun, reporter, timing.verifyTimeoutMs);
+  };
+  const finished = () => reporter.set("ready", `${capitalize2(noun)} ready`, 100);
+  try {
+    const archive = runtimeArchiveFor(platform2, runtime);
+    if (!archive) {
+      throw new BuiltInReasoningInstallError("unsupported_platform", `The ${noun} does not run on ${platform2}.`);
+    }
+    ensureDirectory2(paths.root);
+    const installed = () => ({
+      filePaths: files.map(({ path }) => path),
+      serverPath: findServerBinary(paths.runtimeDir),
+      gpu: archive.gpu
+    });
+    if (filesPresent() && runtimeInstalled2(paths.runtimeDir, archive)) {
+      await stage("verify", verifyAll);
+      finished();
+      return installed();
+    }
+    const now = (options.now ?? (() => new Date))();
+    const previous = readPinnedModelStatus(paths.statusPath, bundle.modelId, noun);
+    if (previous.state === "failed" && previous.failure?.reason === "insufficient_space" && previous.failure.retryAfter && Date.parse(previous.failure.retryAfter) > now.getTime()) {
+      throw new BuiltInReasoningInstallError("insufficient_space", previous.failure.message, {
+        bytesNeeded: previous.failure.bytesNeeded ?? 0,
+        bytesFree: previous.failure.bytesFree ?? 0,
+        retryAfter: previous.failure.retryAfter
+      });
+    }
+    const space = {
+      noun,
+      freeBytes: options.freeBytes ?? volumeFreeBytes,
+      headroomBytes: options.spaceHeadroomBytes ?? BUILT_IN_REASONING_SPACE_HEADROOM_BYTES,
+      backoffMs: options.spaceBackoffMs ?? SPACE_BACKOFF_MS,
+      now: () => (options.now ?? (() => new Date))(),
+      write: options.writeChunk ?? ((fd, chunk) => {
+        writeSync3(fd, chunk);
+      })
+    };
+    await stage("install", () => withInstallLock2(paths.lockPath, lockWaitMs, lockRefreshMs, noun, async () => {
+      if (filesPresent() && runtimeInstalled2(paths.runtimeDir, archive))
+        return;
+      const fetchImpl = options.fetchImpl ?? fetch;
+      const missing = files.filter(({ path }) => !existsSync53(path));
+      const needRuntime = !runtimeInstalled2(paths.runtimeDir, archive);
+      const missingBytes = missing.reduce((total, { file, path }) => total + Math.max(0, file.bytes - fileSize(`${path}.partial`)), 0);
+      assertSpaceFor(paths.root, space, missingBytes + (needRuntime ? archive.bytes * RUNTIME_UNPACK_FACTOR : 0));
+      reporter.begin(missing.reduce((total, { file }) => total + file.bytes, 0) + (needRuntime ? archive.bytes : 0));
+      if (needRuntime) {
+        await stage("runtime", () => withInstallLock2(paths.runtimeLockPath, lockWaitMs, lockRefreshMs, noun, async () => {
+          if (runtimeInstalled2(paths.runtimeDir, archive))
+            return;
+          await installRuntime2(fetchImpl, paths.runtimeDir, archive, reporter, options.extractArchive ?? extractWithTar, timing.downloadStallMs, space);
+        }));
+      }
+      if (missing.length > 0) {
+        ensureDirectory2(paths.modelDir);
+        for (const { file, path } of missing) {
+          await stage("download", () => downloadVerified2(fetchImpl, file.url, path, file.bytes, file.sha256, reporter, `Downloading the ${noun} (${bundle.displayName})`, timing.downloadStallMs, space));
+        }
+      }
+    }));
+    await stage("verify", verifyAll);
+    if (!runtimeInstalled2(paths.runtimeDir, archive)) {
+      throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server did not install completely.");
+    }
+    finished();
+    return installed();
+  } catch (error2) {
+    const failure2 = error2 instanceof BuiltInReasoningInstallError ? error2 : new BuiltInReasoningInstallError("disk_write_failed", error2 instanceof Error ? error2.message : String(error2));
+    reporter.fail(failure2.reason, failure2.message, failure2.shortfall);
+    throw failure2;
+  }
+}
+function volumeFreeBytes(path) {
+  try {
+    const stats = statfsSync(path);
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch {
+    return;
+  }
+}
+function fileSize(path) {
+  try {
+    return statSync27(path).size;
+  } catch {
+    return 0;
+  }
+}
+function spaceShortfallError(space, bytesNeeded, bytesFree, cause) {
+  const retryAfter = new Date(space.now().getTime() + space.backoffMs).toISOString();
+  return new BuiltInReasoningInstallError("insufficient_space", `Not enough free disk space for the ${space.noun}: it needs ${formatGb(bytesNeeded)} free and the disk has ${formatGb(bytesFree)}${cause ? ` (${cause})` : ""}. Free up space; Olympus tries again after ${retryAfter}.`, { bytesNeeded, bytesFree, retryAfter });
+}
+function assertSpaceFor(dir, space, bytes) {
+  if (bytes <= 0)
+    return;
+  const free = space.freeBytes(dir);
+  if (free === undefined)
+    return;
+  const needed = bytes + space.headroomBytes;
+  if (free < needed)
+    throw spaceShortfallError(space, needed, free);
+}
+function isNoSpaceError(error2) {
+  const code = error2?.code;
+  return code === "ENOSPC" || code === "EDQUOT" || /ENOSPC|no space left/i.test(String(error2));
+}
+function formatGb(bytes) {
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+}
+function capitalize2(text2) {
+  return text2.length > 0 ? `${text2[0].toUpperCase()}${text2.slice(1)}` : text2;
+}
+function reportBuiltInReasoningState(options, state, failure2) {
+  const paths = builtInReasoningPaths(options.model, options.env);
+  reportPinnedModelState({
+    statusPath: paths.statusPath,
+    modelId: options.model.modelId,
+    noun: REASONING_NOUN,
+    ...options.now ? { now: options.now } : {},
+    ...options.onProgress ? { onProgress: options.onProgress } : {}
+  }, state, failure2);
+}
+function reportPinnedModelState(target, state, failure2) {
+  const reporter = new ProgressReporter2(target.statusPath, target.modelId, target.noun, target.now, target.onProgress);
+  if (state === "failed" && failure2)
+    reporter.fail(failure2.reason, failure2.message);
+  else
+    reporter.set(state, state === "ready" ? `${capitalize2(target.noun)} ready` : `Starting the ${target.noun}`, 100);
+}
+function findServerBinary(runtimeDir) {
+  const marker = readRuntimeMarker(runtimeDir);
+  if (marker?.serverPath)
+    return join83(runtimeDir, marker.serverPath);
+  throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
+}
+async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
+  const key2 = `${path}:${file.sha256}`;
+  verifiedThisProcess2 ??= new Set;
+  if (verifiedThisProcess2.has(key2))
+    return;
+  const size = statSync27(path).size;
+  const label = `Checking the ${noun}`;
+  reporter.verifying(label, 0, file.bytes);
+  const digest2 = size === file.bytes ? await sha256File3(path, timeoutMs, (done) => reporter.verifying(label, done, file.bytes)) : undefined;
+  if (digest2 !== file.sha256) {
+    rmSync18(path, { force: true });
+    throw new BuiltInReasoningInstallError("checksum_mismatch", `${file.name} did not match its pinned checksum and was removed; it will download again.`);
+  }
+  verifiedThisProcess2.add(key2);
+}
+function readRuntimeMarker(runtimeDir) {
+  try {
+    return JSON.parse(readFileSync53(join83(runtimeDir, RUNTIME_MARKER2), "utf8"));
+  } catch {
+    return;
+  }
+}
+function runtimeInstalled2(runtimeDir, archive) {
+  const marker = readRuntimeMarker(runtimeDir);
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync53(join83(runtimeDir, marker.serverPath));
+}
+async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
+  const staging = `${runtimeDir}.staging-${randomUUID23()}`;
+  ensureDirectory2(staging);
+  try {
+    const archivePath = join83(staging, archive.name);
+    await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
+    reporter.set("verifying", "Unpacking the built-in model server");
+    try {
+      extract(archivePath, staging);
+    } catch (error2) {
+      if (isNoSpaceError(error2)) {
+        throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname59(runtimeDir)) ?? 0, "the disk filled up while unpacking");
+      }
+      throw new BuiltInReasoningInstallError("runtime_load_failed", `The built-in model server could not be unpacked (${error2 instanceof Error ? error2.message : String(error2)}).`);
+    }
+    rmSync18(archivePath, { force: true });
+    const server = locateFile(staging, SERVER_BINARY);
+    if (!server) {
+      throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
+    }
+    const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
+    writeFileSync18(join83(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+`);
+    rmSync18(runtimeDir, { recursive: true, force: true });
+    renameSync16(staging, runtimeDir);
+  } catch (error2) {
+    rmSync18(staging, { recursive: true, force: true });
+    throw error2;
+  }
+}
+function extractWithTar(archivePath, targetDir) {
+  const result = spawnSync15("tar", ["-xzf", archivePath, "-C", targetDir], {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeout: EXTRACT_TIMEOUT_MS
+  });
+  if (result.error)
+    throw result.error;
+  if (result.status !== 0) {
+    throw new Error(result.stderr?.toString().trim() || `tar exited with ${result.status ?? result.signal}`);
+  }
+}
+function locateFile(root, name, depth = 0, prefix = "") {
+  let entries;
+  try {
+    entries = readdirSync12(join83(root, prefix));
+  } catch {
+    return;
+  }
+  if (entries.includes(name)) {
+    const relative8 = prefix ? `${prefix}/${name}` : name;
+    try {
+      if (statSync27(join83(root, relative8)).isFile())
+        return relative8;
+    } catch {}
+  }
+  if (depth >= 2)
+    return;
+  for (const entry of entries) {
+    const child = prefix ? `${prefix}/${entry}` : entry;
+    try {
+      if (!statSync27(join83(root, child)).isDirectory())
+        continue;
+    } catch {
+      continue;
+    }
+    const found = locateFile(root, name, depth + 1, child);
+    if (found)
+      return found;
+  }
+  return;
+}
+async function downloadVerified2(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label, stallMs, space) {
+  const partial2 = `${target}.partial`;
+  const hash = createHash53("sha256");
+  let received = 0;
+  if (existsSync53(partial2)) {
+    const size = statSync27(partial2).size;
+    if (size > 0 && size < expectedBytes) {
+      await hashInto(partial2, hash, VERIFY_TIMEOUT_MS);
+      received = size;
+      reporter.advance(size, label);
+    } else {
+      rmSync18(partial2, { force: true });
+    }
+  }
+  let response;
+  const controller = new AbortController;
+  let stallTimer;
+  const armStall = () => {
+    if (stallTimer)
+      clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
+  };
+  const disarmStall = () => {
+    if (stallTimer)
+      clearTimeout(stallTimer);
+    stallTimer = undefined;
+  };
+  armStall();
+  try {
+    response = await fetchImpl(url, {
+      redirect: "follow",
+      signal: controller.signal,
+      ...received > 0 ? { headers: { Range: `bytes=${received}-` } } : {}
+    });
+  } catch (error2) {
+    disarmStall();
+    throw new BuiltInReasoningInstallError("download_failed", `Could not reach the download server for the ${space.noun} (${error2 instanceof Error ? error2.message : String(error2)}).`);
+  }
+  if (received > 0 && response.status !== 206) {
+    disarmStall();
+    rmSync18(partial2, { force: true });
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    reporter.advance(-received, label);
+    return downloadVerified2(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label, stallMs, space);
+  }
+  if (!response.ok || !response.body) {
+    disarmStall();
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    throw new BuiltInReasoningInstallError("download_failed", `The ${space.noun} download failed (HTTP ${response.status}).`);
+  }
+  reporter.set("downloading", label);
+  let fd;
+  try {
+    fd = openSync14(partial2, received > 0 ? "a" : "w", 420);
+  } catch (error2) {
+    disarmStall();
+    await response.body.cancel().catch(() => {
+      return;
+    });
+    if (isNoSpaceError(error2)) {
+      rmSync18(partial2, { force: true });
+      throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname59(target)) ?? 0, "the disk is full");
+    }
+    throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write ${partial2}: ${String(error2)}`);
+  }
+  try {
+    const reader = response.body.getReader();
+    const aborted2 = new Promise((_resolve, reject) => {
+      controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+    });
+    aborted2.catch(() => {
+      return;
+    });
+    for (;; ) {
+      armStall();
+      const { done, value: value2 } = await Promise.race([reader.read(), aborted2]);
+      if (done)
+        break;
+      received += value2.byteLength;
+      if (received > expectedBytes) {
+        await reader.cancel().catch(() => {
+          return;
+        });
+        closeSync14(fd);
+        rmSync18(partial2, { force: true });
+        throw new BuiltInReasoningInstallError("checksum_mismatch", `${url} is larger than its pinned size.`);
+      }
+      hash.update(value2);
+      try {
+        space.write(fd, value2);
+      } catch (error2) {
+        await reader.cancel().catch(() => {
+          return;
+        });
+        if (isNoSpaceError(error2)) {
+          try {
+            closeSync14(fd);
+          } catch {}
+          rmSync18(partial2, { force: true });
+          throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname59(target)) ?? 0, "the disk filled up during the download");
+        }
+        throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error2)}`);
+      }
+      reporter.advance(value2.byteLength, label);
+    }
+  } catch (error2) {
+    disarmStall();
+    try {
+      closeSync14(fd);
+    } catch {}
+    if (error2 instanceof BuiltInReasoningInstallError)
+      throw error2;
+    throw new BuiltInReasoningInstallError("download_failed", `The ${space.noun} download was interrupted (${error2 instanceof Error ? error2.message : String(error2)}).`);
+  }
+  disarmStall();
+  closeSync14(fd);
+  if (received !== expectedBytes || hash.digest("hex") !== expectedSha256) {
+    rmSync18(partial2, { force: true });
+    throw new BuiltInReasoningInstallError("checksum_mismatch", `${url} did not match its pinned checksum; nothing was installed.`);
+  }
+  renameSync16(partial2, target);
+}
+function hashInto(path, hash, timeoutMs, onProgress) {
+  return new Promise((resolve12, reject) => {
+    let done = 0;
+    let settled = false;
+    const stream = createReadStream2(path);
+    const finish = (error2) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      if (error2) {
+        stream.destroy();
+        reject(error2);
+      } else {
+        resolve12();
+      }
+    };
+    const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
+    stream.on("data", (chunk) => {
+      hash.update(chunk);
+      done += chunk.length;
+      onProgress?.(done);
+    }).on("error", (error2) => finish(error2)).on("end", () => finish()).on("close", () => finish(new Error(`Reading ${path} stopped before the end.`)));
+  });
+}
+async function sha256File3(path, timeoutMs, onProgress) {
+  const hash = createHash53("sha256");
+  await hashInto(path, hash, timeoutMs, onProgress);
+  return hash.digest("hex");
+}
+async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
+  const deadline = Date.now() + waitMs;
+  const token = randomUUID23();
+  for (;; ) {
+    if (tryAcquireLock2(lockPath, token))
+      break;
+    if (Date.now() > deadline) {
+      throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
+    }
+    await new Promise((resolve12) => setTimeout(resolve12, LOCK_POLL_MS2));
+  }
+  const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
+  refresh.unref?.();
+  try {
+    await run();
+  } finally {
+    clearInterval(refresh);
+    if (lockHolder(lockPath)?.token === token)
+      rmSync18(lockPath, { force: true });
+  }
+}
+function lockHolder(lockPath) {
+  try {
+    return JSON.parse(readFileSync53(lockPath, "utf8"));
+  } catch {
+    return;
+  }
+}
+function refreshLock(lockPath, token) {
+  if (lockHolder(lockPath)?.token !== token)
+    return;
+  try {
+    const temporary = `${lockPath}.${process.pid}.tmp`;
+    writeFileSync18(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
+    renameSync16(temporary, lockPath);
+  } catch {}
+}
+function tryAcquireLock2(lockPath, token) {
+  try {
+    const fd = openSync14(lockPath, "wx", 384);
+    writeSync3(fd, JSON.stringify({ pid: process.pid, at: Date.now(), token }));
+    closeSync14(fd);
+    return true;
+  } catch {
+    if (lockIsStale2(lockPath)) {
+      rmSync18(lockPath, { force: true });
+      return tryAcquireLock2(lockPath, token);
+    }
+    return false;
+  }
+}
+function lockIsStale2(lockPath) {
+  try {
+    const holder = JSON.parse(readFileSync53(lockPath, "utf8"));
+    if (typeof holder.pid === "number" && holder.pid !== process.pid) {
+      try {
+        process.kill(holder.pid, 0);
+      } catch (error2) {
+        if (error2.code === "ESRCH")
+          return true;
+      }
+    }
+    return typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS2;
+  } catch {
+    try {
+      return Date.now() - statSync27(lockPath).mtimeMs > STALE_LOCK_MS2;
+    } catch {
+      return true;
+    }
+  }
+}
+function ensureDirectory2(path) {
+  try {
+    mkdirSync42(path, { recursive: true, mode: 448 });
+  } catch (error2) {
+    throw new BuiltInReasoningInstallError("disk_write_failed", `Could not create ${path}: ${String(error2)}`);
+  }
+}
+
+class ProgressReporter2 {
+  statusPath;
+  modelId;
+  noun;
+  now;
+  listener;
+  status;
+  lastWriteMs;
+  constructor(statusPath, modelId, noun, now, listener) {
+    this.statusPath = statusPath;
+    this.modelId = modelId;
+    this.noun = noun;
+    this.now = now ?? (() => new Date);
+    this.listener = listener;
+    this.lastWriteMs = 0;
+    this.status = {
+      state: "not_started",
+      modelId,
+      percent: 0,
+      label: "",
+      bytesDone: 0,
+      bytesTotal: 0,
+      updatedAt: this.now().toISOString()
+    };
+  }
+  begin(bytesTotal) {
+    this.status = { ...this.status, bytesTotal, bytesDone: 0 };
+    this.set("downloading", `Downloading the ${this.noun}`, 0);
+  }
+  advance(bytes, label) {
+    const bytesDone = Math.max(0, this.status.bytesDone + bytes);
+    const percent = this.status.bytesTotal > 0 ? Math.min(99, Math.floor(bytesDone / this.status.bytesTotal * 100)) : 0;
+    this.status = { ...this.status, bytesDone, percent, label, state: "downloading" };
+    this.emit(false);
+  }
+  verifying(label, bytesDone, bytesTotal) {
+    const percent = bytesTotal > 0 ? Math.min(99, Math.floor(bytesDone / bytesTotal * 100)) : 0;
+    const { failure: _failure, ...rest } = this.status;
+    const first = this.status.state !== "verifying" || bytesDone === 0;
+    this.status = { ...rest, state: "verifying", label, percent, bytesDone, bytesTotal };
+    this.emit(first || bytesDone >= bytesTotal);
+  }
+  set(state, label, percent = this.status.percent) {
+    const { failure: _failure, ...rest } = this.status;
+    this.status = { ...rest, state, label, percent };
+    this.emit(true);
+  }
+  fail(reason, message, shortfall) {
+    this.status = {
+      ...this.status,
+      state: "failed",
+      label: reason === "insufficient_space" ? `Waiting for free disk space to download the ${this.noun}` : `The ${this.noun} could not be installed`,
+      failure: { reason, message, ...shortfall ?? {} }
+    };
+    this.emit(true);
+  }
+  emit(force) {
+    const nowMs = this.now().getTime();
+    this.status = { ...this.status, modelId: this.modelId, updatedAt: new Date(nowMs).toISOString() };
+    this.listener?.(this.status);
+    if (!force && nowMs - this.lastWriteMs < PROGRESS_WRITE_INTERVAL_MS2)
+      return;
+    this.lastWriteMs = nowMs;
+    try {
+      mkdirSync42(dirname59(this.statusPath), { recursive: true, mode: 448 });
+      const temporary = `${this.statusPath}.${process.pid}.tmp`;
+      writeFileSync18(temporary, `${JSON.stringify(this.status)}
+`, { mode: 384 });
+      renameSync16(temporary, this.statusPath);
+    } catch {}
+  }
+}
+var BUILT_IN_REASONING_DIR_ENV = "OLYMPUS_BUILT_IN_REASONING_DIR", REASONING_NOUN = "built-in private model", STALE_LOCK_MS2, LOCK_REFRESH_MS = 30000, LOCK_POLL_MS2 = 1000, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, RUNTIME_UNPACK_FACTOR = 4, SPACE_BACKOFF_MS, PROGRESS_WRITE_INTERVAL_MS2 = 500, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS, LOG_PREFIX = "[built-in-model]", RUNTIME_MARKER2 = "olympus-runtime.json", SERVER_BINARY = "llama-server", BuiltInReasoningInstallError, verifiedThisProcess2;
+var init_install = __esm(() => {
+  init_manifest2();
+  STALE_LOCK_MS2 = 60 * 60000;
+  BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+  SPACE_BACKOFF_MS = 15 * 60000;
+  DOWNLOAD_STALL_MS2 = 2 * 60000;
+  VERIFY_TIMEOUT_MS = 15 * 60000;
+  EXTRACT_TIMEOUT_MS = 5 * 60000;
+  BuiltInReasoningInstallError = class BuiltInReasoningInstallError extends Error {
+    reason;
+    shortfall;
+    constructor(reason, message, shortfall) {
+      super(message);
+      this.name = "BuiltInReasoningInstallError";
+      this.reason = reason;
+      this.shortfall = shortfall;
+    }
+  };
+});
+
+// src/core/analyst-built-in.ts
+import { totalmem as totalmem2 } from "node:os";
+function builtInAnalystEnabled(env = process.env, platform2 = `${process.platform}-${process.arch}`) {
+  const raw = env[BUILT_IN_ANALYST_ENV]?.trim().toLowerCase();
+  if (raw === "off" || raw === "false" || raw === "0" || raw === "no")
+    return false;
+  if (!runtimeArchiveFor(platform2))
+    return false;
+  return true;
+}
+function resolveBuiltInReasoningModel(env = process.env, totalMemoryBytes = totalmem2()) {
+  return pickBuiltInReasoningModel(totalMemoryBytes, env[BUILT_IN_ANALYST_MODEL_ENV]?.trim() || "auto");
+}
+function builtInPrivateModelStatus(env = process.env, totalMemoryBytes = totalmem2()) {
+  const spec = resolveBuiltInReasoningModel(env, totalMemoryBytes);
+  const enabled = builtInAnalystEnabled(env) && spec !== undefined;
+  if (!spec) {
+    return {
+      enabled: false,
+      state: "not_started",
+      modelId: "",
+      percent: 0,
+      label: "This computer does not have enough memory for the built-in private model",
+      bytesDone: 0,
+      bytesTotal: 0,
+      updatedAt: new Date(0).toISOString()
+    };
+  }
+  return {
+    ...readBuiltInReasoningStatus(spec, env),
+    enabled,
+    displayName: spec.displayName,
+    downloadBytes: spec.file.bytes
+  };
+}
+function createBuiltInAnalystModel(options = {}) {
+  const env = options.env ?? process.env;
+  const totalMemoryBytes = options.totalMemoryBytes ?? totalmem2();
+  const spec = options.model ?? resolveBuiltInReasoningModel(env, totalMemoryBytes);
+  if (!spec) {
+    throw new OperationError("config_error", "This computer does not have enough memory for the built-in private model.", "Use a local model service or Venice Private for Private answers.");
+  }
+  const install = options.install ?? installBuiltInReasoning;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const installerOptions = {
+    model: spec,
+    env,
+    ...options.platform ? { platform: options.platform } : {},
+    ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}
+  };
+  let installed;
+  let installing;
+  let server;
+  const ensureInstalled = () => {
+    if (installed)
+      return Promise.resolve(installed);
+    installing ??= install(installerOptions).then((result) => {
+      installed = result;
+      return result;
+    }).finally(() => {
+      installing = undefined;
+    });
+    return installing;
+  };
+  const ensureServer = (paths) => {
+    server ??= (options.createServer ?? createLlamaServerHandle)({
+      serverPath: paths.serverPath,
+      modelPath: paths.modelPath,
+      contextTokens: spec.contextTokens,
+      gpu: paths.gpu,
+      threads: builtInReasoningThreads(),
+      idleShutdownSeconds: options.idleShutdownSeconds ?? DEFAULT_IDLE_SHUTDOWN_SECONDS,
+      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS3
+    });
+    return server;
+  };
+  const model = {
+    name: BUILT_IN_ANALYST_NAME,
+    spec,
+    async prepare() {
+      try {
+        const cached3 = installed !== undefined;
+        await ensureInstalled();
+        const status = readBuiltInReasoningStatus(spec, env);
+        if (cached3 && status.state === "failed" && status.failure?.reason === "runtime_load_failed") {
+          reportBuiltInReasoningState({ model: spec, env }, "ready");
+        }
+      } catch {}
+    },
+    status() {
+      return readBuiltInReasoningStatus(spec, env);
+    },
+    async stop() {
+      await server?.stop();
+    },
+    installedRuntime() {
+      return installed;
+    },
+    async complete(request) {
+      let paths = installed;
+      if (!paths) {
+        const pending = ensureInstalled();
+        if (options.waitForInstall) {
+          paths = await pending.catch((error2) => {
+            throw unavailable(error2);
+          });
+        } else {
+          pending.catch(() => {
+            return;
+          });
+          const status = readBuiltInReasoningStatus(spec, env);
+          throw new OperationError("argus_unreachable", status.state === "failed" ? `The built-in private model could not be installed: ${status.failure?.message ?? "unknown error"}` : `The built-in private model is still downloading (${status.percent}%).`, "Private answers use the built-in model once its download finishes; nothing needs to be done.");
+        }
+      }
+      const handle = ensureServer(paths);
+      let endpoint;
+      try {
+        if (!handle.pid)
+          reportBuiltInReasoningState({ model: spec, env }, "loading");
+        endpoint = await handle.ensureRunning(request.signal);
+        reportBuiltInReasoningState({ model: spec, env }, "ready");
+      } catch (error2) {
+        if (request.signal?.aborted)
+          throw error2;
+        if (error2 instanceof LlamaServerStillExitingError) {
+          reportBuiltInReasoningState({ model: spec, env }, "ready");
+          throw unavailable(error2);
+        }
+        reportBuiltInReasoningState({ model: spec, env }, "failed", {
+          reason: "runtime_load_failed",
+          message: error2 instanceof Error ? error2.message : String(error2)
+        });
+        throw unavailable(error2);
+      }
+      try {
+        return await chatCompletion(fetchImpl, endpoint, spec, request, requestTimeoutMs);
+      } finally {
+        handle.touch();
+      }
+    }
+  };
+  return model;
+}
+function unavailable(error2) {
+  if (error2 instanceof OperationError)
+    return error2;
+  const message = error2 instanceof Error ? error2.message : String(error2);
+  return new OperationError("argus_unreachable", error2 instanceof BuiltInReasoningInstallError ? `The built-in private model could not be installed: ${message}` : `The built-in private model is not available: ${message}`, "Check the dashboard for the built-in model status.");
+}
+async function chatCompletion(fetchImpl, endpoint, spec, request, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const signal = request.signal ? AbortSignal.any([timeout, request.signal]) : timeout;
+  let response;
+  try {
+    response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${endpoint.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        messages: [
+          { role: "system", content: request.system },
+          { role: "user", content: request.prompt }
+        ],
+        temperature: 0,
+        max_tokens: maxTokensForChars(request.maxOutputChars),
+        response_format: request.responseSchema ? { type: "json_schema", json_schema: { name: "reply", schema: request.responseSchema } } : { type: "json_object" }
+      }),
+      signal
+    });
+  } catch (error2) {
+    if (request.signal?.aborted)
+      throw error2;
+    if (isZkapiDaemonEndpointRefusal(error2))
+      throw error2;
+    if (isModelEndpointRedirectError(error2)) {
+      throw new OperationError("argus_unreachable", "The built-in private model answered with a redirect, which is refused.", error2.message);
+    }
+    throw new OperationError("argus_unreachable", `The built-in private model did not answer${error2 instanceof Error && error2.name === "TimeoutError" ? ` within ${Math.round(timeoutMs / 1000)}s` : ""}.`, "It runs on this computer; a busy machine answers slowly.");
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new OperationError("argus_error", `The built-in private model returned HTTP ${response.status}.`, body.slice(0, 300) || undefined);
+  }
+  const payload2 = await response.json();
+  const content = payload2.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    throw new OperationError("argus_error", "The built-in private model returned no text.");
+  }
+  const usage = llamaUsage(payload2.timings);
+  return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}`, ...usage ? { usage } : {} };
+}
+function llamaUsage(timings) {
+  if (!timings)
+    return;
+  const count = (value2) => typeof value2 === "number" && Number.isFinite(value2) && value2 >= 0 ? Math.round(value2) : undefined;
+  const usage = {};
+  const promptTokens = count(timings.prompt_n);
+  const promptMs = count(timings.prompt_ms);
+  const outputTokens = count(timings.predicted_n);
+  const outputMs = count(timings.predicted_ms);
+  if (promptTokens !== undefined)
+    usage.promptTokens = promptTokens;
+  if (promptMs !== undefined)
+    usage.promptMs = promptMs;
+  if (outputTokens !== undefined)
+    usage.outputTokens = outputTokens;
+  if (outputMs !== undefined)
+    usage.outputMs = outputMs;
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+function maxTokensForChars(chars) {
+  if (chars === undefined)
+    return 1024;
+  return Math.max(512, Math.ceil(chars / 2));
+}
+function withBuiltInFallback(primary, builtIn) {
+  return {
+    async analyze(pack, options) {
+      try {
+        return await primary.analyze(pack, options);
+      } catch (error2) {
+        if (!isLocalServiceDown(error2))
+          throw error2;
+        return builtIn.analyze(pack, options);
+      }
+    }
+  };
+}
+function isLocalServiceDown(error2) {
+  return error2 instanceof OperationError && error2.code === "argus_unreachable" && !/timed out/i.test(error2.message);
+}
+async function answerPrivately(question, evidence, options = {}) {
+  const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
+  const pack = fitPrivatePack(privateEvidencePack(question, evidence), options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES, options.evidenceFormat ?? "full", options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS);
+  const verdict = { sufficient: undefined };
+  const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
+    auditSuspiciousDrafts: options.audit ?? true,
+    boundedResponseSchema: true,
+    ...options.evidenceFormat ? { evidenceFormat: options.evidenceFormat } : {}
+  });
+  const run = () => analyst.analyze(pack, {
+    localOnly: true,
+    ...options.maxAnswerChars !== undefined ? { maxAnswerChars: options.maxAnswerChars } : {}
+  });
+  const result = options.signal ? await runWithAnalystAbortSignal(options.signal, run) : await run();
+  const byId = new Map(evidence.map((item) => [item.id, item]));
+  const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
+  const unanswered = result.unanswered.filter((line) => !echoesEvidenceScaffolding(line));
+  const gapChars = analystSchemaGapChars(options.maxAnswerChars ?? DEFAULT_PRIVATE_ANSWER_CHARS);
+  if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
+    return {
+      answer: PRIVATE_ANSWER_NOT_FOUND,
+      citations: [],
+      unanswered: cleanUnanswered(unanswered, "", { maxChars: gapChars, complete: false }),
+      modelId
+    };
+  }
+  return {
+    answer: result.answer,
+    unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
+    citations: result.citations.map((citation) => {
+      const id = citation.provenance.sourceItem.providerItemId;
+      const item = byId.get(id);
+      return {
+        id,
+        ...item?.title ? { title: item.title } : {},
+        ...item?.locator ? { locator: item.locator } : {},
+        claim: citation.claim
+      };
+    }),
+    modelId
+  };
+}
+function withVerdict(model, verdict) {
+  return {
+    async complete(request) {
+      const completion = await model.complete(request);
+      verdict.sufficient = replySufficient(completion.text);
+      return completion;
+    }
+  };
+}
+function replySufficient(text2) {
+  const start = text2.indexOf("{");
+  const end = text2.lastIndexOf("}");
+  if (start === -1 || end <= start)
+    return;
+  try {
+    const parsed = JSON.parse(text2.slice(start, end + 1));
+    if (typeof parsed !== "object" || parsed === null)
+      return;
+    const sufficient = parsed.sufficient;
+    return typeof sufficient === "boolean" ? sufficient : undefined;
+  } catch {
+    return;
+  }
+}
+function cleanUnanswered(gaps, answer, options) {
+  if (options.complete)
+    return [];
+  const answered = new Set(specificTerms(answer).map(termStem));
+  const answerText = answer.toLowerCase();
+  const out = [];
+  const seen = new Set;
+  for (const raw of gaps) {
+    const gap = raw.trim();
+    if (!gap || gap.length >= options.maxChars - 1)
+      continue;
+    const terms = specificTerms(gap);
+    if (terms.length === 0)
+      continue;
+    if (terms.every((term) => answered.has(termStem(term)) || answerText.includes(term)))
+      continue;
+    const key2 = gap.toLowerCase();
+    if (seen.has(key2))
+      continue;
+    seen.add(key2);
+    out.push(gap);
+  }
+  return out;
+}
+function specificTerms(text2) {
+  return (text2.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}.,/-]*[\p{L}\p{N}]|[\p{L}\p{N}]/gu) ?? []).filter((word) => /\p{N}/u.test(word) || word.length >= 3 && !GAP_GENERIC_WORDS.has(word));
+}
+function termStem(word) {
+  return word.length > 4 && word.endsWith("es") ? word.slice(0, -2) : word.length > 3 && word.endsWith("s") ? word.slice(0, -1) : word;
+}
+function timedModel(model, report) {
+  let calls = 0;
+  return {
+    async complete(request) {
+      const stage = calls === 0 ? "main" : "audit";
+      calls += 1;
+      const started = performance.now();
+      const promptBytes = utf82.encode(request.system).length + utf82.encode(request.prompt).length;
+      const done = (ok, usage) => {
+        try {
+          report({ stage, ms: Math.round(performance.now() - started), promptBytes, ok, ...usage ?? {} });
+        } catch {}
+      };
+      try {
+        const completion = await model.complete(request);
+        done(true, completion.usage);
+        return completion;
+      } catch (error2) {
+        done(false);
+        throw error2;
+      }
+    }
+  };
+}
+function echoesEvidenceScaffolding(text2) {
+  const normalized = text2.toLowerCase().split(/\s+/).join(" ").split(" /").join("/").split("/ ").join("/").split(" :").join(":");
+  return ANALYST_EVIDENCE_SCAFFOLDING_LABELS.some((label) => normalized.includes(label));
+}
+function fitPrivatePack(pack, maxPromptBytes, format, outputChars) {
+  const options = { localOnly: true };
+  const promptBytes = (candidatePack) => analystPromptBytes(candidatePack, options, format, outputChars);
+  if (promptBytes(pack) <= maxPromptBytes)
+    return pack;
+  for (let keep = pack.candidates.length;keep >= 1; keep -= 1) {
+    const base = pack.candidates.slice(0, keep);
+    const overhead = promptBytes({ ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: [] })) });
+    if (overhead >= maxPromptBytes)
+      continue;
+    let share = Math.floor((maxPromptBytes - overhead) / keep);
+    for (let attempt = 0;attempt < 6; attempt += 1) {
+      if (share < MIN_PRIVATE_PASSAGE_BYTES && keep > 1)
+        break;
+      const fitted = { ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, share) })) };
+      const bytes = promptBytes(fitted);
+      if (bytes <= maxPromptBytes)
+        return fitted;
+      share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
+    }
+  }
+  return { ...pack, candidates: pack.candidates.slice(0, 1).map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, MIN_PRIVATE_PASSAGE_BYTES) })) };
+}
+function clipUtf8(chunks2, maxBytes) {
+  const kept = [];
+  let remaining = Math.max(0, Math.floor(maxBytes));
+  for (const chunk of chunks2) {
+    if (remaining <= 0)
+      break;
+    const bytes = utf82.encode(chunk).length;
+    if (bytes <= remaining) {
+      kept.push(chunk);
+      remaining -= bytes;
+      continue;
+    }
+    let cut = "";
+    for (const codePoint of chunk) {
+      const size = utf82.encode(codePoint).length;
+      if (size > remaining)
+        break;
+      cut += codePoint;
+      remaining -= size;
+    }
+    if (cut)
+      kept.push(cut);
+    break;
+  }
+  return kept;
+}
+function privateEvidencePack(question, evidence) {
+  const candidates = evidence.map((item) => ({
+    provenance: {
+      sourceItem: {
+        family: item.family ?? "file",
+        provider: "private-answer",
+        accountScope: "local",
+        providerItemId: item.id,
+        localItemId: item.id
+      },
+      citation: {
+        ...item.title ? { title: item.title } : {},
+        ...item.source ? { sourceLabel: item.source } : {},
+        ...item.locator ? { uri: item.locator } : {},
+        ...item.date ? { authoredAt: item.date } : {}
+      }
+    },
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    chunks: [item.text]
+  }));
+  return {
+    question,
+    candidates,
+    coverage: { searchedCorpora: ["private-answer"], skippedCorpora: [], extractionGaps: [] },
+    builtAt: new Date().toISOString()
+  };
+}
+var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS = 600, DEFAULT_STARTUP_TIMEOUT_MS3 = 120000, DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES = 28000, MIN_PRIVATE_PASSAGE_BYTES = 600, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel, DEFAULT_PRIVATE_ANSWER_CHARS = 1600, GAP_GENERIC_WORDS, utf82;
+var init_analyst_built_in = __esm(() => {
+  init_analyst();
+  init_operation_error();
+  init_model_transport();
+  init_zkapi_consult_settings();
+  init_install();
+  init_manifest2();
+  init_server();
+  GAP_GENERIC_WORDS = new Set([
+    "the",
+    "and",
+    "for",
+    "are",
+    "was",
+    "were",
+    "with",
+    "from",
+    "that",
+    "this",
+    "these",
+    "those",
+    "not",
+    "any",
+    "all",
+    "its",
+    "their",
+    "there",
+    "which",
+    "what",
+    "when",
+    "where",
+    "who",
+    "whom",
+    "how",
+    "why",
+    "does",
+    "did",
+    "has",
+    "have",
+    "had",
+    "been",
+    "being",
+    "into",
+    "about",
+    "than",
+    "then",
+    "also",
+    "such",
+    "other",
+    "only",
+    "more",
+    "most",
+    "some",
+    "can",
+    "could",
+    "would",
+    "should",
+    "may",
+    "might",
+    "will",
+    "shall",
+    "but",
+    "nor",
+    "yet",
+    "per",
+    "via",
+    "each",
+    "your",
+    "you",
+    "user",
+    "his",
+    "her",
+    "our",
+    "they",
+    "them",
+    "one",
+    "out",
+    "over",
+    "under",
+    "between",
+    "within",
+    "specific",
+    "exact",
+    "precise",
+    "actual",
+    "value",
+    "values",
+    "level",
+    "levels",
+    "number",
+    "numbers",
+    "amount",
+    "detail",
+    "details",
+    "detailed",
+    "information",
+    "info",
+    "result",
+    "results",
+    "data",
+    "figure",
+    "figures",
+    "provided",
+    "provide",
+    "evidence",
+    "found",
+    "find",
+    "missing",
+    "available",
+    "unavailable",
+    "mentioned",
+    "mention",
+    "listed",
+    "list",
+    "given",
+    "give",
+    "stated",
+    "state",
+    "states",
+    "shown",
+    "show",
+    "shows",
+    "included",
+    "include",
+    "includes",
+    "contain",
+    "contains",
+    "contained",
+    "reported",
+    "report",
+    "reports",
+    "document",
+    "documents",
+    "item",
+    "items",
+    "text",
+    "source",
+    "sources",
+    "record",
+    "records",
+    "file",
+    "files",
+    "full",
+    "complete",
+    "entire",
+    "whole",
+    "unknown",
+    "unclear",
+    "unspecified",
+    "specified",
+    "answer",
+    "question",
+    "none",
+    "no",
+    "citations",
+    "citation",
+    "unanswered",
+    "sufficient",
+    "insufficient",
+    "claim",
+    "claims"
+  ]);
+  utf82 = new TextEncoder;
+});
+
+// src/workers/source-index/built-in-reasoning/transcription-model.ts
+import { accessSync as accessSync8, constants as constants7, readFileSync as readFileSync54 } from "node:fs";
+import { delimiter as delimiter8, isAbsolute as isAbsolute23, join as join84 } from "node:path";
+function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
+  const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join84(olympusModelsDir(env), "built-in-transcription");
+  if (!isAbsolute23(root))
+    throw new TypeError("The built-in transcription directory must be an absolute path.");
+  return {
+    root,
+    modelDir: join84(root, model.modelId),
+    runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
+    runtimeLockPath: llamaServerRuntimeLockPath(env),
+    statusPath: join84(root, "status.json"),
+    lockPath: join84(root, "install.lock"),
+    noun: BUILT_IN_TRANSCRIPTION_NOUN
+  };
+}
+async function installBuiltInTranscription(options = {}) {
+  const { model = QWEN3_ASR_06B, ...tuning } = options;
+  const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
+  const platform2 = options.platform ?? currentPlatform2();
+  const installed = await installPinnedModel({
+    ...tuning,
+    bundle: { modelId: model.modelId, displayName: model.displayName, files: model.files },
+    layout: builtInTranscriptionLayout(model, options.env, runtime, platform2)
+  });
+  return {
+    modelPath: installed.filePaths[0],
+    mmprojPath: installed.filePaths[1],
+    serverPath: installed.serverPath,
+    gpu: installed.gpu
+  };
+}
+function readBuiltInTranscriptionStatus(env = process.env, model = QWEN3_ASR_06B) {
+  try {
+    return readPinnedModelStatus(builtInTranscriptionLayout(model, env).statusPath, model.modelId, BUILT_IN_TRANSCRIPTION_NOUN);
+  } catch {
+    return readPinnedModelStatus("", model.modelId, BUILT_IN_TRANSCRIPTION_NOUN);
+  }
+}
+function readBuiltInTranscriptionStatusFile(env = process.env, model = QWEN3_ASR_06B) {
+  const status = readBuiltInTranscriptionStatus(env, model);
+  let raw;
+  try {
+    raw = readFileSync54(builtInTranscriptionLayout(model, env).statusPath, "utf8");
+  } catch (error2) {
+    return { file: error2.code === "ENOENT" ? "missing" : "unreadable", status };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return { file: parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? "current" : "unreadable", status };
+  } catch {
+    return { file: "unreadable", status };
+  }
+}
+function reportBuiltInTranscriptionState(env, model, state, failure2) {
+  try {
+    reportPinnedModelState({
+      statusPath: builtInTranscriptionLayout(model, env).statusPath,
+      modelId: model.modelId,
+      noun: BUILT_IN_TRANSCRIPTION_NOUN
+    }, state, failure2);
+  } catch {}
+}
+function builtInTranscriptionEnabled(env = process.env, platform2 = currentPlatform2(), decoderPresent = () => audioDecoderPresent(platform2, env)) {
+  const raw = env[BUILT_IN_TRANSCRIPTION_ENV]?.trim().toLowerCase();
+  if (raw === "off" || raw === "false" || raw === "0" || raw === "no")
+    return false;
+  if (!runtimeArchiveFor(platform2))
+    return false;
+  if (raw === "on" || raw === "true" || raw === "1" || raw === "yes")
+    return true;
+  return decoderPresent();
+}
+function audioDecoderPresent(platform2 = currentPlatform2(), env = process.env) {
+  const executable = (path) => {
+    try {
+      accessSync8(path, constants7.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (platform2.startsWith("darwin-"))
+    return executable("/usr/bin/afconvert");
+  return (env.PATH ?? "").split(delimiter8).some((dir) => dir.length > 0 && isAbsolute23(dir) && executable(join84(dir, "ffmpeg")));
+}
+function modelLoadFailedReason(message) {
+  const text2 = message ?? "";
+  if (text2.includes("is not installed") || text2.includes("did not install completely") || text2.includes("could not be unpacked") || text2.includes("did not contain")) {
+    return "not_installed";
+  }
+  if (text2.includes("exited while starting"))
+    return "stopped_while_starting";
+  if (text2.includes("did not load within"))
+    return "too_slow";
+  if (text2.includes("port was taken") || text2.includes("No free loopback port"))
+    return "port_taken";
+  return "unknown";
+}
+function builtInTranscriptionDashboardState(read, live = { installing: false }) {
+  if (read.file === "missing")
+    return { state: "not_needed" };
+  if (read.file === "unreadable")
+    return { state: "not_downloaded" };
+  const status = read.status;
+  if (status.state === "not_started")
+    return { state: "not_downloaded" };
+  if (status.state === "ready" || status.state === "loading")
+    return { state: "ready" };
+  if (status.state === "failed") {
+    return status.failure?.reason === "runtime_load_failed" ? { state: "load_failed", loadFailedReason: modelLoadFailedReason(status.failure.message) } : { state: "failed", failedReason: modelInstallFailedReason(status.failure) };
+  }
+  if (!live.installing)
+    return { state: "interrupted" };
+  return {
+    state: status.state === "verifying" ? "verifying" : "downloading",
+    percent: status.percent,
+    ...status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {}
+  };
+}
+var BUILT_IN_TRANSCRIPTION_DIR_ENV = "OLYMPUS_BUILT_IN_TRANSCRIPTION_DIR", BUILT_IN_TRANSCRIPTION_ENV = "OLYMPUS_BUILT_IN_TRANSCRIPTION", BUILT_IN_TRANSCRIPTION_NOUN = "built-in transcription model";
+var init_transcription_model = __esm(() => {
+  init_install();
+  init_manifest2();
+});
+
+// src/core/linux-model-readiness.ts
+function linuxModelReadiness(env = process.env, options = {}) {
+  const embedding = readBuiltInEmbeddingStatus(env, BUILT_IN_EMBEDDING_MODEL);
+  const privateModel = builtInPrivateModelStatus(env, options.totalMemoryBytes);
+  const privateOn = builtInAnalystEnabled(env, `linux-${process.arch}`);
+  const privateEnabled = privateOn && privateModel.enabled;
+  const transcriptionEnabled = builtInTranscriptionEnabled(env, `linux-${process.arch}`, options.decoderPresent);
+  const transcription = builtInTranscriptionDashboardState(readBuiltInTranscriptionStatusFile(env));
+  return [
+    { name: "Embedding", state: embedding.state, detail: `${BUILT_IN_EMBEDDING_MODEL.modelId}: ${embedding.state}. Downloads and warms at first worker start.`, downloadBytes: BUILT_IN_EMBEDDING_MODEL.model.bytes },
+    { name: "Private answers", state: privateEnabled ? privateModel.state : "unavailable", detail: privateEnabled ? `${privateModel.displayName}: ${privateModel.state}. Downloads when needed; Private-source policy still applies.` : privateOn ? privateModel.label : "Built-in private model is off (OLYMPUS_BUILT_IN_ANALYST).", downloadBytes: privateModel.downloadBytes ?? 0 },
+    {
+      name: "Transcription",
+      state: transcriptionEnabled ? transcription.state : "unavailable",
+      detail: env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? "An external transcription command is configured." : transcriptionEnabled ? `Qwen3-ASR 0.6B: ${transcription.state}. Downloads when audio is chosen.` : "Built-in transcription is off or its audio decoder is unavailable. Install ffmpeg, or check OLYMPUS_BUILT_IN_TRANSCRIPTION, then restart Olympus.",
+      downloadBytes: QWEN3_ASR_06B.files.reduce((sum2, file) => sum2 + file.bytes, 0)
+    }
+  ];
+}
+var init_linux_model_readiness = __esm(() => {
+  init_analyst_built_in();
+  init_manifest();
+  init_assets();
+  init_transcription_model();
+  init_manifest2();
+});
+
 // src/core/model-setup.ts
 function requiredModelProfiles(config2) {
   const required4 = new Map;
@@ -98650,10 +100204,10 @@ function createModelKeyReload(options) {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes16 } from "node:crypto";
-import { chmodSync as chmodSync25, lstatSync as lstatSync28, mkdirSync as mkdirSync42, readFileSync as readFileSync53 } from "node:fs";
-import { dirname as dirname59, join as join83 } from "node:path";
+import { chmodSync as chmodSync25, lstatSync as lstatSync28, mkdirSync as mkdirSync43, readFileSync as readFileSync55 } from "node:fs";
+import { dirname as dirname60, join as join85 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
-  return join83(dirname59(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
+  return join85(dirname60(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
 }
 function newDashboardSessionSecret() {
   return randomBytes16(32).toString("base64url");
@@ -98670,7 +100224,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
     else if ((stats.mode & 63) !== 0)
       existing = "invalid";
     else {
-      const text2 = readFileSync53(path, "utf8").trim();
+      const text2 = readFileSync55(path, "utf8").trim();
       if (SECRET_PATTERN.test(text2))
         return { secret: text2, source: "file", path };
       existing = "invalid";
@@ -98680,7 +100234,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
   }
   const secret = newDashboardSessionSecret();
   try {
-    mkdirSync42(dirname59(path), { recursive: true, mode: 448 });
+    mkdirSync43(dirname60(path), { recursive: true, mode: 448 });
     writePrivateFileAtomicSync(path, `${secret}
 `);
     chmodSync25(path, 384);
@@ -99184,10 +100738,10 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync26, mkdirSync as mkdirSync43 } from "node:fs";
-import { createHash as createHash53, randomUUID as randomUUID23 } from "node:crypto";
-import { homedir as homedir54 } from "node:os";
-import { dirname as dirname60, join as join84 } from "node:path";
+import { chmodSync as chmodSync26, mkdirSync as mkdirSync44 } from "node:fs";
+import { createHash as createHash54, randomUUID as randomUUID24 } from "node:crypto";
+import { homedir as homedir55 } from "node:os";
+import { dirname as dirname61, join as join86 } from "node:path";
 import { Database as Database16 } from "bun:sqlite";
 function settleUnreadable(candidates, classify) {
   const items = [];
@@ -99223,8 +100777,8 @@ function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override)
     return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join84(homedir54(), ".local", "share");
-  return join84(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join86(homedir55(), ".local", "share");
+  return join86(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
 }
 
 class LocalFileExtractionJobStore {
@@ -99237,7 +100791,7 @@ class LocalFileExtractionJobStore {
     this.readonly = options.readonly === true;
     const inMemory = dbPath === ":memory:";
     if (!inMemory && !this.readonly) {
-      mkdirSync43(dirname60(dbPath), { recursive: true, mode: 448 });
+      mkdirSync44(dirname61(dbPath), { recursive: true, mode: 448 });
     }
     this.db = this.readonly ? new Database16(dbPath, { readonly: true }) : new Database16(dbPath, { create: true });
     if (!inMemory && !this.readonly)
@@ -99345,7 +100899,7 @@ class LocalFileExtractionJobStore {
     const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
     const now = nowIso4();
     const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const leaseToken = randomUUID23();
+    const leaseToken = randomUUID24();
     const workerHash = hashString5(workerId);
     const claimed = [];
     this.db.transaction(() => {
@@ -100276,7 +101830,7 @@ function fileExtractionJobMigrations() {
       db.query(`
         INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
         VALUES (1, ?, 0)
-      `).run(randomUUID23());
+      `).run(randomUUID24());
     }
   }];
 }
@@ -100462,10 +102016,10 @@ function clampInteger(value2, min, max) {
   return Math.min(max, Math.max(min, value2));
 }
 function makeJobId() {
-  return `fx_${randomUUID23()}`;
+  return `fx_${randomUUID24()}`;
 }
 function hashString5(value2) {
-  return createHash53("sha256").update(value2).digest("hex");
+  return createHash54("sha256").update(value2).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -100567,7 +102121,7 @@ function isBinaryLike(bytes) {
   }
   return suspicious / sample.byteLength > 0.05;
 }
-function parseDelimitedRows(text2, delimiter8) {
+function parseDelimitedRows(text2, delimiter9) {
   const normalized = text2.replace(/\r\n/g, `
 `).replace(/\r/g, `
 `);
@@ -100590,7 +102144,7 @@ function parseDelimitedRows(text2, delimiter8) {
     }
     if (char === '"') {
       quoted = true;
-    } else if (char === delimiter8) {
+    } else if (char === delimiter9) {
       row.push(cell);
       cell = "";
     } else if (char === `
@@ -101056,7 +102610,7 @@ var init_document_formats = __esm(() => {
 // src/workers/file-extraction/extractors/image-prepare.ts
 import { mkdtemp as mkdtemp3, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { tmpdir as tmpdir8 } from "node:os";
-import { join as join85 } from "node:path";
+import { join as join87 } from "node:path";
 function imageDecoderUnavailableWarning(format) {
   return `image_decoder_unavailable_${format}`;
 }
@@ -101095,9 +102649,9 @@ function createImagePreparation(options) {
     if (declared && Math.min(declared.width, declared.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) {
       return { kind: "too_small" };
     }
-    const tempDir = await mkdtemp3(join85(tmpdir8(), TEMP_DIR_PREFIX2));
+    const tempDir = await mkdtemp3(join87(tmpdir8(), TEMP_DIR_PREFIX2));
     try {
-      const inputPath = join85(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+      const inputPath = join87(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
       await writeFile3(inputPath, input.bytes, { mode: 384 });
       let prepared;
       try {
@@ -101164,7 +102718,7 @@ var init_image_prepare = __esm(() => {
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp as mkdtemp4, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir9 } from "node:os";
-import { dirname as dirname61, join as join86 } from "node:path";
+import { dirname as dirname62, join as join88 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -101328,7 +102882,7 @@ function createTextExtractor(options = {}) {
 }
 function releaseStaged(media) {
   if (media.stagingHolder)
-    releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname61(media.path));
+    releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname62(media.path));
 }
 function preparedImageOutput(media, ocr, maxBoundedTextChars, hasOcr) {
   const pending = !ocr && hasOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : imageOcrFailed(ocr) ? [OCR_FAILED_IMAGE_WARNING] : [];
@@ -101522,9 +103076,9 @@ function pdfTextLooksUndecoded(text2) {
   return total > 0 && unreadable / total > 0.1;
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp4(join86(tmpdir9(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp4(join88(tmpdir9(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join86(tempDir, "input.pdf");
+    const inputPath = join88(tempDir, "input.pdf");
     await writeFile4(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
@@ -101784,7 +103338,7 @@ var init_text = __esm(() => {
 // src/workers/file-extraction/extractors/pdf-raster-ocr.ts
 import { mkdtemp as mkdtemp5, readdir as readdir3, rm as rm6 } from "node:fs/promises";
 import { tmpdir as tmpdir10 } from "node:os";
-import { join as join87 } from "node:path";
+import { join as join89 } from "node:path";
 function parseSizePoints(text2) {
   const [first, second] = text2.split("x");
   const width = Number.parseFloat(first ?? "");
@@ -101868,7 +103422,7 @@ async function rasterPdfOcr(input, options) {
   const now = options.now ?? Date.now;
   const deadline = now() + (options.fileDeadlineMs ?? DEFAULT_APPLE_VISION_FILE_DEADLINE_MS);
   const info = await readPdfInfo({ inputPath: input.inputPath, maxPages, options });
-  const tempDir = await mkdtemp5(join87(tmpdir10(), RASTER_TEMP_PREFIX));
+  const tempDir = await mkdtemp5(join89(tmpdir10(), RASTER_TEMP_PREFIX));
   const pages = [];
   let attempted = 0;
   let failed = 0;
@@ -101909,7 +103463,7 @@ async function rasterPdfOcr(input, options) {
                 "-gray",
                 "-png",
                 input.inputPath,
-                join87(tempDir, RASTER_PAGE_PREFIX)
+                join89(tempDir, RASTER_PAGE_PREFIX)
               ],
               timeoutMs: Math.min(options.timeoutMs, renderLeftMs)
             });
@@ -101942,7 +103496,7 @@ async function rasterPdfOcr(input, options) {
             break rangeLoop;
           }
           attempted += 1;
-          const path = join87(tempDir, file.name);
+          const path = join89(tempDir, file.name);
           try {
             const { stdout } = await options.commandRunner({
               command: TESSERACT_COMMAND,
@@ -102060,7 +103614,7 @@ var init_pdf_raster_ocr = __esm(() => {
 // src/workers/file-extraction/extractors/ocr.ts
 import { mkdtemp as mkdtemp6, readFile as readFile9, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
 import { tmpdir as tmpdir11 } from "node:os";
-import { join as join88 } from "node:path";
+import { join as join90 } from "node:path";
 function createOcrEngine(input) {
   const options = input.options ?? {};
   let vision;
@@ -102313,9 +103867,9 @@ async function visionImage(input, vision) {
   }, vision));
 }
 async function withTempInput(bytes, extension, read) {
-  const tempDir = await mkdtemp6(join88(tmpdir11(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join90(tmpdir11(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join88(tempDir, `input${extension}`);
+    const inputPath = join90(tempDir, `input${extension}`);
     await writeFile5(inputPath, bytes);
     return await read(inputPath);
   } finally {
@@ -102335,11 +103889,11 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp6(join88(tmpdir11(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join90(tmpdir11(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join88(tempDir, "input.pdf");
-    const outputPath = join88(tempDir, "output.pdf");
-    const sidecarPath = join88(tempDir, "sidecar.txt");
+    const inputPath = join90(tempDir, "input.pdf");
+    const outputPath = join90(tempDir, "output.pdf");
+    const sidecarPath = join90(tempDir, "sidecar.txt");
     await writeFile5(inputPath, input.bytes);
     try {
       await input.commandRunner({
@@ -102381,9 +103935,9 @@ async function extractPdfOcr(input) {
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp6(join88(tmpdir11(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join90(tmpdir11(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join88(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    const inputPath = join90(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
     await writeFile5(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
@@ -102664,931 +104218,6 @@ var init_remote_vlm = __esm(() => {
   ].join(" ");
 });
 
-// src/workers/source-index/built-in-reasoning/manifest.ts
-function unslothQwen(size, revision, bytes, sha2565) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
-  return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256: sha2565
-  };
-}
-function ggmlOrgAsrFile(name, bytes, sha2565) {
-  return {
-    name,
-    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
-    bytes,
-    sha256: sha2565
-  };
-}
-function pickBuiltInReasoningModel(totalMemoryBytes, choice = "auto", models = BUILT_IN_REASONING_MODELS) {
-  const wanted = choice.trim().toLowerCase() || "auto";
-  const exact = models.find((model) => model.modelId === wanted);
-  if (exact)
-    return totalMemoryBytes >= exact.minimumMemoryBytes ? exact : undefined;
-  if (wanted === "small" || wanted === "standard" || wanted === "large") {
-    const sized = models.find((model) => model.sizeClass === wanted);
-    return sized && totalMemoryBytes >= sized.minimumMemoryBytes ? sized : undefined;
-  }
-  if (wanted !== "auto")
-    return;
-  const standard = models.find((model) => model.sizeClass === "standard");
-  if (standard && totalMemoryBytes >= standard.minimumMemoryBytes)
-    return standard;
-  const small = models.find((model) => model.sizeClass === "small");
-  if (small && totalMemoryBytes >= small.minimumMemoryBytes)
-    return small;
-  return;
-}
-function runtimeArchiveFor(platform2, runtime = LLAMA_SERVER_RUNTIME) {
-  return runtime.archives.find((archive) => archive.platform === platform2);
-}
-var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, BUILT_IN_REASONING_MODELS, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
-var init_manifest2 = __esm(() => {
-  GIB = 1024 ** 3;
-  QWEN35_2B = {
-    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-    displayName: "Qwen3.5 2B",
-    sizeClass: "small",
-    baseRepository: "Qwen/Qwen3.5-2B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-2B-GGUF",
-    revision: QWEN35_2B_REVISION,
-    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_4B = {
-    modelId: "qwen3.5-4b-q4_k_m-e87f176",
-    displayName: "Qwen3.5 4B",
-    sizeClass: "standard",
-    baseRepository: "Qwen/Qwen3.5-4B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-4B-GGUF",
-    revision: QWEN35_4B_REVISION,
-    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_9B = {
-    modelId: "qwen3.5-9b-q4_k_m-3885219",
-    displayName: "Qwen3.5 9B",
-    sizeClass: "large",
-    baseRepository: "Qwen/Qwen3.5-9B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-9B-GGUF",
-    revision: QWEN35_9B_REVISION,
-    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  BUILT_IN_REASONING_MODELS = [QWEN35_2B, QWEN35_4B, QWEN35_9B];
-  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-  LLAMA_SERVER_RUNTIME = {
-    release: LLAMA_CPP_RELEASE,
-    license: "MIT",
-    archives: [
-      {
-        platform: "darwin-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        bytes: 11827796,
-        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-        gpu: true
-      },
-      {
-        platform: "linux-x64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        bytes: 17544875,
-        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-        gpu: false
-      },
-      {
-        platform: "linux-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        bytes: 13590823,
-        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-        gpu: false
-      }
-    ]
-  };
-  QWEN3_ASR_06B = {
-    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
-    displayName: "Qwen3-ASR 0.6B",
-    baseRepository: "Qwen/Qwen3-ASR-0.6B",
-    license: "Apache-2.0",
-    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
-    revision: QWEN3_ASR_06B_REVISION,
-    files: [
-      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
-      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
-    ],
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 4096
-  };
-});
-
-// src/workers/source-index/built-in-reasoning/install.ts
-import { spawnSync as spawnSync15 } from "node:child_process";
-import { createHash as createHash54, randomUUID as randomUUID24 } from "node:crypto";
-import {
-  closeSync as closeSync14,
-  createReadStream as createReadStream2,
-  existsSync as existsSync53,
-  mkdirSync as mkdirSync44,
-  openSync as openSync14,
-  readFileSync as readFileSync54,
-  readdirSync as readdirSync12,
-  renameSync as renameSync16,
-  rmSync as rmSync18,
-  statSync as statSync27,
-  statfsSync,
-  writeFileSync as writeFileSync18,
-  writeSync as writeSync3
-} from "node:fs";
-import { homedir as homedir55 } from "node:os";
-import { dirname as dirname62, isAbsolute as isAbsolute22, join as join89 } from "node:path";
-function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
-  const root = builtInReasoningRoot(env);
-  return {
-    root,
-    modelDir: join89(root, model.modelId),
-    runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
-    statusPath: join89(root, "status.json"),
-    lockPath: join89(root, "install.lock"),
-    runtimeLockPath: join89(root, "runtime.lock")
-  };
-}
-function builtInReasoningRoot(env) {
-  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join89(olympusModelsDir(env), "built-in-reasoning");
-  if (!isAbsolute22(root))
-    throw new TypeError("The built-in reasoning directory must be an absolute path.");
-  return root;
-}
-function olympusModelsDir(env = process.env) {
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join89(env.HOME?.trim() || homedir55(), ".local", "share");
-  return join89(dataRoot, "openclaw", "olympus", "models");
-}
-function llamaServerRuntimeDir(env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
-  return join89(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
-}
-function llamaServerRuntimeLockPath(env = process.env) {
-  return join89(builtInReasoningRoot(env), "runtime.lock");
-}
-function currentPlatform2() {
-  return `${process.platform}-${process.arch}`;
-}
-function readBuiltInReasoningStatus(model, env = process.env) {
-  return readPinnedModelStatus(builtInReasoningPaths(model, env).statusPath, model.modelId, REASONING_NOUN);
-}
-function readPinnedModelStatus(statusPath, modelId, noun) {
-  const fallback = {
-    state: "not_started",
-    modelId,
-    percent: 0,
-    label: `${capitalize2(noun)} not downloaded yet`,
-    bytesDone: 0,
-    bytesTotal: 0,
-    updatedAt: new Date(0).toISOString()
-  };
-  try {
-    const parsed = JSON.parse(readFileSync54(statusPath, "utf8"));
-    return parsed && typeof parsed === "object" && parsed.modelId === modelId ? parsed : fallback;
-  } catch {
-    return fallback;
-  }
-}
-async function installBuiltInReasoning(options) {
-  const { model, ...tuning } = options;
-  const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
-  const platform2 = options.platform ?? currentPlatform2();
-  const installed = await installPinnedModel({
-    ...tuning,
-    bundle: { modelId: model.modelId, displayName: model.displayName, files: [model.file] },
-    layout: { ...builtInReasoningPaths(model, options.env, runtime, platform2), noun: REASONING_NOUN }
-  });
-  return { modelPath: installed.filePaths[0], serverPath: installed.serverPath, gpu: installed.gpu };
-}
-async function installPinnedModel(options) {
-  const { bundle, layout: paths } = options;
-  const noun = paths.noun;
-  const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
-  const platform2 = options.platform ?? currentPlatform2();
-  const reporter = new ProgressReporter2(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
-  const files = bundle.files.map((file) => ({ file, path: join89(paths.modelDir, file.name) }));
-  const filesPresent = () => files.every(({ path }) => existsSync53(path));
-  const log = options.log ?? ((line) => console.log(line));
-  const timing = {
-    downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS2,
-    verifyTimeoutMs: options.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS
-  };
-  const lockWaitMs = options.lockWaitMs ?? STALE_LOCK_MS2;
-  const lockRefreshMs = options.lockRefreshMs ?? LOCK_REFRESH_MS;
-  const stage = async (name, run) => {
-    const started = Date.now();
-    log(`${LOG_PREFIX} model=${bundle.modelId} stage=${name} started`);
-    try {
-      const result = await run();
-      log(`${LOG_PREFIX} model=${bundle.modelId} stage=${name} done ms=${Date.now() - started}`);
-      return result;
-    } catch (error2) {
-      const reason = error2 instanceof BuiltInReasoningInstallError ? error2.reason : "disk_write_failed";
-      log(`${LOG_PREFIX} model=${bundle.modelId} stage=${name} failed reason=${reason} ms=${Date.now() - started}`);
-      throw error2;
-    }
-  };
-  const verifyAll = async () => {
-    for (const { file, path } of files)
-      await verifyPinnedFile(path, file, noun, reporter, timing.verifyTimeoutMs);
-  };
-  const finished = () => reporter.set("ready", `${capitalize2(noun)} ready`, 100);
-  try {
-    const archive = runtimeArchiveFor(platform2, runtime);
-    if (!archive) {
-      throw new BuiltInReasoningInstallError("unsupported_platform", `The ${noun} does not run on ${platform2}.`);
-    }
-    ensureDirectory2(paths.root);
-    const installed = () => ({
-      filePaths: files.map(({ path }) => path),
-      serverPath: findServerBinary(paths.runtimeDir),
-      gpu: archive.gpu
-    });
-    if (filesPresent() && runtimeInstalled2(paths.runtimeDir, archive)) {
-      await stage("verify", verifyAll);
-      finished();
-      return installed();
-    }
-    const now = (options.now ?? (() => new Date))();
-    const previous = readPinnedModelStatus(paths.statusPath, bundle.modelId, noun);
-    if (previous.state === "failed" && previous.failure?.reason === "insufficient_space" && previous.failure.retryAfter && Date.parse(previous.failure.retryAfter) > now.getTime()) {
-      throw new BuiltInReasoningInstallError("insufficient_space", previous.failure.message, {
-        bytesNeeded: previous.failure.bytesNeeded ?? 0,
-        bytesFree: previous.failure.bytesFree ?? 0,
-        retryAfter: previous.failure.retryAfter
-      });
-    }
-    const space = {
-      noun,
-      freeBytes: options.freeBytes ?? volumeFreeBytes,
-      headroomBytes: options.spaceHeadroomBytes ?? BUILT_IN_REASONING_SPACE_HEADROOM_BYTES,
-      backoffMs: options.spaceBackoffMs ?? SPACE_BACKOFF_MS,
-      now: () => (options.now ?? (() => new Date))(),
-      write: options.writeChunk ?? ((fd, chunk) => {
-        writeSync3(fd, chunk);
-      })
-    };
-    await stage("install", () => withInstallLock2(paths.lockPath, lockWaitMs, lockRefreshMs, noun, async () => {
-      if (filesPresent() && runtimeInstalled2(paths.runtimeDir, archive))
-        return;
-      const fetchImpl = options.fetchImpl ?? fetch;
-      const missing = files.filter(({ path }) => !existsSync53(path));
-      const needRuntime = !runtimeInstalled2(paths.runtimeDir, archive);
-      const missingBytes = missing.reduce((total, { file, path }) => total + Math.max(0, file.bytes - fileSize(`${path}.partial`)), 0);
-      assertSpaceFor(paths.root, space, missingBytes + (needRuntime ? archive.bytes * RUNTIME_UNPACK_FACTOR : 0));
-      reporter.begin(missing.reduce((total, { file }) => total + file.bytes, 0) + (needRuntime ? archive.bytes : 0));
-      if (needRuntime) {
-        await stage("runtime", () => withInstallLock2(paths.runtimeLockPath, lockWaitMs, lockRefreshMs, noun, async () => {
-          if (runtimeInstalled2(paths.runtimeDir, archive))
-            return;
-          await installRuntime2(fetchImpl, paths.runtimeDir, archive, reporter, options.extractArchive ?? extractWithTar, timing.downloadStallMs, space);
-        }));
-      }
-      if (missing.length > 0) {
-        ensureDirectory2(paths.modelDir);
-        for (const { file, path } of missing) {
-          await stage("download", () => downloadVerified2(fetchImpl, file.url, path, file.bytes, file.sha256, reporter, `Downloading the ${noun} (${bundle.displayName})`, timing.downloadStallMs, space));
-        }
-      }
-    }));
-    await stage("verify", verifyAll);
-    if (!runtimeInstalled2(paths.runtimeDir, archive)) {
-      throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server did not install completely.");
-    }
-    finished();
-    return installed();
-  } catch (error2) {
-    const failure2 = error2 instanceof BuiltInReasoningInstallError ? error2 : new BuiltInReasoningInstallError("disk_write_failed", error2 instanceof Error ? error2.message : String(error2));
-    reporter.fail(failure2.reason, failure2.message, failure2.shortfall);
-    throw failure2;
-  }
-}
-function volumeFreeBytes(path) {
-  try {
-    const stats = statfsSync(path);
-    return Number(stats.bavail) * Number(stats.bsize);
-  } catch {
-    return;
-  }
-}
-function fileSize(path) {
-  try {
-    return statSync27(path).size;
-  } catch {
-    return 0;
-  }
-}
-function spaceShortfallError(space, bytesNeeded, bytesFree, cause) {
-  const retryAfter = new Date(space.now().getTime() + space.backoffMs).toISOString();
-  return new BuiltInReasoningInstallError("insufficient_space", `Not enough free disk space for the ${space.noun}: it needs ${formatGb(bytesNeeded)} free and the disk has ${formatGb(bytesFree)}${cause ? ` (${cause})` : ""}. Free up space; Olympus tries again after ${retryAfter}.`, { bytesNeeded, bytesFree, retryAfter });
-}
-function assertSpaceFor(dir, space, bytes) {
-  if (bytes <= 0)
-    return;
-  const free = space.freeBytes(dir);
-  if (free === undefined)
-    return;
-  const needed = bytes + space.headroomBytes;
-  if (free < needed)
-    throw spaceShortfallError(space, needed, free);
-}
-function isNoSpaceError(error2) {
-  const code = error2?.code;
-  return code === "ENOSPC" || code === "EDQUOT" || /ENOSPC|no space left/i.test(String(error2));
-}
-function formatGb(bytes) {
-  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-}
-function capitalize2(text2) {
-  return text2.length > 0 ? `${text2[0].toUpperCase()}${text2.slice(1)}` : text2;
-}
-function reportBuiltInReasoningState(options, state, failure2) {
-  const paths = builtInReasoningPaths(options.model, options.env);
-  reportPinnedModelState({
-    statusPath: paths.statusPath,
-    modelId: options.model.modelId,
-    noun: REASONING_NOUN,
-    ...options.now ? { now: options.now } : {},
-    ...options.onProgress ? { onProgress: options.onProgress } : {}
-  }, state, failure2);
-}
-function reportPinnedModelState(target, state, failure2) {
-  const reporter = new ProgressReporter2(target.statusPath, target.modelId, target.noun, target.now, target.onProgress);
-  if (state === "failed" && failure2)
-    reporter.fail(failure2.reason, failure2.message);
-  else
-    reporter.set(state, state === "ready" ? `${capitalize2(target.noun)} ready` : `Starting the ${target.noun}`, 100);
-}
-function findServerBinary(runtimeDir) {
-  const marker = readRuntimeMarker(runtimeDir);
-  if (marker?.serverPath)
-    return join89(runtimeDir, marker.serverPath);
-  throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
-}
-async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
-  const key2 = `${path}:${file.sha256}`;
-  verifiedThisProcess2 ??= new Set;
-  if (verifiedThisProcess2.has(key2))
-    return;
-  const size = statSync27(path).size;
-  const label = `Checking the ${noun}`;
-  reporter.verifying(label, 0, file.bytes);
-  const digest2 = size === file.bytes ? await sha256File3(path, timeoutMs, (done) => reporter.verifying(label, done, file.bytes)) : undefined;
-  if (digest2 !== file.sha256) {
-    rmSync18(path, { force: true });
-    throw new BuiltInReasoningInstallError("checksum_mismatch", `${file.name} did not match its pinned checksum and was removed; it will download again.`);
-  }
-  verifiedThisProcess2.add(key2);
-}
-function readRuntimeMarker(runtimeDir) {
-  try {
-    return JSON.parse(readFileSync54(join89(runtimeDir, RUNTIME_MARKER2), "utf8"));
-  } catch {
-    return;
-  }
-}
-function runtimeInstalled2(runtimeDir, archive) {
-  const marker = readRuntimeMarker(runtimeDir);
-  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync53(join89(runtimeDir, marker.serverPath));
-}
-async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
-  const staging = `${runtimeDir}.staging-${randomUUID24()}`;
-  ensureDirectory2(staging);
-  try {
-    const archivePath = join89(staging, archive.name);
-    await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
-    reporter.set("verifying", "Unpacking the built-in model server");
-    try {
-      extract(archivePath, staging);
-    } catch (error2) {
-      if (isNoSpaceError(error2)) {
-        throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname62(runtimeDir)) ?? 0, "the disk filled up while unpacking");
-      }
-      throw new BuiltInReasoningInstallError("runtime_load_failed", `The built-in model server could not be unpacked (${error2 instanceof Error ? error2.message : String(error2)}).`);
-    }
-    rmSync18(archivePath, { force: true });
-    const server = locateFile(staging, SERVER_BINARY);
-    if (!server) {
-      throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
-    }
-    const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync18(join89(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
-`);
-    rmSync18(runtimeDir, { recursive: true, force: true });
-    renameSync16(staging, runtimeDir);
-  } catch (error2) {
-    rmSync18(staging, { recursive: true, force: true });
-    throw error2;
-  }
-}
-function extractWithTar(archivePath, targetDir) {
-  const result = spawnSync15("tar", ["-xzf", archivePath, "-C", targetDir], {
-    stdio: ["ignore", "ignore", "pipe"],
-    timeout: EXTRACT_TIMEOUT_MS
-  });
-  if (result.error)
-    throw result.error;
-  if (result.status !== 0) {
-    throw new Error(result.stderr?.toString().trim() || `tar exited with ${result.status ?? result.signal}`);
-  }
-}
-function locateFile(root, name, depth = 0, prefix = "") {
-  let entries;
-  try {
-    entries = readdirSync12(join89(root, prefix));
-  } catch {
-    return;
-  }
-  if (entries.includes(name)) {
-    const relative9 = prefix ? `${prefix}/${name}` : name;
-    try {
-      if (statSync27(join89(root, relative9)).isFile())
-        return relative9;
-    } catch {}
-  }
-  if (depth >= 2)
-    return;
-  for (const entry of entries) {
-    const child = prefix ? `${prefix}/${entry}` : entry;
-    try {
-      if (!statSync27(join89(root, child)).isDirectory())
-        continue;
-    } catch {
-      continue;
-    }
-    const found = locateFile(root, name, depth + 1, child);
-    if (found)
-      return found;
-  }
-  return;
-}
-async function downloadVerified2(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label, stallMs, space) {
-  const partial2 = `${target}.partial`;
-  const hash = createHash54("sha256");
-  let received = 0;
-  if (existsSync53(partial2)) {
-    const size = statSync27(partial2).size;
-    if (size > 0 && size < expectedBytes) {
-      await hashInto(partial2, hash, VERIFY_TIMEOUT_MS);
-      received = size;
-      reporter.advance(size, label);
-    } else {
-      rmSync18(partial2, { force: true });
-    }
-  }
-  let response;
-  const controller = new AbortController;
-  let stallTimer;
-  const armStall = () => {
-    if (stallTimer)
-      clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
-  };
-  const disarmStall = () => {
-    if (stallTimer)
-      clearTimeout(stallTimer);
-    stallTimer = undefined;
-  };
-  armStall();
-  try {
-    response = await fetchImpl(url, {
-      redirect: "follow",
-      signal: controller.signal,
-      ...received > 0 ? { headers: { Range: `bytes=${received}-` } } : {}
-    });
-  } catch (error2) {
-    disarmStall();
-    throw new BuiltInReasoningInstallError("download_failed", `Could not reach the download server for the ${space.noun} (${error2 instanceof Error ? error2.message : String(error2)}).`);
-  }
-  if (received > 0 && response.status !== 206) {
-    disarmStall();
-    rmSync18(partial2, { force: true });
-    await response.body?.cancel().catch(() => {
-      return;
-    });
-    reporter.advance(-received, label);
-    return downloadVerified2(fetchImpl, url, target, expectedBytes, expectedSha256, reporter, label, stallMs, space);
-  }
-  if (!response.ok || !response.body) {
-    disarmStall();
-    await response.body?.cancel().catch(() => {
-      return;
-    });
-    throw new BuiltInReasoningInstallError("download_failed", `The ${space.noun} download failed (HTTP ${response.status}).`);
-  }
-  reporter.set("downloading", label);
-  let fd;
-  try {
-    fd = openSync14(partial2, received > 0 ? "a" : "w", 420);
-  } catch (error2) {
-    disarmStall();
-    await response.body.cancel().catch(() => {
-      return;
-    });
-    if (isNoSpaceError(error2)) {
-      rmSync18(partial2, { force: true });
-      throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname62(target)) ?? 0, "the disk is full");
-    }
-    throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write ${partial2}: ${String(error2)}`);
-  }
-  try {
-    const reader = response.body.getReader();
-    const aborted2 = new Promise((_resolve, reject) => {
-      controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
-    });
-    aborted2.catch(() => {
-      return;
-    });
-    for (;; ) {
-      armStall();
-      const { done, value: value2 } = await Promise.race([reader.read(), aborted2]);
-      if (done)
-        break;
-      received += value2.byteLength;
-      if (received > expectedBytes) {
-        await reader.cancel().catch(() => {
-          return;
-        });
-        closeSync14(fd);
-        rmSync18(partial2, { force: true });
-        throw new BuiltInReasoningInstallError("checksum_mismatch", `${url} is larger than its pinned size.`);
-      }
-      hash.update(value2);
-      try {
-        space.write(fd, value2);
-      } catch (error2) {
-        await reader.cancel().catch(() => {
-          return;
-        });
-        if (isNoSpaceError(error2)) {
-          try {
-            closeSync14(fd);
-          } catch {}
-          rmSync18(partial2, { force: true });
-          throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname62(target)) ?? 0, "the disk filled up during the download");
-        }
-        throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error2)}`);
-      }
-      reporter.advance(value2.byteLength, label);
-    }
-  } catch (error2) {
-    disarmStall();
-    try {
-      closeSync14(fd);
-    } catch {}
-    if (error2 instanceof BuiltInReasoningInstallError)
-      throw error2;
-    throw new BuiltInReasoningInstallError("download_failed", `The ${space.noun} download was interrupted (${error2 instanceof Error ? error2.message : String(error2)}).`);
-  }
-  disarmStall();
-  closeSync14(fd);
-  if (received !== expectedBytes || hash.digest("hex") !== expectedSha256) {
-    rmSync18(partial2, { force: true });
-    throw new BuiltInReasoningInstallError("checksum_mismatch", `${url} did not match its pinned checksum; nothing was installed.`);
-  }
-  renameSync16(partial2, target);
-}
-function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve13, reject) => {
-    let done = 0;
-    let settled = false;
-    const stream = createReadStream2(path);
-    const finish = (error2) => {
-      if (settled)
-        return;
-      settled = true;
-      clearTimeout(timer);
-      if (error2) {
-        stream.destroy();
-        reject(error2);
-      } else {
-        resolve13();
-      }
-    };
-    const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
-    stream.on("data", (chunk) => {
-      hash.update(chunk);
-      done += chunk.length;
-      onProgress?.(done);
-    }).on("error", (error2) => finish(error2)).on("end", () => finish()).on("close", () => finish(new Error(`Reading ${path} stopped before the end.`)));
-  });
-}
-async function sha256File3(path, timeoutMs, onProgress) {
-  const hash = createHash54("sha256");
-  await hashInto(path, hash, timeoutMs, onProgress);
-  return hash.digest("hex");
-}
-async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
-  const deadline = Date.now() + waitMs;
-  const token = randomUUID24();
-  for (;; ) {
-    if (tryAcquireLock2(lockPath, token))
-      break;
-    if (Date.now() > deadline) {
-      throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
-    }
-    await new Promise((resolve13) => setTimeout(resolve13, LOCK_POLL_MS2));
-  }
-  const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
-  refresh.unref?.();
-  try {
-    await run();
-  } finally {
-    clearInterval(refresh);
-    if (lockHolder(lockPath)?.token === token)
-      rmSync18(lockPath, { force: true });
-  }
-}
-function lockHolder(lockPath) {
-  try {
-    return JSON.parse(readFileSync54(lockPath, "utf8"));
-  } catch {
-    return;
-  }
-}
-function refreshLock(lockPath, token) {
-  if (lockHolder(lockPath)?.token !== token)
-    return;
-  try {
-    const temporary = `${lockPath}.${process.pid}.tmp`;
-    writeFileSync18(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
-    renameSync16(temporary, lockPath);
-  } catch {}
-}
-function tryAcquireLock2(lockPath, token) {
-  try {
-    const fd = openSync14(lockPath, "wx", 384);
-    writeSync3(fd, JSON.stringify({ pid: process.pid, at: Date.now(), token }));
-    closeSync14(fd);
-    return true;
-  } catch {
-    if (lockIsStale2(lockPath)) {
-      rmSync18(lockPath, { force: true });
-      return tryAcquireLock2(lockPath, token);
-    }
-    return false;
-  }
-}
-function lockIsStale2(lockPath) {
-  try {
-    const holder = JSON.parse(readFileSync54(lockPath, "utf8"));
-    if (typeof holder.pid === "number" && holder.pid !== process.pid) {
-      try {
-        process.kill(holder.pid, 0);
-      } catch (error2) {
-        if (error2.code === "ESRCH")
-          return true;
-      }
-    }
-    return typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS2;
-  } catch {
-    try {
-      return Date.now() - statSync27(lockPath).mtimeMs > STALE_LOCK_MS2;
-    } catch {
-      return true;
-    }
-  }
-}
-function ensureDirectory2(path) {
-  try {
-    mkdirSync44(path, { recursive: true, mode: 448 });
-  } catch (error2) {
-    throw new BuiltInReasoningInstallError("disk_write_failed", `Could not create ${path}: ${String(error2)}`);
-  }
-}
-
-class ProgressReporter2 {
-  statusPath;
-  modelId;
-  noun;
-  now;
-  listener;
-  status;
-  lastWriteMs;
-  constructor(statusPath, modelId, noun, now, listener) {
-    this.statusPath = statusPath;
-    this.modelId = modelId;
-    this.noun = noun;
-    this.now = now ?? (() => new Date);
-    this.listener = listener;
-    this.lastWriteMs = 0;
-    this.status = {
-      state: "not_started",
-      modelId,
-      percent: 0,
-      label: "",
-      bytesDone: 0,
-      bytesTotal: 0,
-      updatedAt: this.now().toISOString()
-    };
-  }
-  begin(bytesTotal) {
-    this.status = { ...this.status, bytesTotal, bytesDone: 0 };
-    this.set("downloading", `Downloading the ${this.noun}`, 0);
-  }
-  advance(bytes, label) {
-    const bytesDone = Math.max(0, this.status.bytesDone + bytes);
-    const percent = this.status.bytesTotal > 0 ? Math.min(99, Math.floor(bytesDone / this.status.bytesTotal * 100)) : 0;
-    this.status = { ...this.status, bytesDone, percent, label, state: "downloading" };
-    this.emit(false);
-  }
-  verifying(label, bytesDone, bytesTotal) {
-    const percent = bytesTotal > 0 ? Math.min(99, Math.floor(bytesDone / bytesTotal * 100)) : 0;
-    const { failure: _failure, ...rest } = this.status;
-    const first = this.status.state !== "verifying" || bytesDone === 0;
-    this.status = { ...rest, state: "verifying", label, percent, bytesDone, bytesTotal };
-    this.emit(first || bytesDone >= bytesTotal);
-  }
-  set(state, label, percent = this.status.percent) {
-    const { failure: _failure, ...rest } = this.status;
-    this.status = { ...rest, state, label, percent };
-    this.emit(true);
-  }
-  fail(reason, message, shortfall) {
-    this.status = {
-      ...this.status,
-      state: "failed",
-      label: reason === "insufficient_space" ? `Waiting for free disk space to download the ${this.noun}` : `The ${this.noun} could not be installed`,
-      failure: { reason, message, ...shortfall ?? {} }
-    };
-    this.emit(true);
-  }
-  emit(force) {
-    const nowMs = this.now().getTime();
-    this.status = { ...this.status, modelId: this.modelId, updatedAt: new Date(nowMs).toISOString() };
-    this.listener?.(this.status);
-    if (!force && nowMs - this.lastWriteMs < PROGRESS_WRITE_INTERVAL_MS2)
-      return;
-    this.lastWriteMs = nowMs;
-    try {
-      mkdirSync44(dirname62(this.statusPath), { recursive: true, mode: 448 });
-      const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync18(temporary, `${JSON.stringify(this.status)}
-`, { mode: 384 });
-      renameSync16(temporary, this.statusPath);
-    } catch {}
-  }
-}
-var BUILT_IN_REASONING_DIR_ENV = "OLYMPUS_BUILT_IN_REASONING_DIR", REASONING_NOUN = "built-in private model", STALE_LOCK_MS2, LOCK_REFRESH_MS = 30000, LOCK_POLL_MS2 = 1000, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, RUNTIME_UNPACK_FACTOR = 4, SPACE_BACKOFF_MS, PROGRESS_WRITE_INTERVAL_MS2 = 500, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS, LOG_PREFIX = "[built-in-model]", RUNTIME_MARKER2 = "olympus-runtime.json", SERVER_BINARY = "llama-server", BuiltInReasoningInstallError, verifiedThisProcess2;
-var init_install = __esm(() => {
-  init_manifest2();
-  STALE_LOCK_MS2 = 60 * 60000;
-  BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-  SPACE_BACKOFF_MS = 15 * 60000;
-  DOWNLOAD_STALL_MS2 = 2 * 60000;
-  VERIFY_TIMEOUT_MS = 15 * 60000;
-  EXTRACT_TIMEOUT_MS = 5 * 60000;
-  BuiltInReasoningInstallError = class BuiltInReasoningInstallError extends Error {
-    reason;
-    shortfall;
-    constructor(reason, message, shortfall) {
-      super(message);
-      this.name = "BuiltInReasoningInstallError";
-      this.reason = reason;
-      this.shortfall = shortfall;
-    }
-  };
-});
-
-// src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { accessSync as accessSync8, constants as constants7, readFileSync as readFileSync55 } from "node:fs";
-import { delimiter as delimiter8, isAbsolute as isAbsolute23, join as join90 } from "node:path";
-function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
-  const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join90(olympusModelsDir(env), "built-in-transcription");
-  if (!isAbsolute23(root))
-    throw new TypeError("The built-in transcription directory must be an absolute path.");
-  return {
-    root,
-    modelDir: join90(root, model.modelId),
-    runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
-    runtimeLockPath: llamaServerRuntimeLockPath(env),
-    statusPath: join90(root, "status.json"),
-    lockPath: join90(root, "install.lock"),
-    noun: BUILT_IN_TRANSCRIPTION_NOUN
-  };
-}
-async function installBuiltInTranscription(options = {}) {
-  const { model = QWEN3_ASR_06B, ...tuning } = options;
-  const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
-  const platform2 = options.platform ?? currentPlatform2();
-  const installed = await installPinnedModel({
-    ...tuning,
-    bundle: { modelId: model.modelId, displayName: model.displayName, files: model.files },
-    layout: builtInTranscriptionLayout(model, options.env, runtime, platform2)
-  });
-  return {
-    modelPath: installed.filePaths[0],
-    mmprojPath: installed.filePaths[1],
-    serverPath: installed.serverPath,
-    gpu: installed.gpu
-  };
-}
-function readBuiltInTranscriptionStatus(env = process.env, model = QWEN3_ASR_06B) {
-  try {
-    return readPinnedModelStatus(builtInTranscriptionLayout(model, env).statusPath, model.modelId, BUILT_IN_TRANSCRIPTION_NOUN);
-  } catch {
-    return readPinnedModelStatus("", model.modelId, BUILT_IN_TRANSCRIPTION_NOUN);
-  }
-}
-function readBuiltInTranscriptionStatusFile(env = process.env, model = QWEN3_ASR_06B) {
-  const status = readBuiltInTranscriptionStatus(env, model);
-  let raw;
-  try {
-    raw = readFileSync55(builtInTranscriptionLayout(model, env).statusPath, "utf8");
-  } catch (error2) {
-    return { file: error2.code === "ENOENT" ? "missing" : "unreadable", status };
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    return { file: parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? "current" : "unreadable", status };
-  } catch {
-    return { file: "unreadable", status };
-  }
-}
-function reportBuiltInTranscriptionState(env, model, state, failure2) {
-  try {
-    reportPinnedModelState({
-      statusPath: builtInTranscriptionLayout(model, env).statusPath,
-      modelId: model.modelId,
-      noun: BUILT_IN_TRANSCRIPTION_NOUN
-    }, state, failure2);
-  } catch {}
-}
-function builtInTranscriptionEnabled(env = process.env, platform2 = currentPlatform2(), decoderPresent = () => audioDecoderPresent(platform2, env)) {
-  const raw = env[BUILT_IN_TRANSCRIPTION_ENV]?.trim().toLowerCase();
-  if (raw === "off" || raw === "false" || raw === "0" || raw === "no")
-    return false;
-  if (!runtimeArchiveFor(platform2))
-    return false;
-  if (raw === "on" || raw === "true" || raw === "1" || raw === "yes")
-    return true;
-  return decoderPresent();
-}
-function audioDecoderPresent(platform2 = currentPlatform2(), env = process.env) {
-  const executable = (path) => {
-    try {
-      accessSync8(path, constants7.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (platform2.startsWith("darwin-"))
-    return executable("/usr/bin/afconvert");
-  return (env.PATH ?? "").split(delimiter8).some((dir) => dir.length > 0 && isAbsolute23(dir) && executable(join90(dir, "ffmpeg")));
-}
-function modelLoadFailedReason(message) {
-  const text2 = message ?? "";
-  if (text2.includes("is not installed") || text2.includes("did not install completely") || text2.includes("could not be unpacked") || text2.includes("did not contain")) {
-    return "not_installed";
-  }
-  if (text2.includes("exited while starting"))
-    return "stopped_while_starting";
-  if (text2.includes("did not load within"))
-    return "too_slow";
-  if (text2.includes("port was taken") || text2.includes("No free loopback port"))
-    return "port_taken";
-  return "unknown";
-}
-function builtInTranscriptionDashboardState(read, live = { installing: false }) {
-  if (read.file === "missing")
-    return { state: "not_needed" };
-  if (read.file === "unreadable")
-    return { state: "not_downloaded" };
-  const status = read.status;
-  if (status.state === "not_started")
-    return { state: "not_downloaded" };
-  if (status.state === "ready" || status.state === "loading")
-    return { state: "ready" };
-  if (status.state === "failed") {
-    return status.failure?.reason === "runtime_load_failed" ? { state: "load_failed", loadFailedReason: modelLoadFailedReason(status.failure.message) } : { state: "failed", failedReason: modelInstallFailedReason(status.failure) };
-  }
-  if (!live.installing)
-    return { state: "interrupted" };
-  return {
-    state: status.state === "verifying" ? "verifying" : "downloading",
-    percent: status.percent,
-    ...status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {}
-  };
-}
-var BUILT_IN_TRANSCRIPTION_DIR_ENV = "OLYMPUS_BUILT_IN_TRANSCRIPTION_DIR", BUILT_IN_TRANSCRIPTION_ENV = "OLYMPUS_BUILT_IN_TRANSCRIPTION", BUILT_IN_TRANSCRIPTION_NOUN = "built-in transcription model";
-var init_transcription_model = __esm(() => {
-  init_install();
-  init_manifest2();
-});
-
 // src/workers/file-extraction/extractors/audio-wav.ts
 function chunkId(view2, offset) {
   return String.fromCharCode(view2.getUint8(offset), view2.getUint8(offset + 1), view2.getUint8(offset + 2), view2.getUint8(offset + 3));
@@ -103704,7 +104333,7 @@ var init_audio_wav = __esm(() => {
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
 import { existsSync as existsSync54 } from "node:fs";
 import { mkdtemp as mkdtemp7, readFile as readFile10, rm as rm8 } from "node:fs/promises";
-import { tmpdir as tmpdir12, totalmem as totalmem2 } from "node:os";
+import { tmpdir as tmpdir12, totalmem as totalmem3 } from "node:os";
 import { join as join91 } from "node:path";
 function defaultAudioConverter(platform2, runner = runExtractionCommand, timeoutMs = DEFAULT_CONVERT_TIMEOUT_MS) {
   const darwin = platform2.startsWith("darwin-");
@@ -103779,7 +104408,7 @@ function createBuiltInTranscriber(options = {}) {
   const chunkTimeoutMs = options.chunkTimeoutMs ?? DEFAULT_CHUNK_TIMEOUT_MS;
   const fileDeadlineMs = options.fileDeadlineMs ?? DEFAULT_FILE_DEADLINE_MS;
   const maxChars = options.maxTranscriptChars ?? Number.POSITIVE_INFINITY;
-  let unavailable = (options.totalMemoryBytes ?? totalmem2()) < model.minimumMemoryBytes ? "This computer does not have enough memory for the built-in transcription model." : undefined;
+  let unavailable2 = (options.totalMemoryBytes ?? totalmem3()) < model.minimumMemoryBytes ? "This computer does not have enough memory for the built-in transcription model." : undefined;
   let installed;
   let installing;
   let failedAt;
@@ -103788,7 +104417,7 @@ function createBuiltInTranscriber(options = {}) {
   const readyListeners = [];
   let server;
   const prepare = () => {
-    if (unavailable)
+    if (unavailable2)
       return "unavailable";
     if (installed)
       return "ready";
@@ -103808,7 +104437,7 @@ function createBuiltInTranscriber(options = {}) {
       }
     }, (error2) => {
       if (error2 instanceof BuiltInReasoningInstallError && (error2.reason === "unsupported_platform" || error2.reason === "insufficient_memory")) {
-        unavailable = error2.message;
+        unavailable2 = error2.message;
       } else {
         failedAt = now();
         consecutiveFailures = error2 instanceof BuiltInReasoningInstallError && error2.reason === "insufficient_space" ? 1 : consecutiveFailures + 1;
@@ -103826,8 +104455,8 @@ function createBuiltInTranscriber(options = {}) {
       contextTokens: model.contextTokens,
       gpu: paths.gpu,
       threads: builtInReasoningThreads(),
-      idleShutdownSeconds: options.idleShutdownSeconds ?? DEFAULT_IDLE_SHUTDOWN_SECONDS,
-      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS3,
+      idleShutdownSeconds: options.idleShutdownSeconds ?? DEFAULT_IDLE_SHUTDOWN_SECONDS2,
+      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
       batchSize: 512
     });
     return server;
@@ -103851,7 +104480,7 @@ function createBuiltInTranscriber(options = {}) {
   return {
     prepare,
     downloadNow() {
-      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing && !installed && !unavailable) {
+      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing && !installed && !unavailable2) {
         manualSkipFor = failedAt;
         failedAt = undefined;
       }
@@ -103884,7 +104513,7 @@ function createBuiltInTranscriber(options = {}) {
         state = prepare();
       }
       if (state === "unavailable")
-        throw new TranscriberUnavailableError(unavailable ?? "Built-in transcription is unavailable.");
+        throw new TranscriberUnavailableError(unavailable2 ?? "Built-in transcription is unavailable.");
       if (state === "pending" || !installed) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
@@ -103896,7 +104525,7 @@ function createBuiltInTranscriber(options = {}) {
           await convert(input.inputPath, wavPath);
         } catch (error2) {
           if (error2 instanceof TranscriberUnavailableError)
-            unavailable = error2.message;
+            unavailable2 = error2.message;
           throw error2;
         }
         let audio;
@@ -104007,7 +104636,7 @@ function sharedBuiltInTranscriber(env = process.env) {
   sharedTranscriber ??= createBuiltInTranscriber({ env });
   return sharedTranscriber;
 }
-var TRANSCRIPT_TIME_BUDGET_WARNING = "transcript_time_budget_reached", DEFAULT_IDLE_SHUTDOWN_SECONDS = 180, DEFAULT_STARTUP_TIMEOUT_MS3 = 120000, DEFAULT_CHUNK_TIMEOUT_MS = 180000, DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS, LEASE_MARGIN_MS = 60000, DEFAULT_CHUNK_SECONDS = 30, MAX_TOKENS_PER_CHUNK = 512, SILENCE_LEVEL = 24, ASR_TEXT_MARKER = "<asr_text>", LANGUAGE_PREFIX = "language ", TARGET_SAMPLE_RATE = 16000, TEMP_DIR_PREFIX5 = "olympus-asr-", MACOS_AUDIO_CONVERTER = "/usr/bin/afconvert", TranscriberPendingError, TranscriberUnavailableError, AudioUndecodableError, sharedTranscriber;
+var TRANSCRIPT_TIME_BUDGET_WARNING = "transcript_time_budget_reached", DEFAULT_IDLE_SHUTDOWN_SECONDS2 = 180, DEFAULT_STARTUP_TIMEOUT_MS4 = 120000, DEFAULT_CHUNK_TIMEOUT_MS = 180000, DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS, LEASE_MARGIN_MS = 60000, DEFAULT_CHUNK_SECONDS = 30, MAX_TOKENS_PER_CHUNK = 512, SILENCE_LEVEL = 24, ASR_TEXT_MARKER = "<asr_text>", LANGUAGE_PREFIX = "language ", TARGET_SAMPLE_RATE = 16000, TEMP_DIR_PREFIX5 = "olympus-asr-", MACOS_AUDIO_CONVERTER = "/usr/bin/afconvert", TranscriberPendingError, TranscriberUnavailableError, AudioUndecodableError, sharedTranscriber;
 var init_built_in_transcriber = __esm(() => {
   init_model_transport();
   init_install();
@@ -107069,7 +107698,7 @@ function createOpenAICompatibleAnalystModel(options) {
       if (serviceTier !== false)
         body.service_tier = serviceTier;
       if (request.maxOutputChars !== undefined) {
-        body[maxTokensField] = maxTokensForChars(request.maxOutputChars, {
+        body[maxTokensField] = maxTokensForChars2(request.maxOutputChars, {
           reasoningEffort,
           ...options.reasoningHeadroomTokens !== undefined ? { reasoningHeadroomTokens: options.reasoningHeadroomTokens } : {}
         });
@@ -107145,7 +107774,7 @@ function callerAbortError2(reason) {
   error2.name = "AbortError";
   return error2;
 }
-function maxTokensForChars(chars, options) {
+function maxTokensForChars2(chars, options) {
   const answerBudget = Math.max(256, Math.ceil(chars / 3));
   if (options.reasoningEffort === "none" || options.reasoningHeadroomTokens === undefined) {
     return answerBudget;
@@ -116277,6 +116906,7 @@ function renderComputerHostPage(input) {
     "</head>",
     `<body data-olympus-host="computer" data-locked="${locked2 ? "true" : "false"}">`,
     lockedGate(!locked2),
+    ...input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map((model) => `<p><strong>${text2(model.name)} — ${text2(model.state)}</strong>: ${text2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p>`).join("")}</details>`] : [],
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute(input.panelHtml)}"></iframe>`,
     `<script>${program}</script>`,
     "</body>",
@@ -119503,6 +120133,7 @@ function createEmailSourceWorker(options = {}) {
           if (page === "host") {
             return new Response(renderComputerHostPage({
               panelHtml: dashboardResourceHtml(),
+              ...options.localModelReadiness ? { modelReadiness: options.localModelReadiness() } : {},
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {},
               ...dashboardReadToken(url) ? { readToken: dashboardReadToken(url) } : {}
@@ -123127,607 +123758,6 @@ var init_email_source = __esm(() => {
     "telegram.messages",
     "whatsapp.personal.messages"
   ];
-});
-
-// src/core/analyst-built-in.ts
-import { totalmem as totalmem3 } from "node:os";
-function builtInAnalystEnabled(env = process.env, platform2 = `${process.platform}-${process.arch}`) {
-  const raw = env[BUILT_IN_ANALYST_ENV]?.trim().toLowerCase();
-  if (raw === "off" || raw === "false" || raw === "0" || raw === "no")
-    return false;
-  if (!runtimeArchiveFor(platform2))
-    return false;
-  return true;
-}
-function resolveBuiltInReasoningModel(env = process.env, totalMemoryBytes = totalmem3()) {
-  return pickBuiltInReasoningModel(totalMemoryBytes, env[BUILT_IN_ANALYST_MODEL_ENV]?.trim() || "auto");
-}
-function builtInPrivateModelStatus(env = process.env, totalMemoryBytes = totalmem3()) {
-  const spec = resolveBuiltInReasoningModel(env, totalMemoryBytes);
-  const enabled = builtInAnalystEnabled(env) && spec !== undefined;
-  if (!spec) {
-    return {
-      enabled: false,
-      state: "not_started",
-      modelId: "",
-      percent: 0,
-      label: "This computer does not have enough memory for the built-in private model",
-      bytesDone: 0,
-      bytesTotal: 0,
-      updatedAt: new Date(0).toISOString()
-    };
-  }
-  return {
-    ...readBuiltInReasoningStatus(spec, env),
-    enabled,
-    displayName: spec.displayName,
-    downloadBytes: spec.file.bytes
-  };
-}
-function createBuiltInAnalystModel(options = {}) {
-  const env = options.env ?? process.env;
-  const totalMemoryBytes = options.totalMemoryBytes ?? totalmem3();
-  const spec = options.model ?? resolveBuiltInReasoningModel(env, totalMemoryBytes);
-  if (!spec) {
-    throw new OperationError("config_error", "This computer does not have enough memory for the built-in private model.", "Use a local model service or Venice Private for Private answers.");
-  }
-  const install = options.install ?? installBuiltInReasoning;
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const installerOptions = {
-    model: spec,
-    env,
-    ...options.platform ? { platform: options.platform } : {},
-    ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}
-  };
-  let installed;
-  let installing;
-  let server;
-  const ensureInstalled = () => {
-    if (installed)
-      return Promise.resolve(installed);
-    installing ??= install(installerOptions).then((result) => {
-      installed = result;
-      return result;
-    }).finally(() => {
-      installing = undefined;
-    });
-    return installing;
-  };
-  const ensureServer = (paths) => {
-    server ??= (options.createServer ?? createLlamaServerHandle)({
-      serverPath: paths.serverPath,
-      modelPath: paths.modelPath,
-      contextTokens: spec.contextTokens,
-      gpu: paths.gpu,
-      threads: builtInReasoningThreads(),
-      idleShutdownSeconds: options.idleShutdownSeconds ?? DEFAULT_IDLE_SHUTDOWN_SECONDS2,
-      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4
-    });
-    return server;
-  };
-  const model = {
-    name: BUILT_IN_ANALYST_NAME,
-    spec,
-    async prepare() {
-      try {
-        const cached3 = installed !== undefined;
-        await ensureInstalled();
-        const status = readBuiltInReasoningStatus(spec, env);
-        if (cached3 && status.state === "failed" && status.failure?.reason === "runtime_load_failed") {
-          reportBuiltInReasoningState({ model: spec, env }, "ready");
-        }
-      } catch {}
-    },
-    status() {
-      return readBuiltInReasoningStatus(spec, env);
-    },
-    async stop() {
-      await server?.stop();
-    },
-    installedRuntime() {
-      return installed;
-    },
-    async complete(request) {
-      let paths = installed;
-      if (!paths) {
-        const pending = ensureInstalled();
-        if (options.waitForInstall) {
-          paths = await pending.catch((error2) => {
-            throw unavailable(error2);
-          });
-        } else {
-          pending.catch(() => {
-            return;
-          });
-          const status = readBuiltInReasoningStatus(spec, env);
-          throw new OperationError("argus_unreachable", status.state === "failed" ? `The built-in private model could not be installed: ${status.failure?.message ?? "unknown error"}` : `The built-in private model is still downloading (${status.percent}%).`, "Private answers use the built-in model once its download finishes; nothing needs to be done.");
-        }
-      }
-      const handle = ensureServer(paths);
-      let endpoint2;
-      try {
-        if (!handle.pid)
-          reportBuiltInReasoningState({ model: spec, env }, "loading");
-        endpoint2 = await handle.ensureRunning(request.signal);
-        reportBuiltInReasoningState({ model: spec, env }, "ready");
-      } catch (error2) {
-        if (request.signal?.aborted)
-          throw error2;
-        if (error2 instanceof LlamaServerStillExitingError) {
-          reportBuiltInReasoningState({ model: spec, env }, "ready");
-          throw unavailable(error2);
-        }
-        reportBuiltInReasoningState({ model: spec, env }, "failed", {
-          reason: "runtime_load_failed",
-          message: error2 instanceof Error ? error2.message : String(error2)
-        });
-        throw unavailable(error2);
-      }
-      try {
-        return await chatCompletion(fetchImpl, endpoint2, spec, request, requestTimeoutMs);
-      } finally {
-        handle.touch();
-      }
-    }
-  };
-  return model;
-}
-function unavailable(error2) {
-  if (error2 instanceof OperationError)
-    return error2;
-  const message = error2 instanceof Error ? error2.message : String(error2);
-  return new OperationError("argus_unreachable", error2 instanceof BuiltInReasoningInstallError ? `The built-in private model could not be installed: ${message}` : `The built-in private model is not available: ${message}`, "Check the dashboard for the built-in model status.");
-}
-async function chatCompletion(fetchImpl, endpoint2, spec, request, timeoutMs) {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const signal = request.signal ? AbortSignal.any([timeout, request.signal]) : timeout;
-  let response;
-  try {
-    response = await fetchModelEndpoint(fetchImpl, `${endpoint2.baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${endpoint2.token}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        messages: [
-          { role: "system", content: request.system },
-          { role: "user", content: request.prompt }
-        ],
-        temperature: 0,
-        max_tokens: maxTokensForChars2(request.maxOutputChars),
-        response_format: request.responseSchema ? { type: "json_schema", json_schema: { name: "reply", schema: request.responseSchema } } : { type: "json_object" }
-      }),
-      signal
-    });
-  } catch (error2) {
-    if (request.signal?.aborted)
-      throw error2;
-    if (isZkapiDaemonEndpointRefusal(error2))
-      throw error2;
-    if (isModelEndpointRedirectError(error2)) {
-      throw new OperationError("argus_unreachable", "The built-in private model answered with a redirect, which is refused.", error2.message);
-    }
-    throw new OperationError("argus_unreachable", `The built-in private model did not answer${error2 instanceof Error && error2.name === "TimeoutError" ? ` within ${Math.round(timeoutMs / 1000)}s` : ""}.`, "It runs on this computer; a busy machine answers slowly.");
-  }
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new OperationError("argus_error", `The built-in private model returned HTTP ${response.status}.`, body.slice(0, 300) || undefined);
-  }
-  const payload2 = await response.json();
-  const content = payload2.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    throw new OperationError("argus_error", "The built-in private model returned no text.");
-  }
-  const usage = llamaUsage(payload2.timings);
-  return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}`, ...usage ? { usage } : {} };
-}
-function llamaUsage(timings) {
-  if (!timings)
-    return;
-  const count = (value2) => typeof value2 === "number" && Number.isFinite(value2) && value2 >= 0 ? Math.round(value2) : undefined;
-  const usage = {};
-  const promptTokens = count(timings.prompt_n);
-  const promptMs = count(timings.prompt_ms);
-  const outputTokens = count(timings.predicted_n);
-  const outputMs = count(timings.predicted_ms);
-  if (promptTokens !== undefined)
-    usage.promptTokens = promptTokens;
-  if (promptMs !== undefined)
-    usage.promptMs = promptMs;
-  if (outputTokens !== undefined)
-    usage.outputTokens = outputTokens;
-  if (outputMs !== undefined)
-    usage.outputMs = outputMs;
-  return Object.keys(usage).length > 0 ? usage : undefined;
-}
-function maxTokensForChars2(chars) {
-  if (chars === undefined)
-    return 1024;
-  return Math.max(512, Math.ceil(chars / 2));
-}
-function withBuiltInFallback(primary, builtIn) {
-  return {
-    async analyze(pack, options) {
-      try {
-        return await primary.analyze(pack, options);
-      } catch (error2) {
-        if (!isLocalServiceDown(error2))
-          throw error2;
-        return builtIn.analyze(pack, options);
-      }
-    }
-  };
-}
-function isLocalServiceDown(error2) {
-  return error2 instanceof OperationError && error2.code === "argus_unreachable" && !/timed out/i.test(error2.message);
-}
-async function answerPrivately(question, evidence, options = {}) {
-  const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
-  const pack = fitPrivatePack(privateEvidencePack(question, evidence), options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES, options.evidenceFormat ?? "full", options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS);
-  const verdict = { sufficient: undefined };
-  const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
-    auditSuspiciousDrafts: options.audit ?? true,
-    boundedResponseSchema: true,
-    ...options.evidenceFormat ? { evidenceFormat: options.evidenceFormat } : {}
-  });
-  const run = () => analyst.analyze(pack, {
-    localOnly: true,
-    ...options.maxAnswerChars !== undefined ? { maxAnswerChars: options.maxAnswerChars } : {}
-  });
-  const result = options.signal ? await runWithAnalystAbortSignal(options.signal, run) : await run();
-  const byId = new Map(evidence.map((item) => [item.id, item]));
-  const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
-  const unanswered = result.unanswered.filter((line) => !echoesEvidenceScaffolding(line));
-  const gapChars = analystSchemaGapChars(options.maxAnswerChars ?? DEFAULT_PRIVATE_ANSWER_CHARS);
-  if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
-    return {
-      answer: PRIVATE_ANSWER_NOT_FOUND,
-      citations: [],
-      unanswered: cleanUnanswered(unanswered, "", { maxChars: gapChars, complete: false }),
-      modelId
-    };
-  }
-  return {
-    answer: result.answer,
-    unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
-    citations: result.citations.map((citation) => {
-      const id = citation.provenance.sourceItem.providerItemId;
-      const item = byId.get(id);
-      return {
-        id,
-        ...item?.title ? { title: item.title } : {},
-        ...item?.locator ? { locator: item.locator } : {},
-        claim: citation.claim
-      };
-    }),
-    modelId
-  };
-}
-function withVerdict(model, verdict) {
-  return {
-    async complete(request) {
-      const completion = await model.complete(request);
-      verdict.sufficient = replySufficient(completion.text);
-      return completion;
-    }
-  };
-}
-function replySufficient(text3) {
-  const start = text3.indexOf("{");
-  const end = text3.lastIndexOf("}");
-  if (start === -1 || end <= start)
-    return;
-  try {
-    const parsed = JSON.parse(text3.slice(start, end + 1));
-    if (typeof parsed !== "object" || parsed === null)
-      return;
-    const sufficient = parsed.sufficient;
-    return typeof sufficient === "boolean" ? sufficient : undefined;
-  } catch {
-    return;
-  }
-}
-function cleanUnanswered(gaps, answer, options) {
-  if (options.complete)
-    return [];
-  const answered = new Set(specificTerms(answer).map(termStem));
-  const answerText = answer.toLowerCase();
-  const out = [];
-  const seen = new Set;
-  for (const raw of gaps) {
-    const gap = raw.trim();
-    if (!gap || gap.length >= options.maxChars - 1)
-      continue;
-    const terms = specificTerms(gap);
-    if (terms.length === 0)
-      continue;
-    if (terms.every((term) => answered.has(termStem(term)) || answerText.includes(term)))
-      continue;
-    const key2 = gap.toLowerCase();
-    if (seen.has(key2))
-      continue;
-    seen.add(key2);
-    out.push(gap);
-  }
-  return out;
-}
-function specificTerms(text3) {
-  return (text3.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}.,/-]*[\p{L}\p{N}]|[\p{L}\p{N}]/gu) ?? []).filter((word) => /\p{N}/u.test(word) || word.length >= 3 && !GAP_GENERIC_WORDS.has(word));
-}
-function termStem(word) {
-  return word.length > 4 && word.endsWith("es") ? word.slice(0, -2) : word.length > 3 && word.endsWith("s") ? word.slice(0, -1) : word;
-}
-function timedModel(model, report) {
-  let calls = 0;
-  return {
-    async complete(request) {
-      const stage = calls === 0 ? "main" : "audit";
-      calls += 1;
-      const started = performance.now();
-      const promptBytes = utf82.encode(request.system).length + utf82.encode(request.prompt).length;
-      const done = (ok, usage) => {
-        try {
-          report({ stage, ms: Math.round(performance.now() - started), promptBytes, ok, ...usage ?? {} });
-        } catch {}
-      };
-      try {
-        const completion = await model.complete(request);
-        done(true, completion.usage);
-        return completion;
-      } catch (error2) {
-        done(false);
-        throw error2;
-      }
-    }
-  };
-}
-function echoesEvidenceScaffolding(text3) {
-  const normalized = text3.toLowerCase().split(/\s+/).join(" ").split(" /").join("/").split("/ ").join("/").split(" :").join(":");
-  return ANALYST_EVIDENCE_SCAFFOLDING_LABELS.some((label) => normalized.includes(label));
-}
-function fitPrivatePack(pack, maxPromptBytes, format, outputChars) {
-  const options = { localOnly: true };
-  const promptBytes = (candidatePack) => analystPromptBytes(candidatePack, options, format, outputChars);
-  if (promptBytes(pack) <= maxPromptBytes)
-    return pack;
-  for (let keep = pack.candidates.length;keep >= 1; keep -= 1) {
-    const base = pack.candidates.slice(0, keep);
-    const overhead = promptBytes({ ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: [] })) });
-    if (overhead >= maxPromptBytes)
-      continue;
-    let share = Math.floor((maxPromptBytes - overhead) / keep);
-    for (let attempt = 0;attempt < 6; attempt += 1) {
-      if (share < MIN_PRIVATE_PASSAGE_BYTES && keep > 1)
-        break;
-      const fitted = { ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, share) })) };
-      const bytes = promptBytes(fitted);
-      if (bytes <= maxPromptBytes)
-        return fitted;
-      share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
-    }
-  }
-  return { ...pack, candidates: pack.candidates.slice(0, 1).map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, MIN_PRIVATE_PASSAGE_BYTES) })) };
-}
-function clipUtf8(chunks2, maxBytes) {
-  const kept = [];
-  let remaining = Math.max(0, Math.floor(maxBytes));
-  for (const chunk of chunks2) {
-    if (remaining <= 0)
-      break;
-    const bytes = utf82.encode(chunk).length;
-    if (bytes <= remaining) {
-      kept.push(chunk);
-      remaining -= bytes;
-      continue;
-    }
-    let cut = "";
-    for (const codePoint of chunk) {
-      const size = utf82.encode(codePoint).length;
-      if (size > remaining)
-        break;
-      cut += codePoint;
-      remaining -= size;
-    }
-    if (cut)
-      kept.push(cut);
-    break;
-  }
-  return kept;
-}
-function privateEvidencePack(question, evidence) {
-  const candidates = evidence.map((item) => ({
-    provenance: {
-      sourceItem: {
-        family: item.family ?? "file",
-        provider: "private-answer",
-        accountScope: "local",
-        providerItemId: item.id,
-        localItemId: item.id
-      },
-      citation: {
-        ...item.title ? { title: item.title } : {},
-        ...item.source ? { sourceLabel: item.source } : {},
-        ...item.locator ? { uri: item.locator } : {},
-        ...item.date ? { authoredAt: item.date } : {}
-      }
-    },
-    trustTier: "S4",
-    trustDomain: "secure_local",
-    chunks: [item.text]
-  }));
-  return {
-    question,
-    candidates,
-    coverage: { searchedCorpora: ["private-answer"], skippedCorpora: [], extractionGaps: [] },
-    builtAt: new Date().toISOString()
-  };
-}
-var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS2 = 600, DEFAULT_STARTUP_TIMEOUT_MS4 = 120000, DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES = 28000, MIN_PRIVATE_PASSAGE_BYTES = 600, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel, DEFAULT_PRIVATE_ANSWER_CHARS = 1600, GAP_GENERIC_WORDS, utf82;
-var init_analyst_built_in = __esm(() => {
-  init_analyst();
-  init_operation_error();
-  init_model_transport();
-  init_zkapi_consult_settings();
-  init_install();
-  init_manifest2();
-  init_server();
-  GAP_GENERIC_WORDS = new Set([
-    "the",
-    "and",
-    "for",
-    "are",
-    "was",
-    "were",
-    "with",
-    "from",
-    "that",
-    "this",
-    "these",
-    "those",
-    "not",
-    "any",
-    "all",
-    "its",
-    "their",
-    "there",
-    "which",
-    "what",
-    "when",
-    "where",
-    "who",
-    "whom",
-    "how",
-    "why",
-    "does",
-    "did",
-    "has",
-    "have",
-    "had",
-    "been",
-    "being",
-    "into",
-    "about",
-    "than",
-    "then",
-    "also",
-    "such",
-    "other",
-    "only",
-    "more",
-    "most",
-    "some",
-    "can",
-    "could",
-    "would",
-    "should",
-    "may",
-    "might",
-    "will",
-    "shall",
-    "but",
-    "nor",
-    "yet",
-    "per",
-    "via",
-    "each",
-    "your",
-    "you",
-    "user",
-    "his",
-    "her",
-    "our",
-    "they",
-    "them",
-    "one",
-    "out",
-    "over",
-    "under",
-    "between",
-    "within",
-    "specific",
-    "exact",
-    "precise",
-    "actual",
-    "value",
-    "values",
-    "level",
-    "levels",
-    "number",
-    "numbers",
-    "amount",
-    "detail",
-    "details",
-    "detailed",
-    "information",
-    "info",
-    "result",
-    "results",
-    "data",
-    "figure",
-    "figures",
-    "provided",
-    "provide",
-    "evidence",
-    "found",
-    "find",
-    "missing",
-    "available",
-    "unavailable",
-    "mentioned",
-    "mention",
-    "listed",
-    "list",
-    "given",
-    "give",
-    "stated",
-    "state",
-    "states",
-    "shown",
-    "show",
-    "shows",
-    "included",
-    "include",
-    "includes",
-    "contain",
-    "contains",
-    "contained",
-    "reported",
-    "report",
-    "reports",
-    "document",
-    "documents",
-    "item",
-    "items",
-    "text",
-    "source",
-    "sources",
-    "record",
-    "records",
-    "file",
-    "files",
-    "full",
-    "complete",
-    "entire",
-    "whole",
-    "unknown",
-    "unclear",
-    "unspecified",
-    "specified",
-    "answer",
-    "question",
-    "none",
-    "no",
-    "citations",
-    "citation",
-    "unanswered",
-    "sufficient",
-    "insufficient",
-    "claim",
-    "claims"
-  ]);
-  utf82 = new TextEncoder;
 });
 
 // src/core/analyst-delphi.ts
@@ -142460,6 +142490,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   let dashboardPanelTools;
   let localPrivateAnswers;
   const worker = createEmailSourceWorker({
+    ...process.platform === "linux" ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {},
     agentConnectHost: () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port }),
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
@@ -143157,7 +143188,15 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   };
   const startServer = () => socketPath ? Bun.serve({ unix: socketPath, fetch(request, server2) {
     server2.timeout(request, 0);
-    return serverOptions.fetch(request, server2);
+    const response = serverOptions.fetch(request, server2);
+    const path = new URL(request.url).pathname;
+    if (path === "/v1/health" || path === "/health")
+      return Promise.resolve(response).then(async (value2) => {
+        if (!value2.ok)
+          return value2;
+        return Response.json({ ...await value2.json(), built_in_models: linuxModelReadiness(process.env) }, { status: value2.status, headers: value2.headers });
+      });
+    return response;
   } }) : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   sourceScheduler?.start();
@@ -143762,6 +143801,7 @@ function googleFilePage(locator) {
 }
 var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch;
 var init_server5 = __esm(async () => {
+  init_linux_model_readiness();
   init_engine_maintenance();
   init_worker_transport();
   init_package_root();
@@ -147660,10 +147700,11 @@ async function probeWorker(fetchImpl, baseUrl, socket) {
   const timeout = setTimeout(() => controller.abort(), 1500);
   try {
     const response = await fetchImpl(`${baseUrl.replace(/\/$/, "")}/health`, { method: "GET", signal: controller.signal, ...socket ? { unix: socket } : {} });
+    const health = socket && response.ok ? await response.json() : undefined;
     await response.body?.cancel().catch(() => {
       return;
     });
-    return { reachable: response.ok, detail: `HTTP ${response.status}` };
+    return { reachable: response.ok, detail: `HTTP ${response.status}`, ...health?.built_in_models ? { built_in_models: health.built_in_models } : {} };
   } catch {
     return { reachable: false, detail: "no answer" };
   } finally {
