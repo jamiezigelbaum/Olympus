@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Install Olympus on your Mac</title>
-  <meta name="description" content="Install Olympus on your Mac with one line in Terminal, connect it to ChatGPT, and uninstall it.">
+  <title>Add Olympus to your AI</title>
+  <meta name="description" content="Install Olympus on your computer, then connect ChatGPT, Claude Code, Codex, OpenClaw, Hermes or any MCP app.">
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="no-referrer">
   <link rel="stylesheet" href="/assets/brand.css">
@@ -26,31 +26,40 @@
   </header>
   <main id="main">
     <div class="wrap">
-      <h1>Install Olympus on your Mac</h1>
-      <p class="lede">Olympus runs on your Mac and answers your questions in ChatGPT. Installing it takes one line in Terminal.</p>
+      <h1>Add Olympus to your AI</h1>
+      <p class="lede">Two steps. Install Olympus on your computer, then connect the AI you use. Your files stay on your computer; your AI asks Olympus.</p>
 
-      <h2>Before you start</h2>
+      <h2 id="install"><span class="step" aria-hidden="true">1</span>Install Olympus on your Mac</h2>
       <ul>
-        <li>A Mac with Apple silicon (M1 or later). Macs with an Intel processor are not supported.</li>
-        <li>macOS 13 Ventura or later.</li>
-        <li>The ChatGPT desktop app.</li>
+        <li>A Mac with Apple silicon (M1 or later), on macOS 13 Ventura or later. Macs with an Intel processor are not supported.</li>
+        <li>No administrator password, and no account to create.</li>
       </ul>
-
-      <h2 id="install">Install</h2>
       <p>Open <strong>Terminal</strong> (in Applications, then Utilities), paste this line, and press Return:</p>
       <pre><code>curl -fsSL https://olympusplugin.ai/install.sh | sh</code></pre>
-      <p>It takes a minute or two. When it says <strong>Olympus is installed and running</strong>, go back to ChatGPT. Running the same line again later updates Olympus, or repairs it if it stopped. You can <a href="/install.sh">read the installer</a> before you run it.</p>
+      <p>It takes a minute or two. When it says <strong>Olympus is installed and running</strong>, connect your AI. Running the same line again later updates Olympus, or repairs it if it stopped. You can <a href="/install.sh">read the installer</a> before you run it.</p>
+      <div class="note">
+        <p><strong>On Linux, a server, or already using OpenClaw?</strong> Olympus runs there as an OpenClaw plugin. <a href="/install/openclaw/">Install with OpenClaw</a>.</p>
+      </div>
 
-      <h2>Then connect ChatGPT</h2>
-      <ol class="flow">
-        <li><strong>Add Olympus in ChatGPT.</strong> In the ChatGPT desktop app, add the Olympus plugin and ask: <em>Connect Olympus</em>.</li>
-        <li><strong>Approve ChatGPT on your Mac.</strong> An Olympus approval page opens in your Mac's browser. Click <strong>Approve</strong>. That click is how Olympus knows the Mac is yours: there is no code to copy and no account to create.</li>
-        <li><strong>Connect your sources.</strong> Open the Olympus dashboard in the ChatGPT sidebar and connect Dropbox, Gmail or Google Drive, signing in with the accounts you already have. Other sources the dashboard lists, such as X bookmarks or Readwise, are <a href="/help/on-your-computer/#connect">connected on your computer</a>. Indexing starts on its own.</li>
-      </ol>
+      <h2 id="connect"><span class="step" aria-hidden="true">2</span>Connect your AI</h2>
+      <ul class="apps">
+        <li><a href="/install/chatgpt/"><strong>ChatGPT</strong><span>Approve it once, on your Mac</span></a></li>
+        <li><a href="/install/dots/"><strong>Dots</strong><span>OpenAI's always-on agent</span></a></li>
+        <li><a href="/install/claude-code/"><strong>Claude Code</strong><span>On this computer</span></a></li>
+        <li><a href="/install/codex/"><strong>Codex</strong><span>On this computer</span></a></li>
+        <li><a href="/install/openclaw/"><strong>OpenClaw</strong><span>Native plugin, Mac or Linux</span></a></li>
+        <li><a href="/install/hermes/"><strong>Hermes</strong><span>Local MCP server</span></a></li>
+        <li><a href="/install/other/"><strong>Any MCP app</strong><span>On this computer</span></a></li>
+        <li><span class="soon"><strong>Claude</strong><span>Coming soon</span></span></li>
+        <li><span class="soon"><strong>Grok</strong><span>Coming soon</span></span></li>
+      </ul>
+
+      <h2 id="sources"><span class="step" aria-hidden="true">3</span>Connect your sources</h2>
+      <p>Open the Olympus dashboard: in ChatGPT, ask <em>Show my Olympus dashboard</em>; on your Mac, run <code>olympus dashboard</code>. Choose <strong>Connect</strong> next to Dropbox, Gmail or Google Drive and sign in with the accounts you already have. Pick which folders Olympus reads (<strong>Full</strong>, <strong>Names only</strong> or <strong>Skip</strong>), then <strong>Save and start</strong>. Other sources, such as X bookmarks or Readwise, are <a href="/help/on-your-computer/#connect">connected on your computer</a>.</p>
 
       <h2>What the installer does</h2>
       <ul>
-        <li>Installs Olympus for your macOS user only. It needs no administrator password and changes nothing outside your home folder.</li>
+        <li>Installs Olympus for your macOS user only. It changes nothing outside your home folder.</li>
         <li>Downloads two things over a secure connection, and checks each against a published checksum before using it: Bun, the runtime Olympus runs on (about 24 MB), and Olympus itself (about 5 MB). If either does not match, it stops and changes nothing.</li>
         <li>Starts Olympus in the background as a per-user login item (a LaunchAgent), so it is running whenever you are logged in, and checks that it really started.</li>
         <li>Adds the <code>olympus</code> command, and a line to your shell profile so Terminal finds it.</li>
@@ -66,7 +75,7 @@
       <h2>Check that it is running</h2>
       <p>In a new Terminal window:</p>
       <pre><code>olympus engine status</code></pre>
-      <p>Look for <code>"ok": true</code>. If something is missing, the <code>missing</code> list says what to do next. See also <a href="/help/mac-offline/">what to do when ChatGPT says your computer is offline</a>.</p>
+      <p>Look for <code>"ok": true</code>. If something is missing, the <code>missing</code> list says what to do next. See also <a href="/help/mac-offline/">what to do when your AI says your computer is offline</a>.</p>
 
       <h2 id="where">Where Olympus keeps things</h2>
       <div class="table-scroll">
@@ -93,7 +102,7 @@
       <p>To delete your data too, do this <strong>before</strong> uninstalling. It cannot be undone:</p>
       <pre><code>olympus engine stop
 olympus data delete --all</code></pre>
-      <p>Add <code>--dry-run</code> to the second line first to see what it will remove. To disconnect ChatGPT, remove Olympus in ChatGPT. See <a href="/privacy/#controls">Your controls</a> in the privacy policy for more.</p>
+      <p>Add <code>--dry-run</code> to the second line first to see what it will remove. To disconnect an AI app, remove Olympus in that app. See <a href="/privacy/#controls">Your controls</a> in the privacy policy for more.</p>
     </div>
   </main>
   <footer class="site-foot">

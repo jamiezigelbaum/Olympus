@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect Hermes to Olympus</title>
+  <meta name="description" content="Add Olympus to Hermes Agent as a local MCP server with four tools.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <p class="crumb"><a href="/install/">All apps</a></p>
+      <h1>Connect Hermes</h1>
+      <p class="lede">Hermes Agent runs Olympus as a local MCP server and sees four tools: ask, collect a long answer, check which sources are ready, and ask anonymously.</p>
+
+      <h2>Before you start</h2>
+      <ul>
+        <li><strong>Olympus installed on your computer.</strong> On a Mac, that is <a href="/install/#install">one line in Terminal</a>; on Linux or a server, <a href="/install/openclaw/">install with OpenClaw</a>.</li>
+      </ul>
+
+      <h2>Connect</h2>
+      <ol class="flow">
+        <li><strong>Add the server.</strong> Use the absolute path to the <code>olympus</code> command:
+          <pre><code>hermes mcp add olympus --command /absolute/path/to/olympus --args serve
+hermes mcp test olympus</code></pre>
+        </li>
+        <li><strong>Limit it to four tools.</strong> Make the <code>olympus</code> entry in <code>~/.hermes/config.yaml</code> match:
+          <pre><code>mcp_servers:
+  olympus:
+    command: /absolute/path/to/olympus
+    args: [serve]
+    tools:
+      include: [source_answer, source_answer_result, source_index_status, ask_anonymously]
+      prompts: false
+      resources: false</code></pre>
+        </li>
+        <li><strong>Reload.</strong> Restart Hermes or run <code>/reload-mcp</code>. The tools appear as <code>mcp_olympus_source_answer</code>, <code>mcp_olympus_source_answer_result</code>, <code>mcp_olympus_source_index_status</code> and <code>mcp_olympus_ask_anonymously</code>.</li>
+        <li><strong>Add the skill (optional).</strong> Copy the <a href="https://github.com/jamiezigelbaum/Olympus/tree/main/integrations/hermes/ask-sources">ask-sources</a> folder to <code>~/.hermes/skills/ask-sources/</code>, so Hermes knows when to ask.</li>
+      </ol>
+      <p class="meta">On a Mac you installed with the one line, the command is <code>~/.local/bin/olympus</code>. Under OpenClaw, it is <code>bin/olympus</code> inside the plugin folder: run <code>openclaw plugins inspect olympus --json</code> and use <code>plugin.rootDir</code>.</p>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>

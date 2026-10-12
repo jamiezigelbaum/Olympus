@@ -75,3 +75,32 @@ table { width: 100%; border-collapse: collapse; margin: 0 0 20px; font-size: 16p
 th, td { text-align: left; vertical-align: top; padding: 10px 12px 10px 0; border-bottom: 1.5px solid var(--rule); }
 th { font: 400 11px/1.4 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
 .table-scroll { overflow-x: auto; }
+
+/* Install: a back link on each app page, step numbers in the hub's headings,
+   and the app tiles. */
+.crumb { margin: 0 0 12px; font: 400 12px/1.4 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; }
+.crumb a { color: var(--ink-soft); text-decoration: none; }
+.crumb a::before { content: "\2190\00a0"; }
+.crumb a:hover { color: var(--ink); }
+
+h2 .step {
+  display: inline-grid; place-items: center; vertical-align: 0.2em;
+  width: 32px; height: 32px; margin-right: 12px; border-radius: 50%;
+  background: var(--clay); color: var(--on-clay-deep);
+  font: 400 15px/1 var(--font-mono); letter-spacing: 0;
+}
+
+.apps { list-style: none; padding: 0; margin: 0 0 24px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.apps li { margin: 0; }
+.apps a, .apps .soon {
+  display: block; height: 100%; padding: 16px 18px;
+  background: var(--paper-raised); border: 1.5px solid var(--rule); border-radius: var(--radius-paper);
+  color: var(--ink); text-decoration: none;
+  transition: border-color 0.15s var(--ease-out), transform 0.15s var(--ease-out);
+}
+.apps a:hover { border-color: var(--clay-deep); transform: translateY(-1px); }
+.apps strong { display: block; font-size: 20px; font-weight: 400; }
+.apps span span { display: block; margin-top: 2px; font-size: 15px; color: var(--ink-soft); }
+.apps a > span { display: block; margin-top: 2px; font-size: 15px; color: var(--ink-soft); }
+.apps .soon { border-style: dashed; color: var(--ink-soft); }
+.flow pre { margin: 10px 0; }

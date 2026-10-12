@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect any MCP app to Olympus</title>
+  <meta name="description" content="Run Olympus as a local MCP server for any app that speaks MCP.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <p class="crumb"><a href="/install/">All apps</a></p>
+      <h1>Connect any MCP app</h1>
+      <p class="lede">Any app on your computer that speaks MCP can ask Olympus. It runs Olympus as a local server, over standard input and output.</p>
+
+      <h2>Before you start</h2>
+      <ul>
+        <li><strong>Olympus installed on your computer.</strong> On a Mac, that is <a href="/install/#install">one line in Terminal</a>; on Linux or a server, <a href="/install/openclaw/">install with OpenClaw</a>.</li>
+      </ul>
+
+      <h2>Connect</h2>
+      <p>Add a server named <strong>olympus</strong> whose command is the absolute path to <code>olympus</code>, with the argument <code>serve</code>. In apps that take a JSON config, that looks like:</p>
+      <pre><code>{
+  "mcpServers": {
+    "olympus": {
+      "command": "/Users/you/.local/bin/olympus",
+      "args": ["serve"]
+    }
+  }
+}</code></pre>
+      <p class="meta">On a Mac you installed with the one line, the command is <code>~/.local/bin/olympus</code>. Under OpenClaw, it is <code>bin/olympus</code> inside the plugin folder: run <code>openclaw plugins inspect olympus --json</code> and use <code>plugin.rootDir</code>.</p>
+
+      <h2>Tell it when to ask Olympus</h2>
+      <p>Paste this into wherever the app keeps its instructions. Then it asks Olympus on its own whenever your own records might hold the answer.</p>
+      <pre><code>Olympus is my private search over my own email, files, messages, notes, bookmarks and saved reading. You can ask it through its source_answer tool.
+
+Ask Olympus whenever my question might be answered from my own records: what someone told me, what a document or contract says, or when something happened. If you are not sure, ask it anyway. You do not need me to mention Olympus.
+
+Ask one question at a time, in plain words, and wait for each answer before asking the next. Answers can take a few minutes. If Olympus says it is still working and gives you a job_id, call source_answer_result with that job_id, again while it says working, and pass on the answer it returns. Do not ask the same question again.
+
+Pass on what Olympus answers with its citations, and say plainly what it could not find. Do not guess past it or fill gaps from memory.
+
+Use source_index_status only to check which of my sources are ready.</code></pre>
+
+      <h2>Good to know</h2>
+      <ul>
+        <li>Long answers are handed off: the app gets a job id and collects the answer with <code>source_answer_result</code>. The instructions above tell it how.</li>
+        <li>Apps that run in the cloud reach Olympus through the Olympus relay. Today that is ChatGPT; Claude and Grok are coming.</li>
+      </ul>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>
