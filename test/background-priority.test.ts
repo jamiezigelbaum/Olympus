@@ -88,6 +88,14 @@ function scope(jobs: SourceAnswerJobRegistry, owner: string, clientSignal?: Abor
 
 const settle = () => Bun.sleep(5);
 
+async function until(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await Bun.sleep(5);
+  }
+}
+
 describe('the owner first', () => {
   test('a background answer waits while the owner\'s own work is in flight; the owner\'s ChatGPT is never queued', async () => {
     const owner = interactiveWork();
@@ -367,6 +375,64 @@ describe('review fixes', () => {
     expect(log).toEqual(['start a1', 'start chatgpt', 'start b1']);
     held.finish('b1');
     expect(await Promise.all([a, chatgpt, b])).toEqual(['answer a1', 'answer chatgpt', 'answer b1']);
+  });
+});
+
+describe('review fixes, round two', () => {
+  test('a full background queue never refuses the owner: its waiting allowance is its own', async () => {
+    const jobs = registry(interactiveWork(), { maxRunningGlobal: 1, maxRunningPerOwner: 1 });
+    const log: string[] = [];
+    const held = heldWork(log);
+    const calls = [jobs.run(scope(jobs, 'remote:agent-a'), held.work('a1'))];
+    await settle();
+    for (const agent of ['b', 'c', 'd', 'e']) {
+      for (const n of [1, 2]) calls.push(jobs.run(scope(jobs, `remote:agent-${agent}`), held.work(`${agent}${n}`)));
+    }
+    await settle();
+    expect(jobs.queued()).toBe(8);
+    // The background queue is full: another background call is refused...
+    await expect(jobs.run(scope(jobs, 'remote:agent-f'), held.work('f1'))).rejects.toMatchObject({ code: 'source_answer_busy' });
+    // ...but the owner's ChatGPT waits, and goes next.
+    const chatgpt = jobs.run(scope(jobs, 'remote:chatgpt'), held.work('chatgpt'));
+    await settle();
+    held.finish('a1');
+    await settle();
+    expect(log).toEqual(['start a1', 'start chatgpt']);
+    held.finish('chatgpt');
+    expect(await chatgpt).toBe('answer chatgpt');
+    // Drain the rest.
+    for (const label of ['b1', 'c1', 'd1', 'e1', 'b2', 'c2', 'd2', 'e2']) {
+      await until(() => log.includes(`start ${label}`));
+      held.finish(label);
+    }
+    await Promise.all(calls);
+  });
+
+  test('an overdue background call gets one turn between owner turns, however busy the owner keeps the queue', async () => {
+    const jobs = registry(interactiveWork(), { maxRunningGlobal: 1, maxRunningPerOwner: 1 }, { maxWaitMs: 40 });
+    const log: string[] = [];
+    const held = heldWork(log);
+    const a1 = jobs.run(scope(jobs, 'remote:agent-a'), held.work('a1'));
+    await settle();
+    const owners = [1, 2, 3].map((n) => jobs.run(scope(jobs, `remote:chatgpt-${n}`), held.work(`c${n}`)));
+    const b1 = jobs.run(scope(jobs, 'remote:agent-b'), held.work('b1'));
+    await Bun.sleep(60);
+    held.finish('a1');
+    await settle();
+    expect(log).toEqual(['start a1', 'start c1']);
+    // The owner's queue is replenished while it is served.
+    owners.push(jobs.run(scope(jobs, 'remote:chatgpt-4'), held.work('c4')));
+    held.finish('c1');
+    await settle();
+    expect(log.at(-1)).toBe('start b1');
+    held.finish('b1');
+    await settle();
+    expect(log.at(-1)).toBe('start c2');
+    for (const label of ['c2', 'c3', 'c4']) {
+      await until(() => log.includes(`start ${label}`));
+      held.finish(label);
+    }
+    expect(await Promise.all([a1, b1, ...owners])).toEqual(['answer a1', 'answer b1', 'answer c1', 'answer c2', 'answer c3', 'answer c4']);
   });
 });
 

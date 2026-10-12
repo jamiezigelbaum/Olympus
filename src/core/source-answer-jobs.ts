@@ -84,6 +84,8 @@ export const SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16;
 /** Waiting background answers: per connection and in all. */
 export const SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER = 2;
 export const SOURCE_ANSWER_MAX_QUEUED_BACKGROUND = 8;
+/** The owner's own calls waiting for a slot background answers hold: an allowance of their own, never shared with background calls. */
+export const SOURCE_ANSWER_MAX_QUEUED_OWNER = 8;
 /** How long a background answer waits behind the owner's own answers before it starts anyway. */
 export const SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS = 30_000;
 /** A stored answer's serialized size cap. */
@@ -184,6 +186,9 @@ interface Priority {
   maxQueuedPerOwner: number;
   maxQueuedTotal: number;
   maxWaitMs: number;
+  maxOwnerQueued: number;
+  /** Which kind of call started last: an overdue background call gets one turn after an owner's. */
+  lastGrant: 'owner' | 'background' | undefined;
   /** Waiting background calls per owner, oldest first. */
   queues: Map<string, Waiter[]>;
   /** The owner's own calls waiting for a slot background answers hold, oldest first: served before any background call. */
@@ -196,6 +201,7 @@ interface Priority {
    */
   lastServed: Map<string, number>;
   ticks: number;
+  /** Waiting background calls (the owner's are `ownerQueue.length`). */
   queued: number;
   /** Running background answers per owner (granted, not yet released). */
   running: Map<string, number>;
@@ -251,6 +257,8 @@ export class SourceAnswerJobRegistry {
           maxWaitMs: Math.max(0, priority.maxWaitMs ?? SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS),
           queues: new Map(),
           ownerQueue: [],
+          maxOwnerQueued: SOURCE_ANSWER_MAX_QUEUED_OWNER,
+          lastGrant: undefined,
           lastServed: new Map(),
           ticks: 0,
           queued: 0,
@@ -458,9 +466,9 @@ export class SourceAnswerJobRegistry {
     return { running: this.runningTotal, jobs: this.jobs.size };
   }
 
-  /** Background calls waiting for their turn (always 0 without `priority`). */
+  /** Calls waiting for their turn, background and the owner's own (always 0 without `priority`). */
   queued(): number {
-    return this.priority?.queued ?? 0;
+    return (this.priority?.queued ?? 0) + (this.priority?.ownerQueue.length ?? 0);
   }
 
   /**
@@ -492,9 +500,8 @@ export class SourceAnswerJobRegistry {
     const priority = this.priority!;
     const owner = scope.owner;
     if (kind === 'owner') {
-      if (this.ownerWaiting(owner) >= Math.max(1, priority.maxQueuedPerOwner) || priority.queued >= Math.max(1, priority.maxQueuedTotal)) {
-        throw sourceAnswerBusy();
-      }
+      // The owner's own allowance: background calls never use it up.
+      if (priority.ownerQueue.length >= priority.maxOwnerQueued) throw sourceAnswerBusy();
     } else {
       const waiting = priority.queues.get(owner)?.length ?? 0;
       if (waiting >= priority.maxQueuedPerOwner || priority.queued >= priority.maxQueuedTotal) {
@@ -532,6 +539,7 @@ export class SourceAnswerJobRegistry {
         }
         this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
         this.runningTotal += 1;
+        priority.lastGrant = kind;
         // Counted as running first, so leaving the queue keeps its turn history.
         this.unqueue(waiter);
         resolve();
@@ -551,8 +559,8 @@ export class SourceAnswerJobRegistry {
       const queue = priority.queues.get(owner);
       if (queue) queue.push(waiter);
       else priority.queues.set(owner, [waiter]);
+      priority.queued += 1;
     }
-    priority.queued += 1;
     if (scope.clientSignal?.aborted) onClient();
     else scope.clientSignal?.addEventListener('abort', onClient, { once: true });
     if (jobSignal.aborted) onJob();
@@ -587,7 +595,6 @@ export class SourceAnswerJobRegistry {
       const index = priority.ownerQueue.indexOf(waiter);
       if (index < 0) return;
       priority.ownerQueue.splice(index, 1);
-      priority.queued -= 1;
       return;
     }
     const queue = priority.queues.get(waiter.owner);
@@ -617,14 +624,17 @@ export class SourceAnswerJobRegistry {
 
   /**
    * Whether a background call of `owner` that has waited since `enqueuedAt`
-   * may start now: no owner's own call is waiting, its connection runs
-   * nothing, the background answers leave the owner a slot, there is room at
-   * all, and the owner's own answers are not in flight (or it has waited its
-   * longest).
+   * may start now: no owner's own call is waiting (or it is overdue, past
+   * `maxWaitMs`, and an owner's call started last: one turn between owner
+   * turns, so a busy owner queue cannot hold it off for good), its
+   * connection runs nothing, the background answers leave the owner a slot,
+   * there is room at all, and the owner's own answers are not in flight (or
+   * it has waited its longest).
    */
   private backgroundMayStart(owner: string, enqueuedAt: number, at: number): boolean {
     const priority = this.priority!;
-    if (priority.ownerQueue.length > 0) return false;
+    const overdue = at - enqueuedAt >= priority.maxWaitMs;
+    if (priority.ownerQueue.length > 0 && !(overdue && priority.lastGrant === 'owner')) return false;
     if ((priority.running.get(owner) ?? 0) >= 1) return false;
     const backgroundCapacity = Math.max(1, this.limits.maxRunningGlobal - 1);
     if (priority.runningTotal >= backgroundCapacity || this.runningTotal >= this.limits.maxRunningGlobal) return false;
@@ -655,11 +665,12 @@ export class SourceAnswerJobRegistry {
 
   /**
    * Starts every waiting call that may start: the owner's own waiting calls
-   * first, oldest first; then background calls in turn, where among
-   * connections whose next call may start, the one with the earliest turn
-   * (its last start, or else its next call's arrival) goes first. A call
-   * whose connection was revoked never starts: its connection's whole queue
-   * is cancelled before anyone else's turn.
+   * first, oldest first, except that right after an owner's call started an
+   * overdue background call gets one turn; then background calls in turn,
+   * where among connections whose next call may start, the one with the
+   * earliest turn (its last start, or else its next call's arrival) goes
+   * first. A call whose connection was revoked never starts: its
+   * connection's whole queue is cancelled before anyone else's turn.
    */
   private dispatch(): void {
     const priority = this.priority;
@@ -667,23 +678,16 @@ export class SourceAnswerJobRegistry {
     for (;;) {
       const at = this.now();
       let granted: Waiter | undefined;
-      for (const waiter of priority.ownerQueue) {
-        if ((this.running.get(waiter.owner) ?? 0) >= this.limits.maxRunningPerOwner) continue;
-        if (this.runningTotal >= this.limits.maxRunningGlobal) break;
-        granted = waiter;
-        break;
-      }
+      if (priority.ownerQueue.length > 0 && priority.lastGrant === 'owner') granted = this.nextBackground(at);
       if (!granted) {
-        let grantedTurn = 0;
-        for (const [owner, queue] of priority.queues) {
-          const head = queue[0]!;
-          if (!this.backgroundMayStart(owner, head.enqueuedAt, at)) continue;
-          const turn = Math.max(priority.lastServed.get(owner) ?? 0, head.tick);
-          if (granted && turn >= grantedTurn) continue;
-          granted = head;
-          grantedTurn = turn;
+        for (const waiter of priority.ownerQueue) {
+          if ((this.running.get(waiter.owner) ?? 0) >= this.limits.maxRunningPerOwner) continue;
+          if (this.runningTotal >= this.limits.maxRunningGlobal) break;
+          granted = waiter;
+          break;
         }
       }
+      granted ??= this.nextBackground(at);
       if (!granted) break;
       if (!this.stillAuthorized(granted.owner)) {
         this.cancelWaiting(granted.owner, callerAbortError('source_answer connection revoked'));
@@ -692,6 +696,22 @@ export class SourceAnswerJobRegistry {
       granted.grant();
     }
     this.scheduleWaitCheck();
+  }
+
+  /** The background call whose turn it is, among those that may start now. */
+  private nextBackground(at: number): Waiter | undefined {
+    const priority = this.priority!;
+    let granted: Waiter | undefined;
+    let grantedTurn = 0;
+    for (const [owner, queue] of priority.queues) {
+      const head = queue[0]!;
+      if (!this.backgroundMayStart(owner, head.enqueuedAt, at)) continue;
+      const turn = Math.max(priority.lastServed.get(owner) ?? 0, head.tick);
+      if (granted && turn >= grantedTurn) continue;
+      granted = head;
+      grantedTurn = turn;
+    }
+    return granted;
   }
 
   /** While the owner's work holds background answers back, wakes when the longest wait is up. */

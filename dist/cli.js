@@ -93840,6 +93840,7 @@ __export(exports_source_answer_jobs, {
   SOURCE_ANSWER_MAX_RETAINED_PER_OWNER: () => SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
   SOURCE_ANSWER_MAX_RESULT_BYTES: () => SOURCE_ANSWER_MAX_RESULT_BYTES,
   SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER: () => SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER,
+  SOURCE_ANSWER_MAX_QUEUED_OWNER: () => SOURCE_ANSWER_MAX_QUEUED_OWNER,
   SOURCE_ANSWER_MAX_QUEUED_BACKGROUND: () => SOURCE_ANSWER_MAX_QUEUED_BACKGROUND,
   SOURCE_ANSWER_JOB_TTL_MS: () => SOURCE_ANSWER_JOB_TTL_MS,
   SOURCE_ANSWER_JOB_DEADLINE_MS: () => SOURCE_ANSWER_JOB_DEADLINE_MS,
@@ -93883,6 +93884,8 @@ class SourceAnswerJobRegistry {
       maxWaitMs: Math.max(0, priority.maxWaitMs ?? SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS),
       queues: new Map,
       ownerQueue: [],
+      maxOwnerQueued: SOURCE_ANSWER_MAX_QUEUED_OWNER,
+      lastGrant: undefined,
       lastServed: new Map,
       ticks: 0,
       queued: 0,
@@ -94048,7 +94051,7 @@ class SourceAnswerJobRegistry {
     return { running: this.runningTotal, jobs: this.jobs.size };
   }
   queued() {
-    return this.priority?.queued ?? 0;
+    return (this.priority?.queued ?? 0) + (this.priority?.ownerQueue.length ?? 0);
   }
   ownerMustWait(owner) {
     const priority = this.priority;
@@ -94065,9 +94068,8 @@ class SourceAnswerJobRegistry {
     const priority = this.priority;
     const owner = scope.owner;
     if (kind === "owner") {
-      if (this.ownerWaiting(owner) >= Math.max(1, priority.maxQueuedPerOwner) || priority.queued >= Math.max(1, priority.maxQueuedTotal)) {
+      if (priority.ownerQueue.length >= priority.maxOwnerQueued)
         throw sourceAnswerBusy();
-      }
     } else {
       const waiting = priority.queues.get(owner)?.length ?? 0;
       if (waiting >= priority.maxQueuedPerOwner || priority.queued >= priority.maxQueuedTotal) {
@@ -94113,6 +94115,7 @@ class SourceAnswerJobRegistry {
         }
         this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
         this.runningTotal += 1;
+        priority.lastGrant = kind;
         this.unqueue(waiter);
         resolve9();
       },
@@ -94135,8 +94138,8 @@ class SourceAnswerJobRegistry {
         queue.push(waiter);
       else
         priority.queues.set(owner, [waiter]);
+      priority.queued += 1;
     }
-    priority.queued += 1;
     if (scope.clientSignal?.aborted)
       onClient();
     else
@@ -94183,7 +94186,6 @@ class SourceAnswerJobRegistry {
       if (index2 < 0)
         return;
       priority.ownerQueue.splice(index2, 1);
-      priority.queued -= 1;
       return;
     }
     const queue = priority.queues.get(waiter.owner);
@@ -94212,7 +94214,8 @@ class SourceAnswerJobRegistry {
   }
   backgroundMayStart(owner, enqueuedAt, at) {
     const priority = this.priority;
-    if (priority.ownerQueue.length > 0)
+    const overdue = at - enqueuedAt >= priority.maxWaitMs;
+    if (priority.ownerQueue.length > 0 && !(overdue && priority.lastGrant === "owner"))
       return false;
     if ((priority.running.get(owner) ?? 0) >= 1)
       return false;
@@ -94244,27 +94247,19 @@ class SourceAnswerJobRegistry {
     for (;; ) {
       const at = this.now();
       let granted;
-      for (const waiter of priority.ownerQueue) {
-        if ((this.running.get(waiter.owner) ?? 0) >= this.limits.maxRunningPerOwner)
-          continue;
-        if (this.runningTotal >= this.limits.maxRunningGlobal)
-          break;
-        granted = waiter;
-        break;
-      }
+      if (priority.ownerQueue.length > 0 && priority.lastGrant === "owner")
+        granted = this.nextBackground(at);
       if (!granted) {
-        let grantedTurn = 0;
-        for (const [owner, queue] of priority.queues) {
-          const head = queue[0];
-          if (!this.backgroundMayStart(owner, head.enqueuedAt, at))
+        for (const waiter of priority.ownerQueue) {
+          if ((this.running.get(waiter.owner) ?? 0) >= this.limits.maxRunningPerOwner)
             continue;
-          const turn = Math.max(priority.lastServed.get(owner) ?? 0, head.tick);
-          if (granted && turn >= grantedTurn)
-            continue;
-          granted = head;
-          grantedTurn = turn;
+          if (this.runningTotal >= this.limits.maxRunningGlobal)
+            break;
+          granted = waiter;
+          break;
         }
       }
+      granted ??= this.nextBackground(at);
       if (!granted)
         break;
       if (!this.stillAuthorized(granted.owner)) {
@@ -94274,6 +94269,22 @@ class SourceAnswerJobRegistry {
       granted.grant();
     }
     this.scheduleWaitCheck();
+  }
+  nextBackground(at) {
+    const priority = this.priority;
+    let granted;
+    let grantedTurn = 0;
+    for (const [owner, queue] of priority.queues) {
+      const head = queue[0];
+      if (!this.backgroundMayStart(owner, head.enqueuedAt, at))
+        continue;
+      const turn = Math.max(priority.lastServed.get(owner) ?? 0, head.tick);
+      if (granted && turn >= grantedTurn)
+        continue;
+      granted = head;
+      grantedTurn = turn;
+    }
+    return granted;
   }
   scheduleWaitCheck() {
     const priority = this.priority;
@@ -94401,7 +94412,7 @@ function clampedInteger(value, min, max) {
     return;
   return Math.min(max, Math.max(min, Math.round(parsed)));
 }
-var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200000, SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_DEADLINE_MS, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 2, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING = 16, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 2, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER = 2, SOURCE_ANSWER_MAX_QUEUED_BACKGROUND = 8, SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS = 30000, SOURCE_ANSWER_MAX_RESULT_BYTES, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN;
+var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200000, SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_DEADLINE_MS, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 2, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING = 16, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 2, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER = 2, SOURCE_ANSWER_MAX_QUEUED_BACKGROUND = 8, SOURCE_ANSWER_MAX_QUEUED_OWNER = 8, SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS = 30000, SOURCE_ANSWER_MAX_RESULT_BYTES, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN;
 var init_source_answer_jobs = __esm(() => {
   init_operation_error();
   init_opsec();
