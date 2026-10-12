@@ -12488,6 +12488,8 @@ function callerProviderFromLabel(label) {
     return "anthropic";
   if (/chatgpt|openai|codex/i.test(label))
     return "openai";
+  if (/grok|xai|x\.ai/i.test(label))
+    return "xai";
   return;
 }
 function operationCallerToWire(caller) {
@@ -12557,7 +12559,7 @@ function callerClaimsRemoteConnection(caller) {
 var OPERATION_CALLER_SURFACES, OPERATION_CALLER_PROVIDERS, OPERATION_CALLER_DISPLAY_NAME_MAX = 80, OPERATION_CALLER_CONNECTION_ID_MAX = 128, CONNECTION_ID_PATTERN, UNSAFE_LABEL_CHARS, inProcessRemoteRequests;
 var init_operation_caller = __esm(() => {
   OPERATION_CALLER_SURFACES = ["native", "mcp", "cli", "remote"];
-  OPERATION_CALLER_PROVIDERS = ["openai", "anthropic"];
+  OPERATION_CALLER_PROVIDERS = ["openai", "anthropic", "xai"];
   CONNECTION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
   UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
   inProcessRemoteRequests = new WeakSet;
@@ -12583,7 +12585,7 @@ function credentialInstallId(kind, value) {
     return;
   return PATTERN[kind].exec(value)?.[1];
 }
-var AUTHENTICATED_RESPONSE_HEADER = "x-olympus-authenticated", PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN, HANDOFF_PATH_PREFIX = "/go/";
+var AUTHENTICATED_RESPONSE_HEADER = "x-olympus-authenticated", SURFACE_RESPONSE_HEADER = "x-olympus-surface", PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN, HANDOFF_PATH_PREFIX = "/go/";
 var init_tokens = __esm(() => {
   PREFIX = { access: "oly2", refresh: "oly2r", code: "oly2c", handoff: "oly2g", private: "oly2p" };
   PATTERN = {
@@ -67045,7 +67047,7 @@ function consultFrontierModelFor(settings, provider) {
 }
 function consultModelProvider(model) {
   const prefix = model.slice(0, model.indexOf("/")).toLowerCase();
-  return CONSULT_CALLER_PROVIDERS.includes(prefix) ? prefix : undefined;
+  return Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix) ? CONSULT_MODEL_PREFIXES[prefix] : undefined;
 }
 function consultChatgptModelUnavailableMessage(model) {
   return model === CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT ? "Claude Sonnet isn't available through zkAPI right now; choose another model." : "The model chosen for ChatGPT questions isn't available through zkAPI right now; choose another model.";
@@ -67294,7 +67296,7 @@ function hasKeys(value, required3, optional) {
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
-var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_STANDARD_MODES, CONSULT_STANDARD_MODE_WHEN_UNSET = "light_cleanup", CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000, CONSULT_LIGHT_CLEANUP_INSTRUCTION, CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = "anthropic/claude-sonnet-5.5", CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT = "openai/gpt-5.5", CONSULT_CALLER_PROVIDERS, DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
+var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_STANDARD_MODES, CONSULT_STANDARD_MODE_WHEN_UNSET = "light_cleanup", CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000, CONSULT_LIGHT_CLEANUP_INSTRUCTION, CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = "anthropic/claude-sonnet-5.5", CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT = "openai/gpt-5.5", CONSULT_CALLER_PROVIDERS, CONSULT_MODEL_PREFIXES, DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
 var init_consult_settings = __esm(() => {
   init_secret_store();
   init_consult_gate();
@@ -67308,7 +67310,8 @@ var init_consult_settings = __esm(() => {
     "Keep everything else as the user wrote it. You may add details from the material that the outside model needs to answer, with the same removals."
   ].join(" ");
   CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS = Object.freeze({ min: 1e4, max: 240000 });
-  CONSULT_CALLER_PROVIDERS = ["openai", "anthropic"];
+  CONSULT_CALLER_PROVIDERS = ["openai", "anthropic", "xai"];
+  CONSULT_MODEL_PREFIXES = { openai: "openai", anthropic: "anthropic", "x-ai": "xai", xai: "xai" };
   DEFAULT_CONSULT_SETTINGS = Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision: 0,
@@ -121216,9 +121219,14 @@ var init_webStandardStreamableHttp = __esm(() => {
 // src/workers/remote-oauth/pinned-clients.ts
 var exports_pinned_clients = {};
 __export(exports_pinned_clients, {
+  pinnedGrantProvider: () => pinnedGrantProvider,
   pinnedClient: () => pinnedClient,
   isClientIdMetadataUrl: () => isClientIdMetadataUrl,
   isChatGptGrant: () => isChatGptGrant,
+  GROK_REDIRECT_URIS: () => GROK_REDIRECT_URIS,
+  GROK_CLIENT_ID: () => GROK_CLIENT_ID,
+  CLAUDE_REDIRECT_URI: () => CLAUDE_REDIRECT_URI,
+  CLAUDE_CLIENT_ID: () => CLAUDE_CLIENT_ID,
   CHATGPT_REDIRECT_URI: () => CHATGPT_REDIRECT_URI,
   CHATGPT_CODEX_CLIENT_ID: () => CHATGPT_CODEX_CLIENT_ID,
   CHATGPT_CLIENT_ID: () => CHATGPT_CLIENT_ID
@@ -121227,14 +121235,20 @@ function isClientIdMetadataUrl(clientId) {
   return clientId.startsWith("https://");
 }
 function isChatGptGrant(connection) {
-  return typeof connection.clientId === "string" && pinnedClient(connection.clientId) !== undefined;
+  return typeof connection.clientId === "string" && pinnedClient(connection.clientId)?.host === "chatgpt";
 }
 function pinnedClient(clientId) {
   if (clientId === CHATGPT_CODEX_CLIENT_ID) {
-    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com" };
+    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com", host: "chatgpt" };
   }
   if (clientId === CHATGPT_CLIENT_ID) {
-    return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com" };
+    return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com", host: "chatgpt" };
+  }
+  if (clientId === CLAUDE_CLIENT_ID) {
+    return { clientId, clientName: "Claude", redirectUris: [CLAUDE_REDIRECT_URI], verifiedHost: "claude.ai", host: "claude" };
+  }
+  if (clientId === GROK_CLIENT_ID) {
+    return { clientId, clientName: "Grok", redirectUris: GROK_REDIRECT_URIS, verifiedHost: "grok.com", host: "grok" };
   }
   const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
   if (callback) {
@@ -121242,15 +121256,24 @@ function pinnedClient(clientId) {
       clientId,
       clientName: "ChatGPT",
       redirectUris: [`https://chatgpt.com/connector/oauth/${callback}`],
-      verifiedHost: "chatgpt.com"
+      verifiedHost: "chatgpt.com",
+      host: "chatgpt"
     };
   }
   return;
 }
-var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID;
+function pinnedGrantProvider(connection) {
+  const host = typeof connection.clientId === "string" ? pinnedClient(connection.clientId)?.host : undefined;
+  return host === "chatgpt" ? "openai" : host === "claude" ? "anthropic" : host === "grok" ? "xai" : undefined;
+}
+var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS;
 var init_pinned_clients = __esm(() => {
   CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
   CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
 });
 
 // src/workers/dashboard/shared-status.ts
@@ -123411,6 +123434,9 @@ async function askAnonymously(input, deps) {
       return { ok: false, code: "invalid_params", message: CONSULT_ASK_MESSAGES.cleanupCustomMissing };
     cleanup = input.cleanup;
   }
+  if (input.model === undefined && input.callerProvider !== undefined && consultModelProvider(consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider)) === input.callerProvider) {
+    return { ok: false, code: "model_same_provider", message: CONSULT_ASK_MESSAGES.configuredModelSameProvider };
+  }
   let remembered = false;
   let rememberNote;
   if (input.remember === true && input.level !== undefined) {
@@ -123524,6 +123550,9 @@ async function askAnonymously(input, deps) {
     return !stale;
   };
   const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
+  if (input.callerProvider !== undefined && consultModelProvider(model) === input.callerProvider) {
+    return { ok: false, code: "model_same_provider", message: input.model === undefined ? CONSULT_ASK_MESSAGES.configuredModelSameProvider : CONSULT_ASK_MESSAGES.modelSameProvider };
+  }
   let result;
   try {
     result = await deps.send(sent, authorize, { model, ...input.signal ? { signal: input.signal } : {} });
@@ -123588,6 +123617,7 @@ var init_consult_ask = __esm(() => {
     rememberUnavailable: "The choice could not be saved here; it was used for this question only.",
     modelInvalid: "model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.",
     modelSameProvider: "Not sent: that model is from the provider that hosts this conversation, so the question could be tied to the user. Name a model from another provider, or leave model out.",
+    configuredModelSameProvider: "Not sent: the model set for this agent on the Anonymous answers card is from the provider that hosts this conversation, so the question could be tied to the user. Choose a model from another provider there, or name one with model.",
     cancelled: "The request was cancelled before the question was sent; nothing was charged.",
     tooManyBytes: "Not sent: the question is over 8 KiB once encoded. Shorten it."
   });
@@ -127080,7 +127110,9 @@ function createRemoteMcpHandler(options) {
     if (!verification.ok)
       return verification.response;
     const response = await serveAuthenticated(request, verification, surface);
-    return isRelayed(request) ? markAuthenticated(response) : response;
+    if (!isRelayed(request))
+      return response;
+    return markAuthenticated(response, options.chatgpt?.servesRequest(request, verification.connection) === true ? "chatgpt" : "remote");
   };
   async function serveAuthenticated(request, verification, surface) {
     if (request.method !== "POST") {
@@ -127115,9 +127147,10 @@ function createRemoteMcpHandler(options) {
     }
   }
 }
-function markAuthenticated(response) {
+function markAuthenticated(response, surface) {
   const headers = new Headers(response.headers);
   headers.set(AUTHENTICATED_RESPONSE_HEADER, "1");
+  headers.set(SURFACE_RESPONSE_HEADER, surface);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 function authenticateRemoteRequest(request, options, surface = "default") {
@@ -127158,7 +127191,7 @@ function lazyRemoteConnectionStore(resolvePath4, open7) {
   };
 }
 function remoteOperationCaller(connection) {
-  const provider = isChatGptGrant(connection) ? "openai" : callerProviderFromLabel(connection.displayName);
+  const provider = pinnedGrantProvider(connection) ?? callerProviderFromLabel(connection.displayName);
   return { surface: "remote", connectionId: connection.id, displayName: connection.displayName, ...provider ? { provider } : {} };
 }
 function createInProcessOperationContext(input) {
@@ -127310,7 +127343,7 @@ function demoGrantDisplayName(clientName) {
 }
 function isDemoGrant(connection) {
   const pinned = connection.clientId ? pinnedClient(connection.clientId) : undefined;
-  return pinned !== undefined && connection.displayName === demoGrantDisplayName(pinned.clientName);
+  return pinned?.host === "chatgpt" && connection.displayName === demoGrantDisplayName(pinned.clientName);
 }
 var DEMO_SIGN_IN_BURST = 10, DEMO_SIGN_IN_WINDOW_MS;
 var init_demo_consent = __esm(() => {
@@ -127445,7 +127478,7 @@ function createRemoteOAuthHandler(options) {
     if (pinned)
       return { ...pinned, redirectUris: [...pinned.redirectUris] };
     if (isClientIdMetadataUrl(clientId))
-      return "Olympus connects to ChatGPT. It does not recognize this app.";
+      return "Olympus connects to ChatGPT, Claude and Grok. It does not recognize this app.";
     const registered3 = options.connections().oauth.getRegisteredClient(clientId);
     if (!registered3)
       return "This app is not registered with Olympus.";
@@ -127478,7 +127511,7 @@ function createRemoteOAuthHandler(options) {
     const client = resolveClient(clientId, u);
     if (typeof client === "string")
       return errorPage(400, client);
-    if (demo && !client.verifiedHost)
+    if (demo && client.host !== "chatgpt")
       return errorPage(400, "The demo connects ChatGPT only.");
     if (!redirectUriMatches(redirectUri, client.redirectUris)) {
       return errorPage(400, "The return address is not one this app registered.");
@@ -127498,6 +127531,9 @@ function createRemoteOAuthHandler(options) {
     const resource = requestedResource === null ? u.resource : matchConfiguredResource(requestedResource, u);
     if (resource === undefined) {
       return fail("invalid_target", "The requested resource is not this Olympus.");
+    }
+    if (client.host !== "chatgpt" && resource !== u.resource) {
+      return fail("invalid_target", "This app connects to Olympus at its /mcp address.");
     }
     sweep();
     admitPending();
@@ -127753,7 +127789,7 @@ function createRemoteOAuthHandler(options) {
       return oauthError(400, "invalid_redirect_uri", "redirect_uris must list https or loopback URLs.");
     }
     if (u.installId && !redirectUris.every(isLoopbackRedirectUri)) {
-      return oauthError(400, "invalid_redirect_uri", "Only local development clients register; ChatGPT needs no registration.");
+      return oauthError(400, "invalid_redirect_uri", "Only local development clients register here; ChatGPT, Claude and Grok need no registration.");
     }
     const grantTypes = metadata.grant_types;
     if (grantTypes !== undefined && (!Array.isArray(grantTypes) || !grantTypes.includes("authorization_code"))) {

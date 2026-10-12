@@ -3,7 +3,9 @@
 > **Partly superseded (2026-10-01).** ChatGPT now reaches Olympus as a plugin
 > through relay v2 (`mcp.olympusplugin.ai`), specified in
 > [chatgpt-plugin.md](chatgpt-plugin.md), which replaces the hosted-relay parts
-> of this design. Claude, Grok and Muse are out of scope for Olympus 1.0. Kept
+> of this design. Claude and Grok are back in 1.0 since 2026-10-12, through
+> the same relay with pinned OAuth clients and one-click approval on the Mac
+> ([V0_4_RELEASE.md](../V0_4_RELEASE.md), Decisions); Muse stays out. Kept
 > as the record of the hosted-agent design.
 
 Status: design, owner-approved to build on 2026-09-24. This is v0.5 scope: v0.4

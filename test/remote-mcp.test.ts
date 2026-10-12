@@ -4,7 +4,7 @@
 // connection-token handler, every other route to the worker-bearer wrapper.
 // A real MCP SDK client talks Streamable HTTP to it over loopback.
 
-import { AUTHENTICATED_RESPONSE_HEADER } from '../connect-relay/shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../connect-relay/shared/tokens.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
@@ -217,6 +217,9 @@ describe('remote MCP over loopback with a connection token', () => {
     const relayed = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'per-boot-secret' });
     expect(relayed.status).toBe(200);
     expect(relayed.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBe('1');
+    // ...with the surface it was served, which keeps the relay's offline answers to its own tools.
+    expect(relayed.headers.get(SURFACE_RESPONSE_HEADER)).toBe('remote');
+    expect(direct.headers.get(SURFACE_RESPONSE_HEADER)).toBeNull();
     // A marker without the secret is a direct caller.
     const forged = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'forged' });
     expect(forged.status).toBe(200);

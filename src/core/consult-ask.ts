@@ -172,6 +172,7 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   rememberUnavailable: 'The choice could not be saved here; it was used for this question only.',
   modelInvalid: 'model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.',
   modelSameProvider: 'Not sent: that model is from the provider that hosts this conversation, so the question could be tied to the user. Name a model from another provider, or leave model out.',
+  configuredModelSameProvider: 'Not sent: the model set for this agent on the Anonymous answers card is from the provider that hosts this conversation, so the question could be tied to the user. Choose a model from another provider there, or name one with model.',
   cancelled: 'The request was cancelled before the question was sent; nothing was charged.',
   tooManyBytes: 'Not sent: the question is over 8 KiB once encoded. Shorten it.',
 });
@@ -276,6 +277,13 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   if (input.cleanup !== undefined) {
     if (input.cleanup === 'custom' && stored.mode !== 'custom') return { ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.cleanupCustomMissing };
     cleanup = input.cleanup;
+  }
+  // The same rule for the configured model: an agent with no setting of its
+  // own (Grok takes the ChatGPT one) never gets a model from its own provider.
+  // Checked here before any work, and again on the model sent.
+  if (input.model === undefined && input.callerProvider !== undefined
+    && consultModelProvider(consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider)) === input.callerProvider) {
+    return { ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.configuredModelSameProvider };
   }
 
   // Remember before sending, so a refused or failed send still keeps the choice.
@@ -408,6 +416,11 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   // The question goes to the model set for the caller's hosting provider
   // unless it named one.
   const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
+  // Checked again on the model actually sent: settings re-read after
+  // remember may name another one (Codex review of PR #289).
+  if (input.callerProvider !== undefined && consultModelProvider(model) === input.callerProvider) {
+    return { ok: false, code: 'model_same_provider', message: input.model === undefined ? CONSULT_ASK_MESSAGES.configuredModelSameProvider : CONSULT_ASK_MESSAGES.modelSameProvider };
+  }
   let result: ZkapiConsultResult | undefined;
   try {
     result = await deps.send(sent, authorize, { model, ...(input.signal ? { signal: input.signal } : {}) });

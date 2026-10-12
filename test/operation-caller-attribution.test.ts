@@ -18,7 +18,7 @@ import {
   sanitizeCallerDisplayName,
 } from '../src/core/operation-caller.ts';
 import { remoteOperationCaller } from '../src/workers/remote-mcp.ts';
-import { CHATGPT_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, GROK_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { evaluateReleaseGate, isCallingAgentDestination } from '../src/core/opsec.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import type {
@@ -123,18 +123,25 @@ describe('caller wire validation', () => {
     expect(operationCallerToWire({ surface: 'cli' })).toEqual({ surface: 'cli' });
   });
 
-  test('who hosts the agent: a ChatGPT grant by its pinned client id, a Claude client by its name, anything else unknown', () => {
+  test('who hosts the agent: a pinned grant by its client id, a Claude or Grok client by its name, anything else unknown', () => {
     expect(callerProviderFromLabel('claude-code')).toBe('anthropic');
     expect(callerProviderFromLabel('Claude Desktop')).toBe('anthropic');
     expect(callerProviderFromLabel('ChatGPT')).toBe('openai');
     expect(callerProviderFromLabel('codex-cli')).toBe('openai');
-    expect(callerProviderFromLabel('Grok')).toBeUndefined();
+    expect(callerProviderFromLabel('Grok')).toBe('xai');
+    expect(callerProviderFromLabel('Grok API')).toBe('xai');
+    expect(callerProviderFromLabel('Muse')).toBeUndefined();
     expect(callerProviderFromLabel(undefined)).toBeUndefined();
     expect(mcpOperationCaller('claude-code')).toEqual({ surface: 'mcp', displayName: 'claude-code', provider: 'anthropic' });
-    expect(mcpOperationCaller('Grok')).toEqual({ surface: 'mcp', displayName: 'Grok' });
+    expect(mcpOperationCaller('Grok')).toEqual({ surface: 'mcp', displayName: 'Grok', provider: 'xai' });
+    expect(mcpOperationCaller('Hermes')).toEqual({ surface: 'mcp', displayName: 'Hermes' });
     expect(remoteOperationCaller({ id: 'c1', displayName: 'My phone', clientId: CHATGPT_CLIENT_ID })).toEqual({ surface: 'remote', connectionId: 'c1', displayName: 'My phone', provider: 'openai' });
     expect(remoteOperationCaller({ id: 'c2', displayName: 'Claude Desktop', clientId: 'https://example.com/client.json' })).toEqual({ surface: 'remote', connectionId: 'c2', displayName: 'Claude Desktop', provider: 'anthropic' });
-    expect(remoteOperationCaller({ id: 'c3', displayName: 'Grok', clientId: null })).toEqual({ surface: 'remote', connectionId: 'c3', displayName: 'Grok' });
+    expect(remoteOperationCaller({ id: 'c3', displayName: 'Grok', clientId: null })).toEqual({ surface: 'remote', connectionId: 'c3', displayName: 'Grok', provider: 'xai' });
+    // Pinned clients are placed by their client id, whatever the connection is called.
+    expect(remoteOperationCaller({ id: 'c4', displayName: 'Work', clientId: CLAUDE_CLIENT_ID })).toEqual({ surface: 'remote', connectionId: 'c4', displayName: 'Work', provider: 'anthropic' });
+    expect(remoteOperationCaller({ id: 'c5', displayName: 'Claude', clientId: GROK_CLIENT_ID })).toEqual({ surface: 'remote', connectionId: 'c5', displayName: 'Claude', provider: 'xai' });
+    expect(remoteOperationCaller({ id: 'c6', displayName: 'Other', clientId: 'olympus_client_x' })).toEqual({ surface: 'remote', connectionId: 'c6', displayName: 'Other' });
   });
 
   test('display names lose control and bidi characters and are bounded', () => {

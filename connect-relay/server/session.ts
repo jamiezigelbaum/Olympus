@@ -26,6 +26,7 @@ import {
 } from '../shared/protocol.ts';
 import { QueueBudget, type RelayLimits } from './limits.ts';
 import { BODYLESS_STATUSES, DEFAULT_RESPONSE_POLICY, checkResponseHead, type ResponsePolicy } from './response-policy.ts';
+import type { CredentialSurface } from '../shared/tokens.ts';
 
 export interface SessionSocket {
   send(data: string | Uint8Array): number;
@@ -41,8 +42,12 @@ export interface ForwardRequest {
   readonly signal: AbortSignal;
   /** What the install may answer on this route (response-policy.ts); API answers when unset. */
   readonly policy?: ResponsePolicy;
-  /** The install's response head arrived: its status, and whether it carried the engine's authenticated marker. */
-  readonly onHead?: (status: number, authenticated: boolean) => void;
+  /**
+   * The install's response head arrived: its status, whether it carried the
+   * engine's authenticated marker, and the credential's tool surface when the
+   * engine named one.
+   */
+  readonly onHead?: (status: number, authenticated: boolean, surface?: CredentialSurface) => void;
   /** The install's head was refused (a fixed reason code); the caller gets a 502. */
   readonly onRefused?: (reason: string) => void;
   /**
@@ -293,8 +298,8 @@ export class InstallSession {
     }
     clearTimeout(stream.timers.head);
     stream.headSent = true;
-    const { headers, authenticated } = checked;
-    stream.request.onHead?.(status, authenticated);
+    const { headers, authenticated, surface } = checked;
+    stream.request.onHead?.(status, authenticated, surface);
     if (bodyless) {
       // No body will ever be read: the mux stream is complete now. Any body
       // frames or `end` the install still sends find no stream and are dropped.

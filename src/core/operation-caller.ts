@@ -9,14 +9,14 @@ export type OperationCallerSurface = 'native' | 'mcp' | 'cli' | 'remote';
 export const OPERATION_CALLER_SURFACES: readonly OperationCallerSurface[] = ['native', 'mcp', 'cli', 'remote'];
 
 /**
- * Who hosts the calling agent, when a surface can tell: OpenAI (a ChatGPT
- * grant, by the relay's pinned client ids) or Anthropic (a Claude client, by
- * its MCP client name). It chooses which anonymous-answer model setting a
- * question takes (never the provider that holds the conversation); it grants
- * nothing, so a label-based guess is harmless.
+ * Who hosts the calling agent, when a surface can tell: OpenAI, Anthropic or
+ * xAI, by a pinned OAuth client id (ChatGPT, Claude, Grok) or a client's MCP
+ * name. It chooses which anonymous-answer model setting a question takes
+ * (never the provider that holds the conversation); it grants nothing, so a
+ * label-based guess is harmless.
  */
-export type OperationCallerProvider = 'openai' | 'anthropic';
-export const OPERATION_CALLER_PROVIDERS: readonly OperationCallerProvider[] = ['openai', 'anthropic'];
+export type OperationCallerProvider = 'openai' | 'anthropic' | 'xai';
+export const OPERATION_CALLER_PROVIDERS: readonly OperationCallerProvider[] = ['openai', 'anthropic', 'xai'];
 
 export interface OperationCaller {
   surface: OperationCallerSurface;
@@ -62,6 +62,7 @@ export function callerProviderFromLabel(label: string | undefined): OperationCal
   if (!label) return undefined;
   if (/claude|anthropic/i.test(label)) return 'anthropic';
   if (/chatgpt|openai|codex/i.test(label)) return 'openai';
+  if (/grok|xai|x\.ai/i.test(label)) return 'xai';
   return undefined;
 }
 
