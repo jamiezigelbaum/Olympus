@@ -403,6 +403,18 @@ describe('the panel in remote mode', () => {
     expect(win.document.body.innerHTML).not.toContain('olympusplugin.ai/open/');
   });
 
+  test('the last line\'s Open shows the two lines for the plain dashboard, instead of opening the /open/ page', () => {
+    const { win, sent } = mount({ ...remoteModel({ port: 8010, agent: false }), computerControls: { href: 'https://olympusplugin.ai/open/dashboard/' } });
+    hosts.push(win);
+    const open = win.document.querySelector('.more-on-computer button') as unknown as HTMLButtonElement;
+    expect(open.getAttribute('aria-expanded')).toBe('false');
+    open.click();
+    expect(sent.some((message) => message.method === 'ui/open-link')).toBe(false);
+    const box = win.document.querySelector('.more-on-computer .remote-box')!;
+    const expected = remoteOpenInstructions({ port: 8010, target: { kind: 'dashboard' } });
+    expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual([expected.onComputer, expected.onServer]);
+  });
+
   test('not remote: Connect still opens the /open/ page', () => {
     const { win, sent, buttons } = mount(remoteModel(undefined));
     hosts.push(win);

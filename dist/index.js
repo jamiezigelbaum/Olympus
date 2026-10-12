@@ -8217,6 +8217,9 @@ var init_vocabulary = __esm(() => {
     linkExpired: "link expired",
     howOnComputer: "Do this on your computer",
     howOnComputerFix: "Fix this on your computer",
+    moreOnComputer: "More controls on your computer: Private answers, anonymous answers, keys and agents",
+    moreOnComputerOpen: "Open",
+    moreOnComputerOpenLabel: "Open Olympus on your computer",
     remote: {
       title: "Olympus runs on a server, so this opens on your computer through a secure tunnel.",
       askLine: "Ask your assistant:",

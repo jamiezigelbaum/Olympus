@@ -232,6 +232,8 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
       agent: remote.agent === true,
     };
   }
+  const controlsHref = safeHref(view.computerControls?.href);
+  if (controlsHref) out.computerControls = { href: controlsHref };
   const progress = view.progress;
   if (progress) {
     out.progress = {

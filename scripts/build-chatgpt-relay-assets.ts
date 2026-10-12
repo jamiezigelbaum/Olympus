@@ -7,17 +7,23 @@
  *   connect-relay/server/generated/chatgpt-dashboard.json  resources/read of ui://olympus/dashboard
  *   connect-relay/server/generated/chatgpt-private-answer.json  resources/read of ui://olympus/private-answer
  *   connect-relay/server/generated/chatgpt-private-question.json  resources/read of ui://olympus/private-question
+ *   connect-relay/server/generated/remote-tools.json       the remote surface's tools/list (every
+ *                                                           non-ChatGPT connection), served while the
+ *                                                           Mac is offline
  *
  * The relay builds and deploys separately from the engine and imports only
  * these files. `bun run build` writes them; `--check` (and
  * test/chatgpt-relay-assets.test.ts) fails when they are stale.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
+import { defaultConfig } from '../src/core/config.ts';
+import { listMcpTools } from '../src/mcp/tools.ts';
 import { join } from 'node:path';
 import { DASHBOARD_RESOURCE } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { CHATGPT_RESOURCES, CHATGPT_TOOLS, readChatGptResource } from '../src/workers/chatgpt/mcp-surface.ts';
 import { PRIVATE_ANSWER_RESOURCE } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { PRIVATE_QUESTION_RESOURCE } from '../src/workers/chatgpt/private-question-resource.ts';
+import { remoteSearchExtension } from '../src/workers/remote-search.ts';
 
 const ROOT = join(import.meta.dir, '..');
 export const GENERATED_DIR = 'connect-relay/server/generated';
@@ -29,7 +35,21 @@ export function chatgptRelayAssets(): Record<string, string> {
     [`${GENERATED_DIR}/chatgpt-dashboard.json`]: render(readChatGptResource(DASHBOARD_RESOURCE.uri)),
     [`${GENERATED_DIR}/chatgpt-private-answer.json`]: render(readChatGptResource(PRIVATE_ANSWER_RESOURCE.uri)),
     [`${GENERATED_DIR}/chatgpt-private-question.json`]: render(readChatGptResource(PRIVATE_QUESTION_RESOURCE.uri)),
+    [`${GENERATED_DIR}/remote-tools.json`]: render({ tools: relayRemoteTools() }),
   };
+}
+
+/**
+ * The remote surface's tools as an install with the default configuration
+ * lists them: what the relay shows a remote agent while its Mac is offline.
+ */
+export function relayRemoteTools(): ReturnType<typeof listMcpTools> {
+  // As the worker's /mcp lists them with its evidence search on and an
+  // answer model set up (workers/remote-search.ts): the search tool first.
+  // The relay cannot know whether an install has an answer model; offline,
+  // every call gets the same fixed result anyway.
+  const extension = remoteSearchExtension({ evidenceSearch: async () => ({ evidence: [] }) }, () => 'unavailable');
+  return extension.tools(listMcpTools(defaultConfig(), 'remote'));
 }
 
 /** Paths whose committed content differs from what the source generates. */

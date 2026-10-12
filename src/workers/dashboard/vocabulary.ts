@@ -1587,6 +1587,14 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   howOnComputer: 'Do this on your computer',
   howOnComputerFix: 'Fix this on your computer',
   /**
+   * The panel's last line away from the computer (owner request, 2026-10-12):
+   * the controls only the computer's On this computer section has, with Open
+   * on the olympusplugin.ai page that opens Olympus there.
+   */
+  moreOnComputer: 'More controls on your computer: Private answers, anonymous answers, keys and agents',
+  moreOnComputerOpen: 'Open',
+  moreOnComputerOpenLabel: 'Open Olympus on your computer',
+  /**
    * Remote mode (2026-10-10; core/remote-open.ts): the engine runs on a
    * server, so a "do this on your computer" control opens this box instead of
    * the olympus:// page. The two command lines are built from the engine's

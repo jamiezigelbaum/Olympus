@@ -35,6 +35,11 @@
  *   could at most repeat an open the owner just asked for (rate limited,
  *   until the job expires), never open anything else.
  *
+ * While an install is online its engine also confirms, over its own session,
+ * which tool list each of its live access tokens gets (the `surfaces`
+ * feature; server/surface-map.ts), keyed by a one-way fingerprint of the
+ * token, so the relay's offline answers list each agent its own tools.
+ *
  * The relay mints, validates and stores no token: the install does. A caller
  * with no token gets the standard challenge on `/mcp` and the relay's own
  * small MCP answers on `/openai/mcp`; an authorized request for an install
@@ -44,16 +49,17 @@
  * Logging follows log.ts: no bodies, tokens, query strings or addresses.
  */
 import type { Server, ServerWebSocket } from 'bun';
-import { createHash } from 'node:crypto';
 import {
   AUTH_BOUND,
   AUTH_LEGACY,
   CONNECT_PATH,
   INSTALL_ID_PATTERN,
   PROTOCOL_VERSION,
+  RELAY_FEATURE_SURFACES,
   decodeBodyFrame,
   installIdForPublicKey,
   newNonce,
+  parseSurfacesMessage,
   parseTextFrame,
   publicKeyFromSpki,
   spkiOf,
@@ -68,7 +74,15 @@ import {
 import { INSTALL_URL } from '../shared/dashboard-contract.ts';
 import type { McpSurface } from '../shared/directory-tools.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey, prefixKey } from '../shared/rate-limit.ts';
-import { HANDOFF_PATH_PREFIX, OAUTH_HANDBACK_PATHS, credentialInstallId, oauthHandbackInstallId } from '../shared/tokens.ts';
+import {
+  HANDOFF_PATH_PREFIX,
+  OAUTH_HANDBACK_PATHS,
+  credentialDigest,
+  credentialInstallId,
+  oauthHandbackInstallId,
+  surfaceFingerprint,
+  type CredentialSurface,
+} from '../shared/tokens.ts';
 import {
   privateAnswerMaxRequestBytes,
   privateAnswerRoute,
@@ -104,6 +118,16 @@ import { isDashboardCall, relayMcpResponse } from './relay-mcp.ts';
 import { publicKeyOf, type MemoryInstallRegistry, type RegistryCounts } from './registry.ts';
 import { createResponsePolicies, type RouteKind } from './response-policy.ts';
 import { InstallSession } from './session.ts';
+import { SurfaceMap } from './surface-map.ts';
+
+/**
+ * Whether a `surfaces` frame may change its install's mapping: it came over
+ * the install's current session, that session is open, and the install's
+ * registration is in force (not revoked, not expired).
+ */
+export function surfacesFrameAccepted(input: { session: object; current: object | undefined; open: boolean; revoked: boolean; registered: boolean }): boolean {
+  return input.current === input.session && input.open && !input.revoked && input.registered;
+}
 
 /** An OpenAI-hosted origin's host name, or a fixed class: callers can put anything in Origin. */
 export function panelOriginClass(origin: string | null | undefined): string {
@@ -148,6 +172,8 @@ export interface RelayConfig {
   readonly log?: RelayLog;
   /** How often unused registrations are swept (default hourly). */
   readonly sweepIntervalMs?: number;
+  /** The engines' offline tool-list mappings (default: a new, empty one). */
+  readonly surfaceMap?: SurfaceMap;
   readonly now?: () => number;
 }
 
@@ -256,6 +282,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const uploads = new UploadBudget(limits);
   const queueBudget = new QueueBudget(limits.maxQueuedBytes);
   const confirmed = new ConfirmedCredentials(CONFIRMED_CREDENTIAL_TTL_MS, MAX_CONFIRMED_CREDENTIALS, now);
+  const surfaceMap = config.surfaceMap ?? new SurfaceMap(undefined, now);
   /** Sockets that have not authenticated yet, oldest first. */
   const pendingSockets = new Set<ServerWebSocket<SocketData>>();
   /** A relay-wide registration budget ran dry: logged once per episode, for the operator. */
@@ -395,7 +422,18 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   };
 
   /** The admission key of a credential: its install and the digest of the whole credential. */
-  const credentialKey = (installId: string, token: string) => `${installId}:${createHash('sha256').update(token).digest('base64url')}`;
+  const credentialKey = (installId: string, digest: Buffer) => `${installId}:${digest.toString('base64url')}`;
+
+  /**
+   * Which tool list a credential gets while its install is offline: the
+   * mapping its engine synced (server/surface-map.ts); for an engine that
+   * predates syncing, the surface it marked on its last answer to this
+   * credential; else (unknown, expired, revoked) the remote list.
+   */
+  const offlineSurface = (installId: string, key: string, digest: Buffer): CredentialSurface => {
+    if (surfaceMap.synced(installId)) return surfaceMap.lookup(installId, 'default', surfaceFingerprint(digest)) ?? 'remote';
+    return confirmed.surface(key) ?? 'remote';
+  };
 
   /** An id that names no install the relay will route to (never registered, expired, or revoked). */
   const unroutable = (installId: string) => registry.isRevoked(installId) || !registry.get(installId);
@@ -564,7 +602,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       log('request_refused', { install: installTag(installId), reason: 'unknown_install' });
       return refuse();
     }
-    const key = credentialKey(installId, token!);
+    const digest = credentialDigest(token!);
+    const key = credentialKey(installId, digest);
     const lane: AdmissionLane = confirmed.has(key) ? 'owner' : 'unverified';
     if (lane === 'unverified' && !publicRequests.take(ip)) return tooMany();
     const read = await readBody(request, limits.maxRequestBodyBytes, ip);
@@ -590,9 +629,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         state: 'mac_offline',
         lastSeenAt: registry.get(installId)?.lastSeenAt,
         surface,
-        // Which tools this credential gets, as its engine last said; the
+        // Which tools this credential gets, as its engine confirmed; the
         // directory endpoint serves ChatGPT only.
-        credentialSurface: surface === 'directory' ? 'chatgpt' : confirmed.surface(key),
+        credentialSurface: surface === 'directory' ? 'chatgpt' : offlineSurface(installId, key, digest),
       }),
       unknown: refuse,
     });
@@ -898,7 +937,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     ws.data.session = session;
     sessions.set(installId, session);
     registry.seen(installId);
-    session.send({ type: 'ready', installId });
+    session.send({ type: 'ready', installId, features: [RELAY_FEATURE_SURFACES] });
     // `legacy_auth` sessions are what the legacy window still serves: the
     // operator closes it once none appear (docs/design/chatgpt-plugin.md).
     log('session_ready', { install: installTag(installId), ...(scheme === AUTH_LEGACY ? { legacy_auth: true } : {}) });
@@ -1036,6 +1075,24 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           return;
         }
         if (message.type === 'ping') registry.seen(session.installId);
+        if (message.type === 'surfaces') {
+          // Stored under the install this session authenticated as, and no
+          // other, and only while it is that install's current, open session
+          // of a registration still in force: a late frame from a replaced
+          // or revoked session changes nothing. A malformed frame changes
+          // nothing either (and keeps the session).
+          const installId = session.installId;
+          const entries = surfacesFrameAccepted({
+            session,
+            current: sessions.get(installId),
+            open: session.open,
+            revoked: registry.isRevoked(installId),
+            registered: registry.get(installId) !== undefined,
+          }) ? parseSurfacesMessage(message) : undefined;
+          if (entries) surfaceMap.replace(installId, entries);
+          else log('surfaces_refused', { install: installTag(installId) });
+          return;
+        }
         if (session.onMessage(message, streamId(message.id)) === 'protocol_error') ws.close(4002, 'protocol_error');
       },
       close(ws) {
@@ -1056,7 +1113,11 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const startedAt = new Date(now()).toISOString();
   const sweep = (at = now()): string[] => {
     const expired = registry.expire(at, limits.inactiveRegistrationTtlMs, (installId) => sessions.has(installId), limits.unconfirmedRegistrationTtlMs);
-    for (const installId of expired) log('registration_expired', { install: installTag(installId) });
+    for (const installId of expired) {
+      surfaceMap.remove(installId);
+      log('registration_expired', { install: installTag(installId) });
+    }
+    surfaceMap.sweep();
     return expired;
   };
   const sweepTimer = setInterval(() => sweep(), config.sweepIntervalMs ?? 60 * 60_000);
@@ -1071,6 +1132,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       const wasRegistered = registry.get(installId) !== undefined;
       // The registry refuses the id before this returns; the write may still fail.
       const durable = registry.revoke(installId);
+      surfaceMap.remove(installId);
       // The live session ends whatever the write's outcome.
       const live = sessions.get(installId);
       if (live) {

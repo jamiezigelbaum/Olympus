@@ -322,6 +322,7 @@ export function buildChatGptDashboardViewModel(
         }
       : {}),
     ...(options.remote ? { remote: options.remote } : {}),
+    computerControls: { href: openPageUrl({ kind: 'dashboard' }) },
     generatedAt: isoOrNow(view.generated_at, now),
   };
 }
