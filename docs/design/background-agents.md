@@ -68,9 +68,10 @@ line and one page, and loses a page.
   with Revoke and has Connect an agent (`src/workers/dashboard/agents.ts`).
 - The answer ledger is content-free: no questions, answers or citations
   (`answer-latency-log.ts:1-5`).
-- Anonymous answers' same-provider rule knows only `openai` and `anthropic`,
-  guessed from the connection's display name
-  (`src/core/operation-caller.ts:61-66`), and checks only an explicitly
+- Anonymous answers' same-provider rule knows only `openai` and `anthropic`:
+  ChatGPT from its pinned client (`remote-mcp.ts:256`), every other
+  connection guessed from its display name
+  (`src/core/operation-caller.ts:61-66`). It checks only an explicitly
   requested model, not the default it then resolves (`consult-ask.ts:242,410`).
 - No user notifications on the dashboard or ChatGPT paths (native source
   watches do deliver through OpenClaw).
