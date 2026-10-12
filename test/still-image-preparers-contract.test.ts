@@ -43,6 +43,11 @@ import {
   type DecodedPicture,
   type Rgb,
 } from './helpers/image-fixtures.ts';
+import { createImageOcr } from '../src/workers/file-extraction/extractors/ocr.ts';
+import { createOcrCapabilityProbe } from '../src/workers/file-extraction/extractors/ocr-capability.ts';
+import { createTextExtractor } from '../src/workers/file-extraction/extractors/text.ts';
+import { runExtractionCommand } from '../src/workers/file-extraction/extractors/command-runner.ts';
+import { extractorInput } from './fixtures/file-extraction-extractor-fixtures.ts';
 import { solidPng } from './helpers/solid-png.ts';
 
 const work = mkdtempSync(join(tmpdir(), 'olympus-contract-'));
@@ -233,3 +238,32 @@ for (const tool of tools) {
     });
   });
 }
+
+// Exercise the composed text lane: preparation alone cannot prove that its
+// successful HEIC result survives the command OCR path.
+const vipsTool = tools.find(tool => tool.kind === 'vips');
+const tesseract = findExecutable('tesseract');
+const heicReady = vipsTool && readyStillImageFormats(probeStillImageReadiness({ tool: vipsTool, vision: 'ready' })).has('heic');
+test.skipIf(!STRICT && (!vipsTool || !tesseract || !heicReady))('real HEIC through vips and tesseract indexes a photo without pending OCR', async () => {
+  expect(Boolean(vipsTool && tesseract && heicReady)).toBe(true);
+  if (!vipsTool || !tesseract || !heicReady) throw new Error('requires vipsthumbnail with HEIC and tesseract');
+  const capability = createOcrCapabilityProbe();
+  expect((await capability.snapshot()).imageEngine).toBe('tesseract');
+  let reads = 0;
+  const extractor = createTextExtractor({
+    imagePreparation: createImagePreparation({ cacheDir: join(work, 'heic-text-lane'), preparer: createStillImagePreparer(vipsTool) }),
+    imageOcr: createImageOcr({ engine: { platform: 'linux', capability }, commandRunner: async request => {
+      reads++;
+      const result = await runExtractionCommand(request);
+      return result;
+    } }),
+  });
+  const result = await extractor.extract(extractorInput({ bytes: imageFixture('orientation-1.heic'), mimeType: 'image/heic' }));
+  expect(result.status).toBe('indexed');
+  if (result.status !== 'indexed') throw new Error(result.status);
+  expect(result.media?.mimeType).toBe('image/jpeg');
+  expect(result.text).toContain('Photo');
+  expect(result.warnings ?? []).not.toContain('ocr_unavailable_image');
+  expect(result.warnings ?? []).not.toContain('ocr_failed_image');
+  expect(reads).toBe(1);
+}, 120_000);

@@ -234,14 +234,19 @@ describe('image preparation in the shared text lane', () => {
     expect(await extractor.extract(extractorInput(picture(6)))).toEqual({ status: 'metadata_only' });
   });
 
-  test('a picture whose OCR fails leaves nothing in the cache', async () => {
+  test('a picture whose OCR fails keeps its prepared cache copy and pending OCR marker', async () => {
     const cacheDir = join(temporaryDir(), 'media-cache');
     const extractor = createTextExtractor({
       imagePreparation: createImagePreparation({ cacheDir, commandRunner: fakeSips() }),
       imageOcr: async () => ({ status: 'failed_retryable', errorKind: 'ocr_command_failed' }),
     });
-    expect(await extractor.extract(extractorInput(picture(7)))).toEqual({ status: 'failed_retryable', errorKind: 'ocr_command_failed' });
-    expect(readdirSync(cacheDir).filter((name) => name.endsWith('.jpg'))).toEqual([]);
+    const result = await extractor.extract(extractorInput(picture(7)));
+    expect(result.status).toBe('indexed');
+    if (result.status !== 'indexed') throw new Error(result.status);
+    expect(result.text).toBe(IMAGE_MEDIA_DESCRIPTOR);
+    expect(result.warnings).toContain('ocr_failed_image');
+    expect(existsSync(result.media!.path)).toBe(true);
+    expect(readdirSync(cacheDir).filter((name) => name.endsWith('.jpg'))).toHaveLength(1);
   });
 
   test('pictures are queued once more under an image-scoped version; other files keep theirs', () => {

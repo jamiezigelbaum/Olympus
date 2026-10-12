@@ -66,14 +66,15 @@ import {
   type StillImagePreparer,
 } from '../src/workers/file-extraction/extractors/image-preparers.ts';
 import { jpegMetadataSegments } from '../src/workers/file-extraction/extractors/jpeg-metadata.ts';
-import { createOcrRereadPolicy } from '../src/workers/file-extraction/extractors/ocr.ts';
-import type { OcrCapabilitySnapshot } from '../src/workers/file-extraction/extractors/ocr-capability.ts';
+import { createImageOcr, createOcrRereadPolicy } from '../src/workers/file-extraction/extractors/ocr.ts';
+import { createOcrCapabilityProbe, type OcrCapabilitySnapshot } from '../src/workers/file-extraction/extractors/ocr-capability.ts';
 import { IMAGE_MEDIA_VERSION_SUFFIX, IMAGE_OCR_VERSION_SUFFIX, createTextExtractor, type TextExtractorOptions } from '../src/workers/file-extraction/extractors/text.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { buildExtractorRegistry, createDefaultExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
 import { createFileExtractionRunner } from '../src/workers/file-extraction/runner.ts';
 import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
+import { extractorInput } from './fixtures/file-extraction-extractor-fixtures.ts';
 import { bigTiffClaiming, imageFixture, isoBox, pngClaiming, quadrantJpegWithMetadata, realToolShortfalls, realToolsRequired, stubJpeg } from './helpers/image-fixtures.ts';
 
 const temporaryDirs: string[] = [];
@@ -800,47 +801,127 @@ describe('a photo left unread for want of a decoder is read again when the decod
     return { jobs, runner, calls, accepted, fetched, extractor };
   }
 
-  for (const first of ['ocr', 'decoder'] as const) {
-    test(`OCR and decoder markers recover independently, once each (${first} ready first)`, async () => {
-      const ready = new Set<StillImageFormat>(['webp']);
+  for (const first of ['ocr', 'decoder', 'both'] as const) {
+    test(`one photo retains both pending capabilities and recovers without duplicate queues (${first} ready first)`, async () => {
+      const ready = new Set<StillImageFormat>(['jpeg']);
       let ocrReady = false;
       const snapshot = (): OcrCapabilitySnapshot => ({
         tesseract: ocrReady ? 'ok' : 'missing', pdftoppm: 'missing', ocrmypdf: 'missing',
         imageEngine: ocrReady ? 'tesseract' : undefined, pdfEngine: undefined, checkedAt: 1,
       });
-      const lane = setup({
-        'ocr-picture': imageFixture('quadrants.jpg'),
-        'decoder-photo': imageFixture('orientation-1.heic'),
-      }, ready, {
-        imageOcr: async () => ocrReady ? { status: 'indexed', text: 'text in the picture', derivations: [] } : undefined,
+      const lane = setup({ 'photo': imageFixture('quadrants.webp') }, ready, {
+        imageOcr: async () => ocrReady ? { status: 'indexed', text: 'text in the picture' } : undefined,
         ocrReread: createOcrRereadPolicy({ capability: {
           snapshot: async () => snapshot(), peek: snapshot, peekFresh: snapshot,
           warm() {}, invalidate() {},
         } }),
       });
+      const warnings = () => lane.jobs.artifacts(LANE.corpusId, 'personal:photo').flatMap(a => a.derivation.warnings ?? []);
       try {
-        expect((await lane.runner.run({ ...LANE })).counts.metadata_only).toBe(2);
-        expect(lane.jobs.artifacts(LANE.corpusId, 'personal:ocr-picture')[0]?.derivation.warnings)
-          .toContain('ocr_unavailable_image');
-        expect(lane.jobs.artifacts(LANE.corpusId, 'personal:decoder-photo')[0]?.derivation.warnings)
-          .toEqual([imageDecoderUnavailableWarning('heic')]);
+        expect((await lane.runner.run({ ...LANE })).counts.metadata_only).toBe(1);
+        expect(warnings()).toContain('ocr_unavailable_image');
+        expect(warnings()).toContain(imageDecoderUnavailableWarning('webp'));
         expect((await lane.runner.run({ ...LANE })).rereadRequeued).toBeUndefined();
-        for (const reader of [first, first === 'ocr' ? 'decoder' : 'ocr']) {
-          if (reader === 'ocr') ocrReady = true;
-          else ready.add('heic');
-          const before = lane.fetched.length;
-          const result = await lane.runner.run({ ...LANE });
-          expect(result.rereadRequeued).toBe(1);
-          expect(result.counts.indexed).toBe(1);
-          expect(lane.fetched.slice(before)).toEqual([reader === 'ocr' ? 'ocr-picture' : 'decoder-photo']);
-          expect((await lane.runner.run({ ...LANE })).rereadRequeued).toBeUndefined();
+        if (first !== 'decoder') ocrReady = true;
+        if (first !== 'ocr') ready.add('webp');
+        const partial = await lane.runner.run({ ...LANE });
+        expect(partial.rereadRequeued).toBe(1);
+        expect(partial.counts.indexed).toBe(1);
+        if (first === 'ocr') {
+          expect(warnings()).toContain(imageDecoderUnavailableWarning('webp'));
+          expect(warnings()).not.toContain('ocr_unavailable_image');
+        } else if (first === 'decoder') {
+          expect(warnings()).toContain('ocr_unavailable_image');
+          expect(warnings()).not.toContain(imageDecoderUnavailableWarning('webp'));
         }
-        expect(lane.accepted.sort()).toEqual(['decoder-photo', 'ocr-picture']);
-        expect(lane.fetched.filter((id) => id === 'ocr-picture')).toHaveLength(2);
-        expect(lane.fetched.filter((id) => id === 'decoder-photo')).toHaveLength(2);
-      } finally {
-        lane.jobs.close();
-      }
+        expect((await lane.runner.run({ ...LANE })).rereadRequeued).toBeUndefined();
+        ocrReady = true;
+        ready.add('webp');
+        const complete = await lane.runner.run({ ...LANE });
+        expect(complete.rereadRequeued).toBe(first === 'both' ? undefined : 1);
+        expect(warnings()).not.toContain('ocr_unavailable_image');
+        expect(warnings()).not.toContain(imageDecoderUnavailableWarning('webp'));
+        for (let i = 0; i < 3; i++) expect((await lane.runner.run({ ...LANE })).rereadRequeued).toBeUndefined();
+        const jobId = lane.jobs.artifacts(LANE.corpusId, 'personal:photo')[0]!.jobId;
+        expect(lane.jobs.get(jobId)?.janitorTerminalRequeueCount).toBe(0);
+        expect(lane.fetched).toHaveLength(first === 'both' ? 2 : 3);
+        expect(lane.accepted).toHaveLength(first === 'both' ? 1 : 2);
+      } finally { lane.jobs.close(); }
+    });
+  }
+
+  test('a prepared HEIC is sent as JPEG to command OCR, which cannot read HEIC', async () => {
+    const capability = createOcrCapabilityProbe({ probe: async () => ({
+      tesseract: 'ok', pdftoppm: 'missing', ocrmypdf: 'missing',
+      imageEngine: 'tesseract', pdfEngine: undefined, checkedAt: Date.now(),
+    }) });
+    const seen: number[] = [];
+    const imageOcr = createImageOcr({ engine: { platform: 'linux', capability }, commandRunner: async request => {
+      const bytes = readFileSync(request.args[0]!);
+      seen.push(bytes[0]!);
+      if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new ExtractionCommandError({
+        command: request.command, exitCode: 1, stdout: '', stderr: 'unsupported image',
+      });
+      return { stdout: 'WORDS ON PHOTO', stderr: '' };
+    } });
+    const extractor = createTextExtractor({ imageOcr, imagePreparation: createImagePreparation({
+      cacheDir: join(temporaryDir(), 'media-cache'), preparer: createVipsPreparer({ path: '/fake/vipsthumbnail' }),
+      commandRunner: fakeRunner([]), formats: new Set(ALL),
+    }) });
+    const output = await extractor.extract(extractorInput({ bytes: imageFixture('orientation-1.heic'), mimeType: 'image/heic' }));
+    expect(output.status).toBe('indexed');
+    if (output.status !== 'indexed') throw new Error(output.status);
+    expect(output.media?.mimeType).toBe('image/jpeg');
+    expect(output.text).toContain('WORDS ON PHOTO');
+    expect(seen).toEqual([0xff]);
+  });
+
+  test('Vision still reads the original HEIC even when a prepared JPEG exists', async () => {
+    const original = imageFixture('orientation-1.heic');
+    let reads = 0;
+    const extractor = createTextExtractor({
+      imagePreparation: createImagePreparation({
+        cacheDir: join(temporaryDir(), 'media-cache'), commandRunner: fakeRunner([]),
+        preparer: createSipsPreparer({ path: '/fake/sips', ...noProfile }),
+      }),
+      imageOcr: createImageOcr({ engine: { platform: 'darwin', appleVisionScriptPath: '/fake/vision.js' }, commandRunner: async request => {
+        expect(request.command).toBe('/usr/bin/osascript');
+        const imagePath = request.args[request.args.indexOf('image') + 1]!;
+        expect(Buffer.from(readFileSync(imagePath))).toEqual(Buffer.from(original));
+        reads++;
+        return { stdout: JSON.stringify({ engine: 'apple_vision', totalPages: 1, pages: [{ page: 1, text: 'NATIVE HEIC', confidence: 0.9, lines: 1 }] }), stderr: '' };
+      } }),
+    });
+    const output = await extractor.extract(extractorInput({ bytes: original, mimeType: 'image/heic' }));
+    expect(output.status === 'indexed' && output.text).toContain('NATIVE HEIC');
+    expect(reads).toBe(1);
+  });
+
+  for (const failure of ['returned', 'thrown'] as const) {
+    test(`prepared photos survive ${failure} OCR failures and failed recovery does not loop`, async () => {
+      const snapshot = (): OcrCapabilitySnapshot => ({
+        tesseract: 'ok', pdftoppm: 'missing', ocrmypdf: 'missing',
+        imageEngine: 'tesseract', pdfEngine: undefined, checkedAt: 1,
+      });
+      const lane = setup({ photo: imageFixture('quadrants.jpg') }, new Set(ALL), {
+        imageOcr: async () => {
+          if (failure === 'thrown') throw new Error('OCR failed');
+          return { status: 'failed_retryable', errorKind: 'ocr_failed' };
+        },
+        ocrReread: createOcrRereadPolicy({ capability: {
+          snapshot: async () => snapshot(), peek: snapshot, peekFresh: snapshot, warm() {}, invalidate() {},
+        } }),
+      });
+      try {
+        expect((await lane.runner.run({ ...LANE })).counts.indexed).toBe(1);
+        expect(lane.jobs.artifacts(LANE.corpusId, 'personal:photo').flatMap(a => a.derivation.warnings ?? []))
+          .toContain('ocr_failed_image');
+        expect((await lane.runner.run({ ...LANE })).rereadRequeued).toBe(1);
+        for (let i = 0; i < 3; i++) expect((await lane.runner.run({ ...LANE })).rereadRequeued).toBeUndefined();
+        expect(lane.fetched).toHaveLength(2);
+        const jobId = lane.jobs.artifacts(LANE.corpusId, 'personal:photo')[0]!.jobId;
+        expect(lane.jobs.get(jobId)?.janitorTerminalRequeueCount).toBe(1);
+      } finally { lane.jobs.close(); }
     });
   }
 

@@ -25,6 +25,7 @@ import type {
   ExtractionDerivation,
   Extractor,
   ExtractorInput,
+  ExtractorFailureOutput,
   ExtractorOutput,
   ExtractorRereadPolicy,
 } from '../types.ts';
@@ -139,8 +140,7 @@ export interface TextExtractorOptions {
   imageOcrVersion?: boolean;
   /**
    * Prepares an image for media search (a JPEG copy in the media cache).
-   * Injected by the registry on macOS; absent elsewhere, which leaves images
-   * exactly as they were. With it, an image is indexed: a short descriptor
+   * Injected by the registry where a still-image preparer is available. With it, an image is indexed: a short descriptor
    * plus any text OCR read, with the prepared copy attached as `media`.
    */
   imagePreparation?: ImagePreparation;
@@ -161,7 +161,15 @@ export type PdfOcr = (input: {
   sizeBytes: number;
 }) => Promise<ExtractorOutput | undefined>;
 
-export type ImageOcr = PdfOcr;
+export type ImageOcr = (input: {
+  bytes: Uint8Array;
+  mimeType: string;
+  sizeBytes: number;
+  /**
+   * A decoded copy for command OCR; Vision continues to read the original.
+   */
+  preparedImage?: ExtractedMedia;
+}) => Promise<ExtractorOutput | undefined>;
 
 interface DerivedSlice {
   derivation: ExtractionDerivation;
@@ -261,42 +269,54 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
           prepared = await imagePreparation({ bytes, mimeType, sizeBytes: context.sizeBytes });
           if (prepared.kind === 'settled') return prepared.output;
           if (prepared.kind === 'media') {
-            let output: ExtractorOutput;
+            let ocr: ExtractorOutput | undefined;
             try {
-              const ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
-              output = preparedImageOutput(prepared.media, ocr, maxBoundedTextChars);
+              ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes, preparedImage: prepared.media });
+            } catch {
+              // Preparation already succeeded: an OCR fault must not discard
+              // the searchable picture. Its bounded recovery is independent.
+              ocr = { status: 'failed_retryable', errorKind: 'image_ocr_failed' };
+            }
+            try {
+              return preparedImageOutput(prepared.media, ocr, maxBoundedTextChars, imageOcr !== undefined);
             } catch (error) {
               releaseStaged(prepared.media);
               throw error;
             }
-            // A result that does not carry the picture on gives up the
-            // extraction's hold, so the cached copy does not outlive it.
-            if (output.status !== 'indexed') releaseStaged(prepared.media);
-            return output;
           }
         }
+        // The labelled format already waits on its version. A different
+        // format needs an independent marker, even when OCR reads its text.
+        const decoderWarnings = prepared?.kind === 'unavailable' && prepared.format
+          && prepared.format !== stillImageFormatForMimeType(mimeType)
+          ? [imageDecoderUnavailableWarning(prepared.format)] : [];
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
-        if (ocrOutput) return ocrOutput;
-        // The picture was not read because this machine cannot decode its
-        // format, and its media type named a different one (so the version
-        // does not wait on it). The item says which, so it is read again when
-        // that decoder appears.
-        if (prepared?.kind === 'unavailable' && prepared.format && prepared.format !== stillImageFormatForMimeType(mimeType)) {
-          return mediaDescriptorOutput({
-            mimeType,
-            sizeBytes: context.sizeBytes,
-            maxBoundedTextChars,
-            kind: 'image',
-            label: 'image file',
-            warnings: [imageDecoderUnavailableWarning(prepared.format)],
-          });
+        if (ocrOutput) {
+          if (decoderWarnings.length === 0) return ocrOutput;
+          if (imageOcrFailed(ocrOutput)) {
+            return mediaDescriptorOutput({
+              mimeType, sizeBytes: context.sizeBytes, maxBoundedTextChars,
+              kind: 'image', label: 'image file',
+              warnings: [...decoderWarnings, OCR_FAILED_IMAGE_WARNING],
+            });
+          }
+          // Recovery reads stored derivations, not top-level warnings. Keep
+          // the marker even for indexed or empty OCR without derivations.
+          return {
+            ...ocrOutput,
+            warnings: [...(ocrOutput.warnings ?? []), ...decoderWarnings],
+            derivations: [...(ocrOutput.derivations ?? []), buildDerivation({
+              artifact: 'media_descriptor', structural: { kind: 'image', label: 'pending photo decoder' },
+              bounded: boundText('', maxBoundedTextChars), warnings: decoderWarnings,
+            })],
+          };
         }
         // An OCR reader exists in this lane but did not run (no engine works
         // here yet): the picture is marked as waiting for it, so the reread
         // policy reads it when OCR works. A lane with no reader at all has
         // nothing to wait for and settles as it always did.
         const waitingForOcr = imageOcr !== undefined;
-        if (!imageMediaDescriptor && !waitingForOcr) {
+        if (!imageMediaDescriptor && !waitingForOcr && decoderWarnings.length === 0) {
           return { status: 'metadata_only' };
         }
         return mediaDescriptorOutput({
@@ -305,7 +325,11 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
           maxBoundedTextChars,
           kind: 'image',
           label: 'image file',
-          warnings: ['ocr_required', 'image_only', ...(waitingForOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : [])],
+          warnings: [
+            ...decoderWarnings,
+            ...(waitingForOcr || imageMediaDescriptor ? ['ocr_required', 'image_only'] : []),
+            ...(waitingForOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []),
+          ],
         });
       }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
@@ -372,15 +396,17 @@ export const IMAGE_OCR_VERSION_SUFFIX = '.image-ocr-2026-10-12';
 /**
  * An image prepared for media search: indexed, with the prepared copy as
  * `media` and a short descriptor plus whatever text OCR read as its text. An
- * OCR failure is returned as is, so the job retries or settles exactly as it
- * did before; an empty OCR read is just a photo without text.
+ * OCR failure leaves the photo searchable and marked for bounded recovery;
+ * missing OCR waits for readiness, and an empty read is a photo without text.
  */
 function preparedImageOutput(
   media: ExtractedMedia,
   ocr: ExtractorOutput | undefined,
   maxBoundedTextChars: number,
+  hasOcr: boolean,
 ): ExtractorOutput {
-  if (ocr && (ocr.status === 'failed_retryable' || ocr.status === 'failed_terminal')) return ocr;
+  const pending = !ocr && hasOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING]
+    : imageOcrFailed(ocr) ? [OCR_FAILED_IMAGE_WARNING] : [];
   const ocrText = ocr?.status === 'indexed' ? ocr.text : '';
   const bounded = boundText(
     normalizeExtractedText(ocrText ? `${IMAGE_MEDIA_DESCRIPTOR}\n${ocrText}` : IMAGE_MEDIA_DESCRIPTOR),
@@ -395,11 +421,16 @@ function preparedImageOutput(
         artifact: 'image_media',
         structural: { kind: 'image', label: 'prepared image' },
         bounded: boundText(IMAGE_MEDIA_DESCRIPTOR, maxBoundedTextChars),
+        warnings: pending,
       }),
       ...(ocr?.status === 'indexed' ? ocr.derivations ?? [] : []),
     ],
-    ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
+    warnings: [...bounded.warnings, ...(ocr?.warnings ?? []), ...pending],
   };
+}
+
+function imageOcrFailed(output: ExtractorOutput | undefined): output is ExtractorFailureOutput {
+  return output?.status === 'failed_retryable' || output?.status === 'failed_terminal';
 }
 
 /**
@@ -680,6 +711,11 @@ async function extractPdfTextWithCommand(input: {
  */
 export const OCR_UNAVAILABLE_PDF_WARNING = 'ocr_unavailable_pdf';
 export const OCR_UNAVAILABLE_IMAGE_WARNING = 'ocr_unavailable_image';
+/**
+ * OCR ran but failed while photo preparation succeeded. Unlike unavailable
+ * OCR, this gets only the job's once-ever recovery, never an endless retry.
+ */
+export const OCR_FAILED_IMAGE_WARNING = 'ocr_failed_image';
 
 export function isCommandMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';

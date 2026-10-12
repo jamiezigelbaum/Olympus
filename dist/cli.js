@@ -96366,14 +96366,19 @@ class LocalFileExtractionJobStore {
     const { sql, params } = this.unreadJobsQuery(request);
     const now = nowIso4();
     let matched = [];
+    const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken3(warning, "notReadyWarning"));
+    const pendingSql = notReady.length > 0 ? `EXISTS (
+      SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
+      WHERE a.job_id = j.job_id AND w.value IN (${notReady.map(() => "?").join(", ")})
+    )` : "0";
     let requeued = 0;
     this.db.transaction(() => {
       matched = this.db.query(`
-        SELECT j.job_id FROM extraction_jobs j
+        SELECT j.job_id, ${pendingSql} AS not_ready FROM extraction_jobs j
         WHERE ${sql}
         ORDER BY j.updated_at ASC, j.job_id ASC
         LIMIT ?
-      `).all(...params, limit);
+      `).all(...notReady, ...params, limit);
       const update = this.db.query(`
         UPDATE extraction_jobs
         SET status = 'queued',
@@ -96385,15 +96390,15 @@ class LocalFileExtractionJobStore {
             last_error_kind = ?,
             next_retry_at = NULL,
             janitor_requeue_count = COALESCE(janitor_requeue_count, 0) + 1,
-            janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1,
+            janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + ?,
             janitor_requeued_at = ?,
             janitor_requeue_reason = ?,
             updated_at = ?
         WHERE job_id = ?
-          AND status IN ('metadata_only', 'failed_terminal')
+          AND status IN ('metadata_only', 'indexed', 'failed_terminal')
       `);
       for (const row of matched) {
-        requeued += update.run(JANITOR_TERMINAL_ERROR_KIND, now, reason, now, row.job_id).changes;
+        requeued += update.run(JANITOR_TERMINAL_ERROR_KIND, row.not_ready ? 0 : 1, now, reason, now, row.job_id).changes;
       }
     })();
     return { matchedJobs: matched.length, jobsRequeued: requeued };
@@ -96428,7 +96433,7 @@ class LocalFileExtractionJobStore {
       )`;
     const onceGuard = "COALESCE(j.janitor_terminal_requeue_count, 0) < 1";
     if (warnings.length > 0) {
-      clauses.push(`(j.status = 'metadata_only' AND ${hasWarning(warnings)} AND (${onceGuard}${notReady.length > 0 ? ` OR ${hasWarning(notReady)}` : ""}))`);
+      clauses.push(`(j.status IN ('metadata_only', 'indexed') AND ${hasWarning(warnings)} AND (${onceGuard}${notReady.length > 0 ? ` OR ${hasWarning(notReady)}` : ""}))`);
       params.push(...warnings, ...notReady);
     }
     if (kinds.length > 0) {
@@ -97892,34 +97897,48 @@ function createTextExtractor(options = {}) {
           if (prepared.kind === "settled")
             return prepared.output;
           if (prepared.kind === "media") {
-            let output;
+            let ocr;
             try {
-              const ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context2.sizeBytes });
-              output = preparedImageOutput(prepared.media, ocr, maxBoundedTextChars);
+              ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context2.sizeBytes, preparedImage: prepared.media });
+            } catch {
+              ocr = { status: "failed_retryable", errorKind: "image_ocr_failed" };
+            }
+            try {
+              return preparedImageOutput(prepared.media, ocr, maxBoundedTextChars, imageOcr !== undefined);
             } catch (error2) {
               releaseStaged(prepared.media);
               throw error2;
             }
-            if (output.status !== "indexed")
-              releaseStaged(prepared.media);
-            return output;
           }
         }
+        const decoderWarnings = prepared?.kind === "unavailable" && prepared.format && prepared.format !== stillImageFormatForMimeType(mimeType) ? [imageDecoderUnavailableWarning(prepared.format)] : [];
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context2.sizeBytes });
-        if (ocrOutput)
-          return ocrOutput;
-        if (prepared?.kind === "unavailable" && prepared.format && prepared.format !== stillImageFormatForMimeType(mimeType)) {
-          return mediaDescriptorOutput({
-            mimeType,
-            sizeBytes: context2.sizeBytes,
-            maxBoundedTextChars,
-            kind: "image",
-            label: "image file",
-            warnings: [imageDecoderUnavailableWarning(prepared.format)]
-          });
+        if (ocrOutput) {
+          if (decoderWarnings.length === 0)
+            return ocrOutput;
+          if (imageOcrFailed(ocrOutput)) {
+            return mediaDescriptorOutput({
+              mimeType,
+              sizeBytes: context2.sizeBytes,
+              maxBoundedTextChars,
+              kind: "image",
+              label: "image file",
+              warnings: [...decoderWarnings, OCR_FAILED_IMAGE_WARNING]
+            });
+          }
+          return {
+            ...ocrOutput,
+            warnings: [...ocrOutput.warnings ?? [], ...decoderWarnings],
+            derivations: [...ocrOutput.derivations ?? [], buildDerivation({
+              artifact: "media_descriptor",
+              structural: { kind: "image", label: "pending photo decoder" },
+              bounded: boundText("", maxBoundedTextChars),
+              warnings: decoderWarnings
+            })]
+          };
         }
         const waitingForOcr = imageOcr !== undefined;
-        if (!imageMediaDescriptor && !waitingForOcr) {
+        if (!imageMediaDescriptor && !waitingForOcr && decoderWarnings.length === 0) {
           return { status: "metadata_only" };
         }
         return mediaDescriptorOutput({
@@ -97928,7 +97947,11 @@ function createTextExtractor(options = {}) {
           maxBoundedTextChars,
           kind: "image",
           label: "image file",
-          warnings: ["ocr_required", "image_only", ...waitingForOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []]
+          warnings: [
+            ...decoderWarnings,
+            ...waitingForOcr || imageMediaDescriptor ? ["ocr_required", "image_only"] : [],
+            ...waitingForOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []
+          ]
         });
       }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
@@ -97966,9 +97989,8 @@ function releaseStaged(media) {
   if (media.stagingHolder)
     releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname55(media.path));
 }
-function preparedImageOutput(media, ocr, maxBoundedTextChars) {
-  if (ocr && (ocr.status === "failed_retryable" || ocr.status === "failed_terminal"))
-    return ocr;
+function preparedImageOutput(media, ocr, maxBoundedTextChars, hasOcr) {
+  const pending = !ocr && hasOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : imageOcrFailed(ocr) ? [OCR_FAILED_IMAGE_WARNING] : [];
   const ocrText = ocr?.status === "indexed" ? ocr.text : "";
   const bounded = boundText(normalizeExtractedText(ocrText ? `${IMAGE_MEDIA_DESCRIPTOR}
 ${ocrText}` : IMAGE_MEDIA_DESCRIPTOR), maxBoundedTextChars);
@@ -97980,12 +98002,16 @@ ${ocrText}` : IMAGE_MEDIA_DESCRIPTOR), maxBoundedTextChars);
       buildDerivation({
         artifact: "image_media",
         structural: { kind: "image", label: "prepared image" },
-        bounded: boundText(IMAGE_MEDIA_DESCRIPTOR, maxBoundedTextChars)
+        bounded: boundText(IMAGE_MEDIA_DESCRIPTOR, maxBoundedTextChars),
+        warnings: pending
       }),
       ...ocr?.status === "indexed" ? ocr.derivations ?? [] : []
     ],
-    ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
+    warnings: [...bounded.warnings, ...ocr?.warnings ?? [], ...pending]
   };
+}
+function imageOcrFailed(output) {
+  return output?.status === "failed_retryable" || output?.status === "failed_terminal";
 }
 function textLaneAccepts(mimeType) {
   const normalized = normalizeMimeType2(mimeType);
@@ -98404,7 +98430,7 @@ function extractDelimitedText(input) {
     ...bounded.warnings.length > 0 ? { warnings: appendBoundedTextWarnings(undefined, bounded) } : {}
   };
 }
-var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX3 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OCR_UNAVAILABLE_PDF_WARNING = "ocr_unavailable_pdf", OCR_UNAVAILABLE_IMAGE_WARNING = "ocr_unavailable_image";
+var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX3 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OCR_UNAVAILABLE_PDF_WARNING = "ocr_unavailable_pdf", OCR_UNAVAILABLE_IMAGE_WARNING = "ocr_unavailable_image", OCR_FAILED_IMAGE_WARNING = "ocr_failed_image";
 var init_text = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -98752,7 +98778,7 @@ function createOcrRereadPolicy(options) {
     return pinned ? { pdf: seen.ocrmypdf === "ok", image: false } : { pdf: seen.pdfEngine !== undefined, image: seen.imageEngine !== undefined };
   };
   return {
-    unreadWarnings: ["ocr_required", OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
+    unreadWarnings: ["ocr_required", OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING, OCR_FAILED_IMAGE_WARNING],
     unreadTerminalErrorKinds: [],
     notReadyWarnings: [OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
     prepare() {
@@ -98767,7 +98793,7 @@ function createOcrRereadPolicy(options) {
       const ready = readyKinds();
       return [
         ...ready?.pdf ? ["ocr_required", OCR_UNAVAILABLE_PDF_WARNING] : [],
-        ...ready?.image ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []
+        ...ready?.image ? [OCR_UNAVAILABLE_IMAGE_WARNING, OCR_FAILED_IMAGE_WARNING] : []
       ];
     }
   };
@@ -98859,7 +98885,7 @@ function createImageOcr(options = {}) {
     timeoutMs,
     maxBoundedTextChars
   });
-  return async ({ bytes, mimeType, sizeBytes }) => {
+  return async ({ bytes, mimeType, sizeBytes, preparedImage }) => {
     if (!engine.vision && engine.pinned)
       return;
     const laneInput = commandLaneInput({
@@ -98872,7 +98898,13 @@ function createImageOcr(options = {}) {
       capability: engine.capability
     });
     try {
-      return await runOcrLane(async () => await withVision2(engine, (vision) => visionImage(laneInput, vision)) ?? await commandImageOcr(engine, laneInput));
+      return await runOcrLane(async () => {
+        const vision = await withVision2(engine, (reader) => visionImage(laneInput, reader));
+        if (vision)
+          return vision;
+        const decoded = preparedImage ? await readFile9(preparedImage.path) : undefined;
+        return commandImageOcr(engine, decoded ? { ...laneInput, bytes: decoded, mimeType: "image/jpeg", sizeBytes: decoded.byteLength } : laneInput);
+      });
     } catch (error2) {
       if (error2 instanceof OcrUnavailableError)
         return;

@@ -386,7 +386,7 @@ export interface Extractor {
 
 /**
  * Items a lane settled unread because its reader was missing (not because
- * of the file): `metadata_only` jobs whose derivation carries one of
+ * of the file): `metadata_only` or partly `indexed` jobs whose derivation carries one of
  * `unreadWarnings`, and `failed_terminal` jobs whose last error kind is one
  * of `unreadTerminalErrorKinds`. The runner asks `prepare()` only when such
  * jobs exist; `ready` requeues each of them once.

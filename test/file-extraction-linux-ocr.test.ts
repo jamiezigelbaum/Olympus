@@ -946,9 +946,9 @@ describe('rereading what OCR could not read', () => {
       capability: stub(seen), ...(preference ? { preference } : {}),
     }).readyWarnings!();
     expect(ready(base)).toEqual([]);
-    expect(ready({ ...base, imageEngine: 'tesseract' })).toEqual(['ocr_unavailable_image']);
+    expect(ready({ ...base, imageEngine: 'tesseract' })).toEqual(['ocr_unavailable_image', 'ocr_failed_image']);
     expect(ready({ ...base, imageEngine: 'tesseract', pdfEngine: 'pdftoppm_tesseract' }))
-      .toEqual(['ocr_required', 'ocr_unavailable_pdf', 'ocr_unavailable_image']);
+      .toEqual(['ocr_required', 'ocr_unavailable_pdf', 'ocr_unavailable_image', 'ocr_failed_image']);
     // Pinned: ocrmypdf runs directly, and pictures are not read in the text lane.
     expect(ready({ ...base, ocrmypdf: 'ok', imageEngine: 'tesseract', pdfEngine: 'ocrmypdf' }, 'tesseract'))
       .toEqual(['ocr_required', 'ocr_unavailable_pdf']);
@@ -1024,7 +1024,7 @@ describe('rereading what OCR could not read', () => {
     const policy = policyFor(snapshot({}));
     expect(policy.unreadTerminalErrorKinds).toEqual([]);
     expect(policy.notReadyWarnings).toEqual(['ocr_unavailable_pdf', 'ocr_unavailable_image']);
-    expect(policy.unreadWarnings).toEqual(['ocr_required', 'ocr_unavailable_pdf', 'ocr_unavailable_image']);
+    expect(policy.unreadWarnings).toEqual(['ocr_required', 'ocr_unavailable_pdf', 'ocr_unavailable_image', 'ocr_failed_image']);
   });
 
   test('a stale answer starts a background probe when the policy is asked', async () => {
