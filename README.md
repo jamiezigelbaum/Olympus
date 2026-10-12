@@ -465,8 +465,7 @@ linked device in place at the provider for you to remove there.
 
 ### Connect other agents
 
-Open **Agents** under the dashboard's **On this computer** and press
-**Connect an agent**. Pick the
+Open the dashboard's **Setup** page and press **Connect an agent**. Pick the
 agent you use and follow its steps; every address and snippet has a copy
 button.
 

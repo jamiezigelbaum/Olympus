@@ -2085,8 +2085,7 @@ the step is DONE, not broken.
 
 Only when the operator asks for it. Do not offer it as part of installation.
 
-- Send the operator to **Agents** under the dashboard's **On this computer**,
-  then **Connect an agent**. The
+- Send the operator to the dashboard's Setup page, **Connect an agent**. The
   panel carries each agent's exact steps; do not paraphrase them into chat.
 - Pairing codes and connection keys are minted by the operator in that panel
   (or `olympus connections pair` / `olympus connections add <name>`, run by

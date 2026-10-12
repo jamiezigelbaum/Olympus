@@ -605,8 +605,8 @@ instead: `Email worker is not reachable at http://127.0.0.1:8010/v1:`
 followed by the underlying connection error.
 
 To let other agents ask Olympus (Claude, ChatGPT, Grok, Muse, or Claude Code
-and Codex on this computer), open **Agents** under the dashboard's
-**On this computer** and press **Connect an agent** — see the README's "Connect other agents" section. Agents
+and Codex on this computer), open the dashboard's Setup page and press
+**Connect an agent** — see the README's "Connect other agents" section. Agents
 in the cloud also need remote access: press **Turn on remote access** in the
 same Agents section, and Olympus connects through the Olympus relay
 (`mcp.olympusplugin.ai`) with no account, tunnel or certificate agreement to
