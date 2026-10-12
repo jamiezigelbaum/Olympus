@@ -15,11 +15,16 @@ function value(s: string, exec = false): string {
  if (/[\x00-\x1f\x7f]/.test(s)) throw new Error('A systemd value contains control characters.');
  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, exec ? '$$$$' : '$');
 }
+/** Unquoted path settings (WorkingDirectory=, StandardOutput=append:) take no quoting or escapes: refuse what they cannot carry. */
+function pathValue(s: string): string {
+ if (/[\x00-\x1f\x7f"\\]/.test(s) || s !== s.trim() || !s.startsWith('/')) throw new Error('A systemd path setting needs an absolute path without quotes, backslashes, control characters or surrounding spaces.');
+ return s.replace(/%/g, '%%');
+}
 export function renderEngineSystemdUnit(l: LinuxEngineLayout, p: EngineProgram): string {
  const env = { HOME: l.home, PATH: `${dirname(p.runtimePath)}:/usr/bin:/bin`, OLYMPUS_ENGINE_HOST: '1', OLYMPUS_ENGINE_BUILD: p.build ?? '',
  XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome,
  OLYMPUS_SOVEREIGNTY_CONFIG: l.sovereigntyPath };
- return `[Unit]\nDescription=Olympus standalone engine\nStartLimitIntervalSec=0\n\n[Service]\nType=exec\nExecStart="${value(p.runtimePath,true)}" --no-env-file "${value(p.entryPath,true)}" __engine-run\nWorkingDirectory="${value(p.workingDirectory)}"\nEnvironment=${Object.entries(env).map(([k,v]) => `"${k}=${value(v)}"`).join(' ')}\nUMask=0077\nRestart=on-failure\nRestartSec=5\nRestartSteps=5\nRestartMaxDelaySec=300\nRestartPreventExitStatus=78\nKillMode=mixed\nTimeoutStopSec=30\nSendSIGKILL=yes\nStandardOutput=append:${value(join(l.stateDir,'engine.log'))}\nStandardError=append:${value(join(l.stateDir,'engine.err'))}\n\n[Install]\nWantedBy=default.target\n`;
+ return `[Unit]\nDescription=Olympus standalone engine\nStartLimitIntervalSec=0\n\n[Service]\nType=exec\nExecStart="${value(p.runtimePath,true)}" --no-env-file "${value(p.entryPath,true)}" __engine-run\nWorkingDirectory=${pathValue(p.workingDirectory)}\nEnvironment=${Object.entries(env).map(([k,v]) => `"${k}=${value(v)}"`).join(' ')}\nUMask=0077\nRestart=on-failure\nRestartSec=5\nRestartSteps=5\nRestartMaxDelaySec=300\nRestartPreventExitStatus=78\nKillMode=mixed\nTimeoutStopSec=30\nSendSIGKILL=yes\nStandardOutput=append:${pathValue(join(l.stateDir,'engine.log'))}\nStandardError=append:${pathValue(join(l.stateDir,'engine.err'))}\n\n[Install]\nWantedBy=default.target\n`;
 }
 export interface SystemdEngineFacts {
  state: 'running' | 'loaded' | 'not_loaded' | 'unknown'; enabled: boolean | null; active: boolean | null; failed: boolean | null;

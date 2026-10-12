@@ -60464,6 +60464,11 @@ function value(s, exec = false) {
     throw new Error("A systemd value contains control characters.");
   return s.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/%/g, "%%").replace(/\$/g, exec ? "$$$$" : "$");
 }
+function pathValue(s) {
+  if (/[\x00-\x1f\x7f"\\]/.test(s) || s !== s.trim() || !s.startsWith("/"))
+    throw new Error("A systemd path setting needs an absolute path without quotes, backslashes, control characters or surrounding spaces.");
+  return s.replace(/%/g, "%%");
+}
 function renderEngineSystemdUnit(l, p) {
   const env = {
     HOME: l.home,
@@ -60484,7 +60489,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=exec
 ExecStart="${value(p.runtimePath, true)}" --no-env-file "${value(p.entryPath, true)}" __engine-run
-WorkingDirectory="${value(p.workingDirectory)}"
+WorkingDirectory=${pathValue(p.workingDirectory)}
 Environment=${Object.entries(env).map(([k, v]) => `"${k}=${value(v)}"`).join(" ")}
 UMask=0077
 Restart=on-failure
@@ -60495,8 +60500,8 @@ RestartPreventExitStatus=78
 KillMode=mixed
 TimeoutStopSec=30
 SendSIGKILL=yes
-StandardOutput=append:${value(join57(l.stateDir, "engine.log"))}
-StandardError=append:${value(join57(l.stateDir, "engine.err"))}
+StandardOutput=append:${pathValue(join57(l.stateDir, "engine.log"))}
+StandardError=append:${pathValue(join57(l.stateDir, "engine.err"))}
 
 [Install]
 WantedBy=default.target

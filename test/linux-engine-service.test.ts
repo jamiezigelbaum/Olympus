@@ -15,6 +15,11 @@ test('unit has bounded backoff, config-exit suppression, cgroup custody, private
  for (const line of ['Type=exec', 'StartLimitIntervalSec=0', 'RestartSteps=5', 'RestartMaxDelaySec=300', 'RestartPreventExitStatus=78', 'KillMode=mixed', 'UMask=0077', 'TimeoutStopSec=30', 'SendSIGKILL=yes', 'Restart=on-failure']) expect(unit).toContain(line);
  expect(unit).toContain('"/a %%x/$$BUN/bun" --no-env-file "/a %%x/$$HOME/cli.js" __engine-run');
  expect(unit).toContain(`StandardOutput=append:${l.stateDir}/engine.log`);
+ // systemd rejects a quoted WorkingDirectory= ("path is not absolute"): found by the real Omarchy install.
+ expect(unit).toContain('\nWorkingDirectory=/a %%x/$HOME\n');
+ expect(unit).not.toMatch(/^(WorkingDirectory|StandardOutput|StandardError)=.*"/m);
+ expect(() => renderEngineSystemdUnit(l, { runtimePath: '/bin/bun', entryPath: '/cli', workingDirectory: '/a "b"', source: 'package' })).toThrow('quotes');
+ expect(() => renderEngineSystemdUnit(l, { runtimePath: '/bin/bun', entryPath: '/cli', workingDirectory: 'relative', source: 'package' })).toThrow('absolute');
  expect(unit).toContain(`XDG_CONFIG_HOME=${l.configHome}`);
  expect(unit).not.toContain('olympus-worker.service');
  expect(() => renderEngineSystemdUnit(l, { runtimePath: '/bin/bun\nExecStart=bad', entryPath: '/cli', workingDirectory: '/', source: 'package' })).toThrow('control');
