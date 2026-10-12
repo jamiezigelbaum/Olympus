@@ -1630,7 +1630,7 @@ operator is actually using: `/plugin?plugin=olympus&id=dashboard`. Copy the work
 not assume port 18789, reuse the agent host's localhost origin for a remote
 operator, or link only to the OpenClaw chat homepage. Verify that the page loads
 and shows the Olympus panel (its Sources and Models sections; Progress appears
-only while something is being read or indexed) before handing it over.
+only while something is being found, read or indexed) before handing it over.
 The Control UI panel has no **On this computer** section; there, **Change**
 under **Models** offers **Do this on your computer**, which opens **Keys** on
 the Olympus computer. Native plugin pages need
