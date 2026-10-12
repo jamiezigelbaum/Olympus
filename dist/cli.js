@@ -13005,8 +13005,8 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
   try {
     chmodSync4(dbPath, 384);
     const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
-    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA secure_delete = ON;`);
-    const mode = db.query("PRAGMA journal_mode = DELETE").get()?.journal_mode;
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE;`);
+    const mode = db.query("PRAGMA journal_mode").get()?.journal_mode;
     if (mode !== "delete")
       throw new Error("The waiting private questions store could not use its rollback journal yet.");
     db.transaction(() => {
