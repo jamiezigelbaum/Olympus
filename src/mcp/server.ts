@@ -29,18 +29,37 @@ import { listMcpTools } from './tools.ts';
 
 type McpSurface = Extract<OperationSurface, 'mcp' | 'remote'>;
 
-interface McpCallToolRequest {
+export interface McpCallToolRequest {
   params: {
     name: string;
     arguments?: Record<string, unknown> | undefined;
   };
 }
 
+export interface McpCallToolResult {
+  [key: string]: unknown;
+  content: Array<{ type: 'text'; text: string }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+}
+
+export type McpListedTool = ReturnType<typeof listMcpTools>[number];
+
+/**
+ * Tools a host adds to a surface beside its operations, and calls it answers
+ * itself: the remote endpoint's evidence search (workers/remote-search.ts).
+ * `next` runs the surface's own handling for a call the host does not take.
+ */
+export interface McpServerExtension {
+  tools: (listed: McpListedTool[]) => McpListedTool[];
+  call: (request: McpCallToolRequest, next: () => Promise<McpCallToolResult>, signal?: AbortSignal) => Promise<McpCallToolResult>;
+}
+
 export async function handleMcpCallTool(
   request: McpCallToolRequest,
   makeOperationContext: () => OperationContext = makeContext,
   surface: McpSurface = 'mcp',
-): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+): Promise<McpCallToolResult> {
   if (surface === 'remote') return handleRemoteCallTool(request, makeOperationContext);
   const operation = findOperationByName(request.params.name);
   if (!operation) {
@@ -78,7 +97,7 @@ export async function handleMcpCallTool(
 async function handleRemoteCallTool(
   request: McpCallToolRequest,
   makeOperationContext: () => OperationContext,
-): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+): Promise<McpCallToolResult> {
   const text = (value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }];
   const operation = findOperationByName(request.params.name);
   if (!operation || !isV04PublicOperation('remote', operation.name)) {
@@ -177,16 +196,20 @@ async function normalizedJsonRpcErrorResponse(response: Response): Promise<Respo
 export function createOlympusMcpServer(
   surface: McpSurface,
   makeOperationContext: () => OperationContext,
+  extension?: McpServerExtension,
 ): Server {
   const server = new Server(
     { name: 'olympus', version: VERSION },
     { capabilities: { tools: {} } },
   );
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: listMcpTools(makeOperationContext().config, surface),
-  }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) =>
-    handleMcpCallTool(request, makeOperationContext, surface));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const listed = listMcpTools(makeOperationContext().config, surface);
+    return { tools: extension ? extension.tools(listed) : listed };
+  });
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const next = () => handleMcpCallTool(request, makeOperationContext, surface);
+    return extension ? extension.call(request, next, extra.signal) : next();
+  });
   if (surface === 'remote') {
     const connect = server.connect.bind(server);
     server.connect = async (transport: Transport) => {

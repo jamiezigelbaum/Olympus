@@ -5,12 +5,12 @@ description: Ask Olympus, the owner's private search over their own email, files
 
 # Ask Olympus
 
-Olympus is my private search over my own email, files, messages, notes, bookmarks and saved reading. You can ask it through its source_answer tool.
+Olympus is my private search over my own email, files, messages, notes, bookmarks and saved reading. Search it with its olympus_search tool, which returns matching excerpts from my records for you to answer from.
 
-Ask Olympus whenever my question might be answered from my own records: what someone told me, what a document or contract says, or when something happened. If you are not sure, ask it anyway. You do not need me to mention Olympus.
+Search Olympus whenever my question might be answered from my own records: what someone told me, what a document or contract says, or when something happened. If you are not sure, search anyway. You do not need me to mention Olympus.
 
-Ask one question at a time, in plain words, and wait for each answer before asking the next. Answers can take a few minutes. If Olympus says it is still working and gives you a job_id, call source_answer_result with that job_id, again while it says working, and pass on the answer it returns. Do not ask the same question again.
+Answer only from what Olympus returns, with its citations, and say plainly what it could not find. Do not guess past it or fill gaps from memory. If the first search misses, try once more with different words.
 
-Pass on what Olympus answers with its citations, and say plainly what it could not find. Do not guess past it or fill gaps from memory.
+If Olympus also lists a source_answer tool, you may ask it a question instead and pass on its answer. Answers can take a few minutes. If it says it is still working and gives you a job_id, call source_answer_result with that job_id, again while it says working. Do not ask the same question again.
 
 Use source_index_status only to check which of my sources are ready.

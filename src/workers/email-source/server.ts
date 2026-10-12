@@ -5239,6 +5239,12 @@ export async function main(): Promise<void> {
           // self-registered connections keep the remote operation surface; a
           // demo sign-in grant gets the read-only tools. The dashboard tool
           // reads the view `/dashboard.json` serves, in-process.
+          // Every other caller (Claude, Grok, Grok Bot or Cursor, keys)
+          // gets the same evidence search, so it can answer on an install
+          // with no answer model (workers/remote-search.ts).
+          ...(chatgptEvidenceSearch
+            ? { search: { evidenceSearch: chatgptEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } }
+            : {}),
           chatgpt: {
             servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),
             readOnlyFor: isDemoGrant,

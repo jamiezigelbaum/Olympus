@@ -66,6 +66,10 @@
       "approval": "In chat: yes approved, merge it (Agents page through the relay: Claude and Grok one click on this computer like ChatGPT, Claude works on the phone after, label Grok (grok.com); screenshot sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).",
       "screenshot_commit": "72230e74afe9298f9be87bc4c014960e187d98a5",
       "rendered_from_commit": "72230e74afe9298f9be87bc4c014960e187d98a5",
+      "pending_review": {
+        "reason": "The pasted agent instructions now lead with olympus_search (Claude, Grok and Grok Bot answer from Olympus search on installs with no answer model); this render awaits Jamie's re-approval.",
+        "candidate_rendered_html_sha256": "e8d05abf2980aeadad64659531a4bdaac5d3eaac936c8d9b371cf1e280d6bc9b"
+      },
       "prior_approval": {
         "rendered_html_sha256": "053b0b6e802ae5f78030771b5dc80f465066884b68f1757b9d8d49d1d18201a2",
         "approved_on": "2026-10-12",
