@@ -12,7 +12,10 @@ own machine, sources open from an answer, the ChatGPT engine installs and
 runs as a managed service, and the zkAPI private lane is confined at least as
 tightly as on a Mac, or Olympus refuses or states plainly how much weaker it
 is. Linux means x86_64 and arm64, glibc, systemd user services, with or
-without a desktop session.
+without a desktop session. The primary desktop target is Omarchy (Arch,
+Hyprland on Wayland, pacman); Ubuntu 24.04 (Sparta) is the primary headless
+target. Owner direction 2026-10-12: Olympus itself must run on Linux;
+where the AI client runs does not matter.
 
 The first real user is Sparta. Stage 2 of the approved Sparta fresh install
 ("Linux photo processing") is W3. Every change is a product capability for
@@ -74,6 +77,8 @@ deferred for it is reread automatically once the capability appears.
 Unsupported-host tests (tool missing, kernel lacking a feature) are separate
 from enforcement tests, and enforcement tests may not skip silently.
 
+- Omarchy (current release, real install or VM): W1, W3, W4, W5, including
+  opening sources on the Hyprland desktop and the pacman remedy commands.
 - Ubuntu 24.04, kernel 6.8, AppArmor userns restriction on: W1, W3, W4, W5.
 - Linux arm64: W3 (LiteRT vision), W4 launcher, W5 install.
 - Mac regression proof for every gate that changes.
@@ -101,9 +106,13 @@ use a named runner or a recorded Sparta/Delphi run per PR.
 Acceptance: missing tool → install tool → unchanged source reread to text,
 for a PDF and an image, on Ubuntu 24.04; Mac unchanged.
 
-### W2. Built-in models on Linux: two measured defaults (small code)
+### W2. Built-in models on by default on Linux (small code)
 
-Two separate decisions, the private model and transcription.
+Owner decision 2026-10-12: Linux uses the same built-in models as the Mac
+(Qwen3.5 for private answers, sized by memory as on the Mac; Qwen3-ASR for
+transcription, on the same llama.cpp runtime), on by default. The
+measurements below confirm they are usable and set the floor below which a
+machine is told it is too small, rather than deciding whether to ship them.
 
 1. Measure on Sparta with production thread limits, cold and warm, while
    indexing runs: private-answer time to first token, total time for a
@@ -116,8 +125,9 @@ Two separate decisions, the private model and transcription.
    threshold. Env `on`/`off` still wins.
 3. Out of scope: Vulkan/ROCm builds for integrated GPUs, unless CPU fails.
 
-Acceptance: unit tests for each rule; measurements recorded here; owner
-decides each default from the numbers.
+Acceptance: unit tests for each rule; measurements recorded here; Sparta
+and Omarchy answer a Private question and transcribe a voice note with no
+env settings.
 
 ### W3. Photos searchable on Linux (medium; Sparta stage 2)
 
@@ -188,7 +198,10 @@ Acceptance: the full self-test matrix on Ubuntu 24.04 with the AppArmor
 restriction on and off, and on arm64; refusal proven when confinement
 fails; Mac unchanged.
 
-### W5. ChatGPT path on Linux: engine service and install (large)
+### W5. Olympus without OpenClaw on Linux: engine service and install (large)
+
+On Linux today Olympus runs only inside OpenClaw. The standalone engine,
+which ChatGPT and other clients reach through the relay, refuses Linux.
 
 1. `olympus engine` on Linux as a user systemd service: install, status,
    stop, restart, upgrade with rollback, process cleanup, uninstall, XDG
@@ -224,18 +237,19 @@ Independent work runs in parallel and lands when proven:
 
 - Now: W1; W2 measurement; W3 (Sparta stage 2); W4 namespace prototype on
   Sparta; W5 lifecycle design.
-- W2 defaults once the owner decides from the numbers.
 - W4 lands after independent review.
 - W5's user-facing copy, listing and demo-box changes after the OpenAI
   review closes.
 
 ## Decisions for the owner
 
-1. Private model on Linux by default: decide from the W2 numbers.
-2. Transcription on Linux by default: decide from the W2 numbers.
-3. HEIC and other formats the host cannot decode: prepare what the host can
-   and report the rest. Recommended.
-4. zkAPI on a host that cannot run the namespace (stock Ubuntu 24.04 without
+Decided 2026-10-12: built-in models on by default on Linux (W2); photos
+the host cannot decode are reported, the rest indexed (W3); Omarchy is a
+first-class target.
+
+Open:
+
+1. zkAPI on a host that cannot run the namespace (stock Ubuntu 24.04 without
    an admin step): refuse the lane and offer the one-time admin step, or
    allow the clearly disclosed weaker mode. Recommendation: refuse by
    default and offer the admin step; the weaker mode only if you want the
