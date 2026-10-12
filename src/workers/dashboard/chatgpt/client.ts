@@ -1713,7 +1713,29 @@ export function chatgptDashboardClient(
     add(page, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data.progress, true));
     add(page, modelsSection(data.models));
     add(page, computerSection());
+    add(page, moreOnComputer());
     return page;
+  }
+
+  /**
+   * Away from the computer (ChatGPT, OpenClaw), one quiet line in place of
+   * the On this computer section: what lives only there, and Open on the
+   * view model's `computerControls` page. Not while the whole page waits on
+   * the connection. In remote mode Open shows the tunnel instructions in
+   * place, as howLink does.
+   */
+  function moreOnComputer(): HTMLElement | null {
+    if (onComputer() || GLOBAL_STATES.indexOf(connectionState()) >= 0) return null;
+    const href = helpHref(state.data.computerControls && state.data.computerControls.href);
+    if (!href) return null;
+    const key = 'more-on-computer';
+    const line = add(el('div', 'section more-on-computer'), el('p', 'muted', P.moreOnComputer));
+    const remote = remoteMode();
+    const open = button(P.moreOnComputerOpen, key, remote ? () => toggleRemote(key) : () => openLink(href), 'plain');
+    open.className = 'btn link';
+    open.setAttribute('aria-label', P.moreOnComputerOpenLabel);
+    if (remote) open.setAttribute('aria-expanded', state.open['remote:' + key] ? 'true' : 'false');
+    return add(line, open, remote ? remoteBox(key, href) : null);
   }
 
   /**
