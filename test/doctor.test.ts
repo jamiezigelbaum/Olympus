@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
+import { SecretStoreError } from '../src/core/secret-store.ts';
 import { runDoctor } from '../src/core/doctor.ts';
 import { stillImageReadinessOf } from '../src/core/still-image-readiness.ts';
 import type { DoctorCheck, DoctorDeps } from '../src/core/doctor.ts';
@@ -1378,6 +1379,29 @@ describe('runDoctor', () => {
     const prerequisites = checkByName(result.checks, 'sovereignty_prerequisites');
     expect(prerequisites.ok).toBe(true);
     expect(checkByName(result.checks, 'sovereignty_model_lanes').ok).toBe(true);
+  });
+
+  test('doctor reports typed backend failure instead of a missing zkAPI credential', async () => {
+    const policy = structuredClone(loadSovereigntyPreset('private-cloud-only'));
+    (policy.modelProfiles as Record<string, unknown>)['zkapi-consult'] = {
+      provider: 'zkapi', trust: 'standard_cloud', purpose: 'consult',
+      baseUrl: 'http://localhost:8787/v1', model: 'openai/gpt-5-mini',
+      secretRef: 'store:fixture',
+      zkapi: { fundingDate: '2026-10-01', acknowledgements: { version: 0, accepted: [] } },
+    };
+    const result = await runDoctor(doctorDeps({
+      config: defaultConfig(),
+      delphi: healthyDelphi(),
+      sovereigntyEngine: createSovereigntyEngine(policy),
+      secretStore: {
+        getSync: () => { throw new SecretStoreError('locked', 'libsecret is locked.'); },
+        get: async () => { throw new SecretStoreError('locked', 'libsecret is locked.'); },
+      },
+    }));
+    const check = checkByName(result.checks, 'zkapi_consult_transport');
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('secret store locked');
+    expect(check.detail).not.toContain('missing');
   });
 
   test('an unreachable secret is still reported while the local lane is left to its own probe', async () => {

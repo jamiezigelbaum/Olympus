@@ -1,6 +1,7 @@
 # Standalone Olympus engine on Linux (W5)
 
-Status: lifecycle design, 2026-10-12. Not implemented or host-qualified.
+Status: lifecycle design, 2026-10-12. PR 2 implemented in the SECRETS track;
+remaining landing rows and real-host qualification are pending.
 Code baseline: `12ccfcae62a695d0a3db8021e6c79b409cb52c77`. All repository
 `file:line` references below refer to that revision. Statements under
 “Current contract” describe inspected code; subsequent sections specify work
@@ -420,6 +421,33 @@ Passphrase stores require an explicitly
 provisioned unlock mechanism; a locked store is visibly unavailable after
 boot. No passphrase in unit text, argv, journal or persistent plaintext env
 file, and no unattended-readiness claim without proving unlock.
+
+### PR 2 implementation seam (2026-10-12)
+
+The SECRETS implementation persists `{ "version": 1, "backend": "file" }`
+in `$XDG_CONFIG_HOME/olympus/secret-backend.json` before the Linux default
+factory returns a credential consumer. Explicit `libsecret` selection is
+persisted in the same file; conflicting ambient selections refuse. Existing
+ciphertext/key files without that record require recovery or a fresh layout,
+never migration. `secrets.enc` and `secrets.key` use the table's config root.
+
+PR 1a integration point: replace `resolveLinuxSecretPaths` in
+`src/core/linux-secret-backend.ts` with the shared receipt-bound resolver.
+Until then it resolves and validates absolute HOME/XDG paths, and callers can
+supply `encryptedFilePath`, `keyFilePath`, and `backendFilePath`. The installer
+must resolve selection before starting consumers; CLI and service must receive
+the same receipt-bound paths. This local resolver does not discover receipts.
+
+The optional Secret Service backend requires `/usr/bin/python3` with
+PyGObject/Gio (`python-gobject` on Arch; `python3-gi` on Debian/Ubuntu) and an
+already provisioned, unlocked user Secret Service. It uses D-Bus directly:
+`secret-tool`'s password helpers may unlock during access, so they cannot
+preserve the no-interactive-unlock rule across a lock race. Every helper has
+a five-second SIGKILL deadline; neither Unlock nor Prompt is invoked. Missing
+dependencies refuse as unavailable. Its explicit `probe()` exercises disposable
+write/read/delete and reports failed cleanup, but proves no reboot unlock.
+CI exercises a private fake Secret Service; real Omarchy logout/reboot,
+unattended file access, and desktop keyring behavior remain host acceptance.
 
 ## Desktop source opening and headless approval
 
