@@ -513,7 +513,8 @@ export function transcriptionDeadlineFromLease(leaseExpiresAt: string | undefine
 
 /**
  * The process's one built-in transcriber, or undefined where it is off
- * (`OLYMPUS_BUILT_IN_TRANSCRIPTION`, default on for Apple silicon only).
+ * (`OLYMPUS_BUILT_IN_TRANSCRIPTION`, default on where a runtime is pinned and
+ * the audio decoder is installed).
  */
 export function sharedBuiltInTranscriber(
   env: Record<string, string | undefined> = process.env,

@@ -97,9 +97,12 @@ describe('model choice', () => {
     }
   });
 
-  test('on by default on Apple silicon only; the env switch wins', () => {
+  test('on by default wherever a runtime is pinned; the env switch wins', () => {
     expect(builtInAnalystEnabled({}, 'darwin-arm64')).toBe(true);
-    expect(builtInAnalystEnabled({}, 'linux-x64')).toBe(false);
+    expect(builtInAnalystEnabled({}, 'linux-x64')).toBe(true);
+    expect(builtInAnalystEnabled({}, 'linux-arm64')).toBe(true);
+    expect(builtInAnalystEnabled({}, 'darwin-x64')).toBe(false);
+    expect(builtInAnalystEnabled({ OLYMPUS_BUILT_IN_ANALYST: 'off' }, 'linux-x64')).toBe(false);
     expect(builtInAnalystEnabled({ OLYMPUS_BUILT_IN_ANALYST: 'on' }, 'linux-x64')).toBe(true);
     expect(builtInAnalystEnabled({ OLYMPUS_BUILT_IN_ANALYST: 'off' }, 'darwin-arm64')).toBe(false);
     expect(builtInAnalystEnabled({ OLYMPUS_BUILT_IN_ANALYST: 'on' }, 'win32-x64')).toBe(false);
