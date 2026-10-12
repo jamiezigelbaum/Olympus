@@ -10,7 +10,8 @@
  * vendors that load skills. A test holds the two equal.
  *
  * It names only the remote tools (`olympus_search`, `source_answer`,
- * `source_answer_result`, `source_index_status`) and promises nothing the
+ * `source_answer_result`, `source_index_status`, `ask_anonymously`, which an
+ * agent uses only when asked: it can cost money) and promises nothing the
  * privacy rules do not already enforce. Agents reaching `/mcp` from outside
  * get `olympus_search` (workers/remote-search.ts), and source_answer only
  * where an answer model runs on the computer; agents on the computer (stdio
@@ -42,6 +43,8 @@ export const AGENT_INSTRUCTION_TEXT = [
     + 'Do not guess past it or fill gaps from memory.',
   '',
   'Use source_index_status only to check which of my sources are ready.',
+  '',
+  'Use ask_anonymously only when I ask you to send a question anonymously.',
 ].join('\n');
 
 /** The packaged SKILL.md, byte for byte. */
