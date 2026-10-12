@@ -110,19 +110,19 @@ export function isApprovedSecureSourceEmbeddingProvider(provider: Pick<SourceEmb
 }
 
 /**
- * The embedding provider a local lane may hold: the built-in model, already
- * on this computer, or nothing (the lane then searches by keyword). Anything
+ * The embedding provider a local lane may hold: the built-in model as this
+ * process already holds it (`loadedOnly`, which never installs, downloads or
+ * starts a model), or nothing (the lane then searches by keyword). Anything
  * reached over HTTP (a cloud service, a configured "local" server that may be
- * another machine) is refused, and so is a built-in model that would have to
- * download first.
+ * another machine) is refused.
  */
 export function builtInEmbeddingOnly(
   provider: SourceEmbeddingProvider | undefined,
-  isBuiltInReady: (provider: SourceEmbeddingProvider) => boolean,
+  loadedOnly: (provider: SourceEmbeddingProvider) => SourceEmbeddingProvider | undefined,
 ): SourceEmbeddingProvider | undefined {
   if (!provider || provider.backend !== 'local') return undefined;
   try {
-    return isBuiltInReady(provider) ? provider : undefined;
+    return loadedOnly(provider);
   } catch {
     return undefined;
   }

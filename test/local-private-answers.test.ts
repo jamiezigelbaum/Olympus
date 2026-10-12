@@ -33,8 +33,11 @@ import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../s
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
 import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
-import { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } from '../src/workers/chatgpt/private-answer-model.ts';
-import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
+import { createBuiltInPrivateAnswerModel, type PanelAnswerLimits } from '../src/workers/chatgpt/private-answer-model.ts';
+import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
+import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { VERSIONED_FIXTURE_ITEMS, versionedFixtureHits } from '../eval/fixtures/versioned-documents.ts';
+import { defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
@@ -42,20 +45,20 @@ import { DASHBOARD_COMPUTER_PANEL_COPY } from '../src/workers/dashboard/vocabula
 import { createDashboardPanelTools, type DashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
 import { DASHBOARD_TOOLS_CALL_PATH } from '../src/workers/dashboard/host-page.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { createLocalPrivateAnswers, type LocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
+import { createLocalAnswerPath, createLocalPrivateAnswers, type LocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
+import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
 import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, DASHBOARD_PRIVATE_ANSWERS_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
+import { installBuiltInEmbedding, reportBuiltInEmbeddingState } from '../src/workers/source-index/built-in-embedding/assets.ts';
+import { ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2 } from '../src/workers/source-index/built-in-embedding/manifest.ts';
+import { BuiltInEmbeddingNotReadyError, BuiltInSourceEmbeddingProvider, loadedBuiltInEmbedding } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import {
-  answerOnThisComputer,
   builtInEmbeddingOnly,
-  checkLocalEvidenceItems,
-  readLocalEvidenceItem,
   type LocalAnswerRequest,
   type LocalAnswerResult,
 } from '../src/workers/source-index/local-answer.ts';
-import type { SourceIndexAnswerRequest } from '../src/workers/source-index/answer-types.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import {
   FIXTURE_PLACEMENT,
@@ -65,6 +68,7 @@ import {
   openTierFixture,
   tempDir,
   type FixtureSpec,
+  type TierFixture,
 } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
@@ -114,7 +118,7 @@ function denyNetwork() {
 // ---- the built-in models' stand-ins -------------------------------------------
 
 /** The built-in private model: a canned completion behind the real answerPrivately and Analyst. */
-function stubBuiltInModel(text: string) {
+function stubBuiltInModel(text: string, duringSynthesis?: () => Promise<void>) {
   const requests: AnalystModelRequest[] = [];
   const model: BuiltInAnalystModel = {
     name: 'built_in',
@@ -124,6 +128,7 @@ function stubBuiltInModel(text: string) {
     async stop() {},
     async complete(request) {
       requests.push(request);
+      await duringSynthesis?.();
       return { text, modelId: `built_in/${QWEN35_4B.modelId}` };
     },
   };
@@ -151,78 +156,166 @@ const CLOUD_ONLY_CORPUS = 'internal.fixture.cloud_mail';
 const NO_ADAPTER_CORPUS = 'secure_local.fixture.elsewhere';
 const SOURCE_NAMES: Record<string, string> = { [CLOUD_ONLY_CORPUS]: 'Cloud mail', [NO_ADAPTER_CORPUS]: 'Other files' };
 
+/** A word-count vector: related text scores close, as a real model's would. */
+function bagOfWords(text: string, dimension: number): Float32Array {
+  const vector = new Float32Array(dimension);
+  for (const word of text.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
+    let hash = 0;
+    for (const char of word) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+    vector[hash % dimension]! += 1;
+  }
+  vector[0]! += 0.01;
+  return vector;
+}
+
 /**
- * The lanes the worker builds for a local answer, over a real tier fixture:
- * the scoped adapters and content providers of each mounted store, with only
- * the built-in embedding model (`builtInEmbeddingOnly`), as server.ts wires
- * `sourceAnswerLanes(request, 'built_in_only')`.
+ * The built-in embedding model's state on this computer:
+ * - `loaded`: installed and loaded by this process (as warm() leaves it at boot);
+ * - `stale_ready_litert` / `stale_ready_onnx`: the status file still says
+ *   ready, but the files are gone and nothing is loaded here;
+ * - `damaged_runtime`: says ready, files present, but the runtime cannot start.
  */
-async function localFixture() {
+type BuiltInEmbeddingState = 'loaded' | 'stale_ready_litert' | 'stale_ready_onnx' | 'damaged_runtime';
+
+/**
+ * The real built-in embedding provider, its control flow untouched: only the
+ * model runtime (a LiteRT helper stand-in) and, where noted, the installer
+ * are replaced. Every install and runtime start is recorded; the stale
+ * states fall through to the real installer, which downloads what is missing.
+ */
+async function builtInEmbedding(state: BuiltInEmbeddingState) {
+  const { dir, cleanup } = tempDir('olympus-local-embedding-');
+  cleanups.push(cleanup);
+  const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
+  const model = state === 'stale_ready_onnx' || state === 'damaged_runtime' ? ARCTIC_EMBED_M_V1_5 : EMBEDDINGGEMMA_2;
+  const installs: string[] = [];
+  const starts: string[] = [];
+  const embedded: string[] = [];
+  const provider = new BuiltInSourceEmbeddingProvider({
+    env,
+    model,
+    install: async (options) => {
+      installs.push(model.modelId);
+      if (state === 'loaded' || state === 'damaged_runtime') {
+        return { modelPath: join(dir, 'model.bin'), runtimeDir: dir, libraryPath: join(dir, 'liblitert.so'), vocabularyPath: join(dir, 'vocab.txt') };
+      }
+      return installBuiltInEmbedding(options);
+    },
+    liteRt: async () => {
+      starts.push('litert');
+      return {
+        device: 'cpu' as const,
+        vision: false,
+        async embed(items) {
+          return items.map((item) => {
+            const text = typeof item === 'string' ? item : item.text;
+            embedded.push(text);
+            return bagOfWords(text, model.dimension);
+          });
+        },
+        async release() {},
+      };
+    },
+    runtime: () => {
+      starts.push('onnx');
+      throw new Error('the runtime is damaged');
+    },
+  });
+  if (state === 'loaded') await provider.prepare();
+  else reportBuiltInEmbeddingState({ env, model }, 'ready');
+  // Vectors under this model's identity, so a search would embed the query with it.
+  const vectors: SourceEmbeddingProvider = state === 'loaded'
+    ? provider
+    : {
+      provider: provider.provider,
+      modelId: provider.modelId,
+      dimension: provider.dimension,
+      configHash: provider.configHash,
+      epochId: provider.epochId,
+      backend: provider.backend,
+      embed: async (inputs) => inputs.map((input) => Array.from(bagOfWords(input.text, model.dimension))),
+    };
+  return { provider, vectors, installs, starts, embedded, env, model };
+}
+
+/** Tier-fixture specs with a saved date each, as a file source reports it. */
+function datedConnector(specs: readonly FixtureSpec[], dates: Readonly<Record<string, string>>) {
+  const base = fixtureConnector(() => specs);
+  const dated = <T extends { identity: { providerItemId: string }; metadata: Readonly<Record<string, unknown>> }>(item: T): T => {
+    const date = dates[item.identity.providerItemId];
+    return date ? { ...item, metadata: Object.freeze({ ...item.metadata, authoredAt: date }) } : item;
+  };
+  return {
+    ...base,
+    listItems() {
+      const pages = base.listItems();
+      return (async function* () {
+        for await (const page of pages) yield { ...page, items: page.items.map(dated) };
+      })();
+    },
+    async fetchItem(localItemId: string) {
+      return dated(await base.fetchItem(localItemId));
+    },
+  } as typeof base;
+}
+
+/**
+ * The worker's own local answer path over a real tier fixture: the shared
+ * lane factory server.ts uses (createSourceAnswerLanes, narrowed by
+ * `built_in_only`, with the production `loadedBuiltInEmbedding`), and the
+ * shared wiring (createLocalAnswerPath). The Private store's vectors are the
+ * built-in model's; the Personal store's a cloud model's, which a local
+ * answer must never call.
+ */
+async function localFixture(options: {
+  embedding?: BuiltInEmbeddingState;
+  specs?: readonly FixtureSpec[];
+  privateIds?: readonly string[];
+  dates?: Readonly<Record<string, string>>;
+  answer?: string;
+  limits?: Partial<PanelAnswerLimits>;
+  duringSynthesis?: (fixture: TierFixture) => Promise<void>;
+} = {}) {
   const { dir, cleanup } = tempDir('olympus-local-answer-');
   const fixture = openTierFixture(dir);
   cleanups.push(() => {
     fixture.close();
     cleanup();
   });
-  await fixture.set.sync(fixtureConnector(() => SPECS), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const specs = options.specs ?? SPECS;
+  await fixture.set.sync(datedConnector(specs, options.dates ?? {}), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   // The lease papers are Private: their names and contents live in the Private store.
-  for (const id of ['lease', 'deposit']) {
+  for (const id of options.privateIds ?? ['lease', 'deposit']) {
     await moveTieredItem({ set: fixture.set, identity: identityOf(id), target: { metadataTier: 'secure', contentTier: 'secure' } });
   }
-  // The Private store's vectors come from the built-in model; the Personal
-  // store's from a cloud model, which a local answer must never call.
-  await fixture.stores.secure_local!.embedChunks({ provider: fixture.local });
+  const builtIn = await builtInEmbedding(options.embedding ?? 'loaded');
+  await fixture.stores.secure_local!.embedChunks({ provider: builtIn.vectors });
   await fixture.stores.internal!.embedChunks({ provider: fixture.cloud });
-  // The built-in embedding model, installed here.
-  const builtIn = fixture.local;
-  const ready = (provider: SourceEmbeddingProvider) => provider === builtIn;
-  const lanes = (request: SourceIndexAnswerRequest) => {
-    const stores = fixture.set.openStores();
-    const embeddingFor = (trustDomain: string) => builtInEmbeddingOnly(trustDomain === 'secure_local' ? fixture.local : fixture.cloud, ready);
-    return {
-      registry: buildSourceIndexCorpusRegistry([
-        ...stores.map((store) => defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })),
-        defineSourceIndexCorpus({ corpusId: CLOUD_ONLY_CORPUS, family: 'email', trustDomain: 'internal', storageProfileInput: { cloudQueryApproved: true } }),
-        defineConnectorCorpus({ corpusId: NO_ADAPTER_CORPUS, family: 'file', trustDomain: 'secure_local' }),
-      ]),
-      adapters: {
-        ...Object.fromEntries(stores.map((store) => {
-          const embeddingProvider = embeddingFor(store.trustDomain);
-          return [store.corpusId, createConnectorStoreCorpusAdapter({
-            store,
-            retrievalMode: request.retrieval_mode ?? 'keyword',
-            ...(embeddingProvider ? { embeddingProvider } : {}),
-          })];
-        })),
-        // Searching it would send the query to a cloud service: never called.
-        [CLOUD_ONLY_CORPUS]: async () => {
-          throw new Error('a cloud-only corpus was searched');
-        },
-      },
-      contentProviders: Object.fromEntries(stores.map((store) => {
-        const embeddingProvider = request.retrieval_mode === 'hybrid' ? embeddingFor(store.trustDomain) : undefined;
-        return [store.corpusId, createConnectorStoreContentProvider({ store, ...(embeddingProvider ? { embeddingProvider } : {}) })];
-      })),
-      visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }]),
-    };
-  };
-  const eligible = (items: readonly Readonly<Record<string, unknown>>[]) => checkLocalEvidenceItems({ lanes, items });
-  const stub = stubBuiltInModel(ANSWER_JSON);
-  const model = createBuiltInPrivateAnswerModel({
+  const lanes = createSourceAnswerLanes({
+    stores: () => fixture.set.openStores(),
+    registry: () => buildSourceIndexCorpusRegistry([
+      ...fixture.set.openStores().map((store) => defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })),
+      // Searchable only by a cloud query, and registered with no store here.
+      defineSourceIndexCorpus({ corpusId: CLOUD_ONLY_CORPUS, family: 'email', trustDomain: 'internal', storageProfileInput: { cloudQueryApproved: true } }),
+      defineConnectorCorpus({ corpusId: NO_ADAPTER_CORPUS, family: 'file', trustDomain: 'secure_local' }),
+    ]),
+    embeddingProvider: (store) => (store.trustDomain === 'secure_local' ? builtIn.provider : fixture.cloud),
+    localEmbedding: loadedBuiltInEmbedding,
+    readScope: () => ({ allowed: true, contentAllowed: true }),
+    answerScope: () => ({ kind: 'search' }),
+    accountScope: () => undefined,
+    visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(fixture.set.openStores().map((store) => store.corpusId)) }]),
+  });
+  const stub = stubBuiltInModel(options.answer ?? ANSWER_JSON, options.duringSynthesis ? () => options.duringSynthesis!(fixture) : undefined);
+  const path = createLocalAnswerPath({
+    lanes,
     model: stub.model,
     available: () => true,
-    answer: answerPrivately,
-    eligible,
-    relevance: embeddingPanelRelevance(() => builtInEmbeddingOnly(builtIn, ready)),
-    readItem: (item, request) => readLocalEvidenceItem({ lanes, item, ...request }),
-  });
-  const answer = (input: LocalAnswerRequest) => answerOnThisComputer(input, {
-    lanes,
-    model,
-    eligible,
+    relevanceEmbedding: () => builtInEmbeddingOnly(builtIn.provider, loadedBuiltInEmbedding),
     sourceName: (corpusId) => SOURCE_NAMES[corpusId],
+    ...(options.limits ? { limits: options.limits } : {}),
   });
-  return { fixture, builtIn, stub, answer, eligible };
+  return { fixture, builtIn, stub, answer: path.answer, eligible: path.eligible };
 }
 
 function waitingStore(): WaitingQuestionStore {
@@ -237,25 +330,33 @@ function waitingStore(): WaitingQuestionStore {
 
 // ---- zero egress -----------------------------------------------------------------
 
+/** Lets anything a call left running in the background (a load it started) reach the network first. */
+async function backgroundSettled(): Promise<void> {
+  for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 describe('answers on this computer, with every outbound request denied', () => {
   test('Ask privately: retrieval, the built-in embedding, passage ranking and synthesis all run here', async () => {
     const local = await localFixture();
-    const embeddedBefore = local.builtIn.inputs.length;
+    const installsBefore = local.builtIn.installs.length;
+    const embeddedBefore = local.builtIn.embedded.length;
     const cloudBefore = local.fixture.cloud.inputs.length;
     const network = denyNetwork();
     const controller = createLocalPrivateAnswers({ answer: local.answer, store: () => undefined });
     const outcome = await controller.handle({ action: 'ask', question: 'When does the orchard flat lease end?' }, 'session:owner');
+    await backgroundSettled();
     network.restore();
 
     expect(network.attempts).toEqual([]);
+    expect(local.builtIn.installs.length).toBe(installsBefore);
     expect(outcome.status).toBe(200);
     expect(outcome.body).toMatchObject({ ok: true, status: 'answered', answer: 'The orchard flat lease ends on 31 May 2027.' });
     // The Private passage reached synthesis, on the built-in model.
     expect(local.stub.requests.length).toBeGreaterThan(0);
     expect(JSON.stringify(local.stub.requests)).toMatch(PRIVATE_SENTINEL);
-    // The question and the passages were embedded by the built-in model, here.
-    const embedded = local.builtIn.inputs.slice(embeddedBefore);
-    expect(embedded).toContain('When does the orchard flat lease end?');
+    // The question and the passages were embedded by the built-in model already loaded here.
+    const embedded = local.builtIn.embedded.slice(embeddedBefore);
+    expect(embedded.some((text) => text.includes('When does the orchard flat lease end?'))).toBe(true);
     expect(embedded.some((text) => PRIVATE_SENTINEL.test(text))).toBe(true);
     // The store whose vectors came from another (cloud) model was searched by keyword: its model saw nothing.
     expect(local.fixture.cloud.inputs.slice(cloudBefore)).toEqual([]);
@@ -267,20 +368,49 @@ describe('answers on this computer, with every outbound request denied', () => {
 
   test('Answer on a waiting question: the same local path, with the question\'s own selectors', async () => {
     const local = await localFixture();
+    const installsBefore = local.builtIn.installs.length;
     const store = waitingStore();
     const ref = store.record(store.ticket('conn-chatgpt'), { question: 'When does the orchard flat lease end?', surface: 'chatgpt', state: 'waiting' })!;
     const network = denyNetwork();
     const controller = createLocalPrivateAnswers({ answer: local.answer, store: () => store, connectionName: () => 'ChatGPT' });
     const outcome = await controller.handle({ action: 'answer', id: ref.id }, 'session:owner');
     const seen = await controller.handle({ action: 'seen', ack: outcome.body.ack }, 'session:owner');
+    await backgroundSettled();
     network.restore();
 
     expect(network.attempts).toEqual([]);
+    expect(local.builtIn.installs.length).toBe(installsBefore);
     expect(outcome.body).toMatchObject({ ok: true, status: 'answered' });
     expect(JSON.stringify(local.stub.requests)).toMatch(PRIVATE_SENTINEL);
     expect(seen.body).toEqual({ ok: true, status: 'cleared' });
     expect(store.list().questions).toEqual([]);
   });
+
+  for (const state of ['stale_ready_litert', 'stale_ready_onnx', 'damaged_runtime'] as const) {
+    test(`the built-in model not loaded here (${state}): Ask and Answer search by keyword; nothing installs, downloads or starts`, async () => {
+      const local = await localFixture({ embedding: state });
+      const store = waitingStore();
+      const ref = store.record(store.ticket('conn-chatgpt'), { question: 'When does the orchard flat lease end?', surface: 'chatgpt', state: 'waiting' })!;
+      const statusBefore = local.builtIn.provider.status();
+      const network = denyNetwork();
+      const controller = createLocalPrivateAnswers({ answer: local.answer, store: () => store, connectionName: () => 'ChatGPT' });
+      const asked = await controller.handle({ action: 'ask', question: 'When does the orchard flat lease end?' }, 'session:owner');
+      const answered = await controller.handle({ action: 'answer', id: ref.id }, 'session:owner');
+      await backgroundSettled();
+      network.restore();
+
+      expect(network.attempts).toEqual([]);
+      expect(local.builtIn.installs).toEqual([]);
+      expect(local.builtIn.starts).toEqual([]);
+      expect(local.builtIn.embedded).toEqual([]);
+      // The status file is as it was: nothing reported loading, failing or downloading.
+      expect(local.builtIn.provider.status()).toEqual(statusBefore);
+      for (const outcome of [asked, answered]) {
+        expect(outcome.body).toMatchObject({ ok: true, status: 'answered', answer: 'The orchard flat lease ends on 31 May 2027.' });
+      }
+      expect(JSON.stringify(local.stub.requests)).toMatch(PRIVATE_SENTINEL);
+    });
+  }
 
   test('the denial itself works: a fetch from inside it is refused and recorded', async () => {
     const network = denyNetwork();
@@ -290,14 +420,21 @@ describe('answers on this computer, with every outbound request denied', () => {
     expect(network.attempts).toEqual(['fetch', 'http.request']);
   });
 
-  test('a model reached over HTTP, or a built-in model not yet on this computer, is never the local embedding', () => {
+  test('a model reached over HTTP is never the local embedding; the built-in one only as already loaded', async () => {
     const cloud = new RecordingProvider('google-gemini', 'gemini-embedding-2', 'cloud');
     const server = new RecordingProvider('openai-compatible', 'secure-local-qwen3-embed', 'local');
-    expect(builtInEmbeddingOnly(cloud, () => true)).toBeUndefined();
-    expect(builtInEmbeddingOnly(server, () => false)).toBeUndefined();
-    expect(builtInEmbeddingOnly(undefined, () => true)).toBeUndefined();
-    expect(builtInEmbeddingOnly(server, () => { throw new Error('status unreadable'); })).toBeUndefined();
-    expect(builtInEmbeddingOnly(server, () => true)).toBe(server);
+    expect(builtInEmbeddingOnly(cloud, () => cloud)).toBeUndefined();
+    expect(builtInEmbeddingOnly(server, loadedBuiltInEmbedding)).toBeUndefined();
+    expect(builtInEmbeddingOnly(undefined, loadedBuiltInEmbedding)).toBeUndefined();
+    expect(builtInEmbeddingOnly(server, () => { throw new Error('unreadable'); })).toBeUndefined();
+    // Not loaded: the query fails at once (the lane then searches by keyword), and no load starts.
+    const stale = await builtInEmbedding('stale_ready_litert');
+    const narrowed = builtInEmbeddingOnly(stale.provider, loadedBuiltInEmbedding)!;
+    expect(narrowed.modelId).toBe(stale.provider.modelId);
+    await expect(narrowed.embed([{ text: 'q' }], { taskType: 'RETRIEVAL_QUERY' })).rejects.toBeInstanceOf(BuiltInEmbeddingNotReadyError);
+    await expect(narrowed.embed([{ text: 'd' }], { taskType: 'RETRIEVAL_DOCUMENT' })).rejects.toBeInstanceOf(BuiltInEmbeddingNotReadyError);
+    await backgroundSettled();
+    expect(stale.installs).toEqual([]);
   });
 
   test('nothing here answers it: not found, with what was left out', async () => {
@@ -306,6 +443,85 @@ describe('answers on this computer, with every outbound request denied', () => {
     const result = await local.answer({ question: 'zebra quartz xylophone', selectors: { retrieval_mode: 'keyword' } });
     expect(result).toEqual({ status: 'not_found', leftOut: ['Cloud mail', 'Other files'] });
     expect(local.stub.requests).toEqual([]);
+  });
+});
+
+// ---- the version note's other versions -----------------------------------------
+
+/** The offer as a signed final and an earlier draft: the panel reads one, and its note names the other. */
+const OFFER_IDS = ['offer-v3', 'offer-v1'] as const;
+const OFFER_SPECS: FixtureSpec[] = OFFER_IDS.map((id) => {
+  const item = VERSIONED_FIXTURE_ITEMS.find((candidate) => candidate.id === id)!;
+  return { id, name: item.title, text: item.text, legacyDomain: 'secure_local' as const };
+});
+const OFFER_DATES = Object.fromEntries(OFFER_IDS.map((id) => [id, VERSIONED_FIXTURE_ITEMS.find((candidate) => candidate.id === id)!.saved]));
+const OFFER_ANSWER = JSON.stringify({ answer: 'The price is €620,000 [1].', citations: [{ evidence: 1, claim: 'Price €620,000' }], unanswered: [], sufficient: true });
+/** One item read: the newest version, with the draft as an unread other version. */
+const ONE_ITEM = { maxItems: 1, maxLeadingItems: 0 };
+const VERSION_NOTE = /Several versions of .* were found/;
+
+describe('another version the answer\'s note names is checked again before anything is shown', () => {
+  test('on this computer: a version re-tiered to Secrets while the answer is written withdraws it', async () => {
+    const control = await localFixture({ specs: OFFER_SPECS, privateIds: OFFER_IDS, dates: OFFER_DATES, answer: OFFER_ANSWER, limits: ONE_ITEM, embedding: 'stale_ready_litert' });
+    const shown = await control.answer({ question: 'What purchase price is in the offer for 14 Larch Court?' });
+    // Without a change, the note names the other version.
+    expect(shown).toMatchObject({ status: 'answered' });
+    expect(shown.status === 'answered' ? shown.answer : '').toMatch(VERSION_NOTE);
+    // Only the newest version was read; the draft's price never reached the model.
+    expect(JSON.stringify(control.stub.requests)).not.toContain('€640,000');
+
+    const local = await localFixture({
+      specs: OFFER_SPECS,
+      privateIds: OFFER_IDS,
+      dates: OFFER_DATES,
+      answer: OFFER_ANSWER,
+      limits: ONE_ITEM,
+      embedding: 'stale_ready_litert',
+      duringSynthesis: async (fixture) => {
+        await moveTieredItem({ set: fixture.set, identity: identityOf('offer-v1'), target: { metadataTier: 'secrets', contentTier: 'secrets' } });
+      },
+    });
+    expect(await local.answer({ question: 'What purchase price is in the offer for 14 Larch Court?' })).toEqual({ status: 'changed' });
+  });
+
+  test('in ChatGPT\'s private answer panel: the same version re-tiered while the answer is written: that answer is discarded and the one sealed no longer names it', async () => {
+    const run = async (retierDuringSynthesis: boolean) => {
+      const secret = new Set<string>();
+      const checked: string[][] = [];
+      const eligible = async (items: readonly Readonly<Record<string, unknown>>[]) => {
+        const ids = items.map((item) => String((item.sourceItem as { localItemId?: unknown } | undefined)?.localItemId));
+        checked.push(ids);
+        return ids.map((id) => !secret.has(id));
+      };
+      const stub = stubBuiltInModel(OFFER_ANSWER, async () => {
+        if (retierDuringSynthesis) secret.add('offer-v1');
+      });
+      const model = createBuiltInPrivateAnswerModel({ model: stub.model, available: () => true, answer: answerPrivately, eligible, limits: ONE_ITEM });
+      const jobs = new PrivateAnswerJobs({ eligible, model: () => model, installId: () => 'c'.repeat(32), claimHoldMs: 0, log: () => {} });
+      const evidence = versionedFixtureHits([...OFFER_IDS]);
+      const { jobId } = jobs.begin({ question: 'What purchase price is in the offer for 14 Larch Court?', count: 2, evidence, refresh: async () => evidence });
+      const panel = await generatePanelKeyPair();
+      let response = await jobs.claim(jobId!, panel.publicKey);
+      for (let attempt = 0; attempt < 40 && response.status === 202; attempt += 1) {
+        await Bun.sleep(25);
+        response = await jobs.claim(jobId!, panel.publicKey);
+      }
+      expect(response.body.status).toBe('ready');
+      const opened = JSON.parse(await openPrivateAnswer(jobId!, panel.privateKey, response.body as unknown as SealedPrivateAnswer)) as { answer: string };
+      return { answer: opened.answer, stub, checked };
+    };
+    const control = await run(false);
+    expect(control.answer).toMatch(VERSION_NOTE);
+    expect(control.stub.requests).toHaveLength(1);
+
+    // The draft is re-tiered while the answer is written: the check before
+    // sealing covers it, so that answer (and its note) is discarded, and the
+    // one sealed is computed again from what is eligible now, the draft gone.
+    const retiered = await run(true);
+    expect(retiered.checked).toContainEqual(['offer-v3', 'offer-v1']);
+    expect(retiered.stub.requests).toHaveLength(2);
+    expect(retiered.answer).toBe('The price is €620,000.');
+    expect(retiered.answer).not.toMatch(VERSION_NOTE);
   });
 });
 

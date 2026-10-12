@@ -30,8 +30,24 @@
 import { lstatSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import type { WaitingQuestion, WaitingQuestionRef, WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
+import { answerPrivately, type BuiltInAnalystModel } from '../../core/analyst-built-in.ts';
 import type { PrivateAnswerSourceCitation, PrivateEvidenceItem } from '../chatgpt/private-answer-contract.ts';
-import type { LocalAnswerRequest, LocalAnswerResult } from '../source-index/local-answer.ts';
+import {
+  createBuiltInPrivateAnswerModel,
+  embeddingPanelRelevance,
+  type PanelAnswerLimits,
+  type PrivateSourceLinks,
+} from '../chatgpt/private-answer-model.ts';
+import type { AnalystAnswerLanes } from '../source-index/analyst-answer.ts';
+import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
+import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import {
+  answerOnThisComputer,
+  checkLocalEvidenceItems,
+  readLocalEvidenceItem,
+  type LocalAnswerRequest,
+  type LocalAnswerResult,
+} from '../source-index/local-answer.ts';
 
 export const LOCAL_PRIVATE_ANSWERS_PATH = '/dashboard/private-answers';
 const TOKEN_TTL_MS = 30 * 60_000;
@@ -96,6 +112,54 @@ interface OpenEntry {
   path: string;
   read: readonly PrivateEvidenceItem[];
   expiresAt: number;
+}
+
+export interface LocalAnswerPathOptions {
+  /** The worker's shared lane factory (source-answer-lanes.ts); called with `built_in_only`. */
+  lanes: (request: SourceIndexAnswerRequest, embedding?: 'built_in_only') => AnalystAnswerLanes;
+  /** The worker's one built-in private model. */
+  model: BuiltInAnalystModel | undefined;
+  available: () => boolean;
+  /**
+   * The embedding model that ranks the items read, as the built-in model this
+   * process already holds (builtInEmbeddingOnly), or undefined.
+   */
+  relevanceEmbedding: () => SourceEmbeddingProvider | undefined;
+  sourceLinks?: (item: PrivateEvidenceItem) => PrivateSourceLinks | undefined;
+  sourceName?: (corpusId: string) => string | undefined;
+  limits?: Partial<PanelAnswerLimits>;
+}
+
+/**
+ * The answer path behind Ask privately and Answer, as the worker wires it:
+ * the shared lanes narrowed to this computer's built-in embedding model, the
+ * live eligibility guard over those lanes, and the built-in private model.
+ */
+export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
+  eligible: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
+  answer: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
+} {
+  const lanes = (request: SourceIndexAnswerRequest) => options.lanes(request, 'built_in_only');
+  const eligible = (items: readonly PrivateEvidenceItem[]) => checkLocalEvidenceItems({ lanes, items });
+  const model = createBuiltInPrivateAnswerModel({
+    model: options.model,
+    eligible,
+    available: options.available,
+    answer: answerPrivately,
+    relevance: embeddingPanelRelevance(options.relevanceEmbedding),
+    readItem: (item, request) => readLocalEvidenceItem({ lanes, item, ...request }),
+    ...(options.sourceLinks ? { sourceLinks: options.sourceLinks } : {}),
+    ...(options.limits ? { limits: options.limits } : {}),
+  });
+  return {
+    eligible,
+    answer: (input) => answerOnThisComputer(input, {
+      lanes,
+      model,
+      eligible,
+      ...(options.sourceName ? { sourceName: options.sourceName } : {}),
+    }),
+  };
 }
 
 function refused(status: number, code: string, message: string): LocalPrivateAnswersResponse {

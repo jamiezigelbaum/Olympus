@@ -8,9 +8,10 @@
  * Every stage stays on this computer:
  * - planning: none. The question (or the waiting question's own explicit
  *   query) is the one retrieval query; no planner model is called.
- * - embeddings: the built-in embedding model only, and only once it is on
- *   disk (`builtInEmbeddingOnly`). A store whose vectors came from any other
- *   model is searched by its local keyword index instead.
+ * - embeddings: the built-in embedding model only, and only as this process
+ *   already holds it loaded (`builtInEmbeddingOnly`): nothing here installs,
+ *   downloads or starts a model. A store whose vectors came from any other
+ *   model, or a model not loaded yet, is searched by its local keyword index.
  * - retrieval: the shared EvidencePack build over the lanes the caller hands
  *   in (Private stores and the Personal stores mounted here, through their
  *   scoped adapters), with cloud queries refused; a corpus that could only be
@@ -27,7 +28,9 @@
  * the owner's current scope (`checkLocalEvidenceItems`), the same live check
  * the panel uses for Private items, widened to Personal ones. It is asked
  * again after the answer, before anything is shown, so an item re-tiered or
- * removed meanwhile withdraws the answer.
+ * removed meanwhile withdraws the answer. That check covers every item that
+ * can reach the output: the items read and the other versions the answer's
+ * version note names (the model's `used`).
  */
 import { buildEvidencePackDetailed, type LocalContentProvider } from '../../core/evidence-pack.ts';
 import type { EvidenceCandidate } from '../../core/contracts.ts';
@@ -190,7 +193,8 @@ export async function answerOnThisComputer(
     if (error instanceof NoPrivateEvidenceError) return { status: 'not_found', leftOut };
     return { status: 'failed' };
   }
-  // Before anything is shown: every item the answer read is still readable now.
+  // Before anything is shown: every item that can reach the output (the items
+  // read, and the other versions the note names) is still readable now.
   const read = (used ?? candidates.map((_, index) => index)).map((index) => candidates[index]).filter((item): item is PrivateEvidenceItem => item !== undefined);
   if (read.length > 0) {
     let ok: readonly boolean[];
