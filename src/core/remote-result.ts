@@ -13,14 +13,19 @@
  * - No audit, policy, lane, provider-identifier, URI, span, Secret count or
  *   Secret location field, in any result or error.
  * - Every retained free-text field (answer, reply, sent question, titles,
- *   route, notes, refusal messages) is secret-scanned with the release gate's
- *   own scanner (`secretLabelsInText`); scalars are fixed enums, identifiers
- *   of a fixed shape, numbers or booleans.
- * - Errors carry a fixed sentence per code, never the internal message.
- * - An answer's cited items are rechecked against their current tiers when it
- *   is collected (`CitedItemCheck`): a cited item now Secret withholds the
- *   answer; a cited item gone drops its citation; a check that cannot run
- *   withholds.
+ *   route, notes, refusal messages) and every retained variable identifier
+ *   (model, corpus id, job id) is secret-scanned with the release gate's own
+ *   scanner (`secretLabelsInText`): the whole original, then the normalized
+ *   text, then exactly what is emitted, so a secret cut by a length cap still
+ *   counts. Codes and statuses are closed enums.
+ * - Errors carry a fixed sentence per code, never the internal message; an
+ *   invalid argument is named only when it is one the operation declares.
+ * - A source answer is revalidated against its release manifest
+ *   (core/release-manifest.ts) when it is collected: every item the analyst
+ *   read, cited or not, against the current tiers and release rules. Any
+ *   input now Secret, any input now Private when Private derivatives would no
+ *   longer be released, or a manifest that is missing or cannot be read
+ *   withholds the answer; a cited item gone drops its citation.
  *
  * The local stdio MCP surface, native OpenClaw and the ChatGPT surface do not
  * use this module; their output is unchanged.
@@ -28,32 +33,21 @@
 import { boundedLogErrorMessage } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
+import type { ReleaseCheck, ReleaseInput, ReleaseInputVerdict, ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 
 /** The operations the remote surface serves (core/public-surface.ts V0_4_PUBLIC_REMOTE_MCP_TOOLS). */
 export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously';
 
-/** One cited item, as a released answer's evidence names it (no account scope). */
-export interface CitedItemRef {
-  corpusId: string;
-  provider: string;
-  providerItemId: string;
-  providerConversationId?: string;
-}
-
-/**
- * An item's tier now: `secret` (now Secret, or moving to Secret), `gone`
- * (no current copy anywhere), `current`, or `unknown` (no per-item tier to
- * recheck: a legacy corpus or an item never placed by the tier router).
- */
-export type CitedItemVerdict = 'current' | 'secret' | 'gone' | 'unknown';
-
-/** One verdict per item, in order. Throws when the tiers cannot be read; the answer is then withheld. */
-export type CitedItemCheck = (items: readonly CitedItemRef[]) => readonly CitedItemVerdict[];
-
 export interface RemoteOutputOptions {
-  /** The worker's current-tier check; without one (no tiered stores) cited items are not rechecked. */
-  citedItemCheck?: CitedItemCheck;
+  /**
+   * The worker's current tiers and release rules. Set (by the worker) for
+   * every remote call; without it (a test context with no tiered stores)
+   * source answers are not revalidated.
+   */
+  releaseCheck?: ReleaseCheck;
+  /** The release manifests the call collected (its own answer's, or its job's). */
+  releaseManifests?: readonly ReleaseManifest[];
 }
 
 const MAX_ANSWER = 64 * 1024;
@@ -64,7 +58,7 @@ const MAX_MESSAGE = 2_000;
 const MAX_CITATIONS = 50;
 const MAX_CORPORA = 200;
 const JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
-const CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
 const MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
 // C0/C1 controls (tab, newline and carriage return kept), zero-width and bidi controls.
@@ -72,8 +66,10 @@ const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009fâ€‹-â€
 
 export const REMOTE_PENDING_MESSAGE = 'Olympus is still working on this and it keeps running. '
   + 'Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.';
-/** A cited item changed tier since the answer was written; neutral, so it says nothing about which tier. */
+/** An item the answer drew on changed tier since it was written; neutral, so it says nothing about which tier. */
 export const REMOTE_ANSWER_CHANGED = 'Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.';
+/** The answer's inputs could not be checked against the current tiers. */
+export const REMOTE_ANSWER_UNVERIFIED = 'Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.';
 export const REMOTE_ANSWER_WITHHELD = 'Olympus withheld this answer under the owner\'s privacy rules.';
 export const REMOTE_REPLY_WITHHELD = 'Olympus withheld the reply because it looked like it contained a password, key or token.';
 const REMOTE_REFUSAL_FALLBACK = 'Olympus could not ask anonymously.';
@@ -81,7 +77,7 @@ const REMOTE_REFUSAL_FALLBACK = 'Olympus could not ask anonymously.';
 export const REMOTE_NEEDS_CHOICE_MESSAGE = 'Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.';
 
 /* ------------------------------------------------------------------ */
-/* Source labels: a fixed vocabulary, never a provider identifier       */
+/* Closed vocabularies                                                 */
 /* ------------------------------------------------------------------ */
 
 const PROVIDER_LABELS: Readonly<Record<string, string>> = {
@@ -125,6 +121,119 @@ function sourceLabel(provider: unknown, family: unknown): string {
   return OTHER_SOURCE_LABEL;
 }
 
+/**
+ * Every refusal code an anonymous answer can carry: core/consult-ask.ts's own
+ * and the zkAPI transport's (core/consult-transport-zkapi.ts
+ * ZkapiConsultErrorCode). Anything else is `refused`. A test keeps this list
+ * in step with both sources.
+ */
+export const REMOTE_REFUSAL_CODES: readonly string[] = Object.freeze([
+  'refused',
+  // core/consult-ask.ts
+  'anonymous_answers_off', 'cancelled', 'gate_refused', 'internal_error', 'invalid_params', 'model_same_provider',
+  'question_empty', 'question_too_long', 'route_not_configured', 'secret_detected', 'settings_invalid',
+  'settings_stale', 'writer_declined', 'writer_failed',
+  // core/consult-transport-zkapi.ts ZkapiConsultErrorCode
+  'invalid_question', 'busy', 'acknowledgements_incomplete', 'funding_date_missing', 'funding_date_invalid',
+  'note_expired', 'daemon_api_key_missing', 'daemon_not_found', 'tor_not_found', 'unresolved_session',
+  'unresolved_session_other_wallet', 'no_unresolved_session', 'stranded_processes', 'daemon_already_running',
+  'tor_port_busy', 'tor_bootstrap_failed', 'daemon_start_failed', 'daemon_version_unsupported',
+  'daemon_supervisor_unsupported', 'relay_mismatch', 'key_reuse_on', 'key_reuse_unverified', 'daemon_keyless',
+  'daemon_identity_failed', 'daemon_api_key_rejected', 'session_process_exited', 'confinement_self_test_failed',
+  'policy_unavailable', 'model_unavailable', 'daily_cap_reached', 'spend_cap_reached', 'state_unavailable',
+  'timeout', 'aborted', 'redirect_refused', 'response_too_large', 'invalid_response', 'daemon_error',
+  'transport_failed', 'teardown_incomplete', 'authorization_refused', 'session_spent',
+].filter((code, index, all) => all.indexOf(code) === index));
+
+/** The zkAPI daemon's own error codes (core/consult-transport-zkapi.ts ZkapiDaemonErrorCode). */
+export const REMOTE_DAEMON_CODES: readonly string[] = Object.freeze([
+  'busy', 'request_cancelled', 'funding_required', 'model_budget_unavailable', 'model_policy_unavailable',
+  'invalid_model', 'anonymous_access_failed', 'upstream_error', 'invalid_upstream_response', 'withdrawal_pending',
+  'wallet_conflict', 'invalid_request_error', 'invalid_body', 'testnet_password_required', 'invalid_api_key',
+  'local_connection_required', 'browser_origin_denied', 'unrecognized',
+]);
+
+/** A connector-store sync run's status (workers/connector-store/local-index.ts). */
+const REFRESH_STATUSES: readonly string[] = Object.freeze(['running', 'completed', 'failed']);
+const TRUST_DOMAINS: readonly string[] = Object.freeze(['public_safe', 'internal', 'secure_local']);
+const RETRIEVAL_MODES: readonly string[] = Object.freeze(['keyword', 'hybrid']);
+const RETRIEVAL_STATES: readonly string[] = Object.freeze(['ready', 'degraded']);
+const NETWORK_IDENTITIES: readonly string[] = Object.freeze(['hidden', 'visible', 'not_verified']);
+const CLEANUPS: readonly string[] = Object.freeze(['as_written', 'light_cleanup', 'custom']);
+const OUTCOMES: readonly string[] = Object.freeze(['not_sent', 'sent_failed', 'unknown']);
+
+function oneOf(value: unknown, allowed: readonly string[]): string | undefined {
+  return typeof value === 'string' && allowed.includes(value) ? value : undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/* The remote view of each operation's parameters                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Parameters the remote surface does not serve, per operation: they are not
+ * advertised there and a call that passes one is refused by name. Their
+ * output (sender counts, ledgers, item listings) never reaches a remote agent.
+ */
+export const REMOTE_WITHHELD_PARAMS: Readonly<Partial<Record<RemoteOperationName, readonly string[]>>> = {
+  source_index_status: [
+    'conversation_id',
+    'include_sender_aggregation',
+    'max_senders',
+    'include_readiness_ledger',
+    'include_ingestion_ledger',
+    'include_items',
+    'max_items',
+    'query',
+  ],
+};
+
+const REMOTE_DESCRIPTIONS: Readonly<Partial<Record<RemoteOperationName, string>>> = {
+  source_index_status: [
+    'Inspect source-index corpus status: each corpus\'s refresh status and aggregate counts.',
+    'Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.',
+    'Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts.',
+  ].join(' '),
+};
+
+function withheldParams(operation: string): readonly string[] {
+  return Object.prototype.hasOwnProperty.call(REMOTE_WITHHELD_PARAMS, operation)
+    ? REMOTE_WITHHELD_PARAMS[operation as RemoteOperationName] ?? []
+    : [];
+}
+
+/** The parameters an operation declares on the remote surface. */
+export function remoteDeclaredParams(operation: string, declared: readonly string[]): string[] {
+  const withheld = withheldParams(operation);
+  return declared.filter((name) => !withheld.includes(name));
+}
+
+/** The remote surface's description of an operation. */
+export function remoteToolDescription(operation: string, description: string): string {
+  return Object.prototype.hasOwnProperty.call(REMOTE_DESCRIPTIONS, operation)
+    ? REMOTE_DESCRIPTIONS[operation as RemoteOperationName] ?? description
+    : description;
+}
+
+/** An operation's input schema on the remote surface: withheld parameters removed. */
+export function remoteToolSchema(operation: string, schema: Record<string, unknown>): Record<string, unknown> {
+  const withheld = withheldParams(operation);
+  if (withheld.length === 0) return schema;
+  const properties = asRecord(schema.properties) ?? {};
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  return {
+    ...schema,
+    properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !withheld.includes(name))),
+    required: required.filter((name) => typeof name === 'string' && !withheld.includes(name)),
+  };
+}
+
+/** The first withheld parameter a call passes (by name order), or undefined. */
+export function remoteWithheldParam(operation: string, args: Readonly<Record<string, unknown>>): string | undefined {
+  const withheld = withheldParams(operation);
+  return Object.keys(args).filter((name) => withheld.includes(name)).sort()[0];
+}
+
 /* ------------------------------------------------------------------ */
 /* Per-operation output                                                */
 /* ------------------------------------------------------------------ */
@@ -164,7 +273,8 @@ export function isAnonymousAnswerResult(raw: unknown): boolean {
 function pendingOutput(raw: unknown): Record<string, unknown> | undefined {
   const record = asRecord(raw);
   if (record?.status !== 'working') return undefined;
-  if (typeof record.job_id !== 'string' || !JOB_ID.test(record.job_id)) {
+  // Minted by Olympus (core/source-answer-jobs.ts, never scanner-shaped), and scanned again here.
+  if (typeof record.job_id !== 'string' || !JOB_ID.test(record.job_id) || isSecretLike(record.job_id)) {
     throw new OperationError('source_index_error', 'unexpected pending shape');
   }
   return {
@@ -182,16 +292,22 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
     throw new OperationError('source_index_error', 'unexpected answer shape');
   }
   const evidence = record.evidence.map(asRecord).filter((entry): entry is Record<string, unknown> => entry !== undefined);
-  const verdicts = recheckCitedItems(evidence, options.citedItemCheck);
-  if (verdicts === 'withhold') return withheldAnswer(REMOTE_ANSWER_CHANGED);
-  const answer = cleanMultiline(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER);
-  if (isSecretLike(answer)) return withheldAnswer(REMOTE_ANSWER_WITHHELD);
+  let dropped: ReadonlySet<number> = new Set();
+  if (options.releaseCheck) {
+    const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
+    if ('withhold' in recheck) return withheldAnswer(recheck.withhold);
+    dropped = recheck.dropped;
+  }
+  // The raw answer is scanned whole as well: only the Secret note (fixed text) is taken out first.
+  if (isSecretLike(record.answer)) return withheldAnswer(REMOTE_ANSWER_WITHHELD);
+  const answer = scannedText(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER, 'multiline');
+  if (answer.secret) return withheldAnswer(REMOTE_ANSWER_WITHHELD);
   const citations: Array<Record<string, unknown>> = [];
   evidence.forEach((entry, index) => {
-    if (verdicts?.[index] === 'gone' || citations.length >= MAX_CITATIONS) return;
+    if (dropped.has(index) || citations.length >= MAX_CITATIONS) return;
     citations.push(citationOutput(entry));
   });
-  return { kind: 'source_answer', status: 'answered', answer, citations };
+  return { kind: 'source_answer', status: 'answered', answer: answer.text ?? '', citations };
 }
 
 function withheldAnswer(message: string): Record<string, unknown> {
@@ -199,50 +315,71 @@ function withheldAnswer(message: string): Record<string, unknown> {
 }
 
 /**
- * Per-entry verdicts, or 'withhold' when a cited item is now Secret or the
- * check cannot run. Undefined when there is nothing to recheck.
+ * Revalidates an answer against its release manifests: withholds when one is
+ * missing, cannot be read, names an input now Secret or unprovable, names an
+ * input now Private when Private derivatives would not be released now, or
+ * does not cover a cited item. Otherwise the citations of gone items are
+ * dropped.
  */
-function recheckCitedItems(
+function recheckRelease(
   evidence: readonly Record<string, unknown>[],
-  check: CitedItemCheck | undefined,
-): Array<CitedItemVerdict | undefined> | 'withhold' | undefined {
-  if (!check || evidence.length === 0) return undefined;
-  const refs = evidence.map(citedItemRef);
-  const checkable = refs.flatMap((ref, index) => (ref ? [{ ref, index }] : []));
-  if (checkable.length === 0) return undefined;
-  let verdicts: readonly CitedItemVerdict[];
-  try {
-    verdicts = check(checkable.map(({ ref }) => ref));
-    if (verdicts.length !== checkable.length) throw new Error('cited item check returned the wrong number of verdicts');
-  } catch (error) {
-    console.error(`[olympus:remote] cited_item_check_failed error_message=${boundedLogErrorMessage(error)}`);
-    return 'withhold';
+  manifests: readonly ReleaseManifest[],
+  check: ReleaseCheck,
+): { withhold: string } | { dropped: ReadonlySet<number> } {
+  if (manifests.length === 0) {
+    console.error('[olympus:remote] release_manifest_missing');
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
   }
-  if (verdicts.some((verdict) => verdict === 'secret')) return 'withhold';
-  const byIndex: Array<CitedItemVerdict | undefined> = evidence.map(() => undefined);
-  checkable.forEach(({ index }, position) => { byIndex[index] = verdicts[position]; });
-  return byIndex;
+  const inputs: Array<{ input: ReleaseInput; manifest: ReleaseManifest }> = manifests
+    .flatMap((manifest) => manifest.inputs.map((input) => ({ input, manifest })));
+  let verdicts: readonly ReleaseInputVerdict[];
+  let postureNow: 'allow' | 'approval';
+  try {
+    verdicts = check.inputs(inputs.map(({ input }) => input));
+    if (verdicts.length !== inputs.length) throw new Error('release check returned the wrong number of verdicts');
+    postureNow = check.secureDerivativeDefault();
+  } catch (error) {
+    console.error(`[olympus:remote] release_check_failed error_message=${boundedLogErrorMessage(error)}`);
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  }
+  if (verdicts.some((verdict) => verdict.tier === 'secret')) return { withhold: REMOTE_ANSWER_CHANGED };
+  if (verdicts.some((verdict) => verdict.tier === 'unknown')) return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  for (const [index, { input, manifest }] of inputs.entries()) {
+    const verdict = verdicts[index]!;
+    const privateNow = verdict.tier === 'private' || (verdict.tier === 'legacy' && input.privateAtAnswer);
+    if (!privateNow) continue;
+    // As the analyst handler decides it: an explicit request, or the posture now.
+    const releasableNow = manifest.constraints.includeSecureLocalContent || postureNow === 'allow';
+    if (!releasableNow) return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
+  }
+  const dropped = new Set<number>();
+  for (const [index, entry] of evidence.entries()) {
+    const matches = inputs.flatMap(({ input }, position) => (citesInput(entry, input) ? [verdicts[position]!] : []));
+    if (matches.length === 0) {
+      console.error('[olympus:remote] release_manifest_incomplete');
+      return { withhold: REMOTE_ANSWER_UNVERIFIED };
+    }
+    if (matches.some((verdict) => verdict.gone)) dropped.add(index);
+  }
+  return { dropped };
 }
 
-function citedItemRef(entry: Record<string, unknown>): CitedItemRef | undefined {
-  const { corpus_id: corpusId, provider, provider_item_id: providerItemId, provider_conversation_id: conversation } = entry;
-  if (typeof corpusId !== 'string' || typeof provider !== 'string' || typeof providerItemId !== 'string') return undefined;
-  if (!corpusId || !provider || !providerItemId) return undefined;
-  return {
-    corpusId,
-    provider,
-    providerItemId,
-    ...(typeof conversation === 'string' && conversation ? { providerConversationId: conversation } : {}),
-  };
+/** A citation names its corpus, provider, conversation and item, never its account. */
+function citesInput(entry: Record<string, unknown>, input: ReleaseInput): boolean {
+  return entry.corpus_id === input.corpusId
+    && entry.provider === input.provider
+    && entry.provider_item_id === input.providerItemId
+    && (typeof entry.provider_conversation_id === 'string' && entry.provider_conversation_id ? entry.provider_conversation_id : undefined)
+      === input.providerConversationId;
 }
 
 /** Label, title and date only: no provider identifiers, URIs, spans or trust fields. */
 function citationOutput(entry: Record<string, unknown>): Record<string, unknown> {
-  const title = cleanLine(entry.title, MAX_TITLE);
+  const title = scannedText(entry.title, MAX_TITLE, 'line');
   const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
   return {
     label: sourceLabel(entry.provider, entry.family),
-    ...(title && !isSecretLike(title) ? { title } : {}),
+    ...(title.text && !title.secret ? { title: title.text } : {}),
     ...(date ? { date } : {}),
   };
 }
@@ -254,21 +391,22 @@ function anonymousAnswerOutput(raw: unknown): Record<string, unknown> {
   }
   if (record.ok) {
     if (typeof record.reply !== 'string') throw new OperationError('email_error', 'unexpected anonymous answer shape');
-    const reply = cleanMultiline(record.reply, MAX_ANSWER);
-    const sent = scannedMultiline(record.sent, MAX_SENT);
-    const route = scannedLine(record.route, MAX_ROUTE);
-    const note = scannedLine(record.note, MAX_MESSAGE);
-    const model = typeof record.model === 'string' && MODEL_ID.test(record.model) ? record.model : undefined;
+    const reply = scannedText(record.reply, MAX_ANSWER, 'multiline');
+    const sent = keptText(record.sent, MAX_SENT, 'multiline');
+    const route = keptText(record.route, MAX_ROUTE, 'line');
+    const note = keptText(record.note, MAX_MESSAGE, 'line');
+    const model = typeof record.model === 'string' && MODEL_ID.test(record.model) && !isSecretLike(record.model) ? record.model : undefined;
+    const cleanup = oneOf(record.cleanup, CLEANUPS);
     return {
       kind: 'anonymous_answer',
       status: 'answered',
-      reply: isSecretLike(reply) ? REMOTE_REPLY_WITHHELD : reply,
+      reply: reply.secret ? REMOTE_REPLY_WITHHELD : reply.text ?? '',
       level: record.level === 'strict' ? 'strict' : 'standard',
       rewritten: record.rewritten === true,
       remembered: record.remembered === true,
       // Anonymous only when the network address was hidden (Tor, verified).
-      network_identity: record.networkIdentity === 'hidden' || record.networkIdentity === 'visible' ? record.networkIdentity : 'not_verified',
-      ...(record.cleanup === 'as_written' || record.cleanup === 'light_cleanup' || record.cleanup === 'custom' ? { cleanup: record.cleanup } : {}),
+      network_identity: oneOf(record.networkIdentity, NETWORK_IDENTITIES) ?? 'not_verified',
+      ...(cleanup ? { cleanup } : {}),
       ...(model ? { model } : {}),
       ...(route ? { route } : {}),
       ...(sent ? { sent } : {}),
@@ -284,29 +422,27 @@ function anonymousAnswerOutput(raw: unknown): Record<string, unknown> {
       message: REMOTE_NEEDS_CHOICE_MESSAGE,
       options: {
         suggested_level: options?.suggestedLevel === 'strict' ? 'strict' : 'standard',
-        suggested_cleanup: options?.suggestedCleanup === 'light_cleanup' || options?.suggestedCleanup === 'custom'
-          ? options.suggestedCleanup
-          : 'as_written',
+        suggested_cleanup: oneOf(options?.suggestedCleanup, CLEANUPS) ?? 'as_written',
         custom_instruction: options?.customInstruction === true,
       },
     };
   }
-  const sent = scannedMultiline(record.sent, MAX_SENT);
+  const sent = keptText(record.sent, MAX_SENT, 'multiline');
+  const outcome = oneOf(record.outcome, OUTCOMES);
+  const daemonCode = oneOf(record.daemonCode, REMOTE_DAEMON_CODES);
   return {
     kind: 'anonymous_answer',
     status: 'refused',
-    code: typeof record.code === 'string' && CODE.test(record.code) ? record.code : 'refused',
-    message: scannedLine(record.message, MAX_MESSAGE) ?? REMOTE_REFUSAL_FALLBACK,
+    code: oneOf(record.code, REMOTE_REFUSAL_CODES) ?? 'refused',
+    message: keptText(record.message, MAX_MESSAGE, 'line') ?? REMOTE_REFUSAL_FALLBACK,
     // Whether the question left: absent means it was never handed to the
     // transport; `not_sent` refused before it left; `sent_failed` or
     // `unknown` may have spent from the user's zkAPI balance.
-    ...(record.outcome === 'not_sent' || record.outcome === 'sent_failed' || record.outcome === 'unknown' ? { outcome: record.outcome } : {}),
-    ...(typeof record.daemonCode === 'string' && CODE.test(record.daemonCode) ? { daemon_code: record.daemonCode } : {}),
+    ...(outcome ? { outcome } : {}),
+    ...(daemonCode ? { daemon_code: daemonCode } : {}),
     ...(sent ? { sent } : {}),
   };
 }
-
-const TRUST_DOMAINS = new Set(['public_safe', 'internal', 'secure_local']);
 
 /** Per-corpus status and counts; every other status field stays on the computer. */
 function sourceIndexStatusOutput(raw: unknown): Record<string, unknown> {
@@ -319,18 +455,20 @@ function sourceIndexStatusOutput(raw: unknown): Record<string, unknown> {
   for (const value of record.corpora) {
     if (corpora.length >= MAX_CORPORA) break;
     const corpus = asRecord(value);
-    if (!corpus || typeof corpus.corpus_id !== 'string' || !CORPUS_ID.test(corpus.corpus_id) || corpus.corpus_id.length > 128) continue;
+    if (!corpus || typeof corpus.corpus_id !== 'string' || corpus.corpus_id.length > 128
+      || !CORPUS_ID.test(corpus.corpus_id) || isSecretLike(corpus.corpus_id)) continue;
     const retrieval = asRecord(corpus.retrieval);
-    const mode = retrieval?.servable_mode === 'keyword' || retrieval?.servable_mode === 'hybrid' ? retrieval.servable_mode : undefined;
-    const state = retrieval?.state === 'ready' || retrieval?.state === 'degraded' ? retrieval.state : undefined;
+    const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
+    const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
     const refresh = asRecord(corpus.last_refresh);
-    const refreshStatus = typeof refresh?.status === 'string' && CODE.test(refresh.status) ? refresh.status : undefined;
+    const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
     const completedAt = iso(refresh?.completed_at);
     const counts = asRecord(corpus.counts);
+    const trustDomain = oneOf(corpus.trust_domain, TRUST_DOMAINS);
     corpora.push({
       corpus_id: corpus.corpus_id,
       label: sourceLabel(corpus.provider, corpus.family),
-      ...(typeof corpus.trust_domain === 'string' && TRUST_DOMAINS.has(corpus.trust_domain) ? { trust_domain: corpus.trust_domain } : {}),
+      ...(trustDomain ? { trust_domain: trustDomain } : {}),
       configured: corpus.configured === true,
       ...(mode && state ? { retrieval: { mode, state } } : {}),
       ...(refreshStatus ? { last_refresh: { status: refreshStatus, ...(completedAt ? { completed_at: completedAt } : {}) } } : {}),
@@ -352,7 +490,22 @@ function sourceIndexStatusOutput(raw: unknown): Record<string, unknown> {
 /* Errors                                                              */
 /* ------------------------------------------------------------------ */
 
-export type RemoteErrorCode = OperationErrorCode | 'internal_error' | 'unknown_operation' | 'operation_unavailable';
+/** Failures before any operation runs: credentials, paths, methods, bodies. */
+export type RemoteTransportErrorCode =
+  | 'unauthorized'
+  | 'invalid_token'
+  | 'remote_connections_unavailable'
+  | 'not_found'
+  | 'method_not_allowed'
+  | 'unsupported_media_type'
+  | 'payload_too_large';
+
+export type RemoteErrorCode =
+  | OperationErrorCode
+  | RemoteTransportErrorCode
+  | 'internal_error'
+  | 'unknown_operation'
+  | 'operation_unavailable';
 
 const REMOTE_ERROR_TEXT: Readonly<Record<RemoteErrorCode, string>> = {
   invalid_params: 'The request was not valid. Check the arguments against the tool\'s schema and try again.',
@@ -375,6 +528,13 @@ const REMOTE_ERROR_TEXT: Readonly<Record<RemoteErrorCode, string>> = {
   internal_error: 'Olympus could not complete this request.',
   unknown_operation: 'Olympus has no operation with that name here.',
   operation_unavailable: 'That operation is not enabled on this Olympus install.',
+  unauthorized: 'A connection token is required.',
+  invalid_token: 'The connection token is not valid or has been revoked.',
+  remote_connections_unavailable: 'Olympus could not check the connection token. Try again later.',
+  not_found: 'There is nothing at this path.',
+  method_not_allowed: 'That HTTP method is not allowed here.',
+  unsupported_media_type: 'The request body must be JSON (Content-Type: application/json).',
+  payload_too_large: 'The request body is too large.',
 };
 
 export const REMOTE_ERROR_CODES: readonly RemoteErrorCode[] = Object.freeze(Object.keys(REMOTE_ERROR_TEXT) as RemoteErrorCode[]);
@@ -392,14 +552,32 @@ const REFERENCED_ERROR_CODES: ReadonlySet<RemoteErrorCode> = new Set<RemoteError
   'config_error',
 ]);
 
+export interface RemoteErrorBody {
+  error: RemoteErrorCode;
+  message: string;
+  /** Where the owner finds this failure in Olympus's log on the computer. */
+  ref?: string;
+  /** The argument at fault: only ever one the operation declares on the remote surface. */
+  param?: string;
+}
+
+export interface RemoteErrorOptions {
+  /** The operation's declared remote parameters: the only names an error may give. */
+  declaredParams?: readonly string[];
+}
+
 export function remoteErrorCode(error: unknown): RemoteErrorCode {
   if (error instanceof OperationError && Object.prototype.hasOwnProperty.call(REMOTE_ERROR_TEXT, error.code)) return error.code;
   return 'internal_error';
 }
 
-/** `{ error, message, ref? }`: a fixed sentence per code; the internal message never leaves. */
-export function remoteErrorOutput(error: unknown): { error: RemoteErrorCode; message: string; ref?: string } {
+/** A fixed sentence per code; the internal message never leaves. */
+export function remoteErrorOutput(error: unknown, options: RemoteErrorOptions = {}): RemoteErrorBody {
   const code = remoteErrorCode(error);
+  if (code === 'invalid_params' && options.declaredParams && error instanceof OperationError) {
+    const param = namedParam(error.message, options.declaredParams);
+    if (param) return { error: code, message: invalidParamMessage(param), param };
+  }
   if (!REFERENCED_ERROR_CODES.has(code)) return { error: code, message: REMOTE_ERROR_TEXT[code] };
   const ref = mintErrorRef();
   const errorClass = error instanceof Error ? error.name : typeof error;
@@ -407,9 +585,34 @@ export function remoteErrorOutput(error: unknown): { error: RemoteErrorCode; mes
   return { error: code, message: REMOTE_ERROR_TEXT[code], ref };
 }
 
-/** A surface-level refusal (no such operation, or switched off here). */
-export function remoteSurfaceErrorOutput(code: 'unknown_operation' | 'operation_unavailable'): { error: RemoteErrorCode; message: string } {
+/** A surface-level or transport refusal (no such operation, switched off, bad credential or request). */
+export function remoteSurfaceErrorOutput(code: 'unknown_operation' | 'operation_unavailable' | RemoteTransportErrorCode | 'invalid_request'): RemoteErrorBody {
   return { error: code, message: REMOTE_ERROR_TEXT[code] };
+}
+
+/** A withheld parameter, refused by name (it is one the operation declares elsewhere). */
+export function remoteWithheldParamOutput(param: string): RemoteErrorBody {
+  if (!PARAM_NAME.test(param)) return { error: 'invalid_params', message: REMOTE_ERROR_TEXT.invalid_params };
+  return {
+    error: 'invalid_params',
+    message: `The ${param} argument is not available to remote agents. Remove it and try again.`,
+    param,
+  };
+}
+
+function invalidParamMessage(param: string): string {
+  return `The ${param} argument was not valid. Check it against the tool's schema and try again.`;
+}
+
+/** The declared name the internal message mentions first, as a whole word; never anything else. */
+function namedParam(message: string, declared: readonly string[]): string | undefined {
+  let best: { name: string; at: number } | undefined;
+  for (const name of declared) {
+    if (!PARAM_NAME.test(name)) continue;
+    const match = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).exec(message);
+    if (match && (!best || match.index < best.at)) best = { name, at: match.index };
+  }
+  return best?.name;
 }
 
 function mintErrorRef(): string {
@@ -455,7 +658,7 @@ const SOURCE_ANSWER_SCHEMA = {
   properties: {
     kind: { const: 'source_answer' },
     status: { enum: ['answered', 'withheld'] },
-    answer: { type: 'string' },
+    answer: { type: 'string', maxLength: MAX_ANSWER },
     citations: { type: 'array', maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
   },
 } as const;
@@ -468,12 +671,12 @@ const ANONYMOUS_ANSWERED_SCHEMA = {
   properties: {
     kind: { const: 'anonymous_answer' },
     status: { const: 'answered' },
-    reply: { type: 'string' },
+    reply: { type: 'string', maxLength: MAX_ANSWER },
     level: { enum: ['strict', 'standard'] },
     rewritten: { type: 'boolean' },
     remembered: { type: 'boolean' },
-    network_identity: { enum: ['hidden', 'visible', 'not_verified'] },
-    cleanup: { enum: ['as_written', 'light_cleanup', 'custom'] },
+    network_identity: { enum: [...NETWORK_IDENTITIES] },
+    cleanup: { enum: [...CLEANUPS] },
     model: { type: 'string', pattern: MODEL_ID.source },
     route: { type: 'string', maxLength: MAX_ROUTE },
     sent: { type: 'string', maxLength: MAX_SENT },
@@ -496,7 +699,7 @@ const ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
       required: ['suggested_level', 'suggested_cleanup', 'custom_instruction'],
       properties: {
         suggested_level: { enum: ['strict', 'standard'] },
-        suggested_cleanup: { enum: ['as_written', 'light_cleanup', 'custom'] },
+        suggested_cleanup: { enum: [...CLEANUPS] },
         custom_instruction: { type: 'boolean' },
       },
     },
@@ -511,10 +714,10 @@ const ANONYMOUS_REFUSED_SCHEMA = {
   properties: {
     kind: { const: 'anonymous_answer' },
     status: { const: 'refused' },
-    code: { type: 'string', pattern: CODE.source },
+    code: { enum: [...REMOTE_REFUSAL_CODES] },
     message: { type: 'string', maxLength: MAX_MESSAGE },
-    outcome: { enum: ['not_sent', 'sent_failed', 'unknown'] },
-    daemon_code: { type: 'string', pattern: CODE.source },
+    outcome: { enum: [...OUTCOMES] },
+    daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
     sent: { type: 'string', maxLength: MAX_SENT },
   },
 } as const;
@@ -535,17 +738,17 @@ const SOURCE_INDEX_STATUS_SCHEMA = {
         additionalProperties: false,
         required: ['corpus_id', 'label', 'configured'],
         properties: {
-          corpus_id: { type: 'string', pattern: CORPUS_ID.source },
+          corpus_id: { type: 'string', pattern: CORPUS_ID.source, maxLength: 128 },
           label: { type: 'string', enum: [...REMOTE_SOURCE_LABELS] },
-          trust_domain: { enum: ['public_safe', 'internal', 'secure_local'] },
+          trust_domain: { enum: [...TRUST_DOMAINS] },
           configured: { type: 'boolean' },
           retrieval: {
             type: 'object',
             additionalProperties: false,
             required: ['mode', 'state'],
             properties: {
-              mode: { enum: ['keyword', 'hybrid'] },
-              state: { enum: ['ready', 'degraded'] },
+              mode: { enum: [...RETRIEVAL_MODES] },
+              state: { enum: [...RETRIEVAL_STATES] },
             },
           },
           last_refresh: {
@@ -553,7 +756,7 @@ const SOURCE_INDEX_STATUS_SCHEMA = {
             additionalProperties: false,
             required: ['status'],
             properties: {
-              status: { type: 'string', pattern: CODE.source },
+              status: { enum: [...REFRESH_STATUSES] },
               completed_at: { type: 'string', format: 'date-time' },
             },
           },
@@ -573,15 +776,16 @@ const SOURCE_INDEX_STATUS_SCHEMA = {
   },
 } as const;
 
-/** The error body's schema (OpenAPI `components.schemas.Error`). */
+/** The error body's schema (OpenAPI `components.schemas.Error`): every remote failure has this shape. */
 export const REMOTE_ERROR_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['error'],
+  required: ['error', 'message'],
   properties: {
-    error: { type: 'string', description: 'A stable error code.' },
+    error: { enum: [...REMOTE_ERROR_CODES], description: 'A stable error code.' },
     message: { type: 'string', description: 'A fixed sentence for this code.' },
     ref: { type: 'string', pattern: '^[0-9a-f]{16}$', description: 'Where the owner finds this failure in Olympus\'s log on the computer.' },
+    param: { type: 'string', pattern: PARAM_NAME.source, description: 'The argument at fault, when it is one the operation declares.' },
   },
 } as const;
 
@@ -602,33 +806,36 @@ export function remoteOutputSchema(operation: string): Record<string, unknown> |
 }
 
 /* ------------------------------------------------------------------ */
-/* Scalars                                                             */
+/* Scanning and scalars                                                */
 /* ------------------------------------------------------------------ */
 
 function isSecretLike(text: string): boolean {
   return secretLabelsInText(text).length > 0;
 }
 
-function cleanMultiline(value: string, max: number): string {
-  return value.replace(UNSAFE_CHARS, '').slice(0, max);
+/**
+ * A free-text field, normalized and capped. `secret` when the whole original,
+ * the whole normalized text, or the emitted (capped) text is secret-like, so
+ * a secret straddling the cap never leaves as a prefix. `line` folds
+ * whitespace to single spaces; `multiline` keeps line breaks.
+ */
+function scannedText(value: unknown, max: number, mode: 'line' | 'multiline'): { text?: string; secret: boolean } {
+  if (typeof value !== 'string') return { secret: false };
+  if (isSecretLike(value)) return { secret: true };
+  const normalized = mode === 'line'
+    ? value.replace(UNSAFE_CHARS, ' ').replace(/\s+/g, ' ').trim()
+    : value.replace(UNSAFE_CHARS, '');
+  if (isSecretLike(normalized)) return { secret: true };
+  const emitted = mode === 'line' ? normalized.slice(0, max).trim() : normalized.slice(0, max);
+  if (isSecretLike(emitted)) return { secret: true };
+  return emitted ? { text: emitted, secret: false } : { secret: false };
 }
 
-function cleanLine(value: unknown, max: number): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const cleaned = value.replace(UNSAFE_CHARS, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
-  return cleaned || undefined;
-}
-
-/** A free-text line, or undefined when absent, empty or secret-like. */
-function scannedLine(value: unknown, max: number): string | undefined {
-  const cleaned = cleanLine(value, max);
-  return cleaned && !isSecretLike(cleaned) ? cleaned : undefined;
-}
-
-function scannedMultiline(value: unknown, max: number): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const cleaned = cleanMultiline(value, max).trim();
-  return cleaned && !isSecretLike(cleaned) ? cleaned : undefined;
+/** An optional free-text field: undefined when absent, empty or secret-like. */
+function keptText(value: unknown, max: number, mode: 'line' | 'multiline'): string | undefined {
+  const scanned = scannedText(value, max, mode);
+  const text = mode === 'multiline' ? scanned.text?.trim() : scanned.text;
+  return text && !scanned.secret ? text : undefined;
 }
 
 function wholeNumber(value: unknown): number {

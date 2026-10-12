@@ -17074,44 +17074,33 @@ class TierLedger {
     })();
     return result;
   }
-  itemsAcrossAccounts(items) {
+  itemStatesForMany(identities) {
     const result = new Map;
-    if (items.length === 0)
+    if (identities.length === 0)
       return result;
+    const unique = new Map;
+    for (const identity of identities)
+      unique.set(tierLedgerIdentityKey(identity), identity);
+    const list = [...unique.values()];
     this.db.transaction(() => {
-      const scopesByProvider = new Map;
-      for (const item of items) {
-        const key = tierLedgerItemKeyAcrossAccounts(item);
-        if (result.has(key))
-          continue;
-        let scopes = scopesByProvider.get(item.provider);
-        if (!scopes) {
-          scopes = this.db.query(`
-            WITH RECURSIVE scopes(account_scope) AS (
-              SELECT MIN(account_scope) FROM tier_items WHERE provider = ?
-              UNION ALL
-              SELECT (SELECT MIN(account_scope) FROM tier_items WHERE provider = ? AND account_scope > scopes.account_scope)
-              FROM scopes WHERE scopes.account_scope IS NOT NULL
-            )
-            SELECT account_scope FROM scopes WHERE account_scope IS NOT NULL
-          `).all(item.provider, item.provider).map((row) => row.account_scope);
-          scopesByProvider.set(item.provider, scopes);
+      for (let offset = 0;offset < list.length; offset += 200) {
+        const batch = list.slice(offset, offset + 200);
+        const values = batch.map(() => "(?, ?, ?, ?)").join(", ");
+        const params = batch.flatMap((identity) => [...idParams(identity)]);
+        const rows = this.db.query(`
+          SELECT * FROM tier_items
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        `).all(...params);
+        for (const row of rows) {
+          result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
         }
-        const found = [];
-        for (const accountScope of scopes) {
-          const identity = { ...item, accountScope };
-          const record = this.readRow(identity);
-          if (!record)
-            continue;
-          const copies = this.db.query(`
-            SELECT * FROM tier_copies
-            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-            ORDER BY corpus_id
-          `).all(...idParams(identity)).map(copyFromRow);
-          found.push({ record, copies });
-        }
-        if (found.length > 0)
-          result.set(key, found);
+        const copies = this.db.query(`
+          SELECT * FROM tier_copies
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          ORDER BY corpus_id
+        `).all(...params);
+        for (const row of copies)
+          result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
       }
     })();
     return result;
@@ -17773,9 +17762,6 @@ function openRejudgeQuestionOf(row) {
 }
 function tierLedgerIdentityKey(identity) {
   return `${identity.provider}\x00${identity.accountScope}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
-}
-function tierLedgerItemKeyAcrossAccounts(identity) {
-  return `${identity.provider}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
 }
 function trustDomainRank(domain) {
   return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
@@ -37053,6 +37039,31 @@ var init_evidence_pack = __esm(() => {
   utf8 = new TextEncoder;
 });
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+function createReleaseManifestSink() {
+  return { manifests: [] };
+}
+function runWithReleaseManifestSink(sink, fn) {
+  return storage2.run(sink, fn);
+}
+function currentReleaseManifestSink() {
+  return storage2.getStore();
+}
+function recordReleaseManifest(manifest) {
+  storage2.getStore()?.manifests.push({
+    inputs: manifest.inputs.map((input) => ({ ...input })),
+    constraints: { ...manifest.constraints }
+  });
+}
+function adoptReleaseManifests(into, from) {
+  into.manifests.push(...from.manifests);
+}
+var storage2;
+var init_release_manifest = __esm(() => {
+  storage2 = new AsyncLocalStorage4;
+});
+
 // src/core/secret-location-note.ts
 function secretLocationCoverageNote(count) {
   return `${count} Secret(s) matched by location only; their contents are never read into an answer.`;
@@ -37208,6 +37219,10 @@ function createAnalystSourceIndexAnswerHandler(options) {
       }
       const includeInternal = request.include_internal !== false;
       const releaseSecureContent = request.include_secure_local_content === true || (options.secureDerivativeDefault ?? "allow") === "allow";
+      const releaseConstraints = {
+        secureDerivativeDefault: options.secureDerivativeDefault ?? "allow",
+        includeSecureLocalContent: request.include_secure_local_content === true
+      };
       const laneSetupStartedAt = Date.now();
       const retrievalRequest = request.retrieval_mode === undefined ? { ...request, retrieval_mode: "hybrid" } : request;
       const lanes = options.lanes(retrievalRequest);
@@ -37238,6 +37253,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
         };
         recordSourceAnswerPhaseTimings(phaseTimings2);
         recordSourceAnswerReleaseDecision(decision2.decision);
+        recordReleaseManifest({ inputs: [], constraints: releaseConstraints });
         return {
           answer: answerForReleaseDecision(decision2),
           evidence: [],
@@ -37431,6 +37447,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
         total_ms: totalLatencyMs
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
+      recordReleaseManifest({ inputs: releaseInputs(detail), constraints: releaseConstraints });
       return {
         answer,
         evidence: released ? releasedEvidence(analystResult.citations, detail, releaseSecureContent) : [],
@@ -37493,6 +37510,19 @@ function createAnalystSourceIndexAnswerHandler(options) {
       };
     }
   };
+}
+function releaseInputs(detail) {
+  return detail.pack.candidates.map((candidate, index) => {
+    const item = candidate.provenance.sourceItem;
+    return {
+      corpusId: detail.candidateCorpusIds[index] ?? "",
+      provider: item.provider,
+      accountScope: item.accountScope ?? "",
+      providerItemId: item.providerItemId,
+      ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {},
+      privateAtAnswer: isSecureSensitivity(candidate)
+    };
+  });
 }
 function sourceAnswerCorpusIds(request) {
   const ids = request.corpus_ids?.length ? [...request.corpus_ids] : [];
@@ -38840,6 +38870,7 @@ var init_analyst_answer = __esm(() => {
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
+  init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
   init_source_model_policy();
@@ -90489,6 +90520,35 @@ function sourceLabel3(provider, family) {
     return FAMILY_LABELS[family];
   return OTHER_SOURCE_LABEL;
 }
+function oneOf(value, allowed) {
+  return typeof value === "string" && allowed.includes(value) ? value : undefined;
+}
+function withheldParams(operation) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_WITHHELD_PARAMS, operation) ? REMOTE_WITHHELD_PARAMS[operation] ?? [] : [];
+}
+function remoteDeclaredParams(operation, declared) {
+  const withheld = withheldParams(operation);
+  return declared.filter((name) => !withheld.includes(name));
+}
+function remoteToolDescription(operation, description) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_DESCRIPTIONS, operation) ? REMOTE_DESCRIPTIONS[operation] ?? description : description;
+}
+function remoteToolSchema(operation, schema) {
+  const withheld = withheldParams(operation);
+  if (withheld.length === 0)
+    return schema;
+  const properties = asRecord14(schema.properties) ?? {};
+  const required4 = Array.isArray(schema.required) ? schema.required : [];
+  return {
+    ...schema,
+    properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !withheld.includes(name))),
+    required: required4.filter((name) => typeof name === "string" && !withheld.includes(name))
+  };
+}
+function remoteWithheldParam(operation, args) {
+  const withheld = withheldParams(operation);
+  return Object.keys(args).filter((name) => withheld.includes(name)).sort()[0];
+}
 function remoteOperationOutput(operation, raw, options = {}) {
   const pending = pendingOutput(raw);
   switch (operation) {
@@ -90512,7 +90572,7 @@ function pendingOutput(raw) {
   const record3 = asRecord14(raw);
   if (record3?.status !== "working")
     return;
-  if (typeof record3.job_id !== "string" || !JOB_ID.test(record3.job_id)) {
+  if (typeof record3.job_id !== "string" || !JOB_ID.test(record3.job_id) || isSecretLike(record3.job_id)) {
     throw new OperationError("source_index_error", "unexpected pending shape");
   }
   return {
@@ -90529,68 +90589,80 @@ function sourceAnswerOutput(raw, options) {
     throw new OperationError("source_index_error", "unexpected answer shape");
   }
   const evidence = record3.evidence.map(asRecord14).filter((entry) => entry !== undefined);
-  const verdicts = recheckCitedItems(evidence, options.citedItemCheck);
-  if (verdicts === "withhold")
-    return withheldAnswer(REMOTE_ANSWER_CHANGED);
-  const answer = cleanMultiline(withoutSecretLocationCoverageNotes(record3.answer), MAX_ANSWER);
-  if (isSecretLike(answer))
+  let dropped = new Set;
+  if (options.releaseCheck) {
+    const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
+    if ("withhold" in recheck)
+      return withheldAnswer(recheck.withhold);
+    dropped = recheck.dropped;
+  }
+  if (isSecretLike(record3.answer))
+    return withheldAnswer(REMOTE_ANSWER_WITHHELD);
+  const answer = scannedText(withoutSecretLocationCoverageNotes(record3.answer), MAX_ANSWER, "multiline");
+  if (answer.secret)
     return withheldAnswer(REMOTE_ANSWER_WITHHELD);
   const citations = [];
   evidence.forEach((entry, index) => {
-    if (verdicts?.[index] === "gone" || citations.length >= MAX_CITATIONS)
+    if (dropped.has(index) || citations.length >= MAX_CITATIONS)
       return;
     citations.push(citationOutput(entry));
   });
-  return { kind: "source_answer", status: "answered", answer, citations };
+  return { kind: "source_answer", status: "answered", answer: answer.text ?? "", citations };
 }
 function withheldAnswer(message) {
   return { kind: "source_answer", status: "withheld", answer: message, citations: [] };
 }
-function recheckCitedItems(evidence, check) {
-  if (!check || evidence.length === 0)
-    return;
-  const refs = evidence.map(citedItemRef);
-  const checkable = refs.flatMap((ref, index) => ref ? [{ ref, index }] : []);
-  if (checkable.length === 0)
-    return;
-  let verdicts;
-  try {
-    verdicts = check(checkable.map(({ ref }) => ref));
-    if (verdicts.length !== checkable.length)
-      throw new Error("cited item check returned the wrong number of verdicts");
-  } catch (error2) {
-    console.error(`[olympus:remote] cited_item_check_failed error_message=${boundedLogErrorMessage(error2)}`);
-    return "withhold";
+function recheckRelease(evidence, manifests, check) {
+  if (manifests.length === 0) {
+    console.error("[olympus:remote] release_manifest_missing");
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
   }
-  if (verdicts.some((verdict) => verdict === "secret"))
-    return "withhold";
-  const byIndex = evidence.map(() => {
-    return;
-  });
-  checkable.forEach(({ index }, position) => {
-    byIndex[index] = verdicts[position];
-  });
-  return byIndex;
+  const inputs = manifests.flatMap((manifest2) => manifest2.inputs.map((input) => ({ input, manifest: manifest2 })));
+  let verdicts;
+  let postureNow;
+  try {
+    verdicts = check.inputs(inputs.map(({ input }) => input));
+    if (verdicts.length !== inputs.length)
+      throw new Error("release check returned the wrong number of verdicts");
+    postureNow = check.secureDerivativeDefault();
+  } catch (error2) {
+    console.error(`[olympus:remote] release_check_failed error_message=${boundedLogErrorMessage(error2)}`);
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  }
+  if (verdicts.some((verdict) => verdict.tier === "secret"))
+    return { withhold: REMOTE_ANSWER_CHANGED };
+  if (verdicts.some((verdict) => verdict.tier === "unknown"))
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  for (const [index, { input, manifest: manifest2 }] of inputs.entries()) {
+    const verdict = verdicts[index];
+    const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
+    if (!privateNow)
+      continue;
+    const releasableNow = manifest2.constraints.includeSecureLocalContent || postureNow === "allow";
+    if (!releasableNow)
+      return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
+  }
+  const dropped = new Set;
+  for (const [index, entry] of evidence.entries()) {
+    const matches = inputs.flatMap(({ input }, position) => citesInput(entry, input) ? [verdicts[position]] : []);
+    if (matches.length === 0) {
+      console.error("[olympus:remote] release_manifest_incomplete");
+      return { withhold: REMOTE_ANSWER_UNVERIFIED };
+    }
+    if (matches.some((verdict) => verdict.gone))
+      dropped.add(index);
+  }
+  return { dropped };
 }
-function citedItemRef(entry) {
-  const { corpus_id: corpusId, provider, provider_item_id: providerItemId, provider_conversation_id: conversation } = entry;
-  if (typeof corpusId !== "string" || typeof provider !== "string" || typeof providerItemId !== "string")
-    return;
-  if (!corpusId || !provider || !providerItemId)
-    return;
-  return {
-    corpusId,
-    provider,
-    providerItemId,
-    ...typeof conversation === "string" && conversation ? { providerConversationId: conversation } : {}
-  };
+function citesInput(entry, input) {
+  return entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
 }
 function citationOutput(entry) {
-  const title = cleanLine(entry.title, MAX_TITLE);
+  const title = scannedText(entry.title, MAX_TITLE, "line");
   const date4 = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
   return {
     label: sourceLabel3(entry.provider, entry.family),
-    ...title && !isSecretLike(title) ? { title } : {},
+    ...title.text && !title.secret ? { title: title.text } : {},
     ...date4 ? { date: date4 } : {}
   };
 }
@@ -90602,20 +90674,21 @@ function anonymousAnswerOutput(raw) {
   if (record3.ok) {
     if (typeof record3.reply !== "string")
       throw new OperationError("email_error", "unexpected anonymous answer shape");
-    const reply = cleanMultiline(record3.reply, MAX_ANSWER);
-    const sent2 = scannedMultiline(record3.sent, MAX_SENT);
-    const route = scannedLine(record3.route, MAX_ROUTE);
-    const note = scannedLine(record3.note, MAX_MESSAGE);
-    const model = typeof record3.model === "string" && MODEL_ID.test(record3.model) ? record3.model : undefined;
+    const reply = scannedText(record3.reply, MAX_ANSWER, "multiline");
+    const sent2 = keptText(record3.sent, MAX_SENT, "multiline");
+    const route = keptText(record3.route, MAX_ROUTE, "line");
+    const note = keptText(record3.note, MAX_MESSAGE, "line");
+    const model = typeof record3.model === "string" && MODEL_ID.test(record3.model) && !isSecretLike(record3.model) ? record3.model : undefined;
+    const cleanup = oneOf(record3.cleanup, CLEANUPS);
     return {
       kind: "anonymous_answer",
       status: "answered",
-      reply: isSecretLike(reply) ? REMOTE_REPLY_WITHHELD : reply,
+      reply: reply.secret ? REMOTE_REPLY_WITHHELD : reply.text ?? "",
       level: record3.level === "strict" ? "strict" : "standard",
       rewritten: record3.rewritten === true,
       remembered: record3.remembered === true,
-      network_identity: record3.networkIdentity === "hidden" || record3.networkIdentity === "visible" ? record3.networkIdentity : "not_verified",
-      ...record3.cleanup === "as_written" || record3.cleanup === "light_cleanup" || record3.cleanup === "custom" ? { cleanup: record3.cleanup } : {},
+      network_identity: oneOf(record3.networkIdentity, NETWORK_IDENTITIES) ?? "not_verified",
+      ...cleanup ? { cleanup } : {},
       ...model ? { model } : {},
       ...route ? { route } : {},
       ...sent2 ? { sent: sent2 } : {},
@@ -90630,19 +90703,21 @@ function anonymousAnswerOutput(raw) {
       message: REMOTE_NEEDS_CHOICE_MESSAGE,
       options: {
         suggested_level: options?.suggestedLevel === "strict" ? "strict" : "standard",
-        suggested_cleanup: options?.suggestedCleanup === "light_cleanup" || options?.suggestedCleanup === "custom" ? options.suggestedCleanup : "as_written",
+        suggested_cleanup: oneOf(options?.suggestedCleanup, CLEANUPS) ?? "as_written",
         custom_instruction: options?.customInstruction === true
       }
     };
   }
-  const sent = scannedMultiline(record3.sent, MAX_SENT);
+  const sent = keptText(record3.sent, MAX_SENT, "multiline");
+  const outcome = oneOf(record3.outcome, OUTCOMES);
+  const daemonCode = oneOf(record3.daemonCode, REMOTE_DAEMON_CODES);
   return {
     kind: "anonymous_answer",
     status: "refused",
-    code: typeof record3.code === "string" && CODE.test(record3.code) ? record3.code : "refused",
-    message: scannedLine(record3.message, MAX_MESSAGE) ?? REMOTE_REFUSAL_FALLBACK,
-    ...record3.outcome === "not_sent" || record3.outcome === "sent_failed" || record3.outcome === "unknown" ? { outcome: record3.outcome } : {},
-    ...typeof record3.daemonCode === "string" && CODE.test(record3.daemonCode) ? { daemon_code: record3.daemonCode } : {},
+    code: oneOf(record3.code, REMOTE_REFUSAL_CODES) ?? "refused",
+    message: keptText(record3.message, MAX_MESSAGE, "line") ?? REMOTE_REFUSAL_FALLBACK,
+    ...outcome ? { outcome } : {},
+    ...daemonCode ? { daemon_code: daemonCode } : {},
     ...sent ? { sent } : {}
   };
 }
@@ -90657,19 +90732,20 @@ function sourceIndexStatusOutput(raw) {
     if (corpora.length >= MAX_CORPORA)
       break;
     const corpus = asRecord14(value);
-    if (!corpus || typeof corpus.corpus_id !== "string" || !CORPUS_ID.test(corpus.corpus_id) || corpus.corpus_id.length > 128)
+    if (!corpus || typeof corpus.corpus_id !== "string" || corpus.corpus_id.length > 128 || !CORPUS_ID.test(corpus.corpus_id) || isSecretLike(corpus.corpus_id))
       continue;
     const retrieval = asRecord14(corpus.retrieval);
-    const mode = retrieval?.servable_mode === "keyword" || retrieval?.servable_mode === "hybrid" ? retrieval.servable_mode : undefined;
-    const state = retrieval?.state === "ready" || retrieval?.state === "degraded" ? retrieval.state : undefined;
+    const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
+    const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
     const refresh = asRecord14(corpus.last_refresh);
-    const refreshStatus = typeof refresh?.status === "string" && CODE.test(refresh.status) ? refresh.status : undefined;
+    const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
     const completedAt = iso(refresh?.completed_at);
     const counts = asRecord14(corpus.counts);
+    const trustDomain = oneOf(corpus.trust_domain, TRUST_DOMAINS);
     corpora.push({
       corpus_id: corpus.corpus_id,
       label: sourceLabel3(corpus.provider, corpus.family),
-      ...typeof corpus.trust_domain === "string" && TRUST_DOMAINS.has(corpus.trust_domain) ? { trust_domain: corpus.trust_domain } : {},
+      ...trustDomain ? { trust_domain: trustDomain } : {},
       configured: corpus.configured === true,
       ...mode && state ? { retrieval: { mode, state } } : {},
       ...refreshStatus ? { last_refresh: { status: refreshStatus, ...completedAt ? { completed_at: completedAt } : {} } } : {},
@@ -90689,8 +90765,13 @@ function remoteErrorCode(error2) {
     return error2.code;
   return "internal_error";
 }
-function remoteErrorOutput(error2) {
+function remoteErrorOutput(error2, options = {}) {
   const code = remoteErrorCode(error2);
+  if (code === "invalid_params" && options.declaredParams && error2 instanceof OperationError) {
+    const param = namedParam(error2.message, options.declaredParams);
+    if (param)
+      return { error: code, message: invalidParamMessage(param), param };
+  }
   if (!REFERENCED_ERROR_CODES.has(code))
     return { error: code, message: REMOTE_ERROR_TEXT[code] };
   const ref = mintErrorRef();
@@ -90700,6 +90781,29 @@ function remoteErrorOutput(error2) {
 }
 function remoteSurfaceErrorOutput(code) {
   return { error: code, message: REMOTE_ERROR_TEXT[code] };
+}
+function remoteWithheldParamOutput(param) {
+  if (!PARAM_NAME.test(param))
+    return { error: "invalid_params", message: REMOTE_ERROR_TEXT.invalid_params };
+  return {
+    error: "invalid_params",
+    message: `The ${param} argument is not available to remote agents. Remove it and try again.`,
+    param
+  };
+}
+function invalidParamMessage(param) {
+  return `The ${param} argument was not valid. Check it against the tool's schema and try again.`;
+}
+function namedParam(message, declared) {
+  let best;
+  for (const name of declared) {
+    if (!PARAM_NAME.test(name))
+      continue;
+    const match = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).exec(message);
+    if (match && (!best || match.index < best.at))
+      best = { name, at: match.index };
+  }
+  return best?.name;
 }
 function mintErrorRef() {
   const bytes = new Uint8Array(8);
@@ -90712,24 +90816,23 @@ function remoteOutputSchema(operation) {
 function isSecretLike(text) {
   return secretLabelsInText(text).length > 0;
 }
-function cleanMultiline(value, max) {
-  return value.replace(UNSAFE_CHARS, "").slice(0, max);
-}
-function cleanLine(value, max) {
+function scannedText(value, max, mode) {
   if (typeof value !== "string")
-    return;
-  const cleaned = value.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, max);
-  return cleaned || undefined;
+    return { secret: false };
+  if (isSecretLike(value))
+    return { secret: true };
+  const normalized = mode === "line" ? value.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim() : value.replace(UNSAFE_CHARS, "");
+  if (isSecretLike(normalized))
+    return { secret: true };
+  const emitted = mode === "line" ? normalized.slice(0, max).trim() : normalized.slice(0, max);
+  if (isSecretLike(emitted))
+    return { secret: true };
+  return emitted ? { text: emitted, secret: false } : { secret: false };
 }
-function scannedLine(value, max) {
-  const cleaned = cleanLine(value, max);
-  return cleaned && !isSecretLike(cleaned) ? cleaned : undefined;
-}
-function scannedMultiline(value, max) {
-  if (typeof value !== "string")
-    return;
-  const cleaned = cleanMultiline(value, max).trim();
-  return cleaned && !isSecretLike(cleaned) ? cleaned : undefined;
+function keptText(value, max, mode) {
+  const scanned = scannedText(value, max, mode);
+  const text = mode === "multiline" ? scanned.text?.trim() : scanned.text;
+  return text && !scanned.secret ? text : undefined;
 }
 function wholeNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
@@ -90746,7 +90849,7 @@ function dateOnly(value) {
 function asRecord14(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, CODE, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, TRUST_DOMAINS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_operation_error();
   init_opsec();
@@ -90754,7 +90857,7 @@ var init_remote_result = __esm(() => {
   MAX_ANSWER = 64 * 1024;
   MAX_SENT = 16 * 1024;
   JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
-  CODE = /^[a-z][a-z0-9_]{0,63}$/;
+  PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
   CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
   MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
   UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
@@ -90789,7 +90892,111 @@ var init_remote_result = __esm(() => {
     ...Object.values(FAMILY_LABELS),
     OTHER_SOURCE_LABEL
   ])].sort());
-  TRUST_DOMAINS = new Set(["public_safe", "internal", "secure_local"]);
+  REMOTE_REFUSAL_CODES = Object.freeze([
+    "refused",
+    "anonymous_answers_off",
+    "cancelled",
+    "gate_refused",
+    "internal_error",
+    "invalid_params",
+    "model_same_provider",
+    "question_empty",
+    "question_too_long",
+    "route_not_configured",
+    "secret_detected",
+    "settings_invalid",
+    "settings_stale",
+    "writer_declined",
+    "writer_failed",
+    "invalid_question",
+    "busy",
+    "acknowledgements_incomplete",
+    "funding_date_missing",
+    "funding_date_invalid",
+    "note_expired",
+    "daemon_api_key_missing",
+    "daemon_not_found",
+    "tor_not_found",
+    "unresolved_session",
+    "unresolved_session_other_wallet",
+    "no_unresolved_session",
+    "stranded_processes",
+    "daemon_already_running",
+    "tor_port_busy",
+    "tor_bootstrap_failed",
+    "daemon_start_failed",
+    "daemon_version_unsupported",
+    "daemon_supervisor_unsupported",
+    "relay_mismatch",
+    "key_reuse_on",
+    "key_reuse_unverified",
+    "daemon_keyless",
+    "daemon_identity_failed",
+    "daemon_api_key_rejected",
+    "session_process_exited",
+    "confinement_self_test_failed",
+    "policy_unavailable",
+    "model_unavailable",
+    "daily_cap_reached",
+    "spend_cap_reached",
+    "state_unavailable",
+    "timeout",
+    "aborted",
+    "redirect_refused",
+    "response_too_large",
+    "invalid_response",
+    "daemon_error",
+    "transport_failed",
+    "teardown_incomplete",
+    "authorization_refused",
+    "session_spent"
+  ].filter((code, index, all) => all.indexOf(code) === index));
+  REMOTE_DAEMON_CODES = Object.freeze([
+    "busy",
+    "request_cancelled",
+    "funding_required",
+    "model_budget_unavailable",
+    "model_policy_unavailable",
+    "invalid_model",
+    "anonymous_access_failed",
+    "upstream_error",
+    "invalid_upstream_response",
+    "withdrawal_pending",
+    "wallet_conflict",
+    "invalid_request_error",
+    "invalid_body",
+    "testnet_password_required",
+    "invalid_api_key",
+    "local_connection_required",
+    "browser_origin_denied",
+    "unrecognized"
+  ]);
+  REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+  TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+  RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+  RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+  NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+  CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+  OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+  REMOTE_WITHHELD_PARAMS = {
+    source_index_status: [
+      "conversation_id",
+      "include_sender_aggregation",
+      "max_senders",
+      "include_readiness_ledger",
+      "include_ingestion_ledger",
+      "include_items",
+      "max_items",
+      "query"
+    ]
+  };
+  REMOTE_DESCRIPTIONS = {
+    source_index_status: [
+      "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+      "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+      "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+    ].join(" ")
+  };
   REMOTE_ERROR_TEXT = {
     invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
     invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
@@ -90810,7 +91017,14 @@ var init_remote_result = __esm(() => {
     source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
     internal_error: "Olympus could not complete this request.",
     unknown_operation: "Olympus has no operation with that name here.",
-    operation_unavailable: "That operation is not enabled on this Olympus install."
+    operation_unavailable: "That operation is not enabled on this Olympus install.",
+    unauthorized: "A connection token is required.",
+    invalid_token: "The connection token is not valid or has been revoked.",
+    remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+    not_found: "There is nothing at this path.",
+    method_not_allowed: "That HTTP method is not allowed here.",
+    unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+    payload_too_large: "The request body is too large."
   };
   REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
   REFERENCED_ERROR_CODES = new Set([
@@ -90851,7 +91065,7 @@ var init_remote_result = __esm(() => {
     properties: {
       kind: { const: "source_answer" },
       status: { enum: ["answered", "withheld"] },
-      answer: { type: "string" },
+      answer: { type: "string", maxLength: MAX_ANSWER },
       citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA }
     }
   };
@@ -90863,12 +91077,12 @@ var init_remote_result = __esm(() => {
     properties: {
       kind: { const: "anonymous_answer" },
       status: { const: "answered" },
-      reply: { type: "string" },
+      reply: { type: "string", maxLength: MAX_ANSWER },
       level: { enum: ["strict", "standard"] },
       rewritten: { type: "boolean" },
       remembered: { type: "boolean" },
-      network_identity: { enum: ["hidden", "visible", "not_verified"] },
-      cleanup: { enum: ["as_written", "light_cleanup", "custom"] },
+      network_identity: { enum: [...NETWORK_IDENTITIES] },
+      cleanup: { enum: [...CLEANUPS] },
       model: { type: "string", pattern: MODEL_ID.source },
       route: { type: "string", maxLength: MAX_ROUTE },
       sent: { type: "string", maxLength: MAX_SENT },
@@ -90890,7 +91104,7 @@ var init_remote_result = __esm(() => {
         required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
         properties: {
           suggested_level: { enum: ["strict", "standard"] },
-          suggested_cleanup: { enum: ["as_written", "light_cleanup", "custom"] },
+          suggested_cleanup: { enum: [...CLEANUPS] },
           custom_instruction: { type: "boolean" }
         }
       }
@@ -90904,10 +91118,10 @@ var init_remote_result = __esm(() => {
     properties: {
       kind: { const: "anonymous_answer" },
       status: { const: "refused" },
-      code: { type: "string", pattern: CODE.source },
+      code: { enum: [...REMOTE_REFUSAL_CODES] },
       message: { type: "string", maxLength: MAX_MESSAGE },
-      outcome: { enum: ["not_sent", "sent_failed", "unknown"] },
-      daemon_code: { type: "string", pattern: CODE.source },
+      outcome: { enum: [...OUTCOMES] },
+      daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
       sent: { type: "string", maxLength: MAX_SENT }
     }
   };
@@ -90927,17 +91141,17 @@ var init_remote_result = __esm(() => {
           additionalProperties: false,
           required: ["corpus_id", "label", "configured"],
           properties: {
-            corpus_id: { type: "string", pattern: CORPUS_ID.source },
+            corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
             label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
-            trust_domain: { enum: ["public_safe", "internal", "secure_local"] },
+            trust_domain: { enum: [...TRUST_DOMAINS] },
             configured: { type: "boolean" },
             retrieval: {
               type: "object",
               additionalProperties: false,
               required: ["mode", "state"],
               properties: {
-                mode: { enum: ["keyword", "hybrid"] },
-                state: { enum: ["ready", "degraded"] }
+                mode: { enum: [...RETRIEVAL_MODES] },
+                state: { enum: [...RETRIEVAL_STATES] }
               }
             },
             last_refresh: {
@@ -90945,7 +91159,7 @@ var init_remote_result = __esm(() => {
               additionalProperties: false,
               required: ["status"],
               properties: {
-                status: { type: "string", pattern: CODE.source },
+                status: { enum: [...REFRESH_STATUSES] },
                 completed_at: { type: "string", format: "date-time" }
               }
             },
@@ -90967,11 +91181,12 @@ var init_remote_result = __esm(() => {
   REMOTE_ERROR_SCHEMA = {
     type: "object",
     additionalProperties: false,
-    required: ["error"],
+    required: ["error", "message"],
     properties: {
-      error: { type: "string", description: "A stable error code." },
+      error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
       message: { type: "string", description: "A fixed sentence for this code." },
-      ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." }
+      ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+      param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." }
     }
   };
   REMOTE_OUTPUT_SCHEMAS = {
@@ -91037,9 +91252,11 @@ class SourceAnswerJobRegistry {
     const startedAt = this.now();
     const controller = new AbortController;
     const release = this.occupy(scope.owner);
+    const callerManifests = currentReleaseManifestSink();
+    const jobManifests = callerManifests ? createReleaseManifestSink() : undefined;
     let pending;
     try {
-      pending = work(controller.signal);
+      pending = jobManifests ? runWithReleaseManifestSink(jobManifests, () => work(controller.signal)) : work(controller.signal);
     } catch (error2) {
       release();
       throw error2;
@@ -91053,6 +91270,8 @@ class SourceAnswerJobRegistry {
     clearTimeout(timer);
     if (first !== "handoff") {
       release();
+      if (callerManifests && jobManifests)
+        adoptReleaseManifests(callerManifests, jobManifests);
       if (first.ok)
         return first.value;
       throw first.error;
@@ -91075,7 +91294,8 @@ class SourceAnswerJobRegistry {
         release();
         wake();
       },
-      abort: (reason) => controller.abort(reason)
+      abort: (reason) => controller.abort(reason),
+      ...jobManifests ? { releaseManifests: jobManifests } : {}
     };
     job.deadline = setTimeout(() => {
       job.abort(callerAbortError("source_answer job deadline reached"));
@@ -91114,8 +91334,12 @@ class SourceAnswerJobRegistry {
       throw sourceAnswerJobNotFound();
     if (!job.outcome)
       return pendingResult(job.id, this.now() - job.startedAt, this.limits.resultWaitMs);
-    if (job.outcome.ok)
+    if (job.outcome.ok) {
+      const collecting = currentReleaseManifestSink();
+      if (collecting && job.releaseManifests)
+        adoptReleaseManifests(collecting, job.releaseManifests);
       return job.outcome.value;
+    }
     throw job.outcome.error;
   }
   dropOwner(owner) {
@@ -91246,7 +91470,11 @@ function pendingResult(jobId, elapsedMs2, resultWaitMs) {
   };
 }
 function newJobId() {
-  return `${JOB_ID_PREFIX}${randomBytes11(32).toString("base64url")}`;
+  for (;; ) {
+    const id = `${JOB_ID_PREFIX}${randomBytes11(32).toString("base64url")}`;
+    if (secretLabelsInText(id).length === 0)
+      return id;
+  }
 }
 function clampedInteger(value, min, max) {
   if (value === undefined || value.trim() === "")
@@ -91259,6 +91487,8 @@ function clampedInteger(value, min, max) {
 var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200000, SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_DEADLINE_MS, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 2, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING = 16, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 2, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, SOURCE_ANSWER_MAX_RESULT_BYTES, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN;
 var init_source_answer_jobs = __esm(() => {
   init_operation_error();
+  init_opsec();
+  init_release_manifest();
   SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
   SOURCE_ANSWER_JOB_DEADLINE_MS = 20 * 60000;
   SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
@@ -91269,8 +91499,8 @@ var init_source_answer_jobs = __esm(() => {
 function listMcpTools(config2, surface = "mcp") {
   return exposedOperations(operations, { config: config2, surface }).map((operation) => ({
     name: operation.name,
-    description: operationDescription(operation, { config: config2 }),
-    inputSchema: operationToolSchema(operation, { config: config2 }),
+    description: surface === "remote" ? remoteToolDescription(operation.name, operationDescription(operation, { config: config2 })) : operationDescription(operation, { config: config2 }),
+    inputSchema: surface === "remote" ? remoteToolSchema(operation.name, operationToolSchema(operation, { config: config2 })) : operationToolSchema(operation, { config: config2 }),
     annotations: {
       readOnlyHint: !operation.mutating,
       destructiveHint: false,
@@ -91281,6 +91511,7 @@ function listMcpTools(config2, surface = "mcp") {
 var init_tools = __esm(() => {
   init_operation_exposure();
   init_operations();
+  init_remote_result();
 });
 
 // src/mcp/server.ts
@@ -91322,14 +91553,56 @@ async function handleRemoteCallTool(request, makeOperationContext) {
   if (!shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
     return { content: text(remoteSurfaceErrorOutput("operation_unavailable")), isError: true };
   }
+  const args = request.params.arguments ?? {};
+  const withheld = remoteWithheldParam(operation.name, args);
+  if (withheld)
+    return { content: text(remoteWithheldParamOutput(withheld)), isError: true };
+  const declaredParams = remoteDeclaredParams(operation.name, Object.keys(operation.params));
+  const manifests = createReleaseManifestSink();
   try {
-    const result = await operation.handler(ctx, request.params.arguments ?? {});
+    const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
     return {
-      content: text(remoteOperationOutput(operation.name, result, ctx.citedItemCheck ? { citedItemCheck: ctx.citedItemCheck } : {}))
+      content: text(remoteOperationOutput(operation.name, result, {
+        ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
+        releaseManifests: manifests.manifests
+      }))
     };
   } catch (error2) {
-    return { content: text(remoteErrorOutput(error2)), isError: true };
+    return { content: text(remoteErrorOutput(error2, { declaredParams })), isError: true };
   }
+}
+function normalizeRemoteTransportErrors(transport) {
+  const handle = transport.handleRequest;
+  if (typeof handle !== "function")
+    return;
+  transport.handleRequest = async (...args) => normalizedJsonRpcErrorResponse(await handle.apply(transport, args));
+}
+async function normalizedJsonRpcErrorResponse(response) {
+  if (!(response.headers.get("Content-Type") ?? "").toLowerCase().includes("application/json"))
+    return response;
+  let body;
+  try {
+    body = JSON.parse(await response.clone().text());
+  } catch {
+    return response;
+  }
+  let changed = false;
+  const normalize4 = (message) => {
+    if (typeof message !== "object" || message === null || Array.isArray(message))
+      return message;
+    const record3 = message;
+    if (typeof record3.error !== "object" || record3.error === null)
+      return message;
+    changed = true;
+    const code = typeof record3.error.code === "number" ? record3.error.code : -32603;
+    return { ...record3, error: { code, message: REMOTE_JSON_RPC_ERROR_TEXT[code] ?? REMOTE_JSON_RPC_ERROR_FALLBACK } };
+  };
+  const normalized = Array.isArray(body) ? body.map(normalize4) : normalize4(body);
+  if (!changed)
+    return response;
+  const headers = new Headers(response.headers);
+  headers.delete("Content-Length");
+  return new Response(JSON.stringify(normalized), { status: response.status, statusText: response.statusText, headers });
 }
 function createOlympusMcpServer(surface, makeOperationContext) {
   const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {} } });
@@ -91337,6 +91610,13 @@ function createOlympusMcpServer(surface, makeOperationContext) {
     tools: listMcpTools(makeOperationContext().config, surface)
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => handleMcpCallTool(request, makeOperationContext, surface));
+  if (surface === "remote") {
+    const connect = server.connect.bind(server);
+    server.connect = async (transport) => {
+      normalizeRemoteTransportErrors(transport);
+      return connect(transport);
+    };
+  }
   return server;
 }
 async function serve() {
@@ -91379,6 +91659,7 @@ function makeContext(clientName, sourceAnswerJobs) {
     ...sourceAnswerJobs && owner ? { sourceAnswerJobs: { registry: sourceAnswerJobs, owner } } : {}
   };
 }
+var REMOTE_JSON_RPC_ERROR_TEXT, REMOTE_JSON_RPC_ERROR_FALLBACK = "The request could not be handled.";
 var init_server4 = __esm(() => {
   init_server3();
   init_stdio2();
@@ -91390,10 +91671,19 @@ var init_server4 = __esm(() => {
   init_operation_exposure();
   init_operations();
   init_public_surface();
+  init_release_manifest();
   init_remote_result();
   init_source_answer_jobs();
   init_version();
   init_tools();
+  REMOTE_JSON_RPC_ERROR_TEXT = {
+    [-32700]: "Parse error: the request was not valid JSON-RPC.",
+    [-32600]: "Invalid request.",
+    [-32601]: "Method not found.",
+    [-32602]: "Invalid params.",
+    [-32603]: "Internal error.",
+    [-32001]: "Session not found."
+  };
 });
 
 // connect-relay/shared/protocol.ts
@@ -117367,47 +117657,49 @@ function createTierVisibilityGate(scopes) {
     return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
   };
 }
-function createCitedItemTierCheck(scopes) {
-  return (items) => {
-    const verdicts = items.map(() => "unknown");
-    if (items.length === 0)
-      return verdicts;
-    const current = scopes();
-    for (const scope of current) {
-      const governed = items.flatMap((item, index) => scope.corpusIds.has(item.corpusId) ? [index] : []);
-      if (governed.length === 0)
-        continue;
-      const rows = scope.ledger.itemsAcrossAccounts(governed.map((index) => {
-        const item = items[index];
-        return {
-          provider: item.provider,
-          providerItemId: item.providerItemId,
-          ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}
-        };
-      }));
-      for (const index of governed) {
-        const item = items[index];
-        const found = rows.get(tierLedgerItemKeyAcrossAccounts({
-          provider: item.provider,
-          providerItemId: item.providerItemId,
-          ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}
-        }));
-        if (!found || found.length === 0)
+function createReleaseTierCheck(scopes, secureDerivativeDefault) {
+  return {
+    secureDerivativeDefault,
+    inputs: (inputs) => {
+      const verdicts = inputs.map(() => ({ tier: "legacy", gone: false }));
+      if (inputs.length === 0)
+        return verdicts;
+      for (const scope of scopes()) {
+        const governed = [];
+        inputs.forEach((input, index) => {
+          if (!scope.corpusIds.has(input.corpusId))
+            return;
+          if (!input.accountScope || !input.provider || !input.providerItemId) {
+            verdicts[index] = { tier: "unknown", gone: false };
+            return;
+          }
+          governed.push({
+            index,
+            identity: {
+              provider: input.provider,
+              accountScope: input.accountScope,
+              providerItemId: input.providerItemId,
+              ...input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}
+            }
+          });
+        });
+        if (governed.length === 0)
           continue;
-        const secret = found.some(({ record: record3 }) => record3.metadataTier === "secrets" || record3.contentTier === "secrets" || record3.targetMetadataTier === "secrets" || record3.targetContentTier === "secrets");
-        if (secret) {
-          verdicts[index] = "secret";
-          continue;
+        const states = scope.ledger.itemStatesForMany(governed.map(({ identity }) => identity));
+        for (const { index, identity } of governed) {
+          const state = states.get(tierLedgerIdentityKey(identity));
+          if (!state)
+            continue;
+          const { record: record3, copies } = state;
+          const tiers = [record3.metadataTier, record3.contentTier, record3.targetMetadataTier, record3.targetContentTier];
+          verdicts[index] = {
+            tier: tiers.includes("secrets") ? "secret" : tiers.includes("secure") ? "private" : "public_or_personal",
+            gone: record3.routed && !copies.some((copy) => copy.state === "current")
+          };
         }
-        const routed = found.filter(({ record: record3 }) => record3.routed);
-        if (routed.length === 0) {
-          verdicts[index] = "current";
-          continue;
-        }
-        verdicts[index] = routed.some(({ copies }) => copies.some((copy) => copy.state === "current")) ? "current" : "gone";
       }
+      return verdicts;
     }
-    return verdicts;
   };
 }
 var init_tier_visibility = __esm(() => {
@@ -126472,7 +126764,7 @@ async function callSetupTool(name, args, backend) {
   try {
     switch (name) {
       case CONNECT_SOURCE_TOOL_NAME: {
-        const source = oneOf(args.source, OAUTH_SOURCES2);
+        const source = oneOf2(args.source, OAUTH_SOURCES2);
         const started = await backend.startOAuth(source);
         if (backend.directSignIn) {
           return connectSourceToolResult({ status: "open_link", source, openUrl: started.authorizationUrl, expiresAt: started.expiresAt }, { direct: true });
@@ -126487,16 +126779,16 @@ async function callSetupTool(name, args, backend) {
       case SCOPE_SET_TOOL_NAME:
         return await scopeSet(backend, args);
       case DISCONNECT_SOURCE_TOOL_NAME: {
-        const sourceId = oneOf(args.source_id, DISCONNECT_SOURCE_IDS3);
+        const sourceId = oneOf2(args.source_id, DISCONNECT_SOURCE_IDS3);
         await backend.disconnect(sourceId);
         return disconnectToolResult({ status: "disconnected", source_id: sourceId });
       }
       case MODEL_SET_TOOL_NAME: {
         const choice = {};
         if (args.embedding !== undefined)
-          choice.embedding = oneOf(args.embedding, ["built_in"]);
+          choice.embedding = oneOf2(args.embedding, ["built_in"]);
         if (args.answers !== undefined)
-          choice.answers = oneOf(args.answers, ["local", "venice"]);
+          choice.answers = oneOf2(args.answers, ["local", "venice"]);
         const result = await backend.setModels(choice);
         return modelSetToolResult({
           status: result.changed ? "applied" : "unchanged",
@@ -126506,13 +126798,13 @@ async function callSetupTool(name, args, backend) {
         });
       }
       case MODEL_RETRY_TOOL_NAME: {
-        const model = oneOf(args.model, ["embedding", "answers", "transcription"]);
+        const model = oneOf2(args.model, ["embedding", "answers", "transcription"]);
         if (!backend.retryModel(model))
           throw new ChatGptSurfaceError("model_not_configured");
         return modelRetryToolResult({ status: "retrying", model });
       }
       case SYNC_SOURCE_TOOL_NAME: {
-        const sourceId = oneOf(args.source_id, SYNC_SOURCE_IDS2);
+        const sourceId = oneOf2(args.source_id, SYNC_SOURCE_IDS2);
         let status;
         try {
           status = await backend.syncSource(sourceId);
@@ -126599,7 +126891,7 @@ function spendPrivacyConfirmation(backend, token) {
   confirmationsFor(backend).delete(token);
 }
 async function scopeList(backend, args) {
-  const sourceId = oneOf(args.source_id, SCOPE_SOURCE_IDS3);
+  const sourceId = oneOf2(args.source_id, SCOPE_SOURCE_IDS3);
   const secrets = secretLocations(backend);
   if (sourceId === "gmail.email") {
     const draft = args.draft === undefined ? undefined : parseDraft(args.draft);
@@ -126666,7 +126958,7 @@ function decodeSortedCursor(value, parentKey) {
   }
 }
 async function scopeSet(backend, args) {
-  const sourceId = oneOf(args.source_id, SCOPE_SOURCE_IDS3);
+  const sourceId = oneOf2(args.source_id, SCOPE_SOURCE_IDS3);
   const accountGeneration = requiredString6(args.account_generation);
   const expectedRevision = requiredString6(args.scope_revision);
   const secrets = secretLocations(backend);
@@ -126784,12 +127076,12 @@ function parseSelections(value) {
   return value.map((entry) => {
     const record3 = typeof entry === "object" && entry !== null && !Array.isArray(entry) ? entry : {};
     const key2 = requiredString6(record3.key);
-    const state = oneOf(record3.state, ["ingest", "metadata_only", "exclude"]);
+    const state = oneOf2(record3.state, ["ingest", "metadata_only", "exclude"]);
     const ancestors = Array.isArray(record3.ancestor_keys) ? record3.ancestor_keys.filter((ancestor) => typeof ancestor === "string" && ancestor.length > 0 && ancestor.length <= 4096).slice(0, 64) : [];
     return { key: key2, state, ...ancestors.length > 0 ? { ancestor_keys: ancestors } : {} };
   });
 }
-function oneOf(value, allowed) {
+function oneOf2(value, allowed) {
   if (typeof value === "string" && allowed.includes(value))
     return value;
   throw new ChatGptSurfaceError("invalid_params");
@@ -130170,7 +130462,7 @@ class PrivateQuestionJobs {
     try {
       const choice = this.options.choice();
       const level = choice.level === "strict" ? "strict" : "standard";
-      const cleanup = CLEANUPS.includes(choice.cleanup) ? choice.cleanup : "as_written";
+      const cleanup = CLEANUPS2.includes(choice.cleanup) ? choice.cleanup : "as_written";
       return { level, cleanup, customInstruction: cleanup === "custom" && choice.customInstruction === true };
     } catch {
       return { level: "standard", cleanup: "light_cleanup", customInstruction: false };
@@ -130194,7 +130486,7 @@ function parseQuestion(text4) {
     return;
   if (typeof record3.level !== "string" || !LEVELS.includes(record3.level))
     return;
-  if (record3.cleanup !== undefined && (typeof record3.cleanup !== "string" || !CLEANUPS.includes(record3.cleanup)))
+  if (record3.cleanup !== undefined && (typeof record3.cleanup !== "string" || !CLEANUPS2.includes(record3.cleanup)))
     return;
   return {
     v: 1,
@@ -130228,7 +130520,7 @@ function resultOf(outcome) {
     ..."sent" in outcome && outcome.sent !== undefined ? { sent: outcome.sent } : {}
   };
 }
-var PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS, LEVELS, CLEANUPS, PENDING_RETRY_SECONDS2 = 5, WAITING_RETRY_SECONDS = 2, POLL_CAPACITY = 12, POLL_REFILL_PER_SECOND = 0.5, MAX_JOBS = 8;
+var PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS, LEVELS, CLEANUPS2, PENDING_RETRY_SECONDS2 = 5, WAITING_RETRY_SECONDS = 2, POLL_CAPACITY = 12, POLL_REFILL_PER_SECOND = 0.5, MAX_JOBS = 8;
 var init_private_question_jobs = __esm(() => {
   init_private_answer();
   init_private_answer_crypto();
@@ -130242,7 +130534,7 @@ var init_private_question_jobs = __esm(() => {
     daily_limit_reached: { code: "daily_limit_reached", message: "The daily zkAPI limit you set is reached." }
   };
   LEVELS = ["strict", "standard"];
-  CLEANUPS = ["as_written", "light_cleanup", "custom"];
+  CLEANUPS2 = ["as_written", "light_cleanup", "custom"];
 });
 
 // src/workers/chatgpt/private-answer-model.ts
@@ -130861,7 +131153,11 @@ function createRemoteOpenApiHandler(options) {
       response = serveSpec(request, text4, etag);
     } else {
       const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
-      response = name === undefined ? jsonResponse(404, { error: "not_found" }) : await callTool(request, name, options);
+      try {
+        response = name === undefined ? failure2(404, remoteSurfaceErrorOutput("not_found")) : await callTool(request, name, options);
+      } catch (error2) {
+        response = failure2(500, remoteErrorOutput(error2));
+      }
     }
     response.headers.set("X-Content-Type-Options", "nosniff");
     return response;
@@ -130869,7 +131165,7 @@ function createRemoteOpenApiHandler(options) {
 }
 function serveSpec(request, specText, etag) {
   if (request.method !== "GET" && request.method !== "HEAD") {
-    return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "GET, HEAD" });
+    return failure2(405, remoteSurfaceErrorOutput("method_not_allowed"), { Allow: "GET, HEAD" });
   }
   const headers = { "Content-Type": "application/json", "Cache-Control": "no-cache", ETag: etag };
   const ifNoneMatch = request.headers.get("If-None-Match");
@@ -130881,34 +131177,40 @@ function serveSpec(request, specText, etag) {
 async function callTool(request, name, options) {
   const verification = authenticateRemoteRequest(request, options);
   if (!verification.ok)
-    return verification.response;
+    return credentialFailure(verification.response);
   if (request.method !== "POST") {
-    return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "POST" });
+    return failure2(405, remoteSurfaceErrorOutput("method_not_allowed"), { Allow: "POST" });
   }
   if (!isJsonContentType(request.headers.get("Content-Type"))) {
-    return jsonResponse(415, { error: "unsupported_media_type", message: "Content-Type must be application/json." });
+    return failure2(415, remoteSurfaceErrorOutput("unsupported_media_type"));
   }
   const ctx = options.makeOperationContext(remoteOperationCaller(verification.connection), request.signal);
   const operation = findOperationByName(name);
   if (!operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: "remote" })) {
-    return jsonResponse(404, { error: "unknown_operation", message: `No Olympus operation named ${name} is available here.` });
+    return failure2(404, remoteSurfaceErrorOutput("unknown_operation"));
   }
   if (!shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
-    return jsonResponse(503, { error: "operation_unavailable", message: `${name} is not enabled on this Olympus install.` });
+    return failure2(503, remoteSurfaceErrorOutput("operation_unavailable"));
   }
   const params = await readParams(request);
   if (!params.ok)
     return params.response;
-  const undeclared = Object.keys(params.value).filter((key2) => !Object.prototype.hasOwnProperty.call(operation.params, key2)).sort();
-  if (undeclared.length > 0) {
-    const names = undeclared.slice(0, 10).map((key2) => JSON.stringify(key2.slice(0, 64))).join(", ");
-    return invalidRequest(`Undeclared parameters: ${names}. Remove them and retry.`);
+  const withheld = remoteWithheldParam(operation.name, params.value);
+  if (withheld)
+    return failure2(400, remoteWithheldParamOutput(withheld));
+  const declaredParams = remoteDeclaredParams(operation.name, Object.keys(operation.params));
+  if (Object.keys(params.value).some((key2) => !declaredParams.includes(key2))) {
+    return failure2(400, remoteSurfaceErrorOutput("invalid_request"));
   }
+  const manifests = createReleaseManifestSink();
   try {
-    const result = await operation.handler(ctx, params.value);
-    return jsonResponse(200, remoteOperationOutput(operation.name, result, ctx.citedItemCheck ? { citedItemCheck: ctx.citedItemCheck } : {}));
+    const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
+    return jsonResponse(200, remoteOperationOutput(operation.name, result, {
+      ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
+      releaseManifests: manifests.manifests
+    }));
   } catch (error2) {
-    return operationErrorResponse(error2);
+    return operationErrorResponse(error2, declaredParams);
   }
 }
 async function readParams(request) {
@@ -130916,7 +131218,7 @@ async function readParams(request) {
   if (!body.ok) {
     return {
       ok: false,
-      response: body.reason === "too_large" ? jsonResponse(413, { error: "payload_too_large" }) : invalidRequest("The request body could not be read as UTF-8.")
+      response: body.reason === "too_large" ? failure2(413, remoteSurfaceErrorOutput("payload_too_large")) : failure2(400, remoteSurfaceErrorOutput("invalid_request"))
     };
   }
   const text4 = body.text;
@@ -130926,19 +131228,31 @@ async function readParams(request) {
   try {
     parsed = JSON.parse(text4);
   } catch {
-    return { ok: false, response: invalidRequest("The request body must be a JSON object.") };
+    return { ok: false, response: failure2(400, remoteSurfaceErrorOutput("invalid_request")) };
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, response: invalidRequest("The request body must be a JSON object.") };
+    return { ok: false, response: failure2(400, remoteSurfaceErrorOutput("invalid_request")) };
   }
   return { ok: true, value: parsed };
 }
-function invalidRequest(message) {
-  return jsonResponse(400, { error: "invalid_request", message });
+function failure2(status, body, headers = {}) {
+  return jsonResponse(status, body, headers);
 }
-function operationErrorResponse(error2) {
+async function credentialFailure(refusal2) {
+  let code = "unauthorized";
+  try {
+    const body = await refusal2.json();
+    if (body.error === "invalid_token" || body.error === "remote_connections_unavailable")
+      code = body.error;
+  } catch {}
+  if (refusal2.status === 503)
+    code = "remote_connections_unavailable";
+  const challenge = refusal2.headers.get("WWW-Authenticate");
+  return failure2(refusal2.status === 503 ? 503 : 401, remoteSurfaceErrorOutput(code), challenge ? { "WWW-Authenticate": challenge } : {});
+}
+function operationErrorResponse(error2, declaredParams) {
   const status = error2 instanceof OperationError ? ERROR_STATUS[error2.code] ?? 502 : 500;
-  return jsonResponse(status, remoteErrorOutput(error2));
+  return failure2(status, remoteErrorOutput(error2, { declaredParams }));
 }
 function livePublicServerUrl(publicBaseUrl) {
   try {
@@ -131000,9 +131314,9 @@ function buildRemoteOpenApiSpec(options = {}) {
   };
 }
 function openApiOperation(operation, config2) {
-  const description = operationDescription(operation, { config: config2 });
-  const schema = { ...operationToolSchema(operation, { config: config2 }), additionalProperties: false };
-  const hasRequired = Object.values(operation.params).some((param) => param.required);
+  const description = remoteToolDescription(operation.name, operationDescription(operation, { config: config2 }));
+  const schema = { ...remoteToolSchema(operation.name, operationToolSchema(operation, { config: config2 })), additionalProperties: false };
+  const hasRequired = Array.isArray(schema.required) && schema.required.length > 0;
   const errorRef = { $ref: "#/components/responses/Error" };
   return {
     operationId: operation.name,
@@ -131021,7 +131335,9 @@ function openApiOperation(operation, config2) {
       401: errorRef,
       403: errorRef,
       404: errorRef,
+      405: errorRef,
       413: errorRef,
+      415: errorRef,
       429: errorRef,
       504: errorRef,
       500: errorRef,
@@ -131042,6 +131358,7 @@ var REMOTE_OPENAPI_SPEC_PATH = "/openapi.json", REMOTE_OPENAPI_TOOLS_PREFIX = "/
 var init_remote_openapi = __esm(() => {
   init_config();
   init_operation_error();
+  init_release_manifest();
   init_remote_result();
   init_operation_exposure();
   init_operations();
@@ -133425,12 +133742,12 @@ async function main() {
   const bootModelCredentials = new Map(requiredProfiles.map(({ id, profile }) => [id, safeModelCredential(profile, process.env)]));
   const modelCredentialState = (id, profile) => {
     if (!profile.secretRef)
-      return bootSecretResolver.status().some((failure2) => failure2.affected_profiles?.includes(id)) ? "missing" : "ready";
+      return bootSecretResolver.status().some((failure3) => failure3.affected_profiles?.includes(id)) ? "missing" : "ready";
     const storedEnv = { ...process.env, ...readWorkerSetupEnv() ?? {} };
     const current = safeModelCredential(profile, storedEnv);
     if (!current)
       return "missing";
-    if (current !== bootModelCredentials.get(id) || bootSecretResolver.status().some((failure2) => failure2.affected_profiles?.includes(id)))
+    if (current !== bootModelCredentials.get(id) || bootSecretResolver.status().some((failure3) => failure3.affected_profiles?.includes(id)))
       return "applying";
     return "ready";
   };
@@ -133554,10 +133871,6 @@ async function main() {
     }
   });
   const tierVisibilityGate = createTierVisibilityGate(() => tierLanes.map((lane) => ({
-    ledger: lane.ledger,
-    corpusIds: lane.corpusIds
-  })));
-  const remoteCitedItemCheck = createCitedItemTierCheck(() => tierLanes.map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds
   })));
@@ -135289,6 +135602,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       };
     }
   }
+  const remoteReleaseCheck = createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow");
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -135301,7 +135615,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         signal,
         sourceAnswerJobs
       }),
-      citedItemCheck: remoteCitedItemCheck
+      releaseCheck: remoteReleaseCheck
     })
   };
   const { createRemoteOpenApiHandler: createRemoteOpenApiHandler2, withRemoteOpenApiRoutes: withRemoteOpenApiRoutes2 } = await Promise.resolve().then(() => (init_remote_openapi(), exports_remote_openapi));

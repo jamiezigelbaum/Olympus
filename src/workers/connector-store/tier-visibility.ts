@@ -14,9 +14,9 @@
 // held one of its hits) is hidden, never mistaken for legacy. A set whose
 // ledger cannot be read fails closed for its own stores only.
 
-import type { CitedItemCheck, CitedItemVerdict } from '../../core/remote-result.ts';
+import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
-import { tierLedgerIdentityKey, tierLedgerItemKeyAcrossAccounts, type TierLedger } from '../classification/tier-ledger.ts';
+import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 
 export interface TierVisibilityScope {
   ledger: TierLedger;
@@ -58,60 +58,64 @@ export function createTierVisibilityGate(scopes: () => readonly TierVisibilitySc
 }
 
 /**
- * The current-tier check for items an answer already cited, run when a
- * remote agent collects the answer (core/remote-result.ts): a delayed answer
- * may have been written before an item it cites was reclassified.
+ * The current tiers of the items an answer was written from (its release
+ * manifest, core/release-manifest.ts), read when a remote agent collects the
+ * answer: a delayed answer may have been written before an item it read was
+ * reclassified.
  *
- * A citation names its corpus, provider, conversation and item, never its
- * account, so each item is read across every account the governing ledger
- * holds for that provider (`TierLedger.itemsAcrossAccounts`), in one read per
- * ledger. Any account's row at Secrets (or moving to Secrets) makes the item
- * `secret`: two accounts with the same item id fail closed. A routed item
- * with no current copy anywhere is `gone` (removed, or settled as a Secret
- * whose row was cleared). A corpus no tiered set governs, or an item the
- * ledger never placed (legacy), is `unknown`: there is no per-item tier to
- * recheck. A ledger that cannot be read throws, and the caller withholds.
+ * Each input is read by its exact identity, account included, from the ledger
+ * that governs its corpus: one batched read per ledger, so every input is
+ * judged against one snapshot. A row at Secrets (or moving there) is
+ * `secret`; at Private (or moving there) `private`; anything else classified
+ * is `public_or_personal`; a routed item with no current copy left is also
+ * `gone`. An item
+ * no ledger governs, or one its ledger never classified (ledger rows are never
+ * deleted, so no row means never classified), is `legacy`: its tier is still
+ * its corpus's. An input in a governed corpus without an account cannot be
+ * read and is `unknown`. A ledger that cannot be read throws; the caller
+ * withholds.
  */
-export function createCitedItemTierCheck(scopes: () => readonly TierVisibilityScope[]): CitedItemCheck {
-  return (items) => {
-    const verdicts: CitedItemVerdict[] = items.map(() => 'unknown');
-    if (items.length === 0) return verdicts;
-    const current = scopes();
-    for (const scope of current) {
-      const governed = items.flatMap((item, index) => (scope.corpusIds.has(item.corpusId) ? [index] : []));
-      if (governed.length === 0) continue;
-      const rows = scope.ledger.itemsAcrossAccounts(governed.map((index) => {
-        const item = items[index]!;
-        return {
-          provider: item.provider,
-          providerItemId: item.providerItemId,
-          ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
-        };
-      }));
-      for (const index of governed) {
-        const item = items[index]!;
-        const found = rows.get(tierLedgerItemKeyAcrossAccounts({
-          provider: item.provider,
-          providerItemId: item.providerItemId,
-          ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
-        }));
-        if (!found || found.length === 0) continue;
-        const secret = found.some(({ record }) => record.metadataTier === 'secrets'
-          || record.contentTier === 'secrets'
-          || record.targetMetadataTier === 'secrets'
-          || record.targetContentTier === 'secrets');
-        if (secret) {
-          verdicts[index] = 'secret';
-          continue;
+export function createReleaseTierCheck(
+  scopes: () => readonly TierVisibilityScope[],
+  secureDerivativeDefault: () => 'allow' | 'approval',
+): ReleaseCheck {
+  return {
+    secureDerivativeDefault,
+    inputs: (inputs) => {
+      const verdicts: ReleaseInputVerdict[] = inputs.map(() => ({ tier: 'legacy', gone: false }));
+      if (inputs.length === 0) return verdicts;
+      for (const scope of scopes()) {
+        const governed: Array<{ index: number; identity: TierLedgerIdentity }> = [];
+        inputs.forEach((input, index) => {
+          if (!scope.corpusIds.has(input.corpusId)) return;
+          if (!input.accountScope || !input.provider || !input.providerItemId) {
+            verdicts[index] = { tier: 'unknown', gone: false };
+            return;
+          }
+          governed.push({
+            index,
+            identity: {
+              provider: input.provider,
+              accountScope: input.accountScope,
+              providerItemId: input.providerItemId,
+              ...(input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}),
+            },
+          });
+        });
+        if (governed.length === 0) continue;
+        const states = scope.ledger.itemStatesForMany(governed.map(({ identity }) => identity));
+        for (const { index, identity } of governed) {
+          const state = states.get(tierLedgerIdentityKey(identity));
+          if (!state) continue;
+          const { record, copies } = state;
+          const tiers = [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+          verdicts[index] = {
+            tier: tiers.includes('secrets') ? 'secret' : tiers.includes('secure') ? 'private' : 'public_or_personal',
+            gone: record.routed && !copies.some((copy) => copy.state === 'current'),
+          };
         }
-        const routed = found.filter(({ record }) => record.routed);
-        if (routed.length === 0) {
-          verdicts[index] = 'current';
-          continue;
-        }
-        verdicts[index] = routed.some(({ copies }) => copies.some((copy) => copy.state === 'current')) ? 'current' : 'gone';
       }
-    }
-    return verdicts;
+      return verdicts;
+    },
   };
 }

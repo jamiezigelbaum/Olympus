@@ -10690,44 +10690,33 @@ class TierLedger {
     })();
     return result;
   }
-  itemsAcrossAccounts(items) {
+  itemStatesForMany(identities) {
     const result = new Map;
-    if (items.length === 0)
+    if (identities.length === 0)
       return result;
+    const unique = new Map;
+    for (const identity of identities)
+      unique.set(tierLedgerIdentityKey(identity), identity);
+    const list = [...unique.values()];
     this.db.transaction(() => {
-      const scopesByProvider = new Map;
-      for (const item of items) {
-        const key = tierLedgerItemKeyAcrossAccounts(item);
-        if (result.has(key))
-          continue;
-        let scopes = scopesByProvider.get(item.provider);
-        if (!scopes) {
-          scopes = this.db.query(`
-            WITH RECURSIVE scopes(account_scope) AS (
-              SELECT MIN(account_scope) FROM tier_items WHERE provider = ?
-              UNION ALL
-              SELECT (SELECT MIN(account_scope) FROM tier_items WHERE provider = ? AND account_scope > scopes.account_scope)
-              FROM scopes WHERE scopes.account_scope IS NOT NULL
-            )
-            SELECT account_scope FROM scopes WHERE account_scope IS NOT NULL
-          `).all(item.provider, item.provider).map((row) => row.account_scope);
-          scopesByProvider.set(item.provider, scopes);
+      for (let offset = 0;offset < list.length; offset += 200) {
+        const batch = list.slice(offset, offset + 200);
+        const values = batch.map(() => "(?, ?, ?, ?)").join(", ");
+        const params = batch.flatMap((identity) => [...idParams(identity)]);
+        const rows = this.db.query(`
+          SELECT * FROM tier_items
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        `).all(...params);
+        for (const row of rows) {
+          result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
         }
-        const found = [];
-        for (const accountScope of scopes) {
-          const identity = { ...item, accountScope };
-          const record = this.readRow(identity);
-          if (!record)
-            continue;
-          const copies = this.db.query(`
-            SELECT * FROM tier_copies
-            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-            ORDER BY corpus_id
-          `).all(...idParams(identity)).map(copyFromRow);
-          found.push({ record, copies });
-        }
-        if (found.length > 0)
-          result.set(key, found);
+        const copies = this.db.query(`
+          SELECT * FROM tier_copies
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          ORDER BY corpus_id
+        `).all(...params);
+        for (const row of copies)
+          result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
       }
     })();
     return result;
@@ -11389,9 +11378,6 @@ function openRejudgeQuestionOf(row) {
 }
 function tierLedgerIdentityKey(identity) {
   return `${identity.provider}\x00${identity.accountScope}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
-}
-function tierLedgerItemKeyAcrossAccounts(identity) {
-  return `${identity.provider}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
 }
 function trustDomainRank(domain) {
   return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
@@ -24210,6 +24196,13 @@ var init_evidence_pack = __esm(() => {
   utf8 = new TextEncoder;
 });
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var storage2;
+var init_release_manifest = __esm(() => {
+  storage2 = new AsyncLocalStorage4;
+});
+
 // src/core/secret-location-note.ts
 var init_secret_location_note = () => {};
 
@@ -24312,6 +24305,7 @@ var init_analyst_answer = __esm(() => {
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
+  init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
   init_source_model_policy();

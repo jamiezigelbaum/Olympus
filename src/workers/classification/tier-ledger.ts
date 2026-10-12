@@ -1705,51 +1705,37 @@ export class TierLedger {
   }
 
   /**
-   * Every account's row (and its copies) for each item, for a caller that
-   * knows an item but not its account scope: a released citation carries the
-   * provider, conversation and item ids only. Read in ONE transaction, so all
-   * items are judged against one snapshot. The provider's account scopes come
-   * from a loose index scan of the primary key (one probe per account, not a
-   * table scan); each (account, item) is then an exact key lookup. Items with
-   * no row in any account are absent from the map. Keyed by
-   * `tierLedgerItemKeyAcrossAccounts`.
+   * Each item's row and copies, read in ONE transaction so every item is
+   * judged against one ledger snapshot: one batched query for the rows and
+   * one for the copies (per 200 items). Keyed by `tierLedgerIdentityKey`;
+   * an item with no row is absent from the map (never classified).
    */
-  itemsAcrossAccounts(
-    items: readonly Omit<TierLedgerIdentity, 'accountScope'>[],
-  ): Map<string, Array<{ record: TierLedgerRecord; copies: TierCopy[] }>> {
-    const result = new Map<string, Array<{ record: TierLedgerRecord; copies: TierCopy[] }>>();
-    if (items.length === 0) return result;
+  itemStatesForMany(
+    identities: readonly TierLedgerIdentity[],
+  ): Map<string, { record: TierLedgerRecord; copies: TierCopy[] }> {
+    const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[] }>();
+    if (identities.length === 0) return result;
+    const unique = new Map<string, TierLedgerIdentity>();
+    for (const identity of identities) unique.set(tierLedgerIdentityKey(identity), identity);
+    const list = [...unique.values()];
     this.db.transaction(() => {
-      const scopesByProvider = new Map<string, string[]>();
-      for (const item of items) {
-        const key = tierLedgerItemKeyAcrossAccounts(item);
-        if (result.has(key)) continue;
-        let scopes = scopesByProvider.get(item.provider);
-        if (!scopes) {
-          scopes = (this.db.query(`
-            WITH RECURSIVE scopes(account_scope) AS (
-              SELECT MIN(account_scope) FROM tier_items WHERE provider = ?
-              UNION ALL
-              SELECT (SELECT MIN(account_scope) FROM tier_items WHERE provider = ? AND account_scope > scopes.account_scope)
-              FROM scopes WHERE scopes.account_scope IS NOT NULL
-            )
-            SELECT account_scope FROM scopes WHERE account_scope IS NOT NULL
-          `).all(item.provider, item.provider) as Array<{ account_scope: string }>).map((row) => row.account_scope);
-          scopesByProvider.set(item.provider, scopes);
+      for (let offset = 0; offset < list.length; offset += 200) {
+        const batch = list.slice(offset, offset + 200);
+        const values = batch.map(() => '(?, ?, ?, ?)').join(', ');
+        const params = batch.flatMap((identity) => [...idParams(identity)]);
+        const rows = this.db.query(`
+          SELECT * FROM tier_items
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        `).all(...params) as TierItemRow[];
+        for (const row of rows) {
+          result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
         }
-        const found: Array<{ record: TierLedgerRecord; copies: TierCopy[] }> = [];
-        for (const accountScope of scopes) {
-          const identity: TierLedgerIdentity = { ...item, accountScope };
-          const record = this.readRow(identity);
-          if (!record) continue;
-          const copies = (this.db.query(`
-            SELECT * FROM tier_copies
-            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-            ORDER BY corpus_id
-          `).all(...idParams(identity)) as TierCopyRow[]).map(copyFromRow);
-          found.push({ record, copies });
-        }
-        if (found.length > 0) result.set(key, found);
+        const copies = this.db.query(`
+          SELECT * FROM tier_copies
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          ORDER BY corpus_id
+        `).all(...params) as TierCopyRow[];
+        for (const row of copies) result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
       }
     })();
     return result;
@@ -2893,11 +2879,6 @@ function openRejudgeQuestionOf(row: TierItemRow & { rejudge_json?: string | null
 /** Stable map key for an item identity in ledger lookups. */
 export function tierLedgerIdentityKey(identity: TierLedgerIdentity): string {
   return `${identity.provider}\u0000${identity.accountScope}\u0000${tierLedgerConversationKey(identity)}\u0000${identity.providerItemId}`;
-}
-
-/** An item's key in every account at once (`TierLedger.itemsAcrossAccounts`). */
-export function tierLedgerItemKeyAcrossAccounts(identity: Omit<TierLedgerIdentity, 'accountScope'>): string {
-  return `${identity.provider}\u0000${tierLedgerConversationKey(identity)}\u0000${identity.providerItemId}`;
 }
 
 const TRUST_DOMAIN_RANK: Readonly<Record<SourceTrustDomain, number>> = {

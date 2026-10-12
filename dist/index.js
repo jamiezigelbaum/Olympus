@@ -10897,6 +10897,13 @@ var init_evidence_pack = __esm(() => {
   utf8 = new TextEncoder;
 });
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var storage2;
+var init_release_manifest = __esm(() => {
+  storage2 = new AsyncLocalStorage4;
+});
+
 // src/core/secret-location-note.ts
 var init_secret_location_note = () => {};
 
@@ -10999,6 +11006,7 @@ var init_analyst_answer = __esm(() => {
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
+  init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
   init_source_model_policy();

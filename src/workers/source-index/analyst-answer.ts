@@ -53,6 +53,7 @@ import {
   type ReleaseDecision,
   type StructuredEvidenceFact,
 } from '../../core/opsec.ts';
+import { recordReleaseManifest, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
@@ -285,6 +286,12 @@ export function createAnalystSourceIndexAnswerHandler(
       const includeInternal = request.include_internal !== false;
       const releaseSecureContent = request.include_secure_local_content === true
         || (options.secureDerivativeDefault ?? 'allow') === 'allow';
+      // The rules this answer is released under, recorded with its inputs for
+      // a caller that collects it later (core/release-manifest.ts).
+      const releaseConstraints: ReleaseConstraints = {
+        secureDerivativeDefault: options.secureDerivativeDefault ?? 'allow',
+        includeSecureLocalContent: request.include_secure_local_content === true,
+      };
 
       const laneSetupStartedAt = Date.now();
       // Hybrid is the shared product default: an adapter with approved current
@@ -332,6 +339,8 @@ export function createAnalystSourceIndexAnswerHandler(
         };
         recordSourceAnswerPhaseTimings(phaseTimings);
         recordSourceAnswerReleaseDecision(decision.decision);
+        // Nothing was read: the answer is the fixed approval sentence.
+        recordReleaseManifest({ inputs: [], constraints: releaseConstraints });
         return {
           answer: answerForReleaseDecision(decision),
           evidence: [],
@@ -590,6 +599,8 @@ export function createAnalystSourceIndexAnswerHandler(
         total_ms: totalLatencyMs,
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
+      // Every item the analysed pack held, cited or not.
+      recordReleaseManifest({ inputs: releaseInputs(detail), constraints: releaseConstraints });
       return {
         answer,
         evidence: released
@@ -682,6 +693,21 @@ export function createAnalystSourceIndexAnswerHandler(
       };
     },
   };
+}
+
+/** The analysed pack's items, each with its account and whether it was Private. */
+function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
+  return detail.pack.candidates.map((candidate, index) => {
+    const item = candidate.provenance.sourceItem;
+    return {
+      corpusId: detail.candidateCorpusIds[index] ?? '',
+      provider: item.provider,
+      accountScope: item.accountScope ?? '',
+      providerItemId: item.providerItemId,
+      ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
+      privateAtAnswer: isSecureSensitivity(candidate),
+    };
+  });
 }
 
 /**

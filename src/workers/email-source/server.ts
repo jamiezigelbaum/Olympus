@@ -238,7 +238,7 @@ import {
   createXBookmarksTierLane,
   defaultXBookmarksSecureConnectorStoreDbPath,
 } from '../x-bookmarks/tier-set.ts';
-import { createCitedItemTierCheck, createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
+import { createReleaseTierCheck, createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
@@ -2228,12 +2228,6 @@ export async function main(): Promise<void> {
     }
   });
   const tierVisibilityGate = createTierVisibilityGate(() => tierLanes.map((lane) => ({
-    ledger: lane.ledger,
-    corpusIds: lane.corpusIds,
-  })));
-  // The same ledgers, read when a remote agent collects an answer: a cited
-  // item reclassified since the answer was written is caught there.
-  const remoteCitedItemCheck = createCitedItemTierCheck(() => tierLanes.map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds,
   })));
@@ -4858,6 +4852,13 @@ export async function main(): Promise<void> {
       };
     }
   }
+  // The same ledgers and the same derivative posture the answer handler
+  // uses, read when a remote agent collects an answer: an item the answer
+  // read that was reclassified since it was written is caught there.
+  const remoteReleaseCheck = createReleaseTierCheck(
+    () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+    () => secureDerivativeDefault ?? 'allow',
+  );
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -4870,9 +4871,10 @@ export async function main(): Promise<void> {
         signal,
         sourceAnswerJobs,
       }),
-      // The remote output boundary rechecks a collected answer's cited items
-      // against the tier ledgers as they are now (core/remote-result.ts).
-      citedItemCheck: remoteCitedItemCheck,
+      // The remote output boundary revalidates a collected answer's release
+      // manifest against the tier ledgers and release rules as they are now
+      // (core/remote-result.ts).
+      releaseCheck: remoteReleaseCheck,
     }),
   };
   // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as
