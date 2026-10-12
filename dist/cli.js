@@ -127564,13 +127564,14 @@ var CONSULT_ASK_MAX_CHARS = 4000, CONSULT_ASK_LEVELS, CONSULT_ASK_CLEANUPS, CONS
 var init_consult_ask = __esm(() => {
   init_consult_gate();
   init_consult_settings();
+  init_open_targets();
   CONSULT_ASK_LEVELS = Object.freeze(["strict", "standard"]);
   CONSULT_ASK_CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
   CONSULT_ASK_MESSAGES = Object.freeze({
     empty: "Type a question first.",
     tooLong: `Keep the question under ${CONSULT_ASK_MAX_CHARS.toLocaleString("en-US")} characters.`,
     settingsInvalid: "The anonymous answers settings file could not be read, so nothing was sent.",
-    off: "Not sent: anonymous answers are off on your dashboard. Turn them on under Private answers, then ask again.",
+    off: `Not sent: anonymous answers are off. Turn them on in Private answers on your computer (${openPageUrl({ kind: "private_answers" })}), then ask again.`,
     declined: "Your model chose not to send anything.",
     writerFailed: "Your model could not prepare the question, so nothing was sent.",
     secret: "Not sent: the question looks like it contains a password, key or token.",
@@ -134686,7 +134687,7 @@ function createLocalPrivateAnswers(options) {
       const action = body.action;
       if (action === "ask") {
         const question = typeof body.question === "string" ? body.question.trim() : "";
-        if (!question || question.length > MAX_QUESTION_CHARS2)
+        if (!question || question.length > MAX_QUESTION_CHARS3)
           return refused(400, "invalid_params", "Type a question first.");
         const detail = body.detail === "full" ? "full" : "summary";
         return exclusive(async () => ({ status: 200, body: { ok: true, ...answerBody(await answerFor({ question, detail }), session) } }));
@@ -134783,7 +134784,7 @@ function createLocalPrivateAnswers(options) {
     }
   };
 }
-var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS2 = 2000, TOKEN_PATTERN3;
+var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS3 = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
   init_analyst_built_in();
   init_private_answer_model();
