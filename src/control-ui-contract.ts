@@ -89,9 +89,11 @@ export type OlympusDashboardControlParams =
       action: 'mint_agent_pairing_code';
     }
   | {
-      /** A bearer connection for Muse, the Grok API or a script. Its token is shown once. */
+      /** A bearer connection for the Grok API or another agent. Its token is shown once. */
       action: 'create_agent_key';
       name: string;
+      /** The Connect an agent choice it is for (its `data-agent` id), which sets who hosts it. */
+      agent?: string;
     }
   | {
       action: 'revoke_agent_connection';

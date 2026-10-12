@@ -9,14 +9,16 @@ export type OperationCallerSurface = 'native' | 'mcp' | 'cli' | 'remote';
 export const OPERATION_CALLER_SURFACES: readonly OperationCallerSurface[] = ['native', 'mcp', 'cli', 'remote'];
 
 /**
- * Who hosts the calling agent, when a surface can tell: OpenAI, Anthropic or
- * xAI, by a pinned OAuth client id (ChatGPT, Claude, Grok) or a client's MCP
- * name. It chooses which anonymous-answer model setting a question takes
- * (never the provider that holds the conversation); it grants nothing, so a
- * label-based guess is harmless.
+ * Who hosts the calling agent, when a surface can tell: OpenAI, xAI, Meta or
+ * Anthropic, by a pinned OAuth client id (ChatGPT, Claude, Grok), the host a
+ * remote connection was approved for (core/remote-connections.ts) or a
+ * client's MCP name. `other`: a remote connection whose host Olympus does not
+ * know. It chooses which anonymous-answer model setting a question takes and
+ * which provider's models it never goes to (the one that holds the
+ * conversation); it grants nothing.
  */
-export type OperationCallerProvider = 'openai' | 'anthropic' | 'xai';
-export const OPERATION_CALLER_PROVIDERS: readonly OperationCallerProvider[] = ['openai', 'anthropic', 'xai'];
+export type OperationCallerProvider = 'openai' | 'xai' | 'meta' | 'anthropic' | 'other';
+export const OPERATION_CALLER_PROVIDERS: readonly OperationCallerProvider[] = ['openai', 'xai', 'meta', 'anthropic', 'other'];
 
 export interface OperationCaller {
   surface: OperationCallerSurface;
@@ -53,17 +55,24 @@ export function sanitizeCallerDisplayName(value: unknown): string | undefined {
   return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
 }
 
+// What a name must say to name one host. Meta's agent is Muse.
+const HOST_NAME_PATTERNS: ReadonlyArray<readonly [Exclude<OperationCallerProvider, 'other'>, RegExp]> = [
+  ['anthropic', /claude|anthropic/i],
+  ['openai', /chatgpt|openai|codex/i],
+  ['xai', /grok|xai|x\.ai/i],
+  ['meta', /\b(?:meta|muse)\b/i],
+];
+
 /**
- * The hosting provider an agent's self-reported name suggests ("claude-code",
- * "Claude Desktop", "ChatGPT", "codex"); undefined for anything else. A
- * ChatGPT grant is recognised by its client id instead (remote-mcp.ts).
+ * The hosting provider an agent's name names ("claude-code", "Claude
+ * Desktop", "ChatGPT", "codex", "Grok API", "Muse"); undefined when it names
+ * none, or more than one ("Claude or ChatGPT"). A pinned client is
+ * recognised by its client id instead (remote-oauth/pinned-clients.ts).
  */
-export function callerProviderFromLabel(label: string | undefined): OperationCallerProvider | undefined {
+export function callerProviderFromLabel(label: string | undefined): Exclude<OperationCallerProvider, 'other'> | undefined {
   if (!label) return undefined;
-  if (/claude|anthropic/i.test(label)) return 'anthropic';
-  if (/chatgpt|openai|codex/i.test(label)) return 'openai';
-  if (/grok|xai|x\.ai/i.test(label)) return 'xai';
-  return undefined;
+  const named = HOST_NAME_PATTERNS.filter(([, pattern]) => pattern.test(label));
+  return named.length === 1 ? named[0]![0] : undefined;
 }
 
 export function operationCallerToWire(caller: OperationCaller): OperationCallerWire {

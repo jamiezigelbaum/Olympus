@@ -412,6 +412,10 @@ describe('/openai/mcp is its own protected resource', () => {
     const back = await rpc('/mcp', directory.access_token, 'tools/list');
     expect(back.status).toBe(401);
     expect(back.headers.get('WWW-Authenticate')).toContain('oauth-protected-resource/mcp"');
+    // ChatGPT's grants record OpenAI as their host, as before.
+    const grants = store.list().filter((connection) => connection.kind === 'oauth');
+    expect(grants.length).toBe(2);
+    expect(grants.every((connection) => connection.provider === 'openai' && isChatGptGrant(connection))).toBe(true);
   });
 
   test('a bearer connection token names no resource and does not open the directory endpoint', async () => {
@@ -579,6 +583,8 @@ describe('Claude, Grok, and Grok Bot or Cursor: pinned clients, /mcp only, the r
     }
     const grants = store.list().filter((connection) => connection.kind === 'oauth');
     expect(grants.map((connection) => connection.displayName)).toEqual(['Claude', 'Grok', 'Grok', 'Grok Bot or Cursor']);
+    // Each records its host from its pin; Grok Bot or Cursor counts as xAI.
+    expect(grants.map((connection) => connection.provider)).toEqual(['anthropic', 'xai', 'xai', 'xai']);
     for (const connection of grants) {
       expect(isChatGptGrant(connection)).toBe(false);
       expect(isDemoGrant(connection)).toBe(false);

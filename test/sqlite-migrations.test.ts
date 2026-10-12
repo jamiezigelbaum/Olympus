@@ -123,6 +123,56 @@ describe('SQLite schema migration runner', () => {
   });
 });
 
+describe('two processes migrating one file', () => {
+  test('a handle whose first read of the version went stale applies nothing the other already applied', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-sqlite-migrations-race-'));
+    const path = join(dir, 'fixture.sqlite');
+    try {
+      const winner = openDatabase(path);
+      winner.exec('PRAGMA journal_mode = WAL;');
+      const loserTarget = openDatabase(path);
+      const migrations = [
+        { version: 1, name: 'create_counter', up: (db: Database) => db.exec('CREATE TABLE counter (n INTEGER NOT NULL)') },
+        // Not idempotent on purpose: run twice, it counts 2.
+        { version: 2, name: 'count_once', up: (db: Database) => db.exec('INSERT INTO counter (n) VALUES (1)') },
+      ];
+      runSqliteMigrations(winner, 'race-store', migrations.slice(0, 1));
+      // The loser reads version 1; before it acts, the winner applies 2.
+      let raced = false;
+      const loser = new Proxy(loserTarget, {
+        get(target, prop) {
+          if (prop === 'query') {
+            return (sql: string) => {
+              const statement = target.query(sql);
+              if (raced || !sql.includes('SELECT version FROM')) return statement;
+              return {
+                get: (...args: unknown[]) => {
+                  const row = (statement.get as (...a: unknown[]) => unknown)(...args);
+                  raced = true;
+                  runSqliteMigrations(winner, 'race-store', migrations);
+                  return row;
+                },
+              };
+            };
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const result = runSqliteMigrations(loser, 'race-store', migrations);
+      expect(raced).toBe(true);
+      expect(result.currentVersion).toBe(1);
+      expect(result.applied).toEqual([]);
+      expect((winner.query('SELECT COUNT(*) AS n FROM counter').get() as { n: number }).n).toBe(1);
+      expect(readSqliteSchemaVersion(winner, 'race-store')).toBe(2);
+      loserTarget.close();
+      winner.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 function openDatabase(path: string): Database {
   const db = new Database(path, { create: true });
   db.exec('PRAGMA busy_timeout = 10000;');

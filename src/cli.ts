@@ -2828,6 +2828,7 @@ function remoteConnectionView(connection: RemoteConnectionRecord): Record<string
     name: connection.displayName,
     kind: connection.kind,
     ...(connection.clientId ? { client_id: connection.clientId } : {}),
+    provider: connection.provider,
     created_at: connection.createdAt,
     last_used_at: connection.lastUsedAt,
     revoked_at: connection.revokedAt,

@@ -25,6 +25,7 @@ import { AGENT_MINT_LIMIT, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { FORWARDED_PATHS, forwardPath } from '../connect-relay/client/forward.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import {
+  AGENT_CHOICE_PROVIDERS,
   DASHBOARD_AGENT_CONTROL_PATHS,
   dashboardAgentsView,
   remoteAccessFromStatus,
@@ -287,11 +288,49 @@ describe('request validation', () => {
     expect((await guarded(post('/dashboard/agents/pairing-code', { extra: 1 }, auth))).status).toBe(400);
     expect((await guarded(post('/dashboard/agents/keys', { name: '   ' }, auth))).status).toBe(400);
     expect((await guarded(post('/dashboard/agents/keys', { name: 'Muse', token: 'x' }, auth))).status).toBe(400);
+    expect((await guarded(post('/dashboard/agents/keys', { name: 'Muse', agent: 'muse' }, auth))).status).toBe(400);
+    expect((await guarded(post('/dashboard/agents/keys', { name: 'Muse', agent: 'toString' }, auth))).status).toBe(400);
+    expect((await guarded(post('/dashboard/agents/keys', { name: 'Muse', agent: 7 }, auth))).status).toBe(400);
     expect((await guarded(post('/dashboard/agents/revoke', { connection_id: 'nope' }, auth))).status).toBe(400);
     expect((await guarded(post('/dashboard/agents/revoke', { connection_id: 'b'.repeat(18) }, auth))).status).toBe(404);
     expect(store.list()).toEqual([]);
   });
 
+});
+
+describe('the agent chosen sets who hosts a key', () => {
+  test('Grok API is xAI and Other is other, whatever the key is named; a page that sends no agent goes by the name', async () => {
+    const store = fixtureStore();
+    const guarded = guardedWorker(backend(store, REMOTE_TUNNEL));
+    const auth = { Authorization: 'Bearer worker-secret' };
+    const create = async (body: Record<string, unknown>) => {
+      const response = await guarded(post('/dashboard/agents/keys', body, auth));
+      expect(response.status).toBe(200);
+      return (await response.json() as { connection: { name: string; provider: string } }).connection;
+    };
+    expect(await create({ name: 'Grok API', agent: 'grok-api' })).toMatchObject({ name: 'Grok API', provider: 'xai' });
+    expect(await create({ name: 'My scripts', agent: 'grok-api' })).toMatchObject({ provider: 'xai' });
+    // Named after Claude, but made under Other: the owner's choice stands.
+    expect(await create({ name: 'Claude helper', agent: 'other' })).toMatchObject({ provider: 'other' });
+    expect(await create({ name: 'Agent', agent: 'other' })).toMatchObject({ provider: 'other' });
+    expect(await create({ name: 'Muse' })).toMatchObject({ provider: 'meta' });
+    expect(await create({ name: 'Agent' })).toMatchObject({ provider: 'other' });
+    expect(store.list().map((connection) => `${connection.displayName}: ${connection.provider}`).sort()).toEqual([
+      'Agent: other', 'Agent: other', 'Claude helper: other', 'Grok API: xai', 'Muse: meta', 'My scripts: xai',
+    ]);
+  });
+
+  test('every agent with a Create key form on the page is one the route places', () => {
+    const html = renderDashboardAgentsSection({ view: { remoteAccess: REMOTE_TUNNEL, connections: [] }, now: NOW });
+    const document = new Window().document;
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    const withKeys = [...root.querySelectorAll('form[data-agent-kind="key"]')]
+      .map((form) => form.closest('[data-agent]')!.getAttribute('data-agent'));
+    expect(withKeys.sort()).toEqual(['grok-api', 'other']);
+    for (const agent of withKeys) expect(Object.keys(AGENT_CHOICE_PROVIDERS)).toContain(agent!);
+    expect(AGENT_CHOICE_PROVIDERS).toEqual({ chatgpt: 'openai', claude: 'anthropic', grok: 'xai', 'grok-api': 'xai', other: 'other' });
+  });
 });
 
 describe('remote access follows the relay status', () => {
@@ -537,7 +576,8 @@ describe('the controller shows a secret once', () => {
     form.requestSubmit();
     await Bun.sleep(0);
     await Bun.sleep(0);
-    expect(calls[0]).toEqual({ action: 'create_agent_key', name: 'Grok API' });
+    // The agent chosen travels with the name: it sets who hosts the connection.
+    expect(calls[0]).toEqual({ action: 'create_agent_key', name: 'Grok API', agent: 'grok-api' });
     expect(grokApi.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
     expect(grokApi.querySelector('[data-agent-secret-note]')!.textContent).toContain('cannot show it again');
     refuse = true;
