@@ -5,8 +5,8 @@
 // llama.cpp runtime the reasoning model uses, installed once. Nothing here
 // sends audio anywhere; this module only fetches the pinned model files.
 
-import { readFileSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { accessSync, constants, readFileSync } from 'node:fs';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
 import type { ModelLoadFailedReason } from '../../chatgpt/dashboard-contract.ts';
 import {
@@ -32,7 +32,7 @@ import {
 
 /** Overrides where the transcription model's files live (an absolute path). */
 export const BUILT_IN_TRANSCRIPTION_DIR_ENV = 'OLYMPUS_BUILT_IN_TRANSCRIPTION_DIR';
-/** `on`, `off`, or unset (on for Apple-silicon Macs, off elsewhere). */
+/** `on`, `off`, or unset (on wherever a runtime is pinned and the system audio decoder is present). */
 export const BUILT_IN_TRANSCRIPTION_ENV = 'OLYMPUS_BUILT_IN_TRANSCRIPTION';
 export const BUILT_IN_TRANSCRIPTION_NOUN = 'built-in transcription model';
 
@@ -148,19 +148,42 @@ export function reportBuiltInTranscriptionState(
 
 /**
  * Whether audio may be transcribed by the built-in model here: explicitly on
- * or off by env, otherwise on for Apple silicon only (the Metal build and the
- * system audio decoder), so a Linux host never downloads a model it did not
- * ask for. A platform without a pinned runtime never qualifies.
+ * or off by env, otherwise on wherever a runtime is pinned and the system
+ * audio decoder exists (`afconvert` ships with macOS; Linux needs `ffmpeg`),
+ * so a host never downloads a model it could not feed. A platform without a
+ * pinned runtime never qualifies.
  */
 export function builtInTranscriptionEnabled(
   env: Record<string, string | undefined> = process.env,
   platform = currentPlatform(),
+  decoderPresent: () => boolean = () => audioDecoderPresent(platform, env),
 ): boolean {
   const raw = env[BUILT_IN_TRANSCRIPTION_ENV]?.trim().toLowerCase();
   if (raw === 'off' || raw === 'false' || raw === '0' || raw === 'no') return false;
   if (!runtimeArchiveFor(platform)) return false;
   if (raw === 'on' || raw === 'true' || raw === '1' || raw === 'yes') return true;
-  return platform === 'darwin-arm64';
+  return decoderPresent();
+}
+
+/**
+ * Whether the decoder the transcriber uses on this platform is installed:
+ * `/usr/bin/afconvert` on macOS, an executable `ffmpeg` on PATH elsewhere
+ * (the same lookup the transcriber's command runner makes).
+ */
+export function audioDecoderPresent(
+  platform = currentPlatform(),
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const executable = (path: string): boolean => {
+    try {
+      accessSync(path, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (platform.startsWith('darwin-')) return executable('/usr/bin/afconvert');
+  return (env.PATH ?? '').split(delimiter).some((dir) => dir.length > 0 && isAbsolute(dir) && executable(join(dir, 'ffmpeg')));
 }
 
 /**

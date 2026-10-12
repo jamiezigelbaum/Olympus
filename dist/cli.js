@@ -98259,8 +98259,8 @@ var init_install = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { readFileSync as readFileSync48 } from "node:fs";
-import { isAbsolute as isAbsolute19, join as join79 } from "node:path";
+import { accessSync as accessSync6, constants as constants6, readFileSync as readFileSync48 } from "node:fs";
+import { delimiter as delimiter7, isAbsolute as isAbsolute19, join as join79 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join79(olympusModelsDir(env), "built-in-transcription");
   if (!isAbsolute19(root))
@@ -98322,7 +98322,7 @@ function reportBuiltInTranscriptionState(env, model, state, failure2) {
     }, state, failure2);
   } catch {}
 }
-function builtInTranscriptionEnabled(env = process.env, platform2 = currentPlatform2()) {
+function builtInTranscriptionEnabled(env = process.env, platform2 = currentPlatform2(), decoderPresent = () => audioDecoderPresent(platform2, env)) {
   const raw = env[BUILT_IN_TRANSCRIPTION_ENV]?.trim().toLowerCase();
   if (raw === "off" || raw === "false" || raw === "0" || raw === "no")
     return false;
@@ -98330,7 +98330,20 @@ function builtInTranscriptionEnabled(env = process.env, platform2 = currentPlatf
     return false;
   if (raw === "on" || raw === "true" || raw === "1" || raw === "yes")
     return true;
-  return platform2 === "darwin-arm64";
+  return decoderPresent();
+}
+function audioDecoderPresent(platform2 = currentPlatform2(), env = process.env) {
+  const executable = (path) => {
+    try {
+      accessSync6(path, constants6.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (platform2.startsWith("darwin-"))
+    return executable("/usr/bin/afconvert");
+  return (env.PATH ?? "").split(delimiter7).some((dir) => dir.length > 0 && isAbsolute19(dir) && executable(join79(dir, "ffmpeg")));
 }
 function modelLoadFailedReason(message) {
   const text = message ?? "";
@@ -117427,9 +117440,7 @@ function builtInAnalystEnabled(env = process.env, platform2 = `${process.platfor
     return false;
   if (!runtimeArchiveFor(platform2))
     return false;
-  if (raw === "on" || raw === "true" || raw === "1" || raw === "yes")
-    return true;
-  return platform2 === "darwin-arm64";
+  return true;
 }
 function resolveBuiltInReasoningModel(env = process.env, totalMemoryBytes = totalmem3()) {
   return pickBuiltInReasoningModel(totalMemoryBytes, env[BUILT_IN_ANALYST_MODEL_ENV]?.trim() || "auto");
