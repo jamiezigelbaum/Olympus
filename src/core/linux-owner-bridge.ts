@@ -173,7 +173,7 @@ fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'
       if (!this.live()) throw new Error('Graphical session ended.');
     } catch (error) { this.clearTicket(); throw error; }
   }
-  async handle(request: Request): Promise<Response> {
+  async handle(request: Request, ownerRequestAdmitted?: () => void): Promise<Response> {
     if (!this.live()) return refusal(503);
     const url = new URL(request.url);
     const host = request.headers.get('host');
@@ -236,6 +236,9 @@ fetch(${JSON.stringify(this.origin + '/owner-proof')},{mode:'cors',credentials:'
       return refusal();
     }
     if (!this.live()) return refusal(503);
+    // The worker permits long-running owner operations. Only a proven
+    // request may disable the TCP idle timeout; public traffic keeps it.
+    ownerRequestAdmitted?.();
     // Preserve refusal evidence until AFTER checking browser origin and proof.
     // Internal origin rewriting is confined to this proven owner's socket hop.
     const headers = new Headers(request.headers);
@@ -293,7 +296,7 @@ export function manageLinuxOwnerBridge(options: LinuxOwnerBridgeOptions & { plat
     if (bridge) return;
     const candidate = new LinuxOwnerBridge(options);
     try {
-      listener = options.listen ? options.listen(candidate) : Bun.serve({ hostname: '127.0.0.1', port: options.port, fetch: r => candidate.handle(r) });
+      listener = options.listen ? options.listen(candidate) : Bun.serve({ hostname: '127.0.0.1', port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) });
       bridge = candidate; status = { state: 'listening', origin: bridge.origin };
     } catch (error) {
       candidate.close();

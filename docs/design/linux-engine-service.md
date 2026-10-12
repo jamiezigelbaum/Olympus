@@ -1523,4 +1523,7 @@ installer suite was excluded as instructed. Independent review identified the
 inherited consent form policy, synchronous request-triggered readiness probes,
 and the pending-probe shutdown race; all three were fixed, with the final
 lifecycle re-review passing. No Mac runtime/page implementation was changed;
-Mac consent/agent fixtures and CLI regression cases passed byte-for-byte.
+Mac consent/agent fixtures passed byte-for-byte, and the CLI regression cases
+passed. Proven owner operations retain the worker's unbounded response idle
+timeout; unauthenticated TCP traffic keeps Bun's default idle deadline and
+request bodies have an independent five-second bound.

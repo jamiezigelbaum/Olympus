@@ -34692,7 +34692,7 @@ fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'
       throw error;
     }
   }
-  async handle(request) {
+  async handle(request, ownerRequestAdmitted) {
     if (!this.live())
       return refusal(503);
     const url = new URL(request.url);
@@ -34786,6 +34786,7 @@ fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'
     }
     if (!this.live())
       return refusal(503);
+    ownerRequestAdmitted?.();
     const headers = new Headers(request.headers);
     headers.delete(PROOF_HEADER);
     headers.delete("content-length");

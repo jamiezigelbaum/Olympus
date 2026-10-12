@@ -184,3 +184,21 @@ test('closing the manager is terminal even if an already pending readiness probe
   await expect(manager.open('/dashboard')).rejects.toThrow();
   manager.refresh(); expect(starts).toBe(1);
 });
+
+test('only owner-proven requests can outlive the TCP idle deadline', async () => {
+  const f = fixture(); let admitted = 0;
+  let bridge!: LinuxOwnerBridge;
+  const server = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 1, fetch: (r, s) => bridge.handle(r, () => { admitted++; s.timeout(r, 0); }) });
+  bridge = new LinuxOwnerBridge({ ...f.options, port: server.port!, fetchSocket: async () => { await Bun.sleep(1500); return new Response('completed owner operation'); } });
+  cleanup.push(() => { bridge.close(); server.stop(true); });
+  const host = new URL(bridge.origin).host;
+  const entry = `http://127.0.0.1:${server.port}`;
+  expect((await fetch(entry + '/dashboard', { headers: { Host: host } })).status).toBe(403); expect(admitted).toBe(0);
+  await bridge.openTicket('/dashboard');
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  const proved = await fetch(entry + '/owner-proof', { method: 'POST', headers: { Host: host, Origin: bridge.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
+  const { proof } = await proved.json() as { proof: string };
+  expect(admitted).toBe(0);
+  const response = await fetch(entry + '/dashboard', { headers: { Host: host, Cookie: proved.headers.get('set-cookie')!.split(';')[0]!, 'X-Olympus-Owner-Proof': proof } });
+  expect(await response.text()).toBe('completed owner operation'); expect(admitted).toBe(1);
+});

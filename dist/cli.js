@@ -1388,7 +1388,7 @@ fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'
       throw error;
     }
   }
-  async handle(request) {
+  async handle(request, ownerRequestAdmitted) {
     if (!this.live())
       return refusal(503);
     const url = new URL(request.url);
@@ -1482,6 +1482,7 @@ fetch(${JSON.stringify(this.origin + "/owner-proof")},{mode:'cors',credentials:'
     }
     if (!this.live())
       return refusal(503);
+    ownerRequestAdmitted?.();
     const headers = new Headers(request.headers);
     headers.delete(PROOF_HEADER);
     headers.delete("content-length");
@@ -1555,7 +1556,7 @@ function manageLinuxOwnerBridge(options) {
       return;
     const candidate = new LinuxOwnerBridge(options);
     try {
-      listener = options.listen ? options.listen(candidate) : Bun.serve({ hostname: "127.0.0.1", port: options.port, fetch: (r) => candidate.handle(r) });
+      listener = options.listen ? options.listen(candidate) : Bun.serve({ hostname: "127.0.0.1", port: options.port, fetch: (r, server) => candidate.handle(r, () => server.timeout(r, 0)) });
       bridge = candidate;
       status = { state: "listening", origin: bridge.origin };
     } catch (error) {
