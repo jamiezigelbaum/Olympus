@@ -13,11 +13,10 @@
       line-height: 1; color: var(--ink); white-space: nowrap; }
     .s03-row svg { position: absolute; left: 2px; bottom: 26px; width: 46px; height: 46px; overflow: visible; }
     .s03-row path { fill: none; stroke: var(--clay); stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
-    #s03-sources-more { width: 1228px; }
-    #s03-sources-more .rule { background: repeating-linear-gradient(90deg, var(--muted) 0 16px, transparent 16px 28px); }
-    #s03-sources-more svg rect { fill: none; stroke: var(--muted); stroke-width: 3; stroke-dasharray: 7 6; }
-    #s03-sources-more .name { color: var(--mid); }
-    #s03-sources-more em { font-style: italic; color: var(--ink); display: inline-block; }
+    /* (website) the eighth slot: Build your own, with an open box; under the ledger, the stamp that says where it all lives */
+    #s03-sources-more svg rect { fill: none; stroke: var(--muted); stroke-width: 3.5; }
+    #s03-sources-more .name { font-style: italic; color: var(--mid); }
+    #s03-sources-local { top: 718px; font-size: 64px; }
   </style>
   <div id="root" data-composition-id="s03-sources" data-width="1920" data-height="1080">
     <div class="pan" id="s03-sources-pan"><div class="cam" id="s03-sources-cam"><div class="shake" id="s03-sources-shake"></div></div></div>
@@ -28,7 +27,7 @@
       const $ = (id) => document.getElementById("s03-sources-" + id);
       const P = O.page($("shake"), { header: ["Sources", "Indexed on your Mac"] });
       const S = P.sheet;
-      // Two ledger columns (sheet coordinates), then an eighth, empty row across both.
+      // Two ledger columns (sheet coordinates); the eighth slot is Build your own, its box left open.
       const NAMES = ["Gmail", "Google Drive", "Dropbox", "Telegram", "WhatsApp", "X bookmarks", "Readwise"];
       const TICK = '<svg viewBox="0 0 46 46"><path d="M6 25 L18 37 L41 8" pathLength="1" /></svg>';
       const rows = NAMES.map((n, i) => {
@@ -36,9 +35,12 @@
         gsap.set(r, { left: i < 4 ? 96 : 736, top: 150 + (i % 4) * 128 });
         return r;
       });
-      const more = O.make("div", "s03-row", S, `<svg viewBox="0 0 46 46"><rect x="3" y="3" width="40" height="40" rx="6" /></svg><div class="rule"></div><div class="name">More coming. <em id="s03-sources-own">Or build your own.</em></div>`);
+      const more = O.make("div", "s03-row", S, `<svg viewBox="0 0 46 46"><rect x="3" y="3" width="40" height="40" rx="6" /></svg><div class="rule"></div><div class="name">Build your own</div>`);
       more.id = "s03-sources-more";
-      gsap.set(more, { left: 96, top: 150 + 4 * 128 + 24 });
+      gsap.set(more, { left: 736, top: 150 + 3 * 128 });
+      // Stamped under the ledger: all of it is kept and searched on the Mac (Jamie, 2026-10-12).
+      const local = O.make("div", "stamp", S, "STORED ON YOUR MAC");
+      local.id = "s03-sources-local";
 
       O.ready(() => {
         const tl = gsap.timeline({ paused: true });
@@ -57,16 +59,17 @@
           tl.fromTo(nm, { x: 24, opacity: 0 }, { x: 0, opacity: 1, duration: 0.45, ease: "expo.out" }, land - O.AT * 0.45);
           tl.fromTo(pk, { strokeDashoffset: 1, strokeDasharray: 1 }, { strokeDashoffset: 0, duration: 0.16, ease: "power2.in" }, land);
         });
-        // The eighth row is a dashed empty line; "Or build your own." lands in italic beside it, on the beat.
-        const mr = more.querySelector(".rule"), mn = more.querySelector(".name"), own = $("own");
-        tl.fromTo(mr, { scaleX: 0 }, { scaleX: 1, duration: 0.5, ease: "expo.out" }, B.more - 0.15);
+        // The eighth slot lands like the others, with its box open: nothing ticks it.
+        const mr = more.querySelector(".rule"), mn = more.querySelector(".name");
+        tl.fromTo(mr, { scaleX: 0 }, { scaleX: 1, duration: 0.4, ease: "expo.out" }, B.more - 0.12);
         tl.fromTo(more.querySelector("svg"), { opacity: 0, scale: 0.6, transformOrigin: "50% 50%" }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2)" }, B.more - 0.1);
         tl.fromTo(mn, { x: 24, opacity: 0 }, { x: 0, opacity: 1, duration: 0.45, ease: "expo.out" }, B.more - O.AT * 0.45);
-        gsap.set(own, { opacity: 0 });
-        tl.fromTo(own, { y: 26, opacity: 0, rotation: -2 }, { y: 0, opacity: 1, rotation: 0, duration: 0.5, ease: O.spring(0.75) }, B.own - O.spring(0.75).land * 0.5);
+        // Then the stamp comes down under the ledger, centred on the sheet.
+        gsap.set(local, { left: (S.offsetWidth - local.offsetWidth) / 2 });
+        O.stamp(tl, local, B.own + 0.25, { rot: -6, jolt: [$("shake")], amp: 4, ink: 1 });
 
         // Out: the list scrolls up and away; the feed on the next page streams up into the same sheet.
-        const all = [...rows, more];
+        const all = [...rows, more, local];
         all.forEach((r, i) => tl.to(r, { y: -40, opacity: 0, duration: 0.3, ease: "power2.in" }, B.out + (i % 4) * 0.025 + (i >= 4 ? 0.04 : 0)));  // clear of the header
         tl.set({}, {}, end);
         window.__timelines["s03-sources"] = tl;
