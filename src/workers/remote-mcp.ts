@@ -33,8 +33,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import type { OlympusConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../core/email.ts';
-import { callerProviderFromLabel, markInProcessRemoteRequest, type OperationCaller } from '../core/operation-caller.ts';
-import { pinnedGrantProvider } from './remote-oauth/pinned-clients.ts';
+import { markInProcessRemoteRequest, type OperationCaller } from '../core/operation-caller.ts';
 import type { OperationContext } from '../core/operations.ts';
 import {
   isWellFormedRemoteConnectionToken,
@@ -42,7 +41,7 @@ import {
   type RemoteConnectionStore,
 } from '../core/remote-connections.ts';
 import { isRelayedRequest } from '../core/remote-access.ts';
-import { isWellFormedOAuthAccessToken } from '../core/remote-oauth-store.ts';
+import { isWellFormedOAuthAccessToken, remoteConnectionProvider } from '../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, remoteMcpResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
 import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/source-answer-jobs.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
@@ -92,8 +91,11 @@ export interface RemoteMcpHandlerOptions {
   directoryServer?: typeof createChatGptDirectoryMcpServer;
 }
 
-/** The verified connection behind a remote request; `clientId` for OAuth grants. */
-export type RemoteMcpConnection = Pick<RemoteConnectionRecord, 'id' | 'displayName'> & { clientId?: string | null };
+/** The verified connection behind a remote request; `clientId` for OAuth grants, `provider` as stored. */
+export type RemoteMcpConnection = Pick<RemoteConnectionRecord, 'id' | 'displayName'> & {
+  clientId?: string | null;
+  provider?: RemoteConnectionRecord['provider'];
+};
 
 export function isRemoteMcpRequest(request: Request): boolean {
   return remoteMcpSurface(request) !== undefined;
@@ -293,13 +295,16 @@ export function lazyRemoteConnectionStore(
 }
 
 /**
- * The remote caller: a pinned client's grant is placed by its client id
- * (ChatGPT → OpenAI, Claude → Anthropic, Grok → xAI); any other connection
- * by the name it was approved under.
+ * The remote caller, with the host its connection records
+ * (core/remote-oauth-store.ts remoteConnectionProvider): a pinned client's
+ * grant by its client id (ChatGPT → OpenAI, Claude → Anthropic, Grok and
+ * Grok Bot or Cursor → xAI), any other connection by the agent it was
+ * created for or the name it was approved under, else `other`. Every remote
+ * caller has one, so a host Olympus does not know is said, not silent.
  */
 export function remoteOperationCaller(connection: RemoteMcpConnection): OperationCaller {
-  const provider = pinnedGrantProvider(connection) ?? callerProviderFromLabel(connection.displayName);
-  return { surface: 'remote', connectionId: connection.id, displayName: connection.displayName, ...(provider ? { provider } : {}) };
+  const provider = remoteConnectionProvider({ clientId: connection.clientId ?? null, displayName: connection.displayName, chosen: connection.provider ?? null });
+  return { surface: 'remote', connectionId: connection.id, displayName: connection.displayName, provider };
 }
 
 /**

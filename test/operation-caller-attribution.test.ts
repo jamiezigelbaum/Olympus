@@ -18,7 +18,7 @@ import {
   sanitizeCallerDisplayName,
 } from '../src/core/operation-caller.ts';
 import { remoteOperationCaller } from '../src/workers/remote-mcp.ts';
-import { CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, GROK_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, CURSOR_CLIENT_ID, GROK_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { evaluateReleaseGate, isCallingAgentDestination } from '../src/core/opsec.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import type {
@@ -123,14 +123,20 @@ describe('caller wire validation', () => {
     expect(operationCallerToWire({ surface: 'cli' })).toEqual({ surface: 'cli' });
   });
 
-  test('who hosts the agent: a pinned grant by its client id, a Claude or Grok client by its name, anything else unknown', () => {
+  test('who hosts the agent: a pinned grant by its client id, a client by the one host its name names, anything else unknown', () => {
     expect(callerProviderFromLabel('claude-code')).toBe('anthropic');
     expect(callerProviderFromLabel('Claude Desktop')).toBe('anthropic');
     expect(callerProviderFromLabel('ChatGPT')).toBe('openai');
     expect(callerProviderFromLabel('codex-cli')).toBe('openai');
     expect(callerProviderFromLabel('Grok')).toBe('xai');
     expect(callerProviderFromLabel('Grok API')).toBe('xai');
-    expect(callerProviderFromLabel('Muse')).toBeUndefined();
+    expect(callerProviderFromLabel('Muse')).toBe('meta');
+    expect(callerProviderFromLabel('Meta AI')).toBe('meta');
+    // A word that only contains "meta" names no host; a name naming two hosts names neither.
+    expect(callerProviderFromLabel('metadata sync')).toBeUndefined();
+    expect(callerProviderFromLabel('Claude Code or Codex')).toBeUndefined();
+    expect(callerProviderFromLabel('Grok or ChatGPT')).toBeUndefined();
+    expect(callerProviderFromLabel('Hermes')).toBeUndefined();
     expect(callerProviderFromLabel(undefined)).toBeUndefined();
     expect(mcpOperationCaller('claude-code')).toEqual({ surface: 'mcp', displayName: 'claude-code', provider: 'anthropic' });
     expect(mcpOperationCaller('Grok')).toEqual({ surface: 'mcp', displayName: 'Grok', provider: 'xai' });
@@ -141,7 +147,20 @@ describe('caller wire validation', () => {
     // Pinned clients are placed by their client id, whatever the connection is called.
     expect(remoteOperationCaller({ id: 'c4', displayName: 'Work', clientId: CLAUDE_CLIENT_ID })).toEqual({ surface: 'remote', connectionId: 'c4', displayName: 'Work', provider: 'anthropic' });
     expect(remoteOperationCaller({ id: 'c5', displayName: 'Claude', clientId: GROK_CLIENT_ID })).toEqual({ surface: 'remote', connectionId: 'c5', displayName: 'Claude', provider: 'xai' });
-    expect(remoteOperationCaller({ id: 'c6', displayName: 'Other', clientId: 'olympus_client_x' })).toEqual({ surface: 'remote', connectionId: 'c6', displayName: 'Other' });
+    expect(remoteOperationCaller({ id: 'c7', displayName: 'Phone', clientId: CURSOR_CLIENT_ID })).toEqual({ surface: 'remote', connectionId: 'c7', displayName: 'Phone', provider: 'xai' });
+    // A remote connection whose host nothing names is `other`, never silent.
+    expect(remoteOperationCaller({ id: 'c6', displayName: 'Other', clientId: 'olympus_client_x' })).toEqual({ surface: 'remote', connectionId: 'c6', displayName: 'Other', provider: 'other' });
+    // The host a connection was created for wins over its name; a pin wins over both.
+    expect(remoteOperationCaller({ id: 'c8', displayName: 'Claude helper', clientId: null, provider: 'other' })).toEqual({ surface: 'remote', connectionId: 'c8', displayName: 'Claude helper', provider: 'other' });
+    expect(remoteOperationCaller({ id: 'c9', displayName: 'Agent', clientId: null, provider: 'meta' })).toEqual({ surface: 'remote', connectionId: 'c9', displayName: 'Agent', provider: 'meta' });
+    expect(remoteOperationCaller({ id: 'ca', displayName: 'Agent', clientId: CHATGPT_CLIENT_ID, provider: 'xai' })).toEqual({ surface: 'remote', connectionId: 'ca', displayName: 'Agent', provider: 'openai' });
+  });
+
+  test('every host is accepted on the worker wire, and nothing else', () => {
+    for (const provider of ['openai', 'xai', 'meta', 'anthropic', 'other'] as const) {
+      expect(parseOperationCallerWire({ surface: 'remote', connection_id: 'c1', provider })).toEqual({ ok: true, caller: { surface: 'remote', connection_id: 'c1', provider } });
+    }
+    expect(parseOperationCallerWire({ surface: 'remote', provider: 'google' }).ok).toBe(false);
   });
 
   test('display names lose control and bidi characters and are bounded', () => {

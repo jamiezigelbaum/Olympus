@@ -200,14 +200,27 @@ export function consultClaudeFrontierModel(settings: ConsultSettings): string {
 }
 
 /**
- * The provider hosting the agent that asks: OpenAI, Anthropic or xAI (by a
- * pinned OAuth client id, or a client's MCP name). Unknown callers
- * (OpenClaw, the CLI) have none.
+ * The provider hosting the agent that asks: OpenAI, xAI, Meta or Anthropic
+ * (by a pinned OAuth client id, the host a remote connection was approved
+ * for, or a client's MCP name). `other`: a remote connection whose host is
+ * not known, so the same-provider rule cannot be applied. Callers on this
+ * computer with no known host (OpenClaw, the CLI) have none.
  */
-export type ConsultCallerProvider = 'openai' | 'anthropic' | 'xai';
-export const CONSULT_CALLER_PROVIDERS: readonly ConsultCallerProvider[] = ['openai', 'anthropic', 'xai'];
-/** zkAPI model id prefixes by provider; xAI's models are listed as `x-ai/…`. */
-const CONSULT_MODEL_PREFIXES: Readonly<Record<string, ConsultCallerProvider>> = { openai: 'openai', anthropic: 'anthropic', 'x-ai': 'xai', xai: 'xai' };
+export type ConsultCallerProvider = 'openai' | 'xai' | 'meta' | 'anthropic' | 'other';
+export const CONSULT_CALLER_PROVIDERS: readonly ConsultCallerProvider[] = ['openai', 'xai', 'meta', 'anthropic', 'other'];
+/**
+ * zkAPI model id prefixes by provider; xAI's models are listed as `x-ai/…`,
+ * Meta's as `meta-llama/…`. Open-weight models count as their maker's, so
+ * the rule errs towards keeping a question from the conversation's host.
+ */
+const CONSULT_MODEL_PREFIXES: Readonly<Record<string, Exclude<ConsultCallerProvider, 'other'>>> = {
+  openai: 'openai',
+  anthropic: 'anthropic',
+  'x-ai': 'xai',
+  xai: 'xai',
+  'meta-llama': 'meta',
+  meta: 'meta',
+};
 
 /**
  * The zkAPI model for an agent's question by who hosts the agent: an
@@ -225,7 +238,7 @@ export function consultFrontierModelFor(settings: ConsultSettings, provider: Con
  * `x-ai/grok-5` → `xai`), for the cross-provider rule; undefined when the id
  * names none of the hosting providers.
  */
-export function consultModelProvider(model: string): ConsultCallerProvider | undefined {
+export function consultModelProvider(model: string): Exclude<ConsultCallerProvider, 'other'> | undefined {
   const prefix = model.slice(0, model.indexOf('/')).toLowerCase();
   return Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix) ? CONSULT_MODEL_PREFIXES[prefix] : undefined;
 }
