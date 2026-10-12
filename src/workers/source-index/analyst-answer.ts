@@ -53,7 +53,7 @@ import {
   type ReleaseDecision,
   type StructuredEvidenceFact,
 } from '../../core/opsec.ts';
-import { recordReleaseManifest, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
+import { recordReleaseManifest, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
@@ -2560,6 +2560,36 @@ export interface ReleasedEvidenceResult {
 
 const RELEASED_EXCERPT_MAX_CHARS = 1_500;
 
+/**
+ * Keeps only the items still Public or Personal now: one read of the current
+ * tiers for every listed item. Private, Secrets, gone and unprovable items are
+ * withheld (counted). A check that throws, or answers for the wrong number of
+ * items, fails closed.
+ */
+function recheckReleasedEvidence(
+  evidence: readonly ReleasedEvidenceItem[],
+  identities: readonly ReleaseInput[],
+  check: ReleaseCheck,
+): { evidence: ReleasedEvidenceItem[]; withheld: number } {
+  if (evidence.length === 0) return { evidence: [], withheld: 0 };
+  let verdicts: ReturnType<ReleaseCheck['inputs']>;
+  try {
+    verdicts = check.inputs(identities);
+  } catch (error) {
+    console.error(`[olympus:search] release_check_failed error_message=${JSON.stringify((error instanceof Error ? error.message : String(error)).slice(0, 200))}`);
+    throw new OperationError('source_index_policy_violation', 'The current tiers could not be read.');
+  }
+  if (verdicts.length !== identities.length) {
+    throw new OperationError('source_index_policy_violation', 'The tier check answered for the wrong number of items.');
+  }
+  const kept: ReleasedEvidenceItem[] = [];
+  evidence.forEach((item, index) => {
+    const verdict = verdicts[index]!;
+    if (!verdict.gone && (verdict.tier === 'public_or_personal' || verdict.tier === 'legacy')) kept.push(item);
+  });
+  return { evidence: kept, withheld: evidence.length - kept.length };
+}
+
 export async function searchReleasedEvidence(input: {
   lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
   question: string;
@@ -2567,6 +2597,14 @@ export async function searchReleasedEvidence(input: {
   maxCharsPerCandidate?: number;
   evidenceByteBudget?: number;
   laneTimeoutMs?: number;
+  /**
+   * The current tiers, read once more after every item is read and right
+   * before the result is returned: an item moved to Private or Secrets (or
+   * gone) while the search ran is withheld, and so is one whose tier cannot
+   * be proven. A check that cannot be read fails the whole search. Absent:
+   * the tiers seen when each item was selected (the ChatGPT surface).
+   */
+  releaseCheck?: ReleaseCheck;
 }): Promise<ReleasedEvidenceResult> {
   const question = input.question.trim();
   if (!question) throw new OperationError('invalid_params', 'A question is required.');
@@ -2596,6 +2634,8 @@ export async function searchReleasedEvidence(input: {
   });
   assertEvidencePackModelEligible(detail.pack);
   const evidence: ReleasedEvidenceItem[] = [];
+  // Each listed item's identity, account included, for the final tier check.
+  const identities: ReleaseInput[] = [];
   let withheld = 0;
   const seen = new Set<string>();
   // A match whose name is Personal but whose contents are tiered Private is
@@ -2639,6 +2679,14 @@ export async function searchReleasedEvidence(input: {
       withheld += 1;
       return;
     }
+    identities.push({
+      corpusId,
+      provider: item.provider,
+      accountScope: item.accountScope ?? '',
+      providerItemId: item.providerItemId,
+      ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
+      privateAtAnswer: false,
+    });
     evidence.push(withoutSecretLikeLabels({
       corpus_id: corpusId,
       trust_domain: candidate.trustDomain,
@@ -2654,9 +2702,11 @@ export async function searchReleasedEvidence(input: {
       ...(fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true as const } : {}),
     }));
   });
+  const released = input.releaseCheck ? recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  withheld += released.withheld;
   const coverage = detail.pack.coverage;
   return {
-    evidence,
+    evidence: released.evidence,
     withheld,
     coverage: {
       searched_corpora: coverage.searchedCorpora.length,

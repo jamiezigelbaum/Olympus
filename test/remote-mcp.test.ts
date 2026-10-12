@@ -586,10 +586,14 @@ describe('remote evidence search', () => {
   let searchBase: string;
   let searches: Array<{ question: string; limit?: number }>;
   let answerModel: boolean;
+  let pauseSearch: Promise<void> | undefined;
+  let searchStarted: (() => void) | undefined;
 
   beforeEach(() => {
     searches = [];
     answerModel = false;
+    pauseSearch = undefined;
+    searchStarted = undefined;
     const worker = createEmailSourceWorker({
       sourceAnswer: { async answer() { answered += 1; return answerFixture(); } },
       sourceIndexStatus: { async status() { return statusFixture() as never; } },
@@ -607,6 +611,8 @@ describe('remote evidence search', () => {
         search: {
           evidenceSearch: async (input) => {
             searches.push(input);
+            searchStarted?.();
+            if (pauseSearch) await pauseSearch;
             return {
               evidence: [
                 { trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: 'The lease renews on 1 March.', authored_at: '2026-09-01T10:00:00Z' },
@@ -688,6 +694,27 @@ describe('remote evidence search', () => {
       expect(searches).toEqual([]);
     } finally {
       await client.close();
+    }
+  });
+
+  test('a connection revoked while its search runs gets nothing from it', async () => {
+    const { connection, token } = store.create('Claude');
+    const client = await searchClient(token);
+    let release!: () => void;
+    pauseSearch = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { searchStarted = resolve; });
+    try {
+      const pending = client.callTool({ name: 'olympus_search', arguments: { question: 'when does the lease renew?' } });
+      await started;
+      store.revoke(connection.id);
+      release();
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      const text = (result.content as Array<{ text: string }>)[0]!.text;
+      expect(JSON.parse(text)).toMatchObject({ error: 'invalid_token' });
+      expect(text).not.toContain('lease renews');
+    } finally {
+      await client.close().catch(() => undefined);
     }
   });
 

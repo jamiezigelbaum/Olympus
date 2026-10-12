@@ -110,6 +110,7 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
         screenshot_commit: '72230e74afe9298f9be87bc4c014960e187d98a5',
         rendered_from_commit: '72230e74afe9298f9be87bc4c014960e187d98a5',
         pending_review: {
+          requested_on: '2026-10-12',
           reason: "The pasted agent instructions now lead with olympus_search (Claude, Grok and Grok Bot answer from Olympus search on installs with no answer model); this render awaits Jamie's re-approval.",
           candidate_rendered_html_sha256: 'e8d05abf2980aeadad64659531a4bdaac5d3eaac936c8d9b371cf1e280d6bc9b',
         },

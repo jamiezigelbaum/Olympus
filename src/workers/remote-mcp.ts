@@ -182,7 +182,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       ? surface === 'directory'
         ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached)
         : createChatGptMcpServer(() => ctx, chatgpt, detached)
-      : createOlympusMcpServer('remote', () => ctx, options.search ? remoteSearchExtension(options.search) : undefined);
+      : createOlympusMcpServer('remote', () => ctx, options.search
+        ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface))
+        : undefined);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
@@ -255,6 +257,21 @@ export function authenticateRemoteRequest(
     return connectionsUnavailable();
   }
   return verification.ok ? { ok: true, connection: verification.connection } : refuse('invalid_token');
+}
+
+/**
+ * The request's credential verified again (the remote search, before it
+ * releases evidence): `active` only for the same connection, still valid.
+ */
+function stillAuthorized(
+  request: Request,
+  connection: RemoteMcpConnection,
+  options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
+  surface: McpSurface,
+): 'active' | 'revoked' | 'unavailable' {
+  const again = authenticateRemoteRequest(request, options, surface);
+  if (again.ok) return again.connection.id === connection.id ? 'active' : 'revoked';
+  return again.response.status === 503 ? 'unavailable' : 'revoked';
 }
 
 function connectionsUnavailable(): { ok: false; response: Response } {

@@ -39113,6 +39113,27 @@ function provenanceCorpusId(provenance) {
 function sourceItemsEqual(left, right) {
   return left.family === right.family && left.provider === right.provider && left.accountScope === right.accountScope && left.providerItemId === right.providerItemId && left.providerThreadId === right.providerThreadId && left.providerConversationId === right.providerConversationId && left.providerFileId === right.providerFileId && left.providerEventId === right.providerEventId && left.localItemId === right.localItemId && left.sourceVersion === right.sourceVersion;
 }
+function recheckReleasedEvidence(evidence, identities, check) {
+  if (evidence.length === 0)
+    return { evidence: [], withheld: 0 };
+  let verdicts;
+  try {
+    verdicts = check.inputs(identities);
+  } catch (error) {
+    console.error(`[olympus:search] release_check_failed error_message=${JSON.stringify((error instanceof Error ? error.message : String(error)).slice(0, 200))}`);
+    throw new OperationError("source_index_policy_violation", "The current tiers could not be read.");
+  }
+  if (verdicts.length !== identities.length) {
+    throw new OperationError("source_index_policy_violation", "The tier check answered for the wrong number of items.");
+  }
+  const kept = [];
+  evidence.forEach((item, index) => {
+    const verdict = verdicts[index];
+    if (!verdict.gone && (verdict.tier === "public_or_personal" || verdict.tier === "legacy"))
+      kept.push(item);
+  });
+  return { evidence: kept, withheld: evidence.length - kept.length };
+}
 async function searchReleasedEvidence(input) {
   const question = input.question.trim();
   if (!question)
@@ -39142,6 +39163,7 @@ async function searchReleasedEvidence(input) {
   });
   assertEvidencePackModelEligible(detail.pack);
   const evidence = [];
+  const identities = [];
   let withheld = 0;
   const seen = new Set;
   const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
@@ -39181,6 +39203,14 @@ async function searchReleasedEvidence(input) {
       withheld += 1;
       return;
     }
+    identities.push({
+      corpusId,
+      provider: item.provider,
+      accountScope: item.accountScope ?? "",
+      providerItemId: item.providerItemId,
+      ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {},
+      privateAtAnswer: false
+    });
     evidence.push(withoutSecretLikeLabels({
       corpus_id: corpusId,
       trust_domain: candidate.trustDomain,
@@ -39196,9 +39226,11 @@ async function searchReleasedEvidence(input) {
       ...fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true } : {}
     }));
   });
+  const released = input.releaseCheck ? recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  withheld += released.withheld;
   const coverage = detail.pack.coverage;
   return {
-    evidence,
+    evidence: released.evidence,
     withheld,
     coverage: {
       searched_corpora: coverage.searchedCorpora.length,
@@ -128599,7 +128631,7 @@ var init_directory_surface = __esm(() => {
 });
 
 // src/workers/remote-search.ts
-function remoteSearchExtension(options) {
+function remoteSearchExtension(options, authorized) {
   const answerHidden = () => options.answerModelAvailable !== undefined && !options.answerModelAvailable();
   return {
     tools: (listed) => {
@@ -128608,7 +128640,7 @@ function remoteSearchExtension(options) {
     },
     call: async (request, next, signal) => {
       if (request.params.name === REMOTE_SEARCH_TOOL.name)
-        return await runSearch(request.params.arguments ?? {}, options, signal);
+        return await runSearch(request.params.arguments ?? {}, options, authorized, signal);
       if (answerHidden() && request.params.name === "source_answer")
         return errorResult(remoteSurfaceErrorOutput("unknown_operation"));
       return await next();
@@ -128621,7 +128653,7 @@ function hiddenWithoutAnswerModel(listed) {
     hidden.add("source_answer_result");
   return hidden;
 }
-async function runSearch(args, options, signal) {
+async function runSearch(args, options, authorized, signal) {
   const question = typeof args.question === "string" ? args.question.trim() : "";
   if (!question || question.length > MAX_QUESTION_CHARS)
     return invalidParams("question");
@@ -128637,6 +128669,14 @@ async function runSearch(args, options, signal) {
   } catch (error2) {
     return errorResult(remoteErrorOutput(error2));
   }
+  let access;
+  try {
+    access = authorized();
+  } catch {
+    access = "unavailable";
+  }
+  if (access !== "active")
+    return errorResult(remoteSurfaceErrorOutput(access === "revoked" ? "invalid_token" : "remote_connections_unavailable"));
   if (!Array.isArray(raw?.evidence)) {
     return errorResult(remoteErrorOutput(new OperationError("source_index_error", "unexpected search shape")));
   }
@@ -128823,7 +128863,7 @@ function createRemoteMcpHandler(options) {
     if (surface === "directory" && !chatgpt)
       return jsonResponse(404, remoteSurfaceErrorOutput("not_found"));
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
-    const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, options.search ? remoteSearchExtension(options.search) : undefined);
+    const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface)) : undefined);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -128869,6 +128909,12 @@ function authenticateRemoteRequest(request, options, surface = "default") {
     return connectionsUnavailable();
   }
   return verification.ok ? { ok: true, connection: verification.connection } : refuse3("invalid_token");
+}
+function stillAuthorized(request, connection, options, surface) {
+  const again = authenticateRemoteRequest(request, options, surface);
+  if (again.ok)
+    return again.connection.id === connection.id ? "active" : "revoked";
+  return again.response.status === 503 ? "unavailable" : "revoked";
 }
 function connectionsUnavailable() {
   return { ok: false, response: jsonResponse(503, remoteSurfaceErrorOutput("remote_connections_unavailable")) };
@@ -136885,6 +136931,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...input.limit ? { maxResults: input.limit } : {}
     });
   } : undefined;
+  const remoteEvidenceSearch = sourceAnswerLanes ? async (input) => searchReleasedEvidence({
+    lanes: sourceAnswerLanes,
+    question: input.question,
+    ...input.limit ? { maxResults: input.limit } : {},
+    releaseCheck: remoteReleaseCheck
+  }) : undefined;
   const chatgptPrivateMatchProbe = sourceAnswerLanes ? async (question) => {
     const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes, question });
     return { count: result.matched, evidence: result.candidates };
@@ -136977,7 +137029,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(withRemoteFailureBoundary2(remoteOpenApi), withRemoteMcpRoute2(withRemoteFailureBoundary2(createRemoteMcpHandler2({
       ...remoteAgentOptions,
-      ...chatgptEvidenceSearch ? { search: { evidenceSearch: chatgptEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } } : {},
+      ...remoteEvidenceSearch ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } } : {},
       chatgpt: {
         servesRequest: (request, connection) => isRelayedRequest2(request) && isChatGptGrant2(connection),
         readOnlyFor: isDemoGrant2,

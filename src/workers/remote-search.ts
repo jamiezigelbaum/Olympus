@@ -10,6 +10,12 @@
  * (source-index/analyst-answer.ts searchReleasedEvidence), and there is no
  * private answer panel on these hosts. Owner decision, 2026-10-12.
  *
+ * Two checks run after the search and before anything leaves: the search
+ * itself rereads every listed item's tier (an item moved to Private or
+ * Secrets meanwhile is withheld, searchReleasedEvidence releaseCheck), and the
+ * caller's connection is verified again, so a connection revoked while its
+ * search ran gets nothing.
+ *
  * Without an answer model, source_answer is neither listed nor callable;
  * source_answer_result stays while ask_anonymously is listed, because a
  * handed-off anonymous answer is collected with it.
@@ -58,7 +64,10 @@ export const REMOTE_SEARCH_TOOL: McpListedTool = {
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
 };
 
-export function remoteSearchExtension(options: RemoteSearchOptions): McpServerExtension {
+/** This request's connection, verified again: still active, revoked (or expired), or the store could not be read. */
+export type RemoteSearchAuthorization = () => 'active' | 'revoked' | 'unavailable';
+
+export function remoteSearchExtension(options: RemoteSearchOptions, authorized: RemoteSearchAuthorization): McpServerExtension {
   const answerHidden = () => options.answerModelAvailable !== undefined && !options.answerModelAvailable();
   return {
     tools: (listed) => {
@@ -66,7 +75,7 @@ export function remoteSearchExtension(options: RemoteSearchOptions): McpServerEx
       return [REMOTE_SEARCH_TOOL, ...listed.filter((tool) => !hidden.has(tool.name))];
     },
     call: async (request, next, signal) => {
-      if (request.params.name === REMOTE_SEARCH_TOOL.name) return await runSearch(request.params.arguments ?? {}, options, signal);
+      if (request.params.name === REMOTE_SEARCH_TOOL.name) return await runSearch(request.params.arguments ?? {}, options, authorized, signal);
       if (answerHidden() && request.params.name === 'source_answer') return errorResult(remoteSurfaceErrorOutput('unknown_operation'));
       return await next();
     },
@@ -80,7 +89,12 @@ function hiddenWithoutAnswerModel(listed: readonly McpListedTool[]): Set<string>
   return hidden;
 }
 
-async function runSearch(args: Record<string, unknown>, options: RemoteSearchOptions, signal?: AbortSignal): Promise<McpCallToolResult> {
+async function runSearch(
+  args: Record<string, unknown>,
+  options: RemoteSearchOptions,
+  authorized: RemoteSearchAuthorization,
+  signal?: AbortSignal,
+): Promise<McpCallToolResult> {
   const question = typeof args.question === 'string' ? args.question.trim() : '';
   if (!question || question.length > MAX_QUESTION_CHARS) return invalidParams('question');
   let limit: number | undefined;
@@ -94,6 +108,14 @@ async function runSearch(args: Record<string, unknown>, options: RemoteSearchOpt
   } catch (error) {
     return errorResult(remoteErrorOutput(error));
   }
+  // Verified again now, after the search: a revocation meanwhile releases nothing.
+  let access: ReturnType<RemoteSearchAuthorization>;
+  try {
+    access = authorized();
+  } catch {
+    access = 'unavailable';
+  }
+  if (access !== 'active') return errorResult(remoteSurfaceErrorOutput(access === 'revoked' ? 'invalid_token' : 'remote_connections_unavailable'));
   if (!Array.isArray((raw as { evidence?: unknown } | null)?.evidence)) {
     return errorResult(remoteErrorOutput(new OperationError('source_index_error', 'unexpected search shape')));
   }
