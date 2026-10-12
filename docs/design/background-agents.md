@@ -1,7 +1,7 @@
 # Olympus for background agents (dots, Grok Bot, Muse)
 
-Status: approved design, revision 2 (2026-10-12), after a Codex (gpt-6-astra)
-review and the owner's decisions below. Builds on
+Status: approved design, revision 3 (2026-10-12), after two Codex
+(gpt-6-astra) review rounds and the owner's decisions below. Builds on
 [hosted-agent-compatibility.md](hosted-agent-compatibility.md) (2026-09-24),
 which put Grok and Muse out of scope for 1.0, and on
 [chatgpt-plugin.md](chatgpt-plugin.md) and [private-answers.md](private-answers.md).
@@ -77,90 +77,154 @@ line and one page, and loses a page.
 
 ## Design
 
-### A. Waiting private questions (ChatGPT surface, including dots)
+### A. Waiting private questions
 
-When a ChatGPT-surface search or answer has a Private match, Olympus records a
-**waiting private question** on the computer at that moment, whether or not a
-panel job is created:
+**When one is recorded.** At the moment of the match, independent of any
+panel job:
 
-- Stored: the question, the connection, the time, the requested detail level.
-  Not stored: evidence, answers, match counts, job ids, citation tokens.
-- **Seen:** when a panel successfully delivers the sealed answer, the record
-  is marked seen and leaves the list. A failed, unclaimed, evicted or
-  restarted job leaves it waiting.
-- **Answered on demand:** pressing Answer re-runs the search with today's
-  tiers and answers locally with the built-in model. If nothing Private
-  matches any more, it says so.
-- **Bounds:** deduplicated by connection plus normalized question; 20 per
-  connection and 50 in all (oldest dropped, with a visible "older questions
-  were removed" line); 7 days; Dismiss and Dismiss all. A dismissed question
-  asked again comes back.
-- **Protection:** kept in the worker's private state with the same file
-  permissions as Private stores, excluded from indexing, telemetry and
-  support bundles, and readable only through a local control session (not
-  `dash_` read-only viewers, not the ChatGPT widget, not the Gateway's read
-  scope). Questions from the private question panel are never recorded.
-- Revoking a connection deletes its waiting questions.
+- *ChatGPT surface (chats and dots):* whenever a search or answer has a
+  Private match.
+- *Summary-rule agents:* the private part has three typed outcomes:
+  **delivered** (the summary included Private evidence: nothing recorded),
+  **excluded by policy** or **private route unavailable** (the answer fell
+  back to Public and Personal, `analyst-answer.ts:537-556,729-741`). For the
+  last two, a bounded local match probe (metadata only, as the ChatGPT
+  surface uses) decides whether anything Private matches; if so a waiting
+  question is recorded and the agent is told one sentence: "Private items may
+  answer this; the person can see that answer in Olympus on their computer."
+  Policy is never bypassed: the probe result goes nowhere but the local
+  record.
 
-The model's note becomes host-neutral (one bit, as today): "Some matching
+**What is stored.** Question (at most 2 KB), stable connection id, time,
+detail level, and the corpus scope the original request named. Not stored:
+evidence, answers, match counts, job ids, citation tokens. Total store at
+most 256 KB.
+
+**Bounds.** Deduplicated by connection, scope and normalized question; a
+duplicate refreshes the time and keeps the fuller detail level. 20 per
+connection, 50 in all, oldest dropped, with a visible "older questions were
+removed" line. 7 days. Dismiss and Dismiss all; a dismissed question asked
+again comes back.
+
+**Answered on demand, everywhere.** No Private synthesis runs for nobody:
+
+- A ChatGPT panel's job starts synthesis when the panel **claims** it, not
+  when the tool result is built (`private-answer-jobs.ts:524` today
+  precomputes). In a live chat the panel claims within seconds, so latency
+  barely changes; for a dot no panel claims, so nothing runs.
+- On the computer, pressing **Answer** re-runs the search under today's
+  tiers and policy, answers through the local path (B), and rechecks
+  eligibility again before showing the answer and before opening any cited
+  item (as panels already do, `private-answer-jobs.ts:568,589`).
+
+**Seen.** A record leaves the list only after an authenticated
+acknowledgment that the answer was decrypted and rendered: the panel sends
+it after rendering, the local page after showing. The acknowledgment names
+the record's generation, so a newer duplicate is not cleared by an older
+answer. A lost acknowledgment leaves the question waiting; a duplicate is
+better than a loss.
+
+**Protection.** In the worker's private state with the same file
+permissions as Private stores; excluded from indexing, telemetry and
+support bundles; served only to a local control session (not `dash_`
+read-only viewers, not the ChatGPT widget, not the Gateway's read scope, not
+any shared dashboard JSON). Questions typed into the private question panel
+are never recorded. Revoking a connection deletes its records and bumps a
+generation in the same transaction, so an in-flight insert for that
+connection is refused.
+
+**The model's note** stays one bit and becomes host-neutral: "Some matching
 items are Private in Olympus. Their contents stay on the user's computer and
 are never shown to you. Olympus answers from them privately: in a panel below
-this reply if the app shows one, and always under Private answers in Olympus
-on the user's computer. Say that briefly; don't guess at the private part."
+this reply if the app shows one, and always in Olympus on the user's
+computer. Say that briefly; don't guess at the private part."
 
-Agents on the summary rule do not need this: they already get the summary.
-They create a waiting question only when policy gave them no private route
-for a matching question.
+### B. Ask privately on the computer (fully local)
 
-### B. Ask privately on the computer
+A box on the Private answers page, also used by Answer in A. It needs its
+own retrieval path, because today's routes are not local end to end:
+Private search is Private-only (`analyst-answer.ts:2690-2704,2807-2808`),
+Personal retrieval may query the cloud (`:2551`), some Personal connector
+adapters embed queries remotely (`connector-store/local-index.ts:10535,11289`),
+and query planning uses the configured Delphi model
+(`email-source/server.ts:3276`).
 
-A box on the Private answers page: the question is answered from Private and
-Personal items **entirely on this computer**: query planning, embeddings,
-retrieval and the built-in model. Nothing leaves. Anonymous outside help
-(zkAPI) stays a separate, clearly labeled action below it, never mixed into
-this answer.
+The local path:
+
+- query planning by the built-in model, or none;
+- embeddings by the built-in embedding model only;
+- retrieval over Private stores and the Personal items indexed on this
+  computer; no remote connector query and no cloud fallback;
+- synthesis by the built-in model.
+
+If a Personal source can't be searched locally, the answer says which
+sources were left out (every problem findable). Anonymous outside help
+(zkAPI) stays a separate, clearly labeled action, never mixed into this
+answer, and waiting questions never feed `ask_anonymously`. Proof: a test
+that denies all outbound requests and still answers, for B and for A's
+Answer.
 
 ### C. Remote result hardening (summary rule)
 
 Keeping summaries for non-ChatGPT agents makes the summary path's output the
-boundary, so:
+boundary. Every remote connection, manual tunnels included, gets typed
+output schemas instead of the serialized operation result
+(`src/mcp/server.ts:44-49`):
 
-- Serve remote callers an explicit **field allowlist** (answer, released
-  citations, status, plain errors) instead of the whole operation result, on
-  `source_answer`, `source_answer_result`, status and errors alike, for every
-  remote connection, including manual tunnels.
-- **Drop `secret_locations` for remote callers** (owner decision
-  2026-10-12). Today a remote agent can learn the title and kind of an item
-  that contains a secret. On the computer that is useful; in a cloud agent it
-  is a list of where secrets live.
+- **Answer:** the released answer text. The Secret coverage note ("N
+  Secret(s) matched by location only", `analyst-answer.ts:2082-2092`) is
+  removed for remote callers, with `secret_locations` itself (owner decision
+  2026-10-12).
+- **Citations:** a nested schema of label, title and date only. No provider
+  identifiers, URIs or spans (`analyst-answer.ts:2292-2303`).
+- **Status and pending:** `status`, and `job_id` while working, so
+  `source_answer_result` still works (`source-answer-jobs.ts:73-78`).
+- **Errors:** fixed plain messages, as the ChatGPT surface has
+  (`response-builder.ts:1307`).
+- Every retained free-text field is secret-scanned, not only today's five
+  (`analyst-answer.ts:2349-2364`).
+- A delayed result is rechecked against current tiers and policy when it is
+  collected, not returned as stored (`source-answer-jobs.ts:248`).
+
+The Private summary itself is unchanged.
 
 ### D. Each connection knows its host
 
 Persist a `provider` per connection (`openai`, `xai`, `meta`, `anthropic`,
-`other`): pinned for ChatGPT (and xAI once pinned), chosen by the owner in
-one tap on Connect an agent for tokens; existing connections migrate from
-their name, else `other`. Split "is ChatGPT" from "is pinned" in code.
-Anonymous answers check the **final resolved** model's provider just before
-sending, defaults included; an `other` host is told honestly that
+`other`). ChatGPT already comes from its pinned client
+(`remote-mcp.ts:256`); xAI will too once pinned; tokens get it from a
+one-tap choice on Connect an agent; existing token connections migrate from
+their name, else `other`. **First split "pinned" from "is ChatGPT"**
+(`pinned-clients.ts:42-43`): today any pinned client is served as ChatGPT,
+so no xAI pin may land before this. Anonymous answers check the **final
+resolved** model's provider just before sending, defaults included
+(`consult-ask.ts:242,410`); an `other` host is told honestly that
 same-provider exclusion can't be applied.
 
 ### E. Background-agent behavior
 
-- **Computer offline:** offline discovery currently advertises ChatGPT tools
-  to everyone (`connect-relay/server/relay-mcp.ts:112-115`). Serve each
-  surface its own offline tool list, and say "Olympus is off; last seen …;
-  try again later" in the tool result, so an always-on agent retries.
-- **Load:** remote answers share one admission limit with the owner's own
-  questions, over a model that may run one lane (`source-answer-jobs.ts:45-54`).
-  Give interactive owner work priority, and cap each background connection
-  at one running answer.
+- **Computer offline.** The relay knows the endpoint (`/openai/mcp` or
+  `/mcp`), not the host (`connect-relay/shared/directory-tools.ts:23-24`),
+  and `/mcp` serves both ChatGPT developer connections and other agents. So:
+  `/openai/mcp` keeps the ChatGPT directory list; on `/mcp`, the engine tells
+  the relay, while online, which surface each credential family gets, and
+  the relay serves that list offline (default: the remote list). Tool
+  results say "Olympus is off; last seen …; try again later" with a
+  Retry-After, so an always-on agent backs off and retries.
+- **Priority** lives at the shared model execution boundary, covering native
+  answers, remote answers, panel jobs and the local page
+  (`source-answer-jobs.ts:45-48`, `private-answer-jobs.ts:650-666`):
+  interactive owner work first, then at most one running answer per
+  background connection.
 
 ## Dashboard changes (all of them)
 
-1. **Needs you:** one line, only when something waits: "2 private questions
-   are waiting on this computer". On the computer it opens the page; in
-   ChatGPT it uses open-on-computer with a new fixed target (no question text
-   or capability in the link).
+1. **On the computer, Needs you:** one line, only when something waits:
+   "2 private questions are waiting". It opens the page. **ChatGPT's
+   dashboard shows nothing new:** everything in Needs you is copied into the
+   text ChatGPT's model reads (`response-builder.ts:156-160,402`), so a count
+   there would leak, as would other connections' activity. The agent's own
+   note already tells the person where to look.
 2. **One page, "Private answers"**, which absorbs the Anonymous answers page:
    - Ask privately (B) at the top;
    - the waiting list: question, "ChatGPT · 2 h ago", **Answer**, Dismiss; the
@@ -168,7 +232,8 @@ same-provider exclusion can't be applied.
      authenticated handling;
    - Anonymous answers (zkAPI setup, balance, ask) collapsed beneath, labeled
      as outside help.
-   Net page count is unchanged.
+   A fixed open-on-computer target for the page (no question text or
+   capability in the link). Net page count is unchanged.
 3. **Agents page, Connect an agent:** ChatGPT, Grok, Muse, Other, each with
    its own short steps; the choice sets the provider (D).
 
@@ -180,29 +245,34 @@ and storing questions per agent is new exposure), notifications, a phone view.
 | Host | How it connects | Sign-in | Status |
 |---|---|---|---|
 | ChatGPT chats and dots | ChatGPT plugin (`/openai/mcp`) | Pinned ChatGPT clients, unchanged | Directory review pending; dots with an unlisted plugin unknown |
-| Grok Bot | Custom MCP, `https://mcp.olympusplugin.ai/mcp` | A connection token from the Agents page, if Grok accepts a header token; otherwise pin xAI's client document and redirect once verified, with a matching registration adapter if Grok insists on registration. No per-install URL unless a real host proves it necessary | Verify on a real Grok Bot first |
+| Grok Bot | Custom MCP, `https://mcp.olympusplugin.ai/mcp` | A connection token from the Agents page, if Grok accepts a header token; otherwise pin xAI's client document and redirect once verified (after D's split), with a matching registration adapter if Grok insists on registration. No per-install URL unless a real host proves it necessary | Verify on a real Grok Bot first |
 | Muse | Meta's catalog (consumer) or custom MCP (Muse Code) | Per Meta's catalog rules; token for Muse Code | Check submission requirements |
 | Any other MCP agent | URL and token | Token | Works today |
 
 ## Build sequence
 
-Each slice is one pull request; exact-head CI and the repository's review
-rules apply.
+Each slice is one pull request with exact-head CI, exact-main closeout and
+the applicable pipeline evals (`docs/ENGINEERING_PROCESS.md`).
 
 1. **Grok sign-in probe.** Owned by the Grok Bot integration session running
    in parallel (2026-10-12; Jamie has a Grok Bot account). It records what
-   Grok accepts (header token, OAuth, registration) and decides slice 5;
-   slice 4's provider field should match whatever that session lands.
-2. **Remote result hardening (C).** Critical class: independent review;
-   tests for every serialized field, delayed results and reclassification.
-3. **Waiting private questions and the Private answers page (A, B), the Needs
-   you line, the open target, offline discovery per surface (E).** Critical
-   class (stores private-adjacent records). Includes restart, revoke and
-   migration tests, and a run of the real dashboard.
-4. **Provider per connection and anonymous-answer check (D), owner priority
-   (E).** Critical class (credentials, routing).
-5. **Host onboarding:** Grok per slice 1; Muse catalog submission; dots once
-   the ChatGPT listing is live. Each needs an account.
+   Grok accepts (header token, OAuth, registration) and decides slice 5.
+   Any xAI pin waits for slice 4's split.
+2. **Remote result hardening (C).** Critical: independent review. Proof: a
+   schema test over every serialized field, delayed-result recheck after
+   reclassification, no Secret count or location in any remote output.
+3. **Waiting questions, local Private answers page, Needs you line, open
+   target (A, B, dashboard).** Critical: independent review. Proof: zero
+   outbound requests on the local path; acknowledgment, crash and restart;
+   revoke-versus-insert race; claim-time synthesis; nothing new in ChatGPT's
+   dashboard text; a run of the real dashboard.
+4. **Provider per connection, pinned-versus-ChatGPT split, resolved-model
+   check (D), offline lists and shared priority (E).** Critical: independent
+   review. Proof: migration, offline list per credential family, scheduling
+   under load.
+5. **Host onboarding:** Grok per slice 1 (an OAuth pin is critical class);
+   Muse catalog submission; dots once the ChatGPT listing is live. Relay or
+   engine deployment is a separately authorized live change.
 
 ## Still open
 
@@ -211,14 +281,22 @@ rules apply.
 
 ## Review (Codex gpt-6-astra, 2026-10-12)
 
-Verdict on revision 1: rework. Adopted: the full-result serialization and
-`secret_locations` findings (C); one bit, not a count; waiting records
-persisted at match time with seen, restart and revoke rules (A); D4 local
-throughout (B); no question history (the ledger is content-free); provider
-pinned or owner-chosen and checked on the resolved model (D); no per-install
-OAuth path; offline discovery per surface; one page instead of two. Superseded
-by the owner's decision to keep summaries for non-ChatGPT agents: the
-proposal to remove them.
+- **Round 1, revision 1: rework.** Adopted: full-result serialization and
+  `secret_locations` (C); one bit, not a count; waiting records persisted at
+  match time (A); local-only Ask privately (B); no question history; provider
+  pinned or owner-chosen and checked on the resolved model (D); no
+  per-install OAuth path; offline lists per surface; one page instead of two.
+  Superseded by the owner's decision: removing summaries for non-ChatGPT
+  agents.
+- **Round 2, revision 2: rework.** Adopted in revision 3: no waiting count
+  in ChatGPT's dashboard (it is model-visible); a dedicated local retrieval
+  path with a zero-egress proof; typed remote schemas, the Secret count
+  removed, all free text scanned, delayed results rechecked, `job_id` kept;
+  synthesis on claim and an acknowledged "seen"; typed outcomes for
+  summary agents that lost the Private part; scope, byte caps and
+  revoke-race rules; offline lists by credential family; priority at the
+  shared execution boundary; the pinned-versus-ChatGPT split ordered before
+  any xAI pin; fuller acceptance proofs.
 
 ## Sources (checked 2026-10-12)
 
