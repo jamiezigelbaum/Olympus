@@ -5,9 +5,13 @@
  * sentence: this is the smallest possible service that holds
  * `GOOGLE_CLIENT_SECRET` so the open-source Olympus worker never has to.
  *
- * Routes (both POST only):
+ * Routes:
  *   POST /exchange/google          {code, code_verifier, redirect_uri, state?}
  *   POST /exchange/google/refresh  {refresh_token}
+ *   GET  /exchange/capacity        {google: "open" | "full"}      (public)
+ *   GET  /exchange/stats           the owner's user count         (STATS_TOKEN)
+ * The two POST routes accept nothing else; the two GET routes are in
+ * capacity.ts, and the count they report is kept by user-count.ts.
  *
  * Every response — success or failure, from this endpoint or forwarded from
  * Google — is `Cache-Control: no-store` and carries no cookies. Nothing here
@@ -25,16 +29,27 @@ import {
 import { isAllowedRedirectUri, parseAllowedRedirectUris } from './redirect-allowlist.ts';
 import { checkRateLimit, type RateLimitBinding, type RateLimitResult } from './rate-limit.ts';
 import { parseExchangeRequest, parseRefreshRequest } from './schema.ts';
+import { handleCapacity, handleStats } from './capacity.ts';
+import { recordGoogleUser, type CapacityEnv, type UserCountKv } from './user-count.ts';
 
-export interface Env {
+export interface Env extends CapacityEnv {
   /** Public identifier — a var, not a secret (see wrangler.toml). */
   GOOGLE_CLIENT_ID: string;
   /** `wrangler secret put GOOGLE_CLIENT_SECRET` — never a var, never committed. */
   GOOGLE_CLIENT_SECRET: string;
   /** Comma-separated exact `redirect_uri` matches, in addition to loopback forms. */
   ALLOWED_REDIRECT_URIS?: string;
-  /** Optional: created and bound by the owner. Absent fails open (see rate-limit.ts). */
-  RATE_LIMIT_KV?: RateLimitBinding;
+  /**
+   * Optional: created and bound by the owner. Absent fails open (see
+   * rate-limit.ts). The distinct-user counter lives in the same namespace
+   * under its own key prefix (see user-count.ts); a binding that cannot
+   * `list` still counts, it just cannot cross-check the stored total.
+   */
+  RATE_LIMIT_KV?: RateLimitBinding & Pick<UserCountKv, 'list'>;
+  /** `wrangler secret put STATS_TOKEN`. Absent: `/exchange/stats` answers 404. */
+  STATS_TOKEN?: string;
+  /** Optional `wrangler secret put USER_COUNT_HMAC_KEY`: keys the hash of each account id. */
+  USER_COUNT_HMAC_KEY?: string;
   RATE_LIMIT_MAX?: string;
   RATE_LIMIT_WINDOW_SECONDS?: string;
 }
@@ -42,6 +57,12 @@ export interface Env {
 export interface Deps {
   fetchImpl: GoogleFetch;
   now: () => number;
+  /**
+   * Runs bookkeeping after the response is on its way (`ctx.waitUntil`). When
+   * absent (tests, a runtime without it) the bookkeeping is awaited inline;
+   * either way it never throws into the exchange.
+   */
+  waitUntil?: (work: Promise<unknown>) => void;
 }
 
 const defaultDeps: Deps = { fetchImpl: fetch, now: () => Date.now() };
@@ -59,8 +80,8 @@ const DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60;
 export const DEFAULT_ALLOWED_REDIRECT_URI = 'https://auth.olympusplugin.ai/oauth/callback/';
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return handleRequest(request, env, defaultDeps);
+  fetch(request: Request, env: Env, ctx?: { waitUntil(work: Promise<unknown>): void }): Promise<Response> {
+    return handleRequest(request, env, ctx ? { ...defaultDeps, waitUntil: (work) => ctx.waitUntil(work) } : defaultDeps);
   },
 };
 
@@ -69,6 +90,25 @@ export async function handleRequest(request: Request, env: Env, deps: Deps = def
   const startedAt = deps.now();
   let outcome: { status: number; error?: string } = { status: 500 };
   try {
+    // The two read routes sit ahead of the POST-only exchange rules: capacity
+    // is public and may be read from any origin, stats is token-gated and is
+    // opened from a browser address bar (no Origin header on a navigation).
+    if (url.pathname === '/exchange/capacity') {
+      const response = await handleCapacity(request, env);
+      outcome = { status: response.status };
+      return response;
+    }
+    if (url.pathname === '/exchange/stats') {
+      const response = hasBrowserOrigin(request)
+        ? errorResponse(403, 'browser_origin_refused', 'This endpoint accepts only direct requests.')
+        : await handleStats(request, env, {
+          nowMs: deps.now(),
+          clientIp: clientIp(request),
+          rateLimit: rateLimitConfig(env),
+        });
+      outcome = { status: response.status };
+      return response;
+    }
     if (request.method !== 'POST') {
       outcome = { status: 405, error: 'method_not_allowed' };
       return errorResponse(405, 'method_not_allowed', 'Only POST is accepted.');
@@ -130,6 +170,21 @@ async function handleExchange(request: Request, env: Env, deps: Deps): Promise<R
     deps.fetchImpl,
     UPSTREAM_TIMEOUT_MS,
   );
+  // Tally the account behind a finished consent. The response below is built
+  // from the same upstream text, untouched, whatever this does.
+  if (outcome.ok && outcome.status === 200) {
+    const work = recordGoogleUser(env.RATE_LIMIT_KV, outcome.text, { hmacKey: env.USER_COUNT_HMAC_KEY, nowMs: deps.now() })
+      .catch(() => undefined);
+    if (deps.waitUntil) {
+      try {
+        deps.waitUntil(work);
+      } catch {
+        // Nothing to wait on: the work still runs, unobserved.
+      }
+    } else {
+      await work;
+    }
+  }
   return respondFromGoogle(outcome);
 }
 
@@ -181,11 +236,15 @@ function respondFromGoogle(outcome: GoogleUpstreamOutcome): Response {
   });
 }
 
-async function enforceRateLimit(request: Request, env: Env, deps: Deps): Promise<Response | undefined> {
-  const config = {
+function rateLimitConfig(env: Env): { maxRequests: number; windowSeconds: number } {
+  return {
     maxRequests: positiveIntOr(env.RATE_LIMIT_MAX, DEFAULT_RATE_LIMIT_MAX),
     windowSeconds: positiveIntOr(env.RATE_LIMIT_WINDOW_SECONDS, DEFAULT_RATE_LIMIT_WINDOW_SECONDS),
   };
+}
+
+async function enforceRateLimit(request: Request, env: Env, deps: Deps): Promise<Response | undefined> {
+  const config = rateLimitConfig(env);
   const result = await checkRateLimit(env.RATE_LIMIT_KV, `google-exchange:${clientIp(request)}`, config, deps.now());
   if (result.allowed) return undefined;
   return rateLimitedResponse(result);

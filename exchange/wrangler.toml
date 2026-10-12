@@ -37,6 +37,25 @@ ALLOWED_REDIRECT_URIS = "https://auth.olympusplugin.ai/oauth/callback/"
 RATE_LIMIT_MAX = "20"
 RATE_LIMIT_WINDOW_SECONDS = "60"
 
+# Google lets an unverified app with restricted scopes serve at most GOOGLE_USER_CAP
+# distinct users over its whole lifetime, and sends the 101st to Google's own
+# error page, never back to Olympus. src/user-count.ts counts distinct accounts
+# from each successful sign-in; GET /exchange/capacity turns "full" once the
+# reported number reaches GOOGLE_FULL_AT, so the engine can stop sending people
+# to Google before the wall. Docs: docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md,
+# "User cap counter".
+#
+# Added to the counted number: accounts Google counts that this Worker did not
+# see finish (the owner's own test accounts, a consent whose exchange failed).
+GOOGLE_USER_COUNT_OFFSET = "2"
+GOOGLE_USER_CAP = "100"
+GOOGLE_FULL_AT = "90"
+# Manual override: "1" forces the full state whatever the count says.
+GOOGLE_SIGNIN_FULL = "0"
+# Secrets, set with `wrangler secret put` after deploy and never committed:
+#   STATS_TOKEN          required for GET /exchange/stats (the route is 404 without it)
+#   USER_COUNT_HMAC_KEY  optional; keys the hash of each account id
+
 # Required for rate limiting to do anything at all — see src/rate-limit.ts for
 # why its absence fails open rather than failing the endpoint closed.
 # `wrangler kv namespace create RATE_LIMIT_KV`, then paste the returned id

@@ -1,4 +1,5 @@
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
+import { GOOGLE_SIGNIN_FULL_SENTENCE } from '../core/google-signin-full-copy.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
@@ -1129,6 +1130,14 @@ export type DashboardSourceAction =
     redirect_uri_guidance?: string;
     callback_registration?: DashboardCallbackRegistration;
     instructions: DashboardSetupInstructions;
+    /**
+     * True when this Google source would connect through Olympus's own app but
+     * that app has reached Google's user limit (exchange Worker's capacity
+     * route). The card leads with GOOGLE_SIGNIN_FULL_SENTENCE and the sheet is
+     * the bring-your-own walkthrough, so the owner can still connect with a
+     * Google app of their own. Names nothing but the fact.
+     */
+    publisher_full?: true;
     // The verb, not the deficit: this row is an option the owner may take, and
     // the app-key reality it involves lives in the blurb rather than in the
     // button. Owner ruling, 2026-08-18 review.
@@ -1281,6 +1290,13 @@ export interface SourceDashboardBuildOptions {
    * read-only surface with everything else here.
    */
   publisherOAuthSources?: readonly DashboardOAuthSource[];
+  /**
+   * True when Olympus's own Google app is full (Google allows 100 users while
+   * the app is unverified) and this install has no Google connection yet. A
+   * publisher Google source that would say Connect says so instead and leads
+   * into the bring-your-own walkthrough. Absent or false: nothing changes.
+   */
+  googlePublisherFull?: boolean;
   oauthRedirectBaseUrl?: string;
   apiKeyAvailability?: Partial<Record<DashboardApiKeySource, boolean>>;
   pendingConnects?: DashboardPendingConnect[];
@@ -2102,6 +2118,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.googleCloudProjectId,
       options.googlePilotClientConfigured === true,
       options.publisherOAuthSources ?? [],
+      options.googlePublisherFull === true,
       options.oauthRedirectBaseUrl,
       options.apiKeyAvailability ?? {},
       options.pendingConnects ?? [],
@@ -2261,7 +2278,7 @@ function answerLaneFromDefinition(
       || result.status === 'missing'
       || result.status === 'degraded');
   const connected = !probeUnavailable && (apiKeyAvailability.venice === true || activeHandles.length > 0);
-  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, [], undefined);
+  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, [], false, undefined);
   return {
     lane_id: 'venice-secure-answers',
     source_id: definition.source_id,
@@ -2346,6 +2363,7 @@ function sourceCardFromDefinition(
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
   publisherOAuthSources: readonly DashboardOAuthSource[],
+  googlePublisherFull: boolean,
   oauthRedirectBaseUrl: string | undefined,
   apiKeyAvailability: Partial<Record<DashboardApiKeySource, boolean>>,
   pendingConnects: DashboardPendingConnect[],
@@ -2416,6 +2434,7 @@ function sourceCardFromDefinition(
     googleCloudProjectId,
     googlePilotClientConfigured,
     publisherOAuthSources,
+    googlePublisherFull,
     oauthRedirectBaseUrl,
     apiKeyAvailability,
     pendingConnects,
@@ -3294,6 +3313,7 @@ function connectionFromDefinition(
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
   publisherOAuthSources: readonly DashboardOAuthSource[],
+  googlePublisherFull: boolean,
   oauthRedirectBaseUrl: string | undefined,
   apiKeyAvailability: Partial<Record<DashboardApiKeySource, boolean>>,
   pendingConnects: DashboardPendingConnect[],
@@ -3316,6 +3336,7 @@ function connectionFromDefinition(
     googleCloudProjectId,
     googlePilotClientConfigured,
     publisherOAuthSources,
+    googlePublisherFull,
     oauthRedirectBaseUrl,
     apiKeyAvailability,
     pending,
@@ -3359,6 +3380,7 @@ function connectionStateFromDefinition(
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
   publisherOAuthSources: readonly DashboardOAuthSource[],
+  googlePublisherFull: boolean,
   oauthRedirectBaseUrl: string | undefined,
   apiKeyAvailability: Partial<Record<DashboardApiKeySource, boolean>>,
   pending: DashboardPendingConnect | undefined,
@@ -3429,11 +3451,11 @@ function connectionStateFromDefinition(
     return {
       state: 'not_connected',
       label,
-      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, 'none', pending),
+      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, 'none', pending),
       handles: handleIds,
     };
   }
-  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, sessionEvidence, pending);
+  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, sessionEvidence, pending);
   // A refused attempt is no longer a handshake in flight. Leaving it in
   // awaiting_consent kept the row reading "connecting" for the rest of the
   // ten-minute record over a flow the provider had already rejected (owner,
@@ -3554,6 +3576,7 @@ function sourceAction(
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
   publisherOAuthSources: readonly DashboardOAuthSource[],
+  googlePublisherFull: boolean,
   oauthRedirectBaseUrl: string | undefined,
   sessionEvidence?: DashboardSessionEvidence,
   pending?: DashboardPendingConnect,
@@ -3591,6 +3614,27 @@ function sourceAction(
     // bring-your-own path is not removed — it moves into the sheet's own
     // disclosure, carrying the identical walkthrough these fields feed.
     if (publisherOAuthSources.includes(definition.connect_action.source)) {
+      // The publisher app is out of room: Google would stop this person on its
+      // own page and Olympus would never hear back. Say so here, and make the
+      // bring-your-own walkthrough the whole card. Only a first connect is
+      // held back (label 'Connect'); an install that already has a Google
+      // connection is a reconnect and never reaches this.
+      if (googlePublisherFull && label === 'Connect' && isGoogleOAuthSource(definition.connect_action.source)) {
+        const ownApp = oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl);
+        const web = googleOAuthClientType(oauthRedirectBaseUrl) === 'web';
+        return {
+          kind: 'needs_setup',
+          source: definition.connect_action.source,
+          label: 'Set up',
+          client_secret_required: false,
+          publisher_full: true,
+          instructions: {
+            ...ownApp,
+            plain_intro: `${GOOGLE_SIGNIN_FULL_SENTENCE} Olympus needs a Google ${web ? 'Web application' : 'Desktop app'} Client ID that you create in your own Google account (about 5 minutes; the steps are below).${web ? ' Register the redirect URI shown on this card on that client.' : ''}`,
+          },
+          ...redirectFields,
+        };
+      }
       return {
         kind: 'oauth',
         source: definition.connect_action.source,

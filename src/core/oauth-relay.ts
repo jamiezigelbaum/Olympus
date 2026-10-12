@@ -170,6 +170,16 @@ export function googlePublisherExchangeRefreshUrl(env: Record<string, string | u
   return `${googlePublisherExchangeUrl(env)}/refresh`;
 }
 
+/**
+ * The publisher exchange Worker's public capacity route, derived from
+ * `googlePublisherExchangeUrl()` so the two can never point at different hosts.
+ * `GET` answers `{ "google": "open" | "full" }`
+ * (`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`, "User cap counter").
+ */
+export function googlePublisherCapacityUrl(env: Record<string, string | undefined> = process.env): string {
+  return `${googlePublisherExchangeUrl(env).replace(/\/google\/?$/, '')}/capacity`;
+}
+
 /** A fresh single-use nonce: 32 random bytes, base64url. */
 export function createOAuthRelayNonce(): string {
   return randomBytes(32).toString('base64url');

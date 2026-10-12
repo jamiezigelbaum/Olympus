@@ -2942,6 +2942,9 @@ function googlePublisherExchangeUrl(env = process.env) {
 function googlePublisherExchangeRefreshUrl(env = process.env) {
   return `${googlePublisherExchangeUrl(env)}/refresh`;
 }
+function googlePublisherCapacityUrl(env = process.env) {
+  return `${googlePublisherExchangeUrl(env).replace(/\/google\/?$/, "")}/capacity`;
+}
 function createOAuthRelayNonce() {
   return randomBytes2(32).toString("base64url");
 }
@@ -59722,6 +59725,12 @@ var init_credential_degradation = __esm(() => {
   DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
 });
 
+// src/core/google-signin-full-copy.ts
+var GOOGLE_SIGNIN_FULL_SENTENCE = "Google sign-in is full for the moment. We're working on it. For now, you can still connect Google by using your own Google app.", GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE, GOOGLE_SIGNIN_FULL_CODE = "google_signin_full";
+var init_google_signin_full_copy = __esm(() => {
+  GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE = `${GOOGLE_SIGNIN_FULL_SENTENCE} Open Olympus on your computer to set it up.`;
+});
+
 // src/core/ingestion-throughput.ts
 function dropboxContentExtractionStallHours(env = process.env) {
   const raw = env[DROPBOX_CONTENT_EXTRACTION_STALL_HOURS_ENV];
@@ -60685,7 +60694,8 @@ var init_vocabulary = __esm(() => {
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
-    changeModels: "Change"
+    changeModels: "Change",
+    useOwnGoogleApp: "Use your own Google app"
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
     back: "Back to Olympus",
@@ -62780,7 +62790,7 @@ function buildSourceDashboardViewModel(options) {
     const corpora = statusCorpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
-    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false);
+    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.googlePublisherFull === true, options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false);
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
     const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
     const unreadableFiles = unreadableFilesFor(built, corpora, options.unreadableFileNames);
@@ -62880,7 +62890,7 @@ function answerLaneFromDefinition(definition, registry, credentialHealth, apiKey
   const activeHandles = handles.filter((handle) => backendStatus(handle) !== "reauth_required");
   const probeUnavailable = credentialHealthForDefinition(definition, credentialHealth).some((result) => result.status === "reauth_required" || result.status === "missing" || result.status === "degraded");
   const connected = !probeUnavailable && (apiKeyAvailability.venice === true || activeHandles.length > 0);
-  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, [], undefined);
+  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, [], false, undefined);
   return {
     lane_id: "venice-secure-answers",
     source_id: definition.source_id,
@@ -62939,7 +62949,7 @@ function unreadableFilesFor(card, corpora, names) {
   }
   return { names: listed.slice(0, CARD_UNREADABLE_NAMES), corpus_ids: corpusIds };
 }
-function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired, fileSourceScopeStatus, fileSourceScopeIngestionEnabled) {
+function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired, fileSourceScopeStatus, fileSourceScopeIngestionEnabled) {
   const corpusCards = withoutCustodialDoubleCount(corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)), corpora);
   const schedulers = [
     ...corpora.map((corpus) => schedulerByCorpus.get(corpus.corpus_id)).filter((value) => !!value),
@@ -62959,7 +62969,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   const operatorPaused = schedule?.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason);
   const googleReconnectRequired = (definition.provider === "gmail" || definition.provider === "google_drive") && (handlesForDefinition(definition, registry).some((handle) => isRetiredGoogleHandle(handle)) || !operatorPaused && schedule?.last_error_kind === "credential_missing");
   const providerRefusing = !operatorPaused && (schedule?.degraded_reason === "api_request_guard" || schedule !== undefined && schedule.consecutive_failures > 0 && schedule.last_error_kind === "api_request_guard");
-  const baseConnection = connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, corpora.some(corpusSyncRunning), oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing || googleReconnectRequired, now, registryUnreadable, unpaired);
+  const baseConnection = connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, corpora.some(corpusSyncRunning), oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing || googleReconnectRequired, now, registryUnreadable, unpaired);
   if (googleReconnectRequired) {
     baseConnection.state = "reauth_required";
     baseConnection.label = "Reconnect Google to continue syncing";
@@ -63467,9 +63477,9 @@ function aggregateTierComposition(cards, trustDomainWhenEmpty, coverage) {
     content_ready_items: counts.content_ready_items
   }));
 }
-function connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing, now, registryUnreadable, unpaired) {
+function connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing, now, registryUnreadable, unpaired) {
   const pending = pendingForDefinition(definition, pendingConnects, now);
-  const connection = connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired);
+  const connection = connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired);
   if (!pending?.error)
     return connection;
   const registration = definition.connect_action.kind === "oauth" ? oauthCallbackRegistration(definition.connect_action.source, oauthRedirectBaseUrl, googleCloudProjectId, googlePilotClientConfigured) : undefined;
@@ -63481,7 +63491,7 @@ function connectionFromDefinition(definition, registry, credentialHealth, covera
     }
   };
 }
-function connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired) {
+function connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired) {
   const handles = handlesForDefinition(definition, registry);
   const probeResults = credentialHealthForDefinition(definition, credentialHealth);
   const probeNeedsRepair = probeResults.some((result) => (result.status === "reauth_required" || result.status === "missing") && !probeEvidencePredatesReconnect(result, handles, now));
@@ -63497,11 +63507,11 @@ function connectionStateFromDefinition(definition, registry, credentialHealth, c
     return {
       state: "not_connected",
       label,
-      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, "none", pending),
+      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, "none", pending),
       handles: handleIds
     };
   }
-  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, sessionEvidence, pending);
+  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, sessionEvidence, pending);
   if (pending && !pending.error && !connected) {
     return {
       state: "awaiting_consent",
@@ -63562,7 +63572,7 @@ function sessionConnectionEvidence(coverage, freshness) {
     return "unconfirmed";
   return "none";
 }
-function sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, sessionEvidence, pending) {
+function sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, sessionEvidence, pending) {
   const label = reauthRequired || providerRefusing ? "Reauthenticate" : "Connect";
   if (definition.connect_action.kind === "oauth") {
     if (connected && !reauthRequired && !providerRefusing)
@@ -63580,6 +63590,22 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       ...callbackRegistration ? { callback_registration: callbackRegistration } : {}
     };
     if (publisherOAuthSources.includes(definition.connect_action.source)) {
+      if (googlePublisherFull && label === "Connect" && isGoogleOAuthSource2(definition.connect_action.source)) {
+        const ownApp = oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl);
+        const web = googleOAuthClientType(oauthRedirectBaseUrl) === "web";
+        return {
+          kind: "needs_setup",
+          source: definition.connect_action.source,
+          label: "Set up",
+          client_secret_required: false,
+          publisher_full: true,
+          instructions: {
+            ...ownApp,
+            plain_intro: `${GOOGLE_SIGNIN_FULL_SENTENCE} Olympus needs a Google ${web ? "Web application" : "Desktop app"} Client ID that you create in your own Google account (about 5 minutes; the steps are below).${web ? " Register the redirect URI shown on this card on that client." : ""}`
+          },
+          ...redirectFields
+        };
+      }
       return {
         kind: "oauth",
         source: definition.connect_action.source,
@@ -64457,6 +64483,7 @@ function round12(value) {
 var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_google_handle_compatibility();
+  init_google_signin_full_copy();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -105134,6 +105161,102 @@ var init_openai_compatible_client = __esm(() => {
   init_vlm();
 });
 
+// src/core/google-publisher-capacity.ts
+async function googlePublisherSignInFull(options = {}) {
+  const env = options.env ?? process.env;
+  if (!options.fetch && env.NODE_ENV === "test")
+    return false;
+  const url = googlePublisherCapacityUrl(env);
+  const now = options.now ?? Date.now;
+  const cached3 = cache.get(url);
+  if (cached3 && cached3.expiresAt > now())
+    return cached3.full;
+  const pending = inFlight.get(url);
+  if (pending)
+    return pending;
+  const request = askWorker(url, options, now).finally(() => {
+    inFlight.delete(url);
+  });
+  inFlight.set(url, request);
+  return request;
+}
+async function askWorker(url, options, now) {
+  const fetchImpl = options.fetch ?? fetch;
+  let answer;
+  try {
+    const response = await fetchImpl(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      redirect: "error",
+      credentials: "omit",
+      signal: AbortSignal.timeout(options.timeoutMs ?? CAPACITY_TIMEOUT_MS)
+    });
+    if (response.status === 200)
+      answer = parseCapacityBody(await readBounded2(response));
+  } catch {
+    answer = undefined;
+  }
+  const full = answer === true;
+  cache.set(url, { full, expiresAt: now() + (answer === undefined ? FAILED_TTL_MS : OPEN_OR_FULL_TTL_MS) });
+  return full;
+}
+function parseCapacityBody(text2) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text2);
+  } catch {
+    return;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return;
+  const record3 = parsed;
+  if (Object.keys(record3).length !== 1)
+    return;
+  if (record3.google === "full")
+    return true;
+  if (record3.google === "open")
+    return false;
+  return;
+}
+async function readBounded2(response) {
+  const reader = response.body?.getReader();
+  if (!reader)
+    return (await response.text()).slice(0, MAX_BODY_BYTES);
+  const chunks2 = [];
+  let total = 0;
+  try {
+    for (;; ) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (!value)
+        continue;
+      total += value.byteLength;
+      if (total > MAX_BODY_BYTES)
+        return "";
+      chunks2.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {
+      return;
+    });
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks2) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+var CAPACITY_TIMEOUT_MS = 1500, OPEN_OR_FULL_TTL_MS = 60000, FAILED_TTL_MS = 30000, MAX_BODY_BYTES = 1024, cache, inFlight;
+var init_google_publisher_capacity = __esm(() => {
+  init_oauth_relay();
+  init_google_signin_full_copy();
+  cache = new Map;
+  inFlight = new Map;
+});
+
 // src/workers/remote-oauth/consent-page.ts
 import { randomBytes as randomBytes17 } from "node:crypto";
 function hostnameOf(host) {
@@ -106329,7 +106452,7 @@ function mountDashboardController(options) {
   let signature = options.signature || "";
   let pollIntervalMs = options.pollIntervalMs || 15000;
   let interval;
-  let inFlight = false;
+  let inFlight2 = false;
   let disposed = false;
   let deferredSince = 0;
   let presented = options.presented !== false;
@@ -106916,7 +107039,7 @@ function mountDashboardController(options) {
     applyWriteCapability();
   }
   async function refreshNow(force, requested = false) {
-    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted || !force && !presented)
+    if (disposed || inFlight2 || pendingFormCount > 0 || options.signal.aborted || !force && !presented)
       return;
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === "hidden")
@@ -106933,7 +107056,7 @@ function mountDashboardController(options) {
       if (Date.now() - deferredSince < 120000)
         return;
     }
-    inFlight = true;
+    inFlight2 = true;
     try {
       const result = await options.refresh();
       if (!result || disposed || options.signal.aborted)
@@ -106945,7 +107068,7 @@ function mountDashboardController(options) {
       }
       replaceBody(result, force);
     } catch {} finally {
-      inFlight = false;
+      inFlight2 = false;
     }
   }
   function restartPoll() {
@@ -107816,6 +107939,8 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
 }
 function dashboardGoogleProviderNote(view2, action) {
   if (view2.google_pilot?.mode !== "shared_pilot" || !isGoogleOAuthSource2(action.source))
+    return;
+  if (action.kind === "needs_setup" && action.publisher_full === true)
     return;
   return `${view2.google_pilot.warning} Gmail and Drive ask for their read access separately.`;
 }
@@ -114420,11 +114545,12 @@ ${sheet}`;
   if (action.kind === "needs_setup") {
     const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view2, action));
     const link2 = keyLocationLink(action.instructions);
+    const full = action.publisher_full === true;
     const row = setupRow({
       ...id,
       label: source.label,
-      blurb: action.instructions.plain_intro,
-      ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
+      blurb: full ? action.instructions.plain_intro.replace(GOOGLE_SIGNIN_FULL_SENTENCE, "").trim() : action.instructions.plain_intro,
+      ...full ? { summary: GOOGLE_SIGNIN_FULL_SENTENCE } : dashboardSetupLead(source.source_id, action.instructions.plain_intro),
       action: { label: action.label, kind: "none", sheet: sheetId, ...gate },
       ...link2 === undefined ? {} : { blurbLink: link2 }
     });
@@ -114488,6 +114614,7 @@ function connectAction(source) {
 }
 var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W;
 var init_local = __esm(() => {
+  init_google_signin_full_copy();
   init_source_dashboard();
   init_agents();
   init_components();
@@ -116820,6 +116947,7 @@ function createEmailSourceWorker(options = {}) {
               googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
               oauthRedirectBaseUrl: dashboardOAuthOrigin,
               publisherOAuthSources: dashboardPublisherOAuthSources(dashboardClientIdSets.own),
+              googlePublisherFull: dashboardPublisherOAuthSources(dashboardClientIdSets.own).some(dashboardGoogleOAuthSource) && await dashboardGooglePublisherFull(sourceDashboard, registry2),
               apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
               pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
               contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -116990,6 +117118,9 @@ function createEmailSourceWorker(options = {}) {
             }
             const dashboardOrigin = handback?.origin ?? dashboardOAuthRedirectOrigin(url, request.headers);
             const publisher = submittedClientId ? undefined : dashboardPublisherOAuthFlow(source, dashboardOAuthClientIdForSource(source, clientIdSets.own));
+            if (publisher && dashboardGoogleOAuthSource(source) && await dashboardGooglePublisherFull(sourceDashboard, registry2)) {
+              throw new EmailSourceWorkerError(409, GOOGLE_SIGNIN_FULL_CODE, GOOGLE_SIGNIN_FULL_SENTENCE);
+            }
             if (handback && (submittedClientId || publisher?.relay !== true)) {
               throw new EmailSourceWorkerError(409, "oauth_handback_unavailable", "This source uses your own app registration; connect it in Olympus on your Mac.");
             }
@@ -119649,7 +119780,7 @@ function dashboardReturnTo() {
 function dashboardSecretStore(sourceDashboard) {
   return sourceDashboard.secretStore ?? createDefaultSecretStore();
 }
-async function dashboardExclusionSources(sourceDashboard, cache) {
+async function dashboardExclusionSources(sourceDashboard, cache2) {
   if (!sourceDashboard.ingestionDispositions)
     return [];
   const runtime = await sourceDashboard.ingestionDispositions();
@@ -119659,7 +119790,7 @@ async function dashboardExclusionSources(sourceDashboard, cache) {
       matcher: source.matcher,
       sourceId: source.source_id,
       corpusIds: [...source.corpus_ids],
-      ...resolveDashboardExclusionDebt(cache, source, nowMs)
+      ...resolveDashboardExclusionDebt(cache2, source, nowMs)
     }));
   } finally {
     runtime.close?.();
@@ -119676,11 +119807,11 @@ function readDashboardExclusionDebt(source) {
     ...source.metadataOnlyContentPresent ? { metadataOnlyContentPresent: source.metadataOnlyContentPresent() } : {}
   };
 }
-function resolveDashboardExclusionDebt(cache, source, nowMs) {
+function resolveDashboardExclusionDebt(cache2, source, nowMs) {
   if (!source.excludedItemsPresent && !source.metadataOnlyContentPresent)
     return {};
   const key2 = dashboardExclusionDebtCacheKey(source);
-  const cached3 = cache.get(key2);
+  const cached3 = cache2.get(key2);
   const ageMs = cached3 ? nowMs - cached3.computed_at_ms : undefined;
   if (cached3 && ageMs !== undefined && ageMs >= 0 && ageMs <= DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS) {
     return cached3.debt;
@@ -119688,7 +119819,7 @@ function resolveDashboardExclusionDebt(cache, source, nowMs) {
   const debt = readDashboardExclusionDebt(source);
   if (!debt)
     return {};
-  cache.set(key2, { debt, computed_at_ms: nowMs });
+  cache2.set(key2, { debt, computed_at_ms: nowMs });
   return debt;
 }
 function readDashboardRegistry(registryPath) {
@@ -119800,6 +119931,12 @@ function dashboardPublisherOAuthFlow(source, ownClientId) {
   }
   const appKey = dropboxPublisherAppKey();
   return appKey ? { clientId: appKey, redirectUri: oauthRelayUrl(), relay: true } : undefined;
+}
+async function dashboardGooglePublisherFull(sourceDashboard, registry2) {
+  const hasGoogleConnection = registry2.handles.some((handle) => (handle.provider === "gmail" || handle.provider === "google_drive") && !isRetiredGoogleHandle(handle));
+  if (hasGoogleConnection)
+    return false;
+  return googlePublisherSignInFull(sourceDashboard.googleCapacityFetch ? { fetch: sourceDashboard.googleCapacityFetch } : {});
 }
 function dashboardPublisherOAuthSources(ownClientIds) {
   const sources = ["gmail", "google-drive", "dropbox", "x"];
@@ -120237,6 +120374,7 @@ function mostPrivateTrustDomain(domains) {
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000;
 var init_email_source = __esm(() => {
   init_google_handle_compatibility();
+  init_google_publisher_capacity();
   init_source_account_binding();
   init_consent_page();
   init_analyst();
@@ -125832,10 +125970,11 @@ function buildChatGptDashboardViewModel(view2, options = {}) {
       status = "Working";
     }
     const sync = connecting || status === "Off" || card.sync_now_available !== true ? undefined : syncFix(definition, scrubbed, status, card.connection.action.kind, degraded, progress2);
-    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress: progress2, counts: measured?.counts, sync };
+    const googleFull = card.connection.action.kind === "needs_setup" && card.connection.action.publisher_full === true;
+    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress: progress2, counts: measured?.counts, sync, googleFull };
   });
-  const sources = rows.map(({ definition, card, status, actionKind, connecting, progress: progress2, sync }, index) => ({
-    entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now, sync),
+  const sources = rows.map(({ definition, card, status, actionKind, connecting, progress: progress2, sync, googleFull }, index) => ({
+    entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now, sync, googleFull),
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
   const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").map(({ definition, card, actionKind, connecting, progress: progress2, sync }) => attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync));
@@ -125916,17 +126055,17 @@ function sourceRank(source) {
 function sourceGroup(definition) {
   return definition.connect_kind === "local" ? "local" : "cloud";
 }
-function sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync) {
-  const inFlight = progress && progress.stage !== "done" && status !== "Needs you" && status !== "Failing";
-  const ownDetail = connecting ? CONNECTING_DETAIL : inFlight ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, { surface: "chatgpt", now, ...degraded ? { degradedCredentials: degraded } : {} });
+function sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, googleFull = false) {
+  const inFlight2 = progress && progress.stage !== "done" && status !== "Needs you" && status !== "Failing";
+  const ownDetail = connecting ? CONNECTING_DETAIL : inFlight2 ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, { surface: "chatgpt", now, ...degraded ? { degradedCredentials: degraded } : {} });
   const manualLine = connecting ? undefined : dashboardManualSyncLine(card, now);
-  const detail = manualLine && !(ownDetail ?? "").startsWith(manualLine) ? manualLine : ownDetail;
+  const detail = googleFull ? GOOGLE_SIGNIN_FULL_SENTENCE : manualLine && !(ownDetail ?? "").startsWith(manualLine) ? manualLine : ownDetail;
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === "Needs you" || status === "Failing";
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : undefined);
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : googleFull ? helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.useOwnGoogleApp, openOnComputer(undefined, "connect")) : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : undefined);
   const menu = [];
   if (sync)
     menu.push(sync);
@@ -126441,6 +126580,7 @@ function isoOrNow(value, now) {
 }
 var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
+  init_google_signin_full_copy();
   init_open_targets();
   init_shared_status();
   init_phases();
@@ -130153,6 +130293,7 @@ var MAX_TEXT = 400, MAX_ANSWER2, MAX_CITATIONS2 = 20, UNSAFE_CHARS2, OAUTH_SOURC
 var init_response_builder = __esm(() => {
   init_remote_open();
   init_operation_error();
+  init_google_signin_full_copy();
   init_source_dashboard();
   init_source_failure();
   init_dashboard_contract();
@@ -130242,6 +130383,7 @@ var init_response_builder = __esm(() => {
     unavailable: "The Olympus dashboard is not available on the computer right now. Try again shortly.",
     models_not_ready: "Search isn't ready on your computer yet. Finish setting up models in Olympus on your computer, then try again.",
     connect_unavailable: "This source can't be connected from ChatGPT on this computer. Connect it in Olympus on your computer.",
+    google_signin_full: GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE,
     already_connected: "This source already has a connected account. Disconnect it first to connect another.",
     not_connected: "Connect this source before choosing what Olympus may read.",
     not_linked: "Your computer isn't linked to ChatGPT yet. Open Olympus on your computer, then try again.",
@@ -130979,6 +131121,7 @@ var init_setup_tools = __esm(() => {
   BACKEND_CODES = {
     model_setup_required: "models_not_ready",
     oauth_handback_unavailable: "connect_unavailable",
+    google_signin_full: "google_signin_full",
     oauth_client_id_missing: "connect_unavailable",
     oauth_client_secret_missing: "connect_unavailable",
     oauth_start_invalid: "sign_in_failed",
@@ -132557,7 +132700,7 @@ function createRemoteOAuthHandler(options) {
     if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
       return oauthError(400, "invalid_client_metadata", "Registration must be application/json.");
     }
-    const text4 = await readBounded2(request, MAX_REGISTRATION_BYTES);
+    const text4 = await readBounded3(request, MAX_REGISTRATION_BYTES);
     if (text4 === undefined)
       return oauthError(400, "invalid_client_metadata", "Registration is too large.");
     let body;
@@ -132755,7 +132898,7 @@ function singleParams(params) {
   }
   return { get: (key2) => out.get(key2) ?? null };
 }
-async function readBounded2(request, maxBytes) {
+async function readBounded3(request, maxBytes) {
   const body = await readBoundedRequestText(request, maxBytes, { deadlineMs: CONNECT_BODY_DEADLINE_MS });
   return body.ok ? body.text : undefined;
 }
@@ -132763,7 +132906,7 @@ async function readForm(request) {
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/x-www-form-urlencoded")) {
     return;
   }
-  const text4 = await readBounded2(request, MAX_FORM_BYTES);
+  const text4 = await readBounded3(request, MAX_FORM_BYTES);
   if (text4 === undefined)
     return;
   return singleParams(new URLSearchParams(text4));
@@ -146584,8 +146727,8 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
     const answerReadiness = asRecord20(source.answer_readiness);
     const queue = asRecord20(source.queue_health);
     const needsAttention = typeof queue?.needs_attention === "number" && queue.needs_attention > 0;
-    const inFlight = connectionState === "awaiting_consent" || connectionState === "reauth_required";
-    if (source.configured !== true && !inFlight)
+    const inFlight2 = connectionState === "awaiting_consent" || connectionState === "reauth_required";
+    if (source.configured !== true && !inFlight2)
       continue;
     if (connectionState === "awaiting_consent")
       add({ kind: "oauth_pending", source_id: sourceId });
