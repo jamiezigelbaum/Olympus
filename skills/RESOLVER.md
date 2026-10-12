@@ -63,7 +63,7 @@ files, or messages.
 ## Disambiguation
 
 - Default to ordinary calling-assistant reasoning unless a trigger fires.
-- Use the skill to choose `fast` versus `deep`.
+- Follow explicit lane requests and deployment routing; the shipped default is `fast`. `fast` and `deep` share endpoint/model defaults but remain independently configurable; neither name alone guarantees greater depth or privacy.
 - If Argus is unavailable, fail transparently and tell the user what did not
   run locally.
 - If private email evidence is unavailable through `source_answer`, do not fall

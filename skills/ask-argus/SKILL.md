@@ -34,11 +34,18 @@ Use Olympus tools rather than calling local model endpoints directly.
 
 ## Lane Choice
 
-Use `fast` (the default) for all Argus work. Both lanes resolve to the same
-healthy Delphi model pool; `deep` is a legacy alias kept for old callers, not
-a slower or more careful model, so choosing it changes nothing. For careful or
-sensitive work, give the prompt more context and ask for the reasoning you
-need instead of switching lanes.
+Honor an explicit lane request and the deployment's configured default lane
+(`fast` in the shipped defaults). By default, `fast` and `deep` use the same
+Delphi endpoint and model; selecting `deep` alone adds no reasoning depth or
+privacy.
+
+Operators can configure distinct endpoints or models for either lane. Follow
+the deployment's approved routing guidance when they differ; do not assume
+`deep` is an alias or unavailable. Use `argus_ping` and `argus_list_models`
+when availability needs checking.
+
+Sensitive content must follow the Privacy Posture below regardless of lane
+name. Include only the evidence needed for the task.
 
 ## Privacy Posture
 
@@ -93,5 +100,5 @@ lane if useful.
 Examples:
 
 - "I used Argus fast for this quick local pass."
-- "I used Argus deep because this touches sensitive document reasoning."
+- "I used the deployment's configured Argus lane for this sensitive document task."
 - "Argus was unavailable, so I did not process the sensitive content."
