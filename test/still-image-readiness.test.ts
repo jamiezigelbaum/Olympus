@@ -34,9 +34,13 @@ import {
 } from '../src/core/still-image-formats.ts';
 import { STILL_IMAGE_PROBE_FIXTURES, STILL_IMAGE_PROBE_SIZES } from '../src/core/still-image-probe-fixtures.ts';
 import {
+  STILL_IMAGE_VISION_RECHECK_MS,
   probeStillImageReadiness,
   readyStillImageFormats,
+  refreshStillImageReadiness,
   setStillImageReadiness,
+  setStillImageVisionSource,
+  stillImageReadiness,
   stillImageReadinessOf,
   type SyncRun,
 } from '../src/core/still-image-readiness.ts';
@@ -50,6 +54,7 @@ import {
 } from '../src/workers/file-extraction/extractors/command-runner.ts';
 import {
   IMAGE_PREPARE_ERROR_CACHE_WRITE,
+  imageDecoderUnavailableWarning,
   IMAGE_PREPARE_ERROR_FAILED,
   IMAGE_PREPARE_ERROR_TIMEOUT,
   createImagePreparation,
@@ -62,10 +67,12 @@ import {
 } from '../src/workers/file-extraction/extractors/image-preparers.ts';
 import { jpegMetadataSegments } from '../src/workers/file-extraction/extractors/jpeg-metadata.ts';
 import { IMAGE_MEDIA_VERSION_SUFFIX, createTextExtractor } from '../src/workers/file-extraction/extractors/text.ts';
-import { createDefaultExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
+import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
+import { buildExtractorRegistry, createDefaultExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
+import { createFileExtractionRunner } from '../src/workers/file-extraction/runner.ts';
 import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
-import { imageFixture, pngClaiming, quadrantJpegWithMetadata, stubJpeg } from './helpers/image-fixtures.ts';
+import { bigTiffClaiming, imageFixture, isoBox, pngClaiming, quadrantJpegWithMetadata, realToolShortfalls, realToolsRequired, stubJpeg } from './helpers/image-fixtures.ts';
 
 const temporaryDirs: string[] = [];
 function temporaryDir(prefix = 'olympus-readiness-'): string {
@@ -374,6 +381,33 @@ describe('the preparation settles every outcome the same way for both tools', ()
         expect(calls).toEqual([]);
       });
 
+      test('a BigTIFF bomb is skipped like any other, and a recognised format whose header gives no size is refused', async () => {
+        const calls: string[][] = [];
+        const preparation = prepare(fakeRunner(calls));
+        const bigTiff = bigTiffClaiming(60_000, 60_000, 2_000);
+        expect(await preparation({ bytes: bigTiff, mimeType: 'image/tiff', sizeBytes: bigTiff.byteLength }))
+          .toEqual({ kind: 'settled', output: { status: 'skipped_too_large' } });
+        // A JPEG with a header but no frame: no size to bound, so no tool.
+        const frameless = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x05, 0xdc]), Buffer.alloc(0x5da), Buffer.from([0xff, 0xd9])]);
+        expect(frameless.byteLength).toBeGreaterThan(1_024);
+        expect(await preparation({ bytes: new Uint8Array(frameless), mimeType: 'image/jpeg', sizeBytes: frameless.byteLength }))
+          .toEqual({ kind: 'settled', output: { status: 'failed_terminal', errorKind: IMAGE_PREPARE_ERROR_FAILED } });
+        // A PNG too short to carry its size declares none.
+        const headless = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(8)]);
+        expect(imageDeclaredDimensions(new Uint8Array(headless))).toBeUndefined();
+        expect(calls).toEqual([]);
+      });
+
+      test('a HEIC whose coded data happens to spell ispe is a photo, not a bomb', async () => {
+        const calls: string[][] = [];
+        const real = Buffer.from(imageFixture('orientation-1.heic'));
+        const decoy = isoBox('mdat', Buffer.concat([Buffer.from('ispe', 'latin1'), Buffer.alloc(4), Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])]));
+        const bytes = new Uint8Array(Buffer.concat([real, decoy]));
+        const result = await prepare(fakeRunner(calls))({ bytes, mimeType: 'image/heic', sizeBytes: bytes.byteLength });
+        expect(result.kind).toBe('media');
+        expect(calls).toHaveLength(1);
+      });
+
       test('an icon-sized picture is too small without a tool, by declared size or by bytes', async () => {
         const calls: string[][] = [];
         const preparation = prepare(fakeRunner(calls));
@@ -393,9 +427,9 @@ describe('the preparation settles every outcome the same way for both tools', ()
           commandRunner: fakeRunner(calls),
           formats: () => only,
         });
-        expect(await preparation(heic)).toEqual({ kind: 'unavailable' });
+        expect(await preparation(heic)).toEqual({ kind: 'unavailable', format: 'heic' });
         // The bytes decide, not the label: a HEIC called a JPEG is still unavailable.
-        expect(await preparation({ ...heic, mimeType: 'image/jpeg' })).toEqual({ kind: 'unavailable' });
+        expect(await preparation({ ...heic, mimeType: 'image/jpeg' })).toEqual({ kind: 'unavailable', format: 'heic' });
         expect(calls).toEqual([]);
         expect(preparation.ready?.('image/heic')).toBe(false);
         expect(preparation.ready?.('image/jpeg')).toBe(true);
@@ -614,6 +648,271 @@ describe('recovery when a decoder appears', () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe('content libvips could open but we do not admit is not handed to it', () => {
+  test('unrecognised bytes under an image label are refused for vips, and left to the tool for sips (as before)', async () => {
+    const svg = new Uint8Array(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="60000" height="60000">${' '.repeat(2_000)}</svg>`, 'latin1'));
+    const vipsCalls: string[][] = [];
+    const vips = createImagePreparation({
+      cacheDir: join(temporaryDir(), 'c'),
+      preparer: createVipsPreparer({ path: '/fake/vipsthumbnail' }),
+      commandRunner: fakeRunner(vipsCalls),
+    });
+    expect(await vips({ bytes: svg, mimeType: 'image/png', sizeBytes: svg.byteLength }))
+      .toEqual({ kind: 'settled', output: { status: 'failed_terminal', errorKind: IMAGE_PREPARE_ERROR_FAILED } });
+    expect(vipsCalls).toEqual([]);
+    const sipsCalls: string[][] = [];
+    const sips = createImagePreparation({
+      cacheDir: join(temporaryDir(), 'c'),
+      preparer: createSipsPreparer({ path: '/fake/sips', ...noProfile }),
+      commandRunner: fakeRunner(sipsCalls),
+    });
+    expect((await sips({ bytes: svg, mimeType: 'image/png', sizeBytes: svg.byteLength })).kind).toBe('media');
+    expect(sipsCalls).toHaveLength(1);
+  });
+});
+
+// --- The encoder's state is read live ------------------------------------------
+
+describe('the model\'s image encoder state is never cached for ever', () => {
+  afterEach(() => {
+    setStillImageVisionSource(undefined);
+  });
+
+  test('a record written after the first question, or by another process, changes what is ready', () => {
+    let state: 'ready' | 'unavailable' | 'unknown' = 'unknown';
+    let now = 1_000_000;
+    setStillImageVisionSource({ read: () => state, now: () => now });
+    refreshStillImageReadiness({ tool: VIPS_TOOL, run: fakeTool(withoutHeic) });
+    expect([...readyStillImageFormats()]).toEqual(withoutHeic);
+    expect(stillImagePreparationAvailable()).toBe(true);
+
+    // The provider records that the encoder did not start.
+    state = 'unavailable';
+    // Within the recheck window the last answer stands (the file is not read per row).
+    now += STILL_IMAGE_VISION_RECHECK_MS - 1;
+    expect(readyStillImageFormats().size).toBe(withoutHeic.length);
+    now += 1;
+    expect(readyStillImageFormats().size).toBe(0);
+    expect(stillImageReadiness().formats.jpeg).toEqual({ ready: false, reason: 'vision_unavailable' });
+    // A format the tool never decoded is still just undecodable.
+    expect(stillImageReadiness().formats.heic).toEqual({ ready: false, reason: 'cannot_decode' });
+    expect(stillImagePreparationAvailable()).toBe(false);
+
+    // And it recovers when the record says the encoder is there.
+    state = 'ready';
+    now += STILL_IMAGE_VISION_RECHECK_MS;
+    expect([...readyStillImageFormats()]).toEqual(withoutHeic);
+    expect(stillImageReadiness().vision).toBe('ready');
+  });
+
+  test('everything that admits follows: the default policy\'s gate and the text lane\'s version', () => {
+    let state: 'ready' | 'unavailable' | 'unknown' = 'ready';
+    let now = 5_000_000;
+    setStillImageVisionSource({ read: () => state, now: () => now });
+    refreshStillImageReadiness({ tool: VIPS_TOOL, run: fakeTool(ALL) });
+
+    const matcher = dropboxCanonicalIngestionMatcher(defaultDropboxIngestionPolicy(), NO_EXCLUSIONS());
+    const disposition = () => matcher.evaluateItem({ path: '/Photos/a.jpg', mimeType: 'image/jpeg' }).disposition;
+    const registry = createDefaultExtractorRegistry({ media: { cacheDir: join(temporaryDir(), 'media-cache') }, ocr: { platform: 'linux' } });
+    const text = registry.get('local_text')!;
+    const suffixed = () => text.versionFor!('image/jpeg') !== text.version;
+    expect(disposition()).toBe('admit');
+    expect(suffixed()).toBe(true);
+
+    state = 'unavailable';
+    now += STILL_IMAGE_VISION_RECHECK_MS;
+    expect(disposition()).toBe('metadata_only');
+    expect(suffixed()).toBe(false);
+
+    state = 'ready';
+    now += STILL_IMAGE_VISION_RECHECK_MS;
+    expect(disposition()).toBe('admit');
+    expect(suffixed()).toBe(true);
+  });
+
+  test('a policy built for fixed formats, an owner-written one, and an injected answer do not move', () => {
+    let state: 'ready' | 'unavailable' | 'unknown' = 'ready';
+    let now = 9_000_000;
+    setStillImageVisionSource({ read: () => state, now: () => now });
+    setStillImageReadiness(stillImageReadinessOf(true));
+    const fixed = dropboxCanonicalIngestionMatcher(defaultDropboxIngestionPolicy({ stillImagesRead: true }), NO_EXCLUSIONS());
+    state = 'unavailable';
+    now += 10 * STILL_IMAGE_VISION_RECHECK_MS;
+    expect(fixed.evaluateItem({ path: '/Photos/a.jpg', mimeType: 'image/jpeg' }).disposition).toBe('admit');
+    expect(readyStillImageFormats().size).toBe(ALL.length);
+  });
+});
+
+// --- An item the decoder was missing for is read again when it appears -------
+
+describe('a photo left unread for want of a decoder is read again when the decoder appears', () => {
+  const LANE = { corpusId: 'secure_local.fake.files', provider: 'fake', accountScope: 'personal', approvedScopeKey: 'fake.personal:/Photos' };
+
+  function setup(files: Record<string, Uint8Array>, ready: Set<StillImageFormat>) {
+    const jobs = new LocalFileExtractionJobStore(':memory:');
+    const calls: string[][] = [];
+    const extractor = createTextExtractor({
+      imagePreparation: createImagePreparation({
+        cacheDir: join(temporaryDir(), 'media-cache'),
+        preparer: createVipsPreparer({ path: '/fake/vipsthumbnail' }),
+        commandRunner: fakeRunner(calls),
+        formats: () => ready,
+      }),
+    });
+    const accepted: string[] = [];
+    const runner = createFileExtractionRunner({
+      jobs,
+      registry: buildExtractorRegistry([extractor]),
+      corpora: [{
+        corpusId: LANE.corpusId,
+        trustDomain: 'secure_local',
+        source: {
+          id: 'fake', corpusId: LANE.corpusId, provider: LANE.provider,
+          async listCandidates() { return { candidates: [], done: true }; },
+          async fetch(ref: ExtractionItemRef) { return { bytes: files[ref.providerItemId]!, mimeType: 'image/jpeg' }; },
+        },
+        sink: {
+          async accept(request) {
+            accepted.push(request.ref.providerItemId);
+            return { accepted: true, chunksIndexed: 1, chunksAwaitingEmbedding: 1 };
+          },
+        },
+      }],
+    });
+    jobs.enqueue({
+      refs: Object.keys(files).map((id) => ({
+        ...LANE, providerItemId: id, localItemId: `personal:${id}`, name: `${id}.jpg`, mimeType: 'image/jpeg',
+      })),
+      extractorKind: extractor.kind,
+      extractorVersion: extractor.versionFor!('image/jpeg'),
+      policyDecision: 'index_allowed',
+    });
+    return { jobs, runner, calls, accepted, extractor };
+  }
+
+  test('HEIC bytes served as image/jpeg wait for HEIC specifically, and are read when it is ready', async () => {
+    const ready = new Set<StillImageFormat>(withoutHeic);
+    const lane = setup({
+      'kitchen-heic': imageFixture('orientation-1.heic'),
+      'beach-webp': imageFixture('quadrants.webp'),
+    }, ready);
+    try {
+      // Both are labelled JPEG, so both are queued for pictures; the HEIC cannot be decoded here.
+      const first = await lane.runner.run({ ...LANE });
+      expect(first.counts.metadata_only).toBe(1);
+      expect(first.counts.indexed).toBe(1);
+      expect(lane.calls).toHaveLength(1);
+      const waiting = await lane.runner.run({ ...LANE });
+      expect(waiting.rereadRequeued).toBeUndefined();
+
+      // The decoder appears: only the item that was waiting for it is read again.
+      ready.add('heic');
+      const reread = await lane.runner.run({ ...LANE });
+      expect(reread.rereadRequeued).toBe(1);
+      // Only the HEIC was processed this pass, and it is read now.
+      expect(reread.counts.metadata_only ?? 0).toBe(0);
+      expect(reread.counts.indexed).toBe(1);
+      expect(lane.accepted.filter((id) => id === 'kitchen-heic')).toHaveLength(1);
+      expect(lane.calls).toHaveLength(2);
+      // Settled, it is not read a third time.
+      expect((await lane.runner.run({ ...LANE })).rereadRequeued).toBeUndefined();
+    } finally {
+      lane.jobs.close();
+    }
+  });
+
+  test('a format that is still not ready is left alone however often the lane runs', async () => {
+    const ready = new Set<StillImageFormat>(withoutHeic);
+    const lane = setup({ 'kitchen-heic': imageFixture('orientation-1.heic') }, ready);
+    try {
+      await lane.runner.run({ ...LANE });
+      ready.add('webp');
+      for (let pass = 0; pass < 3; pass += 1) {
+        const again = await lane.runner.run({ ...LANE });
+        expect(again.rereadRequeued).toBeUndefined();
+      }
+      expect(lane.calls).toEqual([]);
+    } finally {
+      lane.jobs.close();
+    }
+  });
+
+  test('the marker names the format the bytes are, and an item with a tool problem carries none', async () => {
+    const calls: string[][] = [];
+    const extractor = createTextExtractor({
+      imagePreparation: createImagePreparation({
+        cacheDir: join(temporaryDir(), 'media-cache'),
+        preparer: createVipsPreparer({ path: '/fake/vipsthumbnail' }),
+        commandRunner: fakeRunner(calls),
+        formats: () => new Set<StillImageFormat>(withoutHeic),
+      }),
+    });
+    const heic = imageFixture('orientation-1.heic');
+    const output = await extractor.extract({
+      ref: { ...LANE, providerItemId: 'x', localItemId: 'personal:x', mimeType: 'image/jpeg' },
+      job: { jobId: 'j', extractorKind: extractor.kind, extractorVersion: '1', policyDecision: 'index_allowed', attempts: 1, leaseExpiresAt: '2099-01-01T00:00:00.000Z' },
+      bytes: heic,
+      mimeType: 'image/jpeg',
+      sizeBytes: heic.byteLength,
+    });
+    expect(output.status).toBe('metadata_only');
+    expect(JSON.stringify(output)).toContain(imageDecoderUnavailableWarning('heic'));
+    expect(JSON.stringify(output)).not.toContain(imageDecoderUnavailableWarning('webp'));
+    expect(calls).toEqual([]);
+    // A tool that is missing from the machine is not a decoder that will appear for a format.
+    const missing = createTextExtractor({
+      imagePreparation: createImagePreparation({
+        cacheDir: join(temporaryDir(), 'media-cache'),
+        preparer: createVipsPreparer({ path: '/fake/vipsthumbnail' }),
+        commandRunner: fakeRunner([], 'missing'),
+        formats: () => new Set<StillImageFormat>(ALL),
+      }),
+    });
+    const jpeg = imageFixture('quadrants.jpg');
+    const plain = await missing.extract({
+      ref: { ...LANE, providerItemId: 'y', localItemId: 'personal:y', mimeType: 'image/jpeg' },
+      job: { jobId: 'k', extractorKind: missing.kind, extractorVersion: '1', policyDecision: 'index_allowed', attempts: 1, leaseExpiresAt: '2099-01-01T00:00:00.000Z' },
+      bytes: jpeg,
+      mimeType: 'image/jpeg',
+      sizeBytes: jpeg.byteLength,
+    });
+    expect(plain).toEqual({ status: 'metadata_only' });
+    // A correctly labelled picture of a format the host cannot decode needs no
+    // marker: its version already waits on that format.
+    const honest = await extractor.extract({
+      ref: { ...LANE, providerItemId: 'z', localItemId: 'personal:z', mimeType: 'image/heic' },
+      job: { jobId: 'm', extractorKind: extractor.kind, extractorVersion: '1', policyDecision: 'index_allowed', attempts: 1, leaseExpiresAt: '2099-01-01T00:00:00.000Z' },
+      bytes: heic,
+      mimeType: 'image/heic',
+      sizeBytes: heic.byteLength,
+    });
+    expect(honest).toEqual({ status: 'metadata_only' });
+  });
+});
+
+// --- Strict mode for the real-tool contract ------------------------------------
+
+describe('the real-tool contract can be made to fail instead of skip', () => {
+  const ready = (formats: readonly StillImageFormat[]) => new Set(formats);
+
+  test('lax mode reports nothing; strict mode names every shortfall', () => {
+    expect(realToolShortfalls({ strict: false, tools: [] })).toEqual([]);
+    expect(realToolShortfalls({ strict: true, tools: [] })).toEqual([expect.stringContaining('neither sips nor vipsthumbnail')]);
+    expect(realToolShortfalls({ strict: true, tools: [{ label: 'vipsthumbnail', readable: true, ready: ready(ALL) }] })).toEqual([]);
+    expect(realToolShortfalls({ strict: true, tools: [{ label: 'vipsthumbnail', readable: true, ready: ready(withoutHeic) }] }))
+      .toEqual([expect.stringContaining('heic')]);
+    expect(realToolShortfalls({ strict: true, tools: [{ label: 'vipsthumbnail', readable: false, ready: ready(ALL) }] }))
+      .toEqual([expect.stringContaining('read back')]);
+    expect(realToolShortfalls({ strict: false, tools: [{ label: 'vipsthumbnail', readable: true, ready: ready([]) }] })).toEqual([]);
+  });
+
+  test('strict mode is the environment variable and nothing else', () => {
+    expect(realToolsRequired({ OLYMPUS_REQUIRE_REAL_IMAGE_TOOLS: '1' })).toBe(true);
+    expect(realToolsRequired({ OLYMPUS_REQUIRE_REAL_IMAGE_TOOLS: '0' })).toBe(false);
+    expect(realToolsRequired({})).toBe(false);
   });
 });
 

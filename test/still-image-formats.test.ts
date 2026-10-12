@@ -27,10 +27,13 @@ import {
   stripJpegMetadata,
 } from '../src/workers/file-extraction/extractors/jpeg-metadata.ts';
 import {
+  bigTiffClaiming,
   commentSegment,
   exifSegment,
   imageFixture,
+  heicClaiming,
   insertJpegSegments,
+  isoBox,
   iptcSegment,
   jpegExifHasGps,
   pngClaiming,
@@ -101,6 +104,49 @@ describe('declared size, read from the header before any decoder runs', () => {
     webp.writeUIntLE(40_000 - 1, 24, 3);
     webp.writeUIntLE(40_000 - 1, 27, 3);
     expect(imageDeclaredDimensions(new Uint8Array(webp))).toEqual({ width: 40_000, height: 40_000 });
+  });
+});
+
+describe('BigTIFF and HEIF headers are read like the rest', () => {
+  test('a BigTIFF (version 43) is a TIFF and declares its size, so the pixel bound applies to it', () => {
+    const bomb = bigTiffClaiming(60_000, 60_000);
+    expect(stillImageFormatFromBytes(bomb)).toBe('tiff');
+    const size = imageDeclaredDimensions(bomb)!;
+    expect(size).toEqual({ width: 60_000, height: 60_000 });
+    expect(size.width * size.height).toBeGreaterThan(IMAGE_MAX_DECLARED_PIXELS);
+    expect(imageDeclaredDimensions(bigTiffClaiming(4_000, 3_000))).toEqual({ width: 4_000, height: 3_000 });
+    // A BigTIFF header with an offset size other than 8, or cut short, declares nothing.
+    const wrongOffsets = Buffer.from(bomb);
+    wrongOffsets.writeUInt16LE(4, 4);
+    expect(imageDeclaredDimensions(new Uint8Array(wrongOffsets))).toBeUndefined();
+    expect(imageDeclaredDimensions(bomb.subarray(0, 12))).toBeUndefined();
+  });
+
+  test('only a genuine ispe property counts: four bytes spelling it inside coded data do not', () => {
+    expect(imageDeclaredDimensions(heicClaiming(192, 96))).toEqual({ width: 192, height: 96 });
+    const decoy = Buffer.concat([Buffer.from('xxispe', 'latin1'), Buffer.alloc(2), Buffer.from([0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00])]);
+    // In a media-data box, and loose after the last box.
+    expect(imageDeclaredDimensions(heicClaiming(192, 96, { after: isoBox('mdat', decoy) }))).toEqual({ width: 192, height: 96 });
+    const loose = Buffer.from(heicClaiming(192, 96));
+    expect(imageDeclaredDimensions(new Uint8Array(Buffer.concat([loose, decoy])))).toEqual({ width: 192, height: 96 });
+    // The real fixture with a decoy appended is still its own size.
+    const real = Buffer.from(imageFixture('orientation-1.heic'));
+    expect(imageDeclaredDimensions(new Uint8Array(Buffer.concat([real, isoBox('mdat', decoy)])))).toEqual({ width: 192, height: 96 });
+    // An ispe outside meta > iprp > ipco is not a property.
+    const stray = Buffer.concat([
+      isoBox('ftyp', Buffer.from('heic', 'latin1'), Buffer.alloc(4), Buffer.from('mif1', 'latin1')),
+      isoBox('free', isoBox('ispe', Buffer.alloc(12, 1))),
+      isoBox('meta', Buffer.alloc(4), isoBox('iprp', isoBox('ispe', Buffer.alloc(12, 1)))),
+    ]);
+    expect(imageDeclaredDimensions(new Uint8Array(stray))).toBeUndefined();
+  });
+
+  test('a genuine huge ispe is declared, and a malformed box size ends the walk without throwing', () => {
+    expect(imageDeclaredDimensions(heicClaiming(60_000, 60_000))).toEqual({ width: 60_000, height: 60_000 });
+    const broken = Buffer.from(heicClaiming(192, 96));
+    broken.writeUInt32BE(0x7fffffff, broken.indexOf('meta', 0, 'latin1') - 4);
+    expect(imageDeclaredDimensions(new Uint8Array(broken))).toBeUndefined();
+    expect(stillImageFormatFromBytes(new Uint8Array(broken))).toBe('heic');
   });
 });
 

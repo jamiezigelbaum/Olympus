@@ -26,13 +26,14 @@ import { join } from 'node:path';
 import { writeMediaCacheFile } from '../../../core/media-cache.ts';
 import {
   IMAGE_MAX_DECLARED_PIXELS,
+  STILL_IMAGE_FORMATS,
   imageDeclaredDimensions,
   jpegPixelSize,
   stillImageFormatForMimeType,
   stillImageFormatFromBytes,
   type StillImageFormat,
 } from '../../../core/still-image-formats.ts';
-import type { ExtractedMedia, ExtractorOutput } from '../types.ts';
+import type { ExtractedMedia, ExtractorOutput, ExtractorRereadPolicy } from '../types.ts';
 import {
   ExtractionCommandError,
   ExtractionCommandTimeoutError,
@@ -108,8 +109,26 @@ export interface ImagePreparationInput {
 export type ImagePreparationResult =
   | { kind: 'media'; media: ExtractedMedia }
   | { kind: 'settled'; output: ExtractorOutput }
-  | { kind: 'unavailable' }
+  | {
+    kind: 'unavailable';
+    /**
+     * Set when the picture was left alone because this machine cannot decode
+     * its format (the format its bytes are, whatever its media type says):
+     * the caller can mark the item as waiting for that decoder.
+     */
+    format?: StillImageFormat;
+  }
   | { kind: 'too_small' };
+
+/**
+ * The warning an item carries when its picture was not read because this
+ * machine could not decode `format`. It names the format the bytes are, so
+ * the item is read again when that decoder appears, even if its media type
+ * said something else (a HEIC served as `image/jpeg`).
+ */
+export function imageDecoderUnavailableWarning(format: StillImageFormat): string {
+  return `image_decoder_unavailable_${format}`;
+}
 
 /**
  * A preparation, and the question the text lane asks of it before queueing a
@@ -117,6 +136,12 @@ export type ImagePreparationResult =
  */
 export type ImagePreparation = ((input: ImagePreparationInput) => Promise<ImagePreparationResult>) & {
   ready?: (mimeType: string | undefined) => boolean;
+  /**
+   * When the lane reads these items again: those marked
+   * `imageDecoderUnavailableWarning(format)` for a format that is ready now.
+   * Present when the preparation knows which formats this machine reads.
+   */
+  rereadPolicy?: ExtractorRereadPolicy;
 };
 
 export function createImagePreparation(options: ImagePreparationOptions): ImagePreparation {
@@ -139,8 +164,10 @@ export function createImagePreparation(options: ImagePreparationOptions): ImageP
     // First of all, so a format this machine cannot decode behaves exactly as
     // it did before pictures were read: no size verdict, no tool. The bytes
     // are what a decoder will meet; the media type is only a label.
-    if (!admitted(stillImageFormatFromBytes(input.bytes) ?? stillImageFormatForMimeType(input.mimeType))) {
-      return { kind: 'unavailable' };
+    const sniffed = stillImageFormatFromBytes(input.bytes);
+    const format = sniffed ?? stillImageFormatForMimeType(input.mimeType);
+    if (!admitted(format)) {
+      return { kind: 'unavailable', ...(format ? { format } : {}) };
     }
     if (Math.max(input.sizeBytes, input.bytes.byteLength) > maxInputBytes) {
       return { kind: 'settled', output: { status: 'skipped_too_large' } };
@@ -152,6 +179,15 @@ export function createImagePreparation(options: ImagePreparationOptions): ImageP
       return { kind: 'settled', output: { status: 'skipped_too_large' } };
     }
     if (input.bytes.byteLength < MIN_INPUT_BYTES) return { kind: 'too_small' };
+    // A format we recognise whose header will not yield a size is refused:
+    // the bound is only a bound if it cannot be skipped by a header our
+    // reader cannot read. The same holds for libvips, which sniffs the bytes
+    // itself and would open formats we do not admit (SVG, PDF, JPEG 2000):
+    // content we cannot recognise is not handed to it.
+    if ((sniffed !== undefined && declared === undefined)
+      || (sniffed === undefined && currentPreparer().kind === 'vips')) {
+      return { kind: 'settled', output: { status: 'failed_terminal', errorKind: IMAGE_PREPARE_ERROR_FAILED } };
+    }
     // Judged on the original: a tool that enlarges (`sips -Z` does) must not
     // turn an icon into a picture.
     if (declared && Math.min(declared.width, declared.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) {
@@ -195,6 +231,21 @@ export function createImagePreparation(options: ImagePreparationOptions): ImageP
     }
   };
   prepare.ready = (mimeType) => admitted(stillImageFormatForMimeType(mimeType));
+  if (options.formats !== undefined) {
+    const readyMarkers = (): string[] => STILL_IMAGE_FORMATS
+      .filter((format) => admitted(format))
+      .map(imageDecoderUnavailableWarning);
+    // Evaluated each time the runner asks, so a decoder that appears is
+    // picked up without restarting anything. Markers of a format still not
+    // ready are not listed, so those items are not touched. The items were
+    // never read, so they do not spend the once-ever requeue.
+    prepare.rereadPolicy = {
+      get unreadWarnings() { return readyMarkers(); },
+      unreadTerminalErrorKinds: [],
+      get notReadyWarnings() { return readyMarkers(); },
+      prepare: () => 'ready',
+    };
+  }
   return prepare;
 }
 

@@ -76,8 +76,13 @@ import {
   normalizeTableCell,
   type ZipEntryDirectoryRecord,
 } from './document-formats.ts';
-import type { ImagePreparation } from './image-prepare.ts';
+import {
+  imageDecoderUnavailableWarning,
+  type ImagePreparation,
+  type ImagePreparationResult,
+} from './image-prepare.ts';
 import { releaseMediaCacheFile } from '../../../core/media-cache.ts';
+import { stillImageFormatForMimeType } from '../../../core/still-image-formats.ts';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -184,6 +189,9 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         },
       }
       : {}),
+    // Pictures left unread for want of an image decoder are read again when
+    // the decoder appears (see `imageDecoderUnavailableWarning`).
+    ...(imagePreparation?.rereadPolicy ? { extraReread: [imagePreparation.rereadPolicy] } : {}),
     egress: 'local',
     accepts(mimeType) {
       return textLaneAccepts(mimeType);
@@ -221,8 +229,9 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         });
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
+        let prepared: ImagePreparationResult | undefined;
         if (imagePreparation) {
-          const prepared = await imagePreparation({ bytes, mimeType, sizeBytes: context.sizeBytes });
+          prepared = await imagePreparation({ bytes, mimeType, sizeBytes: context.sizeBytes });
           if (prepared.kind === 'settled') return prepared.output;
           if (prepared.kind === 'media') {
             let output: ExtractorOutput;
@@ -241,6 +250,20 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         }
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
         if (ocrOutput) return ocrOutput;
+        // The picture was not read because this machine cannot decode its
+        // format, and its media type named a different one (so the version
+        // does not wait on it). The item says which, so it is read again when
+        // that decoder appears.
+        if (prepared?.kind === 'unavailable' && prepared.format && prepared.format !== stillImageFormatForMimeType(mimeType)) {
+          return mediaDescriptorOutput({
+            mimeType,
+            sizeBytes: context.sizeBytes,
+            maxBoundedTextChars,
+            kind: 'image',
+            label: 'image file',
+            warnings: [imageDecoderUnavailableWarning(prepared.format)],
+          });
+        }
         if (!imageMediaDescriptor) {
           return { status: 'metadata_only' };
         }

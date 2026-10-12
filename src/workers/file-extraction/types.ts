@@ -374,6 +374,13 @@ export interface Extractor {
    * becomes available. Absent means the lane never leaves items unread.
    */
   readonly reread?: ExtractorRereadPolicy;
+  /**
+   * More policies of the same kind for other readers of the same lane (the
+   * text lane waits on an OCR engine and, separately, on image decoders). Each
+   * is asked on its own, so one reader being ready never requeues the items
+   * waiting for another.
+   */
+  readonly extraReread?: readonly ExtractorRereadPolicy[];
 }
 
 /**

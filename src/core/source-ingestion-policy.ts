@@ -116,8 +116,35 @@ export function unreadStillImageMatch(read?: StillImagesRead): { mimePrefixes: s
   };
 }
 
+/**
+ * Default policies built from the machine's own readiness (no formats given):
+ * their still-image rule goes stale when readiness changes, so whoever holds
+ * one for long builds its gate from `defaultDropboxIngestionPolicy()` again
+ * when `readyStillImageFormats()` changes. A policy an owner wrote, or one
+ * built for a fixed set of formats, is never in here.
+ */
+const READINESS_FOLLOWING_POLICIES = new WeakMap<SourceIngestionPolicy, SourceIngestionRule[]>();
+
+/**
+ * True while the policy still carries the rules it was built with: a caller
+ * that replaces them has written its own policy, which is never rebuilt.
+ */
+export function followsStillImageReadiness(policy: SourceIngestionPolicy): boolean {
+  return READINESS_FOLLOWING_POLICIES.get(policy) === policy.rules;
+}
+
 export function defaultDropboxIngestionPolicy(
   options: { stillImagesRead?: StillImagesRead; stillImageFormats?: StillImagesRead } = {},
+): SourceIngestionPolicy {
+  const policy = buildDefaultDropboxIngestionPolicy(options);
+  if (options.stillImagesRead === undefined && options.stillImageFormats === undefined) {
+    READINESS_FOLLOWING_POLICIES.set(policy, policy.rules);
+  }
+  return policy;
+}
+
+function buildDefaultDropboxIngestionPolicy(
+  options: { stillImagesRead?: StillImagesRead; stillImageFormats?: StillImagesRead },
 ): SourceIngestionPolicy {
   const unread = unreadStillImageMatch(options.stillImageFormats ?? options.stillImagesRead);
   return {

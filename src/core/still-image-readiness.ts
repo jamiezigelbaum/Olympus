@@ -190,23 +190,72 @@ export function stillImageReadinessOf(
   };
 }
 
-// Lazily probed, once per process: a module-level probe would run a tool at
-// import time in every process that merely loads the module.
-let current: StillImageReadiness | undefined;
+/**
+ * What the process has probed. The tool and what it decodes are asked once
+ * (they only change when something is installed, which needs a restart); the
+ * model's image-encoder state is not: the provider records it after its model
+ * loads, which can be after the first question, and another process may be the
+ * one that loaded it. So it is read again, cheaply, and only the part of the
+ * answer that depends on it is rebuilt.
+ */
+interface Cached {
+  readiness: StillImageReadiness;
+  /** Injected by a caller or a test: never re-read. */
+  pinned: boolean;
+  checkedAt: number;
+}
 
-/** This process's answer, probed on first use. */
+let current: Cached | undefined;
+/** How long a read of the vision record is reused. */
+export const STILL_IMAGE_VISION_RECHECK_MS = 2_000;
+let visionReader: () => StillImageVisionState = readVision;
+let clock: () => number = Date.now;
+
+/** Replace how the encoder record is read and what time it is. For tests. */
+export function setStillImageVisionSource(source: { read?: () => StillImageVisionState; now?: () => number } | undefined): void {
+  visionReader = source?.read ?? readVision;
+  clock = source?.now ?? Date.now;
+}
+
+/**
+ * The same answer under a different encoder state: a format the tool decoded
+ * becomes ready (or not ready, for `vision_unavailable`) with the state; a
+ * format it could not decode stays as it was.
+ */
+function withVision(readiness: StillImageReadiness, vision: StillImageVisionState): StillImageReadiness {
+  const blocked = vision === 'unavailable';
+  const formats = Object.fromEntries(STILL_IMAGE_FORMATS.map((format) => {
+    const entry = readiness.formats[format];
+    const decoded = entry.ready || entry.reason === 'vision_unavailable';
+    return [format, !decoded ? entry : blocked ? { ready: false, reason: 'vision_unavailable' as const } : { ready: true }];
+  })) as Record<StillImageFormat, StillImageFormatReadiness>;
+  return { ...readiness, formats, vision };
+}
+
+/**
+ * This process's answer, probed on first use. The encoder state in it is
+ * never older than `STILL_IMAGE_VISION_RECHECK_MS`, so everything that asks
+ * (admission, the extractor, the store) follows it without a restart.
+ */
 export function stillImageReadiness(): StillImageReadiness {
-  current ??= probeStillImageReadiness();
-  return current;
+  if (!current) current = { readiness: probeStillImageReadiness({ vision: visionReader() }), pinned: false, checkedAt: clock() };
+  if (!current.pinned && clock() - current.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS) {
+    current.checkedAt = clock();
+    const vision = visionReader();
+    if (vision !== current.readiness.vision) current.readiness = withVision(current.readiness, vision);
+  }
+  return current.readiness;
 }
 
 /** Probe again now (a tool was installed, or the model's encoder state changed). */
 export function refreshStillImageReadiness(options: StillImageProbeOptions = {}): StillImageReadiness {
-  current = probeStillImageReadiness(options);
-  return current;
+  const readiness = probeStillImageReadiness({ ...options, vision: options.vision ?? visionReader() });
+  // A caller that supplied the encoder state fixed it; otherwise it stays live.
+  current = { readiness, pinned: options.vision !== undefined, checkedAt: clock() };
+  return readiness;
 }
 
 /** Replace (or, with undefined, forget) this process's answer. For tests. */
 export function setStillImageReadiness(readiness: StillImageReadiness | undefined): void {
-  current = readiness;
+  current = readiness ? { readiness, pinned: true, checkedAt: clock() } : undefined;
 }

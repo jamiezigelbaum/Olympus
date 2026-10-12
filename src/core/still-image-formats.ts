@@ -100,8 +100,9 @@ export function stillImageFormatFromBytes(bytes: Uint8Array): StillImageFormat |
   if (bytes.length >= 8 && bytes[0] === 0x89 && ascii(bytes, 1, 3) === 'PNG') return 'png';
   if (bytes.length >= 6 && ascii(bytes, 0, 4) === 'GIF8') return 'gif';
   if (bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return 'bmp';
-  if (bytes.length >= 4 && ((ascii(bytes, 0, 2) === 'II' && bytes[2] === 0x2a && bytes[3] === 0)
-    || (ascii(bytes, 0, 2) === 'MM' && bytes[2] === 0 && bytes[3] === 0x2a))) return 'tiff';
+  // Classic TIFF is version 42, BigTIFF (64-bit offsets, files over 4 GB) 43.
+  if (bytes.length >= 4 && ((ascii(bytes, 0, 2) === 'II' && (bytes[2] === 0x2a || bytes[2] === 0x2b) && bytes[3] === 0)
+    || (ascii(bytes, 0, 2) === 'MM' && bytes[2] === 0 && (bytes[3] === 0x2a || bytes[3] === 0x2b)))) return 'tiff';
   if (bytes.length >= 12 && ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'WEBP') return 'webp';
   if (bytes.length >= 12 && ascii(bytes, 4, 4) === 'ftyp' && HEIC_BRANDS.has(ascii(bytes, 8, 4))) return 'heic';
   return undefined;
@@ -153,21 +154,35 @@ export function jpegPixelSize(bytes: Uint8Array): ImageDimensions | undefined {
   return undefined;
 }
 
+/**
+ * Width and height from a TIFF's first directory. Classic TIFF (version 42)
+ * has 12-byte entries with 32-bit offsets; BigTIFF (version 43) has 20-byte
+ * entries with 64-bit counts and offsets, so it needs its own reader: a file
+ * only the first reader understood would declare no size at all.
+ */
 function tiffDimensions(bytes: Uint8Array): ImageDimensions | undefined {
   const data = view(bytes);
   const little = ascii(bytes, 0, 2) === 'II';
-  const ifd = data.getUint32(4, little);
-  if (ifd + 2 > bytes.length) return undefined;
-  const count = data.getUint16(ifd, little);
+  const big = data.getUint16(2, little) === 43;
+  if (big && (bytes.length < 16 || data.getUint16(4, little) !== 8)) return undefined;
+  const ifdOffset = big ? Number(data.getBigUint64(8, little)) : data.getUint32(4, little);
+  const countSize = big ? 8 : 2;
+  const entrySize = big ? 20 : 12;
+  if (!Number.isSafeInteger(ifdOffset) || ifdOffset + countSize > bytes.length) return undefined;
+  const count = big ? Number(data.getBigUint64(ifdOffset, little)) : data.getUint16(ifdOffset, little);
   let width: number | undefined;
   let height: number | undefined;
   for (let index = 0; index < count; index += 1) {
-    const entry = ifd + 2 + index * 12;
-    if (entry + 12 > bytes.length) break;
+    const entry = ifdOffset + countSize + index * entrySize;
+    if (entry + entrySize > bytes.length) break;
     const tag = data.getUint16(entry, little);
     if (tag !== 256 && tag !== 257) continue;
     const type = data.getUint16(entry + 2, little);
-    const value = type === 3 ? data.getUint16(entry + 8, little) : type === 4 ? data.getUint32(entry + 8, little) : undefined;
+    const valueAt = entry + (big ? 12 : 8);
+    const value = type === 3 ? data.getUint16(valueAt, little)
+      : type === 4 ? data.getUint32(valueAt, little)
+        : big && type === 16 ? Number(data.getBigUint64(valueAt, little))
+          : undefined;
     if (value === undefined) continue;
     if (tag === 256) width = value;
     else height = value;
@@ -199,19 +214,66 @@ function webpDimensions(bytes: Uint8Array): ImageDimensions | undefined {
   return undefined;
 }
 
-/** The largest declared `ispe` (image spatial extent): a grid names its tiles and the whole. */
+interface Box {
+  type: string;
+  /** Index of the first byte after the box's header. */
+  body: number;
+  /** Index just past the box. */
+  end: number;
+}
+
+/** The most boxes one level of a HEIF file is walked for. */
+const MAX_BOXES_PER_LEVEL = 4_096;
+
+/**
+ * The boxes (ISO base media file format) laid end to end in `[start, end)`.
+ * A box that does not fit its container ends the walk: nothing past a
+ * malformed size is believed.
+ */
+function boxesIn(bytes: Uint8Array, start: number, end: number): Box[] {
+  const data = view(bytes);
+  const boxes: Box[] = [];
+  let at = start;
+  while (at + 8 <= end && boxes.length < MAX_BOXES_PER_LEVEL) {
+    let size = data.getUint32(at);
+    let header = 8;
+    if (size === 1) {
+      if (at + 16 > end) break;
+      const wide = data.getBigUint64(at + 8);
+      if (wide > BigInt(Number.MAX_SAFE_INTEGER)) break;
+      size = Number(wide);
+      header = 16;
+    } else if (size === 0) {
+      size = end - at;
+    }
+    if (size < header || at + size > end) break;
+    boxes.push({ type: ascii(bytes, at + 4, 4), body: at + header, end: at + size });
+    at += size;
+  }
+  return boxes;
+}
+
+/**
+ * The largest `ispe` (image spatial extent) property a HEIF file declares:
+ * a grid names its tiles and the whole. Only genuine properties count: the
+ * file is walked as boxes (`meta` > `iprp` > `ipco` > `ispe`), so four bytes
+ * spelling "ispe" inside coded image data or metadata are not read as one.
+ */
 function heicDimensions(bytes: Uint8Array): ImageDimensions | undefined {
   const data = view(bytes);
-  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let best: ImageDimensions | undefined;
-  let from = 0;
-  for (;;) {
-    const at = buffer.indexOf('ispe', from, 'latin1');
-    if (at < 0 || at + 16 > bytes.length) break;
-    const width = data.getUint32(at + 8);
-    const height = data.getUint32(at + 12);
-    if (!best || width * height > best.width * best.height) best = { width, height };
-    from = at + 4;
+  const meta = boxesIn(bytes, 0, bytes.length).find((box) => box.type === 'meta');
+  if (!meta) return undefined;
+  // `meta` is a full box: four bytes of version and flags come first.
+  for (const iprp of boxesIn(bytes, meta.body + 4, meta.end).filter((box) => box.type === 'iprp')) {
+    for (const ipco of boxesIn(bytes, iprp.body, iprp.end).filter((box) => box.type === 'ipco')) {
+      for (const property of boxesIn(bytes, ipco.body, ipco.end)) {
+        if (property.type !== 'ispe' || property.end - property.body < 12) continue;
+        const width = data.getUint32(property.body + 4);
+        const height = data.getUint32(property.body + 8);
+        if (!best || width * height > best.width * best.height) best = { width, height };
+      }
+    }
   }
   return best;
 }

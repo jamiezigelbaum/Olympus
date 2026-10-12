@@ -35,6 +35,8 @@ import {
   jpegExifHasGps,
   orientationSwapsAxes,
   pngClaiming,
+  realToolShortfalls,
+  realToolsRequired,
   quadrantJpegWithMetadata,
   sampleGrid,
   STORED_GRID,
@@ -82,9 +84,19 @@ async function preparedOrFail(tool: AvailableTool, bytes: Uint8Array, mimeType: 
 }
 
 const tools = availableTools();
+// OLYMPUS_REQUIRE_REAL_IMAGE_TOOLS=1: this machine is meant to have the tools.
+// A missing tool, an unreadable result or a format the tool cannot decode then
+// FAILS instead of skipping (the unset default skips, so a bare CI box passes).
+const STRICT = realToolsRequired();
 if (tools.length === 0) {
   describe('still-image preparers against a real tool', () => {
-    test.skip('neither sips nor vipsthumbnail is installed here (the contract runs where one is)', () => {});
+    if (STRICT) {
+      test('a real image tool is installed (strict mode)', () => {
+        expect(realToolShortfalls({ strict: true, tools: [] })).toEqual([]);
+      });
+    } else {
+      test.skip('neither sips nor vipsthumbnail is installed here (the contract runs where one is)', () => {});
+    }
   });
 }
 
@@ -103,7 +115,19 @@ for (const tool of tools) {
   const readiness = probeStillImageReadiness({ tool, vision: 'ready' });
   const ready = readyStillImageFormats(readiness);
 
-  describe.skipIf(!readable)(`${tool.label}: what a prepared photo is`, () => {
+  // In strict mode an unreadable result is a failure, not a skip.
+  describe.skipIf(!readable && !STRICT)(`${tool.label}: what a prepared photo is`, () => {
+    test('strict mode: every admitted format is ready and the result can be read back', () => {
+      expect(realToolShortfalls({ strict: STRICT, tools: [{ label: tool.label, readable, ready: new Set(ready) }] })).toEqual([]);
+    });
+
+    /** A format this machine cannot decode: skipped, or in strict mode a failure. */
+    const unready = (format: StillImageFormat): boolean => {
+      if (ready.has(format)) return false;
+      if (STRICT) throw new Error(`${tool.label} cannot decode ${format} (OLYMPUS_REQUIRE_REAL_IMAGE_TOOLS=1)`);
+      return true;
+    };
+
     test('the probe finds the formats every host decodes, and only formats it really decoded are ready', () => {
       for (const format of ['jpeg', 'png', 'gif', 'bmp', 'tiff'] as const) expect(ready.has(format)).toBe(true);
       expect(readiness.tool).toBe(tool.kind);
@@ -111,7 +135,7 @@ for (const tool of tools) {
 
     for (const [name, mimeType, format] of containers) {
       test(`${format}: becomes a JPEG of the same picture, upright, with nothing but pixels`, async () => {
-        if (!ready.has(format)) return;
+        if (unready(format)) return;
         const result = await preparedOrFail(tool, imageFixture(name), mimeType);
         expect(result.bytes[0]).toBe(0xff);
         expect(result.bytes[1]).toBe(0xd8);
@@ -132,7 +156,7 @@ for (const tool of tools) {
       });
 
       test(`orientation ${orientation} in a HEIC (its rotation and mirror) is applied to the pixels`, async () => {
-        if (!ready.has('heic')) return;
+        if (unready('heic')) return;
         const result = await preparedOrFail(tool, imageFixture(`orientation-${orientation}.heic`), 'image/heic');
         expect(sampleGrid(result.picture)).toSatisfy((grid: Rgb[][]) => gridsClose(grid, displayedGrid(orientation), 64));
         expect(result.picture.width > result.picture.height).toBe(!orientationSwapsAxes(orientation));
@@ -146,7 +170,7 @@ for (const tool of tools) {
       ['orientation-6.tiff', 'image/tiff', 'tiff'],
     ] as const) {
       test(`orientation 6 in a ${format} is applied too`, async () => {
-        if (!ready.has(format)) return;
+        if (unready(format)) return;
         const result = await preparedOrFail(tool, imageFixture(name), mimeType);
         expect(sampleGrid(result.picture)).toSatisfy((grid: Rgb[][]) => gridsClose(grid, displayedGrid(6), 64));
       });
@@ -160,7 +184,7 @@ for (const tool of tools) {
       expect(jpegMetadataSegments(result.bytes)).toEqual([]);
       expect(jpegExifHasGps(result.bytes)).toBe(false);
       expect(Buffer.from(result.bytes).includes('TestMake')).toBe(false);
-      if (ready.has('heic')) {
+      if (!unready('heic')) {
         // The HEIC fixtures carry an Exif item.
         const heic = await preparedOrFail(tool, imageFixture('orientation-1.heic'), 'image/heic');
         expect(jpegMetadataSegments(heic.bytes)).toEqual([]);

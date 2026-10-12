@@ -164,9 +164,14 @@ proven by fixture tests that run against each real tool where it exists
 - **Opaque.** Transparency is flattened onto white.
 - **Bounded.** The long side is at most 1,024 pixels, never enlarged by
   libvips. A decoder is never handed a decompression bomb: the header
-  (JPEG, PNG, GIF, BMP, TIFF, WebP, HEIC `ispe`) is read first and a picture
+  (JPEG, PNG, GIF, BMP, TIFF and BigTIFF, WebP, HEIC `ispe`) is read first and a picture
   declaring more than 16,384 x 16,384 pixels settles `skipped_too_large`
-  without a tool running. The tool also runs with a timeout and its output is
+  without a tool running. HEIC sizes come from a bounded walk of the
+  `meta > iprp > ipco` boxes, so picture bytes that spell `ispe` never count.
+  A recognised format whose header gives no size is refused
+  (`failed_terminal`, `image_prepare_failed`), never handed to a decoder
+  unbounded; with libvips, content that is not a recognised picture format is
+  refused the same way. The tool also runs with a timeout and its output is
   capped at 16 MB.
 
 A Mac's first command is unchanged; the second pass runs only for a picture
@@ -179,8 +184,11 @@ One answer per format, asked of the machine
 (`still-image-readiness.ts`): a probe prepares a tiny real picture of each
 admitted format (jpeg, png, heic/heif, webp, gif, tiff, bmp) with the
 selected tool and counts the format as ready only if a JPEG of the right
-shape comes back. The answer is computed once per process on first use, and
-a refresh is the same call again. Everything reads it: the ingestion policy,
+shape comes back. The format probe runs once per process on first use, and
+a refresh is the same call again. The vision half (below) is re-read from
+`vision.json` at most every two seconds, so a model that finishes starting
+after the probe is noticed without a restart; the default Dropbox policy's
+still-image rule follows it. Everything reads it: the ingestion policy,
 the text lane's version for images, the extraction candidates, and `olympus
 doctor`. `stillImagePreparationAvailable()` remains and
 means "at least one format is ready".
@@ -213,6 +221,18 @@ queued again: the policy admits them, the version suffix requeues them, and
 the extraction candidates list a photo of a now-ready format that has no
 picture and no reading row. A photo read with its picture considered is not
 listed again.
+
+A picture whose media type names a different format than its bytes (HEIC
+served as `image/jpeg`) cannot wait on the version suffix, which follows the
+label. When it is skipped for want of a decoder, its result carries the
+warning `image_decoder_unavailable_<format>` naming the real format, and the
+reread policy requeues it when that format becomes ready.
+
+## Real-tool contract
+
+`test/still-image-preparers-contract.test.ts` skips when no tool is present.
+With `OLYMPUS_REQUIRE_REAL_IMAGE_TOOLS=1` it fails instead: a missing tool, a
+result that cannot be read back, or any admitted format that is not ready.
 
 No global embedding-space migration: nothing re-embeds the library. A photo's
 embedding input hash names its prepared picture's digest, so only a photo

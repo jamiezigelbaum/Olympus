@@ -198,6 +198,88 @@ export function pngClaiming(width: number, height: number, padTo = 0): Uint8Arra
   return new Uint8Array(Buffer.concat(parts));
 }
 
+/**
+ * A BigTIFF (version 43: 64-bit offsets and counts) whose first directory
+ * claims `width` x `height`, padded to `padTo` bytes.
+ */
+export function bigTiffClaiming(width: number, height: number, padTo = 0): Uint8Array {
+  const out = Buffer.alloc(Math.max(padTo, 16 + 8 + 2 * 20 + 8));
+  out.write('II', 0, 'latin1');
+  out.writeUInt16LE(43, 2);
+  out.writeUInt16LE(8, 4);
+  out.writeUInt16LE(0, 6);
+  out.writeBigUInt64LE(16n, 8);
+  out.writeBigUInt64LE(2n, 16);
+  const entry = (at: number, tag: number, value: number) => {
+    out.writeUInt16LE(tag, at);
+    out.writeUInt16LE(4, at + 2);
+    out.writeBigUInt64LE(1n, at + 4);
+    out.writeUInt32LE(value, at + 12);
+  };
+  entry(24, 256, width);
+  entry(44, 257, height);
+  return new Uint8Array(out);
+}
+
+/** An ISO base media box. */
+export function isoBox(type: string, ...parts: Buffer[]): Buffer {
+  const body = Buffer.concat(parts);
+  const header = Buffer.alloc(8);
+  header.writeUInt32BE(body.length + 8);
+  header.write(type, 4, 'latin1');
+  return Buffer.concat([header, body]);
+}
+
+/** An `ispe` property claiming `width` x `height`. */
+export function ispeBox(width: number, height: number): Buffer {
+  const body = Buffer.alloc(12);
+  body.writeUInt32BE(width, 4);
+  body.writeUInt32BE(height, 8);
+  return isoBox('ispe', body);
+}
+
+/**
+ * A HEIC-shaped file (ftyp, then meta > iprp > ipco > ispe) declaring
+ * `width` x `height`, followed by `after` (boxes or bytes) and padded to
+ * `padTo` bytes inside a trailing `mdat`.
+ */
+export function heicClaiming(width: number, height: number, options: { after?: Buffer; padTo?: number } = {}): Uint8Array {
+  const parts = [
+    isoBox('ftyp', Buffer.from('heic', 'latin1'), Buffer.alloc(4), Buffer.from('mif1heic', 'latin1')),
+    isoBox('meta', Buffer.alloc(4), isoBox('iprp', isoBox('ipco', ispeBox(width, height)))),
+  ];
+  if (options.after) parts.push(options.after);
+  const size = parts.reduce((sum, part) => sum + part.length, 0);
+  if (options.padTo && options.padTo > size + 8) parts.push(isoBox('mdat', Buffer.alloc(options.padTo - size - 8)));
+  return new Uint8Array(Buffer.concat(parts));
+}
+
+// --- Strict mode for the real-tool contract ----------------------------------
+
+/**
+ * Whether the real-tool contract must run: set `OLYMPUS_REQUIRE_REAL_IMAGE_TOOLS=1`
+ * on a machine that is meant to have the tools (a Mac, a Linux box with
+ * libvips and libheif) and a missing tool, or a format the tool cannot read,
+ * fails the run instead of skipping.
+ */
+export function realToolsRequired(env: Record<string, string | undefined> = process.env): boolean {
+  return env.OLYMPUS_REQUIRE_REAL_IMAGE_TOOLS === '1';
+}
+
+/** What is wrong with the tools this machine has, for strict mode; empty otherwise. */
+export function realToolShortfalls(input: {
+  strict: boolean;
+  tools: ReadonlyArray<{ label: string; readable: boolean; ready: ReadonlySet<string> }>;
+}): string[] {
+  if (!input.strict) return [];
+  if (input.tools.length === 0) return ['neither sips nor vipsthumbnail is installed, and OLYMPUS_REQUIRE_REAL_IMAGE_TOOLS=1 requires one'];
+  const admitted = ['jpeg', 'png', 'heic', 'webp', 'gif', 'tiff', 'bmp'];
+  return input.tools.flatMap((tool) => [
+    ...(tool.readable ? [] : [`${tool.label}: its output cannot be read back here (vips copy is missing next to vipsthumbnail)`]),
+    ...admitted.filter((format) => !tool.ready.has(format)).map((format) => `${tool.label} cannot decode ${format}`),
+  ]);
+}
+
 // --- Judging a prepared picture ----------------------------------------------
 
 export interface DecodedPicture {

@@ -343,7 +343,7 @@ export function terminalRetryPaths(
 ): ExtractionTerminalRetryPath[] {
   const paths: ExtractionTerminalRetryPath[] = [];
   for (const extractor of registry.list()) {
-    const kinds = extractor.reread?.unreadTerminalErrorKinds ?? [];
+    const kinds = [extractor.reread, ...(extractor.extraReread ?? [])].flatMap((policy) => policy?.unreadTerminalErrorKinds ?? []);
     if (kinds.length > 0) paths.push({ extractorKind: extractor.kind, lastErrorKinds: [...kinds] });
   }
   for (const rule of rules) {
