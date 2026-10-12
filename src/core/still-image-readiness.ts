@@ -31,7 +31,7 @@ import {
   type SelectedStillImageTool,
   type StillImageToolKind,
 } from '../workers/file-extraction/extractors/image-preparers.ts';
-import { STILL_IMAGE_PROBE_FIXTURES, STILL_IMAGE_PROBE_SIZE } from './still-image-probe-fixtures.ts';
+import { STILL_IMAGE_PROBE_FIXTURES, STILL_IMAGE_PROBE_SIZES } from './still-image-probe-fixtures.ts';
 import {
   STILL_IMAGE_FORMATS,
   jpegPixelSize,
@@ -95,12 +95,13 @@ function isJpegBytes(bytes: Uint8Array): boolean {
  * or enlarge it, so the shape is its aspect ratio, which a tool that failed
  * to decode (or decoded something else) will not reproduce.
  */
-function looksLikeDecodedFixture(bytes: Uint8Array): boolean {
+function looksLikeDecodedFixture(bytes: Uint8Array, format: StillImageFormat): boolean {
   if (!isJpegBytes(bytes)) return false;
   const size = jpegPixelSize(bytes);
   if (!size || size.width < 1 || size.height < 1) return false;
   if (Math.max(size.width, size.height) > IMAGE_PREPARE_MAX_PIXEL_EDGE) return false;
-  const expected = STILL_IMAGE_PROBE_SIZE.width / STILL_IMAGE_PROBE_SIZE.height;
+  const probe = STILL_IMAGE_PROBE_SIZES[format];
+  const expected = probe.width / probe.height;
   return Math.abs(size.width / size.height - expected) < 0.05;
 }
 
@@ -141,7 +142,7 @@ export function probeStillImageReadiness(options: StillImageProbeOptions = {}): 
       try {
         writeFileSync(inputPath, Buffer.from(fixtures[format], 'base64'), { mode: 0o600 });
         const result = run(preparer.command, preparer.decodeArgs(inputPath, outputPath), timeoutMs);
-        decoded[format] = result.ok && looksLikeDecodedFixture(new Uint8Array(readFileSync(outputPath)));
+        decoded[format] = result.ok && looksLikeDecodedFixture(new Uint8Array(readFileSync(outputPath)), format);
       } catch {
         decoded[format] = false;
       }

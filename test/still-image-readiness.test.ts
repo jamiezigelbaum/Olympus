@@ -28,10 +28,11 @@ import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingesti
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import {
   STILL_IMAGE_FORMATS,
+  imageDeclaredDimensions,
   stillImageFormatForExtension,
   type StillImageFormat,
 } from '../src/core/still-image-formats.ts';
-import { STILL_IMAGE_PROBE_FIXTURES, STILL_IMAGE_PROBE_SIZE } from '../src/core/still-image-probe-fixtures.ts';
+import { STILL_IMAGE_PROBE_FIXTURES, STILL_IMAGE_PROBE_SIZES } from '../src/core/still-image-probe-fixtures.ts';
 import {
   probeStillImageReadiness,
   readyStillImageFormats,
@@ -102,7 +103,8 @@ function fakeTool(decodes: Iterable<StillImageFormat>, calls: string[][] = []): 
     calls.push([command, ...args]);
     const format = stillImageFormatForExtension(extname(inputPathOf(args)));
     if (!format || !can.has(format)) return { ok: false };
-    writeFileSync(outputPathOf(args), stubJpeg(STILL_IMAGE_PROBE_SIZE.width, STILL_IMAGE_PROBE_SIZE.height));
+    const size = STILL_IMAGE_PROBE_SIZES[format];
+    writeFileSync(outputPathOf(args), stubJpeg(size.width, size.height));
     return { ok: true };
   };
 }
@@ -181,8 +183,14 @@ describe('the per-format probe', () => {
       heic: (bytes) => bytes.subarray(4, 8).toString('latin1') === 'ftyp',
     };
     for (const format of ALL) {
-      expect(signatures[format](Buffer.from(STILL_IMAGE_PROBE_FIXTURES[format], 'base64'))).toBe(true);
+      const bytes = Buffer.from(STILL_IMAGE_PROBE_FIXTURES[format], 'base64');
+      expect(signatures[format](bytes)).toBe(true);
+      // Each is the size the probe expects back; a HEIC smaller than 64 x 64
+      // is refused by libheif's security limit even where real photos decode.
+      expect(imageDeclaredDimensions(new Uint8Array(bytes))).toEqual(STILL_IMAGE_PROBE_SIZES[format]);
     }
+    expect(STILL_IMAGE_PROBE_SIZES.heic.width).toBeGreaterThanOrEqual(64);
+    expect(STILL_IMAGE_PROBE_SIZES.heic.height).toBeGreaterThanOrEqual(64);
   });
 
   test('a plain yes or no still answers, and the old boolean follows the per-format answer', () => {
