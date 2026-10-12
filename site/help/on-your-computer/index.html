@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fix it on your computer - Olympus help</title>
-  <meta name="description" content="What to do when the Olympus dashboard in ChatGPT says to fix something on your computer.">
+  <meta name="description" content="What is only in Olympus on your computer (Private answers and anonymous answers, Keys, Agents, Build a connector), how to open it, and how to fix what Olympus asks you to fix there.">
   <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
   <link rel="stylesheet" href="/assets/brand.css">
@@ -27,10 +27,20 @@
   <main id="main">
     <div class="wrap">
       <h1>Fix it on your computer</h1>
-      <p class="lede">A few things can only be set up on your computer, because they need a key or a pairing that never goes through ChatGPT. When the Olympus dashboard in ChatGPT says to do something on your computer, this page says what.</p>
+      <p class="lede">A few things can only be set up on your computer, because they need a key, a pairing or your private things, none of which go through ChatGPT or any other AI app. When Olympus says to do something on your computer, this page says what and where.</p>
+
+      <h2 id="only-here">What is only on your computer</h2>
+      <p>These live only in Olympus on your computer, under <strong>On this computer</strong>. No AI app can show them or change them.</p>
+      <ul>
+        <li><strong>Private answers</strong>: questions your agents asked that need your private things, waiting for you to answer them on this computer, and the <strong>Anonymous answers</strong> switch. <a href="/open/private/">Open Private answers</a>.</li>
+        <li><strong>Keys</strong>: your Venice, Readwise and X keys.</li>
+        <li><strong>Agents</strong>: remote access, and the agents connected to Olympus, each with <strong>Revoke</strong>.</li>
+        <li><strong>Build a connector</strong>: for a source Olympus does not have yet.</li>
+      </ul>
+      <p>To reach them, <a href="#open-olympus">open Olympus on your computer</a>, then choose <strong>Open</strong> next to the one you want under <strong>On this computer</strong>.</p>
 
       <h2 id="open-olympus">Open Olympus on your computer</h2>
-      <p>From the Olympus dashboard in ChatGPT, <strong>Connect</strong> and <strong>Fix this on your computer</strong> open Olympus on your computer for you: if your browser asks whether to open Olympus, choose <strong>Open</strong>. If nothing opens (on a phone, or with an older Olympus), open Terminal on your computer and run:</p>
+      <p>On the computer running Olympus, go to <a href="/open/dashboard/">olympusplugin.ai/open/dashboard</a> and choose <strong>Open Olympus</strong>; if your browser asks whether to open Olympus, choose <strong>Open</strong>. From the Olympus dashboard in ChatGPT, <strong>Connect</strong> and <strong>Fix this on your computer</strong> do the same for you. If nothing opens (on a phone, or with an older Olympus), open Terminal on your computer and run:</p>
       <pre><code>olympus dashboard</code></pre>
       <p>It opens the Olympus dashboard in your computer's browser. The link works once, for 15 minutes; run the command again for a new one. If Terminal says Olympus is not running, see <a href="/help/mac-offline/">ChatGPT says your computer is offline</a>.</p>
 
@@ -46,10 +56,18 @@
       <h2 id="reconnect">Reconnect a source</h2>
       <p>When X bookmarks or Readwise stop syncing because their sign-in or token expired, <a href="#open-olympus">open Olympus on your computer</a>, find the source under <strong>Sources</strong> and reconnect it (for Readwise, paste a new token). Gmail, Google Drive and Dropbox reconnect from ChatGPT with <strong>Reconnect</strong>.</p>
 
+      <h2 id="private">Answer private questions, or turn on anonymous answers</h2>
+      <p>Both are on the <strong>Private answers</strong> page on your computer: <a href="/open/private/">open Private answers</a>, or <a href="#open-olympus">open Olympus on your computer</a> and choose <strong>Open</strong> next to <strong>Private answers</strong> under <strong>On this computer</strong>. Not under <strong>Models</strong>: that is only for changing models.</p>
+      <ul>
+        <li><strong>Waiting questions.</strong> When an agent asks something only your private things can answer, the question waits here, and <strong>Needs you</strong> on your computer says so. Choose <strong>Answer</strong> to answer it on this computer with the model built into Olympus, or <strong>Dismiss</strong>. You can also ask your own question in <strong>Ask privately</strong>. Nothing on this page leaves your computer.</li>
+        <li><strong>Anonymous answers</strong> are under <strong>Anonymous answers</strong> on the same page. They are off until you turn them on there; your agent can then send a question anonymously, through zkAPI and Tor, using your own zkAPI account.</li>
+      </ul>
+      <p>In Olympus 1.0.0-rc.6 and earlier there is no Private answers page yet: <strong>Anonymous answers</strong> has its own row under <strong>On this computer</strong>.</p>
+
       <h2 id="answers">Answers have stopped working</h2>
       <p>This means the answer model you set up on your computer cannot be reached. <a href="#open-olympus">Open Olympus on your computer</a> and look under <strong>Models</strong>:</p>
       <ul>
-        <li>If you use <strong>Venice</strong>, check that its key is still valid and your account has credit, and paste a new key if needed.</li>
+        <li>If you use <strong>Venice</strong>, check that your account has credit, and that its key is still valid: keys are on <strong>Keys</strong>, under <strong>On this computer</strong>. Paste a new key there if needed.</li>
         <li>If you use a <strong>local model</strong>, make sure the model server it names is running on your computer.</li>
       </ul>
       <p>Then choose <strong>Check again</strong> in the dashboard in ChatGPT. Personal answers in ChatGPT keep working meanwhile.</p>
@@ -58,7 +76,7 @@
       <p>Your computer uses a custom search (embedding) model that cannot be reached. Make sure the model server it names under <strong>Models</strong> is running on your computer, then choose <strong>Check again</strong>. Changing the search model means indexing everything again, so Olympus only does that on your computer, when you ask.</p>
 
       <h2 id="models">Change models</h2>
-      <p>Models and their keys are set up on your computer, never in ChatGPT: <a href="#open-olympus">open Olympus on your computer</a> and use <strong>Models</strong>. The built-in models need no setup.</p>
+      <p>Models are set up on your computer, never in ChatGPT: <a href="/open/fix/models/">open Models on your computer</a>, or <a href="#open-olympus">open Olympus on your computer</a> and use <strong>Models</strong>. Their keys are on <strong>Keys</strong>, under <strong>On this computer</strong>. The built-in models need no setup. Anonymous answers are not here: they are on <a href="#private">Private answers</a>.</p>
 
       <h2>Still stuck?</h2>
       <p><a href="/support/">Contact support</a> and include the output of <code>olympus engine status</code>. Check it first: it contains file paths on your computer, but no message content.</p>
