@@ -67934,7 +67934,14 @@ function consultFrontierModelFor(settings, provider) {
 }
 function consultModelProvider(model) {
   const prefix = model.slice(0, model.indexOf("/")).toLowerCase();
-  return Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix) ? CONSULT_MODEL_PREFIXES[prefix] : undefined;
+  if (Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix))
+    return CONSULT_MODEL_PREFIXES[prefix];
+  const name = model.slice(model.lastIndexOf("/") + 1).trim().toLowerCase();
+  for (const [family, provider] of CONSULT_BARE_MODEL_FAMILIES) {
+    if (family.test(name))
+      return provider;
+  }
+  return;
 }
 function consultChatgptModelUnavailableMessage(model) {
   return model === CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT ? "Claude Sonnet isn't available through zkAPI right now; choose another model." : "The model chosen for ChatGPT questions isn't available through zkAPI right now; choose another model.";
@@ -68183,7 +68190,7 @@ function hasKeys(value, required3, optional) {
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
-var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_STANDARD_MODES, CONSULT_STANDARD_MODE_WHEN_UNSET = "light_cleanup", CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000, CONSULT_LIGHT_CLEANUP_INSTRUCTION, CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = "anthropic/claude-sonnet-5.5", CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT = "openai/gpt-5.5", CONSULT_CALLER_PROVIDERS, CONSULT_MODEL_PREFIXES, DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
+var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_STANDARD_MODES, CONSULT_STANDARD_MODE_WHEN_UNSET = "light_cleanup", CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000, CONSULT_LIGHT_CLEANUP_INSTRUCTION, CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = "anthropic/claude-sonnet-5.5", CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT = "openai/gpt-5.5", CONSULT_CALLER_PROVIDERS, CONSULT_MODEL_PREFIXES, CONSULT_BARE_MODEL_FAMILIES, DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
 var init_consult_settings = __esm(() => {
   init_secret_store();
   init_consult_gate();
@@ -68206,6 +68213,12 @@ var init_consult_settings = __esm(() => {
     "meta-llama": "meta",
     meta: "meta"
   };
+  CONSULT_BARE_MODEL_FAMILIES = [
+    [/^(?:gpt|chatgpt|o\d)(?:[-.]|$)/, "openai"],
+    [/^claude(?:[-.]|$)/, "anthropic"],
+    [/^grok(?:[-.]|$)/, "xai"],
+    [/^(?:llama|meta-llama)(?:[-.\d]|$)/, "meta"]
+  ];
   DEFAULT_CONSULT_SETTINGS = Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision: 0,
