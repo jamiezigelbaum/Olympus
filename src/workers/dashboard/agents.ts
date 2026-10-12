@@ -7,15 +7,16 @@
  * picks the agent they use and gets that agent's own steps, with every address
  * and snippet behind a copy button. The method follows the agent:
  *
- * - Through the Olympus relay (the default) only ChatGPT connects: the relay
- *   registers only ChatGPT's client and routes no keys. Approval is one click
- *   on Olympus's page in this computer's browser, with no pairing code.
+ * - Through the Olympus relay (the default) ChatGPT, Claude and Grok connect:
+ *   the relay registers only their pinned clients and routes no keys.
+ *   Approval is one click on Olympus's page in this computer's browser, with
+ *   no pairing code.
  * - Through a tunnel the owner runs (`remote.publicBaseUrl`), Claude, ChatGPT
  *   and Grok add Olympus as a connector and approve it on the Olympus approval
  *   page with a one-time pairing code minted right here; the Grok API takes
  *   an address plus a key, and Create key shows the key once. Under the
- *   relay these agents say they need such a tunnel, and show no steps that
- *   cannot work.
+ *   relay the Grok API and other agents say they need such a tunnel, and show
+ *   no steps that cannot work.
  * - Claude Code and Codex on this computer run `olympus serve` locally.
  *
  * Muse is not offered (owner decision, 2026-10-12): consumer Muse adds
@@ -58,7 +59,7 @@ interface AgentChoice {
   keyUse?: string;
   /** Where the when-to-ask instructions go for this agent. */
   instructionsWhere: string;
-  /** Connects through the Olympus relay: ChatGPT only (connect-relay/server/client-registration.ts). */
+  /** Connects through the Olympus relay: ChatGPT, Claude and Grok only (connect-relay/server/client-registration.ts). */
   viaRelay?: true;
   /** Relay oauth agents: what happens after the address is saved; approval is one click, with no pairing code. */
   approveViaRelay?: string;
@@ -72,7 +73,9 @@ const AGENTS: readonly AgentChoice[] = [
     method: 'oauth',
     add: 'In Claude, open Customize, then Connectors. Choose +, then Add custom connector, name it Olympus, and paste this address as the URL:',
     approve: 'Choose Add, then Connect on the Olympus connector. An Olympus approval page opens, on your phone too.',
+    approveViaRelay: 'Choose Add, then Connect on the Olympus connector. An Olympus page opens in this computer\'s browser asking to connect Claude to Olympus: choose Connect. Do this in Claude on this computer; the page opens only here. After that, Olympus works in Claude on your phone too.',
     instructionsWhere: 'Paste this into a Claude project\'s instructions.',
+    viaRelay: true,
   },
   {
     id: 'chatgpt',
@@ -86,11 +89,14 @@ const AGENTS: readonly AgentChoice[] = [
   },
   {
     id: 'grok',
-    label: 'Grok or Grok Bot',
+    label: 'Grok',
+    detail: 'grok.com',
     method: 'oauth',
     add: 'In Grok, go to grok.com/connectors, choose New Connector, then Custom, and paste this address as the MCP server URL:',
     approve: 'Continue to sign in. An Olympus approval page opens.',
-    instructionsWhere: 'Paste this into your Grok Bot\'s skills or into Grok\'s custom instructions.',
+    approveViaRelay: 'Continue to sign in. An Olympus page opens in this computer\'s browser asking to connect Grok to Olympus: choose Connect. Do this on grok.com on this computer; the page opens only here.',
+    instructionsWhere: 'Paste this into Grok\'s custom instructions.',
+    viaRelay: true,
   },
   {
     id: 'grok-api',
@@ -297,7 +303,7 @@ function localBody(agent: AgentChoice): string {
 
 /** For agents the relay cannot serve. Remote access may be on (through the relay), off, or not connected. */
 function tunnelNeeded(): string {
-  const text = 'Olympus\'s relay connects only ChatGPT, so this agent needs a tunnel you run yourself. '
+  const text = 'Olympus\'s relay connects only ChatGPT, Claude and Grok, so this agent needs a tunnel you run yourself. '
     + 'Advanced: set remote.publicBaseUrl in Olympus\'s settings to your tunnel\'s https address and turn on remote access; this agent\'s steps then appear here. '
     + 'Claude Code and Codex on this computer need no tunnel.';
   return `<p class="why" data-agent-needs-tunnel>${escapeHtml(text)}</p>`;

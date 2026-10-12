@@ -486,9 +486,10 @@ there. Olympus then connects through the Olympus relay
 (`mcp.olympusplugin.ai`): you create no account and run no tunnel. The relay
 passes requests between ChatGPT and this computer; it stores and logs no
 questions, answers or tokens, but like any HTTPS endpoint it handles them in
-transit. The relay connects ChatGPT only, and approving it happens on this
-computer only, with one click on a page Olympus serves locally; there is no
-pairing code. **Turn off remote access** turns it off again. If the
+transit. The relay connects ChatGPT, Claude and Grok (grok.com), and approving
+one happens on this computer only, with one click on a page Olympus serves
+locally; there is no pairing code. A Claude connector approved on this
+computer then works in Claude on your phone too. **Turn off remote access** turns it off again. If the
 relay cannot be reached, the page says **Olympus relay unavailable** and
 Olympus keeps retrying on its own; agents on this computer are unaffected.
 

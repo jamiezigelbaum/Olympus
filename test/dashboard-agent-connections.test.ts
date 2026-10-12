@@ -325,7 +325,7 @@ function render(access: DashboardRemoteAccess, store?: RemoteConnectionStore): s
 describe('the panel', () => {
   test('through your own tunnel, offers every agent with its own method', () => {
     const html = render(REMOTE_TUNNEL);
-    for (const label of ['Claude', 'ChatGPT', 'Grok or Grok Bot', 'Grok API', 'Claude Code or Codex', 'Other']) {
+    for (const label of ['Claude', 'ChatGPT', 'Grok', 'Grok API', 'Claude Code or Codex', 'Other']) {
       expect(html).toContain(`<span class="name">${label}</span>`);
     }
     // Muse waits for a Meta catalog connector (owner decision, 2026-10-12).
@@ -360,17 +360,22 @@ describe('the panel', () => {
     expect(html).not.toMatch(/\d+%/);
   });
 
-  test('through the relay, ChatGPT is one click on this computer and the others say they need your own tunnel', () => {
+  test('through the relay, ChatGPT, Claude and Grok are one click on this computer and the others say they need your own tunnel', () => {
     const doc = new Window().document;
     doc.body.innerHTML = render(REMOTE_ON);
     const agent = (id: string) => doc.querySelector(`[data-agent="${id}"]`)!;
-    const chatgpt = agent('chatgpt');
-    expect(chatgpt.textContent).toContain(`${PUBLIC}/mcp`);
-    expect(chatgpt.textContent).toContain('choose Connect');
-    expect(chatgpt.textContent).not.toContain('pairing code');
-    expect(chatgpt.querySelector('form')).toBeNull();
-    expect(chatgpt.querySelector('[data-agent-needs-tunnel]')).toBeNull();
-    for (const id of ['claude', 'grok', 'grok-api', 'other']) {
+    for (const [id, name] of [['chatgpt', 'ChatGPT'], ['claude', 'Claude'], ['grok', 'Grok']] as const) {
+      const choice = agent(id);
+      expect(choice.textContent).toContain(`${PUBLIC}/mcp`);
+      expect(choice.textContent).toContain(`asking to connect ${name} to Olympus: choose Connect`);
+      expect(choice.textContent).toContain('the page opens only here');
+      expect(choice.textContent).not.toContain('pairing code');
+      expect(choice.querySelector('form')).toBeNull();
+      expect(choice.querySelector('[data-agent-needs-tunnel]')).toBeNull();
+      expect(choice.querySelector('summary')!.textContent).not.toContain('needs your own tunnel');
+    }
+    expect(agent('claude').textContent).toContain('on your phone too');
+    for (const id of ['grok-api', 'other']) {
       expect(agent(id).querySelector('[data-agent-needs-tunnel]')).not.toBeNull();
       expect(agent(id).querySelector('summary')!.textContent).toContain('needs your own tunnel');
       expect(agent(id).querySelector('form')).toBeNull();
