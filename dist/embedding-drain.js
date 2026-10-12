@@ -34829,6 +34829,7 @@ var AGENT_INSTRUCTION_TEXT = [
 `);
 
 // src/workers/dashboard/agents.ts
+init_remote_open();
 var LOCAL_AGENT_PROMPT = [
   "Add Olympus to this coding agent as a local MCP server.",
   "First find the full path of the olympus command:",

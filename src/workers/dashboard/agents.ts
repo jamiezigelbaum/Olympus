@@ -36,6 +36,7 @@ import {
   type DashboardRemoteAccess,
 } from '../agent-connections.ts';
 import { AGENT_INSTRUCTION_TEXT, AGENT_SKILL_PATH } from '../../core/agent-instructions.ts';
+import { resolveServerMode } from '../../core/remote-open.ts';
 import { escapeHtml, setupRow } from './components.ts';
 
 export const AGENT_CONNECT_SHEET_ID = 'agent-connect';
@@ -142,7 +143,16 @@ const CODEX_SNIPPET = [
   'args = ["serve"]',
 ].join('\n');
 
-export interface DashboardAgentsSectionInput {
+/** OPENER supplies text only after validating its owner-only socket route.
+ * Undefined means no usable handoff; this callback never creates or approves one.
+ */
+export interface AgentConnectHost {
+  platform?: NodeJS.Platform;
+  headless?: boolean;
+  approvalHandoff?: () => string | undefined;
+}
+
+export interface DashboardAgentsSectionInput extends AgentConnectHost {
   view: DashboardAgentsView;
   /** When the page was built, for "last used" wording. */
   now: Date;
@@ -150,15 +160,24 @@ export interface DashboardAgentsSectionInput {
 
 export function renderDashboardAgentsSection(input: DashboardAgentsSectionInput): string {
   const { view } = input;
+  const platform = input.platform ?? process.platform;
+  const host = {
+    ...input,
+    platform,
+    headless: input.headless ?? resolveServerMode({ env: process.env, platform }).remote,
+  };
+
   return [
     '<div class="sect" id="agents">Agents</div>',
     remoteAccessRow(view.remoteAccess),
     setupRow({
       label: 'Connect an agent',
-      blurb: 'Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.',
+      blurb: platform === 'linux'
+        ? 'Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules on this computer.'
+        : 'Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.',
       action: { label: 'Connect an agent', kind: 'none', sheet: AGENT_CONNECT_SHEET_ID, primary: true },
     }),
-    connectSheet(view.remoteAccess),
+    connectSheet(view.remoteAccess, host),
     // Its own region so the controller can re-read the list after a key,
     // Done or Revoke without replacing an open sheet or a shown key.
     `<div data-agent-connections-list>${connectionList(view, input.now)}</div>`,
@@ -224,8 +243,19 @@ function termsPanel(): string {
     + `</div>`;
 }
 
-function connectSheet(access: DashboardRemoteAccess): string {
-  const choices = AGENTS.map((agent) => agentChoice(agent, access)).join('');
+function connectSheet(access: DashboardRemoteAccess, host: AgentConnectHost): string {
+  // The Mac picker is frozen byte-for-byte. Linux also exposes the clients
+  // already pinned by #296; no new registration or callback is admitted.
+  const agents: readonly AgentChoice[] = host.platform === 'linux'
+    ? [...AGENTS, ...(['grok-bot', 'cursor'] as const).map((id): AgentChoice => ({
+      id, label: id === 'grok-bot' ? 'Grok Bot' : 'Cursor', method: 'oauth', viaRelay: true,
+      add: 'Add Olympus as a custom remote MCP server, choose OAuth, and use this address:',
+      approve: 'Start connecting. An Olympus approval page opens.',
+      approveViaRelay: "An Olympus page opens in this computer's browser asking to connect Grok Bot or Cursor to Olympus: choose Connect. Olympus names this connection Grok Bot or Cursor because the apps share a sign-in.",
+      instructionsWhere: "Paste this into the agent's instructions.",
+    }))]
+    : AGENTS;
+  const choices = agents.map((agent) => agentChoice(agent, access, host)).join('');
   return `<div class="sheet" id="${AGENT_CONNECT_SHEET_ID}" aria-hidden="true">`
     + `<h4>Connect an agent</h4>`
     + `<p>Pick the agent you use. It never sees Private source text or Secrets. For Private items it receives only answers that Venice or a local model reasoned out, with each item's title, path, source and author.</p>`
@@ -233,12 +263,12 @@ function connectSheet(access: DashboardRemoteAccess): string {
     + `</div>`;
 }
 
-function agentChoice(agent: AgentChoice, access: DashboardRemoteAccess): string {
+function agentChoice(agent: AgentChoice, access: DashboardRemoteAccess, host: AgentConnectHost): string {
   const hints = [agent.detail, needsOwnTunnel(agent, access) ? 'needs your own tunnel' : undefined].filter(Boolean).join(' · ');
   const detail = hints ? ` <span class="hint">${escapeHtml(hints)}</span>` : '';
   return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">`
     + `<summary><span class="name">${escapeHtml(agent.label)}</span>${detail}</summary>`
-    + `<div class="agentbody">${agentBody(agent, access)}</div>`
+    + `<div class="agentbody">${agentBody(agent, access, host)}</div>`
     + `</details>`;
 }
 
@@ -252,21 +282,21 @@ function needsOwnTunnel(agent: AgentChoice, access: DashboardRemoteAccess): bool
   return agent.method !== 'local' && !agent.viaRelay && !ownTunnel(access);
 }
 
-function agentBody(agent: AgentChoice, access: DashboardRemoteAccess): string {
-  if (agent.method === 'local') return localBody(agent);
-  if (needsOwnTunnel(agent, access)) return tunnelNeeded() + instructionsStep(agent, false);
+function agentBody(agent: AgentChoice, access: DashboardRemoteAccess, host: AgentConnectHost): string {
+  if (agent.method === 'local') return localBody(agent, host);
+  if (needsOwnTunnel(agent, access)) return tunnelNeeded(host) + instructionsStep(agent, false);
   if (access.state !== 'on') return remoteUnavailable(access) + instructionsStep(agent, false);
   if (agent.method === 'oauth' && !ownTunnel(access) && agent.approveViaRelay) {
     return `<ol class="steps">`
       + `<li>${escapeHtml(agent.add ?? '')}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, 'Copy address')}</li>`
-      + `<li>${escapeHtml(agent.approveViaRelay)}</li>`
+      + `<li>${approvalStep(agent, host)}</li>`
       + `<li>${instructionsStep(agent, true)}</li>`
       + `</ol>`;
   }
   if (agent.method === 'oauth') {
     return `<ol class="steps">`
       + `<li>${escapeHtml(agent.add ?? '')}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, 'Copy address')}</li>`
-      + `<li>${escapeHtml(agent.approve ?? '')}</li>`
+      + `<li>${host.platform === 'linux' ? approvalStep(agent, host, true) : escapeHtml(agent.approve ?? '')}</li>`
       + `<li data-agent-step>On that page, type a pairing code from here.${pairForm(agent.id)}</li>`
       + `<li>${instructionsStep(agent, true)}</li>`
       + `</ol>`;
@@ -283,17 +313,34 @@ function agentBody(agent: AgentChoice, access: DashboardRemoteAccess): string {
     + `<ol class="steps">`
     + `<li>Connector (MCP) address:${copyBox('agent-other-url', access.mcpUrl, 'Copy address')}`
     + `OpenAPI address, for agents that read an API description:${copyBox('agent-other-openapi', access.openapiUrl, 'Copy address')}</li>`
+    + (host.platform === 'linux' ? `<li>${approvalStep(agent, host, true)}</li>` : '')
     + `<li data-agent-step>Approve a connector with a pairing code.${pairForm(agent.id)}</li>`
     + `<li data-agent-step>Or create a key and give it to the agent as a bearer token.${keyForm(agent.id, 'Agent')}</li>`
     + `<li>${instructionsStep(agent, true)}</li>`
     + `</ol>`;
 }
 
-function localBody(agent: AgentChoice): string {
+function approvalStep(agent: AgentChoice, host: AgentConnectHost, pairing = false): string {
+  if (host.platform !== 'linux') return escapeHtml(agent.approveViaRelay ?? '');
+  if (!host.headless) return pairing
+    ? "Open the Olympus approval page in this computer's browser, through the owner's approval route."
+    : escapeHtml(agent.approveViaRelay ?? '');
+  const handoff = host.approvalHandoff?.();
+  if (!handoff) return 'Approval on this computer is not ready. Configure the owner-only SSH socket forward on the Olympus host, then return here.';
+  return 'Before connecting, run the owner-only SSH socket forward on your own computer and keep it running. '
+    + copyBox(`agent-${agent.id}-handoff`, handoff, 'Copy approval handoff')
+    + 'Start the connection in the agent on that computer. Open the approval page in its browser through the forward. '
+    + (pairing ? 'Approve with the pairing code from here.' : 'Choose Connect.')
+    + ' Olympus continues running on this computer.';
+}
+
+function localBody(agent: AgentChoice, host: AgentConnectHost): string {
+  const linux = host.platform === 'linux';
+  const prompt = linux ? LOCAL_AGENT_PROMPT.replace('Mac installer', 'Linux installer') : LOCAL_AGENT_PROMPT;
   return `<p>These run on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>`
-    + copyBox('agent-local-prompt', LOCAL_AGENT_PROMPT, 'Copy prompt', true)
+    + copyBox('agent-local-prompt', prompt, 'Copy prompt', true)
     + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>`
-    + `<p>The olympus path is the full path of the olympus command. On a Mac set up with the Olympus installer it is <b>~/.local/bin/olympus</b>, written out from your home folder. With OpenClaw it is <b>bin/olympus</b> inside the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>`
+    + `<p>The olympus path is the full path of the olympus command. On ${linux ? 'Linux set up with the Olympus Linux installer' : 'a Mac set up with the Olympus installer'} it is <b>~/.local/bin/olympus</b>, written out from your home folder. With OpenClaw it is <b>bin/olympus</b> inside the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>`
     + copyBox('agent-local-claude', CLAUDE_CODE_SNIPPET, 'Copy command')
     + `<p>For Codex, add this to ~/.codex/config.toml:</p>`
     + copyBox('agent-local-codex', CODEX_SNIPPET, 'Copy snippet')
@@ -302,8 +349,10 @@ function localBody(agent: AgentChoice): string {
 }
 
 /** For agents the relay cannot serve. Remote access may be on (through the relay), off, or not connected. */
-function tunnelNeeded(): string {
-  const text = 'Olympus\'s relay connects only ChatGPT, Claude and Grok, so this agent needs a tunnel you run yourself. '
+function tunnelNeeded(host: AgentConnectHost): string {
+  const text = (host.platform === 'linux'
+    ? 'Olympus\'s relay connects ChatGPT, Claude, Grok, Grok Bot and Cursor, so this agent needs a tunnel you run yourself. '
+    : 'Olympus\'s relay connects only ChatGPT, Claude and Grok, so this agent needs a tunnel you run yourself. ')
     + 'Advanced: set remote.publicBaseUrl in Olympus\'s settings to your tunnel\'s https address and turn on remote access; this agent\'s steps then appear here. '
     + 'Claude Code and Codex on this computer need no tunnel.';
   return `<p class="why" data-agent-needs-tunnel>${escapeHtml(text)}</p>`;
