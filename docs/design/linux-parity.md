@@ -247,13 +247,13 @@ Decided 2026-10-12: built-in models on by default on Linux (W2); photos
 the host cannot decode are reported, the rest indexed (W3); Omarchy is a
 first-class target.
 
-Open:
+zkAPI on a host that cannot run the namespace (stock Ubuntu without the
+admin step): the lane is refused and the one-time admin step offered; no
+weaker mode (decided 2026-10-12).
 
-1. zkAPI on a host that cannot run the namespace (stock Ubuntu 24.04 without
-   an admin step): refuse the lane and offer the one-time admin step, or
-   allow the clearly disclosed weaker mode. Recommendation: refuse by
-   default and offer the admin step; the weaker mode only if you want the
-   lane to work with no admin at all.
+Priority (2026-10-12): Omarchy first. If Ubuntu support proves
+disproportionately hard, Ubuntu may be dropped and Sparta moved to Omarchy.
+The test machine is the owner's Omarchy laptop.
 
 ## Out of scope
 
