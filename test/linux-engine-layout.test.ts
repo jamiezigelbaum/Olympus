@@ -58,3 +58,13 @@ test('Mac path and plist bytes are independent of XDG roots', () => {
   const input = { paths, homeDir: '/Users/example', program: { runtimePath: '/opt/bun', entryPath: '/opt/app/dist/cli.js', workingDirectory: '/opt/app', source: 'package' as const, build: '1+abc' } };
   expect(renderEnginePlist(input)).toBe(readFileSync(new URL('./fixtures/engine-mac.plist', import.meta.url), 'utf8'));
 });
+test('an existing same-path engine unit without a receipt is not adopted',()=>{
+ const {env}=fixture(); const l=resolveLinuxEngineLayout(env);mkdirSync(join(l.configHome,'systemd/user'),{recursive:true,mode:0o700});writeFileSync(l.unitPath,'owner unit',{mode:0o600});
+ expect(()=>publishLinuxEngineReceipt(l)).toThrow(l.unitPath); expect(readFileSync(l.unitPath,'utf8')).toBe('owner unit');expect(existsSync(l.receiptPath)).toBe(false);
+});
+
+test('matching receipt permits its verified default-root manager link, but never a replacement',()=>{
+ const {home,env}=fixture();const l=resolveLinuxEngineLayout(env);publishLinuxEngineReceipt(l);mkdirSync(join(l.configHome,'systemd/user'),{recursive:true,mode:0o700});writeFileSync(l.unitPath,'owned',{mode:0o600});
+ const defaultDir=join(home,'.config/systemd/user');mkdirSync(defaultDir,{recursive:true,mode:0o700});const link=join(defaultDir,'olympus-engine.service');symlinkSync(l.unitPath,link);
+ expect(()=>preflightLinuxEngineLayout(l)).not.toThrow();rmSync(link);symlinkSync('/unowned/unit',link);expect(()=>preflightLinuxEngineLayout(l)).toThrow('Existing Olympus');
+});

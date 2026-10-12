@@ -1,5 +1,5 @@
 /** One Linux layout shared by installers, services and consumers. No OpenClaw dependency. */
-import { lstatSync, mkdirSync, readFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
@@ -94,10 +94,16 @@ export function preflightLinuxEngineLayout(layout: LinuxEngineLayout, options: {
   if (options.fresh !== false) {
     const owned = readLinuxEngineReceipt(layout.receiptPath, uid);
     const candidates = [join(layout.home, '.olympus'), join(layout.home, '.config/olympus'), join(layout.home, '.local/share/openclaw/olympus'),
-      join(layout.home, '.local/share/olympus/engine'), layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir,
+      join(layout.home, '.local/share/olympus/engine'), layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir, layout.unitPath, join(layout.home, '.config/systemd/user/olympus-engine.service'),
       join(layout.home, '.config/systemd/user/olympus-worker.service'), join(layout.configHome, 'systemd/user/olympus-worker.service')];
-    const managed = new Set([layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir]);
-    const conflicts = [...new Set(candidates)].filter(p => stat(p) && !(owned && managed.has(p)));
+    const managed = new Set([layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir, layout.unitPath]);
+    const ownedRegistration = (p: string): boolean => {
+      if (!owned || p !== join(layout.home, '.config/systemd/user/olympus-engine.service')) return false;
+      const info = stat(p);
+      if (!info?.isSymbolicLink() || info.uid !== uid) return false;
+      try { assertLinuxManagedPath(dirname(p), uid, 'directory'); return realpathSync(p) === layout.unitPath; } catch { return false; }
+    };
+    const conflicts = [...new Set(candidates)].filter(p => stat(p) && !(owned && managed.has(p)) && !ownedRegistration(p));
     if (conflicts.length) throw new Error(`Existing Olympus data or competing custodian: ${conflicts.join(', ')}. Keep using the existing installation, or stop its custodian and explicitly back up and move the listed Olympus-owned data aside before retrying a fresh install. Nothing was changed.`);
   }
 }

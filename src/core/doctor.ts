@@ -1,3 +1,5 @@
+import { readEngineLinger, linuxInstalledBuild } from './linux-engine-service.ts';
+import { engineServicePaths, waitForEngineHealthy } from './engine-service.ts';
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 // Olympus doctor: a read-only health walk across the chain the calling assistant depends on
 // (Argus local model lanes, the private email source worker, and the source
@@ -138,28 +140,29 @@ export interface DoctorHostFacts {
   /** Absolute `openclaw` executable, when one is installed. */
   openclawPath?: string;
   /** The standalone engine LaunchAgent (macOS). */
-  engine: { installed: boolean; state: string };
+  engine: { installed: boolean; state: string; healthy?: boolean; detail?: string; linger?: boolean | undefined };
   /** The legacy worker unit from `olympus worker install`. */
   legacyWorkerUnit: boolean;
   /** Doctor is running inside the OpenClaw Gateway (the native tool surface). */
   insideOpenClaw?: boolean;
 }
 
-export function defaultDoctorHostProbe(
+export async function defaultDoctorHostProbe(
   env: Record<string, string | undefined> = process.env,
   options: { insideOpenClaw?: boolean } = {},
-): DoctorHostFacts {
+): Promise<DoctorHostFacts> {
   const home = env.HOME?.trim() || homedir();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
-  const engine = process.platform === 'darwin'
-    ? inspectEngine({ homeDir: home })
+  const engine = (process.platform === 'darwin' || process.platform === 'linux')
+    ? inspectEngine({ homeDir: home, env })
     : { installed: false, state: 'not_loaded' };
   const legacyWorkerUnit = process.platform === 'darwin' || process.platform === 'linux'
     ? existsSync(workerServicePaths(process.platform, home).unitPath)
     : false;
+  const health = process.platform === 'linux' && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...(openclawPath ? { openclawPath } : {}),
-    engine: { installed: engine.installed, state: engine.state },
+    engine: { installed: engine.installed, state: engine.state, ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
     legacyWorkerUnit,
     ...(options.insideOpenClaw ? { insideOpenClaw: true } : {}),
   };
@@ -518,6 +521,7 @@ async function ocrReadingCheck(deps: DoctorDeps): Promise<DoctorCheck> {
  */
 async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const facts = await deps.hostProbe!();
+  if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false)) return { name: 'host', ok: false, detail: facts.engine.detail || 'The Linux engine has not proved healthy and persistent.', hint: 'Run olympus engine status and olympus engine logs. Repair configuration, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start.' };
   const hosts: string[] = [];
   if (facts.engine.installed) hosts.push(`standalone engine (${facts.engine.state})`);
   if (facts.insideOpenClaw) hosts.push('OpenClaw (this Gateway)');
@@ -533,7 +537,7 @@ async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
       name: 'host',
       ok: false,
       detail: 'Nothing runs the Olympus engine on this machine: the standalone engine is not installed and OpenClaw is not installed.',
-      hint: 'On a Mac, run olympus engine install. With OpenClaw, install the Olympus plugin there instead.',
+      hint: (deps.platform ?? process.platform) === 'linux' ? 'Run olympus engine install from a Linux-enabled release in a working systemd user session.' : 'On a Mac, run olympus engine install. With OpenClaw, install the Olympus plugin there instead.',
     };
   }
   if (facts.engine.installed && facts.engine.state !== 'running' && !hasOpenClaw) {

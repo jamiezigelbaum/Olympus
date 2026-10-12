@@ -1,3 +1,4 @@
+import { linuxInstalledBuild } from './linux-engine-service.ts';
 /**
  * `olympus engine install|uninstall|status|start|stop|restart|rollback|logs`: the standalone
  * macOS engine's command surface. Mechanics live in engine-service.ts; this
@@ -12,6 +13,8 @@ import { engineStatusPath, type EngineStatusFile } from './engine-host.ts';
 import {
   engineConflictWarnings,
   enginePaths,
+  engineServicePaths,
+  waitForEngineHealthy,
   inspectEngine,
   installEngineVerified,
   readEngineConfig,
@@ -69,6 +72,7 @@ const DEFAULT_OPEN_HANDLER = { install: installOpenHandler, uninstall: uninstall
 export async function runEngineCommand(args: string[], deps: EngineCliDeps = {}): Promise<unknown> {
   const [command, ...rest] = args;
   const service = {
+    ...(deps.env ? { env: deps.env } : {}),
     ...(deps.homeDir ? { homeDir: deps.homeDir } : {}),
     ...(deps.exec ? { exec: deps.exec } : {}),
     ...(deps.uid !== undefined ? { uid: deps.uid } : {}),
@@ -106,14 +110,22 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     return handler ? { ...result, open_handler: handler } : result;
   }
   if (command === 'restart') {
-    return restartEngine({ ...service, ...parseNowArg('restart', rest) });
+    const since = Date.now();
+    const result = restartEngine({ ...service, ...parseNowArg('restart', rest) });
+    if ((deps.platform ?? process.platform) !== 'linux') return result;
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), since }, { ...deps.health, exec: deps.exec });
+    return { ...result, ok: health.ok, health };
   }
   if (command === 'stop') {
     return stopEngine({ ...service, ...parseNowArg('stop', rest) });
   }
   if (command === 'start') {
     expectNoArgs('start', rest);
-    return startEngine(service);
+    const since = Date.now();
+    const result = startEngine(service);
+    if ((deps.platform ?? process.platform) !== 'linux') return result;
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), ...(result.action === 'already_running' ? {} : { since }) }, { ...deps.health, exec: deps.exec });
+    return { ...result, ok: health.ok, health };
   }
   if (command === 'rollback') {
     expectNoArgs('rollback', rest);
@@ -126,10 +138,10 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
   if (command === 'logs') {
     const options = parseLogsArgs(rest);
     if (options.follow) {
-      await followEngineLogs(deps.homeDir ?? homedir(), options.lines);
+      await followEngineLogs(deps, options.lines);
       return undefined;
     }
-    return readEngineLogs({ ...(deps.homeDir ? { homeDir: deps.homeDir } : {}), lines: options.lines });
+    return readEngineLogs({ ...service, lines: options.lines });
   }
   throw new OperationError('invalid_params', `Unknown engine command: ${command ?? ''}`.trim(), 'Run olympus engine --help.');
 }
@@ -150,9 +162,9 @@ function openHandlerOptions(deps: EngineCliDeps, service: { homeDir?: string; pl
 export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Record<string, unknown>> {
   const homeDir = deps.homeDir ?? homedir();
   const env = { ...(deps.env ?? process.env), HOME: homeDir };
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ ...deps, homeDir });
   const agent = inspectEngine({
-    homeDir,
+    homeDir, env,
     ...(deps.exec ? { exec: deps.exec } : {}),
     ...(deps.uid !== undefined ? { uid: deps.uid } : {}),
     ...(deps.platform ? { platform: deps.platform } : {}),
@@ -172,8 +184,10 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const relayStatus = readRemoteAccessStatus(relayDir);
   const relayRunning = relayProcessRunning(relayDir);
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
-  const worker = await probeWorker(deps.fetchImpl ?? fetch, baseUrl);
+  const worker = await probeWorker(deps.fetchImpl ?? fetch, baseUrl, paths.linux?.workerSocketPath);
+  const linuxHealth = paths.linux ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ ...deps, homeDir }) }, { ...deps.health, timeoutMs: 0, fetchImpl: deps.fetchImpl, exec: deps.exec }) : undefined;
   const missing: string[] = [];
+  if (linuxHealth && !linuxHealth.ok) missing.push(linuxHealth.reason ?? 'Linux engine health is unknown.');
   if (!agent.installed) missing.push('The engine agent is not installed: run olympus engine install.');
   else if (agent.state === 'not_loaded') missing.push('The engine agent is installed but not loaded: run olympus engine install.');
   if (!pluginConfig && !configError) missing.push(`${paths.configPath} is missing: run olympus engine install.`);
@@ -185,7 +199,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
     missing.push('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
   }
   return {
-    ok: agent.state === 'running' && worker.reachable && !configError && (remoteMode.mode !== 'relay' || relayRunning),
+    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && (remoteMode.mode !== 'relay' || relayRunning),
     host: openclaw
       ? { mode: 'standalone', openclaw: 'installed (optional; not used by the engine)', openclaw_path: openclaw }
       : { mode: 'standalone', openclaw: 'not installed (not needed)' },
@@ -220,11 +234,11 @@ function readEngineStatusFile(env: Record<string, string | undefined>): EngineSt
   }
 }
 
-async function probeWorker(fetchImpl: typeof fetch, baseUrl: string): Promise<{ reachable: boolean; detail: string }> {
+async function probeWorker(fetchImpl: typeof fetch, baseUrl: string, socket?: string): Promise<{ reachable: boolean; detail: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 1_500);
   try {
-    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/health`, { method: 'GET', signal: controller.signal });
+    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/health`, { method: 'GET', signal: controller.signal, ...(socket ? { unix: socket } : {}) });
     await response.body?.cancel().catch(() => undefined);
     return { reachable: response.ok, detail: `HTTP ${response.status}` };
   } catch {
@@ -234,8 +248,8 @@ async function probeWorker(fetchImpl: typeof fetch, baseUrl: string): Promise<{ 
   }
 }
 
-async function followEngineLogs(homeDir: string, lines: number): Promise<void> {
-  const paths = enginePaths(homeDir);
+async function followEngineLogs(deps: EngineCliDeps, lines: number): Promise<void> {
+  const paths = engineServicePaths(deps);
   const child = spawn('tail', ['-n', String(lines), '-F', paths.logPath, paths.errorLogPath], { stdio: ['ignore', 'pipe', 'ignore'] });
   const reader = createInterface({ input: child.stdout });
   reader.on('line', (line) => console.log(redactLogLine(line)));

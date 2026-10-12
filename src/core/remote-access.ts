@@ -131,6 +131,7 @@ export function remoteAccessDir(env: Record<string, string | undefined> = proces
  * `resolveRemoteConnectionsDbPathForCli` finds the connection database.
  */
 export function remoteAccessDirForCli(env: Record<string, string | undefined> = process.env): string {
+  if (process.platform === 'linux') return remoteAccessDir(env);
   const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
   const xdg = env.XDG_DATA_HOME?.trim() || workerEnv?.XDG_DATA_HOME;
   return remoteAccessDir({ ...(env.HOME !== undefined ? { HOME: env.HOME } : {}), ...(xdg ? { XDG_DATA_HOME: xdg } : {}) });

@@ -225,12 +225,12 @@ describe('olympus engine install/uninstall', () => {
     expect(existsSync(enginePaths(home).plistPath)).toBe(false);
   });
 
-  test('refuses a directory that is not an Olympus checkout, and non-macOS hosts', () => {
+  test('refuses a directory that is not an Olympus checkout, and unsupported hosts', () => {
     const { root, home, bun } = fixture();
     mkdirSync(join(root, 'not-olympus'));
     expect(() => installEngine({ platform: 'darwin', homeDir: home, exec: fakeLaunchctl().exec, fromCheckout: join(root, 'not-olympus'), bunBin: bun }))
       .toThrow('is not an Olympus checkout');
-    expect(() => installEngine({ platform: 'linux', homeDir: home })).toThrow('macOS');
+    expect(() => installEngine({ platform: 'freebsd', homeDir: home })).toThrow('macOS');
   });
 
   test('uninstall unloads and removes the agent but keeps config and worker env; repeating it is a no-op', () => {
@@ -273,7 +273,7 @@ describe('olympus engine install/uninstall', () => {
     expect(inspectEngine({ platform: 'darwin', homeDir: home, exec: launchctl.exec })).toMatchObject({ installed: true, state: 'running', pid: 4242 });
     const paths = enginePaths(home);
     writeFileSync(paths.logPath, `one\nworker ready token=${'a'.repeat(48)}\n`);
-    const logs = readEngineLogs({ homeDir: home, lines: 1 });
+    const logs = readEngineLogs({ platform: 'darwin', homeDir: home, lines: 1 });
     expect(logs.stdout).toEqual(['worker ready token=[redacted]']);
     expect(logs.stderr).toEqual([]);
     expect(parseInstallArgs(['--from-checkout', '/x', '--dry-run'])).toEqual({ fromCheckout: '/x', dryRun: true });
