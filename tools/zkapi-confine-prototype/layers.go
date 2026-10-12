@@ -39,22 +39,25 @@ func allThreads(trap, a1, a2, a3 uintptr) error {
 }
 
 // markCloexec makes every inherited descriptor above stderr close on exec, so
-// nothing the supervisor left open can reach the daemon.
-func markCloexec() {
+// nothing the supervisor left open can reach the daemon. A failure is an error
+// the caller must turn into a refusal: a descriptor left open is a way out.
+func markCloexec() error {
 	const closeRangeCloexec = 4
 	if _, _, e := syscall.RawSyscall(sysCloseRange, 3, ^uintptr(0), closeRangeCloexec); e == 0 {
-		return
+		return nil
 	}
 	entries, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
-		return
+		return fmt.Errorf("cannot sanitize inherited descriptors: %w", err)
 	}
 	for _, ent := range entries {
 		fd, err := strconv.Atoi(ent.Name())
-		if err == nil && fd > 2 {
-			syscall.CloseOnExec(fd)
+		if err != nil || fd <= 2 {
+			continue
 		}
+		syscall.CloseOnExec(fd)
 	}
+	return nil
 }
 
 // ---------------------------------------------------------------- loopback
@@ -275,7 +278,9 @@ const (
 )
 
 // hardenSelf protects the launcher stages themselves: no ptrace, no memory
-// access by the (same-uid) daemon, no new privileges.
+// access by the (same-uid) daemon, no new privileges, and for stage0 and stage1
+// a Landlock domain that names the only ports each may connect to. Any failure
+// is returned; the caller refuses the session.
 func hardenSelf(p profile, cfg *config) ([]string, error) {
 	var layers []string
 	if err := allThreads(syscall.SYS_PRCTL, prSetNoNewPrivs, 1, 0); err != nil {
@@ -288,9 +293,19 @@ func hardenSelf(p profile, cfg *config) ([]string, error) {
 		}
 		layers = append(layers, "launcher-undumpable")
 	}
-	if p == profileStage1 && cfg != nil {
+	if p != profileStage2 && cfg != nil {
 		if abi, err := landlockABI(); err == nil && abi >= 8 {
-			spec := landlockSpec{connect: cfg.connect, bind: cfg.bind, unixDir: cfg.dir, blockUnix: true, scoped: false, tsync: true}
+			spec := landlockSpec{blockUnix: true, tsync: true}
+			if p == profileStage0 {
+				for _, r := range cfg.reach {
+					spec.connect = append(spec.connect, r.hostPort)
+				}
+			} else {
+				// Stage1's domain is the parent of the daemon's: a right it does not
+				// grant, the daemon cannot have. It grants exactly the daemon's ports.
+				spec.connect = cfg.connect
+				spec.bind = cfg.bind
+			}
 			if l, _, err := applyLandlock(spec); err != nil {
 				return nil, err
 			} else if len(l) > 0 {

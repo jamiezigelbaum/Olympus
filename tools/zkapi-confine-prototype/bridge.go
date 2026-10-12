@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net"
@@ -12,62 +15,138 @@ import (
 
 const maxBridgeConns = 64
 
-type bridgeSet struct {
-	listeners []net.Listener
-	paths     []string
-	expose    []string
-	reach     []string
+// ---------------------------------------------------------------------------
+// Two bridges, neither of which resolves a path after the daemon starts.
+//
+// expose (host -> namespace, the daemon API). Stage0 binds <dir>/<name>.sock
+// before the daemon exists and authenticates every connection with a mutual
+// handshake keyed by a token that only travels on the private status
+// descriptor. An authenticated connection is passed to stage1 as a descriptor;
+// stage1 dials the fixed in-namespace port and pumps. A replaced or redirected
+// socket path therefore fails the supervisor's handshake instead of carrying
+// its request anywhere, and a stranger who reaches the socket is closed.
+//
+// reach (namespace -> host, Tor). Stage1 listens on the fixed namespace port.
+// Each accepted connection is passed to stage0 as a descriptor and stage0
+// dials the fixed host port. There is no socket path at all.
+
+type exposeBridge struct {
+	name string
+	port int
+	path string
+	ln   net.Listener
 }
 
-func (b *bridgeSet) exposed() []string { return b.expose }
-func (b *bridgeSet) reached() []string { return b.reach }
-
-func (b *bridgeSet) close() {
-	for _, l := range b.listeners {
-		_ = l.Close()
-	}
-	for _, p := range b.paths {
-		_ = os.Remove(p)
-	}
-}
-
-// openBridges binds every listener before anything untrusted runs, so a
-// listener that cannot be bound refuses the session and nothing races it.
-func openBridges(cfg *config) (*bridgeSet, error) {
-	b := &bridgeSet{}
+func openExpose(cfg *config) ([]*exposeBridge, error) {
+	var out []*exposeBridge
 	for _, e := range cfg.expose {
 		path := filepath.Join(cfg.dir, e.name+".sock")
 		if len(path) > 100 {
+			closeExpose(out)
 			return nil, fmt.Errorf("socket path too long")
 		}
 		_ = os.Remove(path)
 		l, err := net.Listen("unix", path)
 		if err != nil {
-			b.close()
+			closeExpose(out)
 			return nil, err
 		}
-		b.listeners = append(b.listeners, l)
-		b.paths = append(b.paths, path)
-		b.expose = append(b.expose, e.name)
-		go acceptLoop(l, "tcp4", fmt.Sprintf("127.0.0.1:%d", e.port))
-	}
-	for _, r := range cfg.reach {
-		l, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", r.port))
-		if err != nil {
-			b.close()
+		if err := os.Chmod(path, 0o600); err != nil {
+			_ = l.Close()
+			closeExpose(out)
 			return nil, err
 		}
-		b.listeners = append(b.listeners, l)
-		b.reach = append(b.reach, fmt.Sprintf("%d", r.port))
-		go acceptLoop(l, "unix", filepath.Join(cfg.dir, r.name+".sock"))
+		out = append(out, &exposeBridge{name: e.name, port: e.port, path: path, ln: l})
 	}
-	return b, nil
+	return out, nil
 }
 
-// acceptLoop forwards each accepted connection to one fixed destination. A
-// destination that does not answer closes the accepted connection at once, so
-// a dead bridge is a fast failure and never a hang.
-func acceptLoop(l net.Listener, network, address string) {
+func closeExpose(bs []*exposeBridge) {
+	for _, b := range bs {
+		_ = b.ln.Close()
+		_ = os.Remove(b.path)
+	}
+}
+
+func mac(token []byte, role, name string, parts ...[]byte) []byte {
+	m := hmac.New(sha256.New, token)
+	m.Write([]byte("zkapi-confine/" + role + "/" + name + "\x00"))
+	for _, p := range parts {
+		m.Write(p)
+	}
+	return m.Sum(nil)
+}
+
+// serverHandshake authenticates the peer and proves this end holds the token.
+func serverHandshake(c net.Conn, token []byte, name string) bool {
+	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+	defer c.SetDeadline(time.Time{})
+	var cn, sn [16]byte
+	if _, err := io.ReadFull(c, cn[:]); err != nil {
+		return false
+	}
+	if _, err := rand.Read(sn[:]); err != nil {
+		return false
+	}
+	reply := append(append([]byte{}, sn[:]...), mac(token, "srv", name, cn[:], sn[:])...)
+	if _, err := c.Write(reply); err != nil {
+		return false
+	}
+	var proof [32]byte
+	if _, err := io.ReadFull(c, proof[:]); err != nil {
+		return false
+	}
+	return hmac.Equal(proof[:], mac(token, "cli", name, cn[:], sn[:]))
+}
+
+// exposeLoop accepts, authenticates and hands each connection to stage1.
+func exposeLoop(b *exposeBridge, token []byte, ctl *ctlConn) {
+	slots := make(chan struct{}, maxBridgeConns)
+	for {
+		c, err := b.ln.Accept()
+		if err != nil {
+			return
+		}
+		select {
+		case slots <- struct{}{}:
+		default:
+			c.Close()
+			continue
+		}
+		go func() {
+			defer func() { <-slots }()
+			if !serverHandshake(c, token, b.name) {
+				c.Close()
+				return
+			}
+			f, err := c.(*net.UnixConn).File()
+			c.Close()
+			if err != nil {
+				return
+			}
+			defer f.Close()
+			_ = ctl.send(map[string]any{"t": "api", "bridge": b.name}, f)
+		}()
+	}
+}
+
+// dialAndPump runs in whichever stage received the descriptor.
+func dialAndPump(f *os.File, address string) {
+	c, err := net.FileConn(f)
+	f.Close()
+	if err != nil {
+		return
+	}
+	d, err := net.DialTimeout("tcp4", address, 2*time.Second)
+	if err != nil {
+		c.Close() // a dead destination is a fast failure, never a hang
+		return
+	}
+	pump(c, d)
+}
+
+// reachLoop accepts inside the namespace and passes each connection to stage0.
+func reachLoop(l net.Listener, nsPort int, ctl *ctlConn) {
 	slots := make(chan struct{}, maxBridgeConns)
 	for {
 		c, err := l.Accept()
@@ -82,12 +161,13 @@ func acceptLoop(l net.Listener, network, address string) {
 		}
 		go func() {
 			defer func() { <-slots }()
-			d, err := net.DialTimeout(network, address, 2*time.Second)
+			f, err := c.(*net.TCPConn).File()
+			c.Close()
 			if err != nil {
-				c.Close()
 				return
 			}
-			pump(c, d)
+			defer f.Close()
+			_ = ctl.send(map[string]any{"t": "reach", "nsPort": nsPort}, f)
 		}()
 	}
 }

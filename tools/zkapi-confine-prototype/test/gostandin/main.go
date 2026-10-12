@@ -25,7 +25,34 @@ func dial(network, addr string) string {
 	return "connected"
 }
 
+// dgramDecoy is a host-side Unix datagram socket the matrix owns: it appends
+// every datagram it receives to <path>.log, so an attempt that got through is
+// visible to the test. (Node has no Unix datagram sockets.)
+func dgramDecoy(path string) {
+	_ = os.Remove(path)
+	pc, err := net.ListenPacket("unixgram", path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "dgram-decoy:", err)
+		os.Exit(1)
+	}
+	fmt.Println("ready")
+	buf := make([]byte, 2048)
+	for {
+		n, _, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		f, _ := os.OpenFile(path+".log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		f.Write(append(buf[:n], '\n'))
+		f.Close()
+	}
+}
+
 func main() {
+	if len(os.Args) > 2 && os.Args[1] == "dgram-decoy" {
+		dgramDecoy(os.Args[2])
+		return
+	}
 	api, _ := strconv.Atoi(os.Args[1])
 	tor, _ := strconv.Atoi(os.Args[2])
 	other, _ := strconv.Atoi(os.Args[3])

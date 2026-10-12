@@ -16,14 +16,14 @@ type exposeSpec struct {
 }
 
 type reachSpec struct {
-	port int
-	name string
+	nsPort   int // 127.0.0.1:nsPort inside the namespace
+	hostPort int // 127.0.0.1:hostPort in the host network namespace
 }
 
 type config struct {
 	dir     string
-	expose  []exposeSpec // unix socket in dir -> 127.0.0.1:port inside the namespace
-	reach   []reachSpec  // 127.0.0.1:port inside the namespace -> unix socket in dir
+	expose  []exposeSpec // authenticated unix socket in dir -> 127.0.0.1:port inside the namespace
+	reach   []reachSpec  // 127.0.0.1:nsPort inside the namespace -> 127.0.0.1:hostPort on the host
 	connect []int        // Landlock: TCP connect allowed
 	bind    []int        // Landlock: TCP bind allowed
 	prog    []string
@@ -78,10 +78,11 @@ func parseConfig(args []string) (*config, error) {
 				cfg.expose = append(cfg.expose, exposeSpec{left, p})
 			} else {
 				p, err := parsePort(left)
-				if err != nil || !nameRE.MatchString(right) {
+				hp, err2 := parsePort(right)
+				if err != nil || err2 != nil {
 					return nil, fmt.Errorf("bad --reach %q", v)
 				}
-				cfg.reach = append(cfg.reach, reachSpec{p, right})
+				cfg.reach = append(cfg.reach, reachSpec{p, hp})
 			}
 		case "--status-fd":
 			v, err := next(a)
@@ -110,8 +111,11 @@ func parseConfig(args []string) (*config, error) {
 	if len(cfg.prog) == 0 || !strings.HasPrefix(cfg.prog[0], "/") {
 		return nil, fmt.Errorf("the program must be an absolute path after --")
 	}
-	if (len(cfg.expose) > 0 || len(cfg.reach) > 0) && cfg.dir == "" {
-		return nil, fmt.Errorf("--dir is required with bridges")
+	if len(cfg.expose) > 0 && cfg.dir == "" {
+		return nil, fmt.Errorf("--dir is required with --expose")
+	}
+	if !cfg.status {
+		return nil, fmt.Errorf("the private status descriptor is required: pass --status-fd 3")
 	}
 	if cfg.dir != "" {
 		st, err := os.Lstat(cfg.dir)
@@ -126,7 +130,7 @@ func parseConfig(args []string) (*config, error) {
 	return cfg, nil
 }
 
-// stageReport is stage2's account of what it applied, sent to stage1 on fd 3.
+// stageReport is stage2's account of what it applied, sent to stage1 on its report pipe.
 type stageReport struct {
 	OK     bool     `json:"ok"`
 	Code   string   `json:"code,omitempty"`

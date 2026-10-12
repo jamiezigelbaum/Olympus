@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"runtime"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -22,7 +24,7 @@ const (
 	cloneNewMask = 0x7E020080 // NEWNS|NEWCGROUP|NEWUTS|NEWIPC|NEWUSER|NEWPID|NEWNET|NEWTIME
 	afUnix       = 1
 	afInet       = 2
-	afNetlink = 16
+	afNetlink    = 16
 	sockTypeMask = 0xf
 	sockStream   = 1
 	ipprotoTCP   = 6
@@ -159,48 +161,67 @@ func buildFilter(p profile) ([]sockFilter, error) {
 	a.and(cloneNewMask)
 	a.jump(bpfJeqK, 0, "allow", "deny")
 
-	a.label("pair") // anonymous AF_UNIX pairs cannot name a host socket
+	a.label("pair")
+	// Only an anonymous, already-connected AF_UNIX stream pair, and only in the
+	// daemon. A datagram or seqpacket pair could be re-pointed at a host
+	// pathname socket; a stream pair cannot (connect() on it is EISCONN).
+	// Stage1's filter is inherited by the daemon, so it grants exactly what the
+	// daemon's own filter grants; only stage0, which never starts the daemon,
+	// has no pair at all.
 	if p == profileStage0 {
 		a.ret(retErrnoBase | uint32(syscall.EPERM))
 	} else {
 		a.ld(16)
-		a.jump(bpfJeqK, afUnix, "allow", "deny")
+		a.jump(bpfJeqK, afUnix, "pair_type", "deny")
+		a.label("pair_type")
+		a.ld(24)
+		a.and(sockTypeMask)
+		types := []uint32{sockStream}
+		if prototype { // measuring which pair types the runtimes' process spawning needs
+			for _, name := range strings.Split(os.Getenv("ZKAPI_CONFINE_PROTOTYPE_PAIR_ALLOW"), ",") {
+				switch name {
+				case "dgram":
+					types = append(types, 2)
+				case "seqpacket":
+					types = append(types, 5)
+				}
+			}
+		}
+		for i, typ := range types {
+			if i == len(types)-1 {
+				a.jump(bpfJeqK, typ, "pair_proto", "deny")
+			} else {
+				a.jump(bpfJeqK, typ, "pair_proto", "")
+			}
+		}
+		a.label("pair_proto")
+		a.ld(32)
+		a.jump(bpfJeqK, 0, "allow", "deny")
 	}
 
 	a.label("sock")
-	switch p {
-	case profileStage0:
+	// No AF_UNIX socket() for any stage: the bridges are descriptors passed
+	// over the control channel, never sockets a stage opens by name.
+	a.ld(16)
+	a.jump(bpfJeqK, afInet, "sock_inet", "")
+	if p == profileStage0 {
 		a.ret(retErrnoBase | uint32(syscall.EPERM))
-	default:
-		a.ld(16)
-		if p == profileStage1 {
-			a.jump(bpfJeqK, afUnix, "sock_unix", "")
-		}
-		a.jump(bpfJeqK, afInet, "sock_inet", "")
+	} else {
 		a.jump(bpfJeqK, afNetlink, "sock_netlink", "deny")
-		if p == profileStage1 {
-			a.label("sock_unix")
-			a.ld(24)
-			a.and(sockTypeMask)
-			a.jump(bpfJeqK, sockStream, "sock_unix_proto", "deny")
-			a.label("sock_unix_proto")
-			a.ld(32)
-			a.jump(bpfJeqK, 0, "allow", "deny")
-		}
-		// Route-table netlink only, read-only without capabilities: the runtimes'
-		// interface enumeration (getifaddrs) needs it.
+		// Route-table netlink only, read-only without capabilities: the
+		// runtimes' interface enumeration (getifaddrs) needs it.
 		a.label("sock_netlink")
 		a.ld(32)
 		a.jump(bpfJeqK, 0, "allow", "deny")
-		a.label("sock_inet")
-		a.ld(24)
-		a.and(sockTypeMask)
-		a.jump(bpfJeqK, sockStream, "sock_inet_proto", "deny")
-		a.label("sock_inet_proto")
-		a.ld(32)
-		a.jump(bpfJeqK, 0, "allow", "")
-		a.jump(bpfJeqK, ipprotoTCP, "allow", "deny")
 	}
+	a.label("sock_inet")
+	a.ld(24)
+	a.and(sockTypeMask)
+	a.jump(bpfJeqK, sockStream, "sock_inet_proto", "deny")
+	a.label("sock_inet_proto")
+	a.ld(32)
+	a.jump(bpfJeqK, 0, "allow", "")
+	a.jump(bpfJeqK, ipprotoTCP, "allow", "deny")
 	a.label("allow")
 	a.ret(retAllow)
 	a.label("deny")

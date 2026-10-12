@@ -107,7 +107,12 @@ async function run(t, role) {
   r.bind_other_port = await bindRow(t.bindOther);
   r.bind_tor_port = await bindRow(t.tor);
   r.bind_ephemeral = await bindRow(0);
-  r.bind_all_interfaces = await bindRow(t.bindOther, '0.0.0.0');
+  // A wildcard bind on a port the daemon may bind is allowed (Landlock has no
+  // address rule); inside a namespace whose only interface is loopback it is
+  // the same listener as the loopback bind. A wildcard bind on any other port
+  // is refused by the port rule.
+  r.bind_wildcard_forbidden_port = await bindRow(t.bindOther, '0.0.0.0');
+  r.bind_wildcard_permitted_port = await bindRow(t.wallet, '0.0.0.0');
   return r;
 }
 
@@ -115,18 +120,21 @@ function childProbe(t) {
   const argv = [__filename, JSON.stringify(t), 'child'];
   return JSON.parse(execFileSync(process.execPath, argv, { timeout: 30000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
 }
-function stat3(pid) {
-  try { const s = fs.readFileSync('/proc/' + pid + '/stat', 'utf8'); return Number(s.slice(s.lastIndexOf(')') + 1).trim().split(/\s+/)[1]); } catch { return 1; }
+// Inside a PID namespace getppid() is 1, but /proc is the host's procfs, which
+// reports pids as the host sees them: /proc/self/status gives the host pid of
+// the launcher (stage1), and its stat gives stage0.
+function hostPpid(pid) {
+  try { const m = /^PPid:\s*(\d+)/m.exec(fs.readFileSync('/proc/' + pid + '/status', 'utf8')); return m ? Number(m[1]) : 1; } catch { return 1; }
 }
 function goProbe(t) {
   if (!t.launcher) return undefined;
   try {
-    const stage1 = process.ppid; const stage0 = stat3(stage1);
-    return JSON.parse(execFileSync(t.launcher, ['probe', String(stage1), String(stage0)], { timeout: 15000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+    const stage1 = hostPpid('self'); const stage0 = hostPpid(stage1);
+    return JSON.parse(execFileSync(t.launcher, ['probe', String(stage1), String(stage0), t.hostUnix, t.hostDgram], { timeout: 15000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
   } catch { return { error: 'probe_failed' }; }
 }
 
-module.exports = { run, childProbe, goProbe, decoyFds, tcp };
+module.exports = { run, childProbe, goProbe, decoyFds, tcp, hostPpid };
 
 if (require.main === module) {
   const t = JSON.parse(process.argv[2]);
