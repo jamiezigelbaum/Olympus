@@ -1456,6 +1456,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json(await sourceDashboard.panelTools.call(name, args as Record<string, unknown>, {
             ...dashboardPanelCallContext(url, request),
             opener: dashboardPanelOpener(request),
+            ...(request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local' ? { localSession: true } : {}),
           }));
         }
 

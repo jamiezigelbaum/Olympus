@@ -39,11 +39,12 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
 import { DASHBOARD_COMPUTER_PANEL_COPY } from '../src/workers/dashboard/vocabulary.ts';
-import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { createDashboardPanelTools, type DashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { DASHBOARD_TOOLS_CALL_PATH } from '../src/workers/dashboard/host-page.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createLocalPrivateAnswers, type LocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
 import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
-import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, DASHBOARD_PRIVATE_ANSWERS_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, DASHBOARD_PRIVATE_ANSWERS_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import {
@@ -475,7 +476,7 @@ describe('Answer and Dismiss on a waiting question', () => {
 const ORIGIN = 'http://127.0.0.1:28191';
 const TOKEN = 'worker-secret';
 
-function worker(privateAnswers: LocalPrivateAnswers | undefined) {
+function worker(privateAnswers: LocalPrivateAnswers | undefined, panelTools?: DashboardPanelTools) {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-private-answers-worker-'));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   const created = createEmailSourceWorker({
@@ -497,6 +498,7 @@ function worker(privateAnswers: LocalPrivateAnswers | undefined) {
       registryPath: join(dir, 'handles.json'),
       registryAdoptionIntervalMs: 0,
       ...(privateAnswers ? { privateAnswers } : {}),
+      ...(panelTools ? { panelTools } : {}),
     },
   });
   cleanups.push(() => created.close?.());
@@ -633,18 +635,45 @@ describe('the waiting count reaches only the computer\'s control session', () =>
   }
   const metaOf = (result: unknown) => ((result as { _meta?: unknown })._meta as Record<string, Record<string, unknown>> | undefined)?.[COMPUTER_META_KEY];
 
-  test('a control session gets the count; the Gateway bearer and a locked reader do not', async () => {
+  test('a local session gets the count; any other session, the Gateway bearer and a locked reader do not', async () => {
     const panel = tools(2);
-    expect(metaOf(await panel.call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, opener: 'session:owner' }))?.waitingPrivateQuestions).toBe(2);
+    expect(metaOf(await panel.call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, opener: 'session:owner', localSession: true }))?.waitingPrivateQuestions).toBe(2);
+    // A session that is not local grade (a bearer mint or a launch ticket).
+    expect(metaOf(await panel.call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, opener: 'session:owner' }))?.waitingPrivateQuestions).toBeUndefined();
     expect(metaOf(await panel.call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, opener: 'bearer' }))?.waitingPrivateQuestions).toBeUndefined();
     expect(metaOf(await panel.call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN }))?.waitingPrivateQuestions).toBeUndefined();
     // Nothing waiting: no count at all.
-    expect(metaOf(await tools(0).call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, opener: 'session:owner' }))?.waitingPrivateQuestions).toBeUndefined();
+    expect(metaOf(await tools(0).call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, opener: 'session:owner', localSession: true }))?.waitingPrivateQuestions).toBeUndefined();
+  });
+
+  test('through the HTTP boundary: only a local session\'s tool call carries the count; a bearer-minted or launch-ticket session, the bearer, and a forged grade header get nothing', async () => {
+    const fetcher = worker(undefined, tools(2));
+    const call = (headers: Record<string, string>) => fetcher(new Request(`${ORIGIN}${DASHBOARD_TOOLS_CALL_PATH}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: ORIGIN, ...headers },
+      body: JSON.stringify({ name: DASHBOARD_TOOL_NAME, arguments: {} }),
+    }));
+    const countVia = async (headers: Record<string, string>) => {
+      const response = await call(headers);
+      expect(response.status).toBe(200);
+      return metaOf(await response.json())?.waitingPrivateQuestions;
+    };
+    const local = await localSession(fetcher);
+    expect(await countVia({ Cookie: local.cookie, 'X-Olympus-CSRF': local.csrf })).toBe(2);
+    // A bearer holder mints a session, then calls with its cookie and CSRF and no Authorization.
+    const bearerMinted = await bearerSession(fetcher);
+    expect(await countVia({ Cookie: bearerMinted.cookie, 'X-Olympus-CSRF': bearerMinted.csrf })).toBeUndefined();
+    const launched = await launchSession(fetcher);
+    expect(await countVia({ Cookie: launched.cookie, 'X-Olympus-CSRF': launched.csrf })).toBeUndefined();
+    expect(await countVia({ Authorization: `Bearer ${TOKEN}` })).toBeUndefined();
+    // The grade header is the boundary's alone: a caller's own copy is stripped.
+    expect(await countVia({ Cookie: bearerMinted.cookie, 'X-Olympus-CSRF': bearerMinted.csrf, [DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER]: 'local' })).toBeUndefined();
+    expect(await countVia({ Authorization: `Bearer ${TOKEN}`, [DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER]: 'local' })).toBeUndefined();
   });
 
   test('ChatGPT\'s dashboard result, and every word its model reads, is the same whether or not questions wait', async () => {
     const chatgpt = await callChatGptTool(DASHBOARD_TOOL_NAME, {}, {} as never, { dashboardView: async () => view } as never, new AbortController().signal);
-    const computer = await tools(3).call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, opener: 'session:owner' });
+    const computer = await tools(3).call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, opener: 'session:owner', localSession: true });
     const { [COMPUTER_META_KEY]: computerOnly, ...sharedMeta } = (computer._meta ?? {}) as Record<string, unknown>;
     expect((computerOnly as Record<string, unknown>).waitingPrivateQuestions).toBe(3);
     // Everything but the computer's own key is ChatGPT's result, unchanged.

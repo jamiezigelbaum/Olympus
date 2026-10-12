@@ -30,9 +30,10 @@
  *   gets the names alone. Past the first page, `olympus_unreadable_files
  *   {source_id, after}` lists the next (a keyset cursor, so a file judged
  *   Secrets between pages moves nothing), so every file is reachable.
- * - for a control session in the computer's browser, the meta also counts the
- *   private questions waiting here (`waitingPrivateQuestions`), the computer's
- *   one Needs you line. Never for the Gateway bearer, never to ChatGPT.
+ * - for a local-grade control session (the computer's own browser), the meta
+ *   also counts the private questions waiting here (`waitingPrivateQuestions`),
+ *   the computer's one Needs you line. Never for the Gateway bearer, a session
+ *   the bearer minted or a launch ticket redeemed, and never to ChatGPT.
  */
 import {
   COMPUTER_HOST_TOOL_NAMES,
@@ -68,6 +69,12 @@ export interface DashboardPanelCallContext {
    * or the worker bearer. Absent (a locked dash_ reader): names, no tokens.
    */
   opener?: string;
+  /**
+   * True only for a local-grade control session (minted from this computer's
+   * own browser): the grade workers/http.ts injects after the cookie checked
+   * out. A bearer-minted or launch-ticket session, and the bearer, are never local.
+   */
+  localSession?: boolean;
 }
 
 export interface DashboardPanelTools {
@@ -92,9 +99,9 @@ export interface DashboardPanelToolsOptions {
   /**
    * How many private questions wait for this computer (core/
    * waiting-private-questions.ts), for the computer's one Needs you line.
-   * Put in the computer meta only for a control session in the computer's
-   * browser, never for the Gateway bearer (the OpenClaw tab) or a locked
-   * reader, and never in anything ChatGPT receives.
+   * Put in the computer meta only for a local-grade control session, never
+   * for the Gateway bearer (the OpenClaw tab), a bearer-minted or launch-ticket
+   * session, or a locked reader, and never in anything ChatGPT receives.
    */
   waitingPrivateQuestions?: () => number;
 }
@@ -327,7 +334,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       const on = await options.indexFasterState().catch(() => undefined);
       const unpair = computerUnpairEntries(view);
       const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context.opener);
-      const waiting = context.opener?.startsWith('session:') ? waitingCount(options) : 0;
+      const waiting = context.localSession === true ? waitingCount(options) : 0;
       if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0) return result;
       const meta: ComputerDashboardMeta = {
         ...(on !== undefined ? { indexFaster: { on } } : {}),
