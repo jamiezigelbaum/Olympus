@@ -291,3 +291,20 @@ test('bridge readiness uses bounded async probes and refuses an inactive session
     run: async (argv, options) => { count++; expect(options.timeoutMs).toBe(3000); expect(argv).toContain('is-active'); return { status: 3, stdout: 'inactive', stderr: '' }; } });
   expect(count).toBe(1); expect(result).toEqual({ ready: false, reason: 'inactive_graphical_session' });
 });
+
+test('bridge readiness reads a real manager environment larger than 4 KiB (stock Omarchy is about 6 KiB)', async () => {
+  if (process.platform !== 'linux') return;
+  const root = mkdtempSync(join(tmpdir(), 'olympus-manager-env-'));
+  try {
+    const runtime = join(root, 'runtime');
+    mkdirSync(runtime, { mode: 0o700 });
+    const padding = Array.from({ length: 80 }, (_, i) => `PAD_${i}=${'x'.repeat(90)}`).join('\n');
+    const systemctl = join(root, 'systemctl');
+    writeFileSync(systemctl, `#!/bin/sh\ncase "$*" in\n*is-active*) echo active ;;\n*show-environment*) cat <<'ENV'\nXDG_CURRENT_DESKTOP=Hyprland\nXDG_RUNTIME_DIR=${runtime}\n${padding}\nENV\n;;\nesac\n`, { mode: 0o700 });
+    const result = await linuxGraphicalSessionReadinessAsync({ trustExecutable: TRUSTED, executables: { systemctl } });
+    // Parsed past the manager environment; this fixture has no display socket.
+    expect(result).toMatchObject({ ready: false, reason: 'stale_display' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -11,7 +11,8 @@ const XDG_MIME = '/usr/bin/xdg-mime';
 const FILE = '/usr/bin/file';
 const COMMAND_TIMEOUT_MS = 3_000;
 const LAUNCH_OBSERVATION_MS = 3_000;
-const MAX_COMMAND_OUTPUT = 4_096;
+// `systemctl --user show-environment` exceeds 4 KiB on a stock Omarchy desktop (6.2 KiB measured).
+const MAX_COMMAND_OUTPUT = 65_536;
 
 export interface LinuxDesktopExecutables {
   systemctl: string;

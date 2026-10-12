@@ -14200,7 +14200,7 @@ var XDG_OPEN = "/usr/bin/xdg-open";
 var XDG_MIME = "/usr/bin/xdg-mime";
 var FILE = "/usr/bin/file";
 var COMMAND_TIMEOUT_MS = 3000;
-var MAX_COMMAND_OUTPUT = 4096;
+var MAX_COMMAND_OUTPUT = 65536;
 var DEFAULT_EXECUTABLES = {
   systemctl: SYSTEMCTL,
   systemdRun: SYSTEMD_RUN,

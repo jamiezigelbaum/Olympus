@@ -1110,7 +1110,7 @@ async function openLinuxOwnerTicketFile(path, dependencies = {}) {
   if (!result.established)
     throw new Error("Desktop browser did not open the owner ticket.");
 }
-var SYSTEMCTL = "/usr/bin/systemctl", SYSTEMD_RUN = "/usr/bin/systemd-run", XDG_OPEN = "/usr/bin/xdg-open", XDG_MIME = "/usr/bin/xdg-mime", FILE = "/usr/bin/file", COMMAND_TIMEOUT_MS = 3000, LAUNCH_OBSERVATION_MS = 3000, MAX_COMMAND_OUTPUT = 4096, DEFAULT_EXECUTABLES, EXPECTED_MIME_TYPES;
+var SYSTEMCTL = "/usr/bin/systemctl", SYSTEMD_RUN = "/usr/bin/systemd-run", XDG_OPEN = "/usr/bin/xdg-open", XDG_MIME = "/usr/bin/xdg-mime", FILE = "/usr/bin/file", COMMAND_TIMEOUT_MS = 3000, LAUNCH_OBSERVATION_MS = 3000, MAX_COMMAND_OUTPUT = 65536, DEFAULT_EXECUTABLES, EXPECTED_MIME_TYPES;
 var init_linux_desktop_opener = __esm(() => {
   init_open_target();
   DEFAULT_EXECUTABLES = {
