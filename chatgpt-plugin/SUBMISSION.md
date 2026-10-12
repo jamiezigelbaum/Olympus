@@ -231,6 +231,10 @@ Server and UI
       (design: "Private answer panel", Relay).
 
 Reviewer demo
+- Freeze (owner rule, 2026-10-12): once submitted, the demo engine is not
+  changed until OpenAI's review ends. No engine or plugin updates, config or
+  data edits, reinstalls or restarts, and releases skip it. Ask the owner
+  before touching it; update it only after the review result.
 - [ ] Demo engine has anonymous questions on, with a funded zkAPI account
       (owner funds it) so the zkAPI case never runs dry.
 - [ ] Demo engine holds only `demo-data/`, carries the demo marker, and has
