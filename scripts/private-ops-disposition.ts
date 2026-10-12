@@ -46,6 +46,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/consult-writer-instructions.md',
   'docs/design/cross-language-keyword-matching.md',
   'docs/design/hosted-agent-compatibility.md',
+  'docs/design/linux-zkapi-confinement.md',
   'docs/design/open-on-computer.md',
   'docs/design/remote-access.md',
   'docs/connector-templates/connector.test.ts.template',
