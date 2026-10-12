@@ -6,7 +6,9 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { staleChatgptRelayAssets } from '../scripts/build-chatgpt-relay-assets.ts';
-import { CHATGPT_RESOURCES, CHATGPT_TOOLS, DASHBOARD_RESOURCE_CONTENTS, PRIVATE_ANSWER_RESOURCE_CONTENTS, PRIVATE_QUESTION_RESOURCE_CONTENTS } from '../connect-relay/server/relay-mcp.ts';
+import { defaultConfig } from '../src/core/config.ts';
+import { listMcpTools } from '../src/mcp/tools.ts';
+import { CHATGPT_RESOURCES, CHATGPT_TOOLS, DASHBOARD_RESOURCE_CONTENTS, REMOTE_TOOLS, PRIVATE_ANSWER_RESOURCE_CONTENTS, PRIVATE_QUESTION_RESOURCE_CONTENTS } from '../connect-relay/server/relay-mcp.ts';
 import { PRIVATE_ANSWER_RESOURCE } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { PRIVATE_QUESTION_RESOURCE } from '../src/workers/chatgpt/private-question-resource.ts';
 import { DASHBOARD_RESOURCE } from '../src/workers/chatgpt/dashboard-resource.ts';
@@ -39,6 +41,14 @@ describe('relay ChatGPT assets', () => {
         'olympus_sync_source',
       ].map((name) => [name, [{ type: 'oauth2', scopes: [] }]]),
     ]);
+  });
+
+  test('offline, every non-ChatGPT credential gets exactly the engine\'s remote tool list (never a ChatGPT-only tool)', () => {
+    expect(REMOTE_TOOLS).toEqual(JSON.parse(JSON.stringify(listMcpTools(defaultConfig(), 'remote'))));
+    const names = REMOTE_TOOLS.map((tool) => tool.name);
+    expect(names).toContain('source_answer');
+    expect(names).toContain('source_answer_result');
+    for (const chatgptOnly of ['olympus_dashboard', 'open_private_question', 'olympus_privacy_set']) expect(names).not.toContain(chatgptOnly);
   });
 
   test('the relay serves the engine dashboard, private answer and private question resources, bundle and metadata included', () => {

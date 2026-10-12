@@ -56,6 +56,13 @@ export const REMOTE_ACCESS_DIR_NAME = 'connect-relay';
  * connect-relay/client/forward.ts (a test holds them equal).
  */
 export const RELAYED_REQUEST_HEADER = 'x-olympus-relay';
+/**
+ * The worker's loopback route the relay child reads the offline tool-list
+ * mapping from (workers/relay-surfaces.ts): answered only to a request
+ * carrying the child's per-boot secret, and never forwarded from the relay
+ * (connect-relay/client/forward.ts forwards a fixed list of paths).
+ */
+export const RELAY_SURFACES_PATH = '/relay/surfaces';
 
 const STATUS_FILE = 'status.json';
 const DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;

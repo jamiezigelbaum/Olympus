@@ -15,18 +15,23 @@
  * the header (see workers/remote-oauth/handler.ts), and serves the ChatGPT
  * surface and `/private` only when its value is this secret, which the child
  * writes 0600 to the remote-access directory (`relay-secret`) for the worker
- * to check, and removes when it stops.
+ * to check, and removes when it stops. With the same secret the child reads
+ * the worker's offline tool-list mapping (workers/relay-surfaces.ts) and keeps
+ * the relay in step with it over its session (client/relay-client.ts).
  */
 import { randomBytes } from 'node:crypto';
 import { loadOrCreateIdentity } from '../../connect-relay/client/identity.ts';
 import { RelayClient, type RelayClientStatus } from '../../connect-relay/client/relay-client.ts';
 import { DEMO_AUTHORIZE_PATH, FORWARDED_PATHS } from '../../connect-relay/client/forward.ts';
+import { parseSurfacesMessage, type SurfaceEntry } from '../../connect-relay/shared/protocol.ts';
 import {
   clearRelaySecret,
   demoInstallMarked,
   emptyRemoteAccessStatus,
   loopbackWorkerOrigin,
   olympusDataDir,
+  RELAYED_REQUEST_HEADER,
+  RELAY_SURFACES_PATH,
   readRemoteAccessStatus,
   remoteAccessDir,
   writeRemoteAccessStatus,
@@ -46,6 +51,26 @@ export interface RelayRuntimeOptions {
   backoff?: { minMs: number; maxMs: number };
   /** How often the child re-asserts its status file (default 15 s). */
   statusRefreshMs?: number;
+  /** How often the offline tool-list mapping is re-read while online (default 30 s). */
+  surfaceSyncMs?: number;
+}
+
+/**
+ * The worker's offline tool-list mapping, checked against the wire shape, or
+ * undefined when the worker cannot say right now (the relay keeps what it had).
+ */
+export async function readSurfaceEntries(target: string, relaySecret: string): Promise<SurfaceEntry[] | undefined> {
+  try {
+    const response = await fetch(`${target}${RELAY_SURFACES_PATH}`, {
+      headers: { [RELAYED_REQUEST_HEADER]: relaySecret },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) return undefined;
+    const body = await response.json() as { v?: unknown; entries?: unknown };
+    return parseSurfacesMessage({ type: 'surfaces', v: body.v, entries: body.entries });
+  } catch {
+    return undefined;
+  }
 }
 
 export interface RelayRuntime {
@@ -108,6 +133,8 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
     // A demo install also forwards reviewer sign-in; every other install never does.
     forwardedPaths: demoInstallMarked(dir) ? [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH] : FORWARDED_PATHS,
     onStatus,
+    surfaces: () => readSurfaceEntries(target, relaySecret),
+    ...(options.surfaceSyncMs ? { surfaceSyncMs: options.surfaceSyncMs } : {}),
     ...(options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {}),
     ...(options.backoff ? { backoff: options.backoff } : {}),
   });

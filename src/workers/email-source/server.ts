@@ -4484,6 +4484,7 @@ export async function main(): Promise<void> {
   const { resolveRemotePublicUrls } = await import('../../core/remote-public-url.ts');
   const { carriesRelayMarker, createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
   const { withRequestPeer } = await import('../../core/request-peer.ts');
+  const { createRelaySurfacesHandler, withRelaySurfacesRoute } = await import('../relay-surfaces.ts');
   const { isChatGptGrant } = await import('../remote-oauth/pinned-clients.ts');
   const { isDemoGrant } = await import('../remote-oauth/demo-consent.ts');
   const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
@@ -5162,7 +5163,13 @@ export async function main(): Promise<void> {
     // panel's one-time sealed collection (workers/chatgpt/private-answer-jobs.ts).
     // Each request's peer address is recorded for the routes that check it
     // (relay-mode OAuth approval: core/request-peer.ts).
-    fetch: withRequestPeer(withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
+    // The relay child reads the offline tool-list mapping it keeps the relay
+    // in step with (workers/relay-surfaces.ts), by its per-boot secret.
+    fetch: withRequestPeer(withRelaySurfacesRoute(createRelaySurfacesHandler({
+      connections: () => remoteConnections(),
+      publicUrls: remotePublicUrls,
+      isRelayed: isRelayedRequest,
+    }), withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
       questions: privateQuestions,
       isRelayed: isRelayedRequest,
@@ -5197,7 +5204,7 @@ export async function main(): Promise<void> {
         })),
         withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),
       )),
-    )))),
+    ))))),
   });
   sourceScheduler?.start();
   await reconcileCaptures();
