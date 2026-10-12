@@ -79,7 +79,7 @@ import {
   privateAnswerJobId,
 } from '../shared/private-answer.ts';
 import { authorizeBridge } from './authorize-bridge.ts';
-import { MAX_REGISTRATION_BYTES, registerPinnedClient } from './client-registration.ts';
+import { MAX_REGISTRATION_BYTES, registerPinnedClient, refusedRegistrationSummary } from './client-registration.ts';
 import {
   ConfirmedCredentials,
   DEFAULT_LIMITS,
@@ -617,7 +617,10 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       read.release();
     }
     const outcome = registerPinnedClient(text, Math.floor(now() / 1000));
-    log('client_registration', { ok: outcome.ok });
+    const refused = !outcome.ok && outcome.error === 'invalid_redirect_uri' ? refusedRegistrationSummary(text) : undefined;
+    log('client_registration', refused
+      ? { ok: outcome.ok, redirects: refused.redirects.join(' | '), ...(refused.client_name ? { client_name: refused.client_name } : {}) }
+      : { ok: outcome.ok });
     return outcome.ok
       ? json(201, outcome.body)
       : json(400, { error: outcome.error, error_description: outcome.description });

@@ -69,6 +69,37 @@ export type RegistrationOutcome =
 const refuse = (error: 'invalid_client_metadata' | 'invalid_redirect_uri', description: string): RegistrationOutcome =>
   ({ ok: false, error, description });
 
+/**
+ * What a refused registration asked to return to, for the operator's log: at
+ * most six addresses, each cut to its scheme, host and path (no query or
+ * fragment) and to 120 characters, plus the client's name cut to 40. These
+ * are an app's own return addresses, never anything of the owner's; they
+ * show which address a new agent needs pinned. Undefined when the body names
+ * none.
+ */
+export function refusedRegistrationSummary(text: string): { redirects: string[]; client_name?: string } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const metadata = parsed as Record<string, unknown>;
+  if (!Array.isArray(metadata.redirect_uris)) return undefined;
+  const redirects = metadata.redirect_uris.slice(0, 6).map((uri) => {
+    if (typeof uri !== 'string') return '(not a string)';
+    try {
+      const url = new URL(uri);
+      return `${url.protocol}//${url.host}${url.pathname}`.slice(0, 120);
+    } catch {
+      return '(not a URL)';
+    }
+  });
+  const name = typeof metadata.client_name === 'string' ? metadata.client_name.replace(/[^\w .()-]/g, '').slice(0, 40) : undefined;
+  return name ? { redirects, client_name: name } : { redirects };
+}
+
 /** Answers one registration body (already read and size-checked). */
 export function registerPinnedClient(text: string, nowSeconds: number): RegistrationOutcome {
   let parsed: unknown;

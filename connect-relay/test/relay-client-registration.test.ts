@@ -4,7 +4,7 @@
  * nothing stored (server/client-registration.ts).
  */
 import { afterEach, describe, expect, test } from 'bun:test';
-import { MAX_REGISTRATION_BYTES, pinnedClientForRedirect, registerPinnedClient } from '../server/client-registration.ts';
+import { MAX_REGISTRATION_BYTES, pinnedClientForRedirect, refusedRegistrationSummary, registerPinnedClient } from '../server/client-registration.ts';
 import { MemoryInstallRegistry } from '../server/registry.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 
@@ -117,6 +117,26 @@ describe('registerPinnedClient', () => {
     expect(register({ redirect_uris: [STABLE], grant_types: ['client_credentials'] })).toMatchObject({ ok: false, error: 'invalid_client_metadata' });
     expect(register('not json')).toMatchObject({ ok: false, error: 'invalid_client_metadata' });
     expect(register('[]')).toMatchObject({ ok: false, error: 'invalid_client_metadata' });
+  });
+});
+
+describe('refusedRegistrationSummary', () => {
+  test('keeps scheme, host and path of at most six addresses, and a cleaned name', () => {
+    const body = JSON.stringify({
+      client_name: 'Cursor <script>',
+      redirect_uris: ['https://www.example.com/cb?code=secret#frag', 'app://host/path', 7, 'not a url', 'https://a.example/1', 'https://a.example/2', 'https://a.example/3'],
+    });
+    expect(refusedRegistrationSummary(body)).toEqual({
+      client_name: 'Cursor script',
+      redirects: ['https://www.example.com/cb', 'app://host/path', '(not a string)', '(not a URL)', 'https://a.example/1', 'https://a.example/2'],
+    });
+    expect(refusedRegistrationSummary(JSON.stringify({ redirect_uris: [`https://x.example/${'a'.repeat(300)}`] }))!.redirects[0]).toHaveLength(120);
+  });
+
+  test('names nothing for a body without addresses', () => {
+    expect(refusedRegistrationSummary('not json')).toBeUndefined();
+    expect(refusedRegistrationSummary('[]')).toBeUndefined();
+    expect(refusedRegistrationSummary('{}')).toBeUndefined();
   });
 });
 
