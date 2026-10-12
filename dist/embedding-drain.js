@@ -32964,6 +32964,7 @@ init_ocr_capability();
 init_pdf_render();
 
 // src/workers/file-extraction/registry.ts
+init_apple_vision_ocr();
 init_ocr_capability();
 
 // src/workers/file-extraction/extractors/remote-vlm.ts

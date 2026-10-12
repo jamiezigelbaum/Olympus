@@ -70064,7 +70064,7 @@ function createOcrCapabilityProbe(options = {}) {
   const fresh = () => {
     if (!cached2)
       return false;
-    const ttl = cached2.pdfEngine || cached2.imageEngine ? readyTtlMs : missingTtlMs;
+    const ttl = cached2.pdfEngine ? readyTtlMs : missingTtlMs;
     return now() - cached2.checkedAt < ttl;
   };
   const refresh = () => {
@@ -96752,14 +96752,17 @@ function createTextExtractor(options = {}) {
   const pdfOcr = options.pdfOcr;
   const imageOcr = options.imageOcr;
   const imagePreparation = options.imagePreparation;
+  const imageOcrVersion = options.imageOcrVersion === true;
   return {
     kind,
     version: version2,
     needsBytes: true,
-    ...imagePreparation ? {
+    ...imagePreparation || imageOcrVersion ? {
       versionFor(mimeType) {
         const normalized = normalizeMimeType2(mimeType);
-        return normalized && IMAGE_MIME_TYPES.has(normalized) ? `${version2}${IMAGE_MEDIA_VERSION_SUFFIX}` : version2;
+        if (!normalized || !IMAGE_MIME_TYPES.has(normalized))
+          return version2;
+        return `${version2}${imagePreparation ? IMAGE_MEDIA_VERSION_SUFFIX : ""}${imageOcrVersion ? IMAGE_OCR_VERSION_SUFFIX : ""}`;
       }
     } : {},
     ...options.ocrReread ? { reread: options.ocrReread } : {},
@@ -96830,7 +96833,7 @@ function createTextExtractor(options = {}) {
           maxBoundedTextChars,
           kind: "image",
           label: "image file",
-          warnings: ["ocr_required", "image_only", ...waitingForOcr ? [OCR_UNAVAILABLE_WARNING] : []]
+          warnings: ["ocr_required", "image_only", ...waitingForOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []]
         });
       }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
@@ -97113,7 +97116,7 @@ async function pdfTextExtractionResult(input) {
           "ocr_required",
           "pdf_image_only",
           "no_selectable_text_layer",
-          ...input.ocr ? [OCR_UNAVAILABLE_WARNING] : []
+          ...input.ocr ? [OCR_UNAVAILABLE_PDF_WARNING] : []
         ]
       });
     }
@@ -97306,7 +97309,7 @@ function extractDelimitedText(input) {
     ...bounded.warnings.length > 0 ? { warnings: appendBoundedTextWarnings(undefined, bounded) } : {}
   };
 }
-var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", OCR_UNAVAILABLE_WARNING = "ocr_unavailable";
+var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OCR_UNAVAILABLE_PDF_WARNING = "ocr_unavailable_pdf", OCR_UNAVAILABLE_IMAGE_WARNING = "ocr_unavailable_image";
 var init_text = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -97363,17 +97366,18 @@ async function readPdfInfo(input) {
     return { pageLongEdges: new Map };
   }
 }
-function rasterDpiFor(longEdgePoints, maxPixelEdge) {
+function rasterEdgeFor(longEdgePoints, maxPixelEdge) {
+  const cap = Math.max(1, Math.floor(maxPixelEdge));
   if (longEdgePoints === undefined)
-    return DEFAULT_RASTER_OCR_DPI;
-  const fitting = Math.floor(maxPixelEdge * 72 / longEdgePoints);
-  return Math.max(MIN_RASTER_OCR_DPI, Math.min(DEFAULT_RASTER_OCR_DPI, fitting));
+    return Math.min(cap, UNKNOWN_SIZE_RASTER_EDGE);
+  return Math.min(cap, Math.max(1, Math.ceil(longEdgePoints * DEFAULT_RASTER_OCR_DPI / 72)));
 }
 function renderSpecFor(longEdgePoints, maxPixelEdge) {
-  if (longEdgePoints === undefined) {
-    return ["-scale-to", String(Math.max(1, Math.min(maxPixelEdge, UNKNOWN_SIZE_RASTER_EDGE)))];
-  }
-  return ["-r", String(rasterDpiFor(longEdgePoints, maxPixelEdge))];
+  return ["-cropbox", "-scale-to", String(rasterEdgeFor(longEdgePoints, maxPixelEdge))];
+}
+function isPastLastPage(error2) {
+  return error2 instanceof ExtractionCommandError && error2.command === PDFTOPPM_COMMAND && `${error2.stderr}
+${error2.stdout}`.toLowerCase().includes("wrong page range given");
 }
 function classifyRasterPdfRejection(error2) {
   if (!(error2 instanceof ExtractionCommandError) || error2.command !== PDFTOPPM_COMMAND)
@@ -97417,9 +97421,15 @@ async function rasterPdfOcr(input, options) {
           stopReason = "time";
           break;
         }
+        let renderLeftMs = remainingMs;
         try {
           let groupStart = firstPage;
           while (groupStart <= lastPage) {
+            renderLeftMs = deadline - now();
+            if (renderLeftMs <= 0) {
+              stopReason = "time";
+              break;
+            }
             const spec = renderSpecFor(info.pageLongEdges.get(groupStart), maxPixelEdge);
             let groupEnd = groupStart;
             while (groupEnd < lastPage && renderSpecFor(info.pageLongEdges.get(groupEnd + 1), maxPixelEdge).join(" ") === spec.join(" "))
@@ -97437,7 +97447,7 @@ async function rasterPdfOcr(input, options) {
                 input.inputPath,
                 join77(tempDir, RASTER_PAGE_PREFIX)
               ],
-              timeoutMs: Math.min(options.timeoutMs, remainingMs)
+              timeoutMs: Math.min(options.timeoutMs, renderLeftMs)
             });
             groupStart = groupEnd + 1;
           }
@@ -97445,16 +97455,18 @@ async function rasterPdfOcr(input, options) {
           const rejection = classifyRasterPdfRejection(error2);
           if (rejection)
             return { status: "failed_terminal", errorKind: rejection };
-          if (error2 instanceof ExtractionCommandTimeoutError && pages.length > 0 && remainingMs < options.timeoutMs) {
+          if (error2 instanceof ExtractionCommandTimeoutError && pages.length > 0 && renderLeftMs < options.timeoutMs) {
             stopReason = "time";
             break;
           }
-          if (info.totalPages === undefined && firstPage > 1 && error2 instanceof ExtractionCommandError)
+          if (info.totalPages === undefined && firstPage > 1 && isPastLastPage(error2))
             break;
           throw error2;
         }
         const files = (await readdir3(tempDir)).map((name) => ({ name, page: renderedPageNumber(name) })).filter((entry) => entry.page !== undefined).sort((left, right) => left.page - right.page);
         if (files.length === 0) {
+          if (stopReason === "time")
+            break;
           if (firstPage === 1)
             throw new Error("Local PDF rendering produced no page images.");
           break;
@@ -97489,6 +97501,8 @@ async function rasterPdfOcr(input, options) {
           }
           await rm5(path, { force: true });
         }
+        if (stopReason === "time")
+          break;
         const renderedLast = files[files.length - 1].page;
         if (info.totalPages !== undefined ? renderedLast >= info.totalPages : renderedLast < lastPage)
           break;
@@ -97570,7 +97584,7 @@ ${normalizeExtractedText(page.text)}`).join(`
     } : {}
   };
 }
-var RASTER_OCR_ENGINE_WARNING = "ocr_engine_tesseract", DEFAULT_RASTER_OCR_DPI = 200, MIN_RASTER_OCR_DPI = 1, UNKNOWN_SIZE_RASTER_EDGE = 2400, RASTER_PAGE_PREFIX = "page", RASTER_TEMP_PREFIX = "olympus-extraction-raster-ocr-";
+var RASTER_OCR_ENGINE_WARNING = "ocr_engine_tesseract", DEFAULT_RASTER_OCR_DPI = 200, UNKNOWN_SIZE_RASTER_EDGE = 2400, RASTER_PAGE_PREFIX = "page", RASTER_TEMP_PREFIX = "olympus-extraction-raster-ocr-";
 var init_pdf_raster_ocr = __esm(() => {
   init_bounded_text();
   init_apple_vision_ocr();
@@ -97634,18 +97648,30 @@ async function withVision(engine, read) {
 }
 function createOcrRereadPolicy(options) {
   const pinned = options.preference === "tesseract";
+  const readyKinds = () => {
+    const seen = options.capability.peekFresh();
+    if (!seen)
+      return;
+    return pinned ? { pdf: seen.ocrmypdf === "ok", image: false } : { pdf: seen.pdfEngine !== undefined, image: seen.imageEngine !== undefined };
+  };
   return {
-    unreadWarnings: ["ocr_required"],
+    unreadWarnings: ["ocr_required", OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
     unreadTerminalErrorKinds: [],
-    notReadyWarnings: [OCR_UNAVAILABLE_WARNING],
+    notReadyWarnings: [OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
     prepare() {
-      const seen = options.capability.peekFresh();
-      if (!seen) {
+      const ready = readyKinds();
+      if (!ready) {
         options.capability.warm();
         return "pending";
       }
-      const ready = pinned ? seen.ocrmypdf === "ok" : seen.pdfEngine !== undefined;
-      return ready ? "ready" : "unavailable";
+      return ready.pdf || ready.image ? "ready" : "unavailable";
+    },
+    readyWarnings() {
+      const ready = readyKinds();
+      return [
+        ...ready?.pdf ? ["ocr_required", OCR_UNAVAILABLE_PDF_WARNING] : [],
+        ...ready?.image ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []
+      ];
     }
   };
 }
@@ -100286,6 +100312,8 @@ function createDefaultExtractorRegistry(config2 = {}) {
     ...config2.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config2.ocr.ocrTimeoutMs } : {},
     ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {}
   };
+  const pinnedToTesseract = config2.ocr?.engine === "tesseract";
+  const imagePreparationOn = Boolean(config2.media?.cacheDir && (config2.media.platform !== undefined ? config2.media.platform === "darwin" : stillImagePreparationAvailable()));
   const extractors = [
     createTranscriptionExtractor({
       ...config2.transcription?.command !== undefined ? { command: config2.transcription.command } : {},
@@ -100298,18 +100326,19 @@ function createDefaultExtractorRegistry(config2 = {}) {
       ...config2.text?.pdfTextTimeoutMs !== undefined ? { pdfTextTimeoutMs: config2.text.pdfTextTimeoutMs } : {},
       ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {},
       pdfOcr: createPdfOcr(ocrShared),
-      ...config2.ocr?.engine === "tesseract" ? {} : { imageOcr: createImageOcr(ocrShared) },
+      ...pinnedToTesseract ? {} : { imageOcr: createImageOcr(ocrShared) },
       ocrReread: createOcrRereadPolicy({
         capability: ocrCapability,
         ...config2.ocr?.engine !== undefined ? { preference: config2.ocr.engine } : {}
       }),
-      ...config2.media?.cacheDir && (config2.media.platform !== undefined ? config2.media.platform === "darwin" : stillImagePreparationAvailable()) ? {
+      ...imagePreparationOn ? {
         imagePreparation: createImagePreparation({
           cacheDir: config2.media.cacheDir,
           ...config2.media.timeoutMs !== undefined ? { timeoutMs: config2.media.timeoutMs } : {},
           ...config2.media.maxInputBytes !== undefined ? { maxInputBytes: config2.media.maxInputBytes } : {}
         })
-      } : {}
+      } : {},
+      ...!pinnedToTesseract && !appleVisionOcrSelected(config2.ocr?.engine ?? "auto", config2.ocr?.platform ?? process.platform) && !imagePreparationOn ? { imageOcrVersion: true } : {}
     }),
     createOcrExtractor(ocrShared),
     createVlmPdfExtractor({
@@ -100417,6 +100446,7 @@ function terminalRetryPaths(registry2, rules) {
 var DEFAULT_EXTRACTOR_SELECTION_ORDER;
 var init_registry = __esm(() => {
   init_ocr();
+  init_apple_vision_ocr();
   init_ocr_capability();
   init_remote_vlm();
   init_text();
@@ -100733,7 +100763,15 @@ function createFileExtractionRunner(options) {
           continue;
         if (policy.prepare() !== "ready")
           continue;
-        requeued += jobs.requeueUnread({ ...request, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
+        const ready = policy.readyWarnings ? new Set(policy.readyWarnings()) : undefined;
+        const readyRequest = ready ? {
+          ...request,
+          warnings: request.warnings.filter((warning) => ready.has(warning)),
+          ...request.notReadyWarnings ? { notReadyWarnings: request.notReadyWarnings.filter((warning) => ready.has(warning)) } : {}
+        } : request;
+        if (readyRequest.warnings.length === 0 && readyRequest.terminalErrorKinds.length === 0)
+          continue;
+        requeued += jobs.requeueUnread({ ...readyRequest, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
       } catch (error2) {
         console.error(`Extraction reread check failed for ${extractor.kind}: ${error2 instanceof Error ? error2.message : String(error2)}`);
       }
