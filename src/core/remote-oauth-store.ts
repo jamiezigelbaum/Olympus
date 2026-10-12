@@ -32,6 +32,8 @@
 import type { Database } from 'bun:sqlite';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { credentialInstallId, mintCredential } from '../../connect-relay/shared/tokens.ts';
+import { pinnedGrantProvider } from '../workers/remote-oauth/pinned-clients.ts';
+import { callerProviderFromLabel, OPERATION_CALLER_PROVIDERS, type OperationCallerProvider } from './operation-caller.ts';
 import type { SqliteMigration } from './sqlite-migrations.ts';
 
 export const REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600;
@@ -85,10 +87,40 @@ export interface IssuedOAuthTokens {
   expiresIn: number;
 }
 
+/**
+ * Who hosts the agent behind a connection (design
+ * docs/design/background-agents.md section D): a pinned client's host
+ * (ChatGPT → OpenAI, Claude → Anthropic, Grok and Grok Bot or Cursor → xAI),
+ * else the agent the owner chose when creating it, else the host its name
+ * names, else `other`.
+ */
+export type RemoteConnectionProvider = OperationCallerProvider;
+
+export function isRemoteConnectionProvider(value: unknown): value is RemoteConnectionProvider {
+  return typeof value === 'string' && (OPERATION_CALLER_PROVIDERS as readonly string[]).includes(value);
+}
+
+/**
+ * A connection's provider: its pin always wins (a pinned client is that
+ * host); then the owner's choice; then its name, when it names exactly one
+ * host; else `other`.
+ */
+export function remoteConnectionProvider(connection: {
+  clientId?: string | null;
+  displayName: string;
+  chosen?: RemoteConnectionProvider | null;
+}): RemoteConnectionProvider {
+  return pinnedGrantProvider(connection)
+    ?? (isRemoteConnectionProvider(connection.chosen) ? connection.chosen : undefined)
+    ?? callerProviderFromLabel(connection.displayName)
+    ?? 'other';
+}
+
 export interface OAuthConnectionRef {
   id: string;
   displayName: string;
   clientId: string;
+  provider: RemoteConnectionProvider;
 }
 
 export type OAuthAccessTokenCheck =
@@ -104,8 +136,11 @@ export interface RemoteOAuthStore {
   checkPairingCode(input: string): PairingCodeCheck;
   registerClient(input: { clientName: string; redirectUris: string[] }): RegisteredOAuthClient | 'capacity';
   getRegisteredClient(clientId: string): RegisteredOAuthClient | undefined;
-  /** Creates the connection (the grant) and its first token pair; `installId` in relay mode. */
-  createGrant(input: { clientId: string; displayName: string; resource: string; installId?: string }): {
+  /**
+   * Creates the connection (the grant) and its first token pair; `installId`
+   * in relay mode. Its provider follows remoteConnectionProvider.
+   */
+  createGrant(input: { clientId: string; displayName: string; resource: string; installId?: string; provider?: RemoteConnectionProvider }): {
     connection: OAuthConnectionRef;
     tokens: IssuedOAuthTokens;
   };
@@ -166,6 +201,7 @@ interface TokenRow {
   used_at: string | null;
   display_name: string;
   revoked_at: string | null;
+  provider: string | null;
 }
 
 interface ClientRow {
@@ -193,10 +229,17 @@ export function createRemoteOAuthStore(
   const readToken = (token: string, kind: 'access' | 'refresh'): TokenRow | null =>
     db.query(`
       SELECT t.token_hash, t.connection_id, t.kind, t.resource, t.client_id, t.expires_at, t.used_at,
-             c.display_name, c.revoked_at
+             c.display_name, c.revoked_at, c.provider
       FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
       WHERE t.token_hash = ? AND t.kind = ?
     `).get(digest(token), kind) as TokenRow | null;
+
+  const tokenConnection = (row: TokenRow): OAuthConnectionRef => ({
+    id: row.connection_id,
+    displayName: row.display_name,
+    clientId: row.client_id,
+    provider: remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name, chosen: row.provider as RemoteConnectionProvider | null }),
+  });
 
   const issueTokens = (
     connectionId: string,
@@ -317,12 +360,13 @@ export function createRemoteOAuthStore(
       const at = now();
       return db.transaction(() => {
         const id = randomBytes(9).toString('hex');
+        const provider = remoteConnectionProvider({ clientId: input.clientId, displayName: input.displayName, chosen: input.provider ?? null });
         db.query(`
-          INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at)
-          VALUES (?, ?, 'oauth', NULL, ?, ?)
-        `).run(id, input.displayName, input.clientId, at.toISOString());
+          INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at, provider)
+          VALUES (?, ?, 'oauth', NULL, ?, ?, ?)
+        `).run(id, input.displayName, input.clientId, at.toISOString(), provider);
         const tokens = issueTokens(id, input.clientId, input.resource, at, input.installId);
-        return { connection: { id, displayName: input.displayName, clientId: input.clientId }, tokens };
+        return { connection: { id, displayName: input.displayName, clientId: input.clientId, provider }, tokens };
       })();
     },
 
@@ -337,7 +381,7 @@ export function createRemoteOAuthStore(
       // before the public address changed) opens nothing here.
       if (row.resource !== resource) return { ok: false, reason: 'wrong_audience' };
       recordLastUse(row.connection_id, at);
-      return { ok: true, connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id } };
+      return { ok: true, connection: tokenConnection(row) };
     },
 
     refresh(input): OAuthRefreshResult {
@@ -364,7 +408,7 @@ export function createRemoteOAuthStore(
             if (successor && successor.used_at === null) {
               return {
                 ok: true,
-                connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
+                connection: tokenConnection(row),
                 tokens: grace.tokens,
               };
             }
@@ -391,7 +435,7 @@ export function createRemoteOAuthStore(
         });
         return {
           ok: true,
-          connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
+          connection: tokenConnection(row),
           tokens,
         };
       }).immediate();

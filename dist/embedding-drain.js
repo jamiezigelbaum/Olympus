@@ -10643,13 +10643,19 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
   }
   ensureSchemaVersionTable(db);
   const applied = [];
-  db.transaction(() => {
-    for (const migration of ordered.filter((entry) => entry.version > currentVersion)) {
-      migration.up(db);
-      writeSqliteSchemaVersion(db, storeId, migration.version);
-      applied.push({ version: migration.version, name: migration.name });
-    }
-  })();
+  if (pending.length > 0) {
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion) {
+        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+      }
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        writeSqliteSchemaVersion(db, storeId, migration.version);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+  }
   return {
     storeId,
     currentVersion,
@@ -34807,6 +34813,13 @@ init_source_dashboard();
 
 // src/workers/agent-connections.ts
 init_operation_caller();
+var AGENT_CHOICE_PROVIDERS = Object.freeze({
+  chatgpt: "openai",
+  claude: "anthropic",
+  grok: "xai",
+  "grok-api": "xai",
+  other: "other"
+});
 var WORKER_ENV_ADDRESS_MESSAGE = "This address is set by OLYMPUS_PUBLIC_BASE_URL in worker.env, a tunnel you run yourself, " + "so the dashboard cannot turn it off. To turn remote access off, delete that line from ~/.config/olympus/worker.env, " + "then restart OpenClaw (openclaw gateway restart), and stop your tunnel.";
 
 // src/core/agent-instructions.ts

@@ -11,7 +11,9 @@
  * - POST /dashboard/agents/pairing-code mints the same one-time code as
  *   `olympus connections pair`, from the same store.
  * - POST /dashboard/agents/keys creates a bearer connection, as
- *   `olympus connections add <name>` does, and returns its token once.
+ *   `olympus connections add <name>` does, and returns its token once. The
+ *   agent the owner picked on Connect an agent (`agent`) sets who hosts it
+ *   (AGENT_CHOICE_PROVIDERS).
  * - POST /dashboard/agents/revoke revokes a connection by id.
  * - POST /dashboard/agents/remote-access turns remote access on or off. Under
  *   OpenClaw the change goes through OpenClaw's config write path in the
@@ -25,6 +27,7 @@
  * adapter, `remoteAccessFromStatus`.
  */
 import type { RemoteConnectionRecord, RemoteConnectionStore } from '../core/remote-connections.ts';
+import type { RemoteConnectionProvider } from '../core/remote-oauth-store.ts';
 import type { RemotePublicUrls } from '../core/remote-public-url.ts';
 import type { RemoteAccessStatusView } from '../core/remote-access.ts';
 import { sanitizeCallerDisplayName } from '../core/operation-caller.ts';
@@ -36,6 +39,19 @@ export const DASHBOARD_AGENT_REMOTE_ACCESS_PATH = '/dashboard/agents/remote-acce
 
 /** See `needsTerms`: kept only for the dashboard lane's existing reference. */
 export const LETS_ENCRYPT_REPOSITORY_URL = 'https://letsencrypt.org/repository/';
+
+/**
+ * Who hosts each agent offered on Connect an agent (dashboard/agents.ts), by
+ * its id there. A key made under Other is `other`: Olympus cannot tell then
+ * which provider's models to keep its anonymous questions from, and says so.
+ */
+export const AGENT_CHOICE_PROVIDERS: Readonly<Record<string, RemoteConnectionProvider>> = Object.freeze({
+  chatgpt: 'openai',
+  claude: 'anthropic',
+  grok: 'xai',
+  'grok-api': 'xai',
+  other: 'other',
+});
 
 export const DASHBOARD_AGENT_CONTROL_PATHS = [
   DASHBOARD_AGENT_PAIRING_CODE_PATH,
@@ -240,13 +256,19 @@ export async function handleDashboardAgentRequest(
   }
 
   if (pathname === DASHBOARD_AGENT_KEYS_PATH) {
-    const unknown = Object.keys(body).filter((key) => key !== 'name');
-    if (unknown.length > 0) return refusal(400, 'invalid_request', 'A key takes only a name.');
+    const unknown = Object.keys(body).filter((key) => key !== 'name' && key !== 'agent');
+    if (unknown.length > 0) return refusal(400, 'invalid_request', 'A key takes only a name and the agent it is for.');
     const name = sanitizeCallerDisplayName(body.name);
     if (!name) return refusal(400, 'invalid_request', 'Give the connection a name, for example Grok API.');
+    // A page from before the agent was sent leaves it out: the name decides.
+    let provider: RemoteConnectionProvider | undefined;
+    if (body.agent !== undefined) {
+      provider = typeof body.agent === 'string' && Object.hasOwn(AGENT_CHOICE_PROVIDERS, body.agent) ? AGENT_CHOICE_PROVIDERS[body.agent] : undefined;
+      if (!provider) return refusal(400, 'invalid_request', 'That is not an agent Connect an agent offers.');
+    }
     const store = openStore(backend);
     if (!store) return storeUnavailable();
-    const created = store.create(name);
+    const created = store.create(name, provider ? { provider } : {});
     const remoteAccess = backend.remoteAccess();
     return secretResponse({
       ok: true,
@@ -370,6 +392,7 @@ function connectionView(record: RemoteConnectionRecord): Record<string, unknown>
     id: record.id,
     name: record.displayName,
     kind: record.kind,
+    provider: record.provider,
     created_at: record.createdAt,
     last_used_at: record.lastUsedAt,
     revoked_at: record.revokedAt,

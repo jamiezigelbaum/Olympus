@@ -298,6 +298,59 @@ describe('Ask anonymously', () => {
     expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'openai' }, xaiChosen().value)).toMatchObject({ ok: true, model: 'x-ai/grok-5' });
   });
 
+  test('the rule is checked on the model the route resolves for the send, at its final authorization', async () => {
+    // A route that sends with a model of its own (its fallback when none is
+    // passed): authorization is handed that model, and it is the one checked.
+    const routed = (routeModel: string) => {
+      const d = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+      const value: ConsultAskDependencies = {
+        ...d.value,
+        send: async (question, authorize, options) => {
+          if (!authorize(routeModel)) return { ok: false, error: { code: 'authorization_refused', message: 'refused', outcome: 'not_sent', networkIdentity: 'not_verified' } };
+          d.calls.send.push(question);
+          d.calls.sendOptions.push(options);
+          return reply('Usually within two weeks.');
+        },
+      };
+      return { value, calls: d.calls };
+    };
+    const toXai = routed('x-ai/grok-5');
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai' }, toXai.value))
+      .toEqual({ ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.configuredModelSameProvider });
+    expect(toXai.calls.send).toEqual([]);
+    const named = routed('anthropic/claude-opus-5.5');
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'anthropic', model: 'openai/gpt-5.5' }, named.value))
+      .toEqual({ ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.modelSameProvider });
+    expect(named.calls.send).toEqual([]);
+    // From another provider it goes, and the answer names the model that answered.
+    const fine = routed('x-ai/grok-5');
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'openai' }, fine.value)).toMatchObject({ ok: true, model: 'x-ai/grok-5' });
+    expect(fine.calls.send).toEqual(['What is a deposit?']);
+  });
+
+  test('Muse (Meta) never gets a Meta model; an agent whose host is unknown gets its answer with an honest note', async () => {
+    const chosen = (extra: Partial<typeof DEFAULT_CONSULT_SETTINGS> = {}) => deps(settings({ standardMode: 'as_written', levelChosen: true, ...extra }));
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'meta' }, chosen().value)).toMatchObject({ ok: true, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
+    const metaRefused = chosen();
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'meta', model: 'meta-llama/llama-5-405b' }, metaRefused.value)).toMatchObject({ code: 'model_same_provider' });
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'meta' }, chosen({ chatgptFrontierModel: 'meta-llama/llama-5-405b' }).value))
+      .toEqual({ ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.configuredModelSameProvider });
+    expect(metaRefused.calls.send).toEqual([]);
+
+    const unknown = chosen({ chatgptFrontierModel: 'openai/gpt-5.5' });
+    const answered = await askAnonymously({ question: 'What is a deposit?', callerProvider: 'other' }, unknown.value);
+    expect(answered).toMatchObject({ ok: true, model: 'openai/gpt-5.5', providerNote: CONSULT_ASK_MESSAGES.providerUnknown });
+    expect(CONSULT_ASK_MESSAGES.providerUnknown).toBe('Olympus does not know which company runs this agent, so it could not make sure the answer came from another company\'s model.');
+    expect(unknown.calls.send).toEqual(['What is a deposit?']);
+    // Any model may be named; the note still says the rule could not apply.
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'other', model: 'x-ai/grok-5' }, chosen().value)).toMatchObject({ ok: true, model: 'x-ai/grok-5', providerNote: CONSULT_ASK_MESSAGES.providerUnknown });
+    // A known host, or a caller on this computer, gets no such note.
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai' }, chosen().value)).not.toHaveProperty('providerNote');
+    expect(await askAnonymously({ question: 'What is a deposit?' }, chosen().value)).not.toHaveProperty('providerNote');
+    // A refusal is not an answer: no note.
+    expect(await askAnonymously({ question: '', callerProvider: 'other' }, chosen().value)).not.toHaveProperty('providerNote');
+  });
+
   test('a model change that lands between remember and the send cannot route Grok\'s question to xAI (Codex review of PR #289)', async () => {
     let current = settings({ standardMode: 'as_written' });
     const d = deps(current);

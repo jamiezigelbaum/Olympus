@@ -13218,13 +13218,19 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
   }
   ensureSchemaVersionTable(db);
   const applied = [];
-  db.transaction(() => {
-    for (const migration of ordered.filter((entry) => entry.version > currentVersion)) {
-      migration.up(db);
-      writeSqliteSchemaVersion(db, storeId, migration.version);
-      applied.push({ version: migration.version, name: migration.name });
-    }
-  })();
+  if (pending.length > 0) {
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion) {
+        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+      }
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        writeSqliteSchemaVersion(db, storeId, migration.version);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+  }
   return {
     storeId,
     currentVersion,
@@ -13293,13 +13299,8 @@ function sanitizeCallerDisplayName(value) {
 function callerProviderFromLabel(label) {
   if (!label)
     return;
-  if (/claude|anthropic/i.test(label))
-    return "anthropic";
-  if (/chatgpt|openai|codex/i.test(label))
-    return "openai";
-  if (/grok|xai|x\.ai/i.test(label))
-    return "xai";
-  return;
+  const named = HOST_NAME_PATTERNS.filter(([, pattern]) => pattern.test(label));
+  return named.length === 1 ? named[0][0] : undefined;
 }
 function operationCallerToWire(caller) {
   const displayName = sanitizeCallerDisplayName(caller.displayName);
@@ -13365,12 +13366,18 @@ function isInProcessRemoteRequest(request) {
 function callerClaimsRemoteConnection(caller) {
   return caller.surface === "remote" || caller.connection_id !== undefined;
 }
-var OPERATION_CALLER_SURFACES, OPERATION_CALLER_PROVIDERS, OPERATION_CALLER_DISPLAY_NAME_MAX = 80, OPERATION_CALLER_CONNECTION_ID_MAX = 128, CONNECTION_ID_PATTERN, UNSAFE_LABEL_CHARS, inProcessRemoteRequests;
+var OPERATION_CALLER_SURFACES, OPERATION_CALLER_PROVIDERS, OPERATION_CALLER_DISPLAY_NAME_MAX = 80, OPERATION_CALLER_CONNECTION_ID_MAX = 128, CONNECTION_ID_PATTERN, UNSAFE_LABEL_CHARS, HOST_NAME_PATTERNS, inProcessRemoteRequests;
 var init_operation_caller = __esm(() => {
   OPERATION_CALLER_SURFACES = ["native", "mcp", "cli", "remote"];
-  OPERATION_CALLER_PROVIDERS = ["openai", "anthropic", "xai"];
+  OPERATION_CALLER_PROVIDERS = ["openai", "xai", "meta", "anthropic", "other"];
   CONNECTION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
   UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  HOST_NAME_PATTERNS = [
+    ["anthropic", /claude|anthropic/i],
+    ["openai", /chatgpt|openai|codex/i],
+    ["xai", /grok|xai|x\.ai/i],
+    ["meta", /\b(?:meta|muse)\b/i]
+  ];
   inProcessRemoteRequests = new WeakSet;
 });
 
@@ -13406,8 +13413,79 @@ var init_tokens = __esm(() => {
   };
 });
 
+// src/workers/remote-oauth/pinned-clients.ts
+var exports_pinned_clients = {};
+__export(exports_pinned_clients, {
+  pinnedGrantProvider: () => pinnedGrantProvider,
+  pinnedClient: () => pinnedClient,
+  isClientIdMetadataUrl: () => isClientIdMetadataUrl,
+  isChatGptGrant: () => isChatGptGrant,
+  GROK_REDIRECT_URIS: () => GROK_REDIRECT_URIS,
+  GROK_CLIENT_ID: () => GROK_CLIENT_ID,
+  CURSOR_REDIRECT_URI: () => CURSOR_REDIRECT_URI,
+  CURSOR_CLIENT_ID: () => CURSOR_CLIENT_ID,
+  CLAUDE_REDIRECT_URI: () => CLAUDE_REDIRECT_URI,
+  CLAUDE_CLIENT_ID: () => CLAUDE_CLIENT_ID,
+  CHATGPT_REDIRECT_URI: () => CHATGPT_REDIRECT_URI,
+  CHATGPT_CODEX_CLIENT_ID: () => CHATGPT_CODEX_CLIENT_ID,
+  CHATGPT_CLIENT_ID: () => CHATGPT_CLIENT_ID
+});
+function isClientIdMetadataUrl(clientId) {
+  return clientId.startsWith("https://");
+}
+function isChatGptGrant(connection) {
+  return typeof connection.clientId === "string" && pinnedClient(connection.clientId)?.host === "chatgpt";
+}
+function pinnedClient(clientId) {
+  if (clientId === CHATGPT_CODEX_CLIENT_ID) {
+    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com", host: "chatgpt" };
+  }
+  if (clientId === CHATGPT_CLIENT_ID) {
+    return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com", host: "chatgpt" };
+  }
+  if (clientId === CLAUDE_CLIENT_ID) {
+    return { clientId, clientName: "Claude", redirectUris: [CLAUDE_REDIRECT_URI], verifiedHost: "claude.ai", host: "claude" };
+  }
+  if (clientId === GROK_CLIENT_ID) {
+    return { clientId, clientName: "Grok", redirectUris: GROK_REDIRECT_URIS, verifiedHost: "grok.com", host: "grok" };
+  }
+  if (clientId === CURSOR_CLIENT_ID) {
+    return { clientId, clientName: "Grok Bot or Cursor", redirectUris: [CURSOR_REDIRECT_URI], verifiedHost: "cursor.com", host: "cursor" };
+  }
+  const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
+  if (callback) {
+    return {
+      clientId,
+      clientName: "ChatGPT",
+      redirectUris: [`https://chatgpt.com/connector/oauth/${callback}`],
+      verifiedHost: "chatgpt.com",
+      host: "chatgpt"
+    };
+  }
+  return;
+}
+function pinnedGrantProvider(connection) {
+  const host = typeof connection.clientId === "string" ? pinnedClient(connection.clientId)?.host : undefined;
+  return host === "chatgpt" ? "openai" : host === "claude" ? "anthropic" : host === "grok" || host === "cursor" ? "xai" : undefined;
+}
+var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS, CURSOR_CLIENT_ID = "https://cursor.com/oauth/mcp-client.json", CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
+var init_pinned_clients = __esm(() => {
+  CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
+  CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+});
+
 // src/core/remote-oauth-store.ts
 import { createHash as createHash7, randomBytes as randomBytes6, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+function isRemoteConnectionProvider(value) {
+  return typeof value === "string" && OPERATION_CALLER_PROVIDERS.includes(value);
+}
+function remoteConnectionProvider(connection) {
+  return pinnedGrantProvider(connection) ?? (isRemoteConnectionProvider(connection.chosen) ? connection.chosen : undefined) ?? callerProviderFromLabel(connection.displayName) ?? "other";
+}
 function isWellFormedOAuthAccessToken(token) {
   return ACCESS_TOKEN_PATTERN.test(token) || credentialInstallId("access", token) !== undefined;
 }
@@ -13449,10 +13527,16 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
   const refreshGrace = new Map;
   const readToken = (token, kind) => db.query(`
       SELECT t.token_hash, t.connection_id, t.kind, t.resource, t.client_id, t.expires_at, t.used_at,
-             c.display_name, c.revoked_at
+             c.display_name, c.revoked_at, c.provider
       FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
       WHERE t.token_hash = ? AND t.kind = ?
     `).get(digest(token), kind);
+  const tokenConnection = (row) => ({
+    id: row.connection_id,
+    displayName: row.display_name,
+    clientId: row.client_id,
+    provider: remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name, chosen: row.provider })
+  });
   const issueTokens = (connectionId, clientId, resource, at, installId) => {
     const accessToken = installId ? mintCredential("access", installId) : `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes6(32).toString("base64url")}`;
     const refreshToken = installId ? mintCredential("refresh", installId) : `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes6(32).toString("base64url")}`;
@@ -13554,12 +13638,13 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
       const at = now();
       return db.transaction(() => {
         const id = randomBytes6(9).toString("hex");
+        const provider = remoteConnectionProvider({ clientId: input.clientId, displayName: input.displayName, chosen: input.provider ?? null });
         db.query(`
-          INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at)
-          VALUES (?, ?, 'oauth', NULL, ?, ?)
-        `).run(id, input.displayName, input.clientId, at.toISOString());
+          INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at, provider)
+          VALUES (?, ?, 'oauth', NULL, ?, ?, ?)
+        `).run(id, input.displayName, input.clientId, at.toISOString(), provider);
         const tokens = issueTokens(id, input.clientId, input.resource, at, input.installId);
-        return { connection: { id, displayName: input.displayName, clientId: input.clientId }, tokens };
+        return { connection: { id, displayName: input.displayName, clientId: input.clientId, provider }, tokens };
       })();
     },
     verifyAccessToken(token, resource) {
@@ -13576,7 +13661,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
       if (row.resource !== resource)
         return { ok: false, reason: "wrong_audience" };
       recordLastUse(row.connection_id, at);
-      return { ok: true, connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id } };
+      return { ok: true, connection: tokenConnection(row) };
     },
     refresh(input) {
       if (!isWellFormedOAuthRefreshToken(input.refreshToken))
@@ -13599,7 +13684,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
             if (successor && successor.used_at === null) {
               return {
                 ok: true,
-                connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
+                connection: tokenConnection(row),
                 tokens: grace.tokens
               };
             }
@@ -13629,7 +13714,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
         });
         return {
           ok: true,
-          connection: { id: row.connection_id, displayName: row.display_name, clientId: row.client_id },
+          connection: tokenConnection(row),
           tokens
         };
       }).immediate();
@@ -13705,6 +13790,8 @@ function remoteOAuthSchemaMigration(version) {
 var REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600, REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, REMOTE_PAIRING_CODE_MAX_FAILURES = 5, REMOTE_OAUTH_REFRESH_GRACE_MS = 45000, REMOTE_OAUTH_MAX_REGISTERED_CLIENTS = 500, REMOTE_OAUTH_ACCESS_TOKEN_PREFIX = "olympus_at_", REMOTE_OAUTH_REFRESH_TOKEN_PREFIX = "olympus_rt_", ACCESS_TOKEN_PATTERN, REFRESH_TOKEN_PATTERN, REGISTERED_CLIENT_ID_PATTERN, PAIRING_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789", PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
 var init_remote_oauth_store = __esm(() => {
   init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
   REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
   REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
   ACCESS_TOKEN_PATTERN = /^olympus_at_[A-Za-z0-9_-]{43}$/;
@@ -14126,6 +14213,7 @@ __export(exports_remote_connections, {
   isWellFormedRemoteConnectionToken: () => isWellFormedRemoteConnectionToken,
   hashRemoteConnectionToken: () => hashRemoteConnectionToken,
   defaultRemoteConnectionsDbPath: () => defaultRemoteConnectionsDbPath,
+  connectionProviderMigration: () => connectionProviderMigration,
   REMOTE_CONNECTION_TOKEN_PREFIX: () => REMOTE_CONNECTION_TOKEN_PREFIX,
   REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS: () => REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS,
   REMOTE_CONNECTIONS_STORE_ID: () => REMOTE_CONNECTIONS_STORE_ID,
@@ -14215,16 +14303,20 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
   return {
     dbPath,
     oauth,
-    create(displayName) {
+    create(displayName, options2 = {}) {
       const name = requireDisplayName(displayName);
+      if (options2.provider !== undefined && !isRemoteConnectionProvider(options2.provider)) {
+        throw new OperationError("invalid_params", "A connection's host must be openai, xai, meta, anthropic or other.");
+      }
+      const provider = remoteConnectionProvider({ displayName: name, chosen: options2.provider ?? null });
       const id = randomBytes8(CONNECTION_ID_BYTES).toString("hex");
       const secret = randomBytes8(CONNECTION_SECRET_BYTES).toString("base64url");
       const token = `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret}`;
       const createdAt = now().toISOString();
       db.query(`
-        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at)
-        VALUES (?, ?, 'bearer', ?, ?)
-      `).run(id, name, hashRemoteConnectionToken(token), createdAt);
+        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider)
+        VALUES (?, ?, 'bearer', ?, ?, ?)
+      `).run(id, name, hashRemoteConnectionToken(token), createdAt, provider);
       const row = readRow(id);
       if (!row)
         throw new Error("Remote connection could not be read after creation.");
@@ -14286,6 +14378,11 @@ function toRecord(row) {
     displayName: row.display_name,
     kind: row.kind === "oauth" ? "oauth" : "bearer",
     clientId: row.client_id ?? null,
+    provider: remoteConnectionProvider({
+      clientId: row.client_id,
+      displayName: row.display_name,
+      chosen: isRemoteConnectionProvider(row.provider) ? row.provider : null
+    }),
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at
@@ -14315,7 +14412,27 @@ function remoteConnectionMigrations() {
         );
       `);
     }
-  }, remoteOAuthSchemaMigration(2)];
+  }, remoteOAuthSchemaMigration(2), connectionProviderMigration(3)];
+}
+function connectionProviderMigration(version) {
+  return {
+    version,
+    name: "add_connection_provider",
+    up(db) {
+      const columns = db.query("PRAGMA table_info(remote_connections)").all();
+      if (!columns.some((column) => column.name === "provider")) {
+        db.exec(`
+          ALTER TABLE remote_connections ADD COLUMN provider TEXT
+            CHECK(provider IS NULL OR provider IN ('openai', 'xai', 'meta', 'anthropic', 'other'));
+        `);
+      }
+      const unset = db.query("SELECT id, display_name, client_id FROM remote_connections WHERE provider IS NULL").all();
+      const fill = db.query("UPDATE remote_connections SET provider = ? WHERE id = ? AND provider IS NULL");
+      for (const row of unset) {
+        fill.run(remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name }), row.id);
+      }
+    }
+  };
 }
 function backupBeforeOAuthMigration(db, dbPath) {
   if (readSqliteSchemaVersion(db, REMOTE_CONNECTIONS_STORE_ID) !== 1)
@@ -14348,7 +14465,7 @@ function hardenPrivateDatabasePath(dbPath) {
     }
   }
 }
-var REMOTE_CONNECTIONS_STORE_ID = "remote-connections", REMOTE_CONNECTIONS_SCHEMA_VERSION = 2, REMOTE_CONNECTION_TOKEN_PREFIX = "olympus_conn_", REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60000, STORE_BUSY_TIMEOUT_MS2 = 1e4, LAST_USED_BUSY_TIMEOUT_MS = 50, CONNECTION_ID_BYTES = 9, CONNECTION_SECRET_BYTES = 32, CONNECTION_ID_PATTERN2, TOKEN_PATTERN, REMOTE_CONNECTIONS_DB_PATH_ENV = "OLYMPUS_REMOTE_CONNECTIONS_DB_PATH";
+var REMOTE_CONNECTIONS_STORE_ID = "remote-connections", REMOTE_CONNECTIONS_SCHEMA_VERSION = 3, REMOTE_CONNECTION_TOKEN_PREFIX = "olympus_conn_", REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60000, STORE_BUSY_TIMEOUT_MS2 = 1e4, LAST_USED_BUSY_TIMEOUT_MS = 50, CONNECTION_ID_BYTES = 9, CONNECTION_SECRET_BYTES = 32, CONNECTION_ID_PATTERN2, TOKEN_PATTERN, REMOTE_CONNECTIONS_DB_PATH_ENV = "OLYMPUS_REMOTE_CONNECTIONS_DB_PATH";
 var init_remote_connections = __esm(() => {
   init_operation_error();
   init_worker_auth();
@@ -68697,7 +68814,14 @@ function consultFrontierModelFor(settings, provider) {
 }
 function consultModelProvider(model) {
   const prefix = model.slice(0, model.indexOf("/")).toLowerCase();
-  return Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix) ? CONSULT_MODEL_PREFIXES[prefix] : undefined;
+  if (Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix))
+    return CONSULT_MODEL_PREFIXES[prefix];
+  const name = model.slice(model.lastIndexOf("/") + 1).trim().toLowerCase();
+  for (const [family, provider] of CONSULT_BARE_MODEL_FAMILIES) {
+    if (family.test(name))
+      return provider;
+  }
+  return;
 }
 function consultChatgptModelUnavailableMessage(model) {
   return model === CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT ? "Claude Sonnet isn't available through zkAPI right now; choose another model." : "The model chosen for ChatGPT questions isn't available through zkAPI right now; choose another model.";
@@ -68946,7 +69070,7 @@ function hasKeys(value, required3, optional) {
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
-var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_STANDARD_MODES, CONSULT_STANDARD_MODE_WHEN_UNSET = "light_cleanup", CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000, CONSULT_LIGHT_CLEANUP_INSTRUCTION, CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = "anthropic/claude-sonnet-5.5", CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT = "openai/gpt-5.5", CONSULT_CALLER_PROVIDERS, CONSULT_MODEL_PREFIXES, DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
+var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "unnamed", CONSULT_LEVEL_FOR_NEW_SETUP, CONSULT_LEVEL_FOR_REPAIR = "general", CONSULT_STANDARD_MODES, CONSULT_STANDARD_MODE_WHEN_UNSET = "light_cleanup", CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4000, CONSULT_LIGHT_CLEANUP_INSTRUCTION, CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180000, MAX_MODEL_ID_CHARS = 200, MAX_BASE_URL_CHARS = 500, CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = "anthropic/claude-sonnet-5.5", CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT = "openai/gpt-5.5", CONSULT_CALLER_PROVIDERS, CONSULT_MODEL_PREFIXES, CONSULT_BARE_MODEL_FAMILIES, DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, WRITER_REQUIRED_KEYS, WRITER_OPTIONAL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
 var init_consult_settings = __esm(() => {
   init_secret_store();
   init_consult_gate();
@@ -68960,8 +69084,21 @@ var init_consult_settings = __esm(() => {
     "Keep everything else as the user wrote it. You may add details from the material that the outside model needs to answer, with the same removals."
   ].join(" ");
   CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS = Object.freeze({ min: 1e4, max: 240000 });
-  CONSULT_CALLER_PROVIDERS = ["openai", "anthropic", "xai"];
-  CONSULT_MODEL_PREFIXES = { openai: "openai", anthropic: "anthropic", "x-ai": "xai", xai: "xai" };
+  CONSULT_CALLER_PROVIDERS = ["openai", "xai", "meta", "anthropic", "other"];
+  CONSULT_MODEL_PREFIXES = {
+    openai: "openai",
+    anthropic: "anthropic",
+    "x-ai": "xai",
+    xai: "xai",
+    "meta-llama": "meta",
+    meta: "meta"
+  };
+  CONSULT_BARE_MODEL_FAMILIES = [
+    [/^(?:gpt|chatgpt|o\d)(?:[-.]|$)/, "openai"],
+    [/^claude(?:[-.]|$)/, "anthropic"],
+    [/^grok(?:[-.]|$)/, "xai"],
+    [/^(?:llama|meta-llama)(?:[-.\d]|$)/, "meta"]
+  ];
   DEFAULT_CONSULT_SETTINGS = Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision: 0,
@@ -93143,7 +93280,8 @@ function anonymousAnswerOutput(raw) {
       ...model ? { model } : {},
       ...route ? { route } : {},
       ...sent2 ? { sent: sent2 } : {},
-      ...note ? { note } : {}
+      ...note ? { note } : {},
+      ...typeof record3.providerNote === "string" ? { provider_note: REMOTE_PROVIDER_UNKNOWN_NOTE } : {}
     };
   }
   if (record3.code === "needs_choice") {
@@ -93300,7 +93438,7 @@ function dateOnly(value) {
 function asRecord14(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Private items may answer this; the person can see that answer in Olympus on their computer.", REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Private items may answer this; the person can see that answer in Olympus on their computer.", REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_operation_error();
   init_opsec();
@@ -93523,7 +93661,7 @@ var init_remote_result = __esm(() => {
   };
   ANONYMOUS_ANSWERED_SCHEMA = {
     type: "object",
-    description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent".',
+    description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
     additionalProperties: false,
     required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
     properties: {
@@ -93538,7 +93676,8 @@ var init_remote_result = __esm(() => {
       model: { type: "string", pattern: MODEL_ID.source },
       route: { type: "string", maxLength: MAX_ROUTE },
       sent: { type: "string", maxLength: MAX_SENT },
-      note: { type: "string", maxLength: MAX_MESSAGE }
+      note: { type: "string", maxLength: MAX_MESSAGE },
+      provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
     }
   };
   ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
@@ -106107,8 +106246,10 @@ function mountDashboardController(options) {
     const kind = form.dataset.agentKind;
     if (kind === "pair")
       return { action: "mint_agent_pairing_code" };
-    if (kind === "key")
-      return { action: "create_agent_key", name: formRecord(form).name || "" };
+    if (kind === "key") {
+      const agent = form.closest("[data-agent]")?.dataset.agent;
+      return { action: "create_agent_key", name: formRecord(form).name || "", ...agent ? { agent } : {} };
+    }
     if (kind === "revoke")
       return { action: "revoke_agent_connection", connection_id: formRecord(form).connection_id || "" };
     if (kind === "remote-on")
@@ -113098,16 +113239,22 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
     });
   }
   if (pathname === DASHBOARD_AGENT_KEYS_PATH) {
-    const unknown4 = Object.keys(body).filter((key2) => key2 !== "name");
+    const unknown4 = Object.keys(body).filter((key2) => key2 !== "name" && key2 !== "agent");
     if (unknown4.length > 0)
-      return refusal(400, "invalid_request", "A key takes only a name.");
+      return refusal(400, "invalid_request", "A key takes only a name and the agent it is for.");
     const name = sanitizeCallerDisplayName(body.name);
     if (!name)
       return refusal(400, "invalid_request", "Give the connection a name, for example Grok API.");
+    let provider;
+    if (body.agent !== undefined) {
+      provider = typeof body.agent === "string" && Object.hasOwn(AGENT_CHOICE_PROVIDERS, body.agent) ? AGENT_CHOICE_PROVIDERS[body.agent] : undefined;
+      if (!provider)
+        return refusal(400, "invalid_request", "That is not an agent Connect an agent offers.");
+    }
     const store2 = openStore(backend);
     if (!store2)
       return storeUnavailable();
-    const created = store2.create(name);
+    const created = store2.create(name, provider ? { provider } : {});
     const remoteAccess = backend.remoteAccess();
     return secretResponse({
       ok: true,
@@ -113203,6 +113350,7 @@ function connectionView(record3) {
     id: record3.id,
     name: record3.displayName,
     kind: record3.kind,
+    provider: record3.provider,
     created_at: record3.createdAt,
     last_used_at: record3.lastUsedAt,
     revoked_at: record3.revokedAt
@@ -113231,9 +113379,16 @@ function secretResponse(body, status = 200) {
 function refusal(status, code, message) {
   return secretResponse({ ok: false, error: { code, message } }, status);
 }
-var DASHBOARD_AGENT_PAIRING_CODE_PATH = "/dashboard/agents/pairing-code", DASHBOARD_AGENT_KEYS_PATH = "/dashboard/agents/keys", DASHBOARD_AGENT_REVOKE_PATH = "/dashboard/agents/revoke", DASHBOARD_AGENT_REMOTE_ACCESS_PATH = "/dashboard/agents/remote-access", LETS_ENCRYPT_REPOSITORY_URL = "https://letsencrypt.org/repository/", DASHBOARD_AGENT_CONTROL_PATHS, WORKER_ENV_ADDRESS_MESSAGE;
+var DASHBOARD_AGENT_PAIRING_CODE_PATH = "/dashboard/agents/pairing-code", DASHBOARD_AGENT_KEYS_PATH = "/dashboard/agents/keys", DASHBOARD_AGENT_REVOKE_PATH = "/dashboard/agents/revoke", DASHBOARD_AGENT_REMOTE_ACCESS_PATH = "/dashboard/agents/remote-access", LETS_ENCRYPT_REPOSITORY_URL = "https://letsencrypt.org/repository/", AGENT_CHOICE_PROVIDERS, DASHBOARD_AGENT_CONTROL_PATHS, WORKER_ENV_ADDRESS_MESSAGE;
 var init_agent_connections = __esm(() => {
   init_operation_caller();
+  AGENT_CHOICE_PROVIDERS = Object.freeze({
+    chatgpt: "openai",
+    claude: "anthropic",
+    grok: "xai",
+    "grok-api": "xai",
+    other: "other"
+  });
   DASHBOARD_AGENT_CONTROL_PATHS = [
     DASHBOARD_AGENT_PAIRING_CODE_PATH,
     DASHBOARD_AGENT_KEYS_PATH,
@@ -125154,71 +125309,6 @@ var init_webStandardStreamableHttp = __esm(() => {
   init_types2();
 });
 
-// src/workers/remote-oauth/pinned-clients.ts
-var exports_pinned_clients = {};
-__export(exports_pinned_clients, {
-  pinnedGrantProvider: () => pinnedGrantProvider,
-  pinnedClient: () => pinnedClient,
-  isClientIdMetadataUrl: () => isClientIdMetadataUrl,
-  isChatGptGrant: () => isChatGptGrant,
-  GROK_REDIRECT_URIS: () => GROK_REDIRECT_URIS,
-  GROK_CLIENT_ID: () => GROK_CLIENT_ID,
-  CURSOR_REDIRECT_URI: () => CURSOR_REDIRECT_URI,
-  CURSOR_CLIENT_ID: () => CURSOR_CLIENT_ID,
-  CLAUDE_REDIRECT_URI: () => CLAUDE_REDIRECT_URI,
-  CLAUDE_CLIENT_ID: () => CLAUDE_CLIENT_ID,
-  CHATGPT_REDIRECT_URI: () => CHATGPT_REDIRECT_URI,
-  CHATGPT_CODEX_CLIENT_ID: () => CHATGPT_CODEX_CLIENT_ID,
-  CHATGPT_CLIENT_ID: () => CHATGPT_CLIENT_ID
-});
-function isClientIdMetadataUrl(clientId) {
-  return clientId.startsWith("https://");
-}
-function isChatGptGrant(connection) {
-  return typeof connection.clientId === "string" && pinnedClient(connection.clientId)?.host === "chatgpt";
-}
-function pinnedClient(clientId) {
-  if (clientId === CHATGPT_CODEX_CLIENT_ID) {
-    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com", host: "chatgpt" };
-  }
-  if (clientId === CHATGPT_CLIENT_ID) {
-    return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com", host: "chatgpt" };
-  }
-  if (clientId === CLAUDE_CLIENT_ID) {
-    return { clientId, clientName: "Claude", redirectUris: [CLAUDE_REDIRECT_URI], verifiedHost: "claude.ai", host: "claude" };
-  }
-  if (clientId === GROK_CLIENT_ID) {
-    return { clientId, clientName: "Grok", redirectUris: GROK_REDIRECT_URIS, verifiedHost: "grok.com", host: "grok" };
-  }
-  if (clientId === CURSOR_CLIENT_ID) {
-    return { clientId, clientName: "Grok Bot or Cursor", redirectUris: [CURSOR_REDIRECT_URI], verifiedHost: "cursor.com", host: "cursor" };
-  }
-  const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
-  if (callback) {
-    return {
-      clientId,
-      clientName: "ChatGPT",
-      redirectUris: [`https://chatgpt.com/connector/oauth/${callback}`],
-      verifiedHost: "chatgpt.com",
-      host: "chatgpt"
-    };
-  }
-  return;
-}
-function pinnedGrantProvider(connection) {
-  const host = typeof connection.clientId === "string" ? pinnedClient(connection.clientId)?.host : undefined;
-  return host === "chatgpt" ? "openai" : host === "claude" ? "anthropic" : host === "grok" || host === "cursor" ? "xai" : undefined;
-}
-var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS, CURSOR_CLIENT_ID = "https://cursor.com/oauth/mcp-client.json", CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
-var init_pinned_clients = __esm(() => {
-  CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
-  CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
-  GROK_REDIRECT_URIS = Object.freeze([
-    "https://grok.com/connectors-oauth-exchange-code/",
-    "https://console.x.ai/connectors-oauth-exchange-code/"
-  ]);
-});
-
 // src/workers/dashboard/shared-status.ts
 function dashboardHonestStatus(status, progress) {
   if (!progress || progress.stage === "done")
@@ -127498,9 +127588,18 @@ async function askAnonymously(input, deps) {
   }
   const bound = askBinding(read);
   let stale = false;
-  const authorize = () => {
+  let sameProvider = false;
+  const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
+  let sentModel = model;
+  const fromCallersProvider = (candidate) => input.callerProvider !== undefined && consultModelProvider(candidate) === input.callerProvider;
+  const authorize = (modelInUse) => {
     if (input.signal?.aborted)
       return false;
+    sentModel = modelInUse || model;
+    if (fromCallersProvider(sentModel)) {
+      sameProvider = true;
+      return false;
+    }
     try {
       if (input.stillAuthorized && !input.stillAuthorized())
         return false;
@@ -127517,10 +127616,9 @@ async function askAnonymously(input, deps) {
     stale = askBinding(current2) !== bound;
     return !stale;
   };
-  const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
-  if (input.callerProvider !== undefined && consultModelProvider(model) === input.callerProvider) {
-    return { ok: false, code: "model_same_provider", message: input.model === undefined ? CONSULT_ASK_MESSAGES.configuredModelSameProvider : CONSULT_ASK_MESSAGES.modelSameProvider };
-  }
+  const sameProviderRefusal = () => ({ ok: false, code: "model_same_provider", message: input.model === undefined ? CONSULT_ASK_MESSAGES.configuredModelSameProvider : CONSULT_ASK_MESSAGES.modelSameProvider });
+  if (fromCallersProvider(model))
+    return sameProviderRefusal();
   let result;
   try {
     result = await deps.send(sent, authorize, { model, ...input.signal ? { signal: input.signal } : {} });
@@ -127529,6 +127627,8 @@ async function askAnonymously(input, deps) {
   }
   if (!result)
     return { ok: false, code: "route_not_configured", message: CONSULT_ASK_MESSAGES.noRoute };
+  if (sameProvider)
+    return sameProviderRefusal();
   if (stale)
     return { ok: false, code: "settings_stale", message: CONSULT_ASK_MESSAGES.stale };
   if (input.signal?.aborted && !result.ok && result.error.outcome === "not_sent")
@@ -127553,8 +127653,9 @@ async function askAnonymously(input, deps) {
     ...strict ? {} : { cleanup },
     rewritten,
     remembered,
-    model,
-    ...rememberNote ? { note: rememberNote } : {}
+    model: sentModel,
+    ...rememberNote ? { note: rememberNote } : {},
+    ...input.callerProvider === "other" ? { providerNote: CONSULT_ASK_MESSAGES.providerUnknown } : {}
   };
 }
 function validModelId(value) {
@@ -127587,6 +127688,7 @@ var init_consult_ask = __esm(() => {
     modelInvalid: "model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.",
     modelSameProvider: "Not sent: that model is from the provider that hosts this conversation, so the question could be tied to the user. Name a model from another provider, or leave model out.",
     configuredModelSameProvider: "Not sent: the model set for this agent on the Anonymous answers card is from the provider that hosts this conversation, so the question could be tied to the user. Choose a model from another provider there, or name one with model.",
+    providerUnknown: "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.",
     cancelled: "The request was cancelled before the question was sent; nothing was charged.",
     tooManyBytes: "Not sent: the question is over 8 KiB once encoded. Shorten it."
   });
@@ -131321,8 +131423,8 @@ function lazyRemoteConnectionStore(resolvePath4, open7) {
   };
 }
 function remoteOperationCaller(connection) {
-  const provider = pinnedGrantProvider(connection) ?? callerProviderFromLabel(connection.displayName);
-  return { surface: "remote", connectionId: connection.id, displayName: connection.displayName, ...provider ? { provider } : {} };
+  const provider = remoteConnectionProvider({ clientId: connection.clientId ?? null, displayName: connection.displayName, chosen: connection.provider ?? null });
+  return { surface: "remote", connectionId: connection.id, displayName: connection.displayName, provider };
 }
 function createInProcessOperationContext(input) {
   const config2 = {
@@ -131399,7 +131501,6 @@ var init_remote_mcp = __esm(() => {
   init_delphi();
   init_email();
   init_operation_caller();
-  init_pinned_clients();
   init_remote_connections();
   init_remote_access();
   init_remote_oauth_store();
@@ -139564,7 +139665,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             const opened = await openZkapiConsultSession2(route, signal ? { signal } : {});
             if (!opened.ok)
               return { ok: false, error: opened.error };
-            await opened.session.send(text5, { authorize: () => authorize(), ...signal ? { signal } : {} });
+            await opened.session.send(text5, { authorize: () => authorize(route.model), ...signal ? { signal } : {} });
             return opened.session.finished;
           },
           remember: (choice) => dashboardConsult.rememberLevel(choice)
@@ -146681,6 +146782,7 @@ function remoteConnectionView(connection) {
     name: connection.displayName,
     kind: connection.kind,
     ...connection.clientId ? { client_id: connection.clientId } : {},
+    provider: connection.provider,
     created_at: connection.createdAt,
     last_used_at: connection.lastUsedAt,
     revoked_at: connection.revokedAt,

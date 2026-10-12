@@ -63,8 +63,11 @@ export interface ConsultAskInput {
   readonly model?: string;
   /**
    * Who hosts the asking agent, when the surface can tell (OperationCaller
-   * .provider): it chooses the model setting (consultFrontierModelFor) and
-   * refuses a one-off `model` from the same provider.
+   * .provider): it chooses the model setting (consultFrontierModelFor), and
+   * the question never goes to a model from the same provider, whether named
+   * one-off or resolved from the settings. `other` (a remote connection whose
+   * host is not known): the question goes, and the answer says the rule
+   * could not be applied.
    */
   readonly callerProvider?: ConsultCallerProvider;
   /**
@@ -97,9 +100,11 @@ export interface ConsultAskDependencies {
    * One zkAPI consult; undefined when no route is configured. `authorize` is
    * the final authorization: the transport calls it immediately before
    * reserving and dispatching (ZkapiSendControl.authorize), and `false`
-   * refuses the send with nothing reserved.
+   * refuses the send with nothing reserved. `modelInUse` is the model the
+   * route resolved for this send (options.model, or the route's own when
+   * that is empty): the same-provider rule is checked on it there, last.
    */
-  readonly send: (question: string, authorize: () => boolean, options: ConsultAskSendOptions) => Promise<ZkapiConsultResult | undefined>;
+  readonly send: (question: string, authorize: (modelInUse?: string) => boolean, options: ConsultAskSendOptions) => Promise<ZkapiConsultResult | undefined>;
   /**
    * Stores a level (and Standard's cleanup) as the default, through the
    * composition root's settings writer. Absent: `remember` is refused.
@@ -133,6 +138,8 @@ export type ConsultAskResult =
     readonly model?: string;
     /** A requested save that failed (the question still went): the user should hear it, or they are asked again next time. */
     readonly note?: string;
+    /** CONSULT_ASK_MESSAGES.providerUnknown, exactly, when the asking agent's host is not known (`other`). */
+    readonly providerNote?: string;
   }
   | { readonly ok: false; readonly code: 'needs_choice'; readonly message: string; readonly options: ConsultAskChoiceOptions }
   | {
@@ -178,6 +185,8 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   modelInvalid: 'model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.',
   modelSameProvider: 'Not sent: that model is from the provider that hosts this conversation, so the question could be tied to the user. Name a model from another provider, or leave model out.',
   configuredModelSameProvider: 'Not sent: the model set for this agent on the Anonymous answers card is from the provider that hosts this conversation, so the question could be tied to the user. Choose a model from another provider there, or name one with model.',
+  /** Said with an answer to an agent whose host Olympus does not know (a connection set up as Other). */
+  providerUnknown: 'Olympus does not know which company runs this agent, so it could not make sure the answer came from another company\'s model.',
   cancelled: 'The request was cancelled before the question was sent; nothing was charged.',
   tooManyBytes: 'Not sent: the question is over 8 KiB once encoded. Shorten it.',
 });
@@ -400,9 +409,23 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   }
   const bound = askBinding(read);
   let stale = false;
-  const authorize = (): boolean => {
+  let sameProvider = false;
+  // The question goes to the model set for the caller's hosting provider
+  // unless it named one.
+  const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
+  // What answered: the route's resolution, once the transport authorizes.
+  let sentModel = model;
+  const fromCallersProvider = (candidate: string): boolean =>
+    input.callerProvider !== undefined && consultModelProvider(candidate) === input.callerProvider;
+  const authorize = (modelInUse?: string): boolean => {
     // Cancelled before dispatch: refused with nothing reserved.
     if (input.signal?.aborted) return false;
+    // Last, on the model the route resolved for this very send.
+    sentModel = modelInUse || model;
+    if (fromCallersProvider(sentModel)) {
+      sameProvider = true;
+      return false;
+    }
     try {
       if (input.stillAuthorized && !input.stillAuthorized()) return false;
     } catch {
@@ -418,14 +441,11 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     stale = askBinding(current) !== bound;
     return !stale;
   };
-  // The question goes to the model set for the caller's hosting provider
-  // unless it named one.
-  const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
-  // Checked again on the model actually sent: settings re-read after
-  // remember may name another one (Codex review of PR #289).
-  if (input.callerProvider !== undefined && consultModelProvider(model) === input.callerProvider) {
-    return { ok: false, code: 'model_same_provider', message: input.model === undefined ? CONSULT_ASK_MESSAGES.configuredModelSameProvider : CONSULT_ASK_MESSAGES.modelSameProvider };
-  }
+  // Checked again on the model resolved for the send, before a session
+  // opens: settings re-read after remember may name another one (Codex
+  // review of PR #289). The final authorization checks the route's own.
+  const sameProviderRefusal = (): ConsultAskResult => ({ ok: false, code: 'model_same_provider', message: input.model === undefined ? CONSULT_ASK_MESSAGES.configuredModelSameProvider : CONSULT_ASK_MESSAGES.modelSameProvider });
+  if (fromCallersProvider(model)) return sameProviderRefusal();
   let result: ZkapiConsultResult | undefined;
   try {
     result = await deps.send(sent, authorize, { model, ...(input.signal ? { signal: input.signal } : {}) });
@@ -433,6 +453,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     result = { ok: false, error: { code: 'internal_error', message: 'The zkAPI session failed inside Olympus.', outcome: 'unknown', networkIdentity: 'not_verified' } };
   }
   if (!result) return { ok: false, code: 'route_not_configured', message: CONSULT_ASK_MESSAGES.noRoute };
+  if (sameProvider) return sameProviderRefusal();
   if (stale) return { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale };
   if (input.signal?.aborted && !result.ok && result.error.outcome === 'not_sent') return { ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled };
   if (!result.ok) {
@@ -455,8 +476,9 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     ...(strict ? {} : { cleanup }),
     rewritten,
     remembered,
-    model,
+    model: sentModel,
     ...(rememberNote ? { note: rememberNote } : {}),
+    ...(input.callerProvider === 'other' ? { providerNote: CONSULT_ASK_MESSAGES.providerUnknown } : {}),
   };
 }
 
