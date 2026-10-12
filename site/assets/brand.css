@@ -112,7 +112,7 @@ a:hover { text-decoration-color: currentColor; }
   max-width: 1200px; margin: 0 auto; padding: 14px var(--gutter);
 }
 .wordmark { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 300; font-size: 28px; letter-spacing: -0.02em; line-height: 1; }
-.wordmark img { width: 32px; height: 32px; }
+.wordmark__icon { width: 32px; height: 32px; flex: none; background: url("/assets/img/icon-plain-64.png") center / contain no-repeat; }
 .site-nav { display: flex; align-items: center; gap: 8px 22px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
 .site-nav a { text-decoration: none; color: var(--ink-soft); }
 .site-nav a:hover, .site-nav a[aria-current="page"] { color: var(--ink); text-decoration: underline; text-decoration-color: var(--clay); }
