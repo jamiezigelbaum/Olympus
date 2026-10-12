@@ -47,7 +47,6 @@ import {
   type AnalystAnswerLanes,
 } from './analyst-answer.ts';
 import type { SourceIndexAnswerRequest } from './answer-types.ts';
-import type { SourceEmbeddingProvider } from './embeddings.ts';
 
 /**
  * The trust domains a local answer reads: Personal and Private (design
@@ -110,23 +109,10 @@ export interface LocalAnswerOptions {
 }
 
 /**
- * The embedding provider a local lane may hold: the built-in model, already
- * on this computer, or nothing (the lane then searches by keyword). Anything
- * reached over HTTP (a cloud service, a configured "local" server that may be
- * another machine) is refused, and so is a built-in model that would have to
- * download first.
+ * The embedding provider a local lane may hold (source-index/embeddings.ts,
+ * kept there so the worker's lane builder needs nothing else from here).
  */
-export function builtInEmbeddingOnly(
-  provider: SourceEmbeddingProvider | undefined,
-  isBuiltInReady: (provider: SourceEmbeddingProvider) => boolean,
-): SourceEmbeddingProvider | undefined {
-  if (!provider || provider.backend !== 'local') return undefined;
-  try {
-    return isBuiltInReady(provider) ? provider : undefined;
-  } catch {
-    return undefined;
-  }
-}
+export { builtInEmbeddingOnly } from './embeddings.ts';
 
 /** The retrieval request a local answer searches with: the selectors as stored, every tier on. */
 export function localAnswerRequest(question: string, selectors: WaitingQuestionSelectors = {}): SourceIndexAnswerRequest {

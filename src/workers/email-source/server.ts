@@ -55,7 +55,6 @@ import {
   type SovereigntyAnalystRoutePlan,
   type SovereigntyAnalystRouteStep,
 } from '../source-index/analyst-answer.ts';
-import { builtInEmbeddingOnly } from '../source-index/local-answer.ts';
 import { SecureAnalystPoolState, parseSecureAnalystPoolLastLegTimeoutMs } from '../source-index/analyst-pool.ts';
 import {
   createFileSourceAnswerLatencyLog,
@@ -268,6 +267,7 @@ import {
   DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION,
   DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL,
   VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
+  builtInEmbeddingOnly,
   GeminiSourceEmbeddingProvider,
   isApprovedSecureSourceEmbeddingProvider,
   memoizeQueryEmbeddings,

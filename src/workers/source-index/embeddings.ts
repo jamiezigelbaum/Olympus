@@ -109,6 +109,25 @@ export function isApprovedSecureSourceEmbeddingProvider(provider: Pick<SourceEmb
   return provider.backend === 'local' || (provider.backend === 'cloud' && provider.provider === 'venice');
 }
 
+/**
+ * The embedding provider a local lane may hold: the built-in model, already
+ * on this computer, or nothing (the lane then searches by keyword). Anything
+ * reached over HTTP (a cloud service, a configured "local" server that may be
+ * another machine) is refused, and so is a built-in model that would have to
+ * download first.
+ */
+export function builtInEmbeddingOnly(
+  provider: SourceEmbeddingProvider | undefined,
+  isBuiltInReady: (provider: SourceEmbeddingProvider) => boolean,
+): SourceEmbeddingProvider | undefined {
+  if (!provider || provider.backend !== 'local') return undefined;
+  try {
+    return isBuiltInReady(provider) ? provider : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface SourceEmbeddingProviderFingerprint {
   provider: string;
   modelId: string;
