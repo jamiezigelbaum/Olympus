@@ -64,6 +64,19 @@ kernel 6.8, x86_64, 16 threads, 28 GB RAM, AMD Barcelo iGPU; has `tesseract`,
 `kernel.apparmor_restrict_unprivileged_userns = 1`. The demo box is Linux and
 runs the engine through the worker path, not `olympus engine`.
 
+Omarchy test laptop (2026-10-12, read-only survey): Omarchy 4.0.1, kernel
+7.1.9-arch, x86_64, Intel i7-7567U (2 cores, 4 threads), 15 GB RAM, Intel
+Iris iGPU. LSMs `capability,landlock,lockdown,yama,bpf` (no AppArmor);
+Landlock ABI 9; unprivileged user plus network namespaces work without
+admin (`unshare --user --net` succeeds); `bwrap` installed. gnome-keyring
+provides the Secret Service; `secret-tool` present. `vipsthumbnail` with
+libheif (HEIC load true), `heif-convert`, `magick`, `tesseract` and `ffmpeg`
+installed; `ocrmypdf` absent and not in its pacman sync databases. `ufw`
+on by default. Lingering off. No Bun; Node via mise. Consequences: W4's
+namespace design needs no admin step on Omarchy; W3's preparer works with
+stock packages; W1 must cover a host with tesseract but no ocrmypdf; the
+laptop is the small-machine data point for W2.
+
 ## Principle: gate on capability, not on the OS name
 
 Each `darwin` gate becomes a probe of the machine: the tool exists and a real
