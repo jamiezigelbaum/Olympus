@@ -23,7 +23,7 @@ import {
   reapRecordedEngineChildren,
   type EngineChildReapDeps,
 } from './engine-children.ts';
-import { ENGINE_BUILD_ENV, enginePaths, engineStatusPath, readEngineConfig } from './engine-service.ts';
+import { ENGINE_BUILD_ENV, engineServicePaths, engineStatusPath, readEngineConfig } from './engine-service.ts';
 import { createNativeEmbeddingDrainService } from './native-embedding-drain-service.ts';
 import {
   backgroundNativeProcessService,
@@ -65,6 +65,7 @@ export interface EngineHostOptions {
   moduleUrl: string;
   env?: Record<string, string | undefined>;
   homeDir?: string;
+  platform?: string;
   /** Test seams. */
   services?: (pluginConfig: Record<string, unknown>) => NativeProcessServiceDefinition[];
   log?: (line: string) => void;
@@ -93,7 +94,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   const log = options.log ?? ((line: string) => console.log(`${new Date().toISOString()} ${line}`));
   const exit = options.exit ?? ((code: number) => process.exit(code));
   const homeDir = options.homeDir ?? env.HOME ?? '';
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ homeDir, env, platform: options.platform });
 
   let pluginConfig: Record<string, unknown> | undefined;
   let remoteMode = 'off';

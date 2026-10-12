@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 /**
  * The standalone Olympus engine on macOS: one per-user LaunchAgent that runs
  * the engine host (core/engine-host.ts), which supervises the worker, the
@@ -110,6 +111,19 @@ export function enginePaths(homeDir: string): EnginePaths {
     modelsDir: join(olympusDataDir(dataEnv), 'models'),
     remoteAccessDir: remoteAccessDir(dataEnv),
   };
+}
+
+/** Platform-aware seam; the historical Mac path renderer remains byte-for-byte unchanged. */
+export function engineServicePaths(options: { homeDir?: string; platform?: string; env?: Record<string, string | undefined> } = {}): EnginePaths {
+  const env = { ...(options.env ?? process.env), HOME: options.homeDir ?? options.env?.HOME ?? homedir() };
+  if ((options.platform ?? process.platform) !== 'linux') return enginePaths(env.HOME);
+  const l = resolveLinuxEngineLayout(env);
+  return { label: 'olympus-engine.service', plistPath: l.unitPath, logDir: l.stateDir,
+    logPath: join(l.stateDir, 'engine.log'), errorLogPath: join(l.stateDir, 'engine.err'), configPath: l.configPath,
+    sovereigntyPath: l.sovereigntyPath, appSupportDir: l.packageDir, appDir: join(l.packageDir, 'app'),
+    previousAppDir: join(l.packageDir, 'app.previous'), runtimeDir: join(l.packageDir, 'runtime'), workerEnvPath: l.workerEnvPath,
+    statusPath: join(l.dataDir, 'engine/status.json'), childrenPath: join(l.dataDir, 'engine/children.json'),
+    modelsDir: join(l.dataDir, 'models'), remoteAccessDir: join(l.dataDir, 'connect-relay') };
 }
 
 export function engineStatusPath(env: Record<string, string | undefined> = process.env): string {
@@ -279,6 +293,7 @@ export function reconcileEngineConfig(path: string): { wrote: boolean; config: R
 
 export interface EngineServiceOptions {
   homeDir?: string;
+  env?: Record<string, string | undefined>;
   exec?: EngineExec;
   uid?: number;
   /** Test seam; the engine is macOS-only. */

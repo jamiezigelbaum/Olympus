@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
@@ -180,7 +181,8 @@ const TRUST_ORDER: Record<SovereigntyProfileTrust, number> = {
   standard_cloud: 1,
 };
 
-export function defaultSovereigntyConfigPath(): string {
+export function defaultSovereigntyConfigPath(env: Record<string, string | undefined> = process.env): string {
+  if (process.platform === 'linux') return resolveLinuxEngineLayout(env).sovereigntyPath;
   return join(homedir(), '.olympus', 'sovereignty.json');
 }
 
@@ -195,7 +197,7 @@ export function loadSovereigntyEngine(options: LoadSovereigntyOptions = {}): Sov
   const requestedConfigPath = options.configPath?.trim()
     || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim()
     || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
-  const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
+  const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
   if (existsSync(configPath)) {
     const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {

@@ -301,7 +301,7 @@ describe('engine host without OpenClaw', () => {
       async stop() { stopped.push(id); },
     });
     const lines: string[] = [];
-    const handle = await startEngineHost({
+    const handle = await startEngineHost({ platform: 'darwin',
       moduleUrl: 'file:///fixture/dist/cli.js',
       env: { HOME: home },
       homeDir: home,
@@ -433,7 +433,7 @@ if (env.LAUNCH === '0') {
     const lines: string[] = [];
     let handle: Awaited<ReturnType<typeof startEngineHost>> | undefined;
     try {
-      handle = await startEngineHost({
+      handle = await startEngineHost({ platform: 'darwin',
         moduleUrl: 'file:///fixture/dist/cli.js',
         env: { HOME: home },
         homeDir: home,
@@ -465,7 +465,7 @@ if (env.LAUNCH === '0') {
   test('refuses to start without engine.json (exit 78, so launchd throttles)', async () => {
     const { home } = fixture();
     const exits: number[] = [];
-    const handle = await startEngineHost({
+    const handle = await startEngineHost({ platform: 'darwin',
       moduleUrl: 'file:///fixture/dist/cli.js',
       homeDir: home,
       env: { HOME: home },

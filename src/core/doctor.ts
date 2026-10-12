@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 // Olympus doctor: a read-only health walk across the chain the calling assistant depends on
 // (Argus local model lanes, the private email source worker, and the source
 // index), reported in plain language so an operator can see what is broken
@@ -351,7 +352,7 @@ function doctorSovereigntyConfigPath(deps: DoctorDeps): string | undefined {
   // install it never asked about.
   if (deps.env === undefined) return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join(home, '.olympus', 'sovereignty.json') : undefined;
+  return home ? ((deps.platform ?? process.platform) === 'linux' ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join(home, '.olympus', 'sovereignty.json')) : undefined;
 }
 
 async function safeCheck(name: string, run: () => Promise<DoctorCheck>): Promise<DoctorCheck> {
