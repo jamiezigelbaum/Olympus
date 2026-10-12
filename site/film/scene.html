@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <!-- One scene of the launch film, played on the home page. The scene files, paper.js and the clock are the film's own
        (marketing repo, projects/olympus/launch-video at a2772ab): same type, same typewriter redaction, same timing.
-       The home page frames this at 1920x1080, scales it, and sends "play" when the scene reaches the middle of the
-       screen. ?s=<scene id> picks the scene; &still shows its last frame. -->
+       The home page frames this at 1920x1080, scales it, and plays it (by seeking its timeline) when the scene reaches
+       the middle of the screen. ?s=<scene id> picks the scene; &still shows its last frame. -->
   <meta name="viewport" content="width=1920, height=1080">
   <meta name="robots" content="noindex">
   <meta name="referrer" content="no-referrer">
@@ -43,13 +43,6 @@
       var end = [B.out, B.turn, B.pan, B.push].filter(function (t) { return t != null; })[0];
       if (end == null) end = C.dur;
 
-      var tl = null, wantPlay = false;
-      function tell(state) { parent.postMessage({ olympusScene: id, state: state }, location.origin); }
-      function play() {
-        if (!tl) { wantPlay = true; return; }
-        tl.play(0);
-      }
-
       fetch("scenes/" + id + ".html").then(function (r) { return r.text(); }).then(function (html) {
         var doc = new DOMParser().parseFromString(html, "text/html");
         var frag = doc.querySelector("template").content;
@@ -65,23 +58,17 @@
             stage.appendChild(document.importNode(n, true));
           }
         });
-        // OLY.ready waits for the fonts, then the scene registers its timeline.
+        // OLY.ready waits for the fonts, then the scene registers its timeline. The home page drives it from its own
+        // clock (seek, never play), so a frame the browser throttles can't stall a scene halfway.
         (function wait() {
-          tl = window.__timelines[id];
-          if (!tl) return requestAnimationFrame(wait);
-          tl.addPause(end, function () { tell("done"); });
-          if (still) { tl.seek(end, false); tl.pause(); tell("done"); return; }
-          tl.seek(0, false);
-          tell("ready");
-          if (wantPlay) play();
+          var tl = window.__timelines[id];
+          if (!tl) return setTimeout(wait, 16);
+          tl.pause();
+          tl.seek(still ? end : 0, false);
+          window.olympusScene = { tl: tl, end: end };
         })();
       });
 
-      window.addEventListener("message", function (e) {
-        if (e.origin !== location.origin || !e.data) return;
-        if (e.data.olympusScene === "play") play();
-        if (e.data.olympusScene === "still" && tl) { tl.seek(end, false); tl.pause(); }
-      });
     })();
   </script>
 </body>

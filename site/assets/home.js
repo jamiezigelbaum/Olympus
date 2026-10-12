@@ -7,9 +7,9 @@
   var motion = document.documentElement.classList.contains("motion");
   var scenes = Array.prototype.slice.call(document.querySelectorAll("[data-scene]"));
 
-  // Frame each scene. The first loads at once; the rest load as they come near.
+  // Frame each scene, all at once: a scene still loading when it reaches the middle would start late.
   var frames = new Map();
-  scenes.forEach(function (scene, i) {
+  scenes.forEach(function (scene) {
     var stage = scene.querySelector(".stage");
     if (!stage) return;
     var f = document.createElement("iframe");
@@ -17,7 +17,6 @@
     f.tabIndex = -1;
     f.setAttribute("aria-hidden", "true");
     f.setAttribute("scrolling", "no");
-    if (i > 0) f.loading = "lazy";
     f.src = "/film/scene.html?s=" + encodeURIComponent(stage.getAttribute("data-film-scene")) + (motion ? "" : "&still");
     stage.appendChild(f);
     frames.set(scene, f);
@@ -31,12 +30,26 @@
   if ("ResizeObserver" in window) new ResizeObserver(fit).observe(document.querySelector(".reel"));
   else window.addEventListener("resize", fit);
 
+  // One clock for every scene: the page's own animation frames seek each scene's timeline, so no scene depends on
+  // its frame's timers (a scene once stalled halfway, 2026-10-12). A scene asked to play before it has loaded
+  // starts the moment it is ready.
+  var playing = [];
+  var running = false;
   function play(scene) {
-    var f = frames.get(scene);
-    var send = function () { f.contentWindow.postMessage({ olympusScene: "play" }, location.origin); };
-    // A loaded scene queues "play" until its timeline is built. A frame still on about:blank has no OLY yet: wait for it.
-    if (f.contentWindow && f.contentWindow.OLY) send();
-    else f.addEventListener("load", send, { once: true });
+    playing.push({ frame: frames.get(scene), t0: null });
+    if (!running) { running = true; requestAnimationFrame(tick); }
+  }
+  function tick(now) {
+    playing = playing.filter(function (p) {
+      var sc = p.frame.contentWindow && p.frame.contentWindow.olympusScene;
+      if (!sc) return true;
+      if (p.t0 == null) p.t0 = now;
+      var t = Math.min((now - p.t0) / 1000, sc.end);
+      sc.tl.seek(t, false);
+      return t < sc.end;
+    });
+    if (playing.length) requestAnimationFrame(tick);
+    else running = false;
   }
 
   if (motion) {
