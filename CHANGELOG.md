@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0-rc.5 - 2026-10-12
+
+- **OpenClaw core updates are no longer blocked by Olympus.** Before an
+  OpenClaw update swaps versions, its updater reads every installed plugin's
+  code under Node. rc.4's command-line bundle used Bun's `import.meta.dir`,
+  which that reader rejects, so updating OpenClaw from 2026.9.5 stopped at
+  the state snapshot with "Cannot use 'import.meta' outside a module". The
+  bundle now finds its install folder the standard way, and a test keeps
+  Bun-only `import.meta.dir` out of the bundles Node loads.
+
 ## 1.0.0-rc.4 - 2026-10-12
 
 - **Search uses EmbeddingGemma 2, built in.** The model that indexes and
