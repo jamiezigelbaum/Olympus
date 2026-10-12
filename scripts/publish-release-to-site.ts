@@ -490,7 +490,36 @@ export function checkLinuxSiteRelease(root: string): string[] {
   return problems;
 }
 
+/** Local acceptance uses the real pinned installer without weakening publication qualification. */
+export function prepareLinuxLocalBundle(input: { root: string; artifact: string; output: string }): ReleasePins & { directory: string } {
+  const version = sourceVersion(input.root);
+  const packaged = tarballPackage(input.artifact);
+  if (packaged.name !== 'olympus' || packaged.version !== version) throw new Error('Local tarball identity does not match the source package version.');
+  const pins = { version, ...fileDigest(input.artifact) };
+  const runtime = readLinuxRuntimePins(join(input.root, LINUX_RUNTIME_PINS));
+  const script = renderLinuxInstallScript(readFileSync(join(input.root, LINUX_INSTALL_TEMPLATE), 'utf8'), pins, runtime);
+  // Refuse an existing output rather than accidentally mixing two candidates.
+  mkdirSync(input.output, { mode: 0o700 });
+  const name = `olympus-${version}.tgz`;
+  copyFileSync(input.artifact, join(input.output, name), constants.COPYFILE_EXCL);
+  writeFileSync(join(input.output, 'install-linux.sh'), script, { mode: 0o700, flag: 'wx' });
+  copyFileSync(join(input.root, SERVED_LINUX_UNINSTALL_SCRIPT), join(input.output, 'uninstall-linux.sh'), constants.COPYFILE_EXCL);
+  writeFileSync(join(input.output, 'SHA256SUMS'), `${pins.sha256}  ${name}\n`, { flag: 'wx' });
+  writeFileSync(join(input.output, 'README.txt'),
+    `Local Linux x64 acceptance candidate; not host-qualified or published.\n`
+    + `sha256sum -c SHA256SUMS\nsh ./install-linux.sh --tarball "${name}"\n`
+    + `sh ./uninstall-linux.sh\nData is retained by default. See the Omarchy acceptance runbook for explicit purge and recovery.\n`, { flag: 'wx' });
+  return { ...pins, directory: input.output };
+}
+
 function main(args: string[]): void {
+  if (args[0] === '--linux-local' && args[1] === '--artifact' && args[2]
+    && args[3] === '--output' && args[4] && args.length === 5) {
+    const result = prepareLinuxLocalBundle({ root: ROOT, artifact: resolve(args[2]), output: resolve(args[4]) });
+    console.log(`Local Omarchy acceptance bundle: ${result.directory}`);
+    console.log(`SHA-256 ${result.sha256}; ${result.bytes} bytes. Not published or host-qualified.`);
+    return;
+  }
   if (args[0] === '--linux' && args[1] === '--check' && args.length === 2) {
     const problems = checkLinuxSiteRelease(ROOT);
     if (problems.length > 0) {

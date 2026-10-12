@@ -1,6 +1,6 @@
 #!/bin/sh
-# Linux x64 bootstrap DRAFT. SVC owns durable installation and recovery.
-# Publication stays blocked until the runtime and lifecycle contract is qualified.
+# Linux x64 bootstrap. The engine lifecycle owns durable generation exchange,
+# rollback and interrupted-install recovery under the shared kernel lock.
 # Every action is below main: a truncated curl response executes no install.
 # Guard chains intentionally refuse when ANY prerequisite is false.
 # shellcheck disable=SC2015
@@ -26,18 +26,54 @@ check_digest() {
 }
 fetch() { curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "$2" "$1"; }
 
+usage() {
+  say 'Usage: install-linux.sh [--tarball PATH] [--bun-archive PATH]'
+  say 'Both local archives are checked against the release pins before extraction or execution.'
+}
+
+parse_args() {
+  LOCAL_TARBALL=''
+  LOCAL_BUN_ARCHIVE=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tarball|--bun-archive)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a path."
+        case "$1" in --tarball) LOCAL_TARBALL=$2 ;; *) LOCAL_BUN_ARCHIVE=$2 ;; esac
+        shift 2
+        ;;
+      --tarball=*) LOCAL_TARBALL=${1#--tarball=} ; shift ;;
+      --bun-archive=*) LOCAL_BUN_ARCHIVE=${1#--bun-archive=} ; shift ;;
+      --help|-h) usage; exit 0 ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+}
+
 check_tools() {
   missing=''
-  for tool in curl sha256sum tar unzip stat getconf mktemp mkdir chmod rm wc tr id uname df cp mv cat dirname sed head find awk grep diff cmp ps flock loginctl systemctl; do
+  for tool in sha256sum tar unzip stat getconf mktemp mkdir chmod rm wc tr id uname df cp mv cat dirname sed head find awk grep diff cmp ps flock loginctl systemctl systemd-analyze python3; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
   done
+  if { [ -z "$LOCAL_TARBALL" ] || [ -z "$LOCAL_BUN_ARCHIVE" ]; } && ! command -v curl >/dev/null 2>&1; then
+    missing="$missing curl"
+  fi
   if [ -n "$missing" ]; then
     say "Missing required tools:$missing" >&2
-    say 'Arch / Omarchy: sudo pacman -S --needed curl ca-certificates tar unzip coreutils findutils gawk grep diffutils procps-ng util-linux systemd' >&2
-    say 'Ubuntu: sudo apt install curl ca-certificates tar unzip coreutils findutils gawk grep diffutils procps util-linux systemd' >&2
+    say 'Arch / Omarchy: sudo pacman -S --needed curl ca-certificates tar unzip coreutils findutils gawk grep diffutils procps-ng util-linux systemd python' >&2
+    say 'Ubuntu: sudo apt install curl ca-certificates tar unzip coreutils findutils gawk grep diffutils procps util-linux systemd python3' >&2
     die 'Install these packages, then retry. No packages were installed automatically.'
   fi
   flock --version | grep -q 'util-linux' || die 'util-linux flock is required.'
+}
+
+copy_local_archive() {
+  source=$1
+  destination=$2
+  label=$3
+  case "$source" in /*) ;; *) die "$label path must be absolute: $source" ;; esac
+  check_path "$source"
+  [ -f "$source" ] && [ ! -L "$source" ] || die "$label must be a regular, non-symbolic-link file: $source"
+  cp "$source" "$destination" || die "$label could not be copied into private bootstrap storage."
 }
 
 # Existing ancestors must be real, owned by this account/root and not writable
@@ -111,7 +147,7 @@ unpack_package() {
 }
 
 main() {
-  [ "$#" = 0 ] || die 'This bootstrap takes no arguments.'
+  parse_args "$@"
   case "$OLYMPUS_VERSION$OLYMPUS_SHA256$OLYMPUS_BYTES$BUN_VERSION$BUN_URL$BUN_ENTRY$BUN_BYTES$BUN_SHA256$BUN_EXE_SHA256$BUN_GLIBC_MIN" in
     *@*) die 'Unfilled installer template; use a published Linux release.' ;;
   esac
@@ -140,76 +176,60 @@ main() {
   # Allow room for the runtime, compressed package and extraction before downloading.
   available=$(df -Pk "$WORK" | awk 'END {print $4}')
   [ "$available" -ge "$(( (BUN_BYTES * 4 + OLYMPUS_BYTES * 6) / 1024 + 65536 ))" ] || die 'Not enough bootstrap disk space.'
-  fetch "$BUN_URL" "$WORK/bun.zip" || die 'Bun download failed; check HTTPS connectivity and CA certificates.'
+  if [ -n "$LOCAL_BUN_ARCHIVE" ]; then
+    copy_local_archive "$LOCAL_BUN_ARCHIVE" "$WORK/bun.zip" 'Local Bun archive'
+  else
+    fetch "$BUN_URL" "$WORK/bun.zip" || die 'Bun download failed; check HTTPS connectivity and CA certificates.'
+  fi
   check_digest "$WORK/bun.zip" "$BUN_BYTES" "$BUN_SHA256" || die 'Bun archive checksum/size mismatch; nothing was executed.'
   # Read one entry to a fixed path. ZIP paths/links are never extracted.
   unzip -p "$WORK/bun.zip" "$BUN_ENTRY" > "$WORK/bun" || die 'Bun executable is missing.'
   [ "$(sha256_of "$WORK/bun")" = "$BUN_EXE_SHA256" ] || die 'Bun executable checksum mismatch; nothing was executed.'
   chmod 700 "$WORK/bun"
-  fetch "$RELEASE_BASE/$OLYMPUS_VERSION/olympus-$OLYMPUS_VERSION.tgz" "$WORK/release.tgz" || die 'Release download failed.'
+  if [ -n "$LOCAL_TARBALL" ]; then
+    copy_local_archive "$LOCAL_TARBALL" "$WORK/release.tgz" 'Local Olympus tarball'
+  else
+    fetch "$RELEASE_BASE/$OLYMPUS_VERSION/olympus-$OLYMPUS_VERSION.tgz" "$WORK/release.tgz" || die 'Release download failed.'
+  fi
   check_digest "$WORK/release.tgz" "$OLYMPUS_BYTES" "$OLYMPUS_SHA256" || die 'Release checksum/size mismatch; nothing was executed.'
   unpack_package
   [ "$("$WORK/bun" --no-env-file --version)" = "$BUN_VERSION" ] || die 'The verified Bun cannot run on this CPU/glibc, or returned the wrong version.'
   "$WORK/bun" --no-env-file -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(p.name!=="olympus" || p.version!==process.argv[2]) process.exit(1)' "$WORK/unpacked/package/package.json" "$OLYMPUS_VERSION" \
     || die 'The package identity disagrees with the release pins.'
-  # Run observation, account change and lifecycle mutation under ONE supervisor.
+  # Run admission, durable linger provenance and lifecycle mutation under ONE
+  # supervisor. The lifecycle CLI alone may observe or change linger.
   # The helper is private source from this fully received template, not a
   # downloaded command. SVC must verify its flock ancestry and reuse custody.
   cat > "$WORK/activate.sh" <<'ACTIVATE'
 #!/bin/sh
 set -eu
 WORK=$1
-USER_ID=$2
 say() { printf '%s\n' "$*"; }
 die() { printf '%s\n' "Olympus was not installed or upgraded: $*" >&2; exit 1; }
-check_linger() {
-  account=$(id -un)
-  # Shell-safe quoting for the manual command; never eval or execute it.
-  quoted_account=$(printf '%s' "$account" | sed "s/'/'\\\\''/g")
-  prior=$(loginctl show-user "$USER_ID" --property=Linger --value 2>/dev/null) \
-    || die 'systemd-logind and a working user session are required; logind is unavailable.'
-  case "$prior" in yes|no) ;; *) die 'systemd-logind returned an unknown linger state; nothing was changed.' ;; esac
-  OLYMPUS_LINGER_BEFORE=$prior
-  export OLYMPUS_LINGER_BEFORE
-  [ "$prior" != yes ] || return 0
-  say 'Olympus will try to enable account-wide linger, so your user services can run after logout and before login.'
-  loginctl --no-ask-password enable-linger "$account" >/dev/null 2>&1 || true
-  after=$(loginctl show-user "$USER_ID" --property=Linger --value 2>/dev/null) \
-    || die 'systemd-logind became unavailable; the prior linger state was no. Ask an administrator to inspect it. No active package or unit was changed.'
-  [ "$after" != yes ] || return 0
-  [ "$after" = no ] || die 'systemd-logind returned an unknown linger state; ask an administrator to inspect it.'
-  printf '%s\n' \
-    'Olympus needs permission to keep running after you log out and to start' \
-    'before you log in. This account cannot enable that permission without an' \
-    "administrator. Ask an administrator to run: \`sudo loginctl enable-linger '$quoted_account'\`." \
-    'Then run the installer again. Olympus was not installed or upgraded;' \
-    'an existing installation was left running.' >&2
-  exit 1
-}
 
   # Read-only lifecycle admission must refuse existing data, unsafe layout and
   # unsupported capabilities before the account-wide linger change.
   "$WORK/bun" --no-env-file "$WORK/unpacked/package/dist/cli.js" \
     engine install --from-checkout "$WORK/unpacked/package" --bun "$WORK/bun" --dry-run \
     || die 'Lifecycle preflight refused; linger and active installation were not changed.'
-  check_linger
-  say 'Dependencies, user manager and linger are ready. No administrator password is needed.'
+  say 'Dependencies and user manager are ready. Olympus will verify persistent-service permission inside the lifecycle transaction.'
   result=0
   "$WORK/bun" --no-env-file "$WORK/unpacked/package/dist/cli.js" \
     engine install --from-checkout "$WORK/unpacked/package" --bun "$WORK/bun" --restart || result=$?
-  [ "$result" = 0 ] || die "Lifecycle install failed (status $result). The engine CLI's recovery report above is authoritative. Linger was previously $OLYMPUS_LINGER_BEFORE; it has not been disabled automatically."
+  [ "$result" = 0 ] || die "Lifecycle install failed (status $result). The engine CLI's recovery report above is authoritative."
   "$WORK/bun" --no-env-file "$WORK/unpacked/package/dist/cli.js" engine status > "$WORK/status.json" \
     || die 'Lifecycle status failed; do not treat this as a healthy installation.'
   "$WORK/bun" --no-env-file -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(s.ok!==true) process.exit(1)' "$WORK/status.json" \
     || die 'Lifecycle status is unhealthy or unknown; do not treat this as a healthy installation.'
   cat "$WORK/status.json"
-  say 'Installed for your user without an administrator password. Model readiness is reported separately by the engine.'
+  say 'Installed for your user without an administrator password. Run ~/.local/bin/olympus engine status for later checks.'
+  say 'Model readiness is reported separately by the engine.'
 ACTIVATE
   # Ordinary cancellation cannot release the supervisor while its mutation
   # child is running, nor remove scratch beneath that child.
   trap '' HUP INT TERM
   result=0
-  flock --nonblock --close "$LOCK" /bin/sh "$WORK/activate.sh" "$WORK" "$USER_ID" || result=$?
+  flock --nonblock "$LOCK" /bin/sh "$WORK/activate.sh" "$WORK" || result=$?
   trap - HUP INT TERM
   [ "$result" = 0 ] || die "Lifecycle supervisor failed (status $result); see the recovery report above."
 

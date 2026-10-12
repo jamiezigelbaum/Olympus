@@ -17,6 +17,7 @@ import {
   fileDigest,
   pinBunExecutable,
   publishLinuxToSite,
+  prepareLinuxLocalBundle,
   publishToSite,
   readBunPins,
   readInstallScriptPins,
@@ -57,6 +58,20 @@ function fixture(version = '1.0.0-rc.1', packaged: { name: string; version: stri
 }
 
 const cloneLinuxRuntime = (): LinuxRuntimePins => JSON.parse(JSON.stringify(LINUX_RUNTIME)) as LinuxRuntimePins;
+
+test('local Linux bundle pins the real installer without publishing unqualified runtime', () => {
+  const { root, artifact } = linuxFixture('pending-omarchy');
+  const output = join(root, 'acceptance');
+  const pins = prepareLinuxLocalBundle({ root, artifact, output });
+  expect(readInstallScriptPins(readFileSync(join(output, 'install-linux.sh'), 'utf8'))).toEqual({ version: pins.version, sha256: pins.sha256, bytes: pins.bytes });
+  expect(readFileSync(join(output, `olympus-${pins.version}.tgz`))).toEqual(readFileSync(artifact));
+  expect(readFileSync(join(output, 'install-linux.sh'), 'utf8')).toBe(renderLinuxInstallScript(LINUX_TEMPLATE, pins, LINUX_RUNTIME));
+  expect(readFileSync(join(output, 'uninstall-linux.sh'))).toEqual(readFileSync(join(root, 'site/uninstall-linux.sh')));
+  expect(existsSync(join(root, 'site/install-linux.sh'))).toBe(false);
+  expect(() => publishLinuxToSite({ root, artifact })).toThrow();
+  expect(() => prepareLinuxLocalBundle({ root, artifact, output })).toThrow();
+  expect(readFileSync(join(output, 'SHA256SUMS'), 'utf8')).toContain(fileDigest(artifact).sha256);
+});
 
 function linuxFixture(qualification: LinuxRuntimePins['bun']['qualification'] = 'qualified-omarchy') {
   const result = fixture();
@@ -370,7 +385,7 @@ describe('site publishing wiring', () => {
     ].join('\n'), { mode: 0o755 });
     const result = spawnSync('bash', [join(site, 'deploy', 'deploy.sh')], {
       encoding: 'utf8',
-      env: { PATH: `${shims}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: root, SITE_SSH_TARGET: 'deploy@site.test', SITE_REMOTE_DIR: remote, SITE_SSH_KEY: join(root, 'key') },
+      env: { PATH: `${shims}:${process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin'}`, ...(process.env.LD_LIBRARY_PATH ? { LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH } : {}), HOME: root, SITE_SSH_TARGET: 'deploy@site.test', SITE_REMOTE_DIR: remote, SITE_SSH_KEY: join(root, 'key') },
     });
     expect({ status: result.status, output: `${result.stdout}${result.stderr}` }).toEqual({ status: 0, output: `${result.stdout}${result.stderr}` });
     expect(readFileSync(join(remote, 'releases', '1.0.0-rc.1', 'olympus-1.0.0-rc.1.tgz'), 'utf8')).toBe('rc.1');
