@@ -2,23 +2,36 @@
  * Image preparation for media search (docs/design/photo-embeddings.md).
  *
  * Shared by MIME type, never by source: any still image the text lane reads
- * is reduced to a JPEG of at most 1,024 pixels on its long side with the
- * macOS `sips` tool (which also reads HEIC), and the result is stored
+ * is reduced to a JPEG of at most 1,024 pixels on its long side by the
+ * preparation tool this machine has (`sips` on a Mac, `vipsthumbnail` where
+ * libvips is installed; `image-preparers.ts`), and the result is stored
  * content-addressed in the owner-only media cache. The store attaches that
  * copy to the item's chunk, and the embedding lane hands it to a model that
  * reads images. Nothing here reaches the network.
  *
- * Off macOS there is no `sips`, and the registry does not build this at all,
- * so images keep exactly the behaviour they had before.
+ * The prepared copy is upright, in sRGB, flat (no transparency) and carries
+ * no metadata, whichever tool made it. A format the machine's probe found
+ * undecodable is answered `unavailable` without running any tool, so the
+ * caller keeps the behaviour it had before pictures were read; and a picture
+ * whose header declares more pixels than a decoder should hold is
+ * `skipped_too_large` before any tool sees it.
  *
  * Doc comments in this directory are always multi-line blocks, and this
  * module contains no regular expressions.
  */
 
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SIPS_PATH, writeMediaCacheFile } from '../../../core/media-cache.ts';
+import { writeMediaCacheFile } from '../../../core/media-cache.ts';
+import {
+  IMAGE_MAX_DECLARED_PIXELS,
+  imageDeclaredDimensions,
+  jpegPixelSize,
+  stillImageFormatForMimeType,
+  stillImageFormatFromBytes,
+  type StillImageFormat,
+} from '../../../core/still-image-formats.ts';
 import type { ExtractedMedia, ExtractorOutput } from '../types.ts';
 import {
   ExtractionCommandError,
@@ -26,7 +39,15 @@ import {
   runExtractionCommand,
   type ExtractionCommandRunner,
 } from './command-runner.ts';
+import {
+  IMAGE_PREPARE_MAX_PIXEL_EDGE,
+  PreparedOutputError,
+  createSipsPreparer,
+  type StillImagePreparer,
+} from './image-preparers.ts';
 import { imageExtensionForMimeType } from './ocr.ts';
+
+export { IMAGE_PREPARE_MAX_PIXEL_EDGE, jpegPixelSize };
 
 export const DEFAULT_IMAGE_PREPARE_TIMEOUT_MS = 60_000;
 /**
@@ -34,12 +55,6 @@ export const DEFAULT_IMAGE_PREPARE_TIMEOUT_MS = 60_000;
  * megabytes, and a scan or panorama past this is not worth a decode.
  */
 export const DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
-export const IMAGE_PREPARE_MAX_PIXEL_EDGE = 1_024;
-/**
- * A 1,024-pixel JPEG is a few hundred kilobytes; anything past this is not
- * what `sips` was asked for.
- */
-const MAX_PREPARED_BYTES = 16 * 1024 * 1024;
 const TEMP_DIR_PREFIX = 'olympus-image-prepare-';
 /**
  * Pictures smaller than this on either side (a logo, a tracking pixel, an
@@ -56,9 +71,26 @@ export const IMAGE_PREPARE_ERROR_CACHE_WRITE = 'media_cache_write_failed';
 export interface ImagePreparationOptions {
   cacheDir: string;
   commandRunner?: ExtractionCommandRunner;
+  /**
+   * The `sips` to use when no `preparer` is given (the macOS default).
+   */
   sipsPath?: string;
+  /**
+   * The tool that prepares pictures (or a function asked each time); defaults to `sips`.
+   */
+  preparer?: StillImagePreparer | (() => StillImagePreparer);
+  /**
+   * The formats this machine can prepare, or a function asked each time (the
+   * machine's probe). Absent means every format is attempted. A format
+   * outside it is `unavailable` and no tool runs.
+   */
+  formats?: ReadonlySet<StillImageFormat> | (() => ReadonlySet<StillImageFormat>);
   timeoutMs?: number;
   maxInputBytes?: number;
+  /**
+   * Most pixels a picture may declare before it is skipped.
+   */
+  maxPixels?: number;
 }
 
 export interface ImagePreparationInput {
@@ -70,7 +102,8 @@ export interface ImagePreparationInput {
 /**
  * `media` on success; otherwise a settled extractor output (a failure, or
  * `skipped_too_large`). `unavailable` means the tool is missing on this
- * machine, and the caller keeps its behaviour from before.
+ * machine, or cannot decode this format, and the caller keeps its behaviour
+ * from before.
  */
 export type ImagePreparationResult =
   | { kind: 'media'; media: ExtractedMedia }
@@ -78,53 +111,70 @@ export type ImagePreparationResult =
   | { kind: 'unavailable' }
   | { kind: 'too_small' };
 
-export type ImagePreparation = (input: ImagePreparationInput) => Promise<ImagePreparationResult>;
+/**
+ * A preparation, and the question the text lane asks of it before queueing a
+ * picture: can this media type be prepared here. Absent, every type can.
+ */
+export type ImagePreparation = ((input: ImagePreparationInput) => Promise<ImagePreparationResult>) & {
+  ready?: (mimeType: string | undefined) => boolean;
+};
 
 export function createImagePreparation(options: ImagePreparationOptions): ImagePreparation {
   const commandRunner = options.commandRunner ?? runExtractionCommand;
-  const sipsPath = options.sipsPath ?? SIPS_PATH;
+  const fixedPreparer = typeof options.preparer === 'function' ? undefined : options.preparer;
+  const defaultPreparer = fixedPreparer ?? (options.preparer === undefined
+    ? createSipsPreparer(options.sipsPath !== undefined ? { path: options.sipsPath } : {})
+    : undefined);
+  const currentPreparer = (): StillImagePreparer => defaultPreparer
+    ?? (options.preparer as () => StillImagePreparer)();
   const timeoutMs = options.timeoutMs ?? DEFAULT_IMAGE_PREPARE_TIMEOUT_MS;
   const maxInputBytes = options.maxInputBytes ?? DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES;
-  return async (input) => {
+  const maxPixels = options.maxPixels ?? IMAGE_MAX_DECLARED_PIXELS;
+  const admitted = (format: StillImageFormat | undefined): boolean => {
+    if (options.formats === undefined || format === undefined) return true;
+    const formats = typeof options.formats === 'function' ? options.formats() : options.formats;
+    return formats.has(format);
+  };
+  const prepare: ImagePreparation = async (input) => {
+    // First of all, so a format this machine cannot decode behaves exactly as
+    // it did before pictures were read: no size verdict, no tool. The bytes
+    // are what a decoder will meet; the media type is only a label.
+    if (!admitted(stillImageFormatFromBytes(input.bytes) ?? stillImageFormatForMimeType(input.mimeType))) {
+      return { kind: 'unavailable' };
+    }
     if (Math.max(input.sizeBytes, input.bytes.byteLength) > maxInputBytes) {
       return { kind: 'settled', output: { status: 'skipped_too_large' } };
     }
+    // A decompression bomb is a few kilobytes that declare billions of
+    // pixels: the header says so before any decoder is asked.
+    const declared = imageDeclaredDimensions(input.bytes);
+    if (declared && declared.width * declared.height > maxPixels) {
+      return { kind: 'settled', output: { status: 'skipped_too_large' } };
+    }
     if (input.bytes.byteLength < MIN_INPUT_BYTES) return { kind: 'too_small' };
+    // Judged on the original: a tool that enlarges (`sips -Z` does) must not
+    // turn an icon into a picture.
+    if (declared && Math.min(declared.width, declared.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) {
+      return { kind: 'too_small' };
+    }
     const tempDir = await mkdtemp(join(tmpdir(), TEMP_DIR_PREFIX));
     try {
       const inputPath = join(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
-      const outputPath = join(tempDir, 'prepared.jpg');
       await writeFile(inputPath, input.bytes, { mode: 0o600 });
+      let prepared: Uint8Array;
       try {
-        await commandRunner({
-          command: sipsPath,
-          args: [
-            '-s', 'format', 'jpeg',
-            '-Z', String(IMAGE_PREPARE_MAX_PIXEL_EDGE),
-            inputPath,
-            '--out', outputPath,
-          ],
-          timeoutMs,
-        });
+        prepared = await currentPreparer().prepare({ inputPath, tempDir, timeoutMs, commandRunner });
       } catch (error) {
         if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return { kind: 'unavailable' };
         if (error instanceof ExtractionCommandTimeoutError) {
           return { kind: 'settled', output: { status: 'failed_retryable', errorKind: IMAGE_PREPARE_ERROR_TIMEOUT } };
         }
-        if (error instanceof ExtractionCommandError) {
+        if (error instanceof ExtractionCommandError || error instanceof PreparedOutputError) {
           // The same bytes fail the same way every time: a damaged or
           // unsupported picture settles at once rather than retrying.
           return { kind: 'settled', output: { status: 'failed_terminal', errorKind: IMAGE_PREPARE_ERROR_FAILED } };
         }
         return { kind: 'settled', output: { status: 'failed_retryable', errorKind: IMAGE_PREPARE_ERROR_FAILED } };
-      }
-      let prepared: Uint8Array;
-      try {
-        const info = await stat(outputPath);
-        if (!info.isFile() || info.size === 0 || info.size > MAX_PREPARED_BYTES) throw new Error('unusable output');
-        prepared = new Uint8Array(await readFile(outputPath));
-      } catch {
-        return { kind: 'settled', output: { status: 'failed_terminal', errorKind: IMAGE_PREPARE_ERROR_FAILED } };
       }
       if (!isJpeg(prepared)) {
         return { kind: 'settled', output: { status: 'failed_terminal', errorKind: IMAGE_PREPARE_ERROR_FAILED } };
@@ -144,33 +194,8 @@ export function createImagePreparation(options: ImagePreparationOptions): ImageP
       await rm(tempDir, { recursive: true, force: true });
     }
   };
-}
-
-/**
- * Width and height from a JPEG's start-of-frame segment, or undefined when
- * the header cannot be walked.
- */
-export function jpegPixelSize(bytes: Uint8Array): { width: number; height: number } | undefined {
-  let offset = 2;
-  while (offset + 9 < bytes.length) {
-    if (bytes[offset] !== 0xff) return undefined;
-    const marker = bytes[offset + 1]!;
-    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
-      offset += 2;
-      continue;
-    }
-    const length = (bytes[offset + 2]! << 8) | bytes[offset + 3]!;
-    const startOfFrame = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
-    if (startOfFrame) {
-      return {
-        height: (bytes[offset + 5]! << 8) | bytes[offset + 6]!,
-        width: (bytes[offset + 7]! << 8) | bytes[offset + 8]!,
-      };
-    }
-    if (length < 2) return undefined;
-    offset += 2 + length;
-  }
-  return undefined;
+  prepare.ready = (mimeType) => admitted(stillImageFormatForMimeType(mimeType));
+  return prepare;
 }
 
 /**

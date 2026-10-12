@@ -32,6 +32,9 @@
  */
 
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
+import type { StillImageReadiness } from '../../core/still-image-readiness.ts';
+import type { ExtractionCommandRunner } from './extractors/command-runner.ts';
+import type { StillImagePreparer } from './extractors/image-preparers.ts';
 
 // --- Seam 1: the source ----------------------------------------------------
 
@@ -503,7 +506,8 @@ export interface ExtractorRegistryConfig {
   };
   /**
    * Image preparation for media search (docs/design/photo-embeddings.md).
-   * Without a cache directory, or off macOS, images keep today's behaviour.
+   * Without a cache directory, or for a format this machine cannot prepare,
+   * images keep today's behaviour.
    */
   media?: {
     /**
@@ -511,9 +515,18 @@ export interface ExtractorRegistryConfig {
      */
     cacheDir?: string;
     /**
-     * Overrides `process.platform`, for tests.
+     * Which formats this machine can prepare, and with which tool. Defaults
+     * to the machine's own probe (`stillImageReadiness()`); tests inject one.
      */
-    platform?: NodeJS.Platform;
+    readiness?: StillImageReadiness;
+    /**
+     * Overrides the tool the readiness names, for tests.
+     */
+    preparer?: StillImagePreparer;
+    /**
+     * Overrides how the tool is run, for tests.
+     */
+    commandRunner?: ExtractionCommandRunner;
     timeoutMs?: number;
     maxInputBytes?: number;
   };

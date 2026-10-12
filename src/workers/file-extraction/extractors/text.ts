@@ -171,11 +171,16 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
     needsBytes: true,
     // Pictures read for media search are a new reading of an image: an image
     // read before (names only, or OCR text) is queued once more under this.
+    // Only for a format this machine can prepare: one it cannot keeps the
+    // version it had, so it is queued under the suffix when it becomes
+    // preparable, and not before.
     ...(imagePreparation
       ? {
         versionFor(mimeType: string | undefined): string {
           const normalized = normalizeMimeType(mimeType);
-          return normalized && IMAGE_MIME_TYPES.has(normalized) ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}` : version;
+          return normalized && IMAGE_MIME_TYPES.has(normalized) && (imagePreparation.ready?.(normalized) ?? true)
+            ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}`
+            : version;
         },
       }
       : {}),

@@ -40,6 +40,7 @@ import {
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { defaultDropboxConnectorStoreDbPath, dropboxTierConnectorStoreDbPaths } from '../src/workers/dropbox-files/connector-store.ts';
 import { DEFAULT_STILL_IMAGE_EXTENSIONS, defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
+import { stillImageReadinessOf } from '../src/core/still-image-readiness.ts';
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { classifyContentTier, IMAGE_PRIVATE_DEFAULT_REASON } from '../src/workers/classification/tier-classifier.ts';
@@ -290,7 +291,7 @@ describe('image preparation in the shared text lane', () => {
     const extractor = createTextExtractor();
     expect(await extractor.extract(extractorInput(picture(8)))).toEqual({ status: 'metadata_only' });
     const registry = createDefaultExtractorRegistry({
-      media: { cacheDir: join(temporaryDir(), 'media-cache'), platform: 'linux' },
+      media: { cacheDir: join(temporaryDir(), 'media-cache'), readiness: stillImageReadinessOf(false) },
       ocr: { platform: 'linux' },
     });
     const text = registry.get('local_text')!;

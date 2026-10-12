@@ -25,6 +25,7 @@ import {
   installBuiltInEmbedding,
   readBuiltInEmbeddingStatus,
   reportBuiltInEmbeddingState,
+  reportBuiltInEmbeddingVision,
   type BuiltInEmbeddingFailureReason,
   type BuiltInEmbeddingInstallerOptions,
   type BuiltInEmbeddingStatus,
@@ -288,6 +289,11 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
           ...(this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}),
         });
         model = { kind: 'litert', embedder };
+        // The image encoder starting is what makes photos searchable by
+        // content; say whether it did where every process can read it (the
+        // ingestion policy admits photos only while it is not known to have
+        // failed).
+        if (this.spec.vision) reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
       } else {
         if (!installed.vocabularyPath) throw new Error('the model vocabulary is not installed.');
         const tokenizer = loadTokenizer(installed.vocabularyPath);

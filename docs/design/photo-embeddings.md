@@ -20,32 +20,45 @@ relevance bar serve photos with no new search path.
 
 Nothing below names a source. Every step is shared and keyed by media type.
 
-1. **Ingestion policy.** Where this machine can prepare pictures (macOS with
-   `/usr/bin/sips`; `stillImagePreparationAvailable()`), the default rule that
-   kept `image/*` names-only is now video only (`media_default_metadata_only`)
-   and still images (jpeg, jpg, png, heic, heif, webp, gif, tif, tiff, bmp) are
-   extracted. Elsewhere (Linux, the private host) still images stay
-   names-only, so no picture is downloaded for nothing. The book-library rule
-   is unchanged, so covers in a Calibre library stay names-only. The
-   readiness ladder's deferral list follows the same capability. An
-   owner-written `~/.olympus/sources/dropbox.personal.ingestion.json` is used
-   as written: one that still lists `image/` keeps photos names-only until
-   the owner removes the image entries from its media rule.
-2. **Image preparation (text lane).** On macOS the shared text lane converts
-   a still image with `/usr/bin/sips` to a JPEG of at most 1,024 pixels on its
+1. **Ingestion policy.** Photos are read per format, by what this machine
+   can actually decode (see "Per-format readiness" below), never by operating
+   system. For each format the machine reads, the default rule that kept
+   `image/*` names-only no longer lists it (`media_default_metadata_only`
+   keeps video, and any still-image format the machine cannot read). All
+   formats read: the rule is video only, and still images (jpeg, jpg, png,
+   heic, heif, webp, gif, tif, tiff, bmp) are extracted. None read (no tool,
+   or the model's image encoder did not start): every image stays names-only
+   as before, so no picture is downloaded for nothing. Some read: only the
+   unread formats stay names-only, and they are queued as soon as the
+   capability appears (see "Recovery"). The book-library rule is unchanged,
+   so covers in a Calibre library stay names-only. The readiness ladder's
+   deferral list reads the same per-format answer. An owner-written
+   `~/.olympus/sources/dropbox.personal.ingestion.json` is used as written:
+   one that still lists `image/` keeps photos names-only until the owner
+   removes the image entries from its media rule. Owner exclusions are
+   untouched and still win.
+2. **Image preparation (text lane).** The shared text lane converts a still
+   image with the machine's tool to a JPEG of at most 1,024 pixels on its
    long side (HEIC included) and stores it content-addressed by SHA-256 in an
    owner-only media cache (directory 0700, files 0600):
    `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/media-cache`, or
    a dedicated `olympus-media` subdirectory of `OLYMPUS_MEDIA_CACHE_DIR`
    (Olympus never changes the permissions of a directory the owner named).
+   The tool is chosen by capability: `/usr/bin/sips` where it exists (macOS,
+   unchanged), otherwise `vipsthumbnail` (libvips) on the search path. Both
+   sit behind one preparer interface (`image-preparers.ts`) and give the
+   guarantees in "What a prepared photo is".
    Pictures under 1 KB or under 64 pixels on a side (logos, tracking pixels)
-   get no picture and keep the previous behaviour. The extraction is
+   get no picture and keep the previous behaviour; the size is judged from the
+   original's header before any tool runs, so an icon that `sips -Z` would
+   enlarge is still an icon. The extraction is
    `indexed`: its text is
    `Photo` plus any text Apple Vision reads off the picture, and its new
    optional `media` field names the prepared copy. Originals over 64 MB are
-   `skipped_too_large`; a `sips` refusal settles `failed_terminal`
-   (`image_prepare_failed`), a timeout retries. Off macOS nothing is built and
-   images behave exactly as before. Pictures read before (OCR text only) are
+   `skipped_too_large`; a tool refusal settles `failed_terminal`
+   (`image_prepare_failed`), a timeout retries. A format the machine cannot
+   decode is `unavailable` and no tool runs: that image behaves exactly as it
+   did before pictures were read. Pictures read before (OCR text only) are
    queued once more: the text lane's version for images gains the suffix
    `+image-media-2026-10-07` (`Extractor.versionFor`), and a Private store on
    a machine that prepares pictures lists an image with no picture and no
@@ -130,6 +143,86 @@ Nothing below names a source. Every step is shared and keyed by media type.
 7. **Coverage.** An image with a stored chunk is no longer reported as an
    extraction gap.
 
+## What a prepared photo is
+
+Whichever tool made it, a prepared photo is a JPEG with these guarantees,
+proven by fixture tests that run against each real tool where it exists
+(`test/still-image-preparers-contract.test.ts`):
+
+- **No metadata.** No EXIF (so no GPS or camera), XMP, IPTC, ICC profile,
+  comment, or embedded thumbnail. `vipsthumbnail` is asked to strip; `sips`
+  has no switch that does, so its output has the metadata segments cut from
+  the JPEG bytes (`jpeg-metadata.ts`) without touching the image data. Both
+  outputs are cut the same way, so a tool that kept a block would not leak it.
+- **Upright.** All eight EXIF orientations are applied to the pixels, HEIC's
+  own rotation and mirror (`irot`, `imir`) included. `vipsthumbnail --rotate`
+  does it in one pass; `sips` reports the orientation but does not rotate, so
+  a second pass turns the pixels (only when the picture is not already upright).
+- **sRGB.** Wide-gamut pictures (Display P3, Adobe RGB) are converted to
+  sRGB. `vipsthumbnail --export-profile srgb`; `sips -m` with the system sRGB
+  profile, only when the picture carries a non-sRGB RGB profile.
+- **Opaque.** Transparency is flattened onto white.
+- **Bounded.** The long side is at most 1,024 pixels, never enlarged by
+  libvips. A decoder is never handed a decompression bomb: the header
+  (JPEG, PNG, GIF, BMP, TIFF, WebP, HEIC `ispe`) is read first and a picture
+  declaring more than 16,384 x 16,384 pixels settles `skipped_too_large`
+  without a tool running. The tool also runs with a timeout and its output is
+  capped at 16 MB.
+
+A Mac's first command is unchanged; the second pass runs only for a picture
+that needs a turn or a colour conversion, so an ordinary upright sRGB photo is
+not recompressed.
+
+## Per-format readiness
+
+One answer per format, asked of the machine
+(`still-image-readiness.ts`): a probe prepares a tiny real picture of each
+admitted format (jpeg, png, heic/heif, webp, gif, tiff, bmp) with the
+selected tool and counts the format as ready only if a JPEG of the right
+shape comes back. The answer is computed once per process on first use, and
+a refresh is the same call again. Everything reads it: the ingestion policy,
+the text lane's version for images, the extraction candidates, and `olympus
+doctor`. `stillImagePreparationAvailable()` remains and
+means "at least one format is ready".
+
+Whether the built-in model's image encoder started is the other half. The
+LiteRT helper can fall back to text-only; the provider records the result
+beside the install status (`vision.json`, written when the model loads), and
+a recorded failure makes every format not ready with the reason
+`vision_unavailable`: photos are not admitted, because a text-only start would
+read pictures and hold them for ever. Nothing about the model, its identity,
+or its epochs changes.
+
+`olympus doctor` has a `photo_search` check (informational, never failing)
+that says ready, partly ready (naming the formats that stay names-only), or
+missing, with one command by distro: Arch/Omarchy
+`sudo pacman -S --needed libvips libheif`; Debian/Ubuntu
+`sudo apt install libvips-tools libheif-plugin-libde265`; Fedora
+`sudo dnf install vips-tools libheif` (HEIC may also need a codec package).
+After installing, restart Olympus (`olympus worker restart`): the probe runs
+once per process.
+
+## Recovery
+
+A format the machine could not read stays names-only and is not lost. Its
+photos are read as text only (no `image_media_reads` row is written, because
+the picture was not considered), and the text lane's image version suffix is
+withheld for that format. When the capability appears (the package is
+installed, the process restarts, the probe passes), the format's photos are
+queued again: the policy admits them, the version suffix requeues them, and
+the extraction candidates list a photo of a now-ready format that has no
+picture and no reading row. A photo read with its picture considered is not
+listed again.
+
+No global embedding-space migration: nothing re-embeds the library. A photo's
+embedding input hash names its prepared picture's digest, so only a photo
+whose prepared bytes change is re-embedded, when it is next extracted.
+Stripping metadata, turning pixels upright and converting to sRGB change the
+prepared bytes only for pictures that carried metadata, a non-upright
+orientation, or a non-sRGB profile (on a Mac, most phone photos carry EXIF at
+least); no version bump forces a Mac re-extraction, so those are re-embedded
+only if and when the photo is extracted again.
+
 ## Measurements (owner's Mac, M3, 2026-10-07)
 
 - 116 real photos embedded as `title: <file name> | text: Photo in <folder>`
@@ -198,5 +291,7 @@ Shared and source-neutral (`src/workers/source-index/media-judge.ts`,
 
 ## Not in this step
 
-Video, vision on Linux (no `sips`), and image search or judging for
-non-built-in embedding providers.
+Video, and image search or judging for non-built-in embedding providers.
+Linux reads photos through libvips (above); running the LiteRT image encoder
+on a Linux machine is the model runtime's business, and the readiness above
+admits photos only where it started.
