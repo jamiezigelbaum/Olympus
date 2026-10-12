@@ -242,9 +242,13 @@ Reviewer demo
   engine's relay client to it (`connect-relay/test/reviewer-path.test.ts`);
   `connect-relay/deploy/deploy.sh` walks the reviewer path live before and
   after each deploy and rolls back on a failure
-  (`connect-relay/deploy/reviewer-check.ts`). A new submission replaces the
-  pinned listing from the submitted commit, together with its digests and
-  the golden recording.
+  (`connect-relay/deploy/reviewer-check.ts`). Engines serve the same pinned
+  listing on `/openai/mcp` once connected (tool calls run the current code;
+  `src/workers/chatgpt/directory-surface.ts`), and CI holds the current
+  handlers to the submitted schemas and runs the submitted pages against
+  current results (`test/chatgpt-directory-approved.test.ts`). A new
+  submission replaces the pinned listing from the submitted commit, together
+  with its digests and the golden recording.
 - [ ] Demo engine has anonymous questions on, with a funded zkAPI account
       (owner funds it) so the zkAPI case never runs dry.
 - [ ] Demo engine holds only `demo-data/`, carries the demo marker, and has

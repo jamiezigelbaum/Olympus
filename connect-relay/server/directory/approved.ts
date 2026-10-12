@@ -7,7 +7,11 @@
  * relay answers that endpoint itself whenever no engine does (no token yet,
  * or the Mac offline), so it serves this copy there instead of the files it
  * generates from the current engine source for `/mcp`. Relay releases then
- * cannot change the reviewed listing by accident.
+ * cannot change the reviewed listing by accident. The engine serves the same
+ * copy when it answers that endpoint itself
+ * (src/workers/chatgpt/directory-surface.ts), so engine releases cannot
+ * either; test/chatgpt-directory-approved.test.ts holds the engine's current
+ * handlers to it.
  *
  * `approved/*.json` are the relay's generated files of the submitted commit,
  * byte for byte (`git show <commit>:connect-relay/server/generated/chatgpt-*.json`).

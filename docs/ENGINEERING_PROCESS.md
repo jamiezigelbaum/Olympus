@@ -122,10 +122,14 @@ Current blocking gates recorded here:
 
 - **ChatGPT directory reviewer path** (2026-10-12). Prevents a relay release
   from changing what OpenAI's directory reviewers and directory users see on
-  `/openai/mcp`, or from breaking the frozen reviewer demo engine. CI:
-  `connect-relay/test/reviewer-path.test.ts` (pinned listing digests, the
+  `/openai/mcp`, or from breaking the frozen reviewer demo engine; and an
+  engine release from changing that listing or breaking the submitted pages.
+  CI: `connect-relay/test/reviewer-path.test.ts` (pinned listing digests, the
   submitted relay's recorded answers, the submitted engine's relay client
-  against the current relay; a few seconds). Deploy:
+  against the current relay; a few seconds) and
+  `test/chatgpt-directory-approved.test.ts` (the engine serves the pinned
+  listing, current handlers accept the submitted schemas, the submitted pages
+  render current results; about ten seconds). Deploy:
   `connect-relay/deploy/reviewer-check.ts` before and after
   `connect-relay/deploy/deploy.sh` (about ten seconds; a failure after the
   deploy rolls the relay binary back). False positives: none expected from

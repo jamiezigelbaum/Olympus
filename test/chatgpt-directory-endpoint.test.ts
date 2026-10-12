@@ -2,8 +2,10 @@
 // connect-relay/shared/directory-tools.ts):
 //
 // - The allowlist is pinned, and every name on it is a tool the surface has.
-// - /openai/mcp lists exactly what /mcp lists, narrowed to the allowlist, in
-//   every conditional state (answer model or not, demo read-only grant); a
+// - /openai/mcp lists the same tools /mcp lists, narrowed to the allowlist,
+//   in every conditional state (answer model or not, demo read-only grant),
+//   each as submitted to OpenAI (connect-relay/server/directory/approved.ts;
+//   test/chatgpt-directory-approved.test.ts covers the pinned listing); a
 //   tool off the allowlist is neither listed nor callable there, and a call
 //   to it gets the surface's unknown-tool result.
 // - It is its own protected resource: ChatGPT authorizes it (one-click on the
@@ -35,6 +37,7 @@ import {
 import { credentialInstallId } from '../connect-relay/shared/tokens.ts';
 import { protectedResourceMetadata as relayProtectedResourceMetadata, relayOrigin } from '../connect-relay/server/oauth-metadata.ts';
 import generatedSurface from '../connect-relay/server/generated/chatgpt-tools.json';
+import { APPROVED_RESOURCES, APPROVED_TOOLS } from '../connect-relay/server/directory/approved.ts';
 import { createChatGptDirectoryMcpServer } from '../src/workers/chatgpt/directory-surface.ts';
 import { CHATGPT_TOOLS, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
 import { PRIVATE_ANSWER_META_KEY, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
@@ -260,6 +263,8 @@ async function result(response: Response): Promise<Record<string, any>> {
 }
 
 const names = (tools: Array<{ name: string }>) => tools.map((tool) => tool.name);
+/** The submitted definitions of the named tools, in the submitted order. */
+const approved = (listed: string[]) => APPROVED_TOOLS.filter((tool) => listed.includes(tool.name));
 
 describe('the directory allowlist', () => {
   test('is pinned, and names only tools the ChatGPT surface has', () => {
@@ -303,17 +308,18 @@ describe('the directory allowlist', () => {
   });
 });
 
-describe('/openai/mcp serves the same surface, narrowed', () => {
-  test('tools/list equals /mcp\'s narrowed to the allowlist, with and without an answer model', async () => {
+describe('/openai/mcp serves the same surface, narrowed, as submitted', () => {
+  test('tools/list names /mcp\'s tools narrowed to the allowlist, with and without an answer model', async () => {
     const def = await grant();
     const directory = await grant(DIRECTORY_RESOURCE);
     for (const withModel of [true, false]) {
       answerModel = withModel;
       const onMcp = (await result(await rpc('/mcp', def.access_token, 'tools/list'))).tools as Array<{ name: string }>;
       const onDirectory = (await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'tools/list'))).tools as Array<{ name: string }>;
-      expect(onDirectory).toEqual(toolsForSurface(onMcp, 'directory'));
+      expect(names(onDirectory)).toEqual(names(toolsForSurface(onMcp, 'directory')));
       // Today the allowlist is every tool the surface lists.
-      expect(onDirectory).toEqual(onMcp);
+      expect(names(onDirectory)).toEqual(names(onMcp));
+      expect(onDirectory).toEqual(approved(names(onMcp)));
       expect(names(onMcp).includes('source_answer')).toBe(withModel);
     }
   });
@@ -323,7 +329,8 @@ describe('/openai/mcp serves the same surface, narrowed', () => {
     const directory = await grant(DIRECTORY_RESOURCE, 'demo');
     const onMcp = (await result(await rpc('/mcp', def.access_token, 'tools/list'))).tools as Array<{ name: string; annotations: { readOnlyHint?: boolean } }>;
     const onDirectory = (await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'tools/list'))).tools;
-    expect(onDirectory).toEqual(onMcp);
+    expect(names(onDirectory)).toEqual(names(onMcp));
+    expect(onDirectory).toEqual(approved(names(onMcp)));
     expect(onMcp.length).toBeGreaterThan(0);
     // open_private_question is the one named exception (review case P5).
     expect(onMcp.filter((tool) => tool.annotations.readOnlyHint !== true).map((tool) => tool.name)).toEqual(['open_private_question']);
@@ -359,7 +366,8 @@ describe('/openai/mcp serves the same surface, narrowed', () => {
     const onDirectory = (await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'tools/list'))).tools as Array<{ name: string }>;
     expect(names(onMcp)).toContain('olympus_privacy_get');
     expect(names(onDirectory)).not.toContain('olympus_privacy_get');
-    expect(onDirectory).toEqual(onMcp.filter((tool) => tool.name !== 'olympus_privacy_get'));
+    expect(names(onDirectory)).toEqual(names(onMcp).filter((name) => name !== 'olympus_privacy_get'));
+    expect(onDirectory).toEqual(approved(names(onDirectory)));
     const refused = await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'tools/call', { name: 'olympus_privacy_get', arguments: {} }));
     const unknown = await result(await rpc('/mcp', def.access_token, 'tools/call', { name: 'no_such_tool', arguments: {} }));
     expect(refused).toEqual(unknown);
@@ -369,15 +377,22 @@ describe('/openai/mcp serves the same surface, narrowed', () => {
     expect(served.structuredContent?.error).not.toBe('unknown_tool');
   });
 
-  test('widget resources list and read on both endpoints', async () => {
+  test('widget resources list and read on both endpoints: the submitted pages there, the current ones on /mcp', async () => {
     const def = await grant();
     const directory = await grant(DIRECTORY_RESOURCE);
     const listed = (await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'resources/list'))).resources as Array<{ uri: string }>;
-    expect(listed).toEqual((await result(await rpc('/mcp', def.access_token, 'resources/list'))).resources);
-    expect(listed.length).toBe(3);
+    expect(listed).toEqual([...APPROVED_RESOURCES]);
+    const current = (await result(await rpc('/mcp', def.access_token, 'resources/list'))).resources as Array<{ uri: string }>;
+    expect(current).toEqual(generatedSurface.resources);
+    expect(current.map(({ uri }) => uri.split('?')[0])).toEqual(listed.map(({ uri }) => uri.split('?')[0]));
     for (const { uri } of listed) {
       const read = await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'resources/read', { uri }));
-      expect(read).toEqual(await result(await rpc('/mcp', def.access_token, 'resources/read', { uri })));
+      expect(read.contents).toHaveLength(1);
+      expect(read.contents[0].uri).toBe(uri);
+    }
+    for (const { uri } of current) {
+      const read = await result(await rpc('/mcp', def.access_token, 'resources/read', { uri }));
+      expect(read.contents[0].uri).toBe(uri);
     }
   });
 });
