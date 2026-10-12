@@ -6,10 +6,10 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import {
   encodeWav16Mono,
   parseWav16Mono,
@@ -55,6 +55,7 @@ import {
 } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import { llamaServerArguments, type LlamaServerHandle, type LlamaServerLaunch } from '../src/workers/source-index/built-in-reasoning/server.ts';
 import {
+  audioDecoderPresent,
   builtInTranscriptionEnabled,
   builtInTranscriptionLayout,
   installBuiltInTranscription,
@@ -197,12 +198,31 @@ describe('engine selection', () => {
     expect(await faulty.extract(audioInput())).toEqual({ status: 'failed_retryable', errorKind: 'transcriber_failed' });
   });
 
-  test('on by default on Apple silicon only; the env switch wins; no runtime, no engine', () => {
-    expect(builtInTranscriptionEnabled({}, 'darwin-arm64')).toBe(true);
-    expect(builtInTranscriptionEnabled({}, 'linux-x64')).toBe(false);
-    expect(builtInTranscriptionEnabled({ OLYMPUS_BUILT_IN_TRANSCRIPTION: 'on' }, 'linux-x64')).toBe(true);
-    expect(builtInTranscriptionEnabled({ OLYMPUS_BUILT_IN_TRANSCRIPTION: 'off' }, 'darwin-arm64')).toBe(false);
-    expect(builtInTranscriptionEnabled({ OLYMPUS_BUILT_IN_TRANSCRIPTION: 'on' }, 'win32-x64')).toBe(false);
+  test('on by default where a runtime is pinned and the decoder exists; the env switch wins; no runtime, no engine', () => {
+    const present = () => true;
+    const missing = () => false;
+    expect(builtInTranscriptionEnabled({}, 'darwin-arm64', present)).toBe(true);
+    expect(builtInTranscriptionEnabled({}, 'linux-x64', present)).toBe(true);
+    expect(builtInTranscriptionEnabled({}, 'linux-arm64', present)).toBe(true);
+    expect(builtInTranscriptionEnabled({}, 'linux-x64', missing)).toBe(false);
+    expect(builtInTranscriptionEnabled({ OLYMPUS_BUILT_IN_TRANSCRIPTION: 'on' }, 'linux-x64', missing)).toBe(true);
+    expect(builtInTranscriptionEnabled({ OLYMPUS_BUILT_IN_TRANSCRIPTION: 'off' }, 'darwin-arm64', present)).toBe(false);
+    expect(builtInTranscriptionEnabled({ OLYMPUS_BUILT_IN_TRANSCRIPTION: 'on' }, 'win32-x64', present)).toBe(false);
+    expect(builtInTranscriptionEnabled({}, 'darwin-x64', present)).toBe(false);
+  });
+
+  test('the Linux decoder is an executable ffmpeg on PATH', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-ffmpeg-'));
+    try {
+      expect(audioDecoderPresent('linux-x64', { PATH: dir })).toBe(false);
+      writeFileSync(join(dir, 'ffmpeg'), '#!/bin/sh\n', { mode: 0o644 });
+      expect(audioDecoderPresent('linux-x64', { PATH: dir })).toBe(false);
+      chmodSync(join(dir, 'ffmpeg'), 0o755);
+      expect(audioDecoderPresent('linux-x64', { PATH: `relative${delimiter}${dir}` })).toBe(true);
+      expect(audioDecoderPresent('linux-x64', { PATH: '' })).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

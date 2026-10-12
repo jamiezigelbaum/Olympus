@@ -2753,7 +2753,7 @@ export async function main(): Promise<void> {
     },
     extractors: {
       // An owner-configured command wins; otherwise audio is read by the
-      // built-in on-device transcriber where it runs (Apple silicon by default).
+      // built-in on-device transcriber where it runs (Mac and Linux by default).
       ...(process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim()
         ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } }
         : sharedBuiltInTranscriber(process.env)
