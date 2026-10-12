@@ -118,6 +118,23 @@ recurring or expensive, and cheap to detect. Each blocking gate records:
 
 This keeps incidents from turning into permanent latency by default.
 
+Current blocking gates recorded here:
+
+- **ChatGPT directory reviewer path** (2026-10-12). Prevents a relay release
+  from changing what OpenAI's directory reviewers and directory users see on
+  `/openai/mcp`, or from breaking the frozen reviewer demo engine. CI:
+  `connect-relay/test/reviewer-path.test.ts` (pinned listing digests, the
+  submitted relay's recorded answers, the submitted engine's relay client
+  against the current relay; a few seconds). Deploy:
+  `connect-relay/deploy/reviewer-check.ts` before and after
+  `connect-relay/deploy/deploy.sh` (about ten seconds; a failure after the
+  deploy rolls the relay binary back). False positives: none expected from
+  the pinned parts; the live check also needs the demo engine online, so it
+  runs with `RELAY_REVIEWER_CHECK=no-demo` when no demo is meant to run.
+  Owner: the session delivering relay changes. Retire the demo half when no
+  directory review or listing update is pending; the listing pin stays while
+  the plugin is listed, because the directory rescans `/openai/mcp`.
+
 ## Focused proof and CI triage
 
 Choose local proof from the changed surface instead of reflexively running the

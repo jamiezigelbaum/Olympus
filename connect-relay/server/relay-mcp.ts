@@ -29,8 +29,9 @@
  * `mcp/www_authenticate` error is the documented trigger for linking.
  *
  * The plugin directory's endpoint (`/openai/mcp`, shared/directory-tools.ts)
- * gets the same answers with the tool list narrowed to the directory
- * allowlist; a call to any other tool there is answered as an unknown tool.
+ * gets the same answers from the listing submitted to OpenAI instead
+ * (directory/approved.ts): its tools, narrowed to the directory allowlist, and
+ * its UI resources, whatever the current engine source generates for `/mcp`.
  */
 import { toolCallableOn, toolsForSurface, type McpSurface } from '../shared/directory-tools.ts';
 import type { CredentialSurface } from '../shared/tokens.ts';
@@ -39,6 +40,13 @@ import DASHBOARD_RESOURCE_READ from './generated/chatgpt-dashboard.json';
 import PRIVATE_ANSWER_RESOURCE_READ from './generated/chatgpt-private-answer.json';
 import PRIVATE_QUESTION_RESOURCE_READ from './generated/chatgpt-private-question.json';
 import CHATGPT_SURFACE from './generated/chatgpt-tools.json';
+import {
+  APPROVED_DASHBOARD_CONTENTS,
+  APPROVED_PRIVATE_ANSWER_CONTENTS,
+  APPROVED_PRIVATE_QUESTION_CONTENTS,
+  APPROVED_RESOURCES,
+  APPROVED_TOOLS,
+} from './directory/approved.ts';
 
 /** Newest first; an `initialize` asking for one of these gets it back. */
 export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
@@ -65,6 +73,43 @@ export const PRIVATE_QUESTION_RESOURCE_CONTENTS = PRIVATE_QUESTION_RESOURCE_READ
 export const DASHBOARD_TOOL = CHATGPT_TOOLS.find((tool) => tool.name === DASHBOARD_TOOL_NAME)!;
 if (!DASHBOARD_TOOL) throw new Error('generated ChatGPT tool manifest has no dashboard tool');
 
+/** What one endpoint lists and serves when the relay answers it. */
+interface RelayCatalog {
+  readonly tools: readonly { name: string; _meta?: unknown }[];
+  readonly resources: readonly unknown[];
+  readonly dashboardTool: { _meta?: unknown };
+  readonly dashboard: unknown;
+  readonly privateAnswer: unknown;
+  readonly privateQuestion: unknown;
+}
+
+const CURRENT_CATALOG: RelayCatalog = {
+  tools: CHATGPT_TOOLS,
+  resources: CHATGPT_RESOURCES,
+  dashboardTool: DASHBOARD_TOOL,
+  dashboard: DASHBOARD_RESOURCE_CONTENTS,
+  privateAnswer: PRIVATE_ANSWER_RESOURCE_CONTENTS,
+  privateQuestion: PRIVATE_QUESTION_RESOURCE_CONTENTS,
+};
+
+const APPROVED_DASHBOARD_TOOL = APPROVED_TOOLS.find((tool) => tool.name === DASHBOARD_TOOL_NAME)!;
+if (!APPROVED_DASHBOARD_TOOL) throw new Error('approved directory listing has no dashboard tool');
+
+/** The submitted listing, served on the directory endpoint (directory/approved.ts). */
+const APPROVED_CATALOG: RelayCatalog = {
+  tools: APPROVED_TOOLS,
+  resources: APPROVED_RESOURCES,
+  dashboardTool: APPROVED_DASHBOARD_TOOL,
+  dashboard: APPROVED_DASHBOARD_CONTENTS,
+  privateAnswer: APPROVED_PRIVATE_ANSWER_CONTENTS,
+  privateQuestion: APPROVED_PRIVATE_QUESTION_CONTENTS,
+};
+
+/** The listing an endpoint's relay answers come from. */
+export function catalogFor(surface: McpSurface): RelayCatalog {
+  return surface === 'directory' ? APPROVED_CATALOG : CURRENT_CATALOG;
+}
+
 export type RelayMcpState =
   | { state: 'not_connected'; installUrl: string; protectedResourceMetadataUrl: string }
   | { state: 'mac_offline'; lastSeenAt: number | undefined; credentialSurface?: CredentialSurface | undefined };
@@ -85,6 +130,7 @@ function json(body: unknown): Response {
 
 export function relayMcpResponse(input: { method: string; body: string; now: number; surface?: McpSurface } & RelayMcpState): Response {
   const surface = input.surface ?? 'default';
+  const catalog = catalogFor(surface);
   if (input.method !== 'POST') {
     // No standalone SSE stream or session to end without an engine.
     return new Response(null, { status: 405, headers: { Allow: 'POST' } });
@@ -120,19 +166,19 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
     case 'ping':
       return rpcResult(id, {});
     case 'tools/list':
-      return rpcResult(id, { tools: toolsForSurface(CHATGPT_TOOLS, surface) });
+      return rpcResult(id, { tools: toolsForSurface(catalog.tools, surface) });
     case 'resources/list':
-      return rpcResult(id, { resources: CHATGPT_RESOURCES });
+      return rpcResult(id, { resources: catalog.resources });
     case 'resources/templates/list':
       return rpcResult(id, { resourceTemplates: [] });
     case 'resources/read': {
       // The engine advertises content-versioned URIs (`<base>?v=<12 hex>`);
       // any version, or the bare URI, reads the bundle this relay carries.
       const base = resourceBaseUri(args.uri);
-      if (base === PRIVATE_ANSWER_RESOURCE_URI) return rpcResult(id, { contents: PRIVATE_ANSWER_RESOURCE_CONTENTS });
-      if (base === PRIVATE_QUESTION_RESOURCE_URI) return rpcResult(id, { contents: PRIVATE_QUESTION_RESOURCE_CONTENTS });
+      if (base === PRIVATE_ANSWER_RESOURCE_URI) return rpcResult(id, { contents: catalog.privateAnswer });
+      if (base === PRIVATE_QUESTION_RESOURCE_URI) return rpcResult(id, { contents: catalog.privateQuestion });
       if (base !== DASHBOARD_RESOURCE_URI) return rpcError(id, -32002, 'Resource not found');
-      return rpcResult(id, { contents: DASHBOARD_RESOURCE_CONTENTS });
+      return rpcResult(id, { contents: catalog.dashboard });
     }
     case 'tools/call': {
       // A tool off this surface's list is answered like any unknown name.
@@ -145,13 +191,13 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
           return rpcResult(id, {
             content: [{ type: 'text', text: notice }],
             structuredContent: offlineDashboard(input.lastSeenAt, input.now),
-            _meta: DASHBOARD_TOOL._meta,
+            _meta: catalog.dashboardTool._meta,
           });
         }
         return rpcResult(id, {
           content: [{ type: 'text', text: notice }],
           structuredContent: notConnectedDashboard(input.installUrl, input.now),
-          _meta: { ...DASHBOARD_TOOL._meta, ...linkingChallenge(input.protectedResourceMetadataUrl) },
+          _meta: { ...(catalog.dashboardTool._meta as object | undefined), ...linkingChallenge(input.protectedResourceMetadataUrl) },
         });
       }
       if (input.state === 'mac_offline') return rpcError(id, -32000, MAC_OFFLINE_MESSAGE);
