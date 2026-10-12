@@ -8,7 +8,7 @@
  * possession of the Mac plus a click is the proof of ownership. The relay
  * stores nothing from the query and copies it into the link verbatim
  * (escaped for HTML); it reads only `client_id`, to name a pinned app
- * (ChatGPT, Claude, Grok) in the heading from a fixed list, never echoing it.
+ * (ChatGPT, Claude, Grok, Grok Bot or Cursor) in the heading from a fixed list, never echoing it.
  *
  * The page tries to reach the engine first and continues automatically when
  * something answers; otherwise it keeps the link and offers to install
@@ -36,6 +36,7 @@ export function bridgeAppName(clientId: string | null): string | undefined {
   if (/^https:\/\/chatgpt\.com\/oauth\/(?:[A-Za-z0-9_-]{1,128}\/)?client\.json$/.test(clientId)) return 'ChatGPT';
   if (clientId === 'https://claude.ai/oauth/mcp-oauth-client-metadata') return 'Claude';
   if (clientId === 'https://grok.com/oauth/mcp-client.json') return 'Grok';
+  if (clientId === 'https://cursor.com/oauth/mcp-client.json') return 'Grok Bot or Cursor';
   return undefined;
 }
 

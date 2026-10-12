@@ -22,7 +22,8 @@
  *
  * Clients: ChatGPT, Claude or Grok by their pinned client metadata URLs
  * (pinned-clients.ts; no metadata document is ever fetched), or a dynamically
- * registered client. Claude and Grok are authorized for `/mcp` only.
+ * registered client. Claude, Grok, and Grok Bot or Cursor are authorized for
+ * `/mcp` only.
  *
  * A demo install (synthetic sample data, demo marker present) may also let a
  * directory reviewer approve with a username and password through the relay,
@@ -254,7 +255,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (pinned) return { ...pinned, redirectUris: [...pinned.redirectUris] };
     // Never fetched: an arbitrary metadata URL would make this Mac contact a
     // host a stranger chose.
-    if (isClientIdMetadataUrl(clientId)) return 'Olympus connects to ChatGPT, Claude and Grok. It does not recognize this app.';
+    if (isClientIdMetadataUrl(clientId)) return 'Olympus connects to ChatGPT, Claude, Grok, and Grok Bot or Cursor. It does not recognize this app.';
     const registered = options.connections().oauth.getRegisteredClient(clientId);
     if (!registered) return 'This app is not registered with Olympus.';
     // Relay mode: self-registered clients are local development tools only.
@@ -593,7 +594,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       return oauthError(400, 'invalid_redirect_uri', 'redirect_uris must list https or loopback URLs.');
     }
     if (u.installId && !(redirectUris as string[]).every(isLoopbackRedirectUri)) {
-      return oauthError(400, 'invalid_redirect_uri', 'Only local development clients register here; ChatGPT, Claude and Grok need no registration.');
+      return oauthError(400, 'invalid_redirect_uri', 'Only local development clients register here; ChatGPT, Claude, Grok, and Grok Bot or Cursor need no registration.');
     }
     const grantTypes = metadata.grant_types;
     if (grantTypes !== undefined && (!Array.isArray(grantTypes) || !grantTypes.includes('authorization_code'))) {

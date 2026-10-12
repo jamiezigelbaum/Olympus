@@ -47,7 +47,7 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler, withRemoteMcpRoute } from '../src/workers/remote-mcp.ts';
 import { isDemoGrant, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
 import { createRemoteOAuthHandler, protectedResourceMetadata, withRemoteOAuthRoutes } from '../src/workers/remote-oauth/handler.ts';
-import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, GROK_CLIENT_ID, GROK_REDIRECT_URIS, isChatGptGrant } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI, CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, GROK_CLIENT_ID, GROK_REDIRECT_URIS, isChatGptGrant, CURSOR_CLIENT_ID, CURSOR_REDIRECT_URI } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 
 const RELAY_HOST = 'mcp.olympus.test';
@@ -512,11 +512,12 @@ describe('the private answer panel through /openai/mcp', () => {
   });
 });
 
-describe('Claude and Grok: pinned clients, /mcp only, the remote surface', () => {
+describe('Claude, Grok, and Grok Bot or Cursor: pinned clients, /mcp only, the remote surface', () => {
   const HOSTS = [
     { name: 'Claude', clientId: CLAUDE_CLIENT_ID, redirectUri: CLAUDE_REDIRECT_URI },
     { name: 'Grok', clientId: GROK_CLIENT_ID, redirectUri: GROK_REDIRECT_URIS[0]! },
     { name: 'Grok', clientId: GROK_CLIENT_ID, redirectUri: GROK_REDIRECT_URIS[1]! },
+    { name: 'Grok Bot or Cursor', clientId: CURSOR_CLIENT_ID, redirectUri: CURSOR_REDIRECT_URI },
   ] as const;
 
   const hostAuthorizeUrl = (path: string, clientId: string, redirectUri: string, challenge: string, resource?: string) => {
@@ -577,7 +578,7 @@ describe('Claude and Grok: pinned clients, /mcp only, the remote surface', () =>
       expect((await rpc(DIRECTORY_MCP_PATH, tokens.access_token, 'tools/list')).status).toBe(401);
     }
     const grants = store.list().filter((connection) => connection.kind === 'oauth');
-    expect(grants.map((connection) => connection.displayName)).toEqual(['Claude', 'Grok', 'Grok']);
+    expect(grants.map((connection) => connection.displayName)).toEqual(['Claude', 'Grok', 'Grok', 'Grok Bot or Cursor']);
     for (const connection of grants) {
       expect(isChatGptGrant(connection)).toBe(false);
       expect(isDemoGrant(connection)).toBe(false);
@@ -612,6 +613,12 @@ describe('Claude and Grok: pinned clients, /mcp only, the remote surface', () =>
       [GROK_CLIENT_ID, 'https://grok.com/connectors/oauth/callback'],
       [GROK_CLIENT_ID, CLAUDE_REDIRECT_URI],
       [GROK_CLIENT_ID, CHATGPT_REDIRECT_URI],
+      // Cursor's document also lists loopback and other addresses; only its cloud agents' address is pinned.
+      [CURSOR_CLIENT_ID, 'http://localhost:8787/callback'],
+      [CURSOR_CLIENT_ID, 'http://127.0.0.1:8787/callback'],
+      [CURSOR_CLIENT_ID, 'https://www.cursor.com/bot/mcp/oauth/callback'],
+      [CURSOR_CLIENT_ID, 'https://grok.com/connectors-oauth-exchange-code/'],
+      [CURSOR_CLIENT_ID, 'cursor://anysphere.cursor-mcp/oauth/callback'],
     ] as const) {
       const response = await fetch(hostAuthorizeUrl('/connect/authorize', clientId, redirectUri, pkce().challenge), { redirect: 'manual' });
       expect(response.status).toBe(400);

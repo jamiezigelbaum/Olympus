@@ -1,6 +1,6 @@
 /**
  * RFC 7591 registration at the relay, for the pinned hosted agents only:
- * ChatGPT, Claude and Grok.
+ * ChatGPT, Claude, Grok, and Grok Bot or Cursor.
  *
  * Every engine pins these clients by their client metadata document URLs
  * (src/workers/remote-oauth/pinned-clients.ts), and each normally names its
@@ -19,7 +19,12 @@
  *   `https://claude.ai/oauth/mcp-oauth-client-metadata`;
  * - `https://grok.com/connectors-oauth-exchange-code/` or
  *   `https://console.x.ai/connectors-oauth-exchange-code/` →
- *   `https://grok.com/oauth/mcp-client.json`.
+ *   `https://grok.com/oauth/mcp-client.json`;
+ * - `https://www.cursor.com/agents/mcp/oauth/callback` →
+ *   `https://cursor.com/oauth/mcp-client.json` (Grok Bot or Cursor). Grok
+ *   Bot registers that address together with `http://localhost:8787/callback`
+ *   (relay log, 2026-10-12); a loopback address beside it is left out of the
+ *   answer, so only the cloud address is registered, as the engine pins it.
  *
  * Any other return address is refused, so a registration never lets a code
  * go anywhere but one of those apps, and the client it names is one anyone
@@ -38,11 +43,16 @@ const CALLBACK_REDIRECT = /^https:\/\/chatgpt\.com\/connector\/oauth\/([A-Za-z0-
 // (test/remote-oauth.test.ts holds the two equal).
 const CLAUDE = { clientId: 'https://claude.ai/oauth/mcp-oauth-client-metadata', clientName: 'Claude' } as const;
 const GROK = { clientId: 'https://grok.com/oauth/mcp-client.json', clientName: 'Grok' } as const;
+const CURSOR = { clientId: 'https://cursor.com/oauth/mcp-client.json', clientName: 'Grok Bot or Cursor' } as const;
+const CURSOR_REDIRECT = 'https://www.cursor.com/agents/mcp/oauth/callback';
+/** Loopback addresses Cursor's document also lists; dropped beside its cloud address, never registered. */
+const CURSOR_LOOPBACK_EXTRAS: ReadonlySet<string> = new Set(['http://localhost:8787/callback', 'http://127.0.0.1:8787/callback']);
 const EXACT_REDIRECTS: ReadonlyMap<string, PinnedRegistration> = new Map([
   [STABLE_REDIRECT, { clientId: STABLE_CLIENT_ID, clientName: 'ChatGPT' }],
   ['https://claude.ai/api/mcp/auth_callback', CLAUDE],
   ['https://grok.com/connectors-oauth-exchange-code/', GROK],
   ['https://console.x.ai/connectors-oauth-exchange-code/', GROK],
+  [CURSOR_REDIRECT, CURSOR],
 ]);
 
 export interface PinnedRegistration {
@@ -117,12 +127,16 @@ export function registerPinnedClient(text: string, nowSeconds: number): Registra
     || !redirectUris.every((uri) => typeof uri === 'string')) {
     return refuse('invalid_redirect_uri', 'redirect_uris must list the client\'s return addresses.');
   }
+  // Grok Bot lists Cursor's loopback address beside the cloud one; only the
+  // cloud one is pinned, so the loopback one is left out rather than refused.
+  const requested = redirectUris as string[];
+  const uris = requested.includes(CURSOR_REDIRECT) ? requested.filter((uri) => !CURSOR_LOOPBACK_EXTRAS.has(uri)) : requested;
   // Engines pin each client to exactly its own return address, so every
   // address registered must belong to one and the same pinned client.
-  const clients = (redirectUris as string[]).map(pinnedClientForRedirect);
+  const clients = uris.map(pinnedClientForRedirect);
   const [client] = clients;
   if (client === undefined || !clients.every((each) => each?.clientId === client.clientId)) {
-    return refuse('invalid_redirect_uri', 'Only ChatGPT, Claude and Grok register here, each with its own return addresses.');
+    return refuse('invalid_redirect_uri', 'Only ChatGPT, Claude, Grok, and Grok Bot or Cursor register here, each with its own return addresses.');
   }
   const grantTypes = metadata.grant_types;
   if (grantTypes !== undefined && (!Array.isArray(grantTypes) || !grantTypes.includes('authorization_code'))) {
@@ -136,7 +150,7 @@ export function registerPinnedClient(text: string, nowSeconds: number): Registra
       client_id: client.clientId,
       client_id_issued_at: nowSeconds,
       client_name: client.clientName,
-      redirect_uris: [...new Set(redirectUris as string[])],
+      redirect_uris: [...new Set(uris)],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',

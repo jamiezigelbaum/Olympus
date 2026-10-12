@@ -66,8 +66,9 @@ export type DashboardRemoteAccess =
       setBy?: 'worker_env';
       /**
        * The address is `remote.publicBaseUrl`, a tunnel the owner runs, rather
-       * than the Olympus relay. Through the relay ChatGPT, Claude and Grok connect, and
-       * approval is one click on this computer; through a tunnel the approval
+       * than the Olympus relay. Through the relay ChatGPT, Claude, Grok, and
+       * Grok Bot or Cursor connect, and approval is one click on this
+       * computer; through a tunnel the approval
        * page asks for a pairing code, and keys work. A worker.env address
        * (`setBy`) is a tunnel too.
        */
