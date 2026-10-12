@@ -1,3 +1,4 @@
+import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
 import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import type { WorkerLaunch } from './core/model-key-reload.ts';
@@ -2889,6 +2890,18 @@ export async function runDashboardCommand(
   const config = loadConfig();
   const base = workerRootBaseUrl(config.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config);
+  if ((dependencies.platform ?? process.platform) === 'linux' && !dependencies.noOpen) {
+    if (!token) throw new OperationError('config_error', 'No worker auth token is configured. Run olympus setup first.');
+    let response: Response;
+    try { response = await (dependencies.fetchImpl ?? workerFetch)(`${base}${DESKTOP_OWNER_OPEN_PATH}${dependencies.target ? '?target=' + openTargetPath(dependencies.target) : ''}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token ?? ''}` }, redirect: 'error', signal: AbortSignal.timeout(10_000),
+    }); } catch { throw new OperationError('email_unreachable', 'The owner socket did not answer the desktop opening request. Check olympus worker status.'); }
+    let result: { state?: string; opened?: boolean; url?: string; hint?: string; error?: string; remedy?: string };
+    try { result = await response.json(); } catch { throw new OperationError('email_unreachable', 'The owner socket refused desktop opening. Check olympus worker status.'); }
+    if (!response.ok) throw new OperationError('email_unreachable', result.error ?? result.remedy ?? 'Desktop owner bridge unavailable; use the owner SSH socket forward.');
+    if (result.state === 'listening' && result.opened && result.url && result.hint) return { url: result.url, opened: true, hint: result.hint };
+    if (result.state !== 'headless') throw new OperationError('email_unreachable', 'Worker did not provide an owner-proven desktop route.');
+  }
   const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
   const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
   const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;

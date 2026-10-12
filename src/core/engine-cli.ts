@@ -260,14 +260,14 @@ function readEngineStatusFile(env: Record<string, string | undefined>): EngineSt
   }
 }
 
-async function probeWorker(fetchImpl: typeof fetch, baseUrl: string, socket?: string): Promise<{ reachable: boolean; detail: string; built_in_models?: unknown }> {
+async function probeWorker(fetchImpl: typeof fetch, baseUrl: string, socket?: string): Promise<{ reachable: boolean; detail: string; built_in_models?: unknown; desktop_bridge?: unknown }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 1_500);
   try {
     const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/health`, { method: 'GET', signal: controller.signal, ...(socket ? { unix: socket } : {}) });
-    const health = socket && response.ok ? await response.json() as { built_in_models?: unknown } : undefined;
+    const health = socket && response.ok ? await response.json() as { built_in_models?: unknown; desktop_bridge?: unknown } : undefined;
     await response.body?.cancel().catch(() => undefined);
-    return { reachable: response.ok, detail: `HTTP ${response.status}`, ...(health?.built_in_models ? { built_in_models: health.built_in_models } : {}) };
+    return { reachable: response.ok, detail: `HTTP ${response.status}`, ...(health?.built_in_models ? { built_in_models: health.built_in_models } : {}), ...(health?.desktop_bridge ? { desktop_bridge: health.desktop_bridge } : {}) };
   } catch {
     return { reachable: false, detail: 'no answer' };
   } finally {

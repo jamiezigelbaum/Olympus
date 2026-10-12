@@ -536,8 +536,59 @@ to the second computer, so that computer must also be trusted against other
 local users (or use the owner-code factor there too). Same-UID processes and
 root remain trusted; socket permissions cannot separate them. PR 4 must adapt
 worker health, relay/CLI clients and direct-transport validation for the socket,
-without treating a forged HTTP header as proof of socket origin. A browser on
-the engine host also needs the approved socket-to-browser route or code factor.
+without treating a forged HTTP header as proof of socket origin. A desktop browser uses the owner-proven session-origin bridge below. Headless
+browsers continue to use the authenticated socket forward.
+
+**Desktop amendment, approved by the owner on 2026-10-12:** a graphical
+session may additionally expose an owner-proven browser bridge. The private
+socket remains the backend. Each engine instance and each desktop listener
+epoch uses a fresh 128-bit base32 label under `.localhost`, on the configured
+port. The fixed loopback entry serves only a bodyless 303 to that current
+origin, preserving path/query and browser fragment inheritance. It never sets
+cookies or runs scripts. Old session Hosts and every Host mismatch refuse.
+
+`olympus dashboard` asks the private socket to open an owner ticket: exclusive
+0600 HTML inside the validated 0700 runtime directory. The trusted desktop
+opener receives only the absolute filename in its separate systemd scope;
+no secret enters argv. The file probes the current session origin in the
+actual browser before navigating to `/owner-proof#<single-use-ticket>`.
+Resolution failure stays on a clear refusal with the SSH fallback, never the
+fixed origin. Proof consumption is atomic, expires after 60 seconds and
+removes the file. Ticket opening is limited to once per ten seconds globally.
+Only one pending ticket and at most sixteen 12-hour owner sessions are held.
+
+An HttpOnly, SameSite=Lax, host-only cookie is bound to this bridge instance.
+**Cookies alone are insufficient:** cookies cross ports, so every content
+read and privileged socket dispatch also requires an independent random proof
+in this origin's localStorage. A navigation without both proofs receives only
+a constant confirmation shell. The shell fetches the actual document with
+the storage proof; native consent forms attach that proof separately and
+retain the worker's CSRF, Origin and navigation checks. The bridge validates
+external Host and Origin before rewriting the proven request for the socket.
+It never adds a worker bearer to browser requests. After private-ticket proof, the socket also establishes the existing dashboard
+control session so an OAuth-first owner can subsequently open the dashboard.
+Dashboard launch tickets and control-session CSRF remain the existing worker
+mechanism. No browser request gains an injected bearer.
+
+Browser and socket fetches never follow redirects with the storage proof.
+A browser fetch receives an inert destination and performs ordinary navigation;
+form responses use 303. Upstream document CSP is enforced in the reconstructed
+document, with only the bridge bootstrap additionally authorized; all pages
+set `worker-src 'none'`, and every `Service-Worker` request is rejected.
+`Clear-Site-Data` clears entry cache/storage and proof-response cache; it is
+not treated as a way to revoke a hostile running tab. Fresh origin isolation
+provides that boundary. All bridge content is no-store.
+
+Live graphical readiness and the current server-mode setting gate startup,
+every request, and post-await publication. A coalesced asynchronous two-second
+observer performs bounded desktop probes (up to three seconds per command);
+HTTP requests only read its snapshot, never spawn subprocesses. When the
+observer detects logout or server-mode enable it closes the listener and
+revokes proofs; requests immediately refuse the unavailable snapshot. Relogin creates a new
+origin. A port collision leaves the owner socket running, opens no replacement
+listener and reports `desktop_bridge.state=port_in_use` plus its remedy through
+socket health, engine status and doctor. Headless hosts open no TCP listener.
+Mac browser, socket-free transport, and page output are unchanged.
 
 Rejected alternative (kept for the record): retain loopback but require a short-lived, single-use code
 issued only by the owner's CLI, bound to the pending install/client/redirect/
@@ -610,7 +661,7 @@ checks belong to Omarchy acceptance, not claimed unit coverage.
 | 3a. Runtime pins and publisher | Verified Linux architecture pins, archive/executable checks and publisher filling; no install transaction. | Missing pin, tampered archive and tampered cached executable refuse before execution; publisher fixture cannot emit an unfilled template or overwrite prior assets. | Each architecture needs real CPU/glibc/loadability proof before publication; x64 does not qualify arm64. |
 | 3b. Install/upgrade transaction | Depends on 1a–1c, 2 and 3a; Linux installer, util-linux flock supervisor, durable recovery and lifecycle doctor. | Fault injection at every durable boundary recovers twice; same-release repair retains previous; failed upgrade versus failed rollback health are distinct; missing tools/bus/linger refuses before active mutation. | CI subprocess contention for install/rollback and cancellation keeps the lock through mutation; PID-1 container proves real activation/recovery. Shell syntax/ShellCheck; reboot/power-loss acceptance on Omarchy. |
 | 3c. Uninstall and purge | Depends on 3b; receipt-bounded shell removal without Bun/app; optional explicit data purge. | Receipt fixtures preserve unrelated files/replacements, retain data by default, remove only enumerated owned artifacts with consent, and refuse deletion on unknown custody; repeat interrupted removal safely. | PID-1 container: uninstall without Bun/app, install/rollback/uninstall lock contention, cgroup/listener release and purge inventory. Omarchy: final runtime-directory teardown and explicit linger restoration. |
-| 4. Desktop opener and headless handoff | Depends on 1a/1b; live graphical readiness, separate viewer scope and bounded tunnel reuse. Approval transport is the owner-only Unix socket. Public capabilities wait for 5. | Shared private/unreadable dispatch rejects symlink swaps/traversal/argv injection/revoked eligibility. HTML/script disguised as `.pdf` and unknown MIME open only the folder. Inactive graphical target/stale display refuses; manager environment can prove desktop readiness when engine env lacks DISPLAY. **Owner-only socket:** other local user cannot approve, including forged headers/replay. | PID-1 container: viewer fixture in its own scope survives engine restart; socket permission boundary tested with a second UID. Omarchy: actual Hyprland viewer, login/logout readiness and second-computer OAuth/tool call. |
+| 4. Desktop opener and headless handoff | Depends on 1a/1b; live graphical readiness, separate viewer scope and bounded tunnel reuse. Approval backend is the owner-only Unix socket; the approved desktop bridge adds per-session browser origin and owner proof. Public capabilities wait for 5. | Shared private/unreadable dispatch rejects symlink swaps/traversal/argv injection/revoked eligibility. HTML/script disguised as `.pdf` and unknown MIME open only the folder. Inactive graphical target/stale display refuses; manager environment can prove desktop readiness when engine env lacks DISPLAY. **Owner-only socket:** other local user cannot approve, including forged headers/replay. | PID-1 container: viewer fixture in its own scope survives engine restart; socket permission boundary tested with a second UID. Omarchy: actual Hyprland viewer, login/logout readiness and second-computer OAuth/tool call. |
 | 5. Consumer integration and qualification | Depends on all prior parts and relevant W1–W4 proof; **after OpenAI review closes**. Host-neutral payload/decoder, copy inventory and supported entrypoints. | Old/new payload compatibility, Linux never says “opened on Mac,” unsupported architecture/optional lanes remain unavailable, frozen demo/listing fixtures unchanged until authorized publication. | Omarchy acceptance below; independent review and required exact-head/exact-main CI remain required for each critical implementation PR. |
 
 PRs 1a–4 can land internally without altering the reviewed listing or serving
@@ -701,8 +752,8 @@ The frontend transport addition is required to prevent the old instructions
 from forwarding to an unrelated Linux TCP process. It changes no listing,
 demo configuration or public deployment. Linux private-source controls stay
 disabled until the PR 5 host-neutral capability lands. A browser on the Linux
-engine host likewise needs the socket-forward route; no local TCP bridge is
-created automatically.
+engine host uses the owner-proven desktop bridge when graphical readiness
+is confirmed; otherwise it needs the authenticated SSH socket forward.
 
 Real-host qualification remains: second-UID denial (the isolated build runner
 cannot change UID), PID-1/cgroup viewer survival across engine restart,
@@ -975,8 +1026,9 @@ integration seams:
 - Secrets and worker transport consume `resolveLinuxEngineLayout`; installed
   receipt roots take precedence over shell drift. The service selects the durable
   secret backend before launching consumers. Linux zkAPI remains unavailable.
-- Linux worker HTTP runs only over the private Unix socket. HTTP loopback origins
-  remain identifiers for cookies and OAuth; they do not create a TCP listener.
+- The Linux worker backend runs over the private Unix socket. The approved
+  desktop bridge is a separate loopback listener requiring the session-origin
+  owner proofs above; headless mode retains only the socket.
   The outbound relay child uses that socket for forwarded requests. OAuth grants
   for ChatGPT, Claude, Grok, Grok Bot and Cursor retain their existing pins.
 - Linux Grok API keys use the existing routable access-credential envelope,
@@ -984,7 +1036,7 @@ integration seams:
   are accepted only on the default remote surface for the current install ID,
   never as a ChatGPT directory grant. Existing Mac key generation is unchanged.
 - The live agent page receives the opener's resolved SSH socket handoff. A Linux
-  desktop also needs that route for browser approval; the engine never opens an
+  desktop uses the approved owner-proven session-origin bridge; the engine never opens an
   unauthenticated TCP approval listener. Missing SSH configuration is shown as
   not ready. The trusted browser computer's loopback port must be free.
 - Install, upgrade, rollback and removal use the same runtime kernel lock.
@@ -1057,8 +1109,8 @@ olympus doctor
 ```
 
 Expect a private directory/socket (0700/0600, this UID), a healthy exact build,
-an enabled unit, verified linger, and no worker TCP listener on the engine
-host. Relay online is a separate status fact. Model download/warm-up is not
+an enabled unit, verified linger, and an owner Unix worker socket. A live
+desktop additionally reports the owner bridge; headless mode has no TCP listener. Relay online is a separate status fact. Model download/warm-up is not
 engine health; wait for the model readiness the panel reports before testing
 Private answers. The installer refuses missing tools, old systemd, no user
 bus, unsupported CPU/glibc or denied linger with a remedy; do not work around
@@ -1066,21 +1118,47 @@ those refusals by inventing an XDG runtime directory or running as root.
 
 ### Owner approval and agent access
 
-Configure an SSH alias/account that authenticates as the Olympus owner on
-the laptop. Verify it with your SSH client first. The browser computer must
-be trusted and must have port 8010 available. For a browser on the laptop,
-use an SSH configuration that authenticates back to the owner's local account;
-there is still no engine TCP approval listener. If SSH service setup is needed,
-on Omarchy install/start OpenSSH explicitly (these are host-administration
-steps, not actions performed by the Olympus installer):
+On the Omarchy desktop, first run:
+
+```sh
+olympus server-mode auto
+olympus engine status
+olympus dashboard
+```
+
+Expect `desktop_bridge.state` to be `listening`. The command opens a private
+file and then a fresh random `.localhost` origin in Chromium (Omarchy's default)
+or Firefox. The URL printed by the command contains no ticket. Confirm the
+private dashboard loads; connect one client with its original OAuth query,
+then choose Connect on the consent page. Confirm a fresh browser tab can
+reuse the owner session. From a second ordinary account, fixed-entry requests
+may redirect, but dashboard reads and consent must refuse without both proofs.
+Verify copied/previous-instance cookies and forged browser headers do not help.
+
+Repeat with a benign squatter serving the fixed entry while the engine is
+stopped: leave its tab and service worker alive, then stop the squatter and
+start Olympus. Open the owner's ticket using `olympus dashboard`. The old tab
+must not read owner pages or storage or obtain the new cookie. Restart the
+engine and repeat with the old random origin. Confirm `/sw.js` requests with
+`Service-Worker: script` refuse and browser registration is blocked by CSP.
+Log out and inspect from another owner SSH session: only the Unix socket
+remains after the bounded reconciliation interval. Log back in and verify a
+new origin. Explicit server mode must likewise remove the listener. Hold the
+port with another process and confirm doctor/status report the collision.
+
+If browser name resolution fails, the private file must show a refusal with
+SSH instructions, never navigate to the fixed origin. For headless/remote
+use, configure an SSH alias authenticating as the Olympus owner. The browser
+computer must be trusted and have the configured port free. A browser on the
+same laptop needs server mode enabled first to release the bridge port. SSH
+service setup, if needed, is an explicit owner host-administration action:
 
 ```sh
 sudo pacman -S --needed openssh
 sudo systemctl enable --now sshd
 ```
 
-Use your normal owner SSH key authentication and verify it from the browser
-computer before continuing.
+Verify normal owner SSH key authentication before continuing.
 
 On the laptop:
 
@@ -1354,7 +1432,7 @@ latency on the laptop. Do not treat a healthy engine as a ready model.
 
 ### Desktop bridge security disposition (2026-10-12)
 
-**Deferred pending an owner decision on the browser origin.** The real laptop
+**Historical fixed-origin rejection; superseded by the approved desktop amendment above.** The real laptop
 proved that `olympus dashboard` printed a non-listening TCP URL on a desktop.
 The fixed-origin bridge prototype was withheld from the acceptance candidate;
 the shipping path remains the existing Unix socket and SSH handoff.
@@ -1371,15 +1449,11 @@ Independent review and a real isolated Chromium reproduction found:
    that surviving execution context; `Clear-Site-Data: executionContexts` did
    not terminate it. Per-process cookie rotation alone does not fix this.
 
-The proposed fix uses a fresh unguessable loopback browser origin for every
-engine/desktop-listener epoch, retaining `127.0.0.1:8010` as the public entry
-point and the private Unix socket as the worker transport. It needs explicit
-owner acceptance because the work order specified the fixed `127.0.0.1`
-proof URL. Do not enable the fixed-origin prototype or treat its passing
-cookie/replay tests as proof against persistent browser-origin compromise.
-The private ticket/CSRF checks, graphical-only listener, nuisance limits,
-collision reporting and headless SSH path remain acceptance requirements for
-that revised implementation. No desktop-bridge claim is made by this bundle.
+The owner approved fresh random session origins on 2026-10-12. The bridge
+implementation keeps the cookie-independent origin-storage proof, isolates
+old execution contexts with origin rotation, and retains the Unix socket and
+SSH headless path. Disposition: **fix** the browser-origin boundary; no new
+release gate or fixed-origin fallback.
 
 
 ### Doctor/model acceptance candidate proof
@@ -1402,5 +1476,51 @@ continues. Re-run the installer, `olympus doctor` and `olympus engine status`;
 use the existing owner SSH socket forward to inspect the new local model
 summary. Compare the reported model states with actual first-use downloads,
 install `ffmpeg` when prompted, and confirm native model loading on the laptop.
-The desktop approval row is deferred for the origin decision above, not
-reported as passed by these tests or this bundle.
+Those earlier tests and that historical bundle did not qualify the desktop bridge.
+The current owner-bridge acceptance bundle is `release-artifacts/omarchy-acceptance`.
+Its desktop implementation and browser proof are separate from real Hyprland,
+login/logout, default-opener and second-UID acceptance on the laptop.
+
+
+### Desktop owner bridge acceptance proof (2026-10-12)
+
+Disposition: **fix**. The approved origin decision is implemented in
+`src/core/linux-owner-bridge.ts`, integrated only into the Linux socket worker.
+The direct implementation tests cover exact Host admission, cookie plus storage
+proof, previous-instance refusal, forged headers, CSRF preservation, single-use
+and expired tickets, opener argv, service-worker denial, collisions, listener
+rotation and post-await revocation. Mac agent/consent fixtures remain exact.
+
+Real headless Chromium and Firefox through Playwright 1.64.0 both resolved fresh
+random `.localhost` names to the loopback listener with no resolver override.
+Both completed the private-file launch, dashboard fetch, fresh-tab reuse,
+native consent POST, callback redirect and PKCE token exchange. A pre-existing
+entry-origin service worker and hostile tab remained alive and could not read
+owner content, storage or cookies. Old session Hosts refused after rotation;
+service-worker registration on the session origin failed. These are isolated
+browser proofs, not Omarchy/Hyprland qualification.
+
+For reproduction, `test/linux-owner-bridge.browser.test.ts` accepts
+`OLYMPUS_TEST_PLAYWRIGHT` naming an installed Playwright ESM entry. Run it only
+through remote-build. The browser package and missing Firefox system libraries
+were installed/extracted under disposable container paths; no repository
+dependency, host package, hosts file or resolver setting changed.
+
+Re-run the owner approval section above on the actual laptop for xdg-open,
+Hyprland/systemd login/logout and scope survival, port-collision diagnostics,
+second-UID behavior and real client tool calls. The bundle remains rc.6-labeled
+acceptance material for the rc.7 integration; this track does not change the
+frozen directory listing, hosted assets or release version.
+
+
+Final focused validation: 198 tests across the six changed behavior suites and
+three required guards passed, then 49 bridge/guard checks passed after the
+terminal-close regression fix (48 repeat checks, one additional case). The
+Chromium and Firefox cases passed again, including opening a dashboard from
+owner proof without a dashboard launch fragment. Build and TypeScript passed;
+`dist` was rebuilt and returned by remote-build. The built-in-reasoning
+installer suite was excluded as instructed. Independent review identified the
+inherited consent form policy, synchronous request-triggered readiness probes,
+and the pending-probe shutdown race; all three were fixed, with the final
+lifecycle re-review passing. No Mac runtime/page implementation was changed;
+Mac consent/agent fixtures and CLI regression cases passed byte-for-byte.

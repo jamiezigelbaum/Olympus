@@ -142,13 +142,15 @@ export function resolveAgentApprovalHost(input: {
   fileEnv?: Record<string, string | undefined> | undefined;
   platform?: NodeJS.Platform;
   port: number;
+  desktopBridgeReady?: () => boolean;
   desktopReady?: () => boolean;
 }) {
   const platform = input.platform ?? process.platform;
   if (platform !== 'linux') return { platform };
   const mode = resolveServerMode(input);
-  // Linux browsers always need the owner-authenticated socket forward, even
-  // when a desktop is available. Never suggest a non-existent TCP listener.
+  if (!mode.remote && input.desktopBridgeReady?.()) return { platform, headless: false };
+  // Without a confirmed owner bridge, Linux browsers need the authenticated
+  // socket forward. Never suggest an unavailable TCP listener.
   return { platform, headless: true, approvalHandoff: () => {
     if (!mode.sshTarget) return undefined;
     try {

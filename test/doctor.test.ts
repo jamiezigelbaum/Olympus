@@ -207,6 +207,16 @@ describe('runDoctor', () => {
     expect(checkByName(result.checks, 'email_worker').detail).toContain('/run/user/1000/olympus/worker.sock');
     expect(checkByName(result.checks, 'email_worker').detail).not.toContain('127.0.0.1');
   });
+  test('Linux desktop port collision is unhealthy with its remedy; Mac ignores Linux-only bridge facts', async () => {
+    for (const platform of ['linux', 'darwin'] as const) {
+      const result = await runDoctor(doctorDeps({ config: enabledEmailConfig(), delphi: healthyDelphi(), platform,
+        fetchImpl: fakeWorkerFetch({ '/v1/health': { status: 'ok', desktop_bridge: { state: 'port_in_use', remedy: 'Free the port or use the owner SSH socket forward.' } } }).fetchImpl }));
+      const worker = checkByName(result.checks, 'email_worker');
+      expect(worker.ok).toBe(platform === 'darwin');
+      if (platform === 'linux') { expect(worker.detail).toContain('port_in_use'); expect(worker.hint).toContain('SSH socket forward'); }
+    }
+  });
+
   test('Linux standalone host copy does not claim no private model runs; Mac wording is unchanged', async () => {
     for (const platform of ['linux', 'darwin'] as const) {
       const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(), platform,

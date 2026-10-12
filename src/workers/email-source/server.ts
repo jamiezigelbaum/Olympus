@@ -1,3 +1,8 @@
+import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
+import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
+import { linuxGraphicalSessionReadinessAsync } from '../../core/linux-desktop-opener.ts';
+import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
+import { workerFetch } from '../../core/worker-transport.ts';
 import { linuxModelReadiness } from '../../core/linux-model-readiness.ts';
 import { withEngineWorkerAdmission, EngineMaintenanceInProgressError } from '../../core/engine-maintenance.ts';
 import { prepareWorkerSocket, bindWorkerSocket, workerSocketPath } from '../../core/worker-transport.ts';
@@ -4318,9 +4323,12 @@ export async function main(): Promise<void> {
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
+  let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
+  let desktopPoll: ReturnType<typeof setInterval> | undefined;
+  let desktopPollingClosed = false;
   const worker = createEmailSourceWorker({
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
-    agentConnectHost: () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port }),
+    agentConnectHost: () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' }),
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
       ...(process.platform === 'linux' ? { relayInstallId: () => remotePublicUrls()?.installId } : {}),
@@ -5267,16 +5275,63 @@ export async function main(): Promise<void> {
   const startServer = () => socketPath
     ? Bun.serve({ unix: socketPath, fetch(request, server) {
         server.timeout(request, 0);
+        if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
+          if (request.method !== 'POST' || !authToken || request.headers.get('authorization') !== `Bearer ${authToken}`) return new Response(null, { status: 403 });
+          return (async () => {
+            const status = desktopBridge?.status();
+            if (!status || status.state === 'headless') return Response.json({ state: 'headless' });
+            if (status.state !== 'listening') return Response.json(status, { status: 503 });
+            try {
+              const base = `http://127.0.0.1:${port}`;
+              const open = new URL(await mintDashboardOpeningUrl(base, authToken));
+              const requestedTarget = new URL(request.url).searchParams.get('target');
+              const target = requestedTarget ? parseOlympusOpenUrl(`olympus://open/${requestedTarget}`) : undefined;
+              if (requestedTarget && !target) return new Response(null, { status: 400 });
+              if (target) open.hash += `&olympus_open=${openTargetToken(target)}`;
+              const origin = await desktopBridge!.open(open.pathname + open.search + open.hash);
+              return Response.json({ state: 'listening', opened: true, url: origin + '/dashboard', hint: 'A private owner ticket was opened in your desktop browser. If *.localhost resolution fails, use the owner SSH socket forward; never use the fixed origin.' });
+            } catch { return Response.json({ error: 'Owner ticket could not open. Wait ten seconds and retry, or use the owner SSH socket forward.' }, { status: 503 }); }
+          })();
+        }
         const response = serverOptions.fetch(request, server);
         const path = new URL(request.url).pathname;
         if (path === '/v1/health' || path === '/health') return Promise.resolve(response).then(async value => {
           if (!value.ok) return value;
-          return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env) }, { status: value.status, headers: value.headers });
+          return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
         });
         return response;
       } })
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  if (socketPath) {
+    let ready = false;
+    let probing = false;
+    const probeDesktop = async () => {
+      if (probing || desktopPollingClosed) return;
+      probing = true;
+      try {
+        // Coalesce bounded asynchronous probes; unauthenticated HTTP traffic
+        // only reads the current snapshot and cannot spawn systemctl.
+        const desktop = await linuxGraphicalSessionReadinessAsync();
+        if (desktopPollingClosed) return;
+        ready = desktop.ready && !resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => desktop.ready }).remote;
+      } catch { ready = false; }
+      finally { probing = false; if (!desktopPollingClosed) desktopBridge?.refresh(); }
+    };
+    await probeDesktop();
+    desktopBridge = manageLinuxOwnerBridge({ port, socketPath, ready: () => ready,
+      fetchSocket: request => workerFetch(request, { redirect: 'manual' }),
+      establishDashboard: async () => {
+        const base = `http://127.0.0.1:${port}`;
+        const response = await workerFetch(`${base}/dashboard/control/session`, { method: 'POST',
+          headers: { Authorization: `Bearer ${authToken ?? ''}`, Origin: base }, redirect: 'error', signal: AbortSignal.timeout(5_000) });
+        if (!response.ok) throw new Error('Owner dashboard session refused.');
+        await response.body?.cancel();
+        return response.headers.getSetCookie();
+      },
+    });
+    desktopPoll = setInterval(() => { void probeDesktop(); }, 2_000); desktopPoll.unref();
+  }
   sourceScheduler?.start();
   await reconcileCaptures();
   const captureTick = setInterval(() => { void reconcileCaptures(); }, 10_000);
@@ -5336,6 +5391,9 @@ export async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     capturesClosed = true;
+    desktopPollingClosed = true;
+    if (desktopPoll) clearInterval(desktopPoll);
+    desktopBridge?.close();
     clearInterval(captureTick);
     tierSniffer?.stop();
     installedTierClassification.close();

@@ -162,10 +162,12 @@ testers have exercised the normal product journey without custom engineering.
   install, linger, service and socket isolation, and relay operation. Local
   follow-up fixes doctor runtime/socket wording and adds content-free Linux
   model readiness to engine status and the local dashboard. The desktop
-  bridge remains blocked on the browser-origin decision documented in
-  `docs/design/linux-engine-service.md`: fixed-origin port squatting can retain
-  a hostile browser execution context. No new listener is shipped while that
-  consequential defect remains. The listing and plugin bundle remain frozen.
+  bridge origin decision is approved: a fresh random `.localhost` origin for
+  each engine/desktop session, with a redirect-only fixed entry and owner
+  cookie plus origin-storage proof. Implementation and the rebuilt local
+  acceptance bundle are scoped to W5 row 4; real Hyprland/login/logout and
+  second-UID qualification remain owner-run. See `docs/design/linux-engine-service.md`.
+  The listing and hosted plugin bundle remain frozen.
 
 
 - **2026-10-12 — W5 integration for rc.7.** The five local tracks are merged

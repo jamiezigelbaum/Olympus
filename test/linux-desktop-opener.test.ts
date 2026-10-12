@@ -6,6 +6,7 @@ import {
   EXPECTED_MIME_TYPES,
   isActiveLinuxScope,
   linuxGraphicalSessionReadiness,
+  linuxGraphicalSessionReadinessAsync,
   openLinuxDesktopPath,
   type LinuxCommandResult,
   type LinuxDesktopOpenerDependencies,
@@ -280,4 +281,13 @@ describe('the Linux desktop source opener', () => {
     })).rejects.toMatchObject({ code: 'desktop_unavailable' });
     expect(launched).toBe(false);
   });
+});
+
+
+test('bridge readiness uses bounded async probes and refuses an inactive session without a second probe', async () => {
+  let count = 0;
+  const result = await linuxGraphicalSessionReadinessAsync({ trustExecutable: () => true,
+    runSync: () => { throw new Error('bridge readiness must not block the worker'); },
+    run: async (argv, options) => { count++; expect(options.timeoutMs).toBe(3000); expect(argv).toContain('is-active'); return { status: 3, stdout: 'inactive', stderr: '' }; } });
+  expect(count).toBe(1); expect(result).toEqual({ ready: false, reason: 'inactive_graphical_session' });
 });

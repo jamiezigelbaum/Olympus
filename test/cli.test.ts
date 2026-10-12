@@ -1130,7 +1130,7 @@ describe('CLI tool surface', () => {
         origin: request.headers.origin,
       });
       response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ ok: true, ticket, expires_in_seconds: 900 }));
+      response.end(JSON.stringify(request.url === '/desktop-owner/open' ? { state: 'headless' } : { ok: true, ticket, expires_in_seconds: 900 }));
     });
     let serverOpen = false;
     try {
@@ -1160,7 +1160,7 @@ describe('CLI tool surface', () => {
 
       const output = JSON.parse(stdout) as { url: string; opened: boolean; hint: string };
       const expectedUrl = `${workerOrigin}/dashboard/launch#olympus_launch_ticket=${ticket}`;
-      expect(requests).toEqual([{
+      expect(requests).toEqual([...(linux ? [{ method: 'POST', url: '/desktop-owner/open', authorization: `Bearer ${workerToken}`, origin: undefined }] : []), {
         method: 'POST',
         url: '/dashboard/control/launch',
         authorization: `Bearer ${workerToken}`,
@@ -1186,7 +1186,7 @@ describe('CLI tool surface', () => {
       expect(handoffOutput).toMatchObject({ url: expectedUrl, opened: false });
       expect(handoffOutput.hint).toContain(linux ? 'ssh -N -o ExitOnForwardFailure=yes' : 'not opened locally');
       if (!linux) expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(linux ? 3 : 2);
 
       const help = await runSourceCli(['dashboard', '--help']);
       expect(help.stdout).toContain('Usage: olympus dashboard [--read-only] [--no-open]');
@@ -1204,6 +1204,7 @@ describe('CLI tool surface', () => {
     const targetRequests: string[] = [];
     let responseMode: 'failed' | 'redirect' = 'failed';
     const server = createServer((request, response) => {
+      if (request.url === '/desktop-owner/open') { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ state: 'headless' })); return; }
       if (request.url === '/redirect-target') targetRequests.push(request.url);
       if (request.url !== '/dashboard/control/launch') {
         response.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1794,4 +1795,19 @@ describe('how a hint names the Olympus command', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+test('Linux desktop dashboard asks the socket to open a private file, and refuses bridge failures', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'owner-desktop-cli-'));
+  const env = withTemporaryEnv({ HOME: home, OLYMPUS_CONFIG: join(home, 'missing.json'), OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1', OLYMPUS_WORKER_AUTH_TOKEN: 'fixture-worker-token' });
+  try {
+    let sent = '';
+    const result = await runDashboardCommand({ platform: 'linux', openImpl: () => { throw new Error('CLI must never open secret URL'); },
+      fetchImpl: async (input, init) => {
+        sent = String(input); expect(init?.method).toBe('POST'); expect(init?.redirect).toBe('error');
+        return Response.json({ state: 'listening', opened: true, url: 'http://session.localhost:8010/dashboard', hint: 'Private owner ticket opened.' });
+      } });
+    expect(sent).toBe('http://127.0.0.1:8010/desktop-owner/open'); expect(result.opened).toBe(true); expect(result.url).not.toContain('#');
+    await expect(runDashboardCommand({ platform: 'linux', fetchImpl: async () => Response.json({ state: 'port_in_use', remedy: 'Free the port or use SSH socket forward.' }, { status: 503 }) })).rejects.toThrow('Free the port');
+  } finally { env.restore(); rmSync(home, { recursive: true, force: true }); }
 });

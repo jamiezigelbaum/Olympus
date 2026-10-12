@@ -138,6 +138,19 @@ export function linuxGraphicalSessionReadiness(
   return { ready: false, reason: 'stale_display' };
 }
 
+/** Same readiness contract without blocking the worker event loop. The HTTP
+ * bridge uses a coalesced observer, never a subprocess for each request. */
+export async function linuxGraphicalSessionReadinessAsync(dependencies: LinuxDesktopOpenerDependencies = {}): Promise<LinuxGraphicalSessionReadiness> {
+  const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
+  if (!absoluteExecutables(executables) || !(dependencies.trustExecutable ?? isTrustedExecutable)(executables.systemctl)) return { ready: false, reason: 'untrusted_systemctl' };
+  const run = dependencies.run ?? runCommand;
+  const options = { timeoutMs: COMMAND_TIMEOUT_MS, env: process.env as Record<string, string> };
+  const active = await run([executables.systemctl, '--user', 'is-active', 'graphical-session.target'], options);
+  if (!successfulProbe(active) || active.stdout.trim() !== 'active') return { ready: false, reason: 'inactive_graphical_session' };
+  const shown = await run([executables.systemctl, '--user', 'show-environment'], options);
+  return linuxGraphicalSessionReadiness({ ...dependencies, runSync: argv => argv.includes('is-active') ? active : shown });
+}
+
 export type LinuxDesktopOpenErrorCode =
   | 'desktop_unavailable'
   | 'untrusted_executable'
@@ -543,4 +556,27 @@ function mime(...values: string[]): ReadonlySet<string> {
 
 for (const extension of OPENABLE_EXTENSIONS) {
   if (!EXPECTED_MIME_TYPES[extension]) throw new Error(`Missing Linux MIME contract for .${extension}`);
+}
+
+/** Only engine-generated private ticket HTML may use this opener. Source files
+ * still use openLinuxDesktopPath and its MIME/eligibility checks. */
+export async function openLinuxOwnerTicketFile(path: string, dependencies: LinuxDesktopOpenerDependencies = {}): Promise<void> {
+  const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
+  const trusted = dependencies.trustExecutable ?? isTrustedExecutable;
+  if (![executables.systemctl, executables.systemdRun, executables.xdgOpen].every(trusted)) throw new Error('Trusted desktop opener unavailable.');
+  const readiness = dependencies.readiness?.() ?? linuxGraphicalSessionReadiness(dependencies);
+  if (!readiness.ready) throw new Error('No live graphical session.');
+  const runtime = readiness.environment.XDG_RUNTIME_DIR;
+  if (!runtime || dirname(path) !== `${runtime}/olympus` || !/^owner-ticket-[a-f0-9]{32}\.html$/.test(path.slice(dirname(path).length + 1))) throw new Error('Invalid owner ticket path.');
+  const stat = lstatSync(path);
+  const parent = lstatSync(dirname(path));
+  const uid = dependencies.uid ?? process.getuid?.();
+  if (realpathSync(path) !== path || !stat.isFile() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o777) !== 0o600
+    || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 0o777) !== 0o700) throw new Error('Unsafe owner ticket file.');
+  const scopeUnit = `olympus-open-${process.pid}-${randomBytes(8).toString('hex')}`;
+  const result = await (dependencies.launch ?? launchInUserScope)(
+    [executables.systemdRun, '--user', '--scope', `--unit=${scopeUnit}`, '--', executables.xdgOpen, path],
+    { observeMs: LAUNCH_OBSERVATION_MS, env: readiness.environment, scopeUnit, systemctl: executables.systemctl },
+  );
+  if (!result.established) throw new Error('Desktop browser did not open the owner ticket.');
 }

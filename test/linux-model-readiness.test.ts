@@ -33,7 +33,7 @@ test('Linux engine status and local dashboard carry the worker model readiness',
     expect(html).toContain('Install ffmpeg.');
     const report = await engineStatusReport({ homeDir: root, env: { HOME: root, XDG_RUNTIME_DIR: root }, platform: 'linux',
       exec: () => ({ status: 0, stdout: 'LoadState=not-found\nActiveState=inactive\n', stderr: '' }), openclawPath: () => undefined,
-      fetchImpl: (async () => Response.json({ status: 'ok', built_in_models: rows })) as unknown as typeof fetch });
-    expect(report.worker).toMatchObject({ reachable: true, built_in_models: rows });
+      fetchImpl: (async () => Response.json({ status: 'ok', built_in_models: rows, desktop_bridge: { state: 'port_in_use', remedy: 'Free the port or use the owner SSH socket forward.' } })) as unknown as typeof fetch });
+    expect(report.worker).toMatchObject({ reachable: true, built_in_models: rows, desktop_bridge: { state: 'port_in_use', remedy: 'Free the port or use the owner SSH socket forward.' } });
   } finally { worker.close(); rmSync(root, { recursive: true, force: true }); }
 });

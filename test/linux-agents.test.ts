@@ -236,3 +236,9 @@ test('Linux registration refusal changes only the host noun', async () => {
     expect(await response.json()).toEqual({error:'access_denied',error_description:`Registration is available only on this ${platform === 'linux' ? 'computer' : 'Mac'}.`});
   }
 });
+
+test('an active owner bridge selects local Linux browser instructions, never changes Mac', () => {
+  expect(resolveAgentApprovalHost({ platform: 'linux', env: {}, port: 8010, desktopReady: () => true, desktopBridgeReady: () => true })).toEqual({ platform: 'linux', headless: false });
+  expect(resolveAgentApprovalHost({ platform: 'linux', env: { OLYMPUS_SERVER_MODE: 'on' }, port: 8010, desktopReady: () => true, desktopBridgeReady: () => true }).headless).toBe(true);
+  expect(resolveAgentApprovalHost({ platform: 'darwin', env: {}, port: 8010, desktopBridgeReady: () => { throw new Error('Mac must not inspect Linux bridge'); } })).toEqual({ platform: 'darwin' });
+});
