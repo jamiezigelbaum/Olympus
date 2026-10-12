@@ -158,6 +158,19 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-12 — Linux parity, Omarchy first.** Owner decision: Olympus
+  itself runs on Linux with the Mac's capabilities (scan and image text,
+  photo content, transcription, built-in private model, confined zkAPI lane,
+  and the standalone engine without OpenClaw); where the AI client runs does
+  not matter. Omarchy is the first target; Ubuntu may be dropped if it proves
+  disproportionately hard, and the owner's Linux host may move to Omarchy. Built-in models
+  are on by default on Linux, sized by memory as on the Mac, with no speed
+  floor. Photos in formats the host cannot decode are
+  reported and the rest indexed. The zkAPI lane on a host that cannot run
+  the network-namespace confinement is refused, with a one-time admin step
+  offered; there is no weaker mode. Plan: `docs/design/linux-parity.md`.
+  The demo box and the ChatGPT listing stay unchanged until OpenAI's review
+  closes.
 - **2026-10-12 — Claude and Grok are in 1.0.** Owner decision: Claude custom
   connectors (web, desktop, phone) and Grok connectors (grok.com) connect
   through the default relay with the same one-click approval on the Mac that

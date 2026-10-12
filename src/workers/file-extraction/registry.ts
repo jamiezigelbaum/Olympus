@@ -32,16 +32,20 @@ import {
   OCR_EXTRACTOR_KIND,
   createImageOcr,
   createOcrExtractor,
+  createOcrRereadPolicy,
   createPdfOcr,
   type OcrEngineOptions,
 } from './extractors/ocr.ts';
+import { appleVisionOcrSelected } from './extractors/apple-vision-ocr.ts';
+import { sharedOcrCapabilityProbe } from './extractors/ocr-capability.ts';
 import {
   REMOTE_VLM_EXTRACTOR_KINDS,
   createRemoteVlmExtractor,
 } from './extractors/remote-vlm.ts';
 import { TEXT_EXTRACTOR_KIND, createTextExtractor } from './extractors/text.ts';
-import { createImagePreparation } from './extractors/image-prepare.ts';
-import { stillImagePreparationAvailable } from '../../core/media-cache.ts';
+import { createImagePreparation, type ImagePreparation } from './extractors/image-prepare.ts';
+import { createSipsPreparer, createStillImagePreparer, type StillImagePreparer } from './extractors/image-preparers.ts';
+import { readyStillImageFormats, stillImageReadiness } from '../../core/still-image-readiness.ts';
 import {
   TRANSCRIPTION_EXTRACTOR_KIND,
   createTranscriptionExtractor,
@@ -110,10 +114,16 @@ export type ExtractionHealthProbeMap = ReadonlyMap<string, () => Promise<void>>;
 export function createDefaultExtractorRegistry(
   config: ExtractorRegistryConfig = {},
 ): ExtractorRegistry {
+  // One probe of the OCR commands serves the PDF engine, the picture engine
+  // and the reread policy, so they always agree; it is
+  // started now so the first plan pass usually finds its answer.
+  const ocrCapability = config.ocr?.capability ?? sharedOcrCapabilityProbe();
+  ocrCapability.warm();
   const ocrEngine: OcrEngineOptions = {
     ...(config.ocr?.engine !== undefined ? { preference: config.ocr.engine } : {}),
     ...(config.ocr?.maxPages !== undefined ? { maxPages: config.ocr.maxPages } : {}),
     ...(config.ocr?.platform !== undefined ? { platform: config.ocr.platform } : {}),
+    capability: ocrCapability,
   };
   const ocrShared = {
     engine: ocrEngine,
@@ -122,6 +132,8 @@ export function createDefaultExtractorRegistry(
       ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
       : {}),
   };
+  const pinnedToTesseract = config.ocr?.engine === 'tesseract';
+  const imagePreparationOn = Boolean(config.media?.cacheDir);
   const extractors: Extractor[] = [
     createTranscriptionExtractor({
       ...(config.transcription?.command !== undefined ? { command: config.transcription.command } : {}),
@@ -141,21 +153,30 @@ export function createDefaultExtractorRegistry(
       // rather than leaving it for an escalation nothing ever requests. On a
       // Mac the same holds for an image: the built-in engine reads its text.
       pdfOcr: createPdfOcr(ocrShared),
-      imageOcr: createImageOcr(ocrShared),
-      // On a Mac a still image is also prepared for media search (a JPEG in
-      // the owner-only media cache), so its picture can be embedded. The
-      // preparation tool ships with macOS only; elsewhere images stay as
-      // they were.
-      ...(config.media?.cacheDir && (config.media.platform !== undefined
-        ? config.media.platform === 'darwin'
-        : stillImagePreparationAvailable())
-        ? {
-          imagePreparation: createImagePreparation({
-            cacheDir: config.media.cacheDir,
-            ...(config.media.timeoutMs !== undefined ? { timeoutMs: config.media.timeoutMs } : {}),
-            ...(config.media.maxInputBytes !== undefined ? { maxInputBytes: config.media.maxInputBytes } : {}),
-          }),
-        }
+      // Pinned to `tesseract` pictures are never read in the text lane (the
+      // owner chose the legacy direct commands), so no reader is offered and
+      // no picture is marked as waiting for one.
+      ...(pinnedToTesseract ? {} : { imageOcr: createImageOcr(ocrShared) }),
+      // A scan or picture left `ocr_required` for want of an engine is read
+      // again once one works.
+      ocrReread: createOcrRereadPolicy({
+        capability: ocrCapability,
+        ...(config.ocr?.engine !== undefined ? { preference: config.ocr.engine } : {}),
+      }),
+      // A still image is also prepared for media search (a JPEG in the
+      // owner-only media cache), so its picture can be embedded: for each
+      // format this machine's probe found it can decode, with the tool the
+      // probe used. A format it cannot decode stays as it was.
+      ...(config.media?.cacheDir
+        ? { imagePreparation: createMediaPreparation(config.media.cacheDir, config.media) }
+        : {}),
+      // Where a command engine (not Vision, not a preparation) reads pictures,
+      // pictures settled names-only before it could are queued once more under
+      // a fixed version. Nothing is read again on a Mac, where Vision or the
+      // preparation already read them, nor when pinned to `tesseract`.
+      ...(!pinnedToTesseract && !appleVisionOcrSelected(config.ocr?.engine ?? 'auto', config.ocr?.platform ?? process.platform)
+        && !imagePreparationOn
+        ? { imageOcrVersion: true }
         : {}),
     }),
     createOcrExtractor(ocrShared),
@@ -201,6 +222,33 @@ export function createDefaultExtractorRegistry(
   }
 
   return buildExtractorRegistry(extractors);
+}
+
+function createMediaPreparation(
+  cacheDir: string,
+  media: NonNullable<ExtractorRegistryConfig['media']>,
+): ImagePreparation {
+  // Asked each time, so a refreshed probe reaches the running extractor.
+  const readiness = () => media.readiness ?? stillImageReadiness();
+  let built: { key: string; preparer: StillImagePreparer } | undefined;
+  const preparer = (): StillImagePreparer => {
+    if (media.preparer) return media.preparer;
+    const current = readiness();
+    if (current.tool === 'none' || !current.toolPath) return createSipsPreparer();
+    const key = `${current.tool}\u0000${current.toolPath}`;
+    if (built?.key !== key) {
+      built = { key, preparer: createStillImagePreparer({ kind: current.tool, path: current.toolPath }) };
+    }
+    return built.preparer;
+  };
+  return createImagePreparation({
+    cacheDir,
+    preparer,
+    formats: () => readyStillImageFormats(readiness()),
+    ...(media.commandRunner ? { commandRunner: media.commandRunner } : {}),
+    ...(media.timeoutMs !== undefined ? { timeoutMs: media.timeoutMs } : {}),
+    ...(media.maxInputBytes !== undefined ? { maxInputBytes: media.maxInputBytes } : {}),
+  });
 }
 
 /**
@@ -323,7 +371,7 @@ export function terminalRetryPaths(
 ): ExtractionTerminalRetryPath[] {
   const paths: ExtractionTerminalRetryPath[] = [];
   for (const extractor of registry.list()) {
-    const kinds = extractor.reread?.unreadTerminalErrorKinds ?? [];
+    const kinds = [extractor.reread, ...(extractor.extraReread ?? [])].flatMap((policy) => policy?.unreadTerminalErrorKinds ?? []);
     if (kinds.length > 0) paths.push({ extractorKind: extractor.kind, lastErrorKinds: [...kinds] });
   }
   for (const rule of rules) {

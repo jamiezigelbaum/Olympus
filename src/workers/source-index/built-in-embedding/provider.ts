@@ -25,6 +25,7 @@ import {
   installBuiltInEmbedding,
   readBuiltInEmbeddingStatus,
   reportBuiltInEmbeddingState,
+  reportBuiltInEmbeddingVision,
   type BuiltInEmbeddingFailureReason,
   type BuiltInEmbeddingInstallerOptions,
   type BuiltInEmbeddingStatus,
@@ -107,6 +108,15 @@ interface WindowTokenizer {
 interface Window {
   input: number;
   ids: number[];
+}
+
+/**
+ * A configured embedding provider as an answer on this computer may use it:
+ * the built-in model only as this process already holds it
+ * (BuiltInSourceEmbeddingProvider.loadedOnly), anything else not at all.
+ */
+export function loadedBuiltInEmbedding(provider: SourceEmbeddingProvider): SourceEmbeddingProvider | undefined {
+  return provider instanceof BuiltInSourceEmbeddingProvider ? provider.loadedOnly() : undefined;
 }
 
 export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
@@ -239,6 +249,31 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     return this.embedLoaded(model, inputs, options.taskType);
   }
 
+  /**
+   * This provider for a caller that must never start a load (an answer on
+   * this computer alone, source-index/local-answer.ts): it embeds only with a
+   * model this process already holds, and otherwise throws
+   * BuiltInEmbeddingNotReadyError, so the lane searches by keyword. No
+   * install, download or runtime start is reachable from it, whatever the
+   * status file says (a stale "ready" over missing files included).
+   */
+  loadedOnly(): SourceEmbeddingProvider {
+    return {
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      configHash: this.configHash,
+      epochId: this.epochId,
+      backend: this.backend,
+      embed: async (inputs, options) => {
+        if (inputs.length === 0) return [];
+        const model = this.loaded;
+        if (!model) throw new BuiltInEmbeddingNotReadyError(this.status());
+        return this.embedLoaded(model, inputs, options.taskType);
+      },
+    };
+  }
+
   private load(): Promise<LoadedModel> {
     if (this.loading) return this.loading;
     if (this.lastFailure && this.now() - this.lastFailure.atMs < RETRY_AFTER_FAILURE_MS) {
@@ -288,6 +323,11 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
           ...(this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}),
         });
         model = { kind: 'litert', embedder };
+        // The image encoder starting is what makes photos searchable by
+        // content; say whether it did where every process can read it (the
+        // ingestion policy admits photos only while it is not known to have
+        // failed).
+        if (this.spec.vision) reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
       } else {
         if (!installed.vocabularyPath) throw new Error('the model vocabulary is not installed.');
         const tokenizer = loadTokenizer(installed.vocabularyPath);

@@ -35,6 +35,8 @@ const ctx: OperationContext = {
   email: {} as OperationContext['email'],
   // Never this machine's launchd or OpenClaw: a running standalone engine.
   doctorHostProbe: () => ({ engine: { installed: true, state: 'running' }, legacyWorkerUnit: false }),
+  // Never this machine's OCR commands: the walk's shape is what is asserted.
+  doctorOcrProbe: () => ({ state: 'ready', detail: 'Scans and pictures of text are read.' }),
 };
 const result = await doctor.handler(ctx, {}) as { ok: boolean; checks: Array<{ name: string; ok: boolean }> };
 process.stdout.write(JSON.stringify({

@@ -1678,7 +1678,7 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
   rows: {
     keys: { title: 'Keys', line: 'Venice, Readwise and X keys' },
     agents: { title: 'Agents', line: 'Remote access and connected agents' },
-    outsideHelp: { title: 'Anonymous answers', line: 'Ask top AI models without saying who you are' },
+    privateAnswers: { title: 'Private answers', line: 'Questions answered only on this computer' },
     connector: { title: 'Build a connector', line: 'For a source Olympus does not have yet' },
   },
   /**
@@ -1686,6 +1686,12 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
    * computer's banner carries it, so the panel shows it beside no control
    * there; kept for a host without that banner.
    */
+  /**
+   * The computer's Needs you line while private questions wait (design
+   * background-agents.md, "Dashboard changes" 2). Only the computer's meta
+   * carries the count; ChatGPT never sees this line.
+   */
+  waiting: { one: '1 private question is waiting', many: '{count} private questions are waiting' },
   locked: 'Open dashboard controls first',
   /** The OpenClaw tab for a connection without operator.write. */
   readOnlyOpenClaw: 'Reconnect OpenClaw with operator.write access to change this',
@@ -2265,6 +2271,50 @@ export const DASHBOARD_LOCAL_COPY = {
     pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
     unreadable: 'Olympus could not read your privacy settings.',
   },
+} as const;
+
+/**
+ * The Private answers page (pages/private-answers.ts; design
+ * background-agents.md sections A and B, "Dashboard changes" 1 and 2).
+ * Questions are answered by the model built into Olympus, on this computer
+ * only. Anonymous answers (zkAPI) sit beneath it, collapsed, as outside help.
+ */
+export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
+  crumb: 'Private answers',
+  title: 'Private answers',
+  intro: 'Answered on this computer by the model built into Olympus. Nothing here leaves this computer.',
+  askLabel: 'Ask privately',
+  askPlaceholder: 'Ask about your private things',
+  ask: 'Ask',
+  waitingTitle: 'Waiting',
+  waitingIntro: 'Agents asked these, and the answer needs your private things. Answer them here.',
+  noneWaiting: 'Nothing is waiting.',
+  olderRemoved: 'Older questions were removed.',
+  answer: 'Answer',
+  dismiss: 'Dismiss',
+  dismissAll: 'Dismiss all',
+  dismissAllConfirm: 'Dismiss every waiting question?',
+  unchecked: 'not checked yet',
+  answering: 'Answering on this computer…',
+  sources: 'Sources',
+  open: 'Open',
+  leftOut: 'Left out: {sources}. Olympus cannot search them on this computer.',
+  unanswered: 'Not found here: {parts}.',
+  notFound: 'Nothing on this computer answers this.',
+  noModel: 'The model built into Olympus is not set up yet.',
+  downloading: 'The model built into Olympus is still downloading. Try again soon.',
+  changed: 'Something it read changed. Ask again.',
+  failed: 'Olympus could not answer this. Try again.',
+  unreachable: 'Olympus is not responding. Try again in a moment.',
+  dismissed: 'Dismissed.',
+  locked: 'Open dashboard controls to see and answer private questions.',
+  openControls: 'Open dashboard controls →',
+  unlockIntro: 'Private answers need a session opened here, not by an agent or the launch link.',
+  unlock: 'Unlock on this computer',
+  unavailable: 'Private answers are not available from this worker.',
+  anonymousTitle: 'Anonymous answers',
+  anonymousSum: 'Outside help',
+  /** The computer's Needs you line: only on the computer, never in ChatGPT. */
 } as const;
 
 /**

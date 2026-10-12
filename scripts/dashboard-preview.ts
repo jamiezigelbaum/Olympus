@@ -13,8 +13,10 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard            the host page, locked (the Open dashboard controls banner)
 //   /dashboard?controls   the same page with a pretend control session
 //   /dashboard?state=<name>  that preview state, in one load
-//   /dashboard?keys | ?agents | ?outside-help | ?connector
+//   /dashboard?keys | ?agents | ?private-answers | ?connector
 //                the computer's own pages, as the worker renders them.
+//   &waiting=0..9  how many private questions wait (default 2; remembered):
+//                the Private answers list and the panel's Needs you line.
 //   &agents=off|not-connected|relay-unavailable|awaiting-terms|worker-env
 //                picks the Agents fixture.
 //
@@ -29,6 +31,7 @@ import {
   COMPUTER_HOST_PAGE_CSP,
   dashboardHtmlRoutePage,
   renderComputerHostPage,
+  dashboardOutsideHelpRedirect,
   renderDashboardLocalPage,
 } from '../src/workers/dashboard/index.ts';
 import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
@@ -708,10 +711,55 @@ export const DASHBOARD_PREVIEW_STATES = [
   'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
 ] as const;
 
-/** The dashboard tool's result for a preview state, with the computer's Index faster state. */
-export function previewDashboardToolResult(state: string, indexFasterOn: boolean) {
+/** The dashboard tool's result for a preview state, with the computer's Index faster state (and waiting questions, unlocked). */
+export function previewDashboardToolResult(state: string, indexFasterOn: boolean, waitingPrivateQuestions = 0) {
   const result = dashboardToolResult(buildChatGptDashboardViewModel(view(state), { now: NOW, ...buildDashboardPreviewOptions(state) }));
-  return { ...result, _meta: { ...(result._meta ?? {}), [COMPUTER_META_KEY]: { indexFaster: { on: indexFasterOn } } } };
+  return {
+    ...result,
+    _meta: {
+      ...(result._meta ?? {}),
+      [COMPUTER_META_KEY]: { indexFaster: { on: indexFasterOn }, ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}) },
+    },
+  };
+}
+
+/** Pretend waiting questions for the Private answers page: invented, never anyone's. */
+const PREVIEW_WAITING = [
+  { id: 'wq_preview_1', question: 'What did the landlord say about the deposit?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 2 * 3_600_000).toISOString(), unchecked: false },
+  { id: 'wq_preview_2', question: 'When is my next dentist appointment?', from: 'Grok Bot', askedAt: new Date(NOW.getTime() - 26 * 3_600_000).toISOString(), unchecked: true },
+  { id: 'wq_preview_3', question: 'Which flight did I book for March?', from: 'ChatGPT', askedAt: new Date(NOW.getTime() - 50 * 60_000).toISOString(), unchecked: false },
+] as const;
+
+export function previewWaitingQuestions(count: number) {
+  const questions = Array.from({ length: Math.max(0, count) }, (_, index) => {
+    const base = PREVIEW_WAITING[index % PREVIEW_WAITING.length]!;
+    return index < PREVIEW_WAITING.length ? { ...base } : { ...base, id: `${base.id}_${index}` };
+  });
+  return { questions, olderRemoved: count > PREVIEW_WAITING.length };
+}
+
+/** The Private answers route, answered with an obviously pretend answer. Nothing is searched. */
+function previewPrivateAnswersAction(body: Record<string, unknown>): Response {
+  const answered = {
+    ok: true,
+    status: 'answered',
+    answer: 'Preview only: this is where the answer appears, written on this computer from your private things.\n\nNothing was searched: there is no worker behind this page.',
+    citations: [{ title: 'Lease renewal.pdf', source: 'Dropbox', date: '2026-06-30' }],
+    unanswered: [],
+    left_out: ['Gmail'],
+  };
+  if (body.action === 'ask') return Response.json(answered);
+  if (body.action === 'answer') return Response.json({ ...answered, ack: 'preview-ack-preview-ack-preview-ack-00' });
+  if (body.action === 'seen') return Response.json({ ok: true, status: 'cleared' });
+  if (body.action === 'dismiss') return Response.json({ ok: true, status: 'dismissed' });
+  if (body.action === 'dismiss_all') return Response.json({ ok: true, status: 'dismissed', removed: 0 });
+  return Response.json({ ok: false, error: { code: 'preview_only', message: 'Preview only: there is no worker behind this page, so this action cannot run here.' } }, { status: 501 });
+}
+
+function previewWaitingCount(request: Request, url: URL): number {
+  const asked = url.searchParams.get('waiting') ?? /(?:^|;\s*)olympus_preview_waiting=([0-9])/.exec(request.headers.get('cookie') ?? '')?.[1];
+  const count = asked === undefined || asked === null ? 2 : Number(asked);
+  return Number.isInteger(count) && count >= 0 && count <= 9 ? count : 2;
 }
 
 function previewState(request: Request): string {
@@ -749,9 +797,15 @@ if (import.meta.main) {
         headers: { 'content-type': 'application/json', 'set-cookie': 'olympus_preview_controls=1; Path=/; SameSite=Strict' },
       });
     }
+    const waitingCount = previewWaitingCount(request, url);
+    if (request.method === 'POST' && url.pathname === '/dashboard/private-answers') {
+      if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
+      return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>);
+    }
     if (request.method === 'POST' && url.pathname === '/dashboard/tools/call') {
       const body = await request.json().catch(() => ({})) as { name?: unknown };
-      if (body.name === DASHBOARD_TOOL_NAME) return Response.json(previewDashboardToolResult(state, false));
+      // The waiting count rides only an unlocked session, as on the computer.
+      if (body.name === DASHBOARD_TOOL_NAME) return Response.json(previewDashboardToolResult(state, false, previewUnlocked ? waitingCount : 0));
       return Response.json({
         content: [{ type: 'text', text: 'Preview only: there is no worker behind this page, so this action cannot run here.' }],
         structuredContent: { error: 'preview_only' },
@@ -787,10 +841,12 @@ if (import.meta.main) {
       const cookies = [
         ...(stateOverride ? [`olympus_preview_state=${stateOverride}; Path=/; SameSite=Strict`] : []),
         ...(url.searchParams.has('controls') ? ['olympus_preview_controls=1; Path=/; SameSite=Strict'] : []),
+        ...(url.searchParams.has('waiting') ? [`olympus_preview_waiting=${waitingCount}; Path=/; SameSite=Strict`] : []),
       ];
       const pageState = stateOverride ?? state;
       const page = dashboardHtmlRoutePage(url);
       if (page === 'legacy') return new Response(null, { status: 302, headers: { location: '/dashboard' } });
+      if (page === 'outside_help_moved') return new Response(null, { status: 302, headers: { location: dashboardOutsideHelpRedirect(url) } });
       if (page === 'panel_read') return Response.json(previewDashboardToolResult(pageState, false));
       if (page === 'host') {
         return withCookies(html(renderComputerHostPage({
@@ -806,6 +862,9 @@ if (import.meta.main) {
           now: NOW,
           ...(unlocked ? { controlSessionCsrfToken: 'preview-csrf-token' } : {}),
           agents: previewAgentsView(url.searchParams.get('agents')),
+          // The pretend session is a local one, so Private answers shows its list.
+          outsideHelpLocalSession: unlocked,
+          privateAnswers: { available: true, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount) } : {}) },
         },
       })), cookies);
     }
@@ -821,5 +880,5 @@ if (import.meta.main) {
   });
   console.log(`dashboard preview listening on http://127.0.0.1:${port}/dashboard`);
   console.log(`  states (open one, then /dashboard): ${DASHBOARD_PREVIEW_STATES.map((name) => `/${name}`).join(' ')}`);
-  console.log('  /dashboard?controls unlocks; ?keys ?agents ?outside-help ?connector are the computer\'s own pages');
+  console.log('  /dashboard?controls unlocks; ?keys ?agents ?private-answers ?connector are the computer\'s own pages; &waiting=N sets the waiting questions');
 }

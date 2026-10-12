@@ -176,7 +176,7 @@ export async function openRemote(
   return {
     ok: true,
     target: openTargetPath(target),
-    lands_on: isKeysOpenTarget(target) ? '/dashboard?keys' : '/dashboard',
+    lands_on: isKeysOpenTarget(target) ? '/dashboard?keys' : target.kind === 'private_answers' ? '/dashboard?private-answers' : '/dashboard',
     computer,
     engine_port: port,
     ssh_target: sshTarget,

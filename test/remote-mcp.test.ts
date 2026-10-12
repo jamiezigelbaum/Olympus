@@ -577,3 +577,160 @@ function rawPost(port: number, path: string, token: string): Promise<number> {
     ].join('\r\n'));
   });
 }
+
+// The evidence search Claude, Grok and other non-ChatGPT agents get
+// (workers/remote-search.ts, owner decision 2026-10-12): an install with no
+// answer model still answers through the agent's own model.
+describe('remote evidence search', () => {
+  let searchServer: ReturnType<typeof Bun.serve>;
+  let searchBase: string;
+  let searches: Array<{ question: string; limit?: number }>;
+  let answerModel: boolean;
+  let pauseSearch: Promise<void> | undefined;
+  let searchStarted: (() => void) | undefined;
+
+  beforeEach(() => {
+    searches = [];
+    answerModel = false;
+    pauseSearch = undefined;
+    searchStarted = undefined;
+    const worker = createEmailSourceWorker({
+      sourceAnswer: { async answer() { answered += 1; return answerFixture(); } },
+      sourceIndexStatus: { async status() { return statusFixture() as never; } },
+    });
+    const fetch = withRemoteMcpRoute(
+      createRemoteMcpHandler({
+        connections: () => store,
+        makeOperationContext: (caller, signal) => createInProcessOperationContext({
+          config: defaultConfig(),
+          sourceIndexReadEnabled: true,
+          workerFetch: worker.fetch,
+          caller,
+          signal,
+        }),
+        search: {
+          evidenceSearch: async (input) => {
+            searches.push(input);
+            searchStarted?.();
+            if (pauseSearch) await pauseSearch;
+            return {
+              evidence: [
+                { trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: 'The lease renews on 1 March.', authored_at: '2026-09-01T10:00:00Z' },
+                // Never released to this surface: dropped even if a search returned it.
+                { trust_domain: 'secure_local', provider: 'test-mail', family: 'email', title: 'Private note', excerpt: 'private text' },
+              ],
+              withheld: 0,
+              coverage: { searched_corpora: 1 },
+            };
+          },
+          answerModelAvailable: () => answerModel,
+        },
+      }),
+      withWorkerBearerAuth(worker.fetch, { authToken: WORKER_TOKEN }),
+    );
+    searchServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch });
+    searchBase = `http://127.0.0.1:${searchServer.port}`;
+  });
+
+  afterEach(() => {
+    searchServer.stop(true);
+  });
+
+  async function searchClient(token: string): Promise<Client> {
+    const client = new Client({ name: 'remote-search-test', version: '1.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(`${searchBase}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    });
+    await client.connect(transport as unknown as Parameters<Client['connect']>[0]);
+    return client;
+  }
+
+  test('with no answer model: search is listed, source_answer is neither listed nor callable', async () => {
+    const { token } = store.create('Claude');
+    const client = await searchClient(token);
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer_result', 'source_index_status']);
+      const search = tools.tools.find((tool) => tool.name === 'olympus_search')!;
+      expect(search.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+
+      const refused = await client.callTool({ name: 'source_answer', arguments: { question: 'when does the lease renew?' } });
+      expect(refused.isError).toBe(true);
+      expect(answered).toBe(0);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('a search returns only Public and Personal evidence, cited by id', async () => {
+    const { token } = store.create('Claude');
+    const client = await searchClient(token);
+    try {
+      const result = await client.callTool({ name: 'olympus_search', arguments: { question: 'when does the lease renew?', limit: 5 } });
+      expect(result.isError).toBeFalsy();
+      expect(searches).toEqual([{ question: 'when does the lease renew?', limit: 5 }]);
+      const text = (result.content as Array<{ type: string; text: string }>)[0]!.text;
+      expect(text).toContain('[E1] Mail · Lease renewal · 2026-09-01');
+      expect(text).toContain('The lease renews on 1 March.');
+      expect(text).not.toContain('private text');
+      expect(text).not.toContain('Private note');
+      const structured = result.structuredContent as { status: string; evidence: Array<{ id: string }> };
+      expect(structured.status).toBe('found');
+      expect(structured.evidence.map((item) => item.id)).toEqual(['E1']);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('bad arguments are refused before any search', async () => {
+    const { token } = store.create('Grok');
+    const client = await searchClient(token);
+    try {
+      for (const args of [{}, { question: '   ' }, { question: 'x'.repeat(2_001) }, { question: 'q', limit: 0 }, { question: 'q', limit: 49 }, { question: 'q', limit: 2.5 }]) {
+        const result = await client.callTool({ name: 'olympus_search', arguments: args });
+        expect(result.isError).toBe(true);
+        expect(JSON.parse((result.content as Array<{ text: string }>)[0]!.text)).toMatchObject({ error: 'invalid_params' });
+      }
+      expect(searches).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('a connection revoked while its search runs gets nothing from it', async () => {
+    const { connection, token } = store.create('Claude');
+    const client = await searchClient(token);
+    let release!: () => void;
+    pauseSearch = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { searchStarted = resolve; });
+    try {
+      const pending = client.callTool({ name: 'olympus_search', arguments: { question: 'when does the lease renew?' } });
+      await started;
+      store.revoke(connection.id);
+      release();
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      const text = (result.content as Array<{ text: string }>)[0]!.text;
+      expect(JSON.parse(text)).toMatchObject({ error: 'invalid_token' });
+      expect(text).not.toContain('lease renews');
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  test('with an answer model: source_answer is listed and answers beside the search', async () => {
+    answerModel = true;
+    const { token } = store.create('Claude');
+    const client = await searchClient(token);
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name).sort())
+        .toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status']);
+      const answer = await client.callTool({ name: 'source_answer', arguments: { question: 'what changed?' } });
+      expect(answer.isError).toBeFalsy();
+      expect(answered).toBe(1);
+    } finally {
+      await client.close();
+    }
+  });
+});

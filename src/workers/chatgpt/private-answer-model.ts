@@ -318,7 +318,12 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           items: items.length,
           unreadable,
           bytes: items.reduce((sum, item) => sum + utf8Bytes(item.text), 0),
-          used: picked.map((index) => read.sources[index]!),
+          // Every input item that can reach the output: the items read, and
+          // the other versions whose existence and date the version note may
+          // name. The callers' final check before anything is shown or sealed
+          // covers all of them, so a version re-tiered during synthesis
+          // withdraws the answer.
+          used: [...picked, ...eligibleSiblings].map((index) => read.sources[index]!),
         });
       } catch {
         // A reporting hook never fails the answer.

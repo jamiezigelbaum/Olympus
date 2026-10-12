@@ -40,6 +40,7 @@ import {
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { defaultDropboxConnectorStoreDbPath, dropboxTierConnectorStoreDbPaths } from '../src/workers/dropbox-files/connector-store.ts';
 import { DEFAULT_STILL_IMAGE_EXTENSIONS, defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
+import { stillImageReadinessOf } from '../src/core/still-image-readiness.ts';
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { classifyContentTier, IMAGE_PRIVATE_DEFAULT_REASON } from '../src/workers/classification/tier-classifier.ts';
@@ -233,14 +234,19 @@ describe('image preparation in the shared text lane', () => {
     expect(await extractor.extract(extractorInput(picture(6)))).toEqual({ status: 'metadata_only' });
   });
 
-  test('a picture whose OCR fails leaves nothing in the cache', async () => {
+  test('a picture whose OCR fails keeps its prepared cache copy and pending OCR marker', async () => {
     const cacheDir = join(temporaryDir(), 'media-cache');
     const extractor = createTextExtractor({
       imagePreparation: createImagePreparation({ cacheDir, commandRunner: fakeSips() }),
       imageOcr: async () => ({ status: 'failed_retryable', errorKind: 'ocr_command_failed' }),
     });
-    expect(await extractor.extract(extractorInput(picture(7)))).toEqual({ status: 'failed_retryable', errorKind: 'ocr_command_failed' });
-    expect(readdirSync(cacheDir).filter((name) => name.endsWith('.jpg'))).toEqual([]);
+    const result = await extractor.extract(extractorInput(picture(7)));
+    expect(result.status).toBe('indexed');
+    if (result.status !== 'indexed') throw new Error(result.status);
+    expect(result.text).toBe(IMAGE_MEDIA_DESCRIPTOR);
+    expect(result.warnings).toContain('ocr_failed_image');
+    expect(existsSync(result.media!.path)).toBe(true);
+    expect(readdirSync(cacheDir).filter((name) => name.endsWith('.jpg'))).toHaveLength(1);
   });
 
   test('pictures are queued once more under an image-scoped version; other files keep theirs', () => {
@@ -290,8 +296,9 @@ describe('image preparation in the shared text lane', () => {
     const extractor = createTextExtractor();
     expect(await extractor.extract(extractorInput(picture(8)))).toEqual({ status: 'metadata_only' });
     const registry = createDefaultExtractorRegistry({
-      media: { cacheDir: join(temporaryDir(), 'media-cache'), platform: 'linux' },
-      ocr: { platform: 'linux' },
+      media: { cacheDir: join(temporaryDir(), 'media-cache'), readiness: stillImageReadinessOf(false) },
+      // Isolate preparation from whatever OCR tools the host has.
+      ocr: { platform: 'linux', engine: 'tesseract' },
     });
     const text = registry.get('local_text')!;
     expect(await text.extract(extractorInput(picture(8), 'image/jpeg'))).toEqual({ status: 'metadata_only' });
