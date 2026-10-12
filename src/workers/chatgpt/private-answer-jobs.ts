@@ -349,6 +349,8 @@ interface Job {
   readonly waiting: PrivateAnswerWaitingRef | undefined;
   /** The single-use acknowledgment capability, minted when the answer is sealed; spent on use. */
   ack?: string | undefined;
+  /** Handing the sealed answer to the claiming panel counts as its acknowledgment (begin's `seenOnDelivery`). */
+  readonly seenOnDelivery: boolean;
   /** The analysis this job's own claim started (not one that existed before it): its answer is not "precomputed". */
   claimStarted?: Analysis | undefined;
 }
@@ -534,6 +536,14 @@ export class PrivateAnswerJobs {
     detail?: PrivateAnswerDetail;
     /** The waiting record a rendered answer acknowledges. */
     waiting?: PrivateAnswerWaitingRef;
+    /**
+     * For a panel that cannot acknowledge (the plugin directory serves the
+     * private answer panel as submitted, from before acknowledgments): the
+     * first hand-out of the sealed answer to the claiming key acknowledges
+     * the waiting record instead, so an answer shown there does not also
+     * wait on the computer. A panel that never collects still leaves it.
+     */
+    seenOnDelivery?: boolean;
   }): PrivateMatchSummary & { jobId?: string } {
     const count = Math.max(0, Math.min(PRIVATE_MATCH_COUNT_CAP, Math.floor(input.count)));
     const status = this.options.model().status();
@@ -572,6 +582,7 @@ export class PrivateAnswerJobs {
       openTokens: this.openRate.capacity,
       openRefilledAt: at,
       waiting: input.waiting,
+      seenOnDelivery: input.seenOnDelivery === true,
     };
     this.jobs.set(id, job);
     if (this.options.precompute === true) this.precompute(job);
@@ -629,6 +640,7 @@ export class PrivateAnswerJobs {
     // answer read that is no longer eligible withdraws it for good.
     if (!(await this.stillReleasable(job))) return this.jobs.get(jobId) === job ? { status: 200, body: { status: 'failed' } } : gone();
     if (this.jobs.get(jobId) !== job || job.outcome !== outcome) return job.outcome?.kind === 'failed' ? { status: 200, body: { status: 'failed' } } : gone();
+    if (job.seenOnDelivery) this.acknowledgeWaiting(job);
     return { status: 200, body: { status: 'ready', v: 1, ...outcome.sealed } };
   }
 
@@ -686,15 +698,20 @@ export class PrivateAnswerJobs {
     const expected = job.ack;
     if (expected === undefined || job.outcome?.kind !== 'sealed' || job.claimKey !== publicKey) return gone();
     if (!timingSafeEqual(Buffer.from(expected), Buffer.from(ack))) return gone();
-    job.ack = undefined;
-    if (job.waiting) {
-      try {
-        this.options.acknowledge?.(job.waiting);
-      } catch {
-        // A store that cannot be written keeps the question waiting: a duplicate is better than a loss.
-      }
-    }
+    this.acknowledgeWaiting(job);
     return { status: 200, body: { status: 'acknowledged' } };
+  }
+
+  /** Spends the job's acknowledgment (once) and deletes its waiting record if its generation still matches. */
+  private acknowledgeWaiting(job: Job): void {
+    if (job.ack === undefined) return;
+    job.ack = undefined;
+    if (!job.waiting) return;
+    try {
+      this.options.acknowledge?.(job.waiting);
+    } catch {
+      // A store that cannot be written keeps the question waiting: a duplicate is better than a loss.
+    }
   }
 
   /**
