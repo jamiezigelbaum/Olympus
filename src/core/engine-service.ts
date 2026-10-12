@@ -2,6 +2,7 @@ import { withEngineMaintenanceFence, withEngineMaintenanceFenceSync, type Engine
 import { installLinuxEngine, inspectSystemdEngine, linuxEngineCustody, linuxLayoutFor, linuxInstalledBuild, startLinuxEngine, stopLinuxEngine, restartLinuxEngine, uninstallLinuxEngine, rollbackLinuxEngine, systemdPidInCgroup } from './linux-engine-service.ts';
 import { processInstanceIdentity } from './file-lease.ts';
 import { resolveLinuxEngineLayout, preflightLinuxEngineLayout, type LinuxEngineLayout } from './linux-engine-layout.ts';
+import { workerFetch } from './worker-transport.ts';
 /**
  * The standalone Olympus engine on macOS: one per-user LaunchAgent that runs
  * the engine host (core/engine-host.ts), which supervises the worker, the
@@ -608,7 +609,7 @@ export async function waitForEngineHealthy(
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const timeoutMs = deps.timeoutMs ?? ENGINE_HEALTH_TIMEOUT_MS;
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
-  const fetchImpl = deps.fetchImpl ?? fetch;
+  const fetchImpl = deps.fetchImpl ?? workerFetch;
   const started = now();
   let last: EngineHealthProof = {
     ok: false,

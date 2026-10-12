@@ -1,3 +1,4 @@
+import { linuxGraphicalSessionReadiness } from './linux-desktop-opener.ts';
 /**
  * Remote mode: Olympus runs on a server, and the screens that only work on the
  * computer running Olympus (keys, X sign-in, Telegram and WhatsApp pairing)
@@ -71,6 +72,7 @@ export function resolveServerMode(input: {
   env: Record<string, string | undefined>;
   fileEnv?: Record<string, string | undefined> | undefined;
   platform?: string;
+  desktopReady?: () => boolean;
 }): ServerMode {
   const setting = parseServerModeSetting(input.fileEnv?.[SERVER_MODE_ENV])
     ?? parseServerModeSetting(input.env[SERVER_MODE_ENV])
@@ -83,7 +85,7 @@ export function resolveServerMode(input: {
   if (setting === 'off') return withTarget({ remote: false, setting, basis: 'declared' });
   const platform = input.platform ?? process.platform;
   if (platform === 'darwin' || platform === 'win32') return withTarget({ remote: false, setting, basis: 'desktop_platform' });
-  if (input.env.DISPLAY?.trim() || input.env.WAYLAND_DISPLAY?.trim()) {
+  if (platform === 'linux' ? (input.desktopReady?.() ?? linuxGraphicalSessionReadiness().ready) : (input.env.DISPLAY?.trim() || input.env.WAYLAND_DISPLAY?.trim())) {
     return withTarget({ remote: false, setting, basis: 'desktop_session' });
   }
   return withTarget({ remote: true, setting, basis: 'no_desktop_session' });
@@ -122,12 +124,13 @@ export interface RemoteOpenInstructions {
  * a browser-only user): a tunnel from the computer, then a fresh link from
  * the server, opened in the computer's browser.
  */
-export function remoteOpenInstructions(input: { port: number; sshTarget?: string; target?: OpenTarget }): RemoteOpenInstructions {
+export function remoteOpenInstructions(input: { port: number; sshTarget?: string; target?: OpenTarget; socketPath?: string }): RemoteOpenInstructions {
   const port = isValidPort(input.port) ? input.port : DEFAULT_ENGINE_PORT;
   const sshTarget = isValidSshTarget(input.sshTarget) ? input.sshTarget.trim() : SSH_TARGET_PLACEHOLDER;
   const path = input.target ? openTargetPath(input.target) : 'dashboard';
+  const socket = input.socketPath === undefined ? undefined : sshSocketPath(input.socketPath);
   return {
-    onComputer: `ssh -N -L ${port}:127.0.0.1:${port} ${sshTarget}`,
+    onComputer: socket ? `ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:${socket} ${sshTarget}` : `ssh -N -L ${port}:127.0.0.1:${port} ${sshTarget}`,
     onServer: `olympus dashboard --no-open${path === 'dashboard' ? '' : ` --target ${path}`}`,
   };
 }
@@ -164,16 +167,28 @@ export type RemoteOpenPlatform = 'macos' | 'linux' | 'windows';
  * integer, the SSH target matches isValidSshTarget, and the link matches the
  * minted shape, so nothing reaches a shell that was not built here.
  */
-export function remoteOpenNodeCommands(input: { port: number; sshTarget: string; link: string }): Record<RemoteOpenPlatform, RemoteOpenNodeCommands> {
+export function remoteOpenNodeCommands(input: { port: number; sshTarget: string; link: string; socketPath?: string }): Record<RemoteOpenPlatform, RemoteOpenNodeCommands> {
   if (!isValidPort(input.port)) throw new Error('remote open: invalid port');
   if (!isValidSshTarget(input.sshTarget)) throw new Error('remote open: invalid ssh target');
   if (!isOpeningLinkForCommandLine(input.link)) throw new Error('remote open: invalid link');
   const port = input.port;
   const target = input.sshTarget.trim();
-  const forward = `-o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:127.0.0.1:${port} ${target} sleep ${REMOTE_TUNNEL_SECONDS}`;
+  const destination = input.socketPath === undefined ? `127.0.0.1:${port}` : sshSocketPath(input.socketPath);
+  const forward = `-o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:${destination} ${target} sleep ${REMOTE_TUNNEL_SECONDS}`;
   return {
     macos: { tunnel: `ssh -f ${forward}`, open: `open '${input.link}'`, tunnelInBackground: false },
     linux: { tunnel: `ssh -f ${forward}`, open: `xdg-open '${input.link}'`, tunnelInBackground: false },
     windows: { tunnel: `ssh ${forward}`, open: `cmd /c start "" "${input.link}"`, tunnelInBackground: true },
   };
+}
+
+/** Safe as one SSH forwarding token. Colons and
+ * shell syntax are refused; they cannot be represented across all client shells. */
+function sshSocketPath(path: string): string {
+  if (!isSshWorkerSocketPath(path)) throw new Error('Remote open requires a shell-safe absolute worker socket path.');
+  return path;
+}
+
+export function isSshWorkerSocketPath(path: unknown): path is string {
+  return typeof path === 'string' && /^\/[A-Za-z0-9_./-]+\/olympus\/worker\.sock$/.test(path) && !path.split('/').some(p => p === '..' || p === '.');
 }

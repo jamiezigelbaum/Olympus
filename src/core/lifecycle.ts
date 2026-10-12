@@ -1,3 +1,4 @@
+import { validateWorkerSocket } from './worker-transport.ts';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
@@ -915,10 +916,14 @@ function validateWorkerReadinessPort(value: number): number {
 function defaultWorkerReadinessProbe(url: string, bunBin: string | undefined): boolean {
   const executable = bunBin ?? (typeof Bun !== 'undefined' ? Bun.which('bun') : null) ?? process.execPath;
   if (!executable || !isAbsolute(executable)) return false;
+  let socket: string | undefined;
+  try { socket = validateWorkerSocket(); } catch { return false; }
   const script = [
     "const url = process.argv.at(-1);",
     "try {",
-    "  const response = await fetch(url, { signal: AbortSignal.timeout(3000) });",
+    socket
+      ? `  const response = await fetch(url, { unix: ${JSON.stringify(socket)}, redirect: 'error', signal: AbortSignal.timeout(3000) });`
+      : "  const response = await fetch(url, { signal: AbortSignal.timeout(3000) });",
     "  const value = response.ok ? await response.json() : undefined;",
     "  if (!response.ok || !value || value.reachable !== true) process.exit(1);",
     "} catch { process.exit(1); }",

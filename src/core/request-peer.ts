@@ -7,6 +7,10 @@
  * server never recorded has no peer, which such a route treats as remote.
  */
 
+const ownerSockets = new WeakSet<Request>();
+
+export function requestFromOwnerSocket(request: Request): boolean { return ownerSockets.has(request); }
+
 const peers = new WeakMap<Request, string>();
 
 export function recordRequestPeer(request: Request, address: string | undefined): void {
@@ -33,8 +37,10 @@ interface PeerServer {
 /** A Bun.serve `fetch` that records each request's peer before handing it on. */
 export function withRequestPeer(
   handler: (request: Request) => Response | Promise<Response>,
+  ownerSocket = false,
 ): (request: Request, server: PeerServer) => Response | Promise<Response> {
   return (request, server) => {
+    if (ownerSocket) ownerSockets.add(request);
     try {
       recordRequestPeer(request, server?.requestIP(request)?.address);
     } catch {

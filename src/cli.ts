@@ -1,3 +1,4 @@
+import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import type { WorkerLaunch } from './core/model-key-reload.ts';
 import { randomBytes } from 'node:crypto';
@@ -33,7 +34,7 @@ import type { Operation, OperationContext } from './core/operations.ts';
 import { VERSION } from './version.ts';
 import type { WorkerServicePlatform, WorkerServiceState } from './core/worker-service.ts';
 import { writeManagedWorkerEnvSecret } from './core/worker-service.ts';
-import { isValidSshTarget, parseServerModeSetting, resolveServerMode } from './core/remote-open.ts';
+import { isValidSshTarget, parseServerModeSetting, resolveServerMode, remoteOpenInstructions } from './core/remote-open.ts';
 import {
   runWorkerLifecycle,
   type LifecycleRecoverySignal,
@@ -1017,7 +1018,7 @@ export function parseTerminalContentRequalifyArgs(args: string[]): TerminalConte
 async function runTerminalContentRequalify(options: TerminalContentRequalifyCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
+  const response = await workerFetch(`${config.email.baseUrl}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1096,7 +1097,7 @@ export function parseQueuedContentRetargetArgs(args: string[]): QueuedContentRet
 async function runQueuedContentRetarget(options: QueuedContentRetargetCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
+  const response = await workerFetch(`${config.email.baseUrl}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1171,7 +1172,7 @@ export function parseEvalShardExportArgs(args: string[]): EvalShardExportCliOpti
 async function runEvalShardExport(options: EvalShardExportCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
+  const response = await workerFetch(`${config.email.baseUrl}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1247,7 +1248,7 @@ export function parseOwnerTierOverrideArgs(args: string[]): OwnerTierOverrideCli
 async function runOwnerTierOverride(options: OwnerTierOverrideCliOptions): Promise<unknown> {
   const config = loadConfig();
   const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
+  const response = await workerFetch(`${config.email.baseUrl}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
@@ -1961,7 +1962,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(url, init);
+  const response = await workerFetch(url, init);
   if (!response.ok) {
     throw new Error(`${url} returned HTTP ${response.status}`);
   }
@@ -2848,6 +2849,8 @@ export function runDashboardTokenCommand(env: Record<string, string | undefined>
 }
 
 export interface DashboardCommandDependencies {
+  /** Platform seam for preserving native Mac opening regression fixtures. */
+  platform?: string;
   /** The bearer-mint round trip. Injected by tests; production uses fetch. */
   fetchImpl?: DashboardFetch;
   /** The desktop opener. Injected by tests; production uses open/xdg-open. */
@@ -2884,8 +2887,10 @@ export async function runDashboardCommand(
   const base = workerRootBaseUrl(config.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config);
   const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
+  const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
+  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;
   let opened = false;
-  if (!dependencies.noOpen) {
+  if (!socketPath && !dependencies.noOpen) {
     try {
       opened = dependencies.openImpl
         ? dependencies.openImpl(openUrl)
@@ -2897,7 +2902,7 @@ export async function runDashboardCommand(
   return {
     url: openUrl,
     opened,
-    hint: dependencies.noOpen
+    hint: handoff ? `On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen
       ? 'This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser.'
       : 'This link carries a single-use 15-minute ticket, not the worker token;'
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
@@ -2955,8 +2960,10 @@ function runDashboardReadOnlyCommand(
       `Run ${olympusCommandHint()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
     );
   }
+  const socketPath = workerSocketPath();
+  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;
   let opened = false;
-  if (!dependencies.noOpen) {
+  if (!socketPath && !dependencies.noOpen) {
     try {
       opened = dependencies.openImpl
         ? dependencies.openImpl(openUrl)
@@ -2968,7 +2975,7 @@ function runDashboardReadOnlyCommand(
   return {
     url: openUrl,
     opened,
-    hint: dependencies.noOpen
+    hint: handoff ? `On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen
       ? 'This read-only view link was not opened locally, so it is ready to hand to the intended browser.'
       : 'This URL carries the read-only view token, not the worker token, so it cannot change anything;'
         + ` open ${olympusCommandHint()} dashboard (without --read-only) for a link that can.`,

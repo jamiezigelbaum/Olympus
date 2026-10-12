@@ -1,4 +1,5 @@
 import { linuxInstalledBuild } from './linux-engine-service.ts';
+import { workerFetch } from './worker-transport.ts';
 /**
  * `olympus engine install|uninstall|status|start|stop|restart|rollback|logs`: the standalone
  * macOS engine's command surface. Mechanics live in engine-service.ts; this
@@ -184,7 +185,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const relayStatus = readRemoteAccessStatus(relayDir);
   const relayRunning = relayProcessRunning(relayDir);
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
-  const worker = await probeWorker(deps.fetchImpl ?? fetch, baseUrl, paths.linux?.workerSocketPath);
+  const worker = await probeWorker(deps.fetchImpl ?? workerFetch, baseUrl, paths.linux?.workerSocketPath);
   const linuxHealth = paths.linux ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ ...deps, homeDir }) }, { ...deps.health, timeoutMs: 0, fetchImpl: deps.fetchImpl, exec: deps.exec }) : undefined;
   const missing: string[] = [];
   if (linuxHealth && !linuxHealth.ok) missing.push(linuxHealth.reason ?? 'Linux engine health is unknown.');

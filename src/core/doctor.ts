@@ -1,6 +1,7 @@
 import { readEngineLinger, linuxInstalledBuild } from './linux-engine-service.ts';
 import { engineServicePaths, waitForEngineHealthy } from './engine-service.ts';
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { workerFetch } from './worker-transport.ts';
 // Olympus doctor: a read-only health walk across the chain the calling assistant depends on
 // (Argus local model lanes, the private email source worker, and the source
 // index), reported in plain language so an operator can see what is broken
@@ -869,7 +870,7 @@ async function workerCredentialReadiness(
   deps: DoctorDeps,
 ): Promise<WorkerCredentialReadiness[] | undefined> {
   try {
-    const response = await (deps.fetchImpl ?? fetch)(
+    const response = await (deps.fetchImpl ?? workerFetch)(
       `${deps.config.email.baseUrl}/health/dependencies`,
       workerRequestInit(deps),
     );
@@ -936,7 +937,7 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
 
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/health`, workerRequestInit(deps));
+    response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/health`, workerRequestInit(deps));
   } catch (error) {
     return {
       name,
@@ -994,7 +995,7 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
 
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
+    response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
   } catch (error) {
     return {
       name,
@@ -1190,7 +1191,7 @@ async function workerCredentialLanesCheck(deps: DoctorDeps): Promise<DoctorCheck
 
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
+    response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
   } catch (error) {
     return {
       name,
@@ -1238,7 +1239,7 @@ async function dropboxContentExtractionThroughputCheck(deps: DoctorDeps): Promis
 
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(
+    response = await (deps.fetchImpl ?? workerFetch)(
       `${baseUrl}/source/index/status?include_ingestion_ledger=true&include_readiness_ledger=true&include_items=false`,
       workerRequestInit(deps),
     );
@@ -1389,7 +1390,7 @@ async function sourceSchedulerStatusCheck(deps: DoctorDeps): Promise<DoctorCheck
   }
   let response: Response;
   try {
-    response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
+    response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
   } catch (error) {
     return {
       name,
@@ -1596,7 +1597,7 @@ async function sourceIngestionHealthCheck(deps: DoctorDeps): Promise<DoctorCheck
 
 async function fetchSourceIndexStatusForIngestion(deps: DoctorDeps, baseUrl: string): Promise<Record<string, unknown> | undefined> {
   try {
-    const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
+    const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok) return undefined;
     return asRecord(await response.json());
   } catch {
@@ -1606,7 +1607,7 @@ async function fetchSourceIndexStatusForIngestion(deps: DoctorDeps, baseUrl: str
 
 async function fetchSchedulerStatusForIngestion(deps: DoctorDeps, baseUrl: string): Promise<SourceSchedulerStatus | undefined> {
   try {
-    const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
+    const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok) return undefined;
     const status = asRecord(await response.json());
     if (status.kind !== 'source_scheduler_status') return undefined;
@@ -1691,7 +1692,7 @@ function ingestionHealthHint(ledger: SourceIngestionLedgerSnapshot): string | un
 
 async function sourceIndexCorpusIdsForDoctor(deps: DoctorDeps, baseUrl: string): Promise<Set<string>> {
   try {
-    const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
+    const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok) return new Set();
     const status = asRecord(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);

@@ -1,4 +1,5 @@
 import { withEngineWorkerAdmission, EngineMaintenanceInProgressError } from '../../core/engine-maintenance.ts';
+import { prepareWorkerSocket, bindWorkerSocket, workerSocketPath } from '../../core/worker-transport.ts';
 import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
@@ -3447,14 +3448,17 @@ export async function main(): Promise<void> {
           : provider === 'google_drive' && googleFilePage(locator) ? { url: locator } : undefined),
         ...(process.platform === 'darwin'
           ? {
-              openFile: (path: string) => new Promise<void>((resolve, reject) => {
-                const args = unreadableOpenArguments(path, unreadableDropboxRoots());
-                if (!args) {
-                  reject(new Error('open refused'));
-                  return;
-                }
-                execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
-              }),
+              openFile: async (path: string, eligible: () => Promise<boolean>) => {
+                if (!(await eligible())) throw new Error('open refused');
+                return new Promise<void>((resolve, reject) => {
+                  const args = unreadableOpenArguments(path, unreadableDropboxRoots());
+                  if (!args) {
+                    reject(new Error('open refused'));
+                    return;
+                  }
+                  execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+                });
+              },
             }
           : {}),
       })
@@ -4651,14 +4655,17 @@ export async function main(): Promise<void> {
   // again now: no symlink, still inside a Dropbox folder, and only a
   // document type opens; anything else is revealed in Finder.
   const openCitedFile = process.platform === 'darwin'
-    ? (path: string) => new Promise<void>((resolve, reject) => {
-        const args = localOpenArguments(path, localDropboxRoots());
-        if (!args) {
-          reject(new Error('open refused'));
-          return;
-        }
-        execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
-      })
+    ? async (path: string, eligible: () => Promise<boolean>) => {
+        if (!(await eligible())) throw new Error('open refused');
+        return new Promise<void>((resolve, reject) => {
+          const args = localOpenArguments(path, localDropboxRoots());
+          if (!args) {
+            reject(new Error('open refused'));
+            return;
+          }
+          execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+        });
+      }
     : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: workerBuiltInModel?.model,
@@ -5169,7 +5176,7 @@ export async function main(): Promise<void> {
       const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv() });
       const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw';
       return mode.remote
-        ? { port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw && mode.agentRoute }
+        ? { port, ...(process.platform === 'linux' ? { socketPath: workerSocketPath()! } : {}), ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw && mode.agentRoute }
         : undefined;
     },
     privacy: () => {
@@ -5191,10 +5198,8 @@ export async function main(): Promise<void> {
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
   });
 
-  const server = Bun.serve({
-    hostname,
-    port,
-    idleTimeout: 0,
+  const socketPath = prepareWorkerSocket();
+  const serverOptions = {
     // Remote agent routes authenticate connection credentials only (bearer
     // connection tokens, or OAuth access tokens bound to this resource); the
     // OAuth metadata and `/connect/*` routes serve the approval flow; every
@@ -5219,6 +5224,7 @@ export async function main(): Promise<void> {
     }), withRemoteOAuthRoutes(
       createRemoteOAuthHandler({
         publicUrls: remotePublicUrls,
+        requireOwnerSocket: !!socketPath,
         // Any marker, verified or not, refuses approval (fails closed).
         isRelayed: carriesRelayMarker,
         // Demo installs only: inert without remote.demoConsent AND the demo marker.
@@ -5250,10 +5256,17 @@ export async function main(): Promise<void> {
             ...chatgptSurface,
           },
         })),
-        withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),
+        withWorkerBearerAuth(worker.fetch, { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
       )),
-    ))))),
-  });
+    ))), !!socketPath),
+  };
+  const startServer = () => socketPath
+    ? Bun.serve({ unix: socketPath, fetch(request, server) {
+        server.timeout(request, 0);
+        return serverOptions.fetch(request, server);
+      } })
+    : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
+  const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   sourceScheduler?.start();
   await reconcileCaptures();
   const captureTick = setInterval(() => { void reconcileCaptures(); }, 10_000);
@@ -5339,7 +5352,7 @@ export async function main(): Promise<void> {
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 
-  console.log(`Olympus private email source worker listening on http://${hostname}:${port}/v1`);
+  console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog('WhatsApp connector-store storage', whatsappConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog('Telegram connector-store storage', telegramConnectorStoreLane));
