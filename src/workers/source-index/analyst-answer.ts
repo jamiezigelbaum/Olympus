@@ -53,6 +53,7 @@ import {
   type ReleaseDecision,
   type StructuredEvidenceFact,
 } from '../../core/opsec.ts';
+import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
 import type {
@@ -2082,9 +2083,7 @@ function classificationCoverageNotes(detail: EvidencePackBuildDetail): string[] 
 function secretLocationCoverageNotes(detail: EvidencePackBuildDetail): string[] {
   const count = detail.secretLocations?.length ?? 0;
   if (count === 0) return [];
-  return [
-    `${count} Secret(s) matched by location only; their contents are never read into an answer.`,
-  ];
+  return [secretLocationCoverageNote(count)];
 }
 
 function composeReleasedAnswer(answer: string, unanswered: readonly string[]): string {

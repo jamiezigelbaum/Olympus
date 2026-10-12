@@ -10690,6 +10690,48 @@ class TierLedger {
     })();
     return result;
   }
+  itemsAcrossAccounts(items) {
+    const result = new Map;
+    if (items.length === 0)
+      return result;
+    this.db.transaction(() => {
+      const scopesByProvider = new Map;
+      for (const item of items) {
+        const key = tierLedgerItemKeyAcrossAccounts(item);
+        if (result.has(key))
+          continue;
+        let scopes = scopesByProvider.get(item.provider);
+        if (!scopes) {
+          scopes = this.db.query(`
+            WITH RECURSIVE scopes(account_scope) AS (
+              SELECT MIN(account_scope) FROM tier_items WHERE provider = ?
+              UNION ALL
+              SELECT (SELECT MIN(account_scope) FROM tier_items WHERE provider = ? AND account_scope > scopes.account_scope)
+              FROM scopes WHERE scopes.account_scope IS NOT NULL
+            )
+            SELECT account_scope FROM scopes WHERE account_scope IS NOT NULL
+          `).all(item.provider, item.provider).map((row) => row.account_scope);
+          scopesByProvider.set(item.provider, scopes);
+        }
+        const found = [];
+        for (const accountScope of scopes) {
+          const identity = { ...item, accountScope };
+          const record = this.readRow(identity);
+          if (!record)
+            continue;
+          const copies = this.db.query(`
+            SELECT * FROM tier_copies
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+            ORDER BY corpus_id
+          `).all(...idParams(identity)).map(copyFromRow);
+          found.push({ record, copies });
+        }
+        if (found.length > 0)
+          result.set(key, found);
+      }
+    })();
+    return result;
+  }
   listRoutedOverrides() {
     const rows = this.db.query(`
       SELECT i.*, o.override_json AS override_json FROM tier_items i
@@ -11347,6 +11389,9 @@ function openRejudgeQuestionOf(row) {
 }
 function tierLedgerIdentityKey(identity) {
   return `${identity.provider}\x00${identity.accountScope}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
+}
+function tierLedgerItemKeyAcrossAccounts(identity) {
+  return `${identity.provider}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
 }
 function trustDomainRank(domain) {
   return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
@@ -24165,6 +24210,9 @@ var init_evidence_pack = __esm(() => {
   utf8 = new TextEncoder;
 });
 
+// src/core/secret-location-note.ts
+var init_secret_location_note = () => {};
+
 // src/workers/source-index/analyst-pool.ts
 class SecureAnalystPoolState {
   failureThreshold;
@@ -24264,6 +24312,7 @@ var init_analyst_answer = __esm(() => {
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
+  init_secret_location_note();
   init_source_corpus_registry();
   init_source_model_policy();
   init_sovereignty();

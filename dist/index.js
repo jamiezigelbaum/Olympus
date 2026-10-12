@@ -10897,6 +10897,9 @@ var init_evidence_pack = __esm(() => {
   utf8 = new TextEncoder;
 });
 
+// src/core/secret-location-note.ts
+var init_secret_location_note = () => {};
+
 // src/workers/source-index/analyst-pool.ts
 class SecureAnalystPoolState {
   failureThreshold;
@@ -10996,6 +10999,7 @@ var init_analyst_answer = __esm(() => {
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
+  init_secret_location_note();
   init_source_corpus_registry();
   init_source_model_policy();
   init_sovereignty();

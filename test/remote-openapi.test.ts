@@ -403,8 +403,11 @@ describe('REST call path', () => {
     const response = await call('source_answer', `Bearer ${token}`, { question: 'q' });
     expect(response.status).toBeGreaterThanOrEqual(500);
     const text = await response.text();
-    const body = JSON.parse(text) as { error: string; message: string };
-    expect(Object.keys(body).sort()).toEqual(['error', 'message']);
+    const body = JSON.parse(text) as { error: string; message: string; ref: string };
+    // A fixed sentence, plus the reference the computer's log carries it under.
+    expect(Object.keys(body).sort()).toEqual(['error', 'message', 'ref']);
+    expect(body).toMatchObject({ error: 'email_error', message: 'Olympus could not complete this request.' });
+    expect(body.ref).toMatch(/^[0-9a-f]{16}$/);
     for (const leak of ['/Users/secret', 'sk-live-123', 'olympus-worker.internal', WORKER_TOKEN, token, 'stack']) {
       expect({ leak, found: text.includes(leak) }).toEqual({ leak, found: false });
     }

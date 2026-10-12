@@ -24,6 +24,7 @@
 import { createHash } from 'node:crypto';
 import { defaultConfig, type OlympusConfig } from '../core/config.ts';
 import { OperationError, type OperationErrorCode } from '../core/operation-error.ts';
+import { REMOTE_ERROR_SCHEMA, remoteErrorOutput, remoteOperationOutput, remoteOutputSchema } from '../core/remote-result.ts';
 import { exposedOperations, shouldExposeOperation } from '../core/operation-exposure.ts';
 import {
   findOperationByName,
@@ -43,7 +44,9 @@ export const REMOTE_OPENAPI_MAX_BODY_BYTES = REMOTE_REQUEST_MAX_BODY_BYTES;
  * parameter, or a response shape changes. A fixed value keeps the
  * unauthenticated spec from naming the installed build.
  */
-export const REMOTE_OPENAPI_API_VERSION = '1.1.0';
+// 2.0.0 (2026-10-12): every 200 is an allowlisted per-operation output
+// (core/remote-result.ts) and every error a fixed sentence per code.
+export const REMOTE_OPENAPI_API_VERSION = '2.0.0';
 
 const TOOL_PATH_PATTERN = /^\/api\/v1\/tools\/([a-z][a-z0-9_]{0,63})$/;
 
@@ -151,7 +154,7 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
 
   try {
     const result = await operation.handler(ctx, params.value);
-    return jsonResponse(200, result ?? null);
+    return jsonResponse(200, remoteOperationOutput(operation.name, result, ctx.citedItemCheck ? { citedItemCheck: ctx.citedItemCheck } : {}));
   } catch (error) {
     return operationErrorResponse(error);
   }
@@ -187,11 +190,11 @@ function invalidRequest(message: string): Response {
   return jsonResponse(400, { error: 'invalid_request', message });
 }
 
-// Codes whose message describes the caller's own request or a policy refusal,
-// written for the calling agent. Every other failure is Olympus's own plumbing:
-// its message and suggestion can name internal URLs or carry a worker response
-// body, so the agent gets a fixed sentence instead.
-const CALLER_FACING_ERRORS: Partial<Record<OperationErrorCode, number>> = {
+// The HTTP status for each operation error code. The body is the remote
+// surface's fixed sentence for the code (core/remote-result.ts), never the
+// internal message or suggestion: those can name internal URLs or carry a
+// worker response body.
+const ERROR_STATUS: Partial<Record<OperationErrorCode, number>> = {
   invalid_params: 400,
   invalid_request: 400,
   unsupported_filter: 400,
@@ -204,27 +207,9 @@ const CALLER_FACING_ERRORS: Partial<Record<OperationErrorCode, number>> = {
   source_answer_too_large: 502,
 };
 
-const INTERNAL_ERROR_MESSAGES: Partial<Record<OperationErrorCode, string>> = {
-  email_unreachable: 'Olympus could not reach its source worker in time. Retry later.',
-  argus_unreachable: 'Olympus could not reach its private analyst. Retry later.',
-};
-
 function operationErrorResponse(error: unknown): Response {
-  if (error instanceof OperationError) {
-    const status = CALLER_FACING_ERRORS[error.code];
-    if (status !== undefined) {
-      return jsonResponse(status, {
-        error: error.code,
-        message: error.message,
-        ...(error.suggestion ? { suggestion: error.suggestion } : {}),
-      });
-    }
-    return jsonResponse(502, {
-      error: error.code,
-      message: INTERNAL_ERROR_MESSAGES[error.code] ?? 'Olympus could not complete this request.',
-    });
-  }
-  return jsonResponse(500, { error: 'internal_error', message: 'Olympus could not complete this request.' });
+  const status = error instanceof OperationError ? ERROR_STATUS[error.code] ?? 502 : 500;
+  return jsonResponse(status, remoteErrorOutput(error));
 }
 
 /** A live value that is not a plain https origin (a loopback dev URL) falls back to relative. */
@@ -282,15 +267,7 @@ export function buildRemoteOpenApiSpec(options: { serverUrl?: string } = {}): Re
         },
       },
       schemas: {
-        Error: {
-          type: 'object',
-          required: ['error'],
-          properties: {
-            error: { type: 'string', description: 'A stable error code.' },
-            message: { type: 'string' },
-            suggestion: { type: 'string' },
-          },
-        },
+        Error: REMOTE_ERROR_SCHEMA,
       },
       responses: {
         Error: {
@@ -317,8 +294,8 @@ function openApiOperation(operation: Operation, config: OlympusConfig): Record<s
     },
     responses: {
       200: {
-        description: 'The operation result.',
-        content: { 'application/json': { schema: { type: 'object' } } },
+        description: 'The operation result: one of its output families, told apart by kind and status.',
+        content: { 'application/json': { schema: remoteOutputSchema(operation.name) ?? { type: 'object' } } },
       },
       400: errorRef,
       401: errorRef,

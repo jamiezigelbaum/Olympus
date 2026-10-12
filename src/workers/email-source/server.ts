@@ -238,7 +238,7 @@ import {
   createXBookmarksTierLane,
   defaultXBookmarksSecureConnectorStoreDbPath,
 } from '../x-bookmarks/tier-set.ts';
-import { createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
+import { createCitedItemTierCheck, createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
@@ -2228,6 +2228,12 @@ export async function main(): Promise<void> {
     }
   });
   const tierVisibilityGate = createTierVisibilityGate(() => tierLanes.map((lane) => ({
+    ledger: lane.ledger,
+    corpusIds: lane.corpusIds,
+  })));
+  // The same ledgers, read when a remote agent collects an answer: a cited
+  // item reclassified since the answer was written is caught there.
+  const remoteCitedItemCheck = createCitedItemTierCheck(() => tierLanes.map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds,
   })));
@@ -4855,13 +4861,18 @@ export async function main(): Promise<void> {
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
-    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => createInProcessOperationContext({
-      config: olympusConfig,
-      sourceIndexReadEnabled,
-      workerFetch: worker.fetch,
-      caller,
-      signal,
-      sourceAnswerJobs,
+    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
+      ...createInProcessOperationContext({
+        config: olympusConfig,
+        sourceIndexReadEnabled,
+        workerFetch: worker.fetch,
+        caller,
+        signal,
+        sourceAnswerJobs,
+      }),
+      // The remote output boundary rechecks a collected answer's cited items
+      // against the tier ledgers as they are now (core/remote-result.ts).
+      citedItemCheck: remoteCitedItemCheck,
     }),
   };
   // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as

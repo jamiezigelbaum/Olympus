@@ -1705,6 +1705,57 @@ export class TierLedger {
   }
 
   /**
+   * Every account's row (and its copies) for each item, for a caller that
+   * knows an item but not its account scope: a released citation carries the
+   * provider, conversation and item ids only. Read in ONE transaction, so all
+   * items are judged against one snapshot. The provider's account scopes come
+   * from a loose index scan of the primary key (one probe per account, not a
+   * table scan); each (account, item) is then an exact key lookup. Items with
+   * no row in any account are absent from the map. Keyed by
+   * `tierLedgerItemKeyAcrossAccounts`.
+   */
+  itemsAcrossAccounts(
+    items: readonly Omit<TierLedgerIdentity, 'accountScope'>[],
+  ): Map<string, Array<{ record: TierLedgerRecord; copies: TierCopy[] }>> {
+    const result = new Map<string, Array<{ record: TierLedgerRecord; copies: TierCopy[] }>>();
+    if (items.length === 0) return result;
+    this.db.transaction(() => {
+      const scopesByProvider = new Map<string, string[]>();
+      for (const item of items) {
+        const key = tierLedgerItemKeyAcrossAccounts(item);
+        if (result.has(key)) continue;
+        let scopes = scopesByProvider.get(item.provider);
+        if (!scopes) {
+          scopes = (this.db.query(`
+            WITH RECURSIVE scopes(account_scope) AS (
+              SELECT MIN(account_scope) FROM tier_items WHERE provider = ?
+              UNION ALL
+              SELECT (SELECT MIN(account_scope) FROM tier_items WHERE provider = ? AND account_scope > scopes.account_scope)
+              FROM scopes WHERE scopes.account_scope IS NOT NULL
+            )
+            SELECT account_scope FROM scopes WHERE account_scope IS NOT NULL
+          `).all(item.provider, item.provider) as Array<{ account_scope: string }>).map((row) => row.account_scope);
+          scopesByProvider.set(item.provider, scopes);
+        }
+        const found: Array<{ record: TierLedgerRecord; copies: TierCopy[] }> = [];
+        for (const accountScope of scopes) {
+          const identity: TierLedgerIdentity = { ...item, accountScope };
+          const record = this.readRow(identity);
+          if (!record) continue;
+          const copies = (this.db.query(`
+            SELECT * FROM tier_copies
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+            ORDER BY corpus_id
+          `).all(...idParams(identity)) as TierCopyRow[]).map(copyFromRow);
+          found.push({ record, copies });
+        }
+        if (found.length > 0) result.set(key, found);
+      }
+    })();
+    return result;
+  }
+
+  /**
    * Routed items that carry a per-item owner override, with it, in key order.
    * Overrides are set by hand, one item at a time, so the list is small; the
    * override pass (tier-override-settle.ts) reads it whole.
@@ -2842,6 +2893,11 @@ function openRejudgeQuestionOf(row: TierItemRow & { rejudge_json?: string | null
 /** Stable map key for an item identity in ledger lookups. */
 export function tierLedgerIdentityKey(identity: TierLedgerIdentity): string {
   return `${identity.provider}\u0000${identity.accountScope}\u0000${tierLedgerConversationKey(identity)}\u0000${identity.providerItemId}`;
+}
+
+/** An item's key in every account at once (`TierLedger.itemsAcrossAccounts`). */
+export function tierLedgerItemKeyAcrossAccounts(identity: Omit<TierLedgerIdentity, 'accountScope'>): string {
+  return `${identity.provider}\u0000${tierLedgerConversationKey(identity)}\u0000${identity.providerItemId}`;
 }
 
 const TRUST_DOMAIN_RANK: Readonly<Record<SourceTrustDomain, number>> = {

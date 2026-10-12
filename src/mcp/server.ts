@@ -10,6 +10,8 @@ import { createEmailTransport, EmailClient } from '../core/email.ts';
 import { callerProviderFromLabel, sanitizeCallerDisplayName, type OperationCaller } from '../core/operation-caller.ts';
 import { shouldExposeOperation, type OperationSurface } from '../core/operation-exposure.ts';
 import { findOperationByName, operations, OperationError } from '../core/operations.ts';
+import { isV04PublicOperation } from '../core/public-surface.ts';
+import { remoteErrorOutput, remoteOperationOutput, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
 import { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv, sourceAnswerJobOwner } from '../core/source-answer-jobs.ts';
 import type { OperationContext } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
@@ -28,7 +30,8 @@ export async function handleMcpCallTool(
   request: McpCallToolRequest,
   makeOperationContext: () => OperationContext = makeContext,
   surface: McpSurface = 'mcp',
-): Promise<{ content: Array<{ type: 'text'; text: string }> }> {
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  if (surface === 'remote') return handleRemoteCallTool(request, makeOperationContext);
   const operation = findOperationByName(request.params.name);
   if (!operation) {
     throw new OperationError('invalid_params', `Unknown Olympus operation: ${request.params.name}`);
@@ -50,6 +53,35 @@ export async function handleMcpCallTool(
       },
     ],
   };
+}
+
+/**
+ * The remote surface (`/mcp` for every non-ChatGPT connection): each
+ * operation's allowlisted output (core/remote-result.ts) rather than the
+ * serialized operation result, and every failure a tool error with a fixed
+ * sentence per code rather than the internal message.
+ */
+async function handleRemoteCallTool(
+  request: McpCallToolRequest,
+  makeOperationContext: () => OperationContext,
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  const text = (value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }];
+  const operation = findOperationByName(request.params.name);
+  if (!operation || !isV04PublicOperation('remote', operation.name)) {
+    return { content: text(remoteSurfaceErrorOutput('unknown_operation')), isError: true };
+  }
+  const ctx = makeOperationContext();
+  if (!shouldExposeOperation(operation, { config: ctx.config, surface: 'remote' })) {
+    return { content: text(remoteSurfaceErrorOutput('operation_unavailable')), isError: true };
+  }
+  try {
+    const result = await operation.handler(ctx, request.params.arguments ?? {});
+    return {
+      content: text(remoteOperationOutput(operation.name, result, ctx.citedItemCheck ? { citedItemCheck: ctx.citedItemCheck } : {})),
+    };
+  } catch (error) {
+    return { content: text(remoteErrorOutput(error)), isError: true };
+  }
 }
 
 /**
