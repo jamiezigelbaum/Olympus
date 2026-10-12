@@ -34,7 +34,9 @@ describe('which page a /dashboard address names', () => {
     expect(dashboardHtmlRoutePage(dashboardUrl('?token=dash_abc'))).toBe('host');
     expect(dashboardHtmlRoutePage(dashboardUrl('?keys'))).toBe('keys');
     expect(dashboardHtmlRoutePage(dashboardUrl('?agents'))).toBe('agents');
-    expect(dashboardHtmlRoutePage(dashboardUrl('?outside-help'))).toBe('outside_help');
+    expect(dashboardHtmlRoutePage(dashboardUrl('?private-answers'))).toBe('private_answers');
+    // The old Anonymous answers address moved under Private answers.
+    expect(dashboardHtmlRoutePage(dashboardUrl('?outside-help'))).toBe('outside_help_moved');
     expect(dashboardHtmlRoutePage(dashboardUrl('?connector'))).toBe('connector');
     expect(dashboardHtmlRoutePage(dashboardUrl('?panel-read'))).toBe('panel_read');
   });
@@ -58,7 +60,7 @@ describe('which page a /dashboard address names', () => {
 
   test('local page links carry the reader\'s token', () => {
     expect(dashboardLocalPageHref('keys')).toBe('/dashboard?keys');
-    expect(dashboardLocalPageHref('outsideHelp', 'dash_abc')).toBe('/dashboard?outside-help&token=dash_abc');
+    expect(dashboardLocalPageHref('privateAnswers', 'dash_abc')).toBe('/dashboard?private-answers&token=dash_abc');
   });
 
   test('olympusplugin.ai open links land on the computer: Connect and model fixes on Keys, the dashboard on itself', () => {

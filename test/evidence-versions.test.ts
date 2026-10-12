@@ -236,10 +236,12 @@ describe('the panel reads the newest version in every run', () => {
       });
       let used: readonly number[] = [];
       const result = await panel.answerPrivately('What price is in the offer?', versionedFixtureHits(order), undefined, { evidence: (stats) => { used = stats.used ?? []; } });
-      readSets.add(used.map((index) => order[index]).join(','));
+      readSets.add(used.map((index) => order[index]).sort().join(','));
       answers.add(result.answer);
     }
-    expect([...readSets]).toEqual(['offer-v2,offer-v3']);
+    // What can reach the answer, checked again before it is shown: the two
+    // versions read, and the other versions whose dates the note may name.
+    expect([...readSets]).toEqual(['offer-v1,offer-v2,offer-v3,offer-v3-scan']);
     expect(prompts.size).toBe(1);
     expect([...prompts][0]).toContain('version group: newest of 2 likely versions of one document, dated 2025-12-03');
     // The answer says which version it used, the same way every run.

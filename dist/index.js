@@ -12444,12 +12444,15 @@ var OPEN_UNREADABLE_SOURCES = {
 function allOpenTargets() {
   return [
     { kind: "dashboard" },
+    { kind: "private_answers" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
     ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
   ];
 }
 function openTargetPath(target) {
+  if (target.kind === "private_answers")
+    return "private";
   if (target.kind === "connect")
     return `connect/${target.source}`;
   if (target.kind === "fix")
@@ -12464,6 +12467,8 @@ function openTargetFromPath(path) {
   return allOpenTargets().find((target) => openTargetPath(target) === path);
 }
 function openTargetToken(target) {
+  if (target.kind === "private_answers")
+    return "page.private";
   if (target.kind === "connect")
     return `connect.${target.source}`;
   if (target.kind === "fix")
@@ -12482,6 +12487,9 @@ function isKeysOpenTarget(target) {
 function keysOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function privateAnswersOpenTargetTokenPattern() {
+  return `^${openTargetToken({ kind: "private_answers" }).replace(".", "\\.")}$`;
 }
 function isPanelOpenTarget(target) {
   return target.kind === "unreadable";
@@ -12590,6 +12598,7 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
         var PANEL = /${panelOpenTargetTokenPattern()}/;
+        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -12618,10 +12627,12 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
+            // Private answers lands on that page, carrying nothing.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
             window.location.replace(KEYS.test(open)
               ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PRIVATE.test(open) ? '/dashboard?private-answers' : '/dashboard');
             return;
           }
           status.textContent = response.status === 403
@@ -12865,7 +12876,7 @@ async function openRemote(ctx, params, deps = {}) {
   return {
     ok: true,
     target: openTargetPath(target),
-    lands_on: isKeysOpenTarget(target) ? "/dashboard?keys" : "/dashboard",
+    lands_on: isKeysOpenTarget(target) ? "/dashboard?keys" : target.kind === "private_answers" ? "/dashboard?private-answers" : "/dashboard",
     computer,
     engine_port: port,
     ssh_target: sshTarget,

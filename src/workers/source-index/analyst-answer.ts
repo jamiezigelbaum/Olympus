@@ -1088,7 +1088,7 @@ function createOptionalVeniceAnalyst(
   }
 }
 
-function selectedEvidenceItemsFromRequest(request: SourceIndexAnswerRequest): SelectedEvidenceItem[] {
+export function selectedEvidenceItemsFromRequest(request: SourceIndexAnswerRequest): SelectedEvidenceItem[] {
   return (request.selected_items ?? []).map((item) => {
     const selected: SelectedEvidenceItem = {
       // selected_items carries its own request-supplied corpus id, and the
