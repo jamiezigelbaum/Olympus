@@ -50,6 +50,7 @@ import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mc
 import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts';
 import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
+import { remoteErrorOutput, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
@@ -120,13 +121,21 @@ export function withRemoteMcpRoute(
 export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (request: Request) => Promise<Response> {
   const isRelayed = options.isRelayed ?? isRelayedRequest;
   return async (request: Request): Promise<Response> => {
-    const surface = remoteMcpSurface(request) ?? 'default';
-    const verification = authenticateRemoteRequest(request, options, surface);
-    if (!verification.ok) return verification.response;
-    const response = await serveAuthenticated(request, verification, surface);
-    // Only the relay reads the mark; a direct caller never sees it.
-    if (!isRelayed(request)) return response;
-    return markAuthenticated(response, options.chatgpt?.servesRequest(request, verification.connection) === true ? 'chatgpt' : 'remote');
+    try {
+      const surface = remoteMcpSurface(request) ?? 'default';
+      const verification = authenticateRemoteRequest(request, options, surface);
+      if (!verification.ok) return verification.response;
+      const response = await serveAuthenticated(request, verification, surface);
+      // Only the relay reads the mark; a direct caller never sees it.
+      if (!isRelayed(request)) return response;
+      return markAuthenticated(response, options.chatgpt?.servesRequest(request, verification.connection) === true ? 'chatgpt' : 'remote');
+    } catch (error) {
+      // Anything thrown before or around the MCP transport (building the
+      // operation context, the surface choice, the transport itself) is a
+      // fixed JSON error, never the runtime's default page with the exception
+      // in it, and never carries the relay's authenticated mark.
+      return remoteFailureResponse(error);
+    }
   };
 
   async function serveAuthenticated(
@@ -137,14 +146,14 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     if (request.method !== 'POST') {
       // Stateless server: no standalone SSE stream (GET) and no session to end
       // (DELETE). A 405 is how Streamable HTTP says so.
-      return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
+      return jsonResponse(405, remoteSurfaceErrorOutput('method_not_allowed'), { Allow: 'POST' });
     }
     // Bounded read: the SDK's own `req.json()` would buffer any size of body.
     const body = await readBoundedRequestText(request);
     if (!body.ok) {
       return body.reason === 'too_large'
-        ? jsonResponse(413, { error: 'payload_too_large' })
-        : jsonResponse(400, { error: 'invalid_request' });
+        ? jsonResponse(413, remoteSurfaceErrorOutput('payload_too_large'))
+        : jsonResponse(400, remoteSurfaceErrorOutput('invalid_request'));
     }
     let parsedBody: unknown;
     try {
@@ -158,7 +167,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true }
       : undefined;
     // The directory endpoint serves the ChatGPT surface only.
-    if (surface === 'directory' && !chatgpt) return jsonResponse(404, { error: 'not_found' });
+    if (surface === 'directory' && !chatgpt) return jsonResponse(404, remoteSurfaceErrorOutput('not_found'));
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const server = chatgpt
       ? surface === 'directory'
@@ -224,16 +233,46 @@ export function authenticateRemoteRequest(
   try {
     store = options.connections();
   } catch {
-    return { ok: false, response: jsonResponse(503, { error: 'remote_connections_unavailable' }) };
+    return connectionsUnavailable();
   }
   if (!store) return refuse('invalid_token');
-  if (oauthToken) {
-    // Audience binding: only a token issued for this resource opens it.
-    const verification = store.oauth.verifyAccessToken(token, endpoint!.resource);
-    return verification.ok ? { ok: true, connection: verification.connection } : refuse('invalid_token');
+  let verification: ReturnType<RemoteConnectionStore['verifyToken']> | ReturnType<RemoteConnectionStore['oauth']['verifyAccessToken']>;
+  try {
+    // Audience binding: only an OAuth token issued for this resource opens it.
+    verification = oauthToken ? store.oauth.verifyAccessToken(token, endpoint!.resource) : store.verifyToken(token);
+  } catch {
+    // A store that cannot be read (closed, locked, corrupt) refuses with a
+    // fixed 503; the exception's text never reaches the caller.
+    return connectionsUnavailable();
   }
-  const verification = store.verifyToken(token);
   return verification.ok ? { ok: true, connection: verification.connection } : refuse('invalid_token');
+}
+
+function connectionsUnavailable(): { ok: false; response: Response } {
+  return { ok: false, response: jsonResponse(503, remoteSurfaceErrorOutput('remote_connections_unavailable')) };
+}
+
+/** A thrown failure on a remote agent route: a fixed internal_error body with a log ref, never marked. */
+export function remoteFailureResponse(error: unknown): Response {
+  return jsonResponse(500, remoteErrorOutput(error));
+}
+
+/**
+ * The outer exception boundary for a remote agent route (`/mcp`,
+ * `/openai/mcp`, the OpenAPI tool paths), applied where the server composes
+ * them: whatever escapes the route's own handling becomes a fixed JSON error
+ * rather than reaching the runtime's default error page.
+ */
+export function withRemoteFailureBoundary(
+  handler: (request: Request) => Promise<Response>,
+): (request: Request) => Promise<Response> {
+  return async (request) => {
+    try {
+      return await handler(request);
+    } catch (error) {
+      return remoteFailureResponse(error);
+    }
+  };
 }
 
 export function lazyRemoteConnectionStore(

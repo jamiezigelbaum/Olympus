@@ -10690,6 +10690,37 @@ class TierLedger {
     })();
     return result;
   }
+  itemStatesForMany(identities) {
+    const result = new Map;
+    if (identities.length === 0)
+      return result;
+    const unique = new Map;
+    for (const identity of identities)
+      unique.set(tierLedgerIdentityKey(identity), identity);
+    const list = [...unique.values()];
+    this.db.transaction(() => {
+      for (let offset = 0;offset < list.length; offset += 200) {
+        const batch = list.slice(offset, offset + 200);
+        const values = batch.map(() => "(?, ?, ?, ?)").join(", ");
+        const params = batch.flatMap((identity) => [...idParams(identity)]);
+        const rows = this.db.query(`
+          SELECT * FROM tier_items
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        `).all(...params);
+        for (const row of rows) {
+          result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
+        }
+        const copies = this.db.query(`
+          SELECT * FROM tier_copies
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          ORDER BY corpus_id
+        `).all(...params);
+        for (const row of copies)
+          result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+      }
+    })();
+    return result;
+  }
   listRoutedOverrides() {
     const rows = this.db.query(`
       SELECT i.*, o.override_json AS override_json FROM tier_items i
@@ -24165,6 +24196,16 @@ var init_evidence_pack = __esm(() => {
   utf8 = new TextEncoder;
 });
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var storage2;
+var init_release_manifest = __esm(() => {
+  storage2 = new AsyncLocalStorage4;
+});
+
+// src/core/secret-location-note.ts
+var init_secret_location_note = () => {};
+
 // src/workers/source-index/analyst-pool.ts
 class SecureAnalystPoolState {
   failureThreshold;
@@ -24264,6 +24305,8 @@ var init_analyst_answer = __esm(() => {
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
+  init_release_manifest();
+  init_secret_location_note();
   init_source_corpus_registry();
   init_source_model_policy();
   init_sovereignty();

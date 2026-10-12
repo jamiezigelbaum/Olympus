@@ -25,6 +25,14 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
+import { secretLabelsInText } from './opsec.ts';
+import {
+  adoptReleaseManifests,
+  createReleaseManifestSink,
+  currentReleaseManifestSink,
+  runWithReleaseManifestSink,
+  type ReleaseManifestSink,
+} from './release-manifest.ts';
 import type { OperationCaller } from './operation-caller.ts';
 
 export const SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 200_000;
@@ -107,6 +115,12 @@ interface JobRecord {
   finish(outcome: { ok: true; value: unknown } | { ok: false; error: unknown }): void;
   abort(reason: Error): void;
   deadline?: ReturnType<typeof setTimeout>;
+  /**
+   * The job's own release manifests (core/release-manifest.ts), kept with it
+   * and handed to the call that collects it. Only a call that opened a sink
+   * (the remote surface) gets one; it is never serialized.
+   */
+  releaseManifests?: ReleaseManifestSink;
 }
 
 export interface SourceAnswerJobRegistryOptions {
@@ -160,10 +174,16 @@ export class SourceAnswerJobRegistry {
     const startedAt = this.now();
     const controller = new AbortController();
     const release = this.occupy(scope.owner);
+    // A caller collecting release manifests gets them for this work alone,
+    // whether it returns now or is collected later from the job.
+    const callerManifests = currentReleaseManifestSink();
+    const jobManifests = callerManifests ? createReleaseManifestSink() : undefined;
 
     let pending: Promise<T>;
     try {
-      pending = work(controller.signal);
+      pending = jobManifests
+        ? runWithReleaseManifestSink(jobManifests, () => work(controller.signal))
+        : work(controller.signal);
     } catch (error) {
       release();
       throw error;
@@ -181,6 +201,7 @@ export class SourceAnswerJobRegistry {
     clearTimeout(timer);
     if (first !== 'handoff') {
       release();
+      if (callerManifests && jobManifests) adoptReleaseManifests(callerManifests, jobManifests);
       if (first.ok) return first.value;
       throw first.error;
     }
@@ -203,6 +224,7 @@ export class SourceAnswerJobRegistry {
         wake();
       },
       abort: (reason) => controller.abort(reason),
+      ...(jobManifests ? { releaseManifests: jobManifests } : {}),
     };
     // The deadline frees the slot and records its own error at once; it does
     // not wait for the work to notice the abort, so work that never settles
@@ -245,7 +267,12 @@ export class SourceAnswerJobRegistry {
     // Dropped while waiting (its connection was revoked).
     if (!this.jobs.has(job.id)) throw sourceAnswerJobNotFound();
     if (!job.outcome) return pendingResult(job.id, this.now() - job.startedAt, this.limits.resultWaitMs);
-    if (job.outcome.ok) return job.outcome.value;
+    if (job.outcome.ok) {
+      // The collecting call revalidates the answer against its manifests.
+      const collecting = currentReleaseManifestSink();
+      if (collecting && job.releaseManifests) adoptReleaseManifests(collecting, job.releaseManifests);
+      return job.outcome.value;
+    }
     throw job.outcome.error;
   }
 
@@ -437,8 +464,16 @@ function pendingResult(jobId: string, elapsedMs: number, resultWaitMs: number): 
   };
 }
 
+/**
+ * A fresh job id. One that happens to look like a credential to the release
+ * gate's scanner (a `-sk-…` run, say) is drawn again, so a job id never trips
+ * an output scan.
+ */
 function newJobId(): string {
-  return `${JOB_ID_PREFIX}${randomBytes(32).toString('base64url')}`;
+  for (;;) {
+    const id = `${JOB_ID_PREFIX}${randomBytes(32).toString('base64url')}`;
+    if (secretLabelsInText(id).length === 0) return id;
+  }
 }
 
 function clampedInteger(value: string | undefined, min: number, max: number): number | undefined {

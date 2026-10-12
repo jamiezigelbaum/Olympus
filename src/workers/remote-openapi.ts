@@ -24,6 +24,21 @@
 import { createHash } from 'node:crypto';
 import { defaultConfig, type OlympusConfig } from '../core/config.ts';
 import { OperationError, type OperationErrorCode } from '../core/operation-error.ts';
+import { createReleaseManifestSink, runWithReleaseManifestSink } from '../core/release-manifest.ts';
+import {
+  REMOTE_ERROR_SCHEMA,
+  remoteDeclaredParams,
+  remoteErrorOutput,
+  remoteOperationOutput,
+  remoteOutputSchema,
+  remoteSurfaceErrorOutput,
+  remoteToolDescription,
+  remoteToolSchema,
+  remoteWithheldParam,
+  remoteWithheldParamOutput,
+  type RemoteErrorBody,
+  type RemoteTransportErrorCode,
+} from '../core/remote-result.ts';
 import { exposedOperations, shouldExposeOperation } from '../core/operation-exposure.ts';
 import {
   findOperationByName,
@@ -43,7 +58,10 @@ export const REMOTE_OPENAPI_MAX_BODY_BYTES = REMOTE_REQUEST_MAX_BODY_BYTES;
  * parameter, or a response shape changes. A fixed value keeps the
  * unauthenticated spec from naming the installed build.
  */
-export const REMOTE_OPENAPI_API_VERSION = '1.1.0';
+// 2.0.0 (2026-10-12): every 200 is an allowlisted per-operation output
+// (core/remote-result.ts) and every failure, credential and transport ones
+// included, the Error schema with a fixed sentence per code.
+export const REMOTE_OPENAPI_API_VERSION = '2.0.0';
 
 const TOOL_PATH_PATTERN = /^\/api\/v1\/tools\/([a-z][a-z0-9_]{0,63})$/;
 
@@ -93,9 +111,15 @@ export function createRemoteOpenApiHandler(options: RemoteOpenApiHandlerOptions)
       response = serveSpec(request, text, etag);
     } else {
       const name = TOOL_PATH_PATTERN.exec(pathname)?.[1];
-      response = name === undefined
-        ? jsonResponse(404, { error: 'not_found' })
-        : await callTool(request, name, options);
+      try {
+        response = name === undefined
+          ? failure(404, remoteSurfaceErrorOutput('not_found'))
+          : await callTool(request, name, options);
+      } catch (error) {
+        // Anything that escapes (a credential store that throws, a context
+        // that cannot be built) is still the published Error shape.
+        response = failure(500, remoteErrorOutput(error));
+      }
     }
     response.headers.set('X-Content-Type-Options', 'nosniff');
     return response;
@@ -104,7 +128,7 @@ export function createRemoteOpenApiHandler(options: RemoteOpenApiHandlerOptions)
 
 function serveSpec(request: Request, specText: string, etag: string): Response {
   if (request.method !== 'GET' && request.method !== 'HEAD') {
-    return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'GET, HEAD' });
+    return failure(405, remoteSurfaceErrorOutput('method_not_allowed'), { Allow: 'GET, HEAD' });
   }
   const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', ETag: etag };
   const ifNoneMatch = request.headers.get('If-None-Match');
@@ -118,42 +142,48 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
   // Authentication first, exactly as `/mcp` does it, so an unauthenticated
   // probe learns nothing about which tool names exist.
   const verification = authenticateRemoteRequest(request, options);
-  if (!verification.ok) return verification.response;
+  if (!verification.ok) return credentialFailure(verification.response);
   if (request.method !== 'POST') {
-    return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
+    return failure(405, remoteSurfaceErrorOutput('method_not_allowed'), { Allow: 'POST' });
   }
   // As the MCP transport does: a tool call is JSON or it is refused.
   if (!isJsonContentType(request.headers.get('Content-Type'))) {
-    return jsonResponse(415, { error: 'unsupported_media_type', message: 'Content-Type must be application/json.' });
+    return failure(415, remoteSurfaceErrorOutput('unsupported_media_type'));
   }
 
   const ctx = options.makeOperationContext(remoteOperationCaller(verification.connection), request.signal);
   const operation = findOperationByName(name);
   if (!operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: 'remote' })) {
-    return jsonResponse(404, { error: 'unknown_operation', message: `No Olympus operation named ${name} is available here.` });
+    return failure(404, remoteSurfaceErrorOutput('unknown_operation'));
   }
   // On the published list, but this install has it switched off.
   if (!shouldExposeOperation(operation, { config: ctx.config, surface: 'remote' })) {
-    return jsonResponse(503, { error: 'operation_unavailable', message: `${name} is not enabled on this Olympus install.` });
+    return failure(503, remoteSurfaceErrorOutput('operation_unavailable'));
   }
 
   const params = await readParams(request);
   if (!params.ok) return params.response;
+  // A parameter the remote surface does not serve is refused by name (it is
+  // one the operation declares elsewhere).
+  const withheld = remoteWithheldParam(operation.name, params.value);
+  if (withheld) return failure(400, remoteWithheldParamOutput(withheld));
   // Declared parameters only, checked here for every operation rather than
-  // left to each handler: `caller` in particular is set from the token.
-  const undeclared = Object.keys(params.value)
-    .filter((key) => !Object.prototype.hasOwnProperty.call(operation.params, key))
-    .sort();
-  if (undeclared.length > 0) {
-    const names = undeclared.slice(0, 10).map((key) => JSON.stringify(key.slice(0, 64))).join(', ');
-    return invalidRequest(`Undeclared parameters: ${names}. Remove them and retry.`);
+  // left to each handler: `caller` in particular is set from the token. An
+  // undeclared name is never repeated back.
+  const declaredParams = remoteDeclaredParams(operation.name, Object.keys(operation.params));
+  if (Object.keys(params.value).some((key) => !declaredParams.includes(key))) {
+    return failure(400, remoteSurfaceErrorOutput('invalid_request'));
   }
 
+  const manifests = createReleaseManifestSink();
   try {
-    const result = await operation.handler(ctx, params.value);
-    return jsonResponse(200, result ?? null);
+    const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
+    return jsonResponse(200, remoteOperationOutput(operation.name, result, {
+      ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
+      releaseManifests: manifests.manifests,
+    }));
   } catch (error) {
-    return operationErrorResponse(error);
+    return operationErrorResponse(error, declaredParams);
   }
 }
 
@@ -165,8 +195,8 @@ async function readParams(
     return {
       ok: false,
       response: body.reason === 'too_large'
-        ? jsonResponse(413, { error: 'payload_too_large' })
-        : invalidRequest('The request body could not be read as UTF-8.'),
+        ? failure(413, remoteSurfaceErrorOutput('payload_too_large'))
+        : failure(400, remoteSurfaceErrorOutput('invalid_request')),
     };
   }
   const text = body.text;
@@ -175,23 +205,41 @@ async function readParams(
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { ok: false, response: invalidRequest('The request body must be a JSON object.') };
+    return { ok: false, response: failure(400, remoteSurfaceErrorOutput('invalid_request')) };
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, response: invalidRequest('The request body must be a JSON object.') };
+    return { ok: false, response: failure(400, remoteSurfaceErrorOutput('invalid_request')) };
   }
   return { ok: true, value: parsed as Record<string, unknown> };
 }
 
-function invalidRequest(message: string): Response {
-  return jsonResponse(400, { error: 'invalid_request', message });
+function failure(status: number, body: RemoteErrorBody, headers: Record<string, string> = {}): Response {
+  return jsonResponse(status, body, headers);
 }
 
-// Codes whose message describes the caller's own request or a policy refusal,
-// written for the calling agent. Every other failure is Olympus's own plumbing:
-// its message and suggestion can name internal URLs or carry a worker response
-// body, so the agent gets a fixed sentence instead.
-const CALLER_FACING_ERRORS: Partial<Record<OperationErrorCode, number>> = {
+/**
+ * A refused credential in the published Error shape. The status and the
+ * RFC 6750 challenge header (which carries the OAuth discovery pointer) are
+ * kept; the body is the fixed sentence for its code.
+ */
+async function credentialFailure(refusal: Response): Promise<Response> {
+  let code: RemoteTransportErrorCode = 'unauthorized';
+  try {
+    const body = await refusal.json() as { error?: unknown };
+    if (body.error === 'invalid_token' || body.error === 'remote_connections_unavailable') code = body.error;
+  } catch {
+    // An unreadable refusal is still a refusal.
+  }
+  if (refusal.status === 503) code = 'remote_connections_unavailable';
+  const challenge = refusal.headers.get('WWW-Authenticate');
+  return failure(refusal.status === 503 ? 503 : 401, remoteSurfaceErrorOutput(code), challenge ? { 'WWW-Authenticate': challenge } : {});
+}
+
+// The HTTP status for each operation error code. The body is the remote
+// surface's fixed sentence for the code (core/remote-result.ts), never the
+// internal message or suggestion: those can name internal URLs or carry a
+// worker response body.
+const ERROR_STATUS: Partial<Record<OperationErrorCode, number>> = {
   invalid_params: 400,
   invalid_request: 400,
   unsupported_filter: 400,
@@ -204,27 +252,9 @@ const CALLER_FACING_ERRORS: Partial<Record<OperationErrorCode, number>> = {
   source_answer_too_large: 502,
 };
 
-const INTERNAL_ERROR_MESSAGES: Partial<Record<OperationErrorCode, string>> = {
-  email_unreachable: 'Olympus could not reach its source worker in time. Retry later.',
-  argus_unreachable: 'Olympus could not reach its private analyst. Retry later.',
-};
-
-function operationErrorResponse(error: unknown): Response {
-  if (error instanceof OperationError) {
-    const status = CALLER_FACING_ERRORS[error.code];
-    if (status !== undefined) {
-      return jsonResponse(status, {
-        error: error.code,
-        message: error.message,
-        ...(error.suggestion ? { suggestion: error.suggestion } : {}),
-      });
-    }
-    return jsonResponse(502, {
-      error: error.code,
-      message: INTERNAL_ERROR_MESSAGES[error.code] ?? 'Olympus could not complete this request.',
-    });
-  }
-  return jsonResponse(500, { error: 'internal_error', message: 'Olympus could not complete this request.' });
+function operationErrorResponse(error: unknown, declaredParams: readonly string[]): Response {
+  const status = error instanceof OperationError ? ERROR_STATUS[error.code] ?? 502 : 500;
+  return failure(status, remoteErrorOutput(error, { declaredParams }));
 }
 
 /** A live value that is not a plain https origin (a loopback dev URL) falls back to relative. */
@@ -282,15 +312,7 @@ export function buildRemoteOpenApiSpec(options: { serverUrl?: string } = {}): Re
         },
       },
       schemas: {
-        Error: {
-          type: 'object',
-          required: ['error'],
-          properties: {
-            error: { type: 'string', description: 'A stable error code.' },
-            message: { type: 'string' },
-            suggestion: { type: 'string' },
-          },
-        },
+        Error: REMOTE_ERROR_SCHEMA,
       },
       responses: {
         Error: {
@@ -303,9 +325,10 @@ export function buildRemoteOpenApiSpec(options: { serverUrl?: string } = {}): Re
 }
 
 function openApiOperation(operation: Operation, config: OlympusConfig): Record<string, unknown> {
-  const description = operationDescription(operation, { config });
-  const schema = { ...operationToolSchema(operation, { config }), additionalProperties: false };
-  const hasRequired = Object.values(operation.params).some((param) => param.required);
+  // The remote view: parameters the remote surface does not serve are left out.
+  const description = remoteToolDescription(operation.name, operationDescription(operation, { config }));
+  const schema: Record<string, unknown> = { ...remoteToolSchema(operation.name, operationToolSchema(operation, { config })), additionalProperties: false };
+  const hasRequired = Array.isArray(schema.required) && schema.required.length > 0;
   const errorRef = { $ref: '#/components/responses/Error' };
   return {
     operationId: operation.name,
@@ -317,14 +340,16 @@ function openApiOperation(operation: Operation, config: OlympusConfig): Record<s
     },
     responses: {
       200: {
-        description: 'The operation result.',
-        content: { 'application/json': { schema: { type: 'object' } } },
+        description: 'The operation result: one of its output families, told apart by kind and status.',
+        content: { 'application/json': { schema: remoteOutputSchema(operation.name) ?? { type: 'object' } } },
       },
       400: errorRef,
       401: errorRef,
       403: errorRef,
       404: errorRef,
+      405: errorRef,
       413: errorRef,
+      415: errorRef,
       429: errorRef,
       504: errorRef,
       500: errorRef,

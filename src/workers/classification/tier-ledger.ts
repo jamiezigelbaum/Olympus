@@ -1705,6 +1705,43 @@ export class TierLedger {
   }
 
   /**
+   * Each item's row and copies, read in ONE transaction so every item is
+   * judged against one ledger snapshot: one batched query for the rows and
+   * one for the copies (per 200 items). Keyed by `tierLedgerIdentityKey`;
+   * an item with no row is absent from the map (never classified).
+   */
+  itemStatesForMany(
+    identities: readonly TierLedgerIdentity[],
+  ): Map<string, { record: TierLedgerRecord; copies: TierCopy[] }> {
+    const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[] }>();
+    if (identities.length === 0) return result;
+    const unique = new Map<string, TierLedgerIdentity>();
+    for (const identity of identities) unique.set(tierLedgerIdentityKey(identity), identity);
+    const list = [...unique.values()];
+    this.db.transaction(() => {
+      for (let offset = 0; offset < list.length; offset += 200) {
+        const batch = list.slice(offset, offset + 200);
+        const values = batch.map(() => '(?, ?, ?, ?)').join(', ');
+        const params = batch.flatMap((identity) => [...idParams(identity)]);
+        const rows = this.db.query(`
+          SELECT * FROM tier_items
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        `).all(...params) as TierItemRow[];
+        for (const row of rows) {
+          result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
+        }
+        const copies = this.db.query(`
+          SELECT * FROM tier_copies
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          ORDER BY corpus_id
+        `).all(...params) as TierCopyRow[];
+        for (const row of copies) result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+      }
+    })();
+    return result;
+  }
+
+  /**
    * Routed items that carry a per-item owner override, with it, in key order.
    * Overrides are set by hand, one item at a time, so the list is small; the
    * override pass (tier-override-settle.ts) reads it whole.

@@ -238,7 +238,7 @@ import {
   createXBookmarksTierLane,
   defaultXBookmarksSecureConnectorStoreDbPath,
 } from '../x-bookmarks/tier-set.ts';
-import { createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
+import { createReleaseTierCheck, createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
@@ -4554,6 +4554,7 @@ export async function main(): Promise<void> {
     createInProcessOperationContext,
     createRemoteMcpHandler,
     lazyRemoteConnectionStore,
+    withRemoteFailureBoundary,
     withRemoteMcpRoute,
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
@@ -4852,16 +4853,29 @@ export async function main(): Promise<void> {
       };
     }
   }
+  // The same ledgers and the same derivative posture the answer handler
+  // uses, read when a remote agent collects an answer: an item the answer
+  // read that was reclassified since it was written is caught there.
+  const remoteReleaseCheck = createReleaseTierCheck(
+    () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+    () => secureDerivativeDefault ?? 'allow',
+  );
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
-    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => createInProcessOperationContext({
-      config: olympusConfig,
-      sourceIndexReadEnabled,
-      workerFetch: worker.fetch,
-      caller,
-      signal,
-      sourceAnswerJobs,
+    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
+      ...createInProcessOperationContext({
+        config: olympusConfig,
+        sourceIndexReadEnabled,
+        workerFetch: worker.fetch,
+        caller,
+        signal,
+        sourceAnswerJobs,
+      }),
+      // The remote output boundary revalidates a collected answer's release
+      // manifest against the tier ledgers and release rules as they are now
+      // (core/remote-result.ts).
+      releaseCheck: remoteReleaseCheck,
     }),
   };
   // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as
@@ -5141,8 +5155,11 @@ export async function main(): Promise<void> {
         demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,
       }),
-      withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(
-        createRemoteMcpHandler({
+      // Each remote agent route sits inside its own exception boundary, so a
+      // failure there is a fixed JSON error, never the runtime's error page;
+      // the worker-bearer routes keep their own handling.
+      withRemoteOpenApiRoutes(withRemoteFailureBoundary(remoteOpenApi), withRemoteMcpRoute(
+        withRemoteFailureBoundary(createRemoteMcpHandler({
           ...remoteAgentOptions,
           // Relayed requests get the ChatGPT surface (docs/design/chatgpt-plugin.md):
           // the hosted relay is the ChatGPT path, and the relay marker must
@@ -5156,7 +5173,7 @@ export async function main(): Promise<void> {
             readOnlyFor: isDemoGrant,
             ...chatgptSurface,
           },
-        }),
+        })),
         withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),
       )),
     )))),

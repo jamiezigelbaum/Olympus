@@ -16,6 +16,7 @@ import { OPEN_REMOTE_DESCRIPTION, OPEN_REMOTE_PARAMS, OPEN_REMOTE_TOOL_NAME, ope
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
 import type { OperationCaller } from './operation-caller.ts';
 import type { SourceAnswerJobScope, SourceAnswerPending } from './source-answer-jobs.ts';
+import type { ReleaseCheck } from './release-manifest.ts';
 
 type SourceIndexAnswerCorpusId = string;
 type SourceIndexStatusCorpusId = string;
@@ -61,6 +62,13 @@ export interface OperationContext {
   ownerAgentSession?: boolean;
   /** Test seam for olympus_doctor's host check; production probes this machine. */
   doctorHostProbe?: () => DoctorHostFacts;
+  /**
+   * The worker's current tiers and release rules, set by the worker for its
+   * remote surface (email-source/server.ts). The remote output boundary
+   * (core/remote-result.ts) revalidates a source answer's release manifest
+   * with it when the answer is collected; no operation handler reads it.
+   */
+  releaseCheck?: ReleaseCheck;
 }
 
 export interface Operation {
