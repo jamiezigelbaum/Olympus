@@ -180,6 +180,7 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
   const stateRoot = mkdtempSync(join(tmpdir(), 'olympus-doctor-ingestion-state-'));
   process.on('exit', () => rmSync(stateRoot, { recursive: true, force: true }));
   return {
+    runningBun: false,
     commandExists: async (command) => command === 'bun' || command === 'node',
     pythonModuleExists: async () => false,
     // Doctor tests must never inherit a live local worker from the host. Tests
@@ -198,6 +199,25 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
 }
 
 describe('runDoctor', () => {
+  test('Linux accepts its running managed Bun without a PATH bun and names its socket', async () => {
+    const result = await runDoctor(doctorDeps({ config: enabledEmailConfig(), delphi: healthyDelphi(), platform: 'linux', runningBun: true,
+      commandExists: () => false, env: { HOME: '/tmp/doctor-linux', XDG_RUNTIME_DIR: '/run/user/1000' },
+      fetchImpl: fakeWorkerFetch({ '/v1/health': { status: 'ok' } }).fetchImpl }));
+    expect(checkByName(result.checks, 'dependencies').ok).toBe(true);
+    expect(checkByName(result.checks, 'email_worker').detail).toContain('/run/user/1000/olympus/worker.sock');
+    expect(checkByName(result.checks, 'email_worker').detail).not.toContain('127.0.0.1');
+  });
+  test('Linux standalone host copy does not claim no private model runs; Mac wording is unchanged', async () => {
+    for (const platform of ['linux', 'darwin'] as const) {
+      const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(), platform,
+        sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')),
+        hostProbe: () => ({ engine: { installed: true, state: 'running' }, legacyWorkerUnit: false }) }));
+      const detail = checkByName(result.checks, 'host').detail;
+      if (platform === 'linux') { expect(detail).not.toContain('Mac'); expect(detail).toContain('Private model readiness'); }
+      else expect(detail).toContain('No answer model runs on this Mac: ChatGPT answers from Olympus search.');
+    }
+  });
+
   test('does not probe the worker when an explicit credential remains unresolved', async () => {
     const config = enabledEmailConfig();
     config.worker.authTokenSecretRefUnresolved = true;
@@ -1141,7 +1161,8 @@ describe('runDoctor', () => {
     const result = await runDoctor(doctorDeps({
       config: defaultConfig(),
       delphi: healthyDelphi(),
-      commandExists: async (command) => command !== 'bun',
+      runningBun: false,
+    commandExists: async (command) => command !== 'bun',
     }));
 
     const dependencies = checkByName(result.checks, 'dependencies');
