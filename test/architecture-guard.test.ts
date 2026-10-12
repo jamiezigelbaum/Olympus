@@ -975,3 +975,14 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     expect(content).toContain('conceptGroups');
   });
 });
+
+describe('architecture guard: Node-loaded bundles', () => {
+  // OpenClaw's update snapshot parses plugin bundles under Node; Bun-only
+  // import.meta.dir there failed the 2026.9.7 and 2026.10.2 core updates.
+  // Retire once the installed updater skips unparseable plugin files.
+  test('Node-target dist bundles do not use Bun-only import.meta.dir', () => {
+    for (const rel of ['dist/index.js', 'dist/cli.js', 'dist/embedding-drain.js']) {
+      expect(read(rel)).not.toContain('import.meta.dir');
+    }
+  });
+});
