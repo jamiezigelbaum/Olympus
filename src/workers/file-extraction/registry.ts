@@ -36,6 +36,7 @@ import {
   createPdfOcr,
   type OcrEngineOptions,
 } from './extractors/ocr.ts';
+import { appleVisionOcrSelected } from './extractors/apple-vision-ocr.ts';
 import { sharedOcrCapabilityProbe } from './extractors/ocr-capability.ts';
 import {
   REMOTE_VLM_EXTRACTOR_KINDS,
@@ -130,6 +131,10 @@ export function createDefaultExtractorRegistry(
       ? { maxBoundedTextChars: config.text.maxBoundedTextChars }
       : {}),
   };
+  const pinnedToTesseract = config.ocr?.engine === 'tesseract';
+  const imagePreparationOn = Boolean(config.media?.cacheDir && (config.media.platform !== undefined
+    ? config.media.platform === 'darwin'
+    : stillImagePreparationAvailable()));
   const extractors: Extractor[] = [
     createTranscriptionExtractor({
       ...(config.transcription?.command !== undefined ? { command: config.transcription.command } : {}),
@@ -152,7 +157,7 @@ export function createDefaultExtractorRegistry(
       // Pinned to `tesseract` pictures are never read in the text lane (the
       // owner chose the legacy direct commands), so no reader is offered and
       // no picture is marked as waiting for one.
-      ...(config.ocr?.engine === 'tesseract' ? {} : { imageOcr: createImageOcr(ocrShared) }),
+      ...(pinnedToTesseract ? {} : { imageOcr: createImageOcr(ocrShared) }),
       // A scan or picture left `ocr_required` for want of an engine is read
       // again once one works.
       ocrReread: createOcrRereadPolicy({
@@ -163,16 +168,22 @@ export function createDefaultExtractorRegistry(
       // the owner-only media cache), so its picture can be embedded. The
       // preparation tool ships with macOS only; elsewhere images stay as
       // they were.
-      ...(config.media?.cacheDir && (config.media.platform !== undefined
-        ? config.media.platform === 'darwin'
-        : stillImagePreparationAvailable())
+      ...(imagePreparationOn
         ? {
           imagePreparation: createImagePreparation({
-            cacheDir: config.media.cacheDir,
-            ...(config.media.timeoutMs !== undefined ? { timeoutMs: config.media.timeoutMs } : {}),
-            ...(config.media.maxInputBytes !== undefined ? { maxInputBytes: config.media.maxInputBytes } : {}),
+            cacheDir: config.media!.cacheDir!,
+            ...(config.media!.timeoutMs !== undefined ? { timeoutMs: config.media!.timeoutMs } : {}),
+            ...(config.media!.maxInputBytes !== undefined ? { maxInputBytes: config.media!.maxInputBytes } : {}),
           }),
         }
+        : {}),
+      // Where a command engine (not Vision, not a preparation) reads pictures,
+      // pictures settled names-only before it could are queued once more under
+      // a fixed version. Nothing is read again on a Mac, where Vision or the
+      // preparation already read them, nor when pinned to `tesseract`.
+      ...(!pinnedToTesseract && !appleVisionOcrSelected(config.ocr?.engine ?? 'auto', config.ocr?.platform ?? process.platform)
+        && !imagePreparationOn
+        ? { imageOcrVersion: true }
         : {}),
     }),
     createOcrExtractor(ocrShared),

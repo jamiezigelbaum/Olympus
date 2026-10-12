@@ -36,10 +36,10 @@ import {
 import { ocrProbeJpeg } from '../src/workers/file-extraction/extractors/ocr-probe-fixture.ts';
 import {
   classifyRasterPdfRejection,
-  rasterDpiFor,
+  rasterEdgeFor,
   rasterPdfOcr,
 } from '../src/workers/file-extraction/extractors/pdf-raster-ocr.ts';
-import { createTextExtractor } from '../src/workers/file-extraction/extractors/text.ts';
+import { IMAGE_OCR_VERSION_SUFFIX, createTextExtractor } from '../src/workers/file-extraction/extractors/text.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { buildExtractorRegistry, createDefaultExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
 import { createFileExtractionRunner } from '../src/workers/file-extraction/runner.ts';
@@ -68,6 +68,8 @@ interface MachineSpec {
   pageSizes?: readonly string[];
   /** pdfinfo fails (the page sizes are unknown). */
   pdfinfoBroken?: boolean;
+  /** pdftoppm fails (not past-the-end) when asked for a range starting here or later. */
+  renderFailsFromPage?: number;
   /** Pages the real (non-probe) tesseract run fails on. */
   failingPages?: readonly number[];
   /** pdftoppm refuses the document. */
@@ -111,6 +113,14 @@ function fakeMachine(initial: MachineSpec) {
         }
         const first = Number(request.args[request.args.indexOf('-f') + 1]);
         const last = Number(request.args[request.args.indexOf('-l') + 1]);
+        if (spec.renderFailsFromPage !== undefined && first >= spec.renderFailsFromPage && !probing) {
+          throw new ExtractionCommandError({ command: 'pdftoppm', exitCode: 3, stdout: '', stderr: 'Syntax Error: something else' });
+        }
+        if (first > (spec.pages ?? 1)) {
+          throw new ExtractionCommandError({
+            command: 'pdftoppm', exitCode: 99, stdout: '', stderr: `Wrong page range given: the first page (${first}) can not be after the last page (${spec.pages ?? 1}).`,
+          });
+        }
         const prefix = request.args[request.args.length - 1]!;
         for (let page = first; page <= Math.min(last, spec.pages ?? 1); page += 1) {
           await writeFile(`${prefix}-${page}.png`, new Uint8Array([page]));
@@ -267,7 +277,7 @@ describe('OCR capability cache', () => {
 
   test('a working engine is trusted for ten minutes, a missing one is looked at again after one', async () => {
     const clock = { now: 1_000 };
-    const working = counted([{ imageEngine: 'tesseract', tesseract: 'ok' }], clock);
+    const working = counted([{ imageEngine: 'tesseract', pdfEngine: 'pdftoppm_tesseract', tesseract: 'ok' }], clock);
     await working.probe.snapshot();
     clock.now += OCR_READY_TTL_MS - 1;
     await working.probe.snapshot();
@@ -283,6 +293,14 @@ describe('OCR capability cache', () => {
     expect(missing.runs()).toBe(1);
     clock.now += 2;
     expect((await missing.probe.snapshot()).imageEngine).toBe('tesseract');
+  });
+
+  test('a host with pictures but no PDF engine yet is looked at again after one minute, not ten', async () => {
+    const clock = { now: 1_000 };
+    const partial = counted([{ imageEngine: 'tesseract', tesseract: 'ok' }, { imageEngine: 'tesseract', pdfEngine: 'pdftoppm_tesseract', tesseract: 'ok' }], clock);
+    expect((await partial.probe.snapshot()).pdfEngine).toBeUndefined();
+    clock.now += OCR_MISSING_TTL_MS + 1;
+    expect((await partial.probe.snapshot()).pdfEngine).toBe('pdftoppm_tesseract');
   });
 
   test('concurrent callers share one probe, peek is synchronous, warm only probes when nothing is fresh', async () => {
@@ -349,7 +367,7 @@ describe('engine selection: scanned PDFs', () => {
       .extract(extractorInput({ bytes: SCANNED_PDF, mimeType: PDF }));
     expect(text.status).toBe('metadata_only');
     expect(text.status === 'metadata_only' ? text.derivations?.[0]?.warnings : []).toEqual(
-      expect.arrayContaining(['ocr_required', 'ocr_unavailable']),
+      expect.arrayContaining(['ocr_required', 'ocr_unavailable_pdf']),
     );
   });
 
@@ -391,7 +409,7 @@ describe('engine selection: pictures of text', () => {
     expect(output.status).toBe('metadata_only');
     // Marked as waiting for OCR, so the reread policy can read it later.
     expect(output.status === 'metadata_only' ? output.derivations?.[0]?.warnings : []).toEqual(
-      expect.arrayContaining(['ocr_required', 'ocr_unavailable']),
+      expect.arrayContaining(['ocr_required', 'ocr_unavailable_image']),
     );
   });
 
@@ -449,63 +467,105 @@ describe('pdftoppm + tesseract engine', () => {
       .toMatchObject({ readPages: 3, totalPages: 5 });
   });
 
-  test('renders grayscale PNG at 200 dpi, and lowers it so a poster page stays within the pixel cap', async () => {
+  const renderArgs = (machine: ReturnType<typeof fakeMachine>) => machine.calls
+    .filter((call) => call.command === 'pdftoppm')
+    .map((call) => ({
+      range: `${call.args[call.args.indexOf('-f') + 1]}-${call.args[call.args.indexOf('-l') + 1]}`,
+      edge: Number(call.args[call.args.indexOf('-scale-to') + 1]),
+      args: call.args,
+      timeoutMs: call.timeoutMs,
+    }));
+
+  test('renders grayscale PNG with the renderer scaling the long side: a Letter page at the 200 dpi size, a poster at the cap', async () => {
     const letter = fakeMachine(ALL_TOOLS);
     await rasterPdfOcr(base, options(letter));
-    const args = letter.calls.find((call) => call.command === 'pdftoppm')!.args;
-    expect(args[args.indexOf('-r') + 1]).toBe('200');
-    expect(args).toEqual(expect.arrayContaining(['-gray', '-png']));
+    const [first] = renderArgs(letter);
+    expect(first!.edge).toBe(Math.ceil((792 * 200) / 72));
+    expect(first!.args).toEqual(expect.arrayContaining(['-gray', '-png', '-cropbox']));
     const poster = fakeMachine({ ...ALL_TOOLS, pageSize: '1440 x 2000 pts (poster)' });
     await rasterPdfOcr(base, options(poster));
-    const posterArgs = poster.calls.find((call) => call.command === 'pdftoppm')!.args;
-    expect(Number(posterArgs[posterArgs.indexOf('-r') + 1])).toBe(Math.floor((3000 * 72) / 2000));
-    expect(rasterDpiFor(undefined, 3000)).toBe(200);
+    expect(renderArgs(poster)[0]!.edge).toBe(3000);
+    expect(rasterEdgeFor(undefined, 3000)).toBe(2400);
+    expect(rasterEdgeFor(undefined, 1500)).toBe(1500);
   });
 
-  test('the pixel cap holds for any page size: no 72 dpi floor, so a huge page is rendered smaller', async () => {
-    // 10,000 points at the old 72 dpi floor was 10,000 pixels.
-    expect(rasterDpiFor(10_000, 3000)).toBe(21);
-    expect(rasterDpiFor(100_000, 3000)).toBe(2);
-    expect(rasterDpiFor(1_000_000, 3000)).toBe(1);
-    const machine = fakeMachine({ ...ALL_TOOLS, pageSize: '10000 x 7000 pts (banner)' });
-    await rasterPdfOcr(base, options(machine));
-    const args = machine.calls.find((call) => call.command === 'pdftoppm')!.args;
-    const dpi = Number(args[args.indexOf('-r') + 1]);
-    expect((10_000 * dpi) / 72).toBeLessThanOrEqual(3000);
+  test('the cap is a renderer-level bound on every render: any claimed size, a missing size, and no resolution flag to outgrow it', async () => {
+    expect(rasterEdgeFor(10_000, 3000)).toBe(3000);
+    expect(rasterEdgeFor(14_400, 3000)).toBe(3000);
+    expect(rasterEdgeFor(1_000_000, 3000)).toBe(3000);
+    expect(rasterEdgeFor(0.5, 3000)).toBe(2);
+    for (const pageSize of ['612 x 792 pts', '14400 x 14400 pts', '1000000 x 3 pts']) {
+      const machine = fakeMachine({ ...ALL_TOOLS, pageSize });
+      await rasterPdfOcr(base, options(machine));
+      for (const render of renderArgs(machine)) {
+        expect(render.edge).toBeGreaterThan(0);
+        expect(render.edge).toBeLessThanOrEqual(3000);
+        expect(render.args).not.toContain('-r');
+        // The box pdfinfo measured is the box rendered: a small CropBox inside
+        // a huge MediaBox is rendered as its crop, scaled to the target.
+        expect(render.args).toContain('-cropbox');
+      }
+    }
   });
 
-  test('the cap is enforced on every page, not just the first: a larger later page is rendered on its own at a lower resolution', async () => {
+  test('the cap is enforced on every page, not just the first: a larger later page is rendered on its own at a smaller target', async () => {
     const machine = fakeMachine({
       ...ALL_TOOLS,
       pages: 4,
       pageSizes: ['612 x 792 pts', '612 x 792 pts', '5000 x 3000 pts', '612 x 792 pts'],
     });
     const output = await rasterPdfOcr(base, options(machine, { pagesPerRun: 4 }));
-    const renders = machine.calls.filter((call) => call.command === 'pdftoppm').map((call) => ({
-      range: `${call.args[call.args.indexOf('-f') + 1]}-${call.args[call.args.indexOf('-l') + 1]}`,
-      dpi: Number(call.args[call.args.indexOf('-r') + 1]),
-    }));
-    expect(renders).toEqual([
-      { range: '1-2', dpi: 200 },
-      { range: '3-3', dpi: Math.floor((3000 * 72) / 5000) },
-      { range: '4-4', dpi: 200 },
+    expect(renderArgs(machine).map(({ range, edge }) => ({ range, edge }))).toEqual([
+      { range: '1-2', edge: 2200 },
+      { range: '3-3', edge: 3000 },
+      { range: '4-4', edge: 2200 },
     ]);
     expect(indexedText(output)).toContain('--- Page 4 ---');
   });
 
-  test('when pdfinfo cannot describe the document, the renderer scales the long edge instead of trusting a resolution', async () => {
+  test('when pdfinfo cannot describe the document, the renderer still scales every page to a fixed target under the cap', async () => {
     const machine = fakeMachine({ ...ALL_TOOLS, pdfinfoBroken: true, pages: 2, pageSize: '100000 x 100000 pts' });
     const output = await rasterPdfOcr(base, options(machine, { pdfMaxPixelEdge: 3000 }));
-    const renders = machine.calls.filter((call) => call.command === 'pdftoppm');
+    const renders = renderArgs(machine);
     expect(renders).toHaveLength(1);
-    const args = renders[0]!.args;
-    expect(args).not.toContain('-r');
-    expect(args[args.indexOf('-scale-to') + 1]).toBe('2400');
+    expect(renders[0]!.args).not.toContain('-r');
+    expect(renders[0]!.edge).toBe(2400);
     expect(indexedText(output)).toContain('--- Page 1 ---');
     const small = fakeMachine({ ...ALL_TOOLS, pdfinfoBroken: true });
     await rasterPdfOcr(base, options(small, { pdfMaxPixelEdge: 1500 }));
-    const smallArgs = small.calls.find((call) => call.command === 'pdftoppm')!.args;
-    expect(smallArgs[smallArgs.indexOf('-scale-to') + 1]).toBe('1500');
+    expect(renderArgs(small)[0]!.edge).toBe(1500);
+  });
+
+  test('with no page count, only the renderer\'s past-the-end error ends the document; any other failure is not an end', async () => {
+    // Exactly one full range, so the next range starts past the end.
+    const ends = fakeMachine({ ...ALL_TOOLS, pdfinfoBroken: true, pages: 8 });
+    const whole = await rasterPdfOcr(base, options(ends));
+    expect(indexedText(whole)).toContain('--- Page 8 ---');
+    expect(renderArgs(ends).map((render) => render.range)).toEqual(['1-8', '9-16']);
+    // The same position failing for any other reason is a retryable failure.
+    const broken = fakeMachine({ ...ALL_TOOLS, pdfinfoBroken: true, pages: 20, renderFailsFromPage: 9 });
+    await expect(rasterPdfOcr(base, options(broken))).rejects.toBeInstanceOf(ExtractionCommandError);
+  });
+
+  test('each render group gets what is left of the whole-file deadline, and a spent deadline stops further groups', async () => {
+    const machine = fakeMachine({
+      ...ALL_TOOLS,
+      pages: 3,
+      pageSizes: ['612 x 792 pts', '5000 x 3000 pts', '612 x 792 pts'],
+    });
+    let clock = 0;
+    // Each render takes 500 ms of the 1,000 ms the file is allowed.
+    const spendingRunner: ExtractionCommandRunner = async (request) => {
+      if (request.command === 'pdftoppm') clock += 500;
+      return machine.runner(request);
+    };
+    await expect(rasterPdfOcr(base, options(machine, {
+      commandRunner: spendingRunner, pagesPerRun: 3, fileDeadlineMs: 1_000, now: () => clock,
+    }))).rejects.toThrow();
+    const renders = renderArgs(machine);
+    // Three groups were due; the third found no time left and was not started.
+    expect(renders.map((render) => render.range)).toEqual(['1-1', '2-2']);
+    expect(renders.map((render) => render.timeoutMs)).toEqual([1_000, 500]);
   });
 
   test('a document-wide deadline stops reading and records the cut', async () => {
@@ -603,6 +663,7 @@ describe('pdftoppm + tesseract engine', () => {
 describe('rereading what OCR could not read', () => {
   const LANE = { corpusId: 'secure_local.fake.files', provider: 'fake', accountScope: 'personal', approvedScopeKey: 'fake.personal:/Scans' };
   type Kind = 'pdf' | 'image';
+  type Setup = Kind | 'both';
   const KINDS: readonly Kind[] = ['pdf', 'image'];
   const READ_TEXT: Record<Kind, string> = { pdf: 'text of page 1', image: 'text in the picture' };
 
@@ -610,7 +671,7 @@ describe('rereading what OCR could not read', () => {
    * A lane over one scanned PDF or one picture, a text extractor wired exactly
    * as the default registry wires it, and a clock the probe cache obeys.
    */
-  function setup(spec: MachineSpec, kind: Kind = 'pdf') {
+  function setup(spec: MachineSpec, kind: Setup = 'pdf') {
     const machine = fakeMachine(spec);
     const clock = { now: 1_000 };
     const capability = createOcrCapabilityProbe({ commandRunner: machine.runner, now: () => clock.now });
@@ -622,7 +683,7 @@ describe('rereading what OCR could not read', () => {
     });
     const jobs = new LocalFileExtractionJobStore(':memory:');
     const written: string[] = [];
-    const mimeType = kind === 'pdf' ? PDF : PNG;
+    const mimeType = kind === 'image' ? PNG : PDF;
     const runner = createFileExtractionRunner({
       jobs,
       registry: buildExtractorRegistry([text]),
@@ -632,7 +693,10 @@ describe('rereading what OCR could not read', () => {
         source: {
           id: 'fake', corpusId: LANE.corpusId, provider: LANE.provider,
           async listCandidates() { return { candidates: [], done: true }; },
-          async fetch() { return { bytes: kind === 'pdf' ? SCANNED_PDF : PNG_BYTES, mimeType }; },
+          async fetch(ref) {
+            const picture = ref.providerItemId === 'pic-1' || kind === 'image';
+            return { bytes: picture ? PNG_BYTES : SCANNED_PDF, mimeType: picture ? PNG : PDF };
+          },
         },
         sink: {
           async accept(request) {
@@ -642,12 +706,14 @@ describe('rereading what OCR could not read', () => {
         },
       }],
     });
-    jobs.enqueue({
-      refs: [{ ...LANE, providerItemId: 'item-1', localItemId: 'personal:item-1', name: kind === 'pdf' ? 'scan.pdf' : 'pic.png', mimeType }],
+    const enqueue = (providerItemId: string, name: string, itemMime: string) => jobs.enqueue({
+      refs: [{ ...LANE, providerItemId, localItemId: `personal:${providerItemId}`, name, mimeType: itemMime }],
       extractorKind: text.kind,
-      extractorVersion: text.versionFor?.(mimeType) ?? text.version,
+      extractorVersion: text.versionFor?.(itemMime) ?? text.version,
       policyDecision: 'index_allowed',
     });
+    if (kind !== 'image') enqueue('item-1', 'scan.pdf', PDF);
+    if (kind !== 'pdf') enqueue('pic-1', 'pic.png', PNG);
     return {
       jobs, runner, machine, capability, clock, written, text,
       run: () => runner.run({ ...LANE }),
@@ -720,11 +786,14 @@ describe('rereading what OCR could not read', () => {
       pdfOcr: createPdfOcr({ commandRunner: machine.runner, engine }),
       imageOcr: createImageOcr({ commandRunner: machine.runner, engine }),
     });
-    for (const [bytes, mimeType] of [[SCANNED_PDF, PDF], [PNG_BYTES, PNG]] as const) {
+    for (const [bytes, mimeType, marker] of [
+      [SCANNED_PDF, PDF, 'ocr_unavailable_pdf'],
+      [PNG_BYTES, PNG, 'ocr_unavailable_image'],
+    ] as const) {
       const output = await text.extract(extractorInput({ bytes, mimeType }));
       expect(output.status).toBe('metadata_only');
       expect(output.status === 'metadata_only' ? output.derivations?.[0]?.warnings : []).toEqual(
-        expect.arrayContaining(['ocr_required', 'ocr_unavailable']),
+        expect.arrayContaining(['ocr_required', marker]),
       );
     }
     // A lane with no OCR reader at all settles as it always did.
@@ -836,6 +905,85 @@ describe('rereading what OCR could not read', () => {
     }
   });
 
+  test('eligibility is per kind: tesseract alone reads the waiting picture, the PDF waits for a PDF engine', async () => {
+    const lane = setup(NOTHING_INSTALLED, 'both');
+    try {
+      expect((await lane.run()).counts.metadata_only).toBe(2);
+      // tesseract is installed; poppler and ocrmypdf are not.
+      Object.assign(lane.machine.spec, { tesseract: 'ok' });
+      await lane.afterInstallProbe();
+      expect(lane.capability.peekFresh()).toMatchObject({ imageEngine: 'tesseract', pdfEngine: undefined });
+      const picture = await lane.run();
+      expect(picture.rereadRequeued).toBe(1);
+      expect(picture.counts.indexed).toBe(1);
+      const stored = (status: string) => lane.jobs.counts(LANE).filter((row) => row.status === status).reduce((sum, row) => sum + row.jobs, 0);
+      expect(stored('indexed')).toBe(1);
+      expect(stored('metadata_only')).toBe(1);
+      expect(lane.written.join('\n')).toContain('text in the picture');
+      // And again: the PDF is still waiting, unspent, and nothing churns.
+      for (let again = 0; again < 3; again += 1) expect((await lane.run()).rereadRequeued).toBeUndefined();
+      // poppler arrives: now the PDF is read, once.
+      Object.assign(lane.machine.spec, { pdftoppm: 'ok' });
+      await lane.afterInstallProbe();
+      const pdf = await lane.run();
+      expect(pdf.rereadRequeued).toBe(1);
+      expect(pdf.counts.indexed).toBe(1);
+      expect(stored('indexed')).toBe(2);
+      expect(lane.written.join('\n')).toContain('text of page 1');
+    } finally {
+      lane.jobs.close();
+    }
+  });
+
+  test('readyWarnings names the markers whose reader works, per engine', () => {
+    const base: OcrCapabilitySnapshot = {
+      tesseract: 'missing', pdftoppm: 'missing', ocrmypdf: 'missing', pdfEngine: undefined, imageEngine: undefined, checkedAt: 1,
+    };
+    const stub = (seen: OcrCapabilitySnapshot) => ({
+      snapshot: async () => seen, peek: () => seen, peekFresh: () => seen, invalidate: () => {}, warm: () => {},
+    });
+    const ready = (seen: OcrCapabilitySnapshot, preference?: 'tesseract') => createOcrRereadPolicy({
+      capability: stub(seen), ...(preference ? { preference } : {}),
+    }).readyWarnings!();
+    expect(ready(base)).toEqual([]);
+    expect(ready({ ...base, imageEngine: 'tesseract' })).toEqual(['ocr_unavailable_image']);
+    expect(ready({ ...base, imageEngine: 'tesseract', pdfEngine: 'pdftoppm_tesseract' }))
+      .toEqual(['ocr_required', 'ocr_unavailable_pdf', 'ocr_unavailable_image']);
+    // Pinned: ocrmypdf runs directly, and pictures are not read in the text lane.
+    expect(ready({ ...base, ocrmypdf: 'ok', imageEngine: 'tesseract', pdfEngine: 'ocrmypdf' }, 'tesseract'))
+      .toEqual(['ocr_required', 'ocr_unavailable_pdf']);
+    expect(createOcrRereadPolicy({ capability: stub({ ...base, imageEngine: 'tesseract' }) }).prepare()).toBe('ready');
+  });
+
+  test('pictures settled names-only before OCR existed (no marker) are queued once more under a fixed image version', () => {
+    const jobs = new LocalFileExtractionJobStore(':memory:');
+    try {
+      const none = fakeMachine(NOTHING_INSTALLED);
+      const textKind = createTextExtractor().kind;
+      const registryFor = (ocr: Record<string, unknown>) => createDefaultExtractorRegistry({
+        ocr: { capability: createOcrCapabilityProbe({ commandRunner: none.runner }), ...ocr },
+      }).list().find((extractor) => extractor.kind === textKind)!;
+      const linux = registryFor({ platform: 'linux' });
+      // Fixed: the same whatever is installed, and only images move.
+      expect(linux.versionFor!(PNG)).toBe(`${linux.version}${IMAGE_OCR_VERSION_SUFFIX}`);
+      expect(linux.versionFor!(PDF)).toBe(linux.version);
+      const ref = {
+        corpusId: 'secure_local.fake.files', provider: 'fake', accountScope: 'personal', approvedScopeKey: 'fake.personal:/Pictures',
+        providerItemId: 'old', localItemId: 'personal:old', name: 'old.png', mimeType: PNG,
+      };
+      // The job main created, with the plain version, is settled and unmarked.
+      expect(jobs.enqueue({ refs: [ref], extractorKind: linux.kind, extractorVersion: linux.version, policyDecision: 'index_allowed' }).jobsQueued).toBe(1);
+      expect(jobs.enqueue({ refs: [ref], extractorKind: linux.kind, extractorVersion: linux.versionFor!(PNG), policyDecision: 'index_allowed' }).jobsQueued).toBe(1);
+      expect(jobs.enqueue({ refs: [ref], extractorKind: linux.kind, extractorVersion: linux.versionFor!(PNG), policyDecision: 'index_allowed' }).jobsQueued).toBe(0);
+      // Nothing is read again where Vision (or a preparation) already reads pictures, or when pinned.
+      expect(registryFor({ platform: 'darwin' }).versionFor).toBeUndefined();
+      expect(registryFor({ platform: 'darwin', engine: 'auto' }).versionFor).toBeUndefined();
+      expect(registryFor({ platform: 'linux', engine: 'tesseract' }).versionFor).toBeUndefined();
+    } finally {
+      jobs.close();
+    }
+  });
+
   test('items already read are never requeued', async () => {
     const lane = setup(ALL_TOOLS);
     try {
@@ -866,16 +1014,17 @@ describe('rereading what OCR could not read', () => {
     });
     expect(policyFor(undefined).prepare()).toBe('pending');
     expect(policyFor(snapshot({})).prepare()).toBe('unavailable');
-    expect(policyFor(snapshot({ imageEngine: 'tesseract' })).prepare()).toBe('unavailable');
+    // Pictures alone are enough to start: their reader works (PDFs wait; see readyWarnings).
+    expect(policyFor(snapshot({ imageEngine: 'tesseract' })).prepare()).toBe('ready');
     expect(policyFor(snapshot({ pdfEngine: 'pdftoppm_tesseract' })).prepare()).toBe('ready');
     // An expired answer, however good it was, is not a decision.
     expect(policyFor(snapshot({ pdfEngine: 'pdftoppm_tesseract' }), undefined, false).prepare()).toBe('pending');
     expect(policyFor(snapshot({ pdfEngine: 'pdftoppm_tesseract' }), 'tesseract').prepare()).toBe('unavailable');
     expect(policyFor(snapshot({ pdfEngine: 'ocrmypdf', ocrmypdf: 'ok' }), 'tesseract').prepare()).toBe('ready');
     const policy = policyFor(snapshot({}));
-    expect(policy.unreadWarnings).toEqual(['ocr_required']);
     expect(policy.unreadTerminalErrorKinds).toEqual([]);
-    expect(policy.notReadyWarnings).toEqual(['ocr_unavailable']);
+    expect(policy.notReadyWarnings).toEqual(['ocr_unavailable_pdf', 'ocr_unavailable_image']);
+    expect(policy.unreadWarnings).toEqual(['ocr_required', 'ocr_unavailable_pdf', 'ocr_unavailable_image']);
   });
 
   test('a stale answer starts a background probe when the policy is asked', async () => {
@@ -941,7 +1090,7 @@ describe('rereading what OCR could not read', () => {
     });
     const autoText = auto.list().find((extractor) => extractor.kind === textKind)!;
     const marked = await autoText.extract(extractorInput({ bytes: PNG_BYTES, mimeType: PNG }));
-    expect(marked.status === 'metadata_only' ? marked.derivations?.[0]?.warnings : []).toContain('ocr_unavailable');
+    expect(marked.status === 'metadata_only' ? marked.derivations?.[0]?.warnings : []).toContain('ocr_unavailable_image');
   });
 });
 

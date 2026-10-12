@@ -12,12 +12,13 @@
  * rather than by the document, and every process runs under the lane's command
  * timeout. Reading stops at the page cap, at the text cap, or at the whole-file
  * deadline, and the cut is recorded as a warning rather than discarded. The
- * longest-edge pixel cap is enforced on EVERY page: the render resolution of
- * each page is lowered from that page's own size (consecutive pages that
- * share a resolution are rendered together), and when the page sizes are not
- * known (`pdfinfo` failed) the renderer is asked to scale the long edge to a
- * fixed size instead, so a poster-sized page can never produce an enormous
- * bitmap.
+ * longest-edge pixel cap is enforced by the renderer itself on EVERY page:
+ * each render passes `-scale-to <pixels>` (the long side of the page, whatever
+ * its size) and `-cropbox` (the same box `pdfinfo` measures), where the pixel
+ * target is the default resolution's size for that page, never above the cap,
+ * and a fixed size when the page sizes are not known (`pdfinfo` failed).
+ * Consecutive pages that share a target are rendered together. A wrong or
+ * missing size therefore changes the resolution, never the cap.
  *
  * A PDF the renderer refuses (encrypted, damaged) settles terminally with the
  * lane's historical `ocrmypdf_pdf_*` kinds, because the terminal
@@ -61,7 +62,6 @@ import { parsePdfInfoPageCount } from './pdf-render.ts';
 
 export const RASTER_OCR_ENGINE_WARNING = 'ocr_engine_tesseract';
 export const DEFAULT_RASTER_OCR_DPI = 200;
-const MIN_RASTER_OCR_DPI = 1;
 /**
  * The long edge, in pixels, when page sizes are unknown: a Letter or A4 page
  * at roughly 200 dpi, never above the configured cap.
@@ -154,24 +154,33 @@ async function readPdfInfo(input: {
 }
 
 /**
- * The render resolution for one page: the default, lowered (to as little as 1
- * dpi) when that page's long edge would exceed the pixel cap at the default.
+ * The long edge, in pixels, one page is rendered to: the size it would have at
+ * the default resolution, never above the pixel cap. With no size known, a
+ * fixed edge under the cap.
  */
-export function rasterDpiFor(longEdgePoints: number | undefined, maxPixelEdge: number): number {
-  if (longEdgePoints === undefined) return DEFAULT_RASTER_OCR_DPI;
-  const fitting = Math.floor((maxPixelEdge * 72) / longEdgePoints);
-  return Math.max(MIN_RASTER_OCR_DPI, Math.min(DEFAULT_RASTER_OCR_DPI, fitting));
+export function rasterEdgeFor(longEdgePoints: number | undefined, maxPixelEdge: number): number {
+  const cap = Math.max(1, Math.floor(maxPixelEdge));
+  if (longEdgePoints === undefined) return Math.min(cap, UNKNOWN_SIZE_RASTER_EDGE);
+  return Math.min(cap, Math.max(1, Math.ceil((longEdgePoints * DEFAULT_RASTER_OCR_DPI) / 72)));
 }
 
 /**
- * How one page is rendered: at a resolution, or scaled to a long edge when
- * its size is unknown.
+ * How one page is rendered. The renderer scales the page's long side to the
+ * target pixels itself, so the cap holds for any page box.
  */
 function renderSpecFor(longEdgePoints: number | undefined, maxPixelEdge: number): string[] {
-  if (longEdgePoints === undefined) {
-    return ['-scale-to', String(Math.max(1, Math.min(maxPixelEdge, UNKNOWN_SIZE_RASTER_EDGE)))];
-  }
-  return ['-r', String(rasterDpiFor(longEdgePoints, maxPixelEdge))];
+  return ['-cropbox', '-scale-to', String(rasterEdgeFor(longEdgePoints, maxPixelEdge))];
+}
+
+/**
+ * pdftoppm exits 99 with "Wrong page range given" when the first page asked
+ * for is past the end of the document: the one failure that means "no more
+ * pages" when the page count is unknown.
+ */
+function isPastLastPage(error: unknown): boolean {
+  return error instanceof ExtractionCommandError
+    && error.command === PDFTOPPM_COMMAND
+    && `${error.stderr}\n${error.stdout}`.toLowerCase().includes('wrong page range given');
 }
 
 /**
@@ -231,10 +240,17 @@ export async function rasterPdfOcr(
         stopReason = 'time';
         break;
       }
+      let renderLeftMs = remainingMs;
       try {
-        // Consecutive pages that render the same way go in one process.
+        // Consecutive pages that render the same way go in one process, and
+        // each process gets what is left of the whole-file deadline.
         let groupStart = firstPage;
         while (groupStart <= lastPage) {
+          renderLeftMs = deadline - now();
+          if (renderLeftMs <= 0) {
+            stopReason = 'time';
+            break;
+          }
           const spec = renderSpecFor(info.pageLongEdges.get(groupStart), maxPixelEdge);
           let groupEnd = groupStart;
           while (
@@ -252,7 +268,7 @@ export async function rasterPdfOcr(
               input.inputPath,
               join(tempDir, RASTER_PAGE_PREFIX),
             ],
-            timeoutMs: Math.min(options.timeoutMs, remainingMs),
+            timeoutMs: Math.min(options.timeoutMs, renderLeftMs),
           });
           groupStart = groupEnd + 1;
         }
@@ -261,13 +277,13 @@ export async function rasterPdfOcr(
         if (rejection) return { status: 'failed_terminal', errorKind: rejection };
         // A deadline-shortened render that times out after pages were read
         // keeps what was read; a full-length timeout is the lane's ordinary failure.
-        if (error instanceof ExtractionCommandTimeoutError && pages.length > 0 && remainingMs < options.timeoutMs) {
+        if (error instanceof ExtractionCommandTimeoutError && pages.length > 0 && renderLeftMs < options.timeoutMs) {
           stopReason = 'time';
           break;
         }
         // Without a page count, a range past the last page is how the renderer
-        // says the document ended.
-        if (info.totalPages === undefined && firstPage > 1 && error instanceof ExtractionCommandError) break;
+        // says the document ended. Any other renderer failure is not.
+        if (info.totalPages === undefined && firstPage > 1 && isPastLastPage(error)) break;
         throw error;
       }
       const files = (await readdir(tempDir))
@@ -275,6 +291,7 @@ export async function rasterPdfOcr(
         .filter((entry): entry is { name: string; page: number } => entry.page !== undefined)
         .sort((left, right) => left.page - right.page);
       if (files.length === 0) {
+        if (stopReason === 'time') break;
         // The document ended before this range (page count was unknown).
         if (firstPage === 1) throw new Error('Local PDF rendering produced no page images.');
         break;
@@ -309,6 +326,9 @@ export async function rasterPdfOcr(
         }
         await rm(path, { force: true });
       }
+      // The deadline ran out while rendering: what was rendered has been read
+      // (as far as time allowed) and the rest is cut, with the warning.
+      if (stopReason === 'time') break;
       const renderedLast = files[files.length - 1]!.page;
       if (info.totalPages !== undefined ? renderedLast >= info.totalPages : renderedLast < lastPage) break;
       if (renderedLast >= maxPages) {

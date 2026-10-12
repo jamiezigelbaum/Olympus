@@ -54,7 +54,8 @@ import {
   createTextExtractor,
   isCommandMissing,
   missingBytesFailure,
-  OCR_UNAVAILABLE_WARNING,
+  OCR_UNAVAILABLE_IMAGE_WARNING,
+  OCR_UNAVAILABLE_PDF_WARNING,
   textLaneAccepts,
   type ImageOcr,
   type PdfOcr,
@@ -248,40 +249,54 @@ async function withVision(
 
 /**
  * When the text lane's unread scans and pictures are read again. An item the
- * text lane settled `ocr_required` because no OCR engine ran (`ocr_unavailable`
- * marks that the engine was not there, as opposed to a reader that ran and
- * found nothing) is requeued when the probe says OCR works now. Such an item
- * was never read, so it stays eligible until it is: the once-ever requeue
- * is spent only by items settled before the marker existed.
+ * text lane settled because no OCR engine ran carries `ocr_required` and a
+ * marker for its kind (`ocr_unavailable_pdf` / `ocr_unavailable_image`): it was
+ * never read, so it is requeued whenever ITS reader works, without spending the
+ * once-ever requeue (only items settled before the markers existed spend it).
+ *
+ * Readiness is per kind. A picture needs the image engine (tesseract passing
+ * its probe), a scanned PDF the PDF engine (`ocrmypdf`, or `pdftoppm` plus
+ * tesseract), so installing tesseract alone reads pictures while PDFs wait;
+ * `readyWarnings()` tells the runner which markers have a ready reader.
  *
  * The runner asks `prepare()` only when such items exist. It is synchronous
- * and answers from a FRESH probe only: an expired "ready" says nothing about
- * the machine now, so it starts a probe in the background and answers
- * `pending` until that finishes. Vision is deliberately not consulted: a Mac
- * that reads with Vision settles nothing `ocr_required`, and one whose Vision
- * is broken is not made ready by a file existing.
- *
- * A host whose engine can read pictures but not PDFs (no `pdftoppm`) is not
- * ready: PDFs requeued there would settle unread again and be requeued on
- * every run.
+ * and answers from a FRESH probe only (an expired answer starts a probe and
+ * answers `pending`). Vision is deliberately not consulted: a Mac that reads
+ * with Vision settles nothing unread, and one whose Vision is broken is not
+ * made ready by a file existing. Pinned to `tesseract`, the worker runs
+ * `ocrmypdf` directly and reads no pictures in the text lane.
  */
 export function createOcrRereadPolicy(options: {
   capability: OcrCapabilityProbe;
   preference?: OcrEnginePreference;
 }): ExtractorRereadPolicy {
   const pinned = options.preference === 'tesseract';
+  const readyKinds = (): { pdf: boolean; image: boolean } | undefined => {
+    const seen = options.capability.peekFresh();
+    if (!seen) return undefined;
+    return pinned
+      ? { pdf: seen.ocrmypdf === 'ok', image: false }
+      : { pdf: seen.pdfEngine !== undefined, image: seen.imageEngine !== undefined };
+  };
   return {
-    unreadWarnings: ['ocr_required'],
+    unreadWarnings: ['ocr_required', OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
     unreadTerminalErrorKinds: [],
-    notReadyWarnings: [OCR_UNAVAILABLE_WARNING],
+    notReadyWarnings: [OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
     prepare() {
-      const seen = options.capability.peekFresh();
-      if (!seen) {
+      const ready = readyKinds();
+      if (!ready) {
         options.capability.warm();
         return 'pending';
       }
-      const ready = pinned ? seen.ocrmypdf === 'ok' : seen.pdfEngine !== undefined;
-      return ready ? 'ready' : 'unavailable';
+      return ready.pdf || ready.image ? 'ready' : 'unavailable';
+    },
+    readyWarnings() {
+      const ready = readyKinds();
+      return [
+        // Legacy scans carry only `ocr_required`; they are PDFs.
+        ...(ready?.pdf ? ['ocr_required', OCR_UNAVAILABLE_PDF_WARNING] : []),
+        ...(ready?.image ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []),
+      ];
     },
   };
 }

@@ -344,7 +344,9 @@ export function createOcrCapabilityProbe(options: OcrCapabilityProbeOptions = {}
 
   const fresh = (): boolean => {
     if (!cached) return false;
-    const ttl = cached.pdfEngine || cached.imageEngine ? readyTtlMs : missingTtlMs;
+    // A host that reads pictures but not yet scanned PDFs is still waiting for
+    // an install, so it is looked at again as quickly as one with nothing.
+    const ttl = cached.pdfEngine ? readyTtlMs : missingTtlMs;
     return now() - cached.checkedAt < ttl;
   };
   const refresh = (): Promise<OcrCapabilitySnapshot> => {

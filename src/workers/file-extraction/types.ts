@@ -395,6 +395,14 @@ export interface ExtractorRereadPolicy {
    * background (a first-use download); answers whether it is ready now.
    */
   prepare(): 'ready' | 'pending' | 'unavailable';
+  /**
+   * Optional. Which of `unreadWarnings` / `notReadyWarnings` have a reader
+   * that is ready now, asked after `prepare()` answered `ready`, for a lane
+   * whose kinds of item need different readers (a picture needs the image
+   * reader, a PDF the PDF reader). Items carrying only other warnings keep
+   * waiting. Absent means every listed warning.
+   */
+  readyWarnings?(): readonly string[];
 }
 
 export interface ExtractorRegistry {

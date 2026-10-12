@@ -44,32 +44,42 @@ but cannot read it is not an engine. The answer picks the engine:
 A picture is read by `tesseract` when it reads the fixture picture, and is
 otherwise names-only. The raster engine renders grayscale PNG pages at 200 dpi
 in ranges of eight pages, lowering the resolution of each page from that page's
-own size (as far as 1 dpi) so every page's long edge stays within the same
-3,000-pixel cap as Vision; when `pdfinfo` cannot describe the document it asks
-`pdftoppm` to scale the long edge instead (`-scale-to`, at most 2,400 px), reads each page with `tesseract
+own size so every page's long edge stays within the same 3,000-pixel cap as
+Vision. The bound is the renderer's: each render passes `-scale-to <pixels>`
+(the Letter-at-200-dpi size, never above the cap, or 2,400 px when `pdfinfo`
+cannot describe the document) and `-cropbox`, the box `pdfinfo` measures, so
+a wrong size changes the resolution and never the cap. It reads each page with `tesseract
 --psm 3`, and keeps Vision's bounds: 100 pages, the text cap, a 600-second
 whole-file deadline, each cut recorded as a warning. It marks its text
 `ocr_engine_tesseract`. A PDF `pdftoppm` refuses settles with the lane's
 `ocrmypdf_pdf_encrypted` / `ocrmypdf_pdf_invalid` kinds.
 
-The probe result is cached: ten minutes while an engine works, one minute
-while none does, so an install is noticed without a process per file.
+The probe result is cached: ten minutes while a scanned-PDF engine works, one
+minute while none does (pictures alone count as none, as an install is still
+expected), so an install is noticed without a process per file.
 
 ### Recovery
 
 * A scan or picture the text lane could not read because no OCR engine ran
-  settles `metadata_only` with `ocr_required` and `ocr_unavailable` on its
-  derivation; the job keeps its identity (no version change). The text
-  extractor carries the runner's `reread` policy (`unreadWarnings:
-  ['ocr_required']`, `notReadyWarnings: ['ocr_unavailable']`): when the probe
-  says OCR works, the item is requeued and read. An item carrying
-  `ocr_unavailable` was never read, so it stays eligible until it is; only items
-  settled before the marker existed spend the once-ever requeue.
+  settles `metadata_only` with `ocr_required` and a marker for its kind
+  (`ocr_unavailable_pdf` / `ocr_unavailable_image`) on its derivation; the job
+  keeps its identity. The text extractor carries the runner's `reread` policy
+  (`notReadyWarnings` are the markers): when the probe says that kind's reader
+  works, the item is requeued and read. Readiness is per kind
+  (`readyWarnings()`): tesseract alone reads waiting pictures while PDFs wait
+  for `ocrmypdf` or `pdftoppm`. An item carrying a marker was never read, so it
+  stays eligible until it is; only scans settled before the markers existed
+  spend the once-ever requeue.
 * The decision uses a FRESH probe answer only (an expired "ready" starts a
   probe and answers `pending`), and a command found missing when it is run
   forgets the cached answer, so a stale answer cannot spend a recovery.
-* A picture settled before the marker existed carries no `ocr_required`, so it
-  is not found by the policy.
+* A picture settled names-only before the markers existed carries nothing the
+  policy can find, so on a host where a command engine (not Vision, not a
+  preparation) reads pictures the image job version gets one fixed suffix
+  (`.image-ocr-2026-10-12`, independent of what is installed): those pictures
+  are queued once more, and pictures already read are untouched. The registry
+  omits it on a Mac (Vision or the preparation already reads them) and when
+  pinned to `tesseract`.
 * With the engine pinned to `tesseract`, pictures are not read in the text lane
   and are not marked, as before.
 * A scan that was only partly read settles with its cut recorded

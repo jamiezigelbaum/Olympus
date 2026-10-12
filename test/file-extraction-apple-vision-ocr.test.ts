@@ -284,7 +284,7 @@ describe('apple vision ocr: the text lane routes scans and images to it', () => 
     expect(output.status).toBe('metadata_only');
     // Marked as waiting for OCR, so it is read once an engine works.
     expect(output.status === 'metadata_only' ? output.derivations?.[0]?.warnings : []).toEqual(
-      expect.arrayContaining(['ocr_required', 'ocr_unavailable']),
+      expect.arrayContaining(['ocr_required', 'ocr_unavailable_image']),
     );
   });
 
