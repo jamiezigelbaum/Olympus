@@ -145,6 +145,54 @@ describe('checkOcrReadiness', () => {
   });
 });
 
+describe('the worker\'s engine setting', () => {
+  const PINNED = { OLYMPUS_FILE_EXTRACTION_OCR_ENGINE: 'tesseract' };
+
+  test('pinned to tesseract on a Mac, Vision is not used, so a Mac is not reported ready on its strength', async () => {
+    let probed = false;
+    const report = await checkOcrReadiness({
+      platform: 'darwin', env: PINNED,
+      probe: async () => { probed = true; return snapshot({}); },
+    });
+    expect(probed).toBe(true);
+    expect(report.state).toBe('missing');
+    expect(report.detail).not.toContain('Apple Vision');
+  });
+
+  test('pinned with a working ocrmypdf: PDFs only, pictures are not read, and the remedy is the setting', async () => {
+    const report = await checkOcrReadiness({
+      platform: 'linux', osRelease: UBUNTU, env: PINNED, vision: false,
+      probe: async () => snapshot({ tesseract: 'ok', pdftoppm: 'ok', ocrmypdf: 'ok', pdfEngine: 'ocrmypdf', imageEngine: 'tesseract' }),
+    });
+    expect(report).toMatchObject({ state: 'partial', pdfEngine: 'ocrmypdf' });
+    expect(report.imageEngine).toBeUndefined();
+    expect(report.remedy).toContain('OLYMPUS_FILE_EXTRACTION_OCR_ENGINE=auto');
+  });
+
+  test('pinned: pdftoppm and tesseract alone are not an engine, because the pinned worker never falls back to them', async () => {
+    const report = await checkOcrReadiness({
+      platform: 'linux', osRelease: OMARCHY, env: PINNED, vision: false,
+      probe: async () => snapshot({ tesseract: 'ok', pdftoppm: 'ok', pdfEngine: 'pdftoppm_tesseract', imageEngine: 'tesseract' }),
+    });
+    expect(report.state).toBe('missing');
+    expect(report.detail).toContain('ocrmypdf is not installed');
+    // The install command would not fix it; changing the setting does.
+    expect(report.remedy).toBe('Set OLYMPUS_FILE_EXTRACTION_OCR_ENGINE=auto (or remove it) for the worker.');
+  });
+
+  test('auto, unset or invalid values report as before', async () => {
+    const working = snapshot({ tesseract: 'ok', pdftoppm: 'ok', pdfEngine: 'pdftoppm_tesseract', imageEngine: 'tesseract' });
+    for (const env of [{}, { OLYMPUS_FILE_EXTRACTION_OCR_ENGINE: 'auto' }, { OLYMPUS_FILE_EXTRACTION_OCR_ENGINE: 'bogus' }]) {
+      const report = await checkOcrReadiness({ platform: 'linux', osRelease: ARCH, env, vision: false, probe: async () => working });
+      expect(report).toMatchObject({ state: 'ready', pdfEngine: 'pdftoppm + tesseract', imageEngine: 'tesseract' });
+    }
+  });
+
+  test('describeOcrReadiness takes the preference directly', () => {
+    expect(describeOcrReadiness({ platform: 'linux', family: 'arch', snapshot: undefined, preference: 'tesseract' }).state).toBe('missing');
+  });
+});
+
 describe('setup finding', () => {
   test('optional, ok when ready, and the repair hint is the one command otherwise', () => {
     expect(ocrDependencyFinding({ state: 'ready', detail: 'read', pdfEngine: 'ocrmypdf', imageEngine: 'tesseract' }))

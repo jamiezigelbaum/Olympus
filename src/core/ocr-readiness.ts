@@ -8,7 +8,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import {
   APPLE_VISION_OSASCRIPT,
   appleVisionOcrSelected,
+  parseOcrEnginePreference,
   resolveAppleVisionOcrScript,
+  type OcrEnginePreference,
 } from '../workers/file-extraction/extractors/apple-vision-ocr.ts';
 import {
   probeOcrCapability,
@@ -98,8 +100,8 @@ export function ocrInstallRemedy(input: { platform: NodeJS.Platform; family: Lin
   return 'Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.';
 }
 
-function visionReady(platform: NodeJS.Platform): boolean {
-  return appleVisionOcrSelected('auto', platform)
+function visionReady(platform: NodeJS.Platform, preference: OcrEnginePreference): boolean {
+  return appleVisionOcrSelected(preference, platform)
     && resolveAppleVisionOcrScript() !== undefined
     && existsSync(APPLE_VISION_OSASCRIPT);
 }
@@ -113,7 +115,14 @@ export function describeOcrReadiness(input: {
   family: LinuxFamily;
   snapshot: OcrCapabilitySnapshot | undefined;
   vision?: boolean;
+  /**
+   * The worker's OCR engine setting (`OLYMPUS_FILE_EXTRACTION_OCR_ENGINE`);
+   * `auto` when unset. Pinned to `tesseract`, the worker runs the installed
+   * `ocrmypdf` directly and does not read pictures in the text lane.
+   */
+  preference?: OcrEnginePreference;
 }): OcrReadiness {
+  if (input.preference === 'tesseract') return describePinnedReadiness(input);
   if (input.vision) {
     return {
       state: 'ready',
@@ -156,6 +165,44 @@ export function describeOcrReadiness(input: {
   };
 }
 
+const PINNED_SETTING = 'OLYMPUS_FILE_EXTRACTION_OCR_ENGINE';
+
+/**
+ * The engine setting is `tesseract`: the worker runs `ocrmypdf` directly for
+ * scanned PDFs, never probes, never falls back to `pdftoppm`, and does not
+ * read pictures in the text lane. What fixes it is the setting, not a package
+ * (an install that adds tesseract alone changes nothing), so that is the one
+ * remedy; with the setting off, the next check reports any missing package.
+ */
+function describePinnedReadiness(input: {
+  snapshot: OcrCapabilitySnapshot | undefined;
+}): OcrReadiness {
+  const remedy = `Set ${PINNED_SETTING}=auto (or remove it) for the worker.`;
+  if (input.snapshot?.ocrmypdf === 'ok') {
+    return {
+      state: 'partial',
+      pdfEngine: 'ocrmypdf',
+      detail: `${PINNED_SETTING} is set to tesseract: scanned PDFs are read with ocrmypdf, but pictures of text are not read.`,
+      remedy: `Set ${PINNED_SETTING}=auto (or remove it) for the worker to read pictures too.`,
+    };
+  }
+  return {
+    state: 'missing',
+    detail: `${PINNED_SETTING} is set to tesseract, which needs a working ocrmypdf, and ocrmypdf ${
+      input.snapshot === undefined ? 'could not be checked' : input.snapshot.ocrmypdf === 'missing' ? 'is not installed' : 'does not work here'
+    }. Scans and pictures of text are not read.`,
+    remedy,
+  };
+}
+
+function effectivePreference(env: NodeJS.ProcessEnv): OcrEnginePreference {
+  try {
+    return parseOcrEnginePreference(env[PINNED_SETTING]) ?? 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
 export interface CheckOcrReadinessOptions {
   platform?: NodeJS.Platform;
   /**
@@ -164,6 +211,16 @@ export interface CheckOcrReadinessOptions {
   osRelease?: string;
   probe?: () => Promise<OcrCapabilitySnapshot>;
   vision?: boolean;
+  /**
+   * The worker's OCR engine setting; defaults to the one in `env`.
+   */
+  preference?: OcrEnginePreference;
+  /**
+   * Where the engine setting is read from; defaults to `process.env`. An
+   * invalid value is the worker's startup error to report, so here it counts
+   * as unset.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -173,8 +230,9 @@ export interface CheckOcrReadinessOptions {
 export async function checkOcrReadiness(options: CheckOcrReadinessOptions = {}): Promise<OcrReadiness> {
   const platform = options.platform ?? process.platform;
   const family = platform === 'linux' ? linuxFamilyFromOsRelease(options.osRelease ?? readOsRelease()) : 'other';
-  const vision = options.vision ?? visionReady(platform);
-  if (vision) return describeOcrReadiness({ platform, family, snapshot: undefined, vision: true });
+  const preference = options.preference ?? effectivePreference(options.env ?? process.env);
+  const vision = options.vision ?? visionReady(platform, preference);
+  if (vision) return describeOcrReadiness({ platform, family, snapshot: undefined, vision: true, preference });
   const snapshot = await (options.probe ?? (() => probeOcrCapability()))().catch(() => undefined);
-  return describeOcrReadiness({ platform, family, snapshot });
+  return describeOcrReadiness({ platform, family, snapshot, preference });
 }

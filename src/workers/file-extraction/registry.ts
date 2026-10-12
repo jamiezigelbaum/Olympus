@@ -31,7 +31,6 @@ import {
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS,
   OCR_EXTRACTOR_KIND,
   createImageOcr,
-  createImageOcrVersionSuffix,
   createOcrExtractor,
   createOcrRereadPolicy,
   createPdfOcr,
@@ -113,8 +112,8 @@ export type ExtractionHealthProbeMap = ReadonlyMap<string, () => Promise<void>>;
 export function createDefaultExtractorRegistry(
   config: ExtractorRegistryConfig = {},
 ): ExtractorRegistry {
-  // One probe of the OCR commands serves the PDF engine, the picture engine,
-  // the reread policy and the image job version, so they always agree; it is
+  // One probe of the OCR commands serves the PDF engine, the picture engine
+  // and the reread policy, so they always agree; it is
   // started now so the first plan pass usually finds its answer.
   const ocrCapability = config.ocr?.capability ?? sharedOcrCapabilityProbe();
   ocrCapability.warm();
@@ -150,17 +149,15 @@ export function createDefaultExtractorRegistry(
       // rather than leaving it for an escalation nothing ever requests. On a
       // Mac the same holds for an image: the built-in engine reads its text.
       pdfOcr: createPdfOcr(ocrShared),
-      imageOcr: createImageOcr(ocrShared),
-      // A scan left `ocr_required` for want of an engine is read again once
-      // one works; a picture is queued afresh once tesseract reads pictures.
+      // Pinned to `tesseract` pictures are never read in the text lane (the
+      // owner chose the legacy direct commands), so no reader is offered and
+      // no picture is marked as waiting for one.
+      ...(config.ocr?.engine === 'tesseract' ? {} : { imageOcr: createImageOcr(ocrShared) }),
+      // A scan or picture left `ocr_required` for want of an engine is read
+      // again once one works.
       ocrReread: createOcrRereadPolicy({
         capability: ocrCapability,
         ...(config.ocr?.engine !== undefined ? { preference: config.ocr.engine } : {}),
-      }),
-      imageOcrVersionSuffix: createImageOcrVersionSuffix({
-        capability: ocrCapability,
-        ...(config.ocr?.engine !== undefined ? { preference: config.ocr.engine } : {}),
-        ...(config.ocr?.platform !== undefined ? { platform: config.ocr.platform } : {}),
       }),
       // On a Mac a still image is also prepared for media search (a JPEG in
       // the owner-only media cache), so its picture can be embedded. The

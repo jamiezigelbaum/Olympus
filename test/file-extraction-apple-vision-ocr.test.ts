@@ -280,8 +280,12 @@ describe('apple vision ocr: the text lane routes scans and images to it', () => 
     const lane = createTextExtractor({
       imageOcr: createImageOcr({ commandRunner: missing, engine: { platform: 'linux' } }),
     });
-    expect(await lane.extract(extractorInput({ bytes: PNG_BYTES, mimeType: PNG_MIME })))
-      .toEqual({ status: 'metadata_only' });
+    const output = await lane.extract(extractorInput({ bytes: PNG_BYTES, mimeType: PNG_MIME }));
+    expect(output.status).toBe('metadata_only');
+    // Marked as waiting for OCR, so it is read once an engine works.
+    expect(output.status === 'metadata_only' ? output.derivations?.[0]?.warnings : []).toEqual(
+      expect.arrayContaining(['ocr_required', 'ocr_unavailable']),
+    );
   });
 
   test('neither engine available leaves a scan visibly ocr_required', async () => {

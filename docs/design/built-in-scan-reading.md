@@ -43,8 +43,10 @@ but cannot read it is not an engine. The answer picks the engine:
 
 A picture is read by `tesseract` when it reads the fixture picture, and is
 otherwise names-only. The raster engine renders grayscale PNG pages at 200 dpi
-(lowered so the first page's long edge stays within the same 3,000-pixel cap
-as Vision) in ranges of eight pages, reads each page with `tesseract
+in ranges of eight pages, lowering the resolution of each page from that page's
+own size (as far as 1 dpi) so every page's long edge stays within the same
+3,000-pixel cap as Vision; when `pdfinfo` cannot describe the document it asks
+`pdftoppm` to scale the long edge instead (`-scale-to`, at most 2,400 px), reads each page with `tesseract
 --psm 3`, and keeps Vision's bounds: 100 pages, the text cap, a 600-second
 whole-file deadline, each cut recorded as a warning. It marks its text
 `ocr_engine_tesseract`. A PDF `pdftoppm` refuses settles with the lane's
@@ -55,19 +57,31 @@ while none does, so an install is noticed without a process per file.
 
 ### Recovery
 
-* A scan settled `ocr_required` (no engine worked) is requeued once, unchanged,
-  when the probe passes: the text extractor carries the runner's `reread`
-  policy (`unreadWarnings: ['ocr_required']`). The requeue is once ever per
-  job, so a reader that works and then still fails a file costs one more try.
-* A picture is queued afresh under an extractor version suffixed
-  `.image-ocr-<date>` while tesseract reads pictures. Pictures read names-only
-  before are therefore read once tesseract works, with no marker needed. A Mac
-  that reads with Vision never gets the suffix, so no picture there is read
-  again.
+* A scan or picture the text lane could not read because no OCR engine ran
+  settles `metadata_only` with `ocr_required` and `ocr_unavailable` on its
+  derivation; the job keeps its identity (no version change). The text
+  extractor carries the runner's `reread` policy (`unreadWarnings:
+  ['ocr_required']`, `notReadyWarnings: ['ocr_unavailable']`): when the probe
+  says OCR works, the item is requeued and read. An item carrying
+  `ocr_unavailable` was never read, so it stays eligible until it is; only items
+  settled before the marker existed spend the once-ever requeue.
+* The decision uses a FRESH probe answer only (an expired "ready" starts a
+  probe and answers `pending`), and a command found missing when it is run
+  forgets the cached answer, so a stale answer cannot spend a recovery.
+* A picture settled before the marker existed carries no `ocr_required`, so it
+  is not found by the policy.
+* With the engine pinned to `tesseract`, pictures are not read in the text lane
+  and are not marked, as before.
+* A scan that was only partly read settles with its cut recorded
+  (`ocr_pdf_pages_capped`, `ocr_pdf_time_capped`, `ocr_pdf_page_unreadable`),
+  also when no page yielded text; a command failure that left nothing read is a
+  retryable failure, not an empty scan.
 
 `olympus doctor` (`ocr_reading`) and `olympus setup` (an optional `ocr`
 finding) report the engines, or one install command by distribution from
-`/etc/os-release`: `sudo pacman -S --needed tesseract tesseract-data-eng
+`/etc/os-release` and honour `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE`
+(pinned to `tesseract`, the report says what that engine reads and the one
+remedy is the setting): `sudo pacman -S --needed tesseract tesseract-data-eng
 poppler` (Arch, Omarchy), `sudo apt install tesseract-ocr poppler-utils`
 (Debian, Ubuntu), `sudo dnf install tesseract poppler-utils` (Fedora), else the
 package names. `ocrmypdf` is never required. Olympus does not bundle tesseract.

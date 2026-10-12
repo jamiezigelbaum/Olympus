@@ -301,6 +301,17 @@ export interface OcrCapabilityProbe {
    */
   peek(): OcrCapabilitySnapshot | undefined;
   /**
+   * The cached answer only while it is fresh (inside its time to live), else
+   * undefined. A decision that spends a one-time recovery must use this, not
+   * `peek()`: an expired "ready" says nothing about the machine now.
+   */
+  peekFresh(): OcrCapabilitySnapshot | undefined;
+  /**
+   * Forget the cached answer, because a command it vouched for proved to be
+   * missing when it was run. The next caller probes again.
+   */
+  invalidate(): void;
+  /**
    * Start a probe in the background when there is no fresh answer.
    */
   warm(): void;
@@ -327,6 +338,9 @@ export function createOcrCapabilityProbe(options: OcrCapabilityProbeOptions = {}
   }));
   let cached: OcrCapabilitySnapshot | undefined;
   let inFlight: Promise<OcrCapabilitySnapshot> | undefined;
+  // Bumped by `invalidate()`: a probe that started before it must not put a
+  // possibly stale answer back.
+  let generation = 0;
 
   const fresh = (): boolean => {
     if (!cached) return false;
@@ -334,7 +348,9 @@ export function createOcrCapabilityProbe(options: OcrCapabilityProbeOptions = {}
     return now() - cached.checkedAt < ttl;
   };
   const refresh = (): Promise<OcrCapabilitySnapshot> => {
-    inFlight ??= run()
+    if (inFlight) return inFlight;
+    const startedIn = generation;
+    const probing: Promise<OcrCapabilitySnapshot> = run()
       .catch((): OcrCapabilitySnapshot => ({
         tesseract: 'failed',
         pdftoppm: 'failed',
@@ -344,11 +360,12 @@ export function createOcrCapabilityProbe(options: OcrCapabilityProbeOptions = {}
         checkedAt: now(),
       }))
       .then((snapshot) => {
-        cached = snapshot;
-        inFlight = undefined;
+        if (startedIn === generation) cached = snapshot;
+        if (inFlight === probing) inFlight = undefined;
         return snapshot;
       });
-    return inFlight;
+    inFlight = probing;
+    return probing;
   };
   return {
     async snapshot() {
@@ -356,6 +373,12 @@ export function createOcrCapabilityProbe(options: OcrCapabilityProbeOptions = {}
       return refresh();
     },
     peek: () => cached,
+    peekFresh: () => (cached && fresh() ? cached : undefined),
+    invalidate() {
+      generation += 1;
+      cached = undefined;
+      inFlight = undefined;
+    },
     warm() {
       if (!fresh()) void refresh();
     },

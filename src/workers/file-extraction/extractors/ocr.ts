@@ -54,6 +54,7 @@ import {
   createTextExtractor,
   isCommandMissing,
   missingBytesFailure,
+  OCR_UNAVAILABLE_WARNING,
   textLaneAccepts,
   type ImageOcr,
   type PdfOcr,
@@ -246,24 +247,23 @@ async function withVision(
 }
 
 /**
- * Appended to the text lane's image job version while a command engine reads
- * pictures. Job key parts allow only the job store's safe identifier
- * characters (see `IMAGE_MEDIA_VERSION_SUFFIX`).
- */
-export const IMAGE_OCR_VERSION_SUFFIX = '.image-ocr-2026-10-12';
-
-/**
- * When the text lane's unread scans are read again: a scanned PDF settled
- * `ocr_required` while no OCR engine worked is requeued, once, when the
- * probe says one does. The runner asks `prepare()` only when such jobs exist,
- * and requeues each of them once ever, so a reader that works and then still
- * cannot read a file costs that file one more try, never a loop.
+ * When the text lane's unread scans and pictures are read again. An item the
+ * text lane settled `ocr_required` because no OCR engine ran (`ocr_unavailable`
+ * marks that the engine was not there, as opposed to a reader that ran and
+ * found nothing) is requeued when the probe says OCR works now. Such an item
+ * was never read, so it stays eligible until it is: the once-ever requeue
+ * is spent only by items settled before the marker existed.
  *
- * `prepare()` is synchronous: it answers from the probe's cache and starts a
- * background probe when the cache is stale, so the answer is `pending` until
- * the first probe finishes. Vision is deliberately not consulted: a Mac that
- * reads with Vision settles nothing `ocr_required`, and one whose Vision is
- * broken is not made ready by a file existing.
+ * The runner asks `prepare()` only when such items exist. It is synchronous
+ * and answers from a FRESH probe only: an expired "ready" says nothing about
+ * the machine now, so it starts a probe in the background and answers
+ * `pending` until that finishes. Vision is deliberately not consulted: a Mac
+ * that reads with Vision settles nothing `ocr_required`, and one whose Vision
+ * is broken is not made ready by a file existing.
+ *
+ * A host whose engine can read pictures but not PDFs (no `pdftoppm`) is not
+ * ready: PDFs requeued there would settle unread again and be requeued on
+ * every run.
  */
 export function createOcrRereadPolicy(options: {
   capability: OcrCapabilityProbe;
@@ -273,34 +273,16 @@ export function createOcrRereadPolicy(options: {
   return {
     unreadWarnings: ['ocr_required'],
     unreadTerminalErrorKinds: [],
+    notReadyWarnings: [OCR_UNAVAILABLE_WARNING],
     prepare() {
-      const seen = options.capability.peek();
-      options.capability.warm();
-      if (!seen) return 'pending';
+      const seen = options.capability.peekFresh();
+      if (!seen) {
+        options.capability.warm();
+        return 'pending';
+      }
       const ready = pinned ? seen.ocrmypdf === 'ok' : seen.pdfEngine !== undefined;
       return ready ? 'ready' : 'unavailable';
     },
-  };
-}
-
-/**
- * The suffix for the text lane's image job version, or undefined. Defined
- * only while `tesseract` is the engine that reads pictures and has passed its
- * probe: a Mac that reads with Vision never sees it, so no picture there is
- * read again, and a host without a working tesseract keeps its pictures'
- * jobs as they were.
- */
-export function createImageOcrVersionSuffix(options: {
-  capability: OcrCapabilityProbe;
-  preference?: OcrEnginePreference;
-  platform?: NodeJS.Platform;
-}): () => string | undefined {
-  const preference = options.preference ?? 'auto';
-  const visionSelected = appleVisionOcrSelected(preference, options.platform ?? process.platform);
-  return () => {
-    if (preference === 'tesseract' || visionSelected) return undefined;
-    options.capability.warm();
-    return options.capability.peek()?.imageEngine ? IMAGE_OCR_VERSION_SUFFIX : undefined;
   };
 }
 
@@ -377,7 +359,9 @@ export function createPdfOcr(options: {
     maxBoundedTextChars,
   });
   return async ({ bytes, mimeType, sizeBytes }) => {
-    const laneInput = commandLaneInput({ bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs });
+    const laneInput = commandLaneInput({
+      bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs, capability: engine.capability,
+    });
     try {
       return await runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision))
         ?? await commandPdfOcr(engine, laneInput));
@@ -396,9 +380,11 @@ export function createPdfOcr(options: {
  * unavailable, it reads with `tesseract` once the capability probe has seen
  * tesseract read a fixture (`ocr-capability.ts`): checking the binary exists
  * is not enough. Without a working tesseract it answers undefined and images
- * stay names-only in the text lane; they are read once tesseract works (the
- * text extractor versions image jobs by this capability). With the engine
- * pinned to `tesseract` it answers undefined as it always did.
+ * stay names-only in the text lane, marked as waiting for OCR (the text
+ * extractor adds the marker), and are read again by the reread policy once
+ * tesseract works. With the engine pinned to `tesseract` it answers
+ * undefined as it always did, and the registry does not offer it to the text
+ * lane at all, so those pictures are not marked.
  */
 export function createImageOcr(options: {
   maxBoundedTextChars?: number;
@@ -418,7 +404,9 @@ export function createImageOcr(options: {
   });
   return async ({ bytes, mimeType, sizeBytes }) => {
     if (!engine.vision && engine.pinned) return undefined;
-    const laneInput = commandLaneInput({ bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs });
+    const laneInput = commandLaneInput({
+      bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs, capability: engine.capability,
+    });
     try {
       return await runOcrLane(async () => await withVision(engine, (vision) => visionImage(laneInput, vision))
         ?? await commandImageOcr(engine, laneInput));
@@ -440,14 +428,23 @@ function commandLaneInput(input: {
   maxBoundedTextChars: number;
   commandRunner: ExtractionCommandRunner;
   timeoutMs: number;
+  /**
+   * The probe that vouched for the commands: a command that turns out to be
+   * missing means its answer is wrong, so it is forgotten.
+   */
+  capability: OcrCapabilityProbe;
 }): OcrLaneInput {
+  const { capability, ...laneInput } = input;
   return {
-    ...input,
+    ...laneInput,
     commandRunner: async (request) => {
       try {
         return await input.commandRunner(request);
       } catch (error) {
-        if (isCommandMissing(error)) throw new OcrUnavailableError();
+        if (isCommandMissing(error)) {
+          capability.invalidate();
+          throw new OcrUnavailableError();
+        }
         throw error;
       }
     },
