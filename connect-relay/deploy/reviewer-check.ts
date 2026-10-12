@@ -42,8 +42,12 @@ export interface CheckResult {
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
+/** One step's limit, so a relay or demo engine that stops answering fails the walk instead of holding it. */
+const STEP_TIMEOUT_MS = 10_000;
+
 /** One JSON-RPC answer from a POST, plain JSON or a single Server-Sent Event. */
 async function rpcAnswer(response: Response): Promise<{ result?: Record<string, unknown>; error?: unknown }> {
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const text = await response.text();
   const event = /^data: (.*)$/m.exec(text);
   return JSON.parse(event ? event[1]! : text);
@@ -53,15 +57,28 @@ async function rpcAnswer(response: Response): Promise<{ result?: Record<string, 
  * `baseUrl` sends the requests somewhere else with `host` as their Host
  * header (a test's loopback relay); the answers must still name `https://<host>`.
  */
-export async function checkReviewerPath(host: string, options: { demo: boolean; baseUrl?: string }): Promise<CheckResult[]> {
+export async function checkReviewerPath(host: string, options: { demo: boolean; baseUrl?: string; deadline?: number }): Promise<CheckResult[]> {
   const origin = `https://${host}`;
   const base = options.baseUrl ?? origin;
-  const fetch = (path: string, init: RequestInit = {}) =>
-    globalThis.fetch(`${base}${path}`, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...(options.baseUrl ? { Host: host } : {}) } });
+  // Each step gets STEP_TIMEOUT_MS, less once the caller's deadline is near
+  // (at least a second), and the abort covers reading the body too.
+  let signal: AbortSignal = AbortSignal.timeout(STEP_TIMEOUT_MS);
+  const fetch = (path: string, init: RequestInit = {}) => globalThis.fetch(`${base}${path}`, {
+    ...init,
+    signal,
+    headers: { ...(init.headers as Record<string, string> | undefined), ...(options.baseUrl ? { Host: host } : {}) },
+  });
   const results: CheckResult[] = [];
   const check = async (step: string, run: () => Promise<string | undefined>) => {
+    const limit = options.deadline === undefined
+      ? STEP_TIMEOUT_MS
+      : Math.max(1_000, Math.min(STEP_TIMEOUT_MS, options.deadline - Date.now()));
+    signal = AbortSignal.timeout(limit);
     try {
-      const problem = await run();
+      const problem = await Promise.race([
+        run(),
+        new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(new Error(`no answer within ${limit} ms`)), { once: true })),
+      ]);
       results.push(problem === undefined ? { step, ok: true } : { step, ok: false, detail: problem });
     } catch (error) {
       results.push({ step, ok: false, detail: error instanceof Error ? error.message : String(error) });
@@ -173,7 +190,7 @@ if (import.meta.main) {
   const deadline = Date.now() + waitMs;
   let results: CheckResult[];
   for (;;) {
-    results = await checkReviewerPath(host, { demo });
+    results = await checkReviewerPath(host, { demo, deadline });
     if (results.every((result) => result.ok) || Date.now() >= deadline) break;
     await Bun.sleep(5_000);
   }

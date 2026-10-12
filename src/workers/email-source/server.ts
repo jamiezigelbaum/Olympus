@@ -3353,7 +3353,10 @@ export async function main(): Promise<void> {
     ? {
         async answer(request: Parameters<typeof analystSourceAnswer.answer>[0]) {
           // The sniffer shares the private pool: an answer takes it at once.
-          return answerActivity.run(() => analystSourceAnswer.answer(request));
+          // A background agent's answer does not hold back queued background
+          // answers the way the owner's own work does (core/source-answer-jobs.ts).
+          const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
+          return answerActivity.run(() => analystSourceAnswer.answer(request), kind);
         },
       }
     : undefined;
@@ -4484,6 +4487,7 @@ export async function main(): Promise<void> {
   const { resolveRemotePublicUrls } = await import('../../core/remote-public-url.ts');
   const { carriesRelayMarker, createRemotePublicUrlSource, isRelayedRequest } = await import('../../core/remote-access.ts');
   const { withRequestPeer } = await import('../../core/request-peer.ts');
+  const { createRelaySurfacesHandler, withRelaySurfacesRoute } = await import('../relay-surfaces.ts');
   const { isChatGptGrant } = await import('../remote-oauth/pinned-clients.ts');
   const { isDemoGrant } = await import('../remote-oauth/demo-consent.ts');
   const { createRemoteOAuthHandler, withRemoteOAuthRoutes } = await import('../remote-oauth/handler.ts');
@@ -4580,6 +4584,17 @@ export async function main(): Promise<void> {
         : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
     });
   }
+  // A background connection: a live remote agent that is not ChatGPT (the
+  // owner's ChatGPT is the owner's own work). An unknown id is not one.
+  function isBackgroundConnection(connectionId: string | undefined): boolean {
+    if (!connectionId) return false;
+    try {
+      const record = remoteConnections()?.list().find((connection) => connection.id === connectionId);
+      return record !== undefined && !isChatGptGrant(record);
+    } catch {
+      return false;
+    }
+  }
   // Slow source_answer calls from remote agents hand off to in-memory jobs
   // bound to the connection; see core/source-answer-jobs.ts.
   const { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv } = await import('../../core/source-answer-jobs.ts');
@@ -4592,6 +4607,16 @@ export async function main(): Promise<void> {
       const id = owner.slice('remote:'.length);
       const record = remoteConnections()?.list().find((connection) => connection.id === id);
       return record === undefined || record.revokedAt !== null;
+    },
+    // Remote agents that are not ChatGPT wait behind the owner's own answers,
+    // one running per connection, in a small fair queue
+    // (docs/design/background-agents.md section E).
+    priority: {
+      isBackground: (owner) => owner.startsWith('remote:') && isBackgroundConnection(owner.slice('remote:'.length)),
+      interactive: {
+        busy: () => answerActivity.interactiveInFlight > 0,
+        onIdle: (listener) => answerActivity.onInteractiveIdle(listener),
+      },
     },
   });
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30_000);
@@ -5172,7 +5197,13 @@ export async function main(): Promise<void> {
     // panel's one-time sealed collection (workers/chatgpt/private-answer-jobs.ts).
     // Each request's peer address is recorded for the routes that check it
     // (relay-mode OAuth approval: core/request-peer.ts).
-    fetch: withRequestPeer(withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
+    // The relay child reads the offline tool-list mapping it keeps the relay
+    // in step with (workers/relay-surfaces.ts), by its per-boot secret.
+    fetch: withRequestPeer(withRelaySurfacesRoute(createRelaySurfacesHandler({
+      connections: () => remoteConnections(),
+      publicUrls: remotePublicUrls,
+      isRelayed: isRelayedRequest,
+    }), withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
       questions: privateQuestions,
       isRelayed: isRelayedRequest,
@@ -5213,7 +5244,7 @@ export async function main(): Promise<void> {
         })),
         withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),
       )),
-    )))),
+    ))))),
   });
   sourceScheduler?.start();
   await reconcileCaptures();

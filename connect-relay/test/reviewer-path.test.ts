@@ -212,7 +212,23 @@ describe('the submitted demo engine behind the current relay', () => {
       if (offline.result && !('from' in offline.result)) break;
       await Bun.sleep(20);
     }
-    const submittedList = golden.find((answer) => answer.name === 'tools/list')!.body as { result: { tools: unknown[] } };
-    expect(offline.result?.tools).toEqual(submittedList.result.tools);
+    const submitted = (name: string) => golden.find((answer) => answer.name === name)!.body as { result: Record<string, unknown> };
+    const submittedTools = submitted('tools/list').result.tools as Array<{ name: string; _meta: unknown }>;
+    expect(offline.result?.tools).toEqual(submittedTools);
+
+    const offlineCall = async (id: number, method: string, params: Record<string, unknown>) => (await (await fetch(`${relay.url}/openai/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+    })).json()) as { result: Record<string, unknown> };
+    // The offline dashboard carries the submitted dashboard tool's UI metadata, and every submitted bundle reads as submitted.
+    const dashboard = await offlineCall(9, 'tools/call', { name: 'olympus_dashboard', arguments: {} });
+    expect(dashboard.result.structuredContent).toMatchObject({ connection: { state: 'mac_offline' } });
+    expect(dashboard.result._meta).toEqual(submittedTools.find((tool) => tool.name === 'olympus_dashboard')!._meta);
+    for (const answer of golden.filter((recorded) => recorded.name.startsWith('resources/read '))) {
+      const uri = answer.name.slice('resources/read '.length);
+      const read = await offlineCall(10, 'resources/read', { uri });
+      expect(read.result.contents).toEqual((answer.body as { result: { contents: unknown } }).result.contents);
+    }
   });
 });

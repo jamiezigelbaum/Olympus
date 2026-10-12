@@ -10,6 +10,14 @@
  * assembled into one buffer (no per-frame objects, so tiny or empty frames
  * cost nothing extra), capped in bytes and frames, charged to a budget across
  * all requests, and given a local deadline that does not depend on the relay.
+ *
+ * When the relay speaks the `surfaces` feature (shared/protocol.ts), the
+ * client also keeps the relay's offline tool-list mapping for this install in
+ * step with the engine (`surfaces` below): sent whole on every new session,
+ * again whenever it changes (checked every `surfaceSyncMs`, and right after a
+ * token or revocation request it served, so a rotation or a revocation
+ * through the relay reaches it at once), and never to a relay that did not
+ * offer the feature.
  */
 import {
   AUTH_BOUND,
@@ -17,6 +25,7 @@ import {
   CONNECT_PATH,
   PROTOCOL_VERSION,
   PowCancelledError,
+  RELAY_FEATURE_SURFACES,
   chunks,
   decodeBodyFrame,
   encodeBodyFrame,
@@ -26,6 +35,7 @@ import {
   streamId,
   type AuthScheme,
   type ClientToRelayMessage,
+  type SurfaceEntry,
 } from '../shared/protocol.ts';
 import { FORWARDED_METHODS, forwardPath, forwardRequestHeaders, forwardResponseHeaders } from './forward.ts';
 import type { InstallIdentity } from './identity.ts';
@@ -68,6 +78,14 @@ export interface RelayClientOptions {
   readonly maxConcurrent?: number;
   /** Paths forwarded to the worker (default FORWARDED_PATHS; a demo install adds its sign-in path). */
   readonly forwardedPaths?: readonly string[];
+  /**
+   * The engine's current offline tool-list mapping for this install
+   * (src/workers/relay-surfaces.ts), or undefined when it cannot be read
+   * right now (nothing is sent then; the relay keeps what it had).
+   */
+  readonly surfaces?: () => Promise<readonly SurfaceEntry[] | undefined>;
+  /** How often the mapping is re-read while online (default 30 s). */
+  readonly surfaceSyncMs?: number;
   /** Request body cap (default 1 MiB, the relay's own). */
   readonly maxRequestBodyBytes?: number;
   /** Body frames one request may arrive in (default 4096; the relay sends 64 KiB frames). */
@@ -117,6 +135,8 @@ export class RelayClient {
   /** Bytes allocated for request bodies across `inbound`. */
   private bufferedRequestBytes = 0;
   private lastPongAt = 0;
+  /** The current session's relay takes `surfaces` frames. */
+  private surfaceSync: { timer: ReturnType<typeof setInterval>; sent: string | undefined; running: boolean; again: boolean } | undefined;
 
   constructor(private readonly options: RelayClientOptions) {
     const target = new URL(options.target);
@@ -151,6 +171,7 @@ export class RelayClient {
     this.handshake = undefined;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
+    this.stopSurfaceSync();
     this.abortAll();
     this.socket?.close(1000, 'stopping');
     this.socket = undefined;
@@ -200,6 +221,7 @@ export class RelayClient {
         this.socket = undefined;
         if (this.heartbeat) clearInterval(this.heartbeat);
         this.heartbeat = undefined;
+        this.stopSurfaceSync();
         this.abortAll();
       }
       if (this.stopped) return;
@@ -305,6 +327,7 @@ export class RelayClient {
           this.failures = 0;
           this.register = false;
           this.startHeartbeat(() => abandon(4004, 'heartbeat_timeout', 'the relay stopped answering'));
+          if (Array.isArray(message.features) && message.features.includes(RELAY_FEATURE_SURFACES)) this.startSurfaceSync();
           this.options.onStatus?.({ state: 'online', installId: identity.installId, connectedAt: Date.now() });
           return;
         case 'pong':
@@ -366,6 +389,48 @@ export class RelayClient {
       }
       this.send({ type: 'ping' });
     }, interval);
+  }
+
+  /** Sends the mapping now, and again whenever it changes, for this session. */
+  private startSurfaceSync(): void {
+    this.stopSurfaceSync();
+    if (!this.options.surfaces) return;
+    const timer = setInterval(() => this.syncSurfaces(), this.options.surfaceSyncMs ?? 30_000);
+    timer.unref?.();
+    this.surfaceSync = { timer, sent: undefined, running: false, again: false };
+    this.syncSurfaces();
+  }
+
+  private stopSurfaceSync(): void {
+    if (this.surfaceSync) clearInterval(this.surfaceSync.timer);
+    this.surfaceSync = undefined;
+  }
+
+  /** Reads the engine's mapping and sends it when it differs from what this session sent; one read at a time. */
+  private syncSurfaces(): void {
+    const sync = this.surfaceSync;
+    const read = this.options.surfaces;
+    if (!sync || !read) return;
+    if (sync.running) {
+      sync.again = true;
+      return;
+    }
+    sync.running = true;
+    sync.again = false;
+    void read().then(
+      (entries) => {
+        if (this.surfaceSync !== sync || !entries) return;
+        const message: ClientToRelayMessage = { type: 'surfaces', v: 1, entries: [...entries] };
+        const text = JSON.stringify(message);
+        if (text === sync.sent || this.socket?.readyState !== WebSocket.OPEN) return;
+        this.socket.send(text);
+        sync.sent = text;
+      },
+      () => undefined,
+    ).finally(() => {
+      sync.running = false;
+      if (sync.again && this.surfaceSync === sync) this.syncSurfaces();
+    });
   }
 
   private schedule(delayMs: number): void {
@@ -528,6 +593,8 @@ export class RelayClient {
       if (!request.abort.signal.aborted) this.send({ type: 'abort', id });
     } finally {
       this.drop(id, request);
+      // A token was issued or rotated, or one was revoked: the mapping changed.
+      if (path.startsWith('/connect/token') || path.startsWith('/connect/revoke')) this.syncSurfaces();
     }
   }
 

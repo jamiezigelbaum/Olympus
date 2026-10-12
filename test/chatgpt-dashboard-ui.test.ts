@@ -9,6 +9,8 @@ import { Window } from 'happy-dom';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_TOOLS } from '../src/workers/dashboard/chatgpt/privacy.ts';
 import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
+import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import {
   CHATGPT_DASHBOARD_CSS,
   CHATGPT_DASHBOARD_DARK,
@@ -341,6 +343,35 @@ describe('ready page', () => {
     expect(host.calls.filter(([name]) => name === 'openExternal').map(([, args]) => args)).toEqual([
       { href: help('search') }, { href: help('models') }, { href: help('connect') },
     ]);
+  });
+
+  test('the last line names the controls only the computer has, and Open opens Olympus there', () => {
+    const host = mount({ openai: {} });
+    host.push({ structuredContent: model({ computerControls: { href: 'https://olympusplugin.ai/open/dashboard/' } }) });
+    const line = host.win.document.querySelector('#app .more-on-computer')!;
+    expect(line).not.toBeNull();
+    // After Models, at the end of the page.
+    expect(host.win.document.querySelector('#app main')!.lastElementChild).toBe(line);
+    expect(line.querySelector('p')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputer);
+    expect(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputer).toBe('More controls on your computer: Private answers, anonymous answers, keys and agents');
+    const open = line.querySelector('button')!;
+    expect(open.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputerOpen);
+    expect(open.getAttribute('aria-label')).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputerOpenLabel);
+    open.click();
+    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://olympusplugin.ai/open/dashboard/' }]]);
+  });
+
+  test('the engine always sends that page, and only an olympusplugin.ai page crosses the builder', () => {
+    // The engine's dashboard result, over the preview fixture.
+    expect(previewDashboardToolResult('partial', false).structuredContent?.computerControls).toEqual({ href: 'https://olympusplugin.ai/open/dashboard/' });
+    expect(copyDashboardViewModel(model({ computerControls: { href: 'https://evil.example/open/dashboard/' } })).computerControls).toBeUndefined();
+    // Without it (an older engine), and while the page waits on the connection, there is no line.
+    const old = mount();
+    old.push({ structuredContent: model() });
+    expect(old.win.document.querySelector('.more-on-computer')).toBeNull();
+    const offline = mount();
+    offline.push({ structuredContent: model({ connection: { state: 'mac_offline' }, computerControls: { href: 'https://olympusplugin.ai/open/dashboard/' } }) });
+    expect(offline.win.document.querySelector('.more-on-computer')).toBeNull();
   });
 
   test('a fix with only a help page is that link; pages off olympusplugin.ai are never linked', () => {
