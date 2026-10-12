@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.0-rc.6 - 2026-10-12
+
+- **Claude and Grok connect through the Olympus relay.** Claude custom
+  connectors (web, desktop and phone) and Grok connectors add
+  `https://mcp.olympusplugin.ai/mcp` and are approved with one click in a
+  browser on the computer, as ChatGPT is; no tunnel and no pairing code.
+  They get Olympus's remote tools only, never ChatGPT's surface or the
+  directory endpoint, and their anonymous answers never go to a model from
+  their own provider (no Anthropic model for Claude, no xAI model for Grok).
+- **Setup steps say what the screens say.** The approval button is
+  **Connect**; the Agents page (On this computer → Agents) gives each agent
+  steps that work through the relay, says which agents need a tunnel of your
+  own, and no longer offers Muse until an Olympus connector exists in Meta's
+  catalog. The Claude Code and Codex prompt works on a Mac install without
+  OpenClaw (`~/.local/bin/olympus serve`). Install guides and setup output
+  describe the one dashboard, and the local-models prompt points at Keys.
+
 ## 1.0.0-rc.5 - 2026-10-12
 
 - **OpenClaw core updates are no longer blocked by Olympus.** Before an
