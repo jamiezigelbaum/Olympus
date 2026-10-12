@@ -267,6 +267,12 @@ describe('CLI tool surface', () => {
     expect(sovereigntyHelp.stdout).toContain('olympus sovereignty init');
   }, 30_000);
 
+  test('engine group help names the current platform service manager', async () => {
+    const result = await runBin(['engine', '--help']);
+    expect(result.stdout).toContain(process.platform === 'linux' ? 'per-user systemd service' : 'per-user LaunchAgent');
+    if (process.platform === 'linux') expect(result.stdout).not.toContain('this Mac');
+  });
+
   test('the public CLI catalog rejects repository-only commands before dispatch', async () => {
     expect(isV04PublicCliInvocation(['source', 'answer', 'question'])).toBe(true);
     expect(isV04PublicCliInvocation([])).toBe(true);

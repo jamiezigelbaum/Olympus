@@ -1414,7 +1414,9 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
   ],
   engine: [
     'Usage: olympus engine <command>',
-    'Runs Olympus on this Mac without OpenClaw, as a per-user LaunchAgent.',
+    process.platform === 'linux'
+      ? 'Runs Olympus on this computer without OpenClaw, as a per-user systemd service.'
+      : 'Runs Olympus on this Mac without OpenClaw, as a per-user LaunchAgent.',
     'Commands:',
     ...Object.values(ENGINE_CLI_USAGE).map((usage) => `  ${usage}`),
   ],

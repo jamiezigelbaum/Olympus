@@ -1224,7 +1224,7 @@ final logout/reboot; check again after that teardown for full-removal proof.
 
 ### Integration proof and remaining qualification
 
-Local remote-build proof: **819 passed, 0 failed, 4 skipped across 37 focused
+Local remote-build proof: **820 passed, 0 failed, 4 skipped across 37 focused
 files**, including architecture, public-surface and private-ops guards. The
 canonical documentation inventory is 48 files. Build and
 `bunx tsc --noEmit -p .` passed; a subsequent `--artifact dist` rebuild returned
