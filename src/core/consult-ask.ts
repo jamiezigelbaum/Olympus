@@ -33,6 +33,7 @@ import {
 } from './consult-settings.ts';
 import type { ZkapiConsultOutcome, ZkapiConsultResult, ZkapiDaemonErrorCode } from './consult-transport-zkapi.ts';
 import type { ConsultWriterInput, ConsultWriterOutcome } from './consult-writer.ts';
+import { openPageUrl } from './open-targets.ts';
 
 /** The typed question's bound, in characters (the transport also caps it at 8 KiB). */
 export const CONSULT_ASK_MAX_CHARS = 4_000;
@@ -155,8 +156,12 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   empty: 'Type a question first.',
   tooLong: `Keep the question under ${CONSULT_ASK_MAX_CHARS.toLocaleString('en-US')} characters.`,
   settingsInvalid: 'The anonymous answers settings file could not be read, so nothing was sent.',
-  /** The dashboard switch is off (or anonymous answers were never set up): the agent tools send nothing. */
-  off: 'Not sent: anonymous answers are off on your dashboard. Turn them on under Private answers, then ask again.',
+  /**
+   * The dashboard switch is off (or anonymous answers were never set up): the
+   * agent tools send nothing. The link opens Private answers on the computer,
+   * so an agent passes on the exact page instead of guessing one.
+   */
+  off: `Not sent: anonymous answers are off. Turn them on in Private answers on your computer (${openPageUrl({ kind: 'private_answers' })}), then ask again.`,
   declined: 'Your model chose not to send anything.',
   writerFailed: 'Your model could not prepare the question, so nothing was sent.',
   secret: 'Not sent: the question looks like it contains a password, key or token.',
