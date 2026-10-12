@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 // Experimental zkAPI consult transport (design: docs/design/frontier-consult-lane.md,
 // track Z, tranche Z1).
 //
@@ -57,10 +58,13 @@ import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import {
   FileLeaseBusyError,
   processInstanceIdentity,
-  withFileLease,
   withFileLeaseSync,
   type ProcessInstanceIdentity,
 } from './file-lease.ts';
+import {
+  EngineMaintenanceInProgressError,
+  withEngineConsultAdmission,
+} from './engine-maintenance.ts';
 import { managedToolExecutable } from './managed-tools.ts';
 import {
   parseIsoDate,
@@ -846,6 +850,7 @@ interface ZkapiState {
 }
 
 export function defaultZkapiStatePath(home: string = homedir()): string {
+  if (process.platform === 'linux') return join(resolveLinuxEngineLayout({ ...process.env, HOME: home }).configDir, 'zkapi-consult-state.json');
   return join(home, '.olympus', 'zkapi-consult-state.json');
 }
 
@@ -2148,8 +2153,6 @@ async function openSession(
   recovery: boolean,
 ): Promise<ZkapiOpenSessionResult> {
   const initialIdentity: ZkapiNetworkIdentity = options.settings.tor === 'off' ? 'visible' : 'not_verified';
-  if (zkapiConsultInFlight) return failure('busy', 'not_sent', initialIdentity);
-  zkapiConsultInFlight = true;
   const statePath = options.statePath ?? defaultZkapiStatePath();
   const sent = { dispatched: false };
   // Timing never throws and never changes control flow: a failed or
@@ -2176,13 +2179,19 @@ async function openSession(
     }, control.deadlineMs)
     : undefined;
   let leaseHeld = false;
+  let admissionHeld = false;
   const finished = (async (): Promise<ZkapiConsultResult> => {
     try {
       mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
-      const result = await withFileLease(
-        `${statePath}.session`,
+      const result = await withEngineConsultAdmission(
+        statePath,
         () => {
           leaseHeld = true;
+          // The cross-process admission and maintenance probe happen before
+          // this in-process fast path, closing the lifecycle/admission race.
+          if (zkapiConsultInFlight) return Promise.resolve(failure('busy', 'not_sent', initialIdentity));
+          zkapiConsultInFlight = true;
+          admissionHeld = true;
           return runSession(recovery, options, statePath, bridge, sent, clock, startedAt);
         },
         { acquireTimeoutMs: 50 },
@@ -2201,10 +2210,13 @@ async function openSession(
       if (!leaseHeld) stageMs = withTiming(stageMs, 'leaseAcquireMs', total);
       const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
       if (error instanceof FileLeaseBusyError) return failure('busy', 'not_sent', initialIdentity, timed);
+      if (error instanceof EngineMaintenanceInProgressError) return failure('busy', 'not_sent', initialIdentity, timed);
       return failure('internal_error', sent.dispatched ? 'unknown' : 'not_sent', initialIdentity, timed);
     } finally {
-      zkapiConsultInFlight = false;
-      activeSessionId = undefined;
+      if (admissionHeld) {
+        zkapiConsultInFlight = false;
+        activeSessionId = undefined;
+      }
     }
   })().then((result) => {
     // The lease is released by now. A send still waiting (the session ended

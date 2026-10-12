@@ -225,12 +225,12 @@ describe('olympus engine install/uninstall', () => {
     expect(existsSync(enginePaths(home).plistPath)).toBe(false);
   });
 
-  test('refuses a directory that is not an Olympus checkout, and non-macOS hosts', () => {
+  test('refuses a directory that is not an Olympus checkout, and unsupported hosts', () => {
     const { root, home, bun } = fixture();
     mkdirSync(join(root, 'not-olympus'));
     expect(() => installEngine({ platform: 'darwin', homeDir: home, exec: fakeLaunchctl().exec, fromCheckout: join(root, 'not-olympus'), bunBin: bun }))
       .toThrow('is not an Olympus checkout');
-    expect(() => installEngine({ platform: 'linux', homeDir: home })).toThrow('macOS');
+    expect(() => installEngine({ platform: 'freebsd', homeDir: home })).toThrow('macOS');
   });
 
   test('uninstall unloads and removes the agent but keeps config and worker env; repeating it is a no-op', () => {
@@ -273,7 +273,7 @@ describe('olympus engine install/uninstall', () => {
     expect(inspectEngine({ platform: 'darwin', homeDir: home, exec: launchctl.exec })).toMatchObject({ installed: true, state: 'running', pid: 4242 });
     const paths = enginePaths(home);
     writeFileSync(paths.logPath, `one\nworker ready token=${'a'.repeat(48)}\n`);
-    const logs = readEngineLogs({ homeDir: home, lines: 1 });
+    const logs = readEngineLogs({ platform: 'darwin', homeDir: home, lines: 1 });
     expect(logs.stdout).toEqual(['worker ready token=[redacted]']);
     expect(logs.stderr).toEqual([]);
     expect(parseInstallArgs(['--from-checkout', '/x', '--dry-run'])).toEqual({ fromCheckout: '/x', dryRun: true });
@@ -301,7 +301,7 @@ describe('engine host without OpenClaw', () => {
       async stop() { stopped.push(id); },
     });
     const lines: string[] = [];
-    const handle = await startEngineHost({
+    const handle = await startEngineHost({ platform: 'darwin',
       moduleUrl: 'file:///fixture/dist/cli.js',
       env: { HOME: home },
       homeDir: home,
@@ -433,7 +433,7 @@ if (env.LAUNCH === '0') {
     const lines: string[] = [];
     let handle: Awaited<ReturnType<typeof startEngineHost>> | undefined;
     try {
-      handle = await startEngineHost({
+      handle = await startEngineHost({ platform: 'darwin',
         moduleUrl: 'file:///fixture/dist/cli.js',
         env: { HOME: home },
         homeDir: home,
@@ -465,7 +465,7 @@ if (env.LAUNCH === '0') {
   test('refuses to start without engine.json (exit 78, so launchd throttles)', async () => {
     const { home } = fixture();
     const exits: number[] = [];
-    const handle = await startEngineHost({
+    const handle = await startEngineHost({ platform: 'darwin',
       moduleUrl: 'file:///fixture/dist/cli.js',
       homeDir: home,
       env: { HOME: home },
@@ -488,7 +488,8 @@ if (env.LAUNCH === '0') {
   test('the default analyst routes never need openclaw, and a missing openclaw is a categorical error', async () => {
     const config = buildEnvBridgeSovereigntyConfig({});
     expect(Object.values(config.modelProfiles).some((profile) => profile.provider === 'openclaw-infer')).toBe(false);
-    const model = createOpenClawInferAnalystModel({ command: '/nonexistent/openclaw' });
+    // Model ENOENT at the process boundary; emulated Linux may instead return 127.
+    const model = createOpenClawInferAnalystModel({ command: '/nonexistent/openclaw', runner: { run: async () => { throw Object.assign(new Error('missing executable'), { code: 'ENOENT' }); } } });
     await expect(model.complete({ system: 's', prompt: 'p' } as never)).rejects.toThrow('OpenClaw CLI not found');
   });
 
@@ -667,7 +668,7 @@ describe('engine upgrades restart the engine on the new build', () => {
     launchctl.calls.length = 0;
     const stuck = () => ({ since: '2026-10-10T17:09:01.821Z' });
     expect(() => restartEngine({ ...options, consultInFlight: stuck, sleepMs, quietWaitMs: 4_000 })).toThrow(/in flight since 2026-10-10T17:09:01.821Z.*strand its payment/);
-    expect(launchctl.calls.map((call) => call[1])).toEqual(['print']);
+    expect(launchctl.calls).toEqual([]);
     expect(() => installEngine({ ...options, restart: true, consultInFlight: stuck, sleepMs, quietWaitMs: 0 })).toThrow(/strand its payment/);
     expect(() => stopEngine({ ...options, consultInFlight: stuck, sleepMs, quietWaitMs: 0 })).toThrow(/strand its payment/);
     expect(launchctl.loaded()).toBe(true);

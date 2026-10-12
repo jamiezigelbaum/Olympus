@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { createHmac } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -136,7 +137,9 @@ export function environmentWithWorkerSetupEnv(
 
 export function workerSetupEnvPath(options: WorkerAuthTokenLookupOptions = {}): string {
   const env = options.env ?? process.env;
-  return options.workerEnvPath ?? join(
+  if (options.workerEnvPath) return options.workerEnvPath;
+  if (process.platform === 'linux') return resolveLinuxEngineLayout({ ...env, HOME: options.homeDir ?? env.HOME }).workerEnvPath;
+  return join(
     options.homeDir ?? optionalToken(env.HOME) ?? homedir(),
     '.config',
     'olympus',

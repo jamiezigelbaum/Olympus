@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { homedir, platform as osPlatform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -499,7 +500,7 @@ function defaultWorkerServiceExec(command: string, args: string[]): WorkerServic
   };
 }
 
-export function workerServicePaths(platform: WorkerServicePlatform, homeDir: string): {
+export function workerServicePaths(platform: WorkerServicePlatform, homeDir: string, env: Record<string, string | undefined> = process.env): {
   label: string;
   unitPath: string;
   envPath: string;
@@ -517,11 +518,12 @@ export function workerServicePaths(platform: WorkerServicePlatform, homeDir: str
       errorLogPath: join(logDir, 'worker.err'),
     };
   }
-  const stateDir = join(homeDir, '.local', 'state', 'olympus', 'worker');
+  const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
+  const stateDir = join(layout.stateHome, 'olympus', 'worker');
   return {
     label: 'olympus-worker',
-    unitPath: join(homeDir, '.config', 'systemd', 'user', 'olympus-worker.service'),
-    envPath: join(homeDir, '.config', 'olympus', 'worker.env'),
+    unitPath: join(layout.configHome, 'systemd', 'user', 'olympus-worker.service'),
+    envPath: layout.workerEnvPath,
     logPath: join(stateDir, 'worker.log'),
     errorLogPath: join(stateDir, 'worker.err'),
   };

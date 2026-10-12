@@ -1,3 +1,5 @@
+import { processInstanceIdentity } from './file-lease.ts';
+import { rotateEngineLog } from './linux-engine-service.ts';
 /**
  * The standalone engine host: what `olympus __engine-run` runs under the
  * per-user LaunchAgent (core/engine-service.ts).
@@ -23,7 +25,7 @@ import {
   reapRecordedEngineChildren,
   type EngineChildReapDeps,
 } from './engine-children.ts';
-import { ENGINE_BUILD_ENV, enginePaths, engineStatusPath, readEngineConfig } from './engine-service.ts';
+import { ENGINE_BUILD_ENV, engineServicePaths, engineStatusPath, readEngineConfig } from './engine-service.ts';
 import { createNativeEmbeddingDrainService } from './native-embedding-drain-service.ts';
 import {
   backgroundNativeProcessService,
@@ -49,6 +51,7 @@ export interface EngineServiceHealth {
 
 export interface EngineStatusFile {
   schema: typeof ENGINE_STATUS_SCHEMA;
+  process_identity?: ReturnType<typeof processInstanceIdentity>;
   pid: number;
   started_at: string;
   updated_at: string;
@@ -65,6 +68,7 @@ export interface EngineHostOptions {
   moduleUrl: string;
   env?: Record<string, string | undefined>;
   homeDir?: string;
+  platform?: string;
   /** Test seams. */
   services?: (pluginConfig: Record<string, unknown>) => NativeProcessServiceDefinition[];
   log?: (line: string) => void;
@@ -79,12 +83,13 @@ export interface EngineHostHandle {
   status(): EngineStatusFile;
 }
 
-export function engineHostServices(pluginConfig: Record<string, unknown>, moduleUrl: string): NativeProcessServiceDefinition[] {
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl });
+export function engineHostServices(pluginConfig: Record<string, unknown>, moduleUrl: string, paths?: ReturnType<typeof engineServicePaths>): NativeProcessServiceDefinition[] {
+  const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed });
   return [
     backgroundNativeProcessService(worker),
-    backgroundNativeProcessService(createNativeRelayService({ initialPluginConfig: pluginConfig, moduleUrl })),
-    backgroundNativeProcessService(createNativeEmbeddingDrainService({ initialPluginConfig: pluginConfig, moduleUrl })),
+    backgroundNativeProcessService(createNativeRelayService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
+    backgroundNativeProcessService(createNativeEmbeddingDrainService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
   ];
 }
 
@@ -93,7 +98,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   const log = options.log ?? ((line: string) => console.log(`${new Date().toISOString()} ${line}`));
   const exit = options.exit ?? ((code: number) => process.exit(code));
   const homeDir = options.homeDir ?? env.HOME ?? '';
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ homeDir, env, platform: options.platform ?? process.platform });
 
   let pluginConfig: Record<string, unknown> | undefined;
   let remoteMode = 'off';
@@ -141,6 +146,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   const now = () => new Date().toISOString();
   const status: EngineStatusFile = {
     schema: ENGINE_STATUS_SCHEMA,
+    ...(paths.linux ? { process_identity: processInstanceIdentity(process.pid) } : {}),
     pid: process.pid,
     started_at: now(),
     updated_at: now(),
@@ -160,7 +166,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     }
   };
 
-  const services = (options.services ?? ((config) => engineHostServices(config, options.moduleUrl)))(pluginConfig);
+  const services = (options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths)))(pluginConfig);
   const contextFor = (id: string): NativeProcessServiceContext => ({
     // The shape the Gateway hands its services: the services read
     // plugins.entries.olympus.config, exactly as from openclaw.json.
@@ -195,9 +201,15 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   }
   writeStatus();
 
+  const rotation = paths.linux ? setInterval(() => {
+    try { rotateEngineLog(paths.logPath); rotateEngineLog(paths.errorLogPath); }
+    catch { log('engine: private log rotation failed; check engine log permissions.'); }
+  }, 30_000) : undefined;
+  rotation?.unref();
   let stopping: Promise<void> | undefined;
   const stop = (): Promise<void> => {
     stopping ??= (async () => {
+      if (rotation) clearInterval(rotation);
       status.state = 'stopping';
       writeStatus();
       log('engine: stopping.');

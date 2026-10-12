@@ -2551,7 +2551,7 @@ function observedWorkerServiceState(): { workerState: WorkerServiceState; engine
   // The standalone engine supervises its own worker. Loaded at all (running,
   // or between launchd's restarts), it holds the worker whatever the legacy
   // worker unit says.
-  if (process.platform === 'darwin') {
+  if (process.platform === 'darwin' || process.platform === 'linux') {
     const custody = engineDataCustody(inspectEngine());
     if (custody === 'loaded') return { workerState: 'active', engineLoaded: true };
     if (custody === 'unknown') return { workerState: 'unknown', engineLoaded: false };

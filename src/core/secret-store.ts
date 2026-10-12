@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { spawnSync } from 'node:child_process';
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -31,7 +32,8 @@ export interface SecretStorePaths {
 const DEFAULT_SERVICE = 'olympus';
 const STORE_VERSION = 1;
 
-export function defaultOlympusConfigDir(): string {
+export function defaultOlympusConfigDir(env: Record<string, string | undefined> = process.env, targetPlatform: string = process.platform): string {
+  if (targetPlatform === 'linux') return resolveLinuxEngineLayout(env).configDir;
   return join(homedir(), '.config', 'olympus');
 }
 
