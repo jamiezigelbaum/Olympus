@@ -1133,7 +1133,7 @@ describe('the seen acknowledgment', () => {
     expect(ack!.url).toBe(`${RELAY}/private/${JOB}`);
     expect(ack!.init.method).toBe('POST');
     expect(ack!.init.credentials).toBe('omit');
-    expect(ack!.body).toEqual({ v: 1, publicKey: claim!.body.publicKey, ack: ACK });
+    expect(ack!.body as Record<string, unknown>).toEqual({ v: 1, publicKey: claim!.body.publicKey, ack: ACK });
     // Hide and Show reuse the answer in memory: no second acknowledgment.
     host.button(W.hide).click();
     host.button(W.show).click();
