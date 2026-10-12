@@ -1,6 +1,6 @@
 # Olympus for background agents (dots, Grok Bot, Muse)
 
-Status: proposal, revision 2 (2026-10-12), after a Codex (gpt-6-astra)
+Status: approved design, revision 2 (2026-10-12), after a Codex (gpt-6-astra)
 review and the owner's decisions below. Builds on
 [hosted-agent-compatibility.md](hosted-agent-compatibility.md) (2026-09-24),
 which put Grok and Muse out of scope for 1.0, and on
@@ -29,6 +29,8 @@ line and one page, and loses a page.
    on the computer (this is what makes dots work).
 3. **Waiting answers are written only when the person opens them.** Nothing
    Private-derived is computed for nobody or stored.
+4. **`secret_locations` is dropped for remote agents** (section C).
+5. **Phone access to waiting questions is deferred** past v1.
 
 ## Why now
 
@@ -127,9 +129,10 @@ boundary, so:
   citations, status, plain errors) instead of the whole operation result, on
   `source_answer`, `source_answer_result`, status and errors alike, for every
   remote connection, including manual tunnels.
-- **Drop `secret_locations` for remote callers** (recommended). Today a remote
-  agent can learn the title and kind of an item that contains a secret. On the
-  computer that is useful; in a cloud agent it is a list of where secrets live.
+- **Drop `secret_locations` for remote callers** (owner decision
+  2026-10-12). Today a remote agent can learn the title and kind of an item
+  that contains a secret. On the computer that is useful; in a cloud agent it
+  is a list of where secrets live.
 
 ### D. Each connection knows its host
 
@@ -186,8 +189,10 @@ and storing questions per agent is new exposure), notifications, a phone view.
 Each slice is one pull request; exact-head CI and the repository's review
 rules apply.
 
-1. **Grok sign-in probe.** One real Grok Bot connection with a token; record
-   what it accepts (header token, OAuth, registration). Decides slice 5.
+1. **Grok sign-in probe.** Owned by the Grok Bot integration session running
+   in parallel (2026-10-12; Jamie has a Grok Bot account). It records what
+   Grok accepts (header token, OAuth, registration) and decides slice 5;
+   slice 4's provider field should match whatever that session lands.
 2. **Remote result hardening (C).** Critical class: independent review;
    tests for every serialized field, delayed results and reclassification.
 3. **Waiting private questions and the Private answers page (A, B), the Needs
@@ -201,10 +206,8 @@ rules apply.
 
 ## Still open
 
-1. Phone access for waiting questions: deferred from v1 (recommended).
-2. Drop `secret_locations` for remote agents (recommended) or keep it?
-3. Should local agents (OpenClaw, stdio MCP) keep the summary rule? Local
-   transport does not mean a local model; no change proposed here.
+- Should local agents (OpenClaw, stdio MCP) keep the summary rule? Local
+  transport does not mean a local model; no change proposed here.
 
 ## Review (Codex gpt-6-astra, 2026-10-12)
 
