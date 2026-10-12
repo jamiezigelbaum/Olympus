@@ -37,10 +37,17 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pafrom { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
 .pa .paout { grid-column: 1 / -1; }
 .pa .paout:empty { display: none; }
-.pa .paanswer p { margin: 0 0 8px; color: var(--t1); max-width: 72ch; white-space: pre-wrap; overflow-wrap: anywhere; }
-.pa .pasrc { margin: 4px 0 8px; padding-left: 20px; color: var(--t2); font-size: var(--fs-body); }
-.pa .pasrc li { margin: 0 0 4px; overflow-wrap: anywhere; }
-.pa .pasrc .btn { margin-left: 8px; padding: 2px 10px; }
+.pa .srow.answered .paq { font-weight: 600; }
+.pa .pacard { margin: 10px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.pa .paanswer p { margin: 0 0 10px; color: var(--t1); line-height: 1.55; max-width: 72ch; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pa .paanswer p:last-child { margin-bottom: 0; }
+.pa .pameta { margin: 12px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); color: var(--t3); font-size: var(--fs-body); }
+.pa .pameta .palabel { margin: 0 0 4px; color: var(--t3); }
+.pa .pasrc { margin: 0; padding-left: 18px; color: var(--t2); }
+.pa .pasrc li { margin: 0 0 2px; overflow-wrap: anywhere; }
+.pa .pasrc .paopen { margin-left: 8px; padding: 0; background: none; border: 0; color: var(--link); font: inherit; cursor: pointer; }
+.pa .pasrc .paopen:disabled { color: var(--t3); cursor: default; }
+.pa .pameta .pamsg { margin: 8px 0 0; color: var(--t3); }
 .pa .pamsg { color: var(--t2); margin: 0 0 8px; }
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
@@ -270,14 +277,17 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     var status = result.status;
     var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
     if (status === 'answered') {
+      var card = el('div', 'pacard');
       var box = el('div', 'paanswer');
       String(result.answer || '').split(/\\n{2,}/).forEach(function (para) {
         if (para.trim() !== '') box.appendChild(el('p', '', para.trim()));
       });
-      out.appendChild(box);
+      card.appendChild(box);
+      out.appendChild(card);
+      var meta = el('div', 'pameta');
       var citations = Array.isArray(result.citations) ? result.citations : [];
       if (citations.length > 0) {
-        out.appendChild(el('div', 'hint', config.copy.sources));
+        meta.appendChild(el('div', 'palabel', config.copy.sources));
         var list = el('ol', 'pasrc');
         citations.forEach(function (citation) {
           var item = el('li');
@@ -292,18 +302,21 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
             item.appendChild(document.createTextNode(label));
           }
           if (typeof citation.open === 'string') {
-            var button = el('button', 'btn', config.copy.open);
+            var button = el('button', 'paopen', config.copy.open);
             button.type = 'button';
             button.addEventListener('click', function () { openFile(citation.open, button); });
             item.appendChild(button);
           }
           list.appendChild(item);
         });
-        out.appendChild(list);
+        meta.appendChild(list);
       }
       if (Array.isArray(result.unanswered) && result.unanswered.length > 0) {
-        out.appendChild(el('p', 'pamsg', config.copy.unanswered.replace('{parts}', result.unanswered.join('; '))));
+        meta.appendChild(el('p', 'pamsg', config.copy.unanswered.replace('{parts}', result.unanswered.join('; '))));
       }
+      if (leftOut.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+      if (meta.childNodes.length > 0) card.appendChild(meta);
+      return;
     } else if (status === 'not_found') {
       out.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
@@ -352,6 +365,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         return;
       }
       render(out, outcome.result);
+      if (outcome.result.status === 'answered') row.classList.add('answered');
       // The answer is on screen: only now may the question be cleared.
       if (typeof outcome.result.ack === 'string') {
         var seen = await send({ action: 'seen', ack: outcome.result.ack });
