@@ -4829,13 +4829,15 @@ export async function main(): Promise<void> {
           // the one-shot path's steps, with the Ask's settings check at the
           // transport's authorization boundary (review of PR #209), on the
           // model set for the caller's hosting provider (or the one-off model
-          // it named).
+          // it named). The authorization is handed the model this route
+          // resolved, so the same-provider rule is checked on the model that
+          // is actually sent.
           send: async (text, authorize, { model, signal }) => {
             const route = transport(model);
             if (!route) return undefined;
             const opened = await openZkapiConsultSession(route, signal ? { signal } : {});
             if (!opened.ok) return { ok: false, error: opened.error };
-            await opened.session.send(text, { authorize: () => authorize(), ...(signal ? { signal } : {}) });
+            await opened.session.send(text, { authorize: () => authorize(route.model), ...(signal ? { signal } : {}) });
             return opened.session.finished;
           },
           // The agent's "remember" goes through the dashboard adapter: the

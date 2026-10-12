@@ -15,6 +15,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { defaultConfig } from '../src/core/config.ts';
 import type { Analyst, AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { LocalContentProviderMap } from '../src/core/evidence-pack.ts';
+import { CONSULT_ASK_MESSAGES } from '../src/core/consult-ask.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import { findOperationByName } from '../src/core/operations.ts';
 import type { OperationCaller } from '../src/core/operation-caller.ts';
@@ -37,6 +38,7 @@ import {
   REMOTE_ERROR_SCHEMA,
   REMOTE_OUTPUT_SCHEMAS,
   REMOTE_REFUSAL_CODES,
+  REMOTE_PROVIDER_UNKNOWN_NOTE,
   REMOTE_REPLY_WITHHELD,
   REMOTE_WITHHELD_PARAMS,
   remoteErrorOutput,
@@ -292,6 +294,21 @@ describe('remote output allowlists, per operation and result family', () => {
 
     const secretReply = remoteOperationOutput('ask_anonymously', { ...ANSWERED_RAW, reply: 'use sk-abcdefghijklmnopqrstuvwx' });
     expect(secretReply.reply).toBe(REMOTE_REPLY_WITHHELD);
+  });
+
+  test('ask_anonymously answered for an agent whose host is unknown carries one fixed note, in the closed schema', () => {
+    const output = remoteOperationOutput('ask_anonymously', { ...ANSWERED_RAW, providerNote: CONSULT_ASK_MESSAGES.providerUnknown });
+    expect(output.provider_note).toBe('Olympus does not know which company runs this agent, so it could not make sure the answer came from another company\'s model.');
+    expect(REMOTE_PROVIDER_UNKNOWN_NOTE).toBe(CONSULT_ASK_MESSAGES.providerUnknown);
+    expectSchemaValid('ask_anonymously', output);
+    // Whatever text the worker put there, only the fixed sentence leaves.
+    expect(remoteOperationOutput('ask_anonymously', { ...ANSWERED_RAW, providerNote: 'use sk-abcdefghijklmnopqrstuvwx' }).provider_note).toBe(REMOTE_PROVIDER_UNKNOWN_NOTE);
+    // The schema stays closed: any other value, or any other new field, is invalid.
+    const validate = ajv.compile(REMOTE_OUTPUT_SCHEMAS.ask_anonymously);
+    expect(validate({ ...output, provider_note: 'Something else.' })).toBe(false);
+    expect(validate({ ...output, provider: 'other' })).toBe(false);
+    // Refusals never carry it.
+    expect(remoteOperationOutput('ask_anonymously', { ...REFUSED_RAW, providerNote: CONSULT_ASK_MESSAGES.providerUnknown })).not.toHaveProperty('provider_note');
   });
 
   test('ask_anonymously needs_choice keeps the consent choice and its options', () => {
@@ -623,6 +640,7 @@ describe('over the wire', () => {
   let urls: RemotePublicUrls | undefined;
   let answer: () => Promise<SourceIndexAnswerResult>;
   let consult: () => Promise<unknown>;
+  let consultCallers: Array<string | undefined>;
   let releaseCheck: ReleaseCheck | undefined;
   let contextFails: boolean;
   let verifyFails: boolean;
@@ -640,6 +658,7 @@ describe('over the wire', () => {
     store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
     answer = async () => answered();
     consult = async () => NEEDS_CHOICE_RAW;
+    consultCallers = [];
     releaseCheck = undefined;
     contextFails = false;
     verifyFails = false;
@@ -649,7 +668,10 @@ describe('over the wire', () => {
       sourceAnswer: { answer: () => answer() },
       sourceAnswerLatencyLog: { record() {} },
       sourceIndexStatus: { async status() { return statusFixture() as never; } },
-      consultAsk: () => consult(),
+      consultAsk: (input) => {
+        consultCallers.push(input.caller?.provider);
+        return consult();
+      },
     });
     const remote = {
       // A store whose credential checks throw, as a locked or corrupt database would.
@@ -762,6 +784,26 @@ describe('over the wire', () => {
           expect(text).not.toContain('policy');
         }
       }
+    }
+  });
+
+  test('each connection reaches the worker as the host it records; an unknown host\'s answer says so, on both paths', async () => {
+    consult = async () => ({ ...ANSWERED_RAW, providerNote: CONSULT_ASK_MESSAGES.providerUnknown });
+    const connections: Array<[string, string]> = [
+      [store.create('Grok API').token, 'xai'],
+      [store.create('Scripts', { provider: 'meta' }).token, 'meta'],
+      [store.create('Agent').token, 'other'],
+      [oauthToken('Claude'), 'anthropic'],
+      [oauthToken('My agent'), 'other'],
+    ];
+    for (const [token, provider] of connections) {
+      consultCallers = [];
+      const viaMcp = JSON.parse((await mcp(token, 'ask_anonymously', { question: 'q' })).text) as Record<string, unknown>;
+      const viaRest = JSON.parse((await rest(token, 'ask_anonymously', { question: 'q' })).text) as Record<string, unknown>;
+      expect({ provider, callers: consultCallers }).toEqual({ provider, callers: [provider, provider] });
+      expect(viaMcp).toEqual(viaRest);
+      expect(viaRest.provider_note).toBe(REMOTE_PROVIDER_UNKNOWN_NOTE);
+      expectSchemaValid('ask_anonymously', viaRest);
     }
   });
 
