@@ -1,4 +1,4 @@
-import { linuxInstalledBuild } from './linux-engine-service.ts';
+import { beginLinuxOpenHandlerMutation, linuxInstalledBuild, linuxLayoutFor, syncLinuxOpenHandlerReceipt, withLinuxEngineLifecycleLockAsync } from './linux-engine-service.ts';
 import { workerFetch } from './worker-transport.ts';
 /**
  * `olympus engine install|uninstall|status|start|stop|restart|rollback|logs`: the standalone
@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { configFromPluginConfig } from './config.ts';
 import { engineStatusPath, type EngineStatusFile } from './engine-host.ts';
 import {
@@ -48,6 +49,8 @@ export const ENGINE_CLI_USAGE = {
 } as const;
 
 export interface EngineCliDeps {
+  /** Internal reentrant marker: the public Linux lifecycle command already owns kernel custody. */
+  lifecycleLocked?: boolean;
   homeDir?: string;
   exec?: EngineExec;
   uid?: number;
@@ -72,6 +75,10 @@ const DEFAULT_OPEN_HANDLER = { install: installOpenHandler, uninstall: uninstall
 
 export async function runEngineCommand(args: string[], deps: EngineCliDeps = {}): Promise<unknown> {
   const [command, ...rest] = args;
+  if((deps.platform??process.platform)==='linux'&&!deps.lifecycleLocked&&['install','uninstall','rollback'].includes(command??'')){
+    const layout=linuxLayoutFor(deps);
+    return withLinuxEngineLifecycleLockAsync(layout,()=>runEngineCommand(args,{...deps,lifecycleLocked:true}));
+  }
   const service = {
     ...(deps.env ? { env: deps.env } : {}),
     ...(deps.homeDir ? { homeDir: deps.homeDir } : {}),
@@ -85,10 +92,18 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     const { plist, ...summary } = result;
     // The link handler never decides whether the install worked: a handler
     // that could not be built is a warning, and the Terminal fallback stays.
-    const handler = options.dryRun ? undefined : openHandlerFor(deps)?.install({
+    const linux=(deps.platform ?? process.platform)==='linux';
+    const handlerApi=options.dryRun || (linux&&!result.ok)?undefined:openHandlerFor(deps);
+    if(linux&&handlerApi)beginLinuxOpenHandlerMutation(service);
+    let handler = handlerApi?.install({
       ...openHandlerOptions(deps, service),
       program: { runtimePath: result.program.runtimePath, entryPath: result.program.entryPath, workingDirectory: result.program.workingDirectory },
     });
+    if(linux&&handler&&handler.action==='installed'){
+      try{syncLinuxOpenHandlerReceipt(service,true);}
+      catch(error){openHandlerFor(deps)?.uninstall(openHandlerOptions(deps,service));try{syncLinuxOpenHandlerReceipt(service,false);}catch{}handler={...handler,ok:false,action:'failed',detail:`The Linux handler ownership receipt could not be committed: ${error instanceof Error?error.message:'unknown error'}`};}
+    }
+    else if(linux&&handlerApi)syncLinuxOpenHandlerReceipt(service,false);
     if (handler && !handler.ok) summary.warnings.push(`olympus:// links will not open Olympus: ${handler.detail ?? 'the link handler could not be installed.'}`);
     return {
       ...summary,
@@ -108,6 +123,7 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     expectNoArgs('uninstall', rest);
     const result = uninstallEngine(service);
     const handler = openHandlerFor(deps)?.uninstall(openHandlerOptions(deps, service));
+    if((deps.platform??process.platform)==='linux'&&handler?.ok)syncLinuxOpenHandlerReceipt(service,false);
     return handler ? { ...result, open_handler: handler } : result;
   }
   if (command === 'restart') {
@@ -130,7 +146,16 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
   }
   if (command === 'rollback') {
     expectNoArgs('rollback', rest);
-    return rollbackEngine({ ...service, ...(deps.health ? { health: deps.health } : {}) });
+    const result=await rollbackEngine({ ...service, ...(deps.health ? { health: deps.health } : {}) });
+    if((deps.platform??process.platform)!=='linux'||!result.ok)return result;
+    const handlerApi=openHandlerFor(deps);if(handlerApi)beginLinuxOpenHandlerMutation(service);
+    let handler=handlerApi?.install({...openHandlerOptions(deps,service),program:{runtimePath:join(dirname(result.app_dir),'runtime/bun'),entryPath:join(result.app_dir,'dist/cli.js'),workingDirectory:result.app_dir}});
+    if(handler?.action==='installed'){
+      try{syncLinuxOpenHandlerReceipt(service,true);}catch(error){openHandlerFor(deps)?.uninstall(openHandlerOptions(deps,service));try{syncLinuxOpenHandlerReceipt(service,false);}catch{}
+       handler={...handler,ok:false,action:'failed',detail:`The Linux handler ownership receipt could not be committed: ${error instanceof Error?error.message:'unknown error'}`};}
+    }
+    else if(handlerApi)syncLinuxOpenHandlerReceipt(service,false);
+    return handler?{...result,open_handler:handler}:result;
   }
   if (command === 'status') {
     expectNoArgs('status', rest);

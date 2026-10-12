@@ -38,6 +38,8 @@ import {
   type RemoteOAuthStore,
 } from './remote-oauth-store.ts';
 import { revokeWaitingPrivateQuestions } from './waiting-private-questions.ts';
+import { credentialInstallId, mintCredential } from '../../connect-relay/shared/tokens.ts';
+import { readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 
 export const REMOTE_CONNECTIONS_STORE_ID = 'remote-connections';
 export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 3;
@@ -84,7 +86,7 @@ export interface RemoteConnectionStore {
    * A bearer connection. `provider`: the agent the owner chose it for (the
    * Agents page); absent, the host its name names, else `other`.
    */
-  create(displayName: string, options?: { provider?: RemoteConnectionProvider }): CreatedRemoteConnection;
+  create(displayName: string, options?: { provider?: RemoteConnectionProvider; installId?: string }): CreatedRemoteConnection;
   list(): RemoteConnectionRecord[];
   revoke(id: string): RemoteConnectionRecord;
   verifyToken(token: string): RemoteConnectionVerification;
@@ -157,6 +159,10 @@ export function resolveRemoteConnectionsDbPathForCli(
 ): string {
   const explicit = env[REMOTE_CONNECTIONS_DB_PATH_ENV]?.trim();
   if (explicit) return resolveRemoteConnectionsDbPath({ [REMOTE_CONNECTIONS_DB_PATH_ENV]: explicit });
+  if (process.platform === 'linux') {
+    const layout = resolveLinuxEngineLayout(env);
+    if (readLinuxEngineReceipt(layout.receiptPath)) return join(layout.dataDir, 'remote-connections.sqlite');
+  }
   // Located only from a HOME in the environment handed in, like
   // environmentWithWorkerSetupEnv: a scoped environment never reads the
   // process owner's install by accident.
@@ -172,6 +178,7 @@ export function resolveRemoteConnectionsDbPathForCli(
 export function defaultRemoteConnectionsDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
+  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).dataDir, 'remote-connections.sqlite');
   const configured = env.XDG_DATA_HOME?.trim();
   const dataRoot = configured || join(env.HOME?.trim() || homedir(), '.local', 'share');
   if (!isAbsolute(dataRoot)) {
@@ -241,7 +248,7 @@ export function openRemoteConnectionStore(
 
     oauth,
 
-    create(displayName: string, options: { provider?: RemoteConnectionProvider } = {}): CreatedRemoteConnection {
+    create(displayName: string, options: { provider?: RemoteConnectionProvider; installId?: string } = {}): CreatedRemoteConnection {
       const name = requireDisplayName(displayName);
       if (options.provider !== undefined && !isRemoteConnectionProvider(options.provider)) {
         throw new OperationError('invalid_params', 'A connection\'s host must be openai, xai, meta, anthropic or other.');
@@ -249,7 +256,7 @@ export function openRemoteConnectionStore(
       const provider = remoteConnectionProvider({ displayName: name, chosen: options.provider ?? null });
       const id = randomBytes(CONNECTION_ID_BYTES).toString('hex');
       const secret = randomBytes(CONNECTION_SECRET_BYTES).toString('base64url');
-      const token = `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret}`;
+      const token = options.installId ? mintCredential('access', options.installId) : `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret}`;
       const createdAt = now().toISOString();
       db.query(`
         INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider)
@@ -297,9 +304,10 @@ export function openRemoteConnectionStore(
 
     verifyToken(token: string): RemoteConnectionVerification {
       const match = typeof token === 'string' ? TOKEN_PATTERN.exec(token) : null;
-      if (!match) return { ok: false, reason: 'malformed' };
-      const row = readRow(match[1]!);
+      const routed = typeof token === 'string' ? credentialInstallId('access', token) : undefined;
+      if (!match && !routed) return { ok: false, reason: 'malformed' };
       const presented = hashRemoteConnectionToken(token);
+      const row = match ? readRow(match[1]!) : db.query("SELECT * FROM remote_connections WHERE kind = 'bearer' AND token_hash = ?").get(presented) as ConnectionRow | null;
       // Compare against a fixed dummy when the id is unknown (or names an OAuth
       // grant, which has no bearer secret) so every path does the same work.
       const bearer = row && row.kind === 'bearer' && row.token_hash ? row : null;

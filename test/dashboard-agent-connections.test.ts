@@ -73,9 +73,10 @@ function memorySecretStore(): SecretStore {
   } as SecretStore;
 }
 
-function guardedWorker(agents: DashboardAgentConnectionsBackend) {
+function guardedWorker(agents: DashboardAgentConnectionsBackend, agentConnectHost?: () => import('../src/workers/dashboard/agents.ts').AgentConnectHost) {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-agents-worker-'));
   const worker = createEmailSourceWorker({
+    ...(agentConnectHost ? { agentConnectHost } : {}),
     agentConnections: agents,
     sourceIndexStatus: {
       async status() {
@@ -119,6 +120,19 @@ async function controlSession(guarded: (request: Request) => Promise<Response>):
     csrf: ((await mint.json()) as { csrf_token: string }).csrf_token,
   };
 }
+
+test('worker agent page resolves its live approval handoff on each read', async () => {
+  const store = fixtureStore();
+  let target = 'first-target';
+  const guarded = guardedWorker(backend(store), () => ({ platform: 'linux', headless: true,
+    approvalHandoff: () => `ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:/run/user/1000/olympus/worker.sock ${target}` }));
+  const page = () => guarded(new Request(`${ORIGIN}/dashboard?agents`, { headers: { Authorization: 'Bearer worker-secret' } }));
+  expect(await (await page()).text()).toContain('worker.sock first-target');
+  target = 'second-target';
+  const html = await (await page()).text();
+  expect(html).toContain('worker.sock second-target');
+  expect(html).not.toContain('worker.sock first-target');
+});
 
 function post(path: string, body: unknown, headers: Record<string, string>): Request {
   return new Request(`${ORIGIN}${path}`, {

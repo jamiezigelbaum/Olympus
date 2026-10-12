@@ -1195,7 +1195,7 @@ describe('runDoctor', () => {
     expect(prerequisites.hint).toContain('olympus connect venice --api-key-prompt');
   });
 
-  test('reads the sovereignty policy setup wrote at the default path, without an explicit config path', async () => {
+  for (const platform of ['darwin', 'linux'] as const) test(`${platform}: reads the default sovereignty policy without an explicit config path`, async () => {
     // Nothing sets config.sovereignty.policy or configPath by default, so
     // gating on them meant setup wrote ~/.olympus/sovereignty.json and doctor
     // then reported no posture: the prerequisite check went green by skipping
@@ -1203,13 +1203,15 @@ describe('runDoctor', () => {
     // setup they had just run (clean-install rehearsal, 2026-09-05).
     const home = mkdtempSync(join(tmpdir(), 'olympus-doctor-sovereignty-default-'));
     try {
+      const expectedPath = platform === 'linux' ? join(home, '.config', 'olympus', 'sovereignty.json') : join(home, '.olympus', 'sovereignty.json');
       const policyPath = writeSovereigntyConfigFile({
         config: loadPreBuiltInPreset('no-sensitive'),
-        path: join(home, '.olympus', 'sovereignty.json'),
+        path: expectedPath,
       });
-      expect(policyPath).toBe(join(home, '.olympus', 'sovereignty.json'));
+      expect(policyPath).toBe(expectedPath);
 
       const missingKey = await runDoctor(doctorDeps({
+        platform,
         config: defaultConfig(),
         delphi: healthyDelphi(),
         env: { HOME: home },
@@ -1228,6 +1230,7 @@ describe('runDoctor', () => {
       mkdirSync(join(home, '.config', 'olympus'), { recursive: true });
       writeFileSync(join(home, '.config', 'olympus', 'worker.env'), '', { mode: 0o600 });
       const shellOnly = await runDoctor(doctorDeps({
+        platform,
         config: defaultConfig(),
         delphi: healthyDelphi(),
         env: { HOME: home, GEMINI_API_KEY: 'gemini-test-key' },
@@ -1238,6 +1241,7 @@ describe('runDoctor', () => {
       writeFileSync(join(home, '.config', 'olympus', 'worker.env'),
         'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY=stored-test-key\n', { mode: 0o600 });
       const withKey = await runDoctor(doctorDeps({
+        platform,
         config: defaultConfig(),
         delphi: healthyDelphi(),
         env: { HOME: home },

@@ -1,5 +1,5 @@
 import { withEngineMaintenanceFence, withEngineMaintenanceFenceSync, type EngineMaintenanceFence } from './engine-maintenance.ts';
-import { installLinuxEngine, inspectSystemdEngine, linuxEngineCustody, linuxLayoutFor, linuxInstalledBuild, startLinuxEngine, stopLinuxEngine, restartLinuxEngine, uninstallLinuxEngine, rollbackLinuxEngine, systemdPidInCgroup } from './linux-engine-service.ts';
+import { installLinuxEngine, inspectSystemdEngine, linuxEngineCustody, linuxLayoutFor, linuxInstalledBuild, recoverInterruptedLinuxEngineInstall, settleLinuxEngineInstall, startLinuxEngine, stopLinuxEngine, restartLinuxEngine, uninstallLinuxEngine, rollbackLinuxEngine, systemdPidInCgroup, withLinuxEngineLifecycleLockAsync } from './linux-engine-service.ts';
 import { processInstanceIdentity } from './file-lease.ts';
 import { resolveLinuxEngineLayout, preflightLinuxEngineLayout, type LinuxEngineLayout } from './linux-engine-layout.ts';
 import { workerFetch } from './worker-transport.ts';
@@ -318,7 +318,14 @@ export interface EngineServiceOptions {
   sleepMs?: (ms: number) => void;
   /** How long a stop or restart waits for an in-flight question (default ENGINE_QUIET_WAIT_MS). */
   quietWaitMs?: number;
+  /** Test-only dependency injection for crash-boundary lifecycle proof. Never populated from env or CLI. */
+  lifecycleCheckpoint?: (name: EngineLifecycleCheckpoint) => void;
 }
+export type EngineLifecycleCheckpoint =
+  | 'linger_receipt_published' | 'linger_enabled' | 'receipt_published' | 'journal_published' | 'staging_identity_published'
+  | 'generation_identity_published' | 'generation_renamed' | 'activating_published'
+  | 'launcher_published' | 'config_published' | 'unit_published' | 'current_published'
+  | 'qualified_published' | 'receipt_finalized' | 'backup_removed' | 'journal_removed';
 
 /**
  * A stop or restart waits this long for a zkAPI question in flight to settle,
@@ -719,6 +726,29 @@ export type EngineVerifiedInstallResult = Omit<EngineInstallResult, 'ok'> & {
  * agent is not success.
  */
 export async function installEngineVerified(options: EngineInstallOptions & { health?: EngineHealthDeps } = {}): Promise<EngineVerifiedInstallResult> {
+  if (normalizedPlatform(options.platform) === 'linux') {
+    const layout = linuxLayoutFor(options);
+    return withLinuxEngineLifecycleLockAsync(layout, async () => {
+      const recovery = await recoverInterruptedLinuxEngineInstall(options);
+      if (recovery.restored && !recovery.restored.ok) {
+        throw new Error(`Interrupted Linux install recovery did not prove the previous engine healthy: ${recovery.restored.reason ?? 'unknown health failure'}.`);
+      }
+      const now = options.health?.now ?? Date.now;
+      const since = now();
+      const result = installEngine(options);
+      if (result.action === 'dry_run') return result;
+      const health = await waitForEngineHealthy({
+        paths: engineServicePaths(options), expectedBuild: result.program.build ?? null,
+        ...(result.action === 'unchanged' ? {} : { since }),
+      }, { ...options.health, exec: options.exec ?? options.health?.exec });
+      const settlement = await settleLinuxEngineInstall(options, health);
+      if (health.ok) return { ...result, ok: true, health };
+      const restoration = settlement.restored
+        ? ` Previous installation restoration ${settlement.restored.ok ? 'proved healthy' : `failed${settlement.restored.reason ? `: ${settlement.restored.reason}` : ''}`}.`
+        : '';
+      return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restoration}` };
+    });
+  }
   const now = options.health?.now ?? Date.now;
   const since = now();
   const result = installEngine(options);

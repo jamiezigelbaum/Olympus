@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { renderDashboardAgentsPage } from '../src/workers/dashboard/pages/local.ts';
 import { renderDashboardAgentsSection } from '../src/workers/dashboard/agents.ts';
 import { renderLoopbackConsentPage } from '../src/workers/remote-oauth/consent-page.ts';
@@ -10,6 +10,45 @@ import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { parseRemotePublicBaseUrl } from '../src/core/remote-public-url.ts';
 import { registerPinnedClient } from '../connect-relay/server/client-registration.ts';
 import type { DashboardRemoteAccess } from '../src/workers/agent-connections.ts';
+import { resolveAgentApprovalHost } from '../src/core/remote-open.ts';
+import { authenticateRemoteRequest } from '../src/workers/remote-mcp.ts';
+import { credentialInstallId } from '../connect-relay/shared/tokens.ts';
+import { DASHBOARD_AGENT_KEYS_PATH, handleDashboardAgentRequest } from '../src/workers/agent-connections.ts';
+import { loadConfig } from '../src/core/config.ts';
+import { resolveLinuxEngineLayout, publishLinuxEngineReceipt } from '../src/core/linux-engine-layout.ts';
+
+test.skipIf(process.platform !== 'linux')('Linux CLI and local agents discover stored engine config through the shared receipt', () => {
+  const root = mkdtempSync(join(tmpdir(), 'linux-agent-config-'));
+  try {
+    const runtime = join(root, 'run'); mkdirSync(runtime, { mode: 0o700 });
+    const env = { HOME: root, XDG_RUNTIME_DIR: runtime, XDG_DATA_HOME: join(root, 'data') };
+    const layout = resolveLinuxEngineLayout(env);
+    publishLinuxEngineReceipt(layout);
+    mkdirSync(dirname(layout.unitPath), { recursive: true, mode: 0o700 });
+    writeFileSync(layout.unitPath, '[Unit]\nDescription=fixture\n', { mode: 0o600 });
+    writeFileSync(layout.configPath, JSON.stringify({ email: { baseUrl: 'http://127.0.0.1:8123/v1' }, sourceIndex: { enabled: false }, remote: { enabled: false } }), { mode: 0o600 });
+    const loaded = loadConfig({ ...env, XDG_CONFIG_HOME: join(root, 'wrong-config'), XDG_DATA_HOME: join(root, 'wrong-data') });
+    expect(loaded.email.baseUrl).toBe('http://127.0.0.1:8123/v1');
+    expect(loaded.sourceIndex.enabled).toBe(false);
+    expect(loaded.remote?.enabled).toBe(false);
+    writeFileSync(layout.configPath, '{broken', { mode: 0o600 });
+    expect(() => loadConfig(env)).toThrow('not valid JSON');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('production agent handoff resolves the owner socket on desktops and headless hosts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'linux-approval-'));
+  try {
+    for (const desktopReady of [() => true, () => false]) {
+      const host = resolveAgentApprovalHost({ platform: 'linux', port: 8010, desktopReady,
+        env: { HOME: root, XDG_RUNTIME_DIR: root }, fileEnv: { OLYMPUS_SERVER_SSH_TARGET: 'owner-target' } });
+      expect(host.approvalHandoff?.()).toBe(`ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:${root}/olympus/worker.sock owner-target`);
+      expect(section(render(host), 'chatgpt')).toContain('Copy approval handoff');
+    }
+    expect(resolveAgentApprovalHost({ platform: 'linux', port: 8010, env: {}, desktopReady: () => false }).approvalHandoff?.()).toBeUndefined();
+    expect(resolveAgentApprovalHost({ platform: 'darwin', port: 8010, env: {} })).toEqual({ platform: 'darwin' });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 const mac = JSON.parse(readFileSync(new URL('./fixtures/linux-agents/mac.json', import.meta.url), 'utf8'));
 const now = new Date('2026-10-12T00:00:00Z');
@@ -92,12 +131,39 @@ test('Linux local coding agents use the standalone installer; keys and Other req
   expect(local).toContain('codex mcp add olympus');
   expect(local).not.toContain('Mac');
   expect(html).not.toContain('your OpenClaw agent');
-  for (const id of ['grok-api','other']) {
+  expect(section(html, 'grok-api')).toContain('Create key');
+  expect(section(html, 'grok-api')).not.toContain('needs your own tunnel');
+  for (const id of ['other']) {
     expect(section(html,id)).toContain('needs your own tunnel');
     const tunnel = section(render({platform:'linux'},mac.accesses[1]),id);
     expect(tunnel).toContain('Create key');
     expect(tunnel).toContain('bearer token');
   }
+});
+
+test('Linux Grok API owner key routes through the relay and remains install-bound and revocable', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'linux-routed-key-'));
+  const store = openRemoteConnectionStore(join(dir, 'connections.sqlite'));
+  const installId = 'a'.repeat(32);
+  try {
+    const response = await handleDashboardAgentRequest(new Request(`http://localhost${DASHBOARD_AGENT_KEYS_PATH}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Grok API', agent: 'grok-api' }),
+    }), DASHBOARD_AGENT_KEYS_PATH, { store: () => store, remoteAccess: () => access, relayInstallId: () => installId });
+    const body = await response!.json() as { token: string; connection: { id: string } };
+    expect(credentialInstallId('access', body.token)).toBe(installId);
+    const parsed = parseRemotePublicBaseUrl('https://relay.example', installId);
+    if (!parsed.enabled) throw new Error('invalid fixture');
+    const request = new Request('https://relay.example/mcp', { headers: { Authorization: `Bearer ${body.token}` } });
+    const options = { connections: () => store, publicUrls: parsed.urls };
+    expect(authenticateRemoteRequest(request, options)).toMatchObject({ ok: true, connection: { kind: 'bearer', provider: 'xai' } });
+    expect(authenticateRemoteRequest(request, options, 'directory').ok).toBe(false);
+    expect(authenticateRemoteRequest(request, { ...options, publicUrls: { ...parsed.urls, installId: 'b'.repeat(32) } }).ok).toBe(false);
+    store.revoke(body.connection.id);
+    expect(authenticateRemoteRequest(request, options).ok).toBe(false);
+    const macKey = store.create('legacy fixture');
+    expect(macKey.token).toStartWith('olympus_conn_');
+    expect(store.verifyToken(macKey.token).ok).toBe(true);
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('Linux refusal is host-neutral; Mac refusal remains exact', async () => {

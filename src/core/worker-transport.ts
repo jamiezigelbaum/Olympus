@@ -1,7 +1,10 @@
 /** Linux's owner-only worker transport. HTTP origins remain stable for browser
  * cookies/CSRF; they are not listening TCP endpoints on the engine host. */
 import { lstatSync, mkdirSync, realpathSync, chmodSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, isAbsolute, join, normalize, parse } from 'node:path';
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { removeFileDurablySync } from './atomic-file.ts';
 
 export interface WorkerTransportOptions {
   platform?: string;
@@ -33,11 +36,12 @@ function validateDirectory(path: string, uid: number, privateMode: boolean): voi
 
 export function workerSocketPath(options: WorkerTransportOptions = {}): string | undefined {
   if ((options.platform ?? process.platform) !== 'linux') return undefined;
-  const runtime = (options.env ?? process.env).XDG_RUNTIME_DIR;
+  const layout = resolveLinuxEngineLayout(options.env ?? process.env);
+  const runtime = layout.runtimeHome;
   if (!runtime) throw new Error('Linux requires an owner-owned 0700 XDG_RUNTIME_DIR from the user session.');
   validateDirectory(runtime, ownerId(options), true);
   if (!/^\/[A-Za-z0-9_./-]+$/.test(runtime)) throw new Error('XDG_RUNTIME_DIR must be a shell-safe absolute path for SSH socket forwarding.');
-  const path = join(runtime, 'olympus', 'worker.sock');
+  const path = layout.workerSocketPath;
   if (Buffer.byteLength(path) > 107) throw new Error('Worker Unix socket path exceeds the Linux limit.');
   return path;
 }
@@ -62,6 +66,32 @@ export function prepareWorkerSocket(options: WorkerTransportOptions = {}): strin
   try { lstatSync(path); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return path; throw error; }
   throw new Error('Worker socket path is occupied; stop its owner and resolve the path before starting Olympus.');
+}
+
+/** Probe only: true means ENOENT/ECONNREFUSED, false means a listener, undefined means custody is unknown. */
+export function workerSocketListenerStopped(path: string): boolean | undefined {
+ const result=spawnSync(process.execPath,['-e',`const s=Bun.connect({unix:process.argv[1],socket:{data(){},open(s){s.end();process.exit(1)},error(){process.exit(2)}}});s.catch(e=>process.exit(['ENOENT','ECONNREFUSED'].includes(e.code)?0:2));setTimeout(()=>process.exit(2),1500);`,path],{timeout:2000});
+ return result.status===0?true:result.status===1?false:undefined;
+}
+
+/**
+ * A supervisor may remove a retained inode only after its own process/group
+ * custody proved the previous worker released. This function adds independent
+ * listener and inode provenance checks; callers cannot request generic stale
+ * unlinking.
+ */
+export function removeReleasedWorkerSocket(
+ options: WorkerTransportOptions,
+ custody: { previousWorkerReleased: boolean },
+): boolean {
+ const path=workerSocketPath(options);
+ if(!path)return false;
+ try{lstatSync(path);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
+ if(!custody.previousWorkerReleased)throw new Error('Previous worker process custody is not released; the socket was retained.');
+ validateWorkerSocket(options);
+ if(workerSocketListenerStopped(path)!==true)throw new Error('Worker socket listener custody is live or unknown; the socket was retained.');
+ removeFileDurablySync(path);
+ return true;
 }
 
 /** Bind synchronously under a private umask, before any request can run. */

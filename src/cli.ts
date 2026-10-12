@@ -331,9 +331,10 @@ async function main(): Promise<void> {
     try {
       const result = await runEngineCommand(args.slice(1));
       if (result !== undefined) console.log(JSON.stringify(result, null, 2));
-      // install, verify and rollback report ok: false when the build did not prove healthy.
-      const verifying = ['install', 'verify', 'rollback'].includes(args[1] ?? '');
-      if (verifying && result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) process.exitCode = 1;
+      // Linux automation treats every unhealthy/unknown result as nonzero;
+      // retain the historical Mac exit contract for non-verifying commands.
+      const healthExit = process.platform === 'linux' || ['install', 'verify', 'rollback'].includes(args[1] ?? '');
+      if (healthExit && result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) process.exitCode = 1;
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);

@@ -628,6 +628,7 @@ export interface EmailSourceWorkerOptions {
   recheckCredentials?: () => WorkerCredentialDegradation[];
   /** Remote agent connections behind the Setup page's "Connect an agent" panel. */
   agentConnections?: DashboardAgentConnectionsBackend;
+  agentConnectHost?: () => import('../dashboard/agents.ts').AgentConnectHost;
   basePath?: string;
 }
 
@@ -1271,6 +1272,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               options: {
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
+                ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
               },
             }));
           }

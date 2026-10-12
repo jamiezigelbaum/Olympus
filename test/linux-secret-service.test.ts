@@ -12,7 +12,10 @@ test.skipIf(process.platform !== 'linux')('private D-Bus service: bytes, Locked,
   const addressFile = join(root, 'state.json'), ready = join(root, 'ready');
   writeFileSync(addressFile, '{}');
   const config = join(root, 'bus.conf');
-  writeFileSync(config, `<busconfig><type>session</type><listen>unix:dir=${root}</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/></policy></busconfig>`);
+  // This private 0700 fixture tests Secret Service protocol behavior, not
+  // host account authentication. Build containers can use a numeric UID
+  // absent from /etc/passwd, which dbus-daemon's EXTERNAL mapping rejects.
+  writeFileSync(config, `<busconfig><type>session</type><listen>unix:dir=${root}</listen><auth>ANONYMOUS</auth><allow_anonymous/><policy context="default"><allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/></policy></busconfig>`);
   const daemon = spawnSync('dbus-daemon', [`--config-file=${config}`,  '--fork', '--print-address=1', '--print-pid=1'], { encoding: 'utf8' });
   expect(daemon.status, daemon.stderr).toBe(0);
   const [address, pid] = daemon.stdout.trim().split('\n');

@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { ensurePrivateRootDirectorySync, writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
@@ -28,15 +28,15 @@ export interface LinuxSecretPaths {
   backendFilePath: string;
 }
 
-/** PR 1a seam: replace with SVC's receipt-bound layout resolver when available. */
+/** Explicit paths support isolated stores; production defaults use the install receipt. */
 export function resolveLinuxSecretPaths(
   env: Record<string, string | undefined>,
   paths: Partial<LinuxSecretPaths> = {},
 ): LinuxSecretPaths {
-  const root = env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config');
-  if (!isAbsolute(root) || /[\0\r\n]/.test(root)) throw new SecretStoreError('configuration', 'XDG_CONFIG_HOME must be an absolute path.');
-  const config = join(root, 'olympus');
-  const encryptedFilePath = paths.encryptedFilePath ?? join(config, 'secrets.enc');
+  let layout;
+  try { layout = resolveLinuxEngineLayout(env); }
+  catch { throw new SecretStoreError('configuration', 'Cannot resolve the installed Linux layout; XDG roots must be absolute and the install receipt valid.'); }
+  const encryptedFilePath = paths.encryptedFilePath ?? layout.secretsPath;
   const result = {
     encryptedFilePath,
     keyFilePath: paths.keyFilePath ?? join(dirname(encryptedFilePath), 'secrets.key'),

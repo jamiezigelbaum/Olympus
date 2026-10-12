@@ -903,7 +903,7 @@ describe('install and rollback succeed only on proof the new build is healthy', 
     };
     await expect(rollbackEngine({ platform: 'darwin', homeDir: home, uid: 501, exec: broken, health: fastHealth() }))
       .rejects.toThrow(/could not load the engine agent.*Putting back build .* failed too/);
-  });
+  }, 10_000); // Two bounded launchctl retry windows take about seven seconds.
 
   test('PoC: engine verify proves the build it is given, never the one the installed agent names', async () => {
     const { root, home, checkout, bun } = fixture();

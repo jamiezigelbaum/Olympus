@@ -35,6 +35,7 @@ import { homedir, platform as osPlatform } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { OLYMPUS_URL_SCHEME, OPEN_URL_MAX_LENGTH } from './open-targets.ts';
 import { olympusPackageRoot } from './package-root.ts';
+import { resolveLinuxEngineLayout, readLinuxEngineReceipt, linuxEngineEnvironment } from './linux-engine-layout.ts';
 
 export const OPEN_HANDLER_BUNDLE_ID = 'ai.olympusplugin.open';
 export const OPEN_HANDLER_DESKTOP_ID = `${OPEN_HANDLER_BUNDLE_ID}.desktop`;
@@ -90,11 +91,10 @@ export function openHandlerPaths(platform: string, homeDir: string, env: Record<
   if (platform === 'darwin') {
     return { handlerPath: join(homeDir, 'Library', 'Application Support', 'Olympus', 'Olympus.app') };
   }
-  const dataHome = absoluteOr(env.XDG_DATA_HOME, join(homeDir, '.local', 'share'));
-  const configHome = absoluteOr(env.XDG_CONFIG_HOME, join(homeDir, '.config'));
+  const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
   return {
-    handlerPath: join(dataHome, 'applications', OPEN_HANDLER_DESKTOP_ID),
-    mimeappsPath: join(configHome, 'mimeapps.list'),
+    handlerPath: layout.openHandlerPath,
+    mimeappsPath: layout.mimeappsPath,
   };
 }
 
@@ -127,12 +127,12 @@ export function renderMacOpenHandlerScript(program: OpenHandlerProgram): string 
 }
 
 /** The Linux entry: hidden from menus, `%u` the only thing the desktop passes. */
-export function renderLinuxDesktopEntry(program: OpenHandlerProgram): string {
+export function renderLinuxDesktopEntry(program: OpenHandlerProgram, launcherPath?: string): string {
   assertProgram(program);
-  const workDir = programWorkingDirectory(program);
-  for (const path of [program.runtimePath, program.entryPath, workDir]) {
+  const workDir = launcherPath ? dirname(launcherPath) : programWorkingDirectory(program);
+  for (const path of [program.runtimePath, program.entryPath, workDir, ...(launcherPath ? [launcherPath] : [])]) {
     // Desktop-entry quoting has its own escapes; a path that needs one is refused, not escaped.
-    if (/["`$\\%]/.test(path)) throw new Error(`The path ${path} cannot be written into a desktop entry.`);
+    if (!isAbsolute(path) || /[\x00-\x1f\x7f"`$\\%]/.test(path)) throw new Error(`The path ${path} cannot be written into a desktop entry.`);
   }
   return [
     '[Desktop Entry]',
@@ -140,7 +140,7 @@ export function renderLinuxDesktopEntry(program: OpenHandlerProgram): string {
     'Type=Application',
     'Name=Olympus',
     'Comment=Opens the Olympus dashboard on this computer',
-    `Exec="${program.runtimePath}" --no-env-file "${program.entryPath}" open %u`,
+    launcherPath ? `Exec="${launcherPath}" open %u` : `Exec="${program.runtimePath}" --no-env-file "${program.entryPath}" open %u`,
     `Path=${workDir}`,
     'Terminal=false',
     'NoDisplay=true',
@@ -248,10 +248,11 @@ function uninstallMac(options: OpenHandlerOptions): OpenHandlerResult {
 // Linux
 
 function installLinux(options: OpenHandlerOptions): OpenHandlerResult {
-  const exec = options.exec ?? defaultExec;
+  const layout = resolveLinuxEngineLayout({ ...(options.env ?? process.env), HOME: home(options) });
+  const exec = options.exec ?? ((command, args) => defaultExec(command, args, { ...process.env, ...linuxEngineEnvironment(layout) }));
   const program = options.program ?? defaultProgram();
   const { handlerPath } = openHandlerPaths('linux', home(options), options.env ?? process.env);
-  const entry = renderLinuxDesktopEntry(program);
+  const entry = renderLinuxDesktopEntry(program, readLinuxEngineReceipt(layout.receiptPath) ? layout.launcherPath : undefined);
   if (existsSync(handlerPath) && !ownedHandler('linux', handlerPath)) {
     return { ok: false, platform: 'linux', action: 'failed', path: handlerPath, detail: `${handlerPath} was not written by Olympus, so it was left alone.` };
   }
@@ -374,10 +375,6 @@ function home(options: OpenHandlerOptions): string {
   return value;
 }
 
-function absoluteOr(value: string | undefined, fallback: string): string {
-  return value && isAbsolute(value) ? value : fallback;
-}
-
 function writeAtomic(path: string, text: string, mode: number): void {
   const next = `${path}.olympus-next`;
   writeFileSync(next, text, { mode });
@@ -394,8 +391,8 @@ function truncatedDetail(text: string): string {
   return text.slice(0, 300);
 }
 
-function defaultExec(command: string, args: string[]): OpenHandlerExecResult {
-  const result = spawnSync(command, args, { encoding: 'utf8' });
+function defaultExec(command: string, args: string[], env?: NodeJS.ProcessEnv): OpenHandlerExecResult {
+  const result = spawnSync(command, args, { encoding: 'utf8', ...(env ? { env } : {}) });
   return {
     status: result.status,
     stdout: result.stdout ?? '',

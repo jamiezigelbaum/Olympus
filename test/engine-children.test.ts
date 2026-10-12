@@ -113,6 +113,13 @@ describe('stale child-group cleanup', () => {
     expect(signals).toEqual(['SIGTERM']);
   });
 
+  test('retained cleanup evidence keeps settled worker identity beside an unsettled sibling',()=>{
+    const path=join(tempRoot(),'children.json');writeRecord(path,[{service:'olympus-worker',pgid:605},{service:'olympus-remote-relay',pgid:606,argv:RELAY_ARGV}]);
+    const result=reapRecordedEngineChildren(path,{retainSettledRecord:true,listProcesses:()=>[entry(607,606,'relay descendant')],kill:()=>{throw new Error('must not signal');},selfPid:1});
+    expect(result.skipped).toEqual([{service:'olympus-worker',pgid:605,reason:'gone'},{service:'olympus-remote-relay',pgid:606,reason:'unverified'}]);
+    expect(readEngineChildren(path)!.children.map(child=>child.pgid)).toEqual([605,606]);
+  });
+
   test('PoC: a pid and group reused by another run of the same command (another start time) is never signalled', () => {
     const path = join(tempRoot(), 'children.json');
     writeRecord(path, [{ service: 'olympus-worker', pgid: 611 }]);
@@ -333,6 +340,7 @@ describe('the engine records the groups it starts', () => {
       moduleUrl,
       env: { HOME: home, OLYMPUS_ENGINE_BUILD: '9.9.9+abc' },
       homeDir: home,
+      platform: 'darwin',
       services: () => [{
         id: 'olympus-worker', reload: { configPrefixes: [] },
         async start() { order.push('start'); },

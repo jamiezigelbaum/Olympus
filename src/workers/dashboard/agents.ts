@@ -247,7 +247,7 @@ function connectSheet(access: DashboardRemoteAccess, host: AgentConnectHost): st
   // The Mac picker is frozen byte-for-byte. Linux also exposes the clients
   // already pinned by #296; no new registration or callback is admitted.
   const agents: readonly AgentChoice[] = host.platform === 'linux'
-    ? [...AGENTS, ...(['grok-bot', 'cursor'] as const).map((id): AgentChoice => ({
+    ? [...AGENTS.map((agent): AgentChoice => agent.id === 'grok-api' ? { ...agent, viaRelay: true } : agent), ...(['grok-bot', 'cursor'] as const).map((id): AgentChoice => ({
       id, label: id === 'grok-bot' ? 'Grok Bot' : 'Cursor', method: 'oauth', viaRelay: true,
       add: 'Add Olympus as a custom remote MCP server, choose OAuth, and use this address:',
       approve: 'Start connecting. An Olympus approval page opens.',

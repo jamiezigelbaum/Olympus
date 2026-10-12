@@ -20,6 +20,8 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 test('XDG roots reach worker, data, engine and receipt; shell overrides cannot move an installed layout', () => {
   const { home, env } = fixture();
   const layout = resolveLinuxEngineLayout(env);
+  expect(layout.lifecycleLockPath).toBe(join(env.XDG_RUNTIME_DIR,'olympus/lifecycle.lock'));
+  expect(layout.launcherPath).toBe(join(home,'.local/bin/olympus'));
   expect(engineServicePaths({ homeDir: home, platform: 'linux', env }).configPath).toBe(layout.configPath);
   expect(workerSetupEnvPath({ env })).toBe(join(home, 'cfg/olympus/worker.env'));
   expect(defaultOlympusConfigDir(env, 'linux')).toBe(layout.configDir);
@@ -30,6 +32,17 @@ test('XDG roots reach worker, data, engine and receipt; shell overrides cannot m
   expect(statSync(layout.receiptPath).mode & 0o777).toBe(0o600);
   expect(resolveLinuxEngineLayout({ ...env, XDG_DATA_HOME: join(home, 'wrong') }).dataDir).toBe(layout.dataDir);
   expect(JSON.parse(readFileSync(layout.receiptPath, 'utf8')).schema).toBe('olympus.engine.install.v1');
+  expect(JSON.parse(readFileSync(layout.receiptPath,'utf8')).installationState).toBe('installed');
+});
+test('a retained-data uninstall receipt cannot be adopted as a fresh installation',()=>{
+ const {env}=fixture();const layout=resolveLinuxEngineLayout(env);const receipt=publishLinuxEngineReceipt(layout);
+ writeFileSync(layout.receiptPath,`${JSON.stringify({...receipt,installationState:'data_retained',ownedUnitLinks:[],machineArtifacts:[]})}\n`,{mode:0o600});
+ expect(()=>preflightLinuxEngineLayout(layout)).toThrow('--purge --yes');
+});
+test('receipt layout key order is irrelevant to shell-written canonical JSON',()=>{
+ const {env}=fixture();const layout=resolveLinuxEngineLayout(env),receipt=publishLinuxEngineReceipt(layout);
+ const shuffled=Object.fromEntries(Object.entries(receipt.layout).reverse());writeFileSync(layout.receiptPath,`${JSON.stringify({...receipt,layout:shuffled})}\n`,{mode:0o600});
+ expect(resolveLinuxEngineLayout(env)).toEqual(layout);
 });
 test('legacy data refuses before writes and names exact path and fresh-install remedy', () => {
   const { home, env } = fixture(); const legacy = join(home, '.olympus'); mkdirSync(legacy, { mode: 0o700 }); writeFileSync(join(legacy, 'sovereignty.json'), '{}');
@@ -45,6 +58,11 @@ test('symlink, unsafe runtime, relative root and foreign owner refuse without ch
   expect(() => preflightLinuxEngineLayout(resolveLinuxEngineLayout(env))).toThrow('private');
   expect(() => resolveLinuxEngineLayout({ ...env, XDG_DATA_HOME: 'relative' })).toThrow('absolute');
   expect(() => preflightLinuxEngineLayout(resolveLinuxEngineLayout(env), { uid: 123456 })).toThrow('owner');
+});
+test('overlapping managed XDG roots refuse before any install mutation',()=>{
+ const {home,env}=fixture();
+ expect(()=>resolveLinuxEngineLayout({...env,XDG_CONFIG_HOME:join(home,'data/openclaw/olympus/config')})).toThrow('must not overlap');
+ expect(()=>resolveLinuxEngineLayout({...env,XDG_STATE_HOME:env.XDG_DATA_HOME})).toThrow('must not overlap');
 });
 test('two discoverable receipts refuse instead of picking an installation', () => {
   const { home, env } = fixture(); const layout = resolveLinuxEngineLayout(env); publishLinuxEngineReceipt(layout);

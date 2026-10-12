@@ -69,6 +69,8 @@ export interface EngineChildReapDeps {
   graceMs?: number;
   /** This process's own pid; its group is never signalled. */
   selfPid?: number;
+  /** Keep a settled record until a caller durably completes adjacent cleanup. */
+  retainSettledRecord?: boolean;
 }
 
 export type EngineChildSkipReason =
@@ -216,7 +218,8 @@ export function reapRecordedEngineChildren(path: string, deps: EngineChildReapDe
       if (verdict.reason === 'unreadable') unsettled.push(child);
     }
   }
-  if (unsettled.length > 0) writeRecord(path, { ...record, children: unsettled });
+  if(deps.retainSettledRecord)writeRecord(path,record);
+  else if (unsettled.length > 0) writeRecord(path, { ...record, children: unsettled });
   else removeRecord(path);
   return result;
 }

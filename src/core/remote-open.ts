@@ -1,4 +1,5 @@
 import { linuxGraphicalSessionReadiness } from './linux-desktop-opener.ts';
+import { workerSocketPath } from './worker-transport.ts';
 /**
  * Remote mode: Olympus runs on a server, and the screens that only work on the
  * computer running Olympus (keys, X sign-in, Telegram and WhatsApp pairing)
@@ -133,6 +134,28 @@ export function remoteOpenInstructions(input: { port: number; sshTarget?: string
     onComputer: socket ? `ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:${socket} ${sshTarget}` : `ssh -N -L ${port}:127.0.0.1:${port} ${sshTarget}`,
     onServer: `olympus dashboard --no-open${path === 'dashboard' ? '' : ` --target ${path}`}`,
   };
+}
+
+/** Resolve at each page read: linger can outlive the graphical login session. */
+export function resolveAgentApprovalHost(input: {
+  env: Record<string, string | undefined>;
+  fileEnv?: Record<string, string | undefined> | undefined;
+  platform?: NodeJS.Platform;
+  port: number;
+  desktopReady?: () => boolean;
+}) {
+  const platform = input.platform ?? process.platform;
+  if (platform !== 'linux') return { platform };
+  const mode = resolveServerMode(input);
+  // Linux browsers always need the owner-authenticated socket forward, even
+  // when a desktop is available. Never suggest a non-existent TCP listener.
+  return { platform, headless: true, approvalHandoff: () => {
+    if (!mode.sshTarget) return undefined;
+    try {
+      return remoteOpenInstructions({ port: input.port, sshTarget: mode.sshTarget,
+        socketPath: workerSocketPath({ platform, env: input.env })! }).onComputer;
+    } catch { return undefined; }
+  } };
 }
 
 /** How long the agent's tunnel stays up when nothing is using it (the link itself lasts 15 minutes). */

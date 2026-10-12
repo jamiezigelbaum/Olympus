@@ -15,7 +15,7 @@ import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } f
 import { createModelKeyReload, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
-import { resolveServerMode } from '../../core/remote-open.ts';
+import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -4318,8 +4318,10 @@ export async function main(): Promise<void> {
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
   const worker = createEmailSourceWorker({
+    agentConnectHost: () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port }),
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
+      ...(process.platform === 'linux' ? { relayInstallId: () => remotePublicUrls()?.installId } : {}),
       remoteAccess: () => dashboardRemoteAccess(),
       get remoteAccessControl() { return dashboardRemoteAccessControl; },
     },
@@ -5258,7 +5260,7 @@ export async function main(): Promise<void> {
         })),
         withWorkerBearerAuth(worker.fetch, { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
       )),
-    ))), !!socketPath),
+    )))), !!socketPath),
   };
   const startServer = () => socketPath
     ? Bun.serve({ unix: socketPath, fetch(request, server) {

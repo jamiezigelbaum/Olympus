@@ -441,7 +441,7 @@ describe('CLI tool surface', () => {
       // deterministically `missing` on every platform.
       const shimDir = join(dir, 'bin');
       mkdirSync(shimDir, { recursive: true });
-      writeFileSync(join(shimDir, 'systemctl'), '#!/bin/sh\necho inactive\nexit 3\n', { mode: 0o755 });
+      writeFileSync(join(shimDir, 'systemctl'), '#!/bin/sh\ncase "$*" in *" show "*) echo LoadState=not-found; exit 0;; esac\necho inactive\nexit 3\n', { mode: 0o755 });
       writeFileSync(join(shimDir, 'launchctl'), '#!/bin/sh\nexit 3\n', { mode: 0o755 });
 
       const result = await runSourceCliExit([

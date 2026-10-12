@@ -8,7 +8,7 @@
  * they still reported it missing and named the command the operator had just
  * run as the fix (2026-09-04 review).
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -18,6 +18,28 @@ import { setupPreflight } from '../src/core/setup-preflight.ts';
 import { createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import { writeManagedWorkerEnvSecret } from '../src/core/worker-service.ts';
+import { createDefaultSecretStore } from '../src/core/secret-store.ts';
+
+test('environment-only preflight does not initialize a durable secret backend', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'preflight-no-store-'));
+  try {
+    const config = createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')).config;
+    expect((await setupPreflight({ config, env: { HOME: home }, homeDir: home })).map(item => item.id)).toContain('env:GEMINI_API_KEY');
+    expect(existsSync(join(home, '.config', 'olympus'))).toBe(false);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform !== 'linux')('Linux preflight reads store prerequisites from its selected home', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'preflight-scoped-store-'));
+  const other = mkdtempSync(join(tmpdir(), 'preflight-other-home-'));
+  try {
+    await createDefaultSecretStore({ platform: 'linux', env: { HOME: home } }).set('venice.api_key', 'fixture-only');
+    const config = createSovereigntyEngine(loadPreBuiltInPreset('private-cloud-only')).config;
+    const unmet = await setupPreflight({ config, homeDir: home, env: { HOME: other } });
+    expect(unmet.map(item => item.id)).not.toContain('store:venice.api_key');
+    expect(existsSync(join(other, '.config', 'olympus'))).toBe(false);
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true }); }
+});
 
 const EMPTY_STORE = { getSync: () => undefined, get: async () => undefined };
 // Never the developer's own connected-handle registry: a real connected source

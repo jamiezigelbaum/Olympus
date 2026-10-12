@@ -40,13 +40,16 @@ export async function setupPreflight(options: SetupPreflightOptions): Promise<Se
   const managedInstall = options.workerEnvPath || options.homeDir
     || (inputEnv.HOME?.trim() && existsSync(workerSetupEnvPath(options)));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
-  const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
+  let secretStore = options.secretStore;
+  const getSecretStore = () => secretStore ??= createDefaultSecretStore({
+    env: process.platform === 'linux' && options.homeDir ? { ...env, HOME: options.homeDir } : env,
+  });
   const unmet: SetupPrerequisite[] = [];
   const seen = new Set<string>();
 
   for (const [profileId, profile] of Object.entries(options.config.modelProfiles)) {
     if (profile.secretRef) {
-      const prerequisite = await secretRefPrerequisite(profileId, profile, credentialEnv, secretStore);
+      const prerequisite = await secretRefPrerequisite(profileId, profile, credentialEnv, getSecretStore);
       if (prerequisite && !seen.has(prerequisite.id)) {
         seen.add(prerequisite.id);
         unmet.push(prerequisite);
@@ -69,7 +72,7 @@ async function secretRefPrerequisite(
   profileId: string,
   profile: SovereigntyModelProfile,
   env: Record<string, string | undefined>,
-  secretStore: Pick<SecretStore, 'get' | 'getSync'>,
+  getSecretStore: () => Pick<SecretStore, 'get' | 'getSync'>,
 ): Promise<SetupPrerequisite | undefined> {
   const ref = normalizeSecretRef(profile.secretRef ?? '');
   if (!ref) return undefined;
@@ -87,6 +90,7 @@ async function secretRefPrerequisite(
     };
   }
 
+  const secretStore = getSecretStore();
   const value = secretStore.getSync
     ? secretStore.getSync(ref.key)
     : await secretStore.get(ref.key);

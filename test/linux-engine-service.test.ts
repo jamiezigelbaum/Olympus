@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { afterEach, expect, test } from 'bun:test';
-import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
-import { inspectSystemdEngine, linuxEngineCustody, renderEngineSystemdUnit, ensureEngineLinger, rotateEngineLog, preflightSystemdEngine } from '../src/core/linux-engine-service.ts';
+import { inspectSystemdEngine, linuxEngineCustody, linuxMachineArtifactDigest, recoverInterruptedLinuxEngineInstall, renderEngineSystemdUnit, ensureEngineLinger, rotateEngineLog, preflightSystemdEngine, settleLinuxEngineInstall, withLinuxEngineLifecycleLock } from '../src/core/linux-engine-service.ts';
 import type { EngineExec } from '../src/core/engine-service.ts';
 const roots: string[] = [];
 function layout() { const home = mkdtempSync(join(tmpdir(), 'svc-systemd-')); roots.push(home); const run = join(home, 'run'); mkdirSync(run, { mode: 0o700 }); return resolveLinuxEngineLayout({ HOME: home, XDG_RUNTIME_DIR: run }); }
@@ -97,24 +97,76 @@ test('real CLI data deletion checks Linux engine custody even when legacy worker
  const result=spawnSync(process.execPath,['src/cli.ts','data','delete','--all','--yes-i-am-sure'],{cwd:join(import.meta.dir,'..'),env:{...process.env,...linuxEngineEnvironment(l),PATH:`${bin}:${process.env.PATH}`},encoding:'utf8',timeout:20000});
  expect(result.status).not.toBe(0);expect(result.stdout+result.stderr).toContain('engine stop');expect(readFileSync(join(l.dataDir,'keep'),'utf8')).toBe('evidence');
 },25000);
-function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1'}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);return dir;}
+test.skipIf(process.platform!=='linux')('kernel lifecycle lock reuses only an inherited supervisor descriptor and rejects --close',()=>{
+ const l=layout();mkdirSync(l.runtimeDir,{mode:0o700});writeFileSync(l.lifecycleLockPath,'',{mode:0o600});
+ const modulePath=join(import.meta.dir,'../src/core/linux-engine-service.ts');
+ const code=`import {resolveLinuxEngineLayout} from './src/core/linux-engine-layout.ts';import {withLinuxEngineLifecycleLock} from ${JSON.stringify(modulePath)};const l=resolveLinuxEngineLayout(process.env);withLinuxEngineLifecycleLock(l,()=>process.stdout.write('held'));`;
+ const env={...process.env,...linuxEngineEnvironment(l)};
+ const inherited=spawnSync('flock',['--nonblock',l.lifecycleLockPath,process.execPath,'-e',code],{cwd:join(import.meta.dir,'..'),env,encoding:'utf8'});
+ expect({status:inherited.status,stdout:inherited.stdout,stderr:inherited.stderr}).toMatchObject({status:0,stdout:'held'});
+ const closed=spawnSync('flock',['--nonblock','--close',l.lifecycleLockPath,process.execPath,'-e',code],{cwd:join(import.meta.dir,'..'),env,encoding:'utf8'});
+ expect(closed.status).not.toBe(0);expect(closed.stdout).not.toContain('held');
+ expect(withLinuxEngineLifecycleLock(l,()=>statSync(l.lifecycleLockPath).mode&0o777)).toBe(0o600);
+});
+function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1',linuxStateCompatibility:1}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);return dir;}
+function runtimeAt(root:string){const dir=join(root,`fixture-runtime-${Math.random().toString(16).slice(2)}`),runtime=join(dir,'bun');mkdirSync(dir,{mode:0o700});copyFileSync(realpathSync(process.execPath),runtime);chmodSync(runtime,0o700);return runtime;}
 test('install refuses an unintegrated approval package before enabling linger or writing config',()=>{
  const l=layout(),checkout=packageAt(l.home,'v1',false);const calls:string[][]=[];
  const exec:EngineExec=(c,a)=>{calls.push([c,...a]);return c==='systemctl'&&a.includes('--version')?good('systemd 256'):a.includes('--property=Version')?good('256'):good('LoadState=not-found');};
- expect(()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:1000,exec,fromCheckout:checkout,bunBin:process.execPath})).toThrow('owner-only approval');
+ expect(()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:1000,exec,fromCheckout:checkout,bunBin:runtimeAt(l.home)})).toThrow('owner-only approval');
  expect(existsSync(l.configPath)).toBe(false);expect(calls.some(c=>c[0]==='loginctl')).toBe(false);
 });
+test('install refuses a package without the Linux state compatibility declaration before linger',()=>{
+ const l=layout(),checkout=packageAt(l.home,'v1');const manifest=JSON.parse(readFileSync(join(checkout,'package.json'),'utf8'));delete manifest.olympus.linuxStateCompatibility;writeFileSync(join(checkout,'package.json'),JSON.stringify(manifest));const calls:string[][]=[];
+ const exec:EngineExec=(c,a)=>{calls.push([c,...a]);return c==='systemctl'&&a.includes('--version')?good('systemd 256'):a.includes('--property=Version')?good('256'):good('LoadState=not-found');};
+ expect(()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:checkout,bunBin:runtimeAt(l.home)})).toThrow('state compatibility 1');
+ expect(calls.some(call=>call[0]==='loginctl')).toBe(false);
+});
+test('install copies scratch inputs into a durable generation, receipts the launcher, and commits only after health',async()=>{
+ const l=layout(),checkout=packageAt(l.home,'v1');let linked=false,active=false,enabled=false;
+ const exec:EngineExec=(command,args)=>{
+  if(command==='systemctl'&&args[0]==='--version')return good('systemd 256');
+  if(command==='loginctl')return good('yes');
+  if(command==='systemd-analyze')return good();
+  if(args.includes('olympus-worker.service'))return good('LoadState=not-found');
+  if(args.includes('--property=Version'))return good('256');
+  if(args.includes('show'))return linked?good(`LoadState=loaded\nActiveState=${active?'active':'inactive'}\nUnitFileState=${enabled?'enabled':'disabled'}\nMainPID=${active?42:0}\nControlGroup=${active?'/user.slice/engine':''}\nResult=success\nExecMainStatus=0\nFragmentPath=${l.unitPath}\n`):good('LoadState=not-found');
+  if(args.includes('link'))linked=true;if(args.includes('enable'))enabled=true;if(args.includes('disable')){enabled=false;active=false;}if(args.includes('start'))active=true;if(args.includes('stop'))active=false;
+  return good();
+ };
+ const runtime=runtimeAt(l.home);
+ const options={platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:checkout,bunBin:runtime,consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true};
+ const installedResult=installEngine(options);
+ expect(installedResult.program.workingDirectory).toStartWith(join(l.packageDir,'generations/'));expect(installedResult.program.workingDirectory).not.toBe(checkout);
+ expect(readFileSync(l.launcherPath,'utf8')).toContain(`export XDG_CONFIG_HOME='${l.configHome}'`);
+ const journalPath=join(l.stateDir,'install-transaction.json'),journal=readFileSync(journalPath,'utf8'),transaction=JSON.parse(journal);expect(journal).not.toContain('OLYMPUS_WORKER_AUTH_TOKEN');expect(transaction.backupDir).toContain('.install-backup-');expect(Object.values(transaction.before.files).every((snapshot:any)=>snapshot.present===false&&!('backupPath' in snapshot))).toBe(true);
+ await settleLinuxEngineInstall(options,{ok:true,expected_build:installedResult.program.build??null,running_build:installedResult.program.build??null,pid:42,worker:'ok',waited_ms:0});
+ expect(existsSync(join(l.stateDir,'install-transaction.json'))).toBe(false);
+ const receipt=JSON.parse(readFileSync(l.receiptPath,'utf8'));const generation=receipt.machineArtifacts.find((entry:any)=>entry.kind==='tree');
+ expect(generation).toMatchObject({path:dirname(installedResult.program.workingDirectory),markerPath:join(dirname(installedResult.program.workingDirectory),'.olympus-generation.json')});
+ expect(Number.isSafeInteger(generation.rootInode)).toBe(true);expect(receipt.machineArtifacts.some((entry:any)=>entry.path===l.launcherPath)).toBe(true);
+ // Crash after the terminal receipt commit and during backup GC: remaining
+ // snapshot files are no longer recovery inputs, and cleanup is idempotent.
+ mkdirSync(transaction.backupDir,{mode:0o700});writeFileSync(join(transaction.backupDir,'partial'),'',{mode:0o600});const backup=statSync(transaction.backupDir);
+ writeFileSync(journalPath,JSON.stringify({...transaction,phase:'qualified',backupDevice:backup.dev,backupInode:backup.ino}),{mode:0o600});
+ expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(true);expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(false);
+ const upgraded=installEngine({...options,fromCheckout:packageAt(l.home,'v2')}),interrupted=JSON.parse(readFileSync(journalPath,'utf8'));expect(interrupted.generationCreated).toBe(true);
+ rmSync(interrupted.generationPath,{recursive:true});writeFileSync(journalPath,JSON.stringify({...interrupted,phase:'rollback_required',before:{...interrupted.before,active:false}}),{mode:0o600});
+ expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(true);expect(upgraded.program.build).not.toBe(installedResult.program.build);
+},20_000); // Copies and hashes the real Bun binary twice, including on emulated runners.
 test('rollback uses the recorded matching runtime and restores the old unit/config after failed health',async()=>{
- const {l,options,calls}=installed();const old=packageAt(l.home,'v1'),current=packageAt(l.home,'v2');
+ const {l,options,calls}=installed();
  const {engineBuildIdentity}=await import('../src/core/engine-service.ts');
- const runtime=join(l.home,'bun');writeFileSync(runtime,'#!/bin/sh\nexit 0\n',{mode:0o700});
- const program=(path:string)=>({runtimePath:runtime,runtimeDigest:createHash('sha256').update(readFileSync(runtime)).digest('hex'),entryPath:join(path,'dist/cli.js'),workingDirectory:path,source:'package',build:engineBuildIdentity(path)});
+ const artifacts:any[]=[];const generation=(version:string)=>{const stage=join(l.home,`stage-${version}`),sourceApp=packageAt(stage,version),app=join(stage,'app');renameSync(sourceApp,app);const runtimeDir=join(stage,'runtime');mkdirSync(runtimeDir);const runtime=join(runtimeDir,'bun');writeFileSync(runtime,'#!/bin/sh\nexit 0\n',{mode:0o700});writeFileSync(join(stage,'.olympus-generation.json'),JSON.stringify({schema:'olympus.engine.generation.v1',token:version,build:version}),{mode:0o600});
+  const digest=linuxMachineArtifactDigest(stage,'tree'),root=join(l.packageDir,'generations',digest);mkdirSync(dirname(root),{recursive:true,mode:0o700});renameSync(stage,root);const info=statSync(root),marker=join(root,'.olympus-generation.json');artifacts.push({path:root,kind:'tree',sha256:digest,rootDevice:info.dev,rootInode:info.ino,markerPath:marker,markerSha256:createHash('sha256').update(readFileSync(marker)).digest('hex')});
+  return {runtimePath:join(root,'runtime/bun'),runtimeDigest:createHash('sha256').update(readFileSync(join(root,'runtime/bun'))).digest('hex'),entryPath:join(root,'app/dist/cli.js'),workingDirectory:join(root,'app'),source:'package' as const,build:engineBuildIdentity(join(root,'app'))};};
+ const old=generation('v1'),current=generation('v2');publishLinuxEngineReceipt(l,{machineArtifacts:artifacts});
  writeFileSync(l.configPath,'{"remote":{"enabled":false}}',{mode:0o600});
- writeFileSync(join(l.stateDir,'service-current.json'),JSON.stringify({program:program(current)}),{mode:0o600});
- writeFileSync(join(l.stateDir,'service-previous.json'),JSON.stringify({program:program(old),unit:renderEngineSystemdUnit(l,program(old) as any),config:'{}'}),{mode:0o600});
+ writeFileSync(join(l.stateDir,'service-current.json'),JSON.stringify({program:current}),{mode:0o600});
+ writeFileSync(join(l.stateDir,'service-previous.json'),JSON.stringify({program:old,unit:renderEngineSystemdUnit(l,old),config:'{}'}),{mode:0o600});
  const exec:EngineExec=(c,a)=>c==='loginctl'?good('yes'):a.includes('--version')?good('systemd 256'):a.includes('--property=Version')?good('256'):a.includes('olympus-worker.service')?good('LoadState=not-found'):options.exec(c,a);
  const result=await rollbackEngine({...options,uid:1000,exec,health:{timeoutMs:0}});
- expect(result.ok).toBe(false);expect(result.restored?.ok).toBe(false);expect(readFileSync(l.unitPath,'utf8')).toBe('unit');expect(readFileSync(l.configPath,'utf8')).toBe('{"remote":{"enabled":false}}');expect(calls.filter(c=>c.includes('restart'))).toHaveLength(2);
+ expect(result.ok).toBe(false);expect(result.restored?.ok).toBe(false);expect(readFileSync(l.unitPath,'utf8')).toBe('unit');expect(readFileSync(l.configPath,'utf8')).toBe('{"remote":{"enabled":false}}');expect(calls.filter(c=>c.includes('restart'))).toHaveLength(1);
 });
 test('inactive disabled service with retained escaped-child evidence never releases data custody',()=>{
  const {l,options}=installed();stopEngine(options);const paths=engineServicePaths(options);mkdirSync(join(l.dataDir,'engine'),{recursive:true,mode:0o700});writeFileSync(paths.childrenPath,'unreadable retained record',{mode:0o600});

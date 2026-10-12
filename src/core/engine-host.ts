@@ -17,11 +17,12 @@ import { rotateEngineLog } from './linux-engine-service.ts';
  */
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { removeFileDurablySync, writePrivateFileAtomicSync } from './atomic-file.ts';
 import { configFromPluginConfig } from './config.ts';
 import {
   engineChildrenPath,
   engineChildrenRecorder,
+  readEngineChildren,
   reapRecordedEngineChildren,
   type EngineChildReapDeps,
 } from './engine-children.ts';
@@ -37,6 +38,7 @@ import {
 import { createNativeRelayService } from './native-relay-service.ts';
 import { createNativeWorkerService } from './native-worker-service.ts';
 import { resolveRemoteAccessMode } from './remote-access.ts';
+import { removeReleasedWorkerSocket } from './worker-transport.ts';
 
 export const ENGINE_STATUS_SCHEMA = 'olympus.engine.status.v1';
 /** EX_CONFIG: launchd's throttle keeps a misconfigured engine from spinning. */
@@ -137,10 +139,21 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   // record each group this host starts.
   const dataEnv = { ...env, HOME: homeDir };
   const childrenPath = engineChildrenPath(dataEnv);
-  const reaped = reapRecordedEngineChildren(childrenPath, options.reap);
+  const recordedBeforeReap = readEngineChildren(childrenPath);
+  const reaped = reapRecordedEngineChildren(childrenPath, { ...(options.reap ?? {}), retainSettledRecord: true });
   if (reaped.stopped.length > 0) {
     log(`engine: stopped ${reaped.stopped.length} process group(s) a previous engine left running (${reaped.stopped.map((child) => child.service).join(', ')}).`);
   }
+  if (paths.linux) {
+    const workerGroups=recordedBeforeReap?.children.filter(child=>child.service==='olympus-worker')??[];
+    const workerReleased=workerGroups.length>0&&workerGroups.every(child=>reaped.stopped.some(entry=>entry.pgid===child.pgid)
+      ||reaped.skipped.some(entry=>entry.pgid===child.pgid&&['gone','not_ours'].includes(entry.reason)));
+    try { removeReleasedWorkerSocket({platform:'linux',env:dataEnv},{previousWorkerReleased:workerReleased}); }
+    catch(error){log(`engine: retained worker socket because prior process custody is not released: ${error instanceof Error?error.message:'unknown error'}`);exit(EXIT_CONFIG);return undefined;}
+  }
+  const allRecordedReleased=(recordedBeforeReap?.children??[]).every(child=>reaped.stopped.some(entry=>entry.pgid===child.pgid)
+    ||reaped.skipped.some(entry=>entry.pgid===child.pgid&&['gone','not_ours'].includes(entry.reason)));
+  if(allRecordedReleased)removeFileDurablySync(childrenPath);
   setNativeProcessChildObserver(engineChildrenRecorder({ path: childrenPath }));
 
   const now = () => new Date().toISOString();

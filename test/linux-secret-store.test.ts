@@ -40,6 +40,27 @@ import { chmodSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { createCipheriv } from 'node:crypto';
 import { LinuxLibsecretSecretStore, runLinuxSecretCommand, SecretStoreError, type CommandRunner } from '../src/core/secret-store.ts';
 import { resolveLinuxSecretPaths } from '../src/core/linux-secret-backend.ts';
+import { resolveLinuxEngineLayout, publishLinuxEngineReceipt } from '../src/core/linux-engine-layout.ts';
+import { resolveRemoteConnectionsDbPathForCli } from '../src/core/remote-connections.ts';
+
+test('secret consumers follow the installed receipt after shell XDG roots drift', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'linux-secret-layout-'));
+  const runtime = join(root, 'runtime'); mkdirSync(runtime, { mode: 0o700 });
+  try {
+    const env = { HOME: root, XDG_RUNTIME_DIR: runtime, XDG_DATA_HOME: join(root, 'data') };
+    const layout = resolveLinuxEngineLayout(env);
+    publishLinuxEngineReceipt(layout);
+    const drift = { ...env, XDG_CONFIG_HOME: join(root, 'different-config'), XDG_DATA_HOME: join(root, 'different-data') };
+    const paths = resolveLinuxSecretPaths(drift);
+    expect(paths.encryptedFilePath).toBe(layout.secretsPath);
+    expect(paths.keyFilePath).toBe(layout.secretsKeyPath);
+    expect(paths.backendFilePath).toBe(join(layout.configDir, 'secret-backend.json'));
+    expect(resolveRemoteConnectionsDbPathForCli(drift)).toBe(join(layout.dataDir, 'remote-connections.sqlite'));
+    await createDefaultSecretStore({ platform: 'linux', env: drift }).set('fixture', 'fixture-value');
+    expect(await createDefaultSecretStore({ platform: 'linux', env }).get('fixture')).toBe('fixture-value');
+    expect(existsSync(join(root, 'different-config'))).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'linux-secrets-'));

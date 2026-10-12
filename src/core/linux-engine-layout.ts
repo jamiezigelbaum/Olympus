@@ -1,7 +1,7 @@
 /** One Linux layout shared by installers, services and consumers. No OpenClaw dependency. */
-import { lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 
 type Env = Record<string, string | undefined>;
@@ -9,12 +9,25 @@ export interface LinuxEngineLayout {
   home: string; configHome: string; dataHome: string; stateHome: string; cacheHome: string;
   runtimeHome: string; configDir: string; dataDir: string; stateDir: string; cacheDir: string;
   runtimeDir: string; packageDir: string; unitPath: string; configPath: string; sovereigntyPath: string;
-  workerEnvPath: string; workerSocketPath: string; receiptPath: string; lifecycleLockPath: string;
-  secretsPath: string; secretsKeyPath: string;
+  workerEnvPath: string; workerSocketPath: string; receiptPath: string; lifecycleLockPath: string; launcherPath: string;
+  openHandlerPath: string; mimeappsPath: string; secretsPath: string; secretsKeyPath: string;
+}
+export interface LinuxMachineArtifact {
+  path: string;
+  kind: 'file' | 'symlink' | 'tree';
+  sha256: string;
+  rootDevice?: number;
+  rootInode?: number;
+  markerPath?: string;
+  markerSha256?: string;
 }
 export interface LinuxEngineReceipt {
   schema: 'olympus.engine.install.v1'; uid: number; layout: LinuxEngineLayout;
+  installationState: 'installed' | 'recovery_pending' | 'data_retained';
   ownedUnitLinks: string[]; lingerPredated?: boolean;
+  machineArtifacts: LinuxMachineArtifact[];
+  mimeOwnership?: { path: string; scheme: 'x-scheme-handler/olympus'; desktopId: 'ai.olympusplugin.open.desktop' };
+  openHandlerPending?: boolean;
   rotation: { mechanism: 'host-copytruncate'; maxBytes: number; retained: number };
 }
 function absolute(value: string, name: string): string {
@@ -28,14 +41,23 @@ function rawLayout(env: Env): LinuxEngineLayout {
   const stateHome = root('XDG_STATE_HOME', '.local/state'); const cacheHome = root('XDG_CACHE_HOME', '.cache');
   const runtimeHome = env.XDG_RUNTIME_DIR ? absolute(env.XDG_RUNTIME_DIR, 'XDG_RUNTIME_DIR') : '';
   const configDir = join(configHome, 'olympus'); const runtimeDir = runtimeHome ? join(runtimeHome, 'olympus') : '';
+  const dataDir=join(dataHome,'openclaw/olympus'),stateDir=join(stateHome,'olympus/engine'),cacheDir=join(cacheHome,'olympus/engine'),packageDir=join(dataHome,'olympus/engine');
+  const managedRoots=[configDir,dataDir,stateDir,cacheDir,packageDir];
+  for(let i=0;i<managedRoots.length;i+=1)for(let j=i+1;j<managedRoots.length;j+=1){const forward=relative(managedRoots[i]!,managedRoots[j]!),reverse=relative(managedRoots[j]!,managedRoots[i]!);
+   if(forward===''||(!forward.startsWith(`..${sep}`)&&forward!=='..'&&!isAbsolute(forward))||(!reverse.startsWith(`..${sep}`)&&reverse!=='..'&&!isAbsolute(reverse)))throw new Error(`Linux Olympus managed roots must not overlap: ${managedRoots[i]} and ${managedRoots[j]}.`);}
   return { home, configHome, dataHome, stateHome, cacheHome, runtimeHome, configDir,
-    dataDir: join(dataHome, 'openclaw/olympus'), stateDir: join(stateHome, 'olympus/engine'), cacheDir: join(cacheHome, 'olympus/engine'), runtimeDir,
-    packageDir: join(dataHome, 'olympus/engine'), unitPath: join(configHome, 'systemd/user/olympus-engine.service'),
+    dataDir, stateDir, cacheDir, runtimeDir,
+    packageDir, unitPath: join(configHome, 'systemd/user/olympus-engine.service'),
     configPath: join(configDir, 'engine.json'), sovereigntyPath: join(configDir, 'sovereignty.json'), workerEnvPath: join(configDir, 'worker.env'),
-    workerSocketPath: runtimeDir ? join(runtimeDir, 'worker.sock') : '', lifecycleLockPath: runtimeDir ? join(runtimeDir, 'lifecycle') : '',
+    workerSocketPath: runtimeDir ? join(runtimeDir, 'worker.sock') : '', lifecycleLockPath: runtimeDir ? join(runtimeDir, 'lifecycle.lock') : '',
+    launcherPath: join(home, '.local/bin/olympus'), openHandlerPath:join(dataHome,'applications/ai.olympusplugin.open.desktop'),mimeappsPath:join(configHome,'mimeapps.list'),
     receiptPath: join(configDir, 'install-receipt.json'), secretsPath: join(configDir, 'secrets.enc'), secretsKeyPath: join(configDir, 'secrets.key') };
 }
 function stat(path: string) { try { return lstatSync(path); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; } }
+export function linuxEngineLayoutsEqual(left:unknown,right:LinuxEngineLayout):left is LinuxEngineLayout{
+ if(!left||typeof left!=='object'||Array.isArray(left))return false;const record=left as Record<string,unknown>,expected=right as unknown as Record<string,unknown>;
+ const keys=Object.keys(record).sort(),expectedKeys=Object.keys(expected).sort();return keys.length===expectedKeys.length&&keys.every((key,index)=>key===expectedKeys[index]&&record[key]===expected[key]);
+}
 /** Validate the whole ancestor chain without chmod-ing any shared XDG parent. */
 export function assertLinuxManagedPath(path: string, uid = process.getuid!(), leaf: 'file' | 'directory' | 'socket' = 'file'): void {
   const full = absolute(path, 'managed path'); let current = full;
@@ -59,10 +81,35 @@ export function readLinuxEngineReceipt(path: string, uid = process.getuid!()): L
   if ((lstatSync(path).mode & 0o077) !== 0) throw new Error(`${path} must be private (0600).`);
   const receipt = JSON.parse(readFileSync(path, 'utf8')) as LinuxEngineReceipt;
   if (receipt.schema !== 'olympus.engine.install.v1' || receipt.uid !== uid || !receipt.layout) throw new Error(`${path} is a foreign or invalid install receipt.`);
+  if(!['installed','recovery_pending','data_retained'].includes(receipt.installationState))throw new Error(`${path} has an invalid installation state.`);
   const l = receipt.layout;
   const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome });
-  if (JSON.stringify(l) !== JSON.stringify(expected) || l.receiptPath !== path) throw new Error(`${path} has an inconsistent install layout.`);
-  if (!Array.isArray(receipt.ownedUnitLinks) || receipt.ownedUnitLinks.some(p => typeof p !== 'string' || !isAbsolute(p))) throw new Error(`${path} has invalid unit links.`);
+  if (!linuxEngineLayoutsEqual(l,expected) || l.receiptPath !== path) throw new Error(`${path} has an inconsistent install layout.`);
+  const allowedLinkParents=new Set([join(l.configHome,'systemd/user'),join(l.home,'.config/systemd/user')]);
+  if (!Array.isArray(receipt.ownedUnitLinks) || receipt.ownedUnitLinks.some(p => typeof p !== 'string' || !isAbsolute(p)
+    || p===l.unitPath||!allowedLinkParents.has(dirname(p))||!p.endsWith('/olympus-engine.service'))) throw new Error(`${path} has invalid unit links.`);
+  if (!Array.isArray(receipt.machineArtifacts)
+    || receipt.machineArtifacts.some((entry) => !entry || typeof entry.path !== 'string' || !isAbsolute(entry.path)
+      || !['file', 'symlink', 'tree'].includes(entry.kind) || !/^[0-9a-f]{64}$/.test(entry.sha256)
+      || (entry.kind==='tree'&&(!Number.isSafeInteger(entry.rootDevice)||entry.rootDevice!<0||!Number.isSafeInteger(entry.rootInode)||entry.rootInode!<=0
+        ||entry.markerPath!==join(entry.path,'.olympus-generation.json')||!/^[0-9a-f]{64}$/.test(entry.markerSha256??'')))
+      ||(entry.kind!=='tree'&&(entry.rootDevice!==undefined||entry.rootInode!==undefined||entry.markerPath!==undefined||entry.markerSha256!==undefined)))) {
+    throw new Error(`${path} has invalid machine artifacts.`);
+  }
+  if(receipt.mimeOwnership&&(receipt.mimeOwnership.path!==l.mimeappsPath||receipt.mimeOwnership.scheme!=='x-scheme-handler/olympus'||receipt.mimeOwnership.desktopId!=='ai.olympusplugin.open.desktop'))throw new Error(`${path} has invalid MIME ownership.`);
+  if(receipt.openHandlerPending!==undefined&&typeof receipt.openHandlerPending!=='boolean')throw new Error(`${path} has invalid open-handler transaction state.`);
+  const fileArtifacts=new Set([l.unitPath,l.launcherPath,l.openHandlerPath,join(l.stateDir,'service-current.json'),join(l.stateDir,'service-previous.json'),join(l.stateDir,'install-transaction.json')]);
+  const unitLinks=new Set(receipt.ownedUnitLinks);
+  const artifactPaths=new Set<string>();
+  for(const artifact of receipt.machineArtifacts){
+    if(artifactPaths.has(artifact.path))throw new Error(`${path} has duplicate machine artifacts.`);artifactPaths.add(artifact.path);
+    const valid=artifact.kind==='file'?fileArtifacts.has(artifact.path)
+      :artifact.kind==='symlink'?unitLinks.has(artifact.path)&&artifact.path.endsWith('/olympus-engine.service')
+      :dirname(artifact.path)===join(l.packageDir,'generations')&&artifact.sha256===artifact.path.slice(artifact.path.lastIndexOf('/')+1);
+    if(!valid)throw new Error(`${path} has a machine artifact outside the install contract.`);
+  }
+  if(receipt.installationState!=='installed'&&(receipt.machineArtifacts.length!==0||receipt.ownedUnitLinks.length!==0||receipt.mimeOwnership||receipt.openHandlerPending))throw new Error(`${path} has machinery in a non-installed receipt.`);
+  if(receipt.installationState==='recovery_pending'&&typeof receipt.lingerPredated!=='boolean')throw new Error(`${path} recovery receipt has no original linger state.`);
   return receipt;
 }
 /** Discover the default and explicitly selected config root; receipt roots win over shell drift. */
@@ -90,20 +137,27 @@ export function preflightLinuxEngineLayout(layout: LinuxEngineLayout, options: {
   const runtime = stat(layout.runtimeHome);
   if (!runtime || (runtime.mode & 0o077) !== 0) throw new Error(`${layout.runtimeHome} must be an existing private runtime directory (0700).`);
   assertLinuxManagedPath(layout.runtimeDir, uid, 'directory');
-  for (const path of [layout.unitPath, layout.configPath, layout.sovereigntyPath, layout.workerEnvPath, layout.receiptPath, layout.secretsPath, layout.secretsKeyPath]) assertLinuxManagedPath(path, uid);
+  for (const path of [layout.unitPath, layout.launcherPath, layout.openHandlerPath, layout.configPath, layout.sovereigntyPath, layout.workerEnvPath, layout.receiptPath, layout.secretsPath, layout.secretsKeyPath]) assertLinuxManagedPath(path, uid);
   if (options.fresh !== false) {
     const owned = readLinuxEngineReceipt(layout.receiptPath, uid);
+    if(owned?.installationState==='data_retained')throw new Error(`Olympus data was retained after uninstall at ${layout.configDir}. Run the Linux uninstaller with --purge --yes to remove it, or back up and move the retained Olympus data before a fresh install. Nothing was changed.`);
     const candidates = [join(layout.home, '.olympus'), join(layout.home, '.config/olympus'), join(layout.home, '.local/share/openclaw/olympus'),
       join(layout.home, '.local/share/olympus/engine'), layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir, layout.unitPath, join(layout.home, '.config/systemd/user/olympus-engine.service'),
+      layout.launcherPath,
+      layout.openHandlerPath,
       join(layout.home, '.config/systemd/user/olympus-worker.service'), join(layout.configHome, 'systemd/user/olympus-worker.service')];
-    const managed = new Set([layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir, layout.unitPath]);
+    const managed = new Set([layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir, layout.unitPath, layout.launcherPath, layout.openHandlerPath]);
+    const recoverableEmptyDirectory = (p: string): boolean => {
+      const info=stat(p);
+      return managed.has(p)&&Boolean(info?.isDirectory()&&info.uid===uid&&(info.mode&0o077)===0&&readdirSync(p).length===0);
+    };
     const ownedRegistration = (p: string): boolean => {
       if (!owned || p !== join(layout.home, '.config/systemd/user/olympus-engine.service')) return false;
       const info = stat(p);
       if (!info?.isSymbolicLink() || info.uid !== uid) return false;
       try { assertLinuxManagedPath(dirname(p), uid, 'directory'); return realpathSync(p) === layout.unitPath; } catch { return false; }
     };
-    const conflicts = [...new Set(candidates)].filter(p => stat(p) && !(owned && managed.has(p)) && !ownedRegistration(p));
+    const conflicts = [...new Set(candidates)].filter(p => stat(p) && !(owned && managed.has(p)) && !ownedRegistration(p) && !recoverableEmptyDirectory(p));
     if (conflicts.length) throw new Error(`Existing Olympus data or competing custodian: ${conflicts.join(', ')}. Keep using the existing installation, or stop its custodian and explicitly back up and move the listed Olympus-owned data aside before retrying a fresh install. Nothing was changed.`);
   }
 }
@@ -113,11 +167,11 @@ export function createLinuxPrivateDirectory(path: string): void {
   const parent = dirname(path); if (!stat(parent)) createLinuxPrivateDirectory(parent);
   mkdirSync(path, { mode: 0o700 });
 }
-export function publishLinuxEngineReceipt(layout: LinuxEngineLayout, updates: Partial<Pick<LinuxEngineReceipt, 'ownedUnitLinks' | 'lingerPredated'>> = {}): LinuxEngineReceipt {
+export function publishLinuxEngineReceipt(layout: LinuxEngineLayout, updates: Partial<Pick<LinuxEngineReceipt, 'installationState' | 'ownedUnitLinks' | 'lingerPredated' | 'machineArtifacts' | 'mimeOwnership' | 'openHandlerPending'>> = {}): LinuxEngineReceipt {
   preflightLinuxEngineLayout(layout);
   const previous = readLinuxEngineReceipt(layout.receiptPath);
   createLinuxPrivateDirectory(layout.configDir);
-  const receipt: LinuxEngineReceipt = { schema: 'olympus.engine.install.v1', uid: process.getuid!(), layout, ownedUnitLinks: [],
+  const receipt: LinuxEngineReceipt = { schema: 'olympus.engine.install.v1', uid: process.getuid!(), layout, installationState: 'installed', ownedUnitLinks: [], machineArtifacts: [],
     rotation: { mechanism: 'host-copytruncate', maxBytes: 10 * 1024 * 1024, retained: 3 }, ...previous, ...updates };
   writePrivateFileAtomicSync(layout.receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
   return receipt;

@@ -2,8 +2,8 @@ import { afterEach, expect, test } from 'bun:test';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { spawn } from 'node:child_process';
-import { bindWorkerSocket, createWorkerFetch, prepareWorkerSocket, validateWorkerSocket, workerSocketPath } from '../src/core/worker-transport.ts';
+import { spawn, spawnSync } from 'node:child_process';
+import { bindWorkerSocket, createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket, validateWorkerSocket, workerSocketPath } from '../src/core/worker-transport.ts';
 import { withRequestPeer, requestFromOwnerSocket } from '../src/core/request-peer.ts';
 import { createRemoteOAuthHandler } from '../src/workers/remote-oauth/handler.ts';
 import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
@@ -40,6 +40,12 @@ test('private owner socket refuses unsafe, symlinked and occupied paths without 
   expect(() => prepareWorkerSocket(options)).toThrow('occupied');
   rmSync(dirname(socket), { recursive: true }); symlinkSync(dir, dirname(socket));
   expect(() => prepareWorkerSocket(options)).toThrow();
+});
+test('stale socket removal needs both supervisor process custody and listener refusal',()=>{
+ const {options}=fixture();const path=workerSocketPath(options)!;mkdirSync(dirname(path),{mode:0o700});
+ const made=spawnSync('python3',['-c','import socket,sys\ns=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()',path]);expect(made.status).toBe(0);chmodSync(path,0o600);
+ expect(()=>removeReleasedWorkerSocket(options,{previousWorkerReleased:false})).toThrow('custody');expect(lstatSync(path).isSocket()).toBe(true);
+ expect(removeReleasedWorkerSocket(options,{previousWorkerReleased:true})).toBe(true);expect(()=>lstatSync(path)).toThrow();
 });
 
 test('real Unix worker health and CLI/relay fetch retain origin and never follow redirects', async () => {
