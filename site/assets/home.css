@@ -28,11 +28,11 @@
 /* 2. The logline */
 .choice { margin: 8px 0 0; font-size: clamp(40px, 6vw, 74px); }
 .choice > span { display: inline-block; }
+.choice > span:first-child { display: block; }
 .choice__turn { display: inline-grid; place-items: center; vertical-align: baseline; }
 .choice__turn > * { grid-area: 1 / 1; }
 .choice__or { opacity: 0; }
 .choice__and { font-size: 0.5em; padding: 0.12em 0.42em 0.16em; border-width: 0.11em; position: relative; top: -0.08em; }
-.choice > .choice__pick { display: none; }
 .choice__lede { margin-top: 32px; }
 
 /* 3. Sources */
@@ -144,8 +144,9 @@ html.motion [data-do="strike-collapse"] .redact::after { transition: transform 0
 html.motion [data-do="strike"]:not(.on) .redact::after,
 html.motion [data-do="strike-collapse"]:not(.on) .redact::after { transform: scaleX(0); }
 
-/* Strike, then collapse so the line reflows (home.js sets the width it collapses from). */
-html.motion .choice > .choice__pick, html.motion .rally [data-do="strike-collapse"] { display: inline-block; overflow: hidden; vertical-align: bottom; white-space: nowrap; }
+/* Strike, then collapse so the line reflows: only the two "Not"s, where the words left behind make the promise.
+   Everywhere else the bar stays (home.js sets the width it collapses from). */
+html.motion .rally [data-do="strike-collapse"] { display: inline-block; overflow: hidden; vertical-align: bottom; white-space: nowrap; }
 html.motion [data-do="strike-collapse"].gone { width: 0 !important; opacity: 0; transition: width 0.5s var(--ease-turn), opacity 0.3s 0.2s; }
 
 html.motion .choice__or { opacity: 1; transition: opacity 0.18s; }

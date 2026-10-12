@@ -188,7 +188,7 @@ em { font-style: italic; }
 /* Redaction: the marker bar over withheld words. */
 .redact { position: relative; white-space: nowrap; }
 .redact::after {
-  content: ""; position: absolute; left: -0.06em; top: 0.14em; bottom: 0.04em; width: calc(100% + 0.12em);
+  content: ""; position: absolute; left: -0.06em; top: -0.08em; bottom: -0.14em; width: calc(100% + 0.12em);
   background: var(--bar); border-radius: 0.06em 0.18em 0.14em 0.08em;
   transform: scaleX(var(--strike, 1)); transform-origin: left center;
 }
