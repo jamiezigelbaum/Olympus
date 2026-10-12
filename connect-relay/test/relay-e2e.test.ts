@@ -556,7 +556,11 @@ describe('offline fallback', () => {
     cleanups.push(worker.stop);
     const a = await connectInstall(relay, worker);
     const token = mintCredential('access', a.identity.installId);
-    expect((await mcpPost(relay, token, rpc('tools/list'))).status).toBe(200);
+    // A caller naming a surface itself changes nothing: only the engine's answer marks one.
+    const online = await fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-olympus-surface': 'chatgpt' }, body: rpc('tools/list') });
+    expect(online.status).toBe(200);
+    expect(online.headers.get('x-olympus-surface')).toBeNull();
+    expect(worker.requests[0]!.headers['x-olympus-surface']).toBeUndefined();
     await a.client.stop();
     await until(() => relay.onlineInstalls().length === 0);
     const list = await (await mcpPost(relay, token, rpc('tools/list'))).json();
@@ -570,8 +574,11 @@ describe('offline fallback', () => {
     cleanups.push(worker.stop);
     const a = await connectInstall(relay, worker);
     const token = mintCredential('access', a.identity.installId);
-    // Used once while the Mac is online: the engine marks it as ChatGPT's.
-    expect((await mcpPost(relay, token, rpc('tools/list'))).status).toBe(200);
+    // Used once while the Mac is online: the engine marks it as ChatGPT's, and the mark stays at the relay.
+    const online = await mcpPost(relay, token, rpc('tools/list'));
+    expect(online.status).toBe(200);
+    expect(online.headers.get('x-olympus-surface')).toBeNull();
+    expect(online.headers.get('x-olympus-authenticated')).toBeNull();
     await a.client.stop();
     await until(() => relay.onlineInstalls().length === 0);
 

@@ -296,6 +296,20 @@ describe('Ask anonymously', () => {
     expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'openai' }, xaiChosen().value)).toMatchObject({ ok: true, model: 'x-ai/grok-5' });
   });
 
+  test('a model change that lands between remember and the send cannot route Grok\'s question to xAI (Codex review of PR #289)', async () => {
+    let current = settings({ standardMode: 'as_written' });
+    const d = deps(current);
+    const value: ConsultAskDependencies = {
+      ...d.value,
+      settings: () => current,
+      // The remembered level and cleanup, plus another writer's model change.
+      remember: async () => { current = settings({ standardMode: 'as_written', levelChosen: true, revision: 4, chatgptFrontierModel: 'x-ai/grok-5' }); return { ok: true }; },
+    };
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai', level: 'standard', cleanup: 'as_written', remember: true }, value))
+      .toEqual({ ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.configuredModelSameProvider });
+    expect(d.calls.send).toEqual([]);
+  });
+
   test('remember stores the choice through the writer before the send and reports it; without a writer the question still goes, once', async () => {
     let current = settings({ standardMode: 'light_cleanup' });
     const d = deps(current);

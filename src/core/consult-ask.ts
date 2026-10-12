@@ -280,6 +280,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   }
   // The same rule for the configured model: an agent with no setting of its
   // own (Grok takes the ChatGPT one) never gets a model from its own provider.
+  // Checked here before any work, and again on the model sent.
   if (input.model === undefined && input.callerProvider !== undefined
     && consultModelProvider(consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider)) === input.callerProvider) {
     return { ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.configuredModelSameProvider };
@@ -415,6 +416,11 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   // The question goes to the model set for the caller's hosting provider
   // unless it named one.
   const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
+  // Checked again on the model actually sent: settings re-read after
+  // remember may name another one (Codex review of PR #289).
+  if (input.callerProvider !== undefined && consultModelProvider(model) === input.callerProvider) {
+    return { ok: false, code: 'model_same_provider', message: input.model === undefined ? CONSULT_ASK_MESSAGES.configuredModelSameProvider : CONSULT_ASK_MESSAGES.modelSameProvider };
+  }
   let result: ZkapiConsultResult | undefined;
   try {
     result = await deps.send(sent, authorize, { model, ...(input.signal ? { signal: input.signal } : {}) });

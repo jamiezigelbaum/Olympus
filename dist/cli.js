@@ -123539,6 +123539,9 @@ async function askAnonymously(input, deps) {
     return !stale;
   };
   const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
+  if (input.callerProvider !== undefined && consultModelProvider(model) === input.callerProvider) {
+    return { ok: false, code: "model_same_provider", message: input.model === undefined ? CONSULT_ASK_MESSAGES.configuredModelSameProvider : CONSULT_ASK_MESSAGES.modelSameProvider };
+  }
   let result;
   try {
     result = await deps.send(sent, authorize, { model, ...input.signal ? { signal: input.signal } : {} });
