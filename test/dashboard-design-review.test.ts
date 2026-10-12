@@ -103,6 +103,12 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
         // rendered_from_commit; the screenshots Jamie viewed are on
         // codex/v05-remote-toggle-screenshots at screenshot_commit.
         id: 'setup_agents',
+        // The 2026-10-12 wording change: relay-only ChatGPT steps, tunnel notes
+        // for the others, and the local prompt without OpenClaw.
+        pending_review: {
+          reason: "The Agents page wording now matches the product (2026-10-12): under the Olympus relay only ChatGPT shows steps (one click, no pairing code) and Claude, Grok, Muse, the Grok API and Other say they need your own tunnel; the local prompt also covers a Mac install without OpenClaw. The changed render awaits Jamie's re-approval.",
+          candidate_rendered_html_sha256: 'd2305507e20888ea89f6b5ccfc87fb1ba31e7bf1ca52644f981817bbc0784a1c',
+        },
         rendered_html_sha256: '7453298473da4e153c9cb13936f535b728133b363619d2edf2725b40373f5e4d',
         approved_by: 'jamie',
         approved_on: '2026-10-03',
