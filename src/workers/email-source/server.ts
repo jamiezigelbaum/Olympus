@@ -47,6 +47,7 @@ import {
   createAnalystSourceIndexAnswerHandler,
   readPrivateEvidenceItem,
   checkPrivateEvidenceItems,
+  probePrivateMatch,
   searchPrivateEvidence,
   searchReleasedEvidence,
   type AnalystAnswerLanes,
@@ -4583,6 +4584,28 @@ export async function main(): Promise<void> {
     openRemoteConnectionStore,
   );
   dashboardAgentStore = remoteConnections;
+  // Questions waiting on a Private answer (core/waiting-private-questions.ts):
+  // beside the connection store, owner-only, opened on first use. Records of
+  // a connection revoked while this worker was down are dropped on open.
+  const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
+  let waitingStore: import('../../core/waiting-private-questions.ts').WaitingQuestionStore | undefined;
+  let waitingStoreFailed = false;
+  const waitingQuestionStore = () => {
+    if (waitingStore || waitingStoreFailed) return waitingStore;
+    try {
+      const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(process.env)));
+      const connections = remoteConnections()?.list();
+      if (connections) {
+        const active = new Set(connections.filter((connection) => connection.revokedAt === null).map((connection) => connection.id));
+        store.reconcileConnections((id) => active.has(id));
+      }
+      waitingStore = store;
+    } catch {
+      waitingStoreFailed = true;
+      console.warn('[olympus] waiting private questions store unavailable');
+    }
+    return waitingStore;
+  };
   // The panel's remote-access line: the address this worker serves right now,
   // explained by the relay status `olympus connections status` prints.
   const { demoInstallMarked, readRemoteAccessStatus, remoteAccessDir, remoteAccessStatusView, resolveRemoteAccessUrls } = await import('../../core/remote-access.ts');
@@ -4698,6 +4721,11 @@ export async function main(): Promise<void> {
     // While an analysis runs (from the search) and from a claim to
     // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
+    // The panel's seen ack clears the waiting question it answered (same
+    // id, generation and connection; a re-asked question survives).
+    acknowledge: (ref) => {
+      waitingQuestionStore()?.acknowledge(ref);
+    },
     // The panel's "open on this Mac": macOS `open`, on a path this engine
     // resolved for a cited source (never a path from the request), checked
     // again now: no symlink, still inside a Dropbox folder, and only a
@@ -4860,6 +4888,21 @@ export async function main(): Promise<void> {
     () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
     () => secureDerivativeDefault ?? 'allow',
   );
+  // The Private part of a remote agent's answer (core/remote-private-part.ts):
+  // when the answer left Private out, a metadata-only local probe over the
+  // same selectors decides whether the question waits on this computer.
+  // "Couldn't check yet" records are re-probed here every ten minutes.
+  const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
+  const remotePrivateParts = createRemotePrivateParts({
+    probe: (request, timeoutMs) => (sourceAnswerLanes
+      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs })
+      : Promise.resolve('unknown' as const)),
+    store: waitingQuestionStore,
+  });
+  const uncheckedRetry = setInterval(() => {
+    void remotePrivateParts.retryUnchecked().catch(() => undefined);
+  }, 10 * 60_000);
+  uncheckedRetry.unref?.();
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
@@ -4876,6 +4919,8 @@ export async function main(): Promise<void> {
       // manifest against the tier ledgers and release rules as they are now
       // (core/remote-result.ts).
       releaseCheck: remoteReleaseCheck,
+      // Summary-rule agents only: the ChatGPT surface records through its own path (chatgpt/mcp-surface.ts).
+      ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
     }),
   };
   // `/openapi.json` and `/api/v1/tools/<name>`: the same remote surface as
@@ -5092,6 +5137,7 @@ export async function main(): Promise<void> {
     setup: chatgptSetup,
     ...(chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {}),
     ...(chatgptPrivateMatchProbe ? { privateMatchProbe: chatgptPrivateMatchProbe } : {}),
+    waitingQuestions: waitingQuestionStore,
     answerModelAvailable: chatgptAnswerModelAvailable,
     embedding: chatgptEmbeddingState,
     privateModel: chatgptPrivateModelState,

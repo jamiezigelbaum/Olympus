@@ -478,18 +478,22 @@ and the built-in embedding model is loaded and warmed at start and runs a
 question's forward pass before any waiting indexing pass, so a search no
 longer waits behind indexing after a restart.
 
-With the panel `ready` and no readable Public or Personal evidence in the
-result, the note steers ChatGPT to a short reply along the
-lines of "Olympus is preparing your answer privately on your Mac; it'll
-appear in the panel above, visible only to you (it can take up to a
-minute)", with no commentary on other search results unless they actually
+Every panel note opens with the host-neutral lead of
+`background-agents.md` (section A, "The model's note"): the answer comes in
+a panel below the reply if the app shows one, and always in Olympus on the
+user's computer, where the question waits. With the panel `ready` and no
+readable Public or Personal evidence in the result, the note steers ChatGPT
+to a short reply along the lines of "Olympus is answering this privately
+from your Private items on your computer: in a panel here if one appears,
+and in Olympus on your computer (it can take up to a minute)", with no
+commentary on other search results unless they actually
 answer the question and no coverage counts, unread items or file names. A
 `detail: "full"` request says a full read can take a few minutes instead.
 When the result also carries readable Public or Personal evidence (a search
 excerpt, or a released answer with citations), the note
 (`PRIVATE_MATCH_PANEL_EVIDENCE_NOTE`) has ChatGPT answer from that evidence
-as usual and add one short line that Olympus may also add a private answer
-in the panel; if none of that evidence answers the question, ChatGPT gives
+as usual and add one short line that Olympus may also answer privately, in
+a panel if one appears and in Olympus on the computer; if none of that evidence answers the question, ChatGPT gives
 the short panel notice instead. It keeps every other rule (no coverage counts, unread items or
 file names beyond the evidence cited, no folder advice, no upload request,
 follow-ups through the panel). A Private match can be weak while the
@@ -535,6 +539,13 @@ percent when known; counts only, no job).
    answer creates it at `source_answer_result`, not at `source_answer`). It
    holds the question in memory only, for at most **10 minutes** from
    creation.
+   - **Claim-time synthesis (2026-10-12, `background-agents.md` A).** The
+     analysis below now starts when a panel first claims the job, from the
+     same search-time evidence, so no Private synthesis runs for a job no
+     panel claims (a dot, or a host without panels); the question waits on
+     the computer instead. Search-time start remains as the `precompute`
+     option, which the worker no longer sets; the rest of this bullet
+     describes that mode.
    - **Precompute (2026-10-02).** The job's private analysis starts as the
      job is created, from the search-time Private evidence, while ChatGPT
      is still writing its own reply (often 30-50 s), so the panel's answer

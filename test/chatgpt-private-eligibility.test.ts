@@ -169,7 +169,8 @@ function world(options: {
     log: (line: string) => lines.push(line),
     claimHoldMs: 0,
     audit: () => {},
-    ...(options.precompute === false ? { precompute: false } : {}),
+    // Search-time precompute unless a test turns it off (opt-in since claim-time synthesis became the default).
+    precompute: options.precompute !== false,
   } as never);
   return {
     jobs,

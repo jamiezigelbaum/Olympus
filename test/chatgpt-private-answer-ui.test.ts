@@ -1110,3 +1110,45 @@ describe('the card never fills the host frame', () => {
     expect(html).toContain('html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}');
   });
 });
+
+describe('the seen acknowledgment', () => {
+  const ACK = 'C'.repeat(43);
+
+  test('posted once, only after the answer is rendered, with the claiming key and the answer\'s own ack', async () => {
+    const host = mount({ plaintext: { ...PLAINTEXT, ack: ACK } });
+    // What the panel showed when the acknowledgment left.
+    let shownAtAck: string | undefined;
+    const relay = (host.win as any).fetch;
+    Object.defineProperty(host.win, 'fetch', {
+      configurable: true,
+      value: (url: string, init: any) => {
+        if (JSON.parse(init.body).ack !== undefined) shownAtAck = host.text();
+        return relay(url, init);
+      },
+    });
+    await reveal(host);
+    await host.until(() => host.fetched.length === 2, 'the acknowledgment');
+    const [claim, ack] = host.fetched;
+    expect(shownAtAck).toContain('31 March');
+    expect(ack!.url).toBe(`${RELAY}/private/${JOB}`);
+    expect(ack!.init.method).toBe('POST');
+    expect(ack!.init.credentials).toBe('omit');
+    expect(ack!.body).toEqual({ v: 1, publicKey: claim!.body.publicKey, ack: ACK });
+    // Hide and Show reuse the answer in memory: no second acknowledgment.
+    host.button(W.hide).click();
+    host.button(W.show).click();
+    await sleep(20);
+    expect(host.fetched).toHaveLength(2);
+    // Never shown to the person.
+    expect(host.text()).not.toContain(ACK);
+  });
+
+  test('an answer without a well-formed ack posts nothing more', async () => {
+    for (const ack of [undefined, 'short', 'C'.repeat(42) + '!']) {
+      const host = mount({ plaintext: { ...PLAINTEXT, ...(ack === undefined ? {} : { ack }) } });
+      await reveal(host);
+      await sleep(20);
+      expect(host.fetched).toHaveLength(1);
+    }
+  });
+});

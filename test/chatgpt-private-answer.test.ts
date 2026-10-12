@@ -77,7 +77,8 @@ function readyModel(overrides: Partial<PrivateAnswerModel> = {}): PrivateAnswerM
 }
 
 function makeJobs(model: PrivateAnswerModel, clock = { now: 1_000_000 }, extra: Partial<ConstructorParameters<typeof PrivateAnswerJobs>[0]> = {}) {
-  return new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, now: () => clock.now, log: () => {}, claimHoldMs: 0, ...extra });
+  // Search-time precompute, opt-in since claim-time synthesis became the default; tests of the default pass `precompute: undefined`.
+  return new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, now: () => clock.now, log: () => {}, claimHoldMs: 0, precompute: true, ...extra });
 }
 
 /**
@@ -165,13 +166,13 @@ describe('sealing', () => {
 describe('one-time jobs', () => {
   test('claim, poll, collect; replays of the same key get the same sealed bytes, any other key 409', async () => {
     const model = readyModel();
-    const jobs = makeJobs(model);
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, now: () => 1_000_000, log: () => {}, claimHoldMs: 0 });
     const begun = jobs.begin({ question: 'When does the lease end?', count: 3, evidence: EVIDENCE, refresh: async () => EVIDENCE });
     expect(begun).toMatchObject({ count: 3, panelState: 'ready' });
     expect(begun.jobId).toMatch(new RegExp(`^oly2p\\.${INSTALL}\\.`));
-    // The analysis starts at search time, before any claim.
+    // No Private synthesis before a panel claims the job (claim-time synthesis, the default).
     await settled(jobs);
-    expect(model.calls).toEqual([{ question: 'When does the lease end?', evidence: EVIDENCE }]);
+    expect(model.calls).toEqual([]);
     const panel = await generatePanelKeyPair();
     const first = await jobs.claim(begun.jobId!, panel.publicKey);
     expect(first).toMatchObject({ status: 202, body: { status: 'pending' }, retryAfterSeconds: 2 });
@@ -181,7 +182,11 @@ describe('one-time jobs', () => {
     expect(ready.body.status).toBe('ready');
     expect(JSON.stringify(ready.body)).not.toMatch(SENTINEL_PATTERN);
     const opened = JSON.parse(await openPrivateAnswer(begun.jobId!, panel.privateKey, ready.body as unknown as SealedPrivateAnswer));
-    expect(opened).toEqual({ v: 1, answer: SECRET_ANSWER, citations: [{ title: SECRET_CITATION, source: 'Gmail', date: '2026-04-01' }] });
+    const { ack, ...rest } = opened as { ack: string };
+    expect(rest).toEqual({ v: 1, answer: SECRET_ANSWER, citations: [{ title: SECRET_CITATION, source: 'Gmail', date: '2026-04-01' }] });
+    // The seen acknowledgment capability: 32 random bytes, base64url.
+    expect(ack).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(model.calls).toEqual([{ question: 'When does the lease end?', evidence: EVIDENCE }]);
     // A replay of the panel's request (by anyone who saw it) cannot consume
     // the answer: same key, same sealed bytes, useless without the panel's
     // private key. Any other key: 409, and a local audit line.
@@ -552,7 +557,7 @@ describe('the /private/<id> endpoint', () => {
     expect(PRIVATE_ANSWER_PAD_BUCKETS as readonly number[]).toContain(new TextEncoder().encode(opened).byteLength);
     const plaintext = JSON.parse(opened);
     expect(plaintext.answer).toBe(SECRET_ANSWER);
-    expect(Object.keys(plaintext).filter((key) => !['v', 'answer', 'citations', 'unanswered'].includes(key))).toEqual([]);
+    expect(Object.keys(plaintext).filter((key) => !['v', 'answer', 'citations', 'unanswered', 'ack'].includes(key))).toEqual([]);
     expect((await (await post(handler, jobId!, old)).text())).toBe(text);
   });
 });
@@ -593,8 +598,17 @@ describe('the response builder', () => {
     // 2026-10-02 live: with the panel answering, ChatGPT still recited
     // coverage counts and a name-only match ("returned only its filename").
     // The ready note steers it to a short "see the panel" reply instead.
-    expect(PRIVATE_MATCH_PANEL_NOTE).toContain('Olympus is preparing your answer privately on your computer; '
-      + "it'll appear in the panel above, visible only to you (it can take up to a minute).");
+    expect(PRIVATE_MATCH_PANEL_NOTE).toContain('Olympus is answering this privately from your Private items on your computer: '
+      + 'in a panel here if one appears, and in Olympus on your computer (it can take up to a minute).');
+    // Host-neutral (design background-agents.md, A): the design's lead, verbatim, and no "panel above" anywhere.
+    for (const note of [PRIVATE_MATCH_PANEL_NOTE, PRIVATE_MATCH_PANEL_FULL_NOTE]) {
+      expect(note.startsWith('Some matching items are Private in Olympus. Their contents stay on the user\'s computer and are never shown to you. '
+        + 'Olympus answers from them privately: in a panel below this reply if the app shows one, and always in Olympus on the user\'s computer. '
+        + 'Say that briefly; don\'t guess at the private part. ')).toBe(true);
+    }
+    for (const note of [PRIVATE_MATCH_PANEL_NOTE, PRIVATE_MATCH_PANEL_FULL_NOTE, PRIVATE_MATCH_PANEL_SETUP_NOTE, PRIVATE_MATCH_NOTE]) {
+      expect(note).not.toContain('panel above');
+    }
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain("Don't comment on other search results unless they actually answer the question");
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain("don't mention coverage counts, unread items or file names");
     expect(PRIVATE_MATCH_PANEL_FULL_NOTE).toContain('reading the full report can take a few minutes');
@@ -615,13 +629,14 @@ describe('the response builder', () => {
     expect(privateMatchNote({ count: 1, panelState: 'no_model' }, 0, true)).toBe(PRIVATE_MATCH_PANEL_SETUP_NOTE);
     for (const note of [PRIVATE_MATCH_PANEL_EVIDENCE_NOTE, PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE]) {
       expect(note).toContain('Answer the question from the evidence above as usual');
-      expect(note).toContain('Olympus may also add a private answer in the panel above');
+      expect(note).toContain('Olympus may also answer this privately from your Private items, in a panel here if one appears and in Olympus on your computer');
+      expect(note).not.toContain('panel above');
       expect(note).not.toContain('Keep your reply short');
       // Review of #272: weak Personal hits must not become the answer; with
       // none answering, the reply is the original short panel notice.
       expect(note).toContain("If none of the evidence above answers the question, don't answer from it or comment on it; "
-        + 'instead keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; '
-        + "it'll appear in the panel above, visible only to you (");
+        + 'instead keep your reply short, along the lines of: “Olympus is answering this privately from your Private items on your computer: '
+        + 'in a panel here if one appears, and in Olympus on your computer (');
       // Every prohibition of the short note still holds.
       expect(note).toContain("Don't suggest changing folder settings for those items.");
       expect(note).toContain("Don't ask the user to upload, attach or paste those files");

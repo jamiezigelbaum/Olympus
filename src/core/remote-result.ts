@@ -48,6 +48,12 @@ export interface RemoteOutputOptions {
   releaseCheck?: ReleaseCheck;
   /** The release manifests the call collected (its own answer's, or its job's). */
   releaseManifests?: readonly ReleaseManifest[];
+  /**
+   * The answer left Private out and the local probe found matching Private
+   * items (core/remote-private-part.ts): an answered source answer carries
+   * REMOTE_PRIVATE_NOTE, a fixed sentence, and nothing else about them.
+   */
+  privateMayAnswer?: boolean;
 }
 
 const MAX_ANSWER = 64 * 1024;
@@ -70,6 +76,8 @@ export const REMOTE_PENDING_MESSAGE = 'Olympus is still working on this and it k
 export const REMOTE_ANSWER_CHANGED = 'Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.';
 /** The answer's inputs could not be checked against the current tiers. */
 export const REMOTE_ANSWER_UNVERIFIED = 'Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.';
+/** The one sentence a remote agent is told when Private items it was not given may answer its question. */
+export const REMOTE_PRIVATE_NOTE = 'Private items may answer this; the person can see that answer in Olympus on their computer.';
 export const REMOTE_ANSWER_WITHHELD = 'Olympus withheld this answer under the owner\'s privacy rules.';
 export const REMOTE_REPLY_WITHHELD = 'Olympus withheld the reply because it looked like it contained a password, key or token.';
 const REMOTE_REFUSAL_FALLBACK = 'Olympus could not ask anonymously.';
@@ -307,7 +315,13 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
     if (dropped.has(index) || citations.length >= MAX_CITATIONS) return;
     citations.push(citationOutput(entry));
   });
-  return { kind: 'source_answer', status: 'answered', answer: answer.text ?? '', citations };
+  return {
+    kind: 'source_answer',
+    status: 'answered',
+    answer: answer.text ?? '',
+    citations,
+    ...(options.privateMayAnswer === true ? { private_note: REMOTE_PRIVATE_NOTE } : {}),
+  };
 }
 
 function withheldAnswer(message: string): Record<string, unknown> {
@@ -652,7 +666,7 @@ const CITATION_SCHEMA = {
 
 const SOURCE_ANSWER_SCHEMA = {
   type: 'object',
-  description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead.',
+  description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead. When private_note is present, pass it on as written.',
   additionalProperties: false,
   required: ['kind', 'status', 'answer', 'citations'],
   properties: {
@@ -660,6 +674,7 @@ const SOURCE_ANSWER_SCHEMA = {
     status: { enum: ['answered', 'withheld'] },
     answer: { type: 'string', maxLength: MAX_ANSWER },
     citations: { type: 'array', maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
+    private_note: { const: REMOTE_PRIVATE_NOTE },
   },
 } as const;
 

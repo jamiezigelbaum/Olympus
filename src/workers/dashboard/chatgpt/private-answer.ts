@@ -23,7 +23,12 @@
  * tool calls, storage, the console or a URL. The network calls are POSTs to
  * `<relayOrigin>/private/<job id>` (the resource CSP's one connect domain) and,
  * when the person opens a source on their Mac, `<relayOrigin>/private/<job
- * id>/open` with that source's opaque token. A source that carries a web
+ * id>/open` with that source's opaque token. Once an answer is decrypted and
+ * rendered, the panel posts the answer's own single-use `ack` back to the
+ * first path (`{"v":1,"publicKey","ack"}`), once per job, so the question no
+ * longer waits on the computer. That acknowledgment proves the panel
+ * decrypted the answer and says it rendered it; it does not prove a person
+ * read it. A lost one leaves the question waiting there. A source that carries a web
  * address (https only) is handed to the host to open: that address is the one
  * thing the host ever sees, and only on the person's click.
  *
@@ -132,7 +137,9 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   let focusAfter = '';
   type Open = { kind: 'mac'; token: string } | { kind: 'web'; url: string };
   type Source = { name: string; open: Open | null };
-  type Answer = { text: string; sources: Source[]; unanswered: string[] };
+  type Answer = { text: string; sources: Source[]; unanswered: string[]; ack: string | null };
+  // Jobs whose seen acknowledgment has been posted from this frame (once each).
+  const acked: Record<string, boolean> = {};
 
   // ---- host bridge -------------------------------------------------------
   let nextId = 1;
@@ -468,7 +475,31 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : [])
       .filter((item: Any) => typeof item === 'string' && item.trim())
       .map((item: string) => item.trim());
-    return { text: value.answer, sources, unanswered };
+    const ack = typeof value.ack === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.ack) ? value.ack : null;
+    return { text: value.answer, sources, unanswered, ack };
+  }
+
+  /**
+   * The seen acknowledgment, posted once per job and only after the answer
+   * was decrypted and rendered: it proves decryption and this panel's own
+   * render claim, not that a person read it. Fire and forget: a lost one
+   * leaves the question waiting on the computer, which is the safe side.
+   */
+  function acknowledge(jobId: string, publicKey: string, ack: string | null): void {
+    if (!ack || acked[jobId] || !JOB_ID.test(jobId) || typeof (window as Any).fetch !== 'function') return;
+    acked[jobId] = true;
+    try {
+      const posting = (window as Any).fetch(config.relayOrigin + '/private/' + jobId, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ v: 1, publicKey, ack }),
+        credentials: 'omit',
+        cache: 'no-store',
+        referrerPolicy: 'no-referrer',
+        mode: 'cors',
+      });
+      if (posting && typeof posting.then === 'function') posting.then(() => undefined, () => undefined);
+    } catch { /* lost: the question keeps waiting */ }
   }
 
   // ---- collecting --------------------------------------------------------
@@ -608,6 +639,8 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
           phase = 'revealed';
           focusAfter = byUser ? 'answer' : '';
           render();
+          // Rendered: now, and only now, say so.
+          acknowledge(jobId, keys.publicKey, opened.ack);
           return;
         }
         if (code === 200 && status === 'failed') return fail(T.failed, false, byUser);

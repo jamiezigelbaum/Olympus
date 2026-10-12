@@ -17,6 +17,7 @@ import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-wa
 import type { OperationCaller } from './operation-caller.ts';
 import type { SourceAnswerJobScope, SourceAnswerPending } from './source-answer-jobs.ts';
 import type { ReleaseCheck } from './release-manifest.ts';
+import type { RemotePrivatePart } from './remote-private-part.ts';
 
 type SourceIndexAnswerCorpusId = string;
 type SourceIndexStatusCorpusId = string;
@@ -69,6 +70,13 @@ export interface OperationContext {
    * with it when the answer is collected; no operation handler reads it.
    */
   releaseCheck?: ReleaseCheck;
+  /**
+   * The Private part of a remote agent's source answer
+   * (core/remote-private-part.ts), set by the worker for its remote surface
+   * only: a fallback answer whose Private items match is recorded as a
+   * waiting question on this computer. No operation handler reads it.
+   */
+  remotePrivatePart?: RemotePrivatePart;
 }
 
 export interface Operation {

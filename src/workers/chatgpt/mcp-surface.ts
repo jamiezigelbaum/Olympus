@@ -34,7 +34,8 @@ import { DASHBOARD_RESOURCE, dashboardResourceHtml, dashboardResourceMeta, match
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from './dashboard-view-model.ts';
 import { callSetupTool, isSetupTool, SETUP_TOOLS, type ChatGptSetupBackend } from './setup-tools.ts';
 import { PRIVATE_ANSWER_RESOURCE_URI, type PrivateAnswerDetail, type PrivateEvidenceItem, type PrivateMatchSummary } from './private-answer-contract.ts';
-import type { PrivateAnswerJobs, PrivateEvidenceRefresh } from './private-answer-jobs.ts';
+import type { PrivateAnswerJobs, PrivateAnswerWaitingRef, PrivateEvidenceRefresh } from './private-answer-jobs.ts';
+import type { WaitingQuestionStore, WaitingQuestionTicket } from '../../core/waiting-private-questions.ts';
 import { PRIVATE_ANSWER_RESOURCE, privateAnswerResourceHtml, privateAnswerResourceMeta } from './private-answer-resource.ts';
 import { PRIVATE_QUESTION_RESOURCE_URI } from './private-question-contract.ts';
 import type { PrivateQuestionJobs } from './private-question-jobs.ts';
@@ -80,6 +81,14 @@ export interface ChatGptSurfaceOptions {
   privateAnswers?: PrivateAnswerJobs;
   /** Private question jobs for the private question panel; without them open_private_question answers "unavailable". */
   privateQuestions?: PrivateQuestionJobs;
+  /**
+   * Where a question with a Private match waits on the computer
+   * (core/waiting-private-questions.ts), recorded at the match, whether or
+   * not a panel ever claims its job. Read per call (the store opens lazily);
+   * undefined, or a store that throws, records nothing and never fails the
+   * tool. Questions typed into the private question panel never reach it.
+   */
+  waitingQuestions?: () => Pick<WaitingQuestionStore, 'ticket' | 'record'> | undefined;
   /** The built-in embedding model's state, when the embeddings lane reports one. */
   embedding?: () => ChatGptDashboardOptions['embedding'];
   /** The owner's privacy settings, counts only, for the dashboard. */
@@ -454,16 +463,19 @@ async function runChatGptTool(
         const detail = detailArgument(args.detail);
         if (!options.evidenceSearch) throw new ChatGptSurfaceError('unavailable');
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
+        const ticket = waitingTicket(ctx, options);
         const [raw, probed] = await Promise.all([
           options.evidenceSearch({ question, ...(limit ? { limit } : {}) }, signal),
           probeWithinDeadline(probe, question, ctx, options, 'search'),
         ]);
         // A private match goes to the private answer panel only (`_meta`):
         // the job is created as this result is built, so its id is valid
-        // only once ChatGPT can see it.
+        // only once ChatGPT can see it. The question waits on the computer
+        // from this moment, whether or not a panel claims the job.
         const match = normalizeProbe(probed);
+        const waiting = match.count > 0 ? recordWaiting(ticket, question, detail, options) : undefined;
         const privateMatch = match.count > 0
-          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail }, options)
+          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting }, options)
           : undefined;
         const result = searchToolResult(raw, privateMatch ? { privateMatch } : {});
         // A new install's first question: say nothing is connected rather
@@ -481,6 +493,7 @@ async function runChatGptTool(
         if (!question) throw new ChatGptSurfaceError('invalid_params');
         const detail = detailArgument(args.detail);
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
+        const ticket = waitingTicket(ctx, options);
         const [raw, probed] = await Promise.all([
           // Public and Personal evidence only: nothing Private, not even a
           // bounded derivative, is answered from on this surface.
@@ -493,8 +506,11 @@ async function runChatGptTool(
           probeWithinDeadline(probe, question, ctx, options, 'search'),
         ]);
         const match = normalizeProbe(probed);
+        // Recorded at the match, handed off or not: a collector that never
+        // comes back still leaves the question waiting on the computer.
+        const waiting = match.count > 0 ? recordWaiting(ticket, question, detail, options) : undefined;
         const pending: PendingPrivateMatch | undefined = match.count > 0
-          ? { question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail }
+          ? { question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting }
           : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
@@ -607,6 +623,40 @@ interface PendingPrivateMatch {
   /** The connection that asked: its newer job supersedes its older precomputes. */
   caller?: string | undefined;
   detail: PrivateAnswerDetail;
+  /** The waiting record made at the match (source_answer_result's job acknowledges this one). */
+  waiting?: PrivateAnswerWaitingRef | undefined;
+}
+
+/** The asking connection's revocation ticket, read before the probe so a revocation during it is caught. */
+function waitingTicket(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'waitingQuestions'>): WaitingQuestionTicket | undefined {
+  const connectionId = ctx.caller?.connectionId;
+  if (!connectionId || !options.waitingQuestions) return undefined;
+  try {
+    return options.waitingQuestions()?.ticket(connectionId);
+  } catch {
+    console.warn('[chatgpt] waiting private question not recorded reason=store_unavailable');
+    return undefined;
+  }
+}
+
+/**
+ * Records a question whose Private part matched: one bit for ChatGPT, and a
+ * waiting question on the computer (no selectors: this surface searches
+ * every Private corpus with the question alone). Never fails the tool.
+ */
+function recordWaiting(
+  ticket: WaitingQuestionTicket | undefined,
+  question: string,
+  detail: PrivateAnswerDetail,
+  options: Pick<ChatGptSurfaceOptions, 'waitingQuestions'>,
+): PrivateAnswerWaitingRef | undefined {
+  if (!ticket) return undefined;
+  try {
+    return options.waitingQuestions?.()?.record(ticket, { question, surface: 'chatgpt', state: 'waiting', detail });
+  } catch {
+    console.warn('[chatgpt] waiting private question not recorded reason=store_unavailable');
+    return undefined;
+  }
 }
 
 /** The tool's `detail` argument: absent is `summary`; anything but the two values is invalid. */
@@ -637,10 +687,18 @@ function privateRefresh(
  * ready, else counts and state. Called as the answered result is built.
  */
 function beginPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfaceOptions): PrivateMatchSummary & { jobId?: string } {
-  const { question, match, refresh, caller, detail } = pending;
+  const { question, match, refresh, caller, detail, waiting } = pending;
   if (!options.privateAnswers) return { count: match.count, panelState: 'no_model' };
   try {
-    return options.privateAnswers.begin({ question, count: match.count, evidence: match.evidence, refresh, detail, ...(caller ? { caller } : {}) });
+    return options.privateAnswers.begin({
+      question,
+      count: match.count,
+      evidence: match.evidence,
+      refresh,
+      detail,
+      ...(caller ? { caller } : {}),
+      ...(waiting ? { waiting } : {}),
+    });
   } catch {
     return { count: match.count, panelState: 'no_model' };
   }

@@ -176,11 +176,15 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
   }
 
   const manifests = createReleaseManifestSink();
+  // Read before the handler runs: a revocation during the call refuses its record.
+  const privatePart = ctx.remotePrivatePart?.start(operation.name, params.value);
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
+    const privateMayAnswer = privatePart ? await privatePart.settle(result) : false;
     return jsonResponse(200, remoteOperationOutput(operation.name, result, {
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
       releaseManifests: manifests.manifests,
+      ...(privateMayAnswer ? { privateMayAnswer } : {}),
     }));
   } catch (error) {
     return operationErrorResponse(error, declaredParams);

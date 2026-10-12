@@ -2789,6 +2789,71 @@ async function privateNeighbours(
 }
 
 /**
+ * Whether anything Private matches a request, for a remote agent's answer
+ * that left Private out (the owner's policy, or an unavailable private
+ * route): see core/remote-private-part.ts. Metadata only: the same routed
+ * search the answer runs, restricted to Private (secure_local) corpora, under
+ * the request's own selectors (corpora, query, selected items, and the
+ * account and filters its scoped lanes apply), with no content provider, so
+ * no passage is read and nothing reaches a model. No query leaves this
+ * computer. `unknown` on a timeout or any failure; a caller must never treat
+ * it as a match. The verdict goes only to the local waiting record.
+ */
+export async function probePrivateMatch(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  request: SourceIndexAnswerRequest;
+  timeoutMs: number;
+}): Promise<'match' | 'no_match' | 'unknown'> {
+  const question = typeof input.request.question === 'string' ? input.request.question.trim() : '';
+  if (!question) return 'no_match';
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const run = async (): Promise<'match' | 'no_match' | 'unknown'> => {
+    const request: SourceIndexAnswerRequest = {
+      ...input.request,
+      question,
+      include_internal: false,
+      include_secure_local: true,
+      include_secure_local_content: false,
+    };
+    const lanes = input.lanes(request);
+    const corpusIds = sourceAnswerCorpusIds(request);
+    const detail = await buildEvidencePackDetailed({
+      question,
+      ...(request.query?.trim() ? { searchQuery: request.query.trim() } : {}),
+      ...(request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {}),
+      maxResults: PRIVATE_EVIDENCE_MAX_RESULTS,
+      ...(corpusIds ? { corpusIds } : {}),
+      searchContext: {
+        allowedTrustDomains: ['secure_local'],
+        allowCloudQueries: false,
+        ...(corpusIds ? { allowedCorpusIds: corpusIds } : {}),
+      },
+      registry: lanes.registry,
+      adapters: lanes.adapters,
+      contentProviders: {},
+      laneTimeoutMs: input.timeoutMs,
+      ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+    });
+    if (detail.pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local')) return 'match';
+    // A corpus that ran out of time was not searched: that is not a "no".
+    return detail.skippedCorpora.some((skip) => skip.reason === 'lane_timeout') ? 'unknown' : 'no_match';
+  };
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<'unknown'>((resolve) => {
+        timer = setTimeout(() => resolve('unknown'), input.timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    return 'unknown';
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * Whether each Private evidence item may be read by a model right now: the
  * private answer panel's eligibility guard, asked immediately before every
  * model submission and before an answer is sealed or released. Per item, from

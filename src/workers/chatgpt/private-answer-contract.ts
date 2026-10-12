@@ -24,6 +24,11 @@
  * - Open a source on the Mac: `POST <relayOrigin>/private/<jobId>/open` with
  *   `{"v":1,"open":"<token from a citation>"}` → 204 (opened), 410 `gone`
  *   (unknown/expired job or token), 429 `rate_limited`, 403 `forbidden`.
+ * - Seen: after decrypting and rendering, the panel posts the plaintext's
+ *   `ack` to `POST <relayOrigin>/private/<jobId>` as
+ *   `{"v":1,"publicKey","ack"}` → 200 `acknowledged`, or 410 `gone` (spent,
+ *   another job's, or no sealed answer). The relay forwards this body
+ *   unchanged, like a claim.
  * - The answer is bounded on every install (private-answer-payload.ts):
  *   at most 2,700 UTF-16 units, 4 citations and 4 gaps.
  */
@@ -129,6 +134,16 @@ export interface PrivateAnswerPlaintextV1 {
   citations: PrivateAnswerCitation[];
   /** What the private items could not answer: complete sentences, none when the answer is complete. */
   unanswered?: string[];
+  /**
+   * The seen acknowledgment: a single-use capability (32 random bytes,
+   * base64url) for this job. After it has decrypted and rendered the answer,
+   * the panel POSTs `{"v":1,"publicKey","ack"}` to `<relayOrigin>/private/<jobId>`
+   * (200 `acknowledged`; 410 when spent, unknown or another job's). The
+   * computer then removes the waiting question this answer belongs to, if no
+   * newer duplicate replaced it. It proves decryption plus the panel's own
+   * render claim, not that a person read it.
+   */
+  ack?: string;
 }
 
 /** One Private search hit as the worker returned it. Opaque here: only the private model reads it. */
