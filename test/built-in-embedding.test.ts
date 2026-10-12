@@ -18,6 +18,7 @@ import {
   builtInEmbeddingPaths,
   installBuiltInEmbedding,
   readBuiltInEmbeddingStatus,
+  readBuiltInEmbeddingVision,
   type BuiltInEmbeddingStatus,
 } from '../src/workers/source-index/built-in-embedding/assets.ts';
 import { calibratedSemanticRelevanceBar } from '../src/workers/connector-store/local-index.ts';
@@ -687,13 +688,14 @@ function liteRtProvider(extraEnv: Record<string, string> = {}, dimension = 4, vi
   const served = servedLiteRt();
   const log = { batches: [] as string[][], images: [] as Array<Array<string | undefined>>, options: [] as LiteRtEmbedderOptions[] };
   const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir(), OLYMPUS_MEDIA_CACHE_DIR: temporaryDir(), ...extraEnv };
+  const model: BuiltInEmbeddingModelSpec = vision ? { ...served.model, vision: { tokensPerImage: 140 } } : withoutVision(served.model);
   const provider = new BuiltInSourceEmbeddingProvider({
     env,
-    model: vision ? { ...served.model, vision: { tokensPerImage: 140 } } : withoutVision(served.model),
+    model,
     liteRt: stubLiteRt(log, dimension, helper),
     installerOptions: { fetchImpl: served.fetchImpl, liteRtRuntime: served.pack },
   });
-  return { provider, log, env };
+  return { provider, log, env, model };
 }
 
 /** An image input whose path is the media cache's own file for its digest. */
@@ -767,6 +769,40 @@ describe('built-in embedding with a LiteRT model', () => {
   test('a helper whose image encoder did not start reports it, so photos are held', async () => {
     const { provider } = liteRtProvider({}, 4, true, { vision: false });
     expect(await provider.imageSupport()).toBe(false);
+  });
+
+  test('whether the image encoder started is recorded where every process can read it', async () => {
+    const ready = liteRtProvider({}, 4, true);
+    expect(readBuiltInEmbeddingVision(ready.env, ready.model)).toBe('unknown');
+    await ready.provider.prepare();
+    expect(readBuiltInEmbeddingVision(ready.env, ready.model)).toBe('ready');
+    // Another model's record is not this model's.
+    expect(readBuiltInEmbeddingVision(ready.env, { ...ready.model, modelId: 'another-model' })).toBe('unknown');
+
+    const blind = liteRtProvider({}, 4, true, { vision: false });
+    await blind.provider.prepare();
+    expect(readBuiltInEmbeddingVision(blind.env, blind.model)).toBe('unavailable');
+
+    // A model with no image encoder records nothing: photos are not its business.
+    const textOnly = liteRtProvider();
+    await textOnly.provider.prepare();
+    expect(readBuiltInEmbeddingVision(textOnly.env, textOnly.model)).toBe('unknown');
+    expect(existsSync(join(builtInEmbeddingPaths(textOnly.env, textOnly.model).root, 'vision.json'))).toBe(false);
+  });
+
+  test('an unreadable vision record reads as unknown, and a failed write never fails the load', async () => {
+    const { env, model, provider } = liteRtProvider({}, 4, true);
+    const root = builtInEmbeddingPaths(env, model).root;
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, 'vision.json'), '{not json');
+    expect(readBuiltInEmbeddingVision(env, model)).toBe('unknown');
+    writeFileSync(join(root, 'vision.json'), JSON.stringify({ modelId: model.modelId, vision: 'yes' }));
+    expect(readBuiltInEmbeddingVision(env, model)).toBe('unknown');
+    // The record's place is a directory: writing it fails, loading does not.
+    rmSync(join(root, 'vision.json'));
+    mkdirSync(join(root, 'vision.json'));
+    await provider.prepare();
+    expect(await provider.imageSupport()).toBe(true);
   });
 
   test('pictures refused for a missing encoder come back as held, never as failed', async () => {

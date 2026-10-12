@@ -43,8 +43,9 @@ import {
   createRemoteVlmExtractor,
 } from './extractors/remote-vlm.ts';
 import { TEXT_EXTRACTOR_KIND, createTextExtractor } from './extractors/text.ts';
-import { createImagePreparation } from './extractors/image-prepare.ts';
-import { stillImagePreparationAvailable } from '../../core/media-cache.ts';
+import { createImagePreparation, type ImagePreparation } from './extractors/image-prepare.ts';
+import { createSipsPreparer, createStillImagePreparer, type StillImagePreparer } from './extractors/image-preparers.ts';
+import { readyStillImageFormats, stillImageReadiness } from '../../core/still-image-readiness.ts';
 import {
   TRANSCRIPTION_EXTRACTOR_KIND,
   createTranscriptionExtractor,
@@ -132,9 +133,7 @@ export function createDefaultExtractorRegistry(
       : {}),
   };
   const pinnedToTesseract = config.ocr?.engine === 'tesseract';
-  const imagePreparationOn = Boolean(config.media?.cacheDir && (config.media.platform !== undefined
-    ? config.media.platform === 'darwin'
-    : stillImagePreparationAvailable()));
+  const imagePreparationOn = Boolean(config.media?.cacheDir);
   const extractors: Extractor[] = [
     createTranscriptionExtractor({
       ...(config.transcription?.command !== undefined ? { command: config.transcription.command } : {}),
@@ -164,18 +163,12 @@ export function createDefaultExtractorRegistry(
         capability: ocrCapability,
         ...(config.ocr?.engine !== undefined ? { preference: config.ocr.engine } : {}),
       }),
-      // On a Mac a still image is also prepared for media search (a JPEG in
-      // the owner-only media cache), so its picture can be embedded. The
-      // preparation tool ships with macOS only; elsewhere images stay as
-      // they were.
-      ...(imagePreparationOn
-        ? {
-          imagePreparation: createImagePreparation({
-            cacheDir: config.media!.cacheDir!,
-            ...(config.media!.timeoutMs !== undefined ? { timeoutMs: config.media!.timeoutMs } : {}),
-            ...(config.media!.maxInputBytes !== undefined ? { maxInputBytes: config.media!.maxInputBytes } : {}),
-          }),
-        }
+      // A still image is also prepared for media search (a JPEG in the
+      // owner-only media cache), so its picture can be embedded: for each
+      // format this machine's probe found it can decode, with the tool the
+      // probe used. A format it cannot decode stays as it was.
+      ...(config.media?.cacheDir
+        ? { imagePreparation: createMediaPreparation(config.media.cacheDir, config.media) }
         : {}),
       // Where a command engine (not Vision, not a preparation) reads pictures,
       // pictures settled names-only before it could are queued once more under
@@ -229,6 +222,33 @@ export function createDefaultExtractorRegistry(
   }
 
   return buildExtractorRegistry(extractors);
+}
+
+function createMediaPreparation(
+  cacheDir: string,
+  media: NonNullable<ExtractorRegistryConfig['media']>,
+): ImagePreparation {
+  // Asked each time, so a refreshed probe reaches the running extractor.
+  const readiness = () => media.readiness ?? stillImageReadiness();
+  let built: { key: string; preparer: StillImagePreparer } | undefined;
+  const preparer = (): StillImagePreparer => {
+    if (media.preparer) return media.preparer;
+    const current = readiness();
+    if (current.tool === 'none' || !current.toolPath) return createSipsPreparer();
+    const key = `${current.tool}\u0000${current.toolPath}`;
+    if (built?.key !== key) {
+      built = { key, preparer: createStillImagePreparer({ kind: current.tool, path: current.toolPath }) };
+    }
+    return built.preparer;
+  };
+  return createImagePreparation({
+    cacheDir,
+    preparer,
+    formats: () => readyStillImageFormats(readiness()),
+    ...(media.commandRunner ? { commandRunner: media.commandRunner } : {}),
+    ...(media.timeoutMs !== undefined ? { timeoutMs: media.timeoutMs } : {}),
+    ...(media.maxInputBytes !== undefined ? { maxInputBytes: media.maxInputBytes } : {}),
+  });
 }
 
 /**
@@ -351,7 +371,7 @@ export function terminalRetryPaths(
 ): ExtractionTerminalRetryPath[] {
   const paths: ExtractionTerminalRetryPath[] = [];
   for (const extractor of registry.list()) {
-    const kinds = extractor.reread?.unreadTerminalErrorKinds ?? [];
+    const kinds = [extractor.reread, ...(extractor.extraReread ?? [])].flatMap((policy) => policy?.unreadTerminalErrorKinds ?? []);
     if (kinds.length > 0) paths.push({ extractorKind: extractor.kind, lastErrorKinds: [...kinds] });
   }
   for (const rule of rules) {
