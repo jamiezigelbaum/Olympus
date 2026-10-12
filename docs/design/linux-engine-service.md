@@ -1,6 +1,7 @@
 # Standalone Olympus engine on Linux (W5)
 
-Status: lifecycle design, 2026-10-12. Not implemented or host-qualified.
+Status: lifecycle design, 2026-10-12. SVC rows 1a–1c implemented locally;
+unit proof recorded below. Not host-qualified or published.
 Code baseline: `12ccfcae62a695d0a3db8021e6c79b409cb52c77`. All repository
 `file:line` references below refer to that revision. Statements under
 “Current contract” describe inspected code; subsequent sections specify work
@@ -590,6 +591,56 @@ changed plugin bundles; the owner-only approval route stays disabled
 until proven. Publication is a separate explicitly authorized
 action after review closure. Runtime pin qualification and schema compatibility
 are engineering proof tasks; finding 1 was decided by the owner on 2026-10-12.
+
+### SVC implementation handoff (2026-10-12)
+
+Rows 1a, 1b and 1c have separate local commits. The focused remote run passed
+136 tests across nine files, followed by `bun run build` and
+`bunx tsc --noEmit -p .`. Failing-first runs preceded the layout, service and
+admission implementations. A checked-in pre-change Mac plist fixture preserves
+its exact bytes; the retained Mac lifecycle tests pass. Fresh independent
+static review found no remaining P1/P2 findings after custody and alternate-root
+repairs. This is unit/subprocess proof, not service-manager qualification.
+
+Integration seams for the neighbouring tracks:
+
+- `src/core/linux-engine-layout.ts` exports `resolveLinuxEngineLayout(env)`,
+  `linuxEngineEnvironment(layout)`, `preflightLinuxEngineLayout(layout)` and
+  `publishLinuxEngineReceipt(layout)`. Consumers discover the receipt from the
+  default and explicitly selected config roots. `workerSocketPath` is the
+  owner-only socket location; `configDir`, `secretsPath`, `secretsKeyPath` and
+  `workerEnvPath` are the secret/backend track's path seam. Runtime is required
+  and validated at mutation preflight; read-only resolution does not invent it.
+- PR 4 must provide the socket transport at that path, including native worker
+  readiness and relay/CLI clients. Only its proven package may declare
+  `package.json` → `olympus.linuxApprovalTransport = "owner-unix-socket-v1"`.
+  The service installer refuses activation without that declaration; this
+  branch does not declare it. Health requests already use the Unix socket.
+  This declaration is a package integration seam, not a user override or a
+  replacement for PR 4's second-UID proof.
+- `lifecycleLockPath` identifies the lifecycle lease target. Core commands use
+  the process-instance-aware `file-lease.ts` protocol with no live-owner age
+  takeover. PR 3b owns the kernel-flock installer supervisor and must coordinate
+  that outer transaction with this lease; flock and the lease are not equivalent
+  merely because they name the same path. `service-current.json` and
+  `service-previous.json` in `stateDir` retain the program, unit, prior config,
+  build identity and matching Bun digest for service rollback. Durable package
+  generation exchange and interrupted-install recovery remain PR 3b's scope.
+- `src/core/engine-maintenance.ts` exports sync and async maintenance fences,
+  plus worker and session admission. Both use the consult state path; worker
+  preparation may nest session admission. Lifecycle holds the fence before
+  drain through service mutation (and through rollback health/restoration).
+  Forced process death preserves the existing durable settlement record;
+  recovery replay is covered twice without a duplicate recovery dispatch.
+
+The PID-1 systemd/logind CI harness is deferred: the available isolated test
+runner does not supply its own delegated systemd user manager and linger.
+No command mock is claimed as that proof. Before rc.7 host qualification,
+run the Omarchy acceptance below, especially alternate XDG roots, actual
+FragmentPath/enablement, linger/logout/reboot, detached child-cgroup cleanup,
+copytruncate under the manager's open descriptors, and shutdown/recovery during
+settlement. Ubuntu and arm64 are not qualified by these tests. Linux zkAPI,
+listing/demo changes and publication remain outside this activation proof.
 
 ### Deferred copy inventory (PR 5 only)
 

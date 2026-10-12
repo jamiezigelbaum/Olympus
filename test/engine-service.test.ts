@@ -488,7 +488,8 @@ if (env.LAUNCH === '0') {
   test('the default analyst routes never need openclaw, and a missing openclaw is a categorical error', async () => {
     const config = buildEnvBridgeSovereigntyConfig({});
     expect(Object.values(config.modelProfiles).some((profile) => profile.provider === 'openclaw-infer')).toBe(false);
-    const model = createOpenClawInferAnalystModel({ command: '/nonexistent/openclaw' });
+    // Model ENOENT at the process boundary; emulated Linux may instead return 127.
+    const model = createOpenClawInferAnalystModel({ command: '/nonexistent/openclaw', runner: { run: async () => { throw Object.assign(new Error('missing executable'), { code: 'ENOENT' }); } } });
     await expect(model.complete({ system: 's', prompt: 'p' } as never)).rejects.toThrow('OpenClaw CLI not found');
   });
 
@@ -667,7 +668,7 @@ describe('engine upgrades restart the engine on the new build', () => {
     launchctl.calls.length = 0;
     const stuck = () => ({ since: '2026-10-10T17:09:01.821Z' });
     expect(() => restartEngine({ ...options, consultInFlight: stuck, sleepMs, quietWaitMs: 4_000 })).toThrow(/in flight since 2026-10-10T17:09:01.821Z.*strand its payment/);
-    expect(launchctl.calls.map((call) => call[1])).toEqual(['print']);
+    expect(launchctl.calls).toEqual([]);
     expect(() => installEngine({ ...options, restart: true, consultInFlight: stuck, sleepMs, quietWaitMs: 0 })).toThrow(/strand its payment/);
     expect(() => stopEngine({ ...options, consultInFlight: stuck, sleepMs, quietWaitMs: 0 })).toThrow(/strand its payment/);
     expect(launchctl.loaded()).toBe(true);

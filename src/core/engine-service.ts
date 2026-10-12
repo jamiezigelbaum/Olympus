@@ -1,6 +1,7 @@
+import { withEngineMaintenanceFence, withEngineMaintenanceFenceSync, type EngineMaintenanceFence } from './engine-maintenance.ts';
 import { installLinuxEngine, inspectSystemdEngine, linuxEngineCustody, linuxLayoutFor, linuxInstalledBuild, startLinuxEngine, stopLinuxEngine, restartLinuxEngine, uninstallLinuxEngine, rollbackLinuxEngine, systemdPidInCgroup } from './linux-engine-service.ts';
 import { processInstanceIdentity } from './file-lease.ts';
-import { resolveLinuxEngineLayout, type LinuxEngineLayout } from './linux-engine-layout.ts';
+import { resolveLinuxEngineLayout, preflightLinuxEngineLayout, type LinuxEngineLayout } from './linux-engine-layout.ts';
 /**
  * The standalone Olympus engine on macOS: one per-user LaunchAgent that runs
  * the engine host (core/engine-host.ts), which supervises the worker, the
@@ -296,7 +297,9 @@ export function reconcileEngineConfig(path: string): { wrote: boolean; config: R
 // ---------------------------------------------------------------------------
 // launchctl
 
+const MAINTENANCE_FENCE = Symbol('engine maintenance fence');
 export interface EngineServiceOptions {
+  [MAINTENANCE_FENCE]?: EngineMaintenanceFence;
   homeDir?: string;
   env?: Record<string, string | undefined>;
   exec?: EngineExec | undefined;
@@ -354,6 +357,59 @@ export function waitForQuietEngine(options: EngineServiceOptions): { waited_ms: 
   return { waited_ms: waited };
 }
 
+function maintenanceStatePath(options: EngineServiceOptions): string {
+  const paths = engineServicePaths(options);
+  return paths.linux ? join(paths.linux.configDir, 'zkapi-consult-state.json') : join(absolute(options.homeDir ?? homedir(), 'home directory'), '.olympus', 'zkapi-consult-state.json');
+}
+function fencedOptions<T extends EngineServiceOptions>(options: T, fence: EngineMaintenanceFence): T {
+  return { ...options, [MAINTENANCE_FENCE]: fence, consultInFlight: () =>
+    options.consultInFlight?.() ?? (fence.consultInFlight() ? { since: 'before engine maintenance admission closed' } : zkapiConsultInFlightOnDisk(maintenanceStatePath(options))) };
+}
+function preflightMaintenance(options: EngineServiceOptions): boolean {
+  const paths = engineServicePaths(options);
+  if (paths.linux) {
+    preflightLinuxEngineLayout(paths.linux);
+    // There is no old host to drain on a fresh installation; creating an
+    // admission file must not manufacture legacy data before the receipt.
+    return existsSync(paths.linux.receiptPath);
+  }
+  assertDarwin(options.platform);
+  preflightEnginePaths(absolute(options.homeDir ?? homedir(), 'home directory'), paths);
+  return true;
+}
+function serviceMaintenance<T, O extends EngineServiceOptions>(options: O, run: (fenced: O) => T): T {
+  if (options[MAINTENANCE_FENCE] || !preflightMaintenance(options)) return run(options);
+  return withEngineMaintenanceFenceSync(maintenanceStatePath(options), fence => {
+    const fenced = fencedOptions(options, fence);
+    waitForQuietEngine(fenced);
+    return run(fenced);
+  });
+}
+export function installEngine(options: EngineInstallOptions = {}): EngineInstallResult {
+  if (options.dryRun) return installEngineUnderFence(options);
+  // Invalid input must not create even an admission directory.
+  if (normalizedPlatform(options.platform) !== 'linux') assertDarwin(options.platform);
+  resolveEngineProgram(options);
+  return serviceMaintenance(options, installEngineUnderFence);
+}
+export function stopEngine(options: EngineServiceOptions & { reap?: EngineChildReapDeps } = {}): EngineStopResult {
+  return serviceMaintenance(options, stopEngineUnderFence);
+}
+export function restartEngine(options: EngineServiceOptions = {}): { ok: true; command: string[] } {
+  return serviceMaintenance(options, restartEngineUnderFence);
+}
+export function uninstallEngine(options: EngineServiceOptions & { reap?: EngineChildReapDeps } = {}): EngineUninstallResult {
+  return serviceMaintenance(options, uninstallEngineUnderFence);
+}
+export async function rollbackEngine(options: EngineServiceOptions & { bunBin?: string; health?: EngineHealthDeps } = {}): Promise<EngineRollbackResult> {
+  if (options[MAINTENANCE_FENCE] || !preflightMaintenance(options)) return rollbackEngineUnderFence(options);
+  return withEngineMaintenanceFence(maintenanceStatePath(options), async fence => {
+    const fenced = fencedOptions(options, fence);
+    waitForQuietEngine(fenced);
+    return rollbackEngineUnderFence(fenced);
+  });
+}
+
 export interface EngineInstallOptions extends EngineServiceOptions {
   fromCheckout?: string;
   bunBin?: string;
@@ -398,7 +454,7 @@ export interface EngineInstallResult {
   plist: string;
 }
 
-export function installEngine(options: EngineInstallOptions = {}): EngineInstallResult {
+function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInstallResult {
   if (normalizedPlatform(options.platform) === 'linux') return installLinuxEngine(options);
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
@@ -932,7 +988,7 @@ export interface EngineUninstallResult {
  * installer unpacked, downloaded models, and this Mac's relay registration.
  * `olympus data delete --all` removes data.
  */
-export function uninstallEngine(options: EngineServiceOptions & { reap?: EngineChildReapDeps } = {}): EngineUninstallResult {
+function uninstallEngineUnderFence(options: EngineServiceOptions & { reap?: EngineChildReapDeps } = {}): EngineUninstallResult {
   if (normalizedPlatform(options.platform) === 'linux') return uninstallLinuxEngine(options);
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
@@ -1013,7 +1069,7 @@ export interface EngineStopResult {
  * config and data stay. `olympus engine start` (or `olympus engine install`)
  * enables and loads it again.
  */
-export function stopEngine(options: EngineServiceOptions & { reap?: EngineChildReapDeps } = {}): EngineStopResult {
+function stopEngineUnderFence(options: EngineServiceOptions & { reap?: EngineChildReapDeps } = {}): EngineStopResult {
   if (normalizedPlatform(options.platform) === 'linux') return stopLinuxEngine(options);
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
@@ -1081,7 +1137,7 @@ export interface EngineRollbackResult {
  * version that was running is put back and verified too; a failure of that
  * recovery is reported, never swallowed.
  */
-export async function rollbackEngine(options: EngineServiceOptions & { bunBin?: string; health?: EngineHealthDeps } = {}): Promise<EngineRollbackResult> {
+async function rollbackEngineUnderFence(options: EngineServiceOptions & { bunBin?: string; health?: EngineHealthDeps } = {}): Promise<EngineRollbackResult> {
   if (normalizedPlatform(options.platform) === 'linux') return rollbackLinuxEngine(options);
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
@@ -1105,6 +1161,7 @@ export async function rollbackEngine(options: EngineServiceOptions & { bunBin?: 
 
   swapAppDirectories(paths);
   const reinstall = (): Promise<EngineVerifiedInstallResult> => installEngineVerified({
+    ...(options[MAINTENANCE_FENCE] ? { [MAINTENANCE_FENCE]: options[MAINTENANCE_FENCE] } : {}),
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.exec ? { exec: options.exec } : {}),
     ...(options.uid !== undefined ? { uid: options.uid } : {}),
@@ -1287,7 +1344,7 @@ export function engineDataCustody(inspection: Pick<EngineInspection, 'state' | '
   return 'none';
 }
 
-export function restartEngine(options: EngineServiceOptions = {}): { ok: true; command: string[] } {
+function restartEngineUnderFence(options: EngineServiceOptions = {}): { ok: true; command: string[] } {
   if (normalizedPlatform(options.platform) === 'linux') return restartLinuxEngine(options);
   assertDarwin(options.platform);
   const exec = options.exec ?? defaultExec;

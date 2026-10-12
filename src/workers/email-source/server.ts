@@ -1,3 +1,4 @@
+import { withEngineWorkerAdmission, EngineMaintenanceInProgressError } from '../../core/engine-maintenance.ts';
 import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
@@ -4816,7 +4817,7 @@ export async function main(): Promise<void> {
     {
       const { askAnonymously } = await import('../../core/consult-ask.ts');
       const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS } = await import('../../core/consult-settings.ts');
-      askAnonymouslyNow = async (input) => {
+      const admittedAsk: NonNullable<typeof askAnonymouslyNow> = async (input) => {
         const result = await askAnonymously(input, {
           settings: () => readConsultSettings(),
           prepare: (writerInput, writer, level, signal) => runChosenWriter(writerInput, {
@@ -4849,6 +4850,13 @@ export async function main(): Promise<void> {
           else if (result.ok) chatgptModelProblem = undefined;
         }
         return result;
+      };
+      askAnonymouslyNow = async (input) => {
+        try { return await withEngineWorkerAdmission(defaultZkapiStatePath(), () => admittedAsk(input), { acquireTimeoutMs: 50 }); }
+        catch (error) {
+          if (error instanceof EngineMaintenanceInProgressError || (error as { code?: string }).code === 'file_lease_busy') return { ok: false, code: 'engine_maintenance_in_progress', message: 'Olympus engine maintenance or another consult is in progress; try again after it finishes.' };
+          throw error;
+        }
       };
     }
   }
