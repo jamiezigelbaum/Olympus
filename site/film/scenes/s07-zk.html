@@ -14,6 +14,13 @@
     #s07-zk-head em { font-style: italic; }
     #s07-zk-whos { display: inline-block; }
     #s07-zk-sub { position: absolute; left: 96px; top: 448px; font-family: "Martian Mono"; font-size: 44px; color: var(--mid); white-space: nowrap; }
+    /* (website) what zkAPI is, under the subhead, and where it comes from, as a footer that mirrors the header */
+    #s07-zk-more { position: absolute; left: 96px; top: 580px; font-family: "Newsreader"; font-size: 64px; font-weight: 300;
+      line-height: 1.16; color: var(--ink); white-space: nowrap; }
+    #s07-zk-more .ln { display: block; }
+    #s07-zk-cred { position: absolute; left: 96px; right: 96px; top: 784px; padding-top: 22px; border-top: 1.5px solid var(--rule);
+      font-family: "Martian Mono"; font-size: 19px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+    #s07-zk-cred .nc { text-transform: none; }
     /* the redaction that grows to fill the frame and becomes the cut (the next page opens on it) */
     #s07-zk-plum { position: absolute; left: 0; top: 0; width: 10px; height: 10px; opacity: 0; transform-origin: 0 0; }
   </style>
@@ -29,7 +36,9 @@
       const P = O.page(shake, { header: ['Route: <span class="nc">zkAPI</span> · Tor', "Ask anonymously"] });
       P.sheet.insertAdjacentHTML("beforeend", `
         <div class="s07-k" id="s07-zk-head"><span class="ln">zkAPI hides</span><span class="ln"><em id="s07-zk-whos">who’s</em> asking.</span></div>
-        <div id="s07-zk-sub">Paid anonymously · sent over Tor</div>`);
+        <div id="s07-zk-sub">Paid anonymously · sent over Tor</div>
+        <div id="s07-zk-more"><span class="ln">No account, no card, no name.</span><span class="ln">Just proof the question is paid for.</span></div>
+        <div id="s07-zk-cred"><span>Open source · from the Ethereum Foundation’s <span class="nc">zkAPI</span></span></div>`);
       const plum = $("plum");
 
       O.ready(() => {
@@ -41,6 +50,8 @@
         O.cut(tl, P.sheet.querySelectorAll(".hd > span"), B.hd);
         O.rise(tl, O.split($("head")), B.head, { dur: 0.6, stagger: 0.07 });
         O.rise(tl, O.split($("sub")), B.sub, { dur: 0.45, stagger: 0.04 });
+        O.rise(tl, O.split($("more")), B.sub + 0.25, { dur: 0.45, stagger: 0.04 });
+        O.cut(tl, $("cred").children, B.sub + 0.5);
 
         // "who's" is redacted ...
         const W = $("whos");

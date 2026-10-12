@@ -97,13 +97,19 @@
             if (shake && ends.some(function (e) { return Math.abs(tw.startTime() - e) < 0.1; })) { tw.progress(1); tw.kill(); }
           });
 
-          // On the page a few beats come sooner than in the film (Jamie, 2026-10-12: Venice.ai's typewriter and the
-          // anonymous question's red marks should start a beat faster). Everything from that beat on moves up.
-          var SOONER = { "s06-venice": ["strike", 0.6], "s08-zkq": ["hl1", 0.75] };
-          if (SOONER[id]) {
-            var from = B[SOONER[id][0]], by = SOONER[id][1];
-            tl.getChildren(false, true, true).forEach(function (c) { if (c.startTime() >= from - 0.001) c.startTime(c.startTime() - by); });
-            end -= by;
+          // On the page a few beats come sooner than in the film (Jamie, 2026-10-12). Venice.ai's typewriter starts a
+          // beat faster, and everything after it moves up with it; the anonymous question's red highlights start a
+          // beat faster, and only they move: the rest of that card keeps the film's timing.
+          var SOONER = { "s06-venice": { at: "strike", by: 0.6 }, "s08-zkq": { at: "hl1", by: 0.75, only: ".s08-hl" } };
+          var so = SOONER[id];
+          if (so) {
+            var from = B[so.at];
+            tl.getChildren(false, true, true).forEach(function (c) {
+              if (c.startTime() < from - (so.only ? 0.1 : 0.001)) return;   // a sweep's first frame is just before its beat
+              if (so.only && !(c.targets && c.targets().some(function (x) { return x.matches && x.matches(so.only); }))) return;
+              c.startTime(c.startTime() - so.by);
+            });
+            if (!so.only) end -= so.by;
           }
 
           // The stand-in entry: the card rises in the way the film's sources page does (y 1100 -> 0, power3.inOut).
