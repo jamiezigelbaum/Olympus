@@ -128007,9 +128007,11 @@ var init_remote_request_body = __esm(() => {
 var exports_remote_mcp = {};
 __export(exports_remote_mcp, {
   withRemoteMcpRoute: () => withRemoteMcpRoute,
+  withRemoteFailureBoundary: () => withRemoteFailureBoundary,
   unauthorized: () => unauthorized,
   remoteOperationCaller: () => remoteOperationCaller,
   remoteMcpSurface: () => remoteMcpSurface,
+  remoteFailureResponse: () => remoteFailureResponse,
   lazyRemoteConnectionStore: () => lazyRemoteConnectionStore,
   jsonResponse: () => jsonResponse,
   isRemoteMcpRequest: () => isRemoteMcpRequest,
@@ -128038,22 +128040,26 @@ function withRemoteMcpRoute(remoteMcp, rest) {
 function createRemoteMcpHandler(options) {
   const isRelayed = options.isRelayed ?? isRelayedRequest;
   return async (request) => {
-    const surface = remoteMcpSurface(request) ?? "default";
-    const verification = authenticateRemoteRequest(request, options, surface);
-    if (!verification.ok)
-      return verification.response;
-    const response = await serveAuthenticated(request, verification, surface);
-    if (!isRelayed(request))
-      return response;
-    return markAuthenticated(response, options.chatgpt?.servesRequest(request, verification.connection) === true ? "chatgpt" : "remote");
+    try {
+      const surface = remoteMcpSurface(request) ?? "default";
+      const verification = authenticateRemoteRequest(request, options, surface);
+      if (!verification.ok)
+        return verification.response;
+      const response = await serveAuthenticated(request, verification, surface);
+      if (!isRelayed(request))
+        return response;
+      return markAuthenticated(response, options.chatgpt?.servesRequest(request, verification.connection) === true ? "chatgpt" : "remote");
+    } catch (error2) {
+      return remoteFailureResponse(error2);
+    }
   };
   async function serveAuthenticated(request, verification, surface) {
     if (request.method !== "POST") {
-      return jsonResponse(405, { error: "method_not_allowed" }, { Allow: "POST" });
+      return jsonResponse(405, remoteSurfaceErrorOutput("method_not_allowed"), { Allow: "POST" });
     }
     const body = await readBoundedRequestText(request);
     if (!body.ok) {
-      return body.reason === "too_large" ? jsonResponse(413, { error: "payload_too_large" }) : jsonResponse(400, { error: "invalid_request" });
+      return body.reason === "too_large" ? jsonResponse(413, remoteSurfaceErrorOutput("payload_too_large")) : jsonResponse(400, remoteSurfaceErrorOutput("invalid_request"));
     }
     let parsedBody;
     try {
@@ -128063,7 +128069,7 @@ function createRemoteMcpHandler(options) {
     const ctx = options.makeOperationContext(caller, request.signal);
     const chatgpt = options.chatgpt?.servesRequest(request, verification.connection) ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true } : undefined;
     if (surface === "directory" && !chatgpt)
-      return jsonResponse(404, { error: "not_found" });
+      return jsonResponse(404, remoteSurfaceErrorOutput("not_found"));
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
@@ -128100,16 +128106,32 @@ function authenticateRemoteRequest(request, options, surface = "default") {
   try {
     store = options.connections();
   } catch {
-    return { ok: false, response: jsonResponse(503, { error: "remote_connections_unavailable" }) };
+    return connectionsUnavailable();
   }
   if (!store)
     return refuse3("invalid_token");
-  if (oauthToken) {
-    const verification2 = store.oauth.verifyAccessToken(token, endpoint2.resource);
-    return verification2.ok ? { ok: true, connection: verification2.connection } : refuse3("invalid_token");
+  let verification;
+  try {
+    verification = oauthToken ? store.oauth.verifyAccessToken(token, endpoint2.resource) : store.verifyToken(token);
+  } catch {
+    return connectionsUnavailable();
   }
-  const verification = store.verifyToken(token);
   return verification.ok ? { ok: true, connection: verification.connection } : refuse3("invalid_token");
+}
+function connectionsUnavailable() {
+  return { ok: false, response: jsonResponse(503, remoteSurfaceErrorOutput("remote_connections_unavailable")) };
+}
+function remoteFailureResponse(error2) {
+  return jsonResponse(500, remoteErrorOutput(error2));
+}
+function withRemoteFailureBoundary(handler) {
+  return async (request) => {
+    try {
+      return await handler(request);
+    } catch (error2) {
+      return remoteFailureResponse(error2);
+    }
+  };
 }
 function lazyRemoteConnectionStore(resolvePath4, open7) {
   let store;
@@ -128213,6 +128235,7 @@ var init_remote_mcp = __esm(() => {
   init_directory_surface();
   init_directory_tools();
   init_remote_request_body();
+  init_remote_result();
   init_tokens();
   REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
 });
@@ -135387,6 +135410,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     createInProcessOperationContext: createInProcessOperationContext2,
     createRemoteMcpHandler: createRemoteMcpHandler2,
     lazyRemoteConnectionStore: lazyRemoteConnectionStore2,
+    withRemoteFailureBoundary: withRemoteFailureBoundary2,
     withRemoteMcpRoute: withRemoteMcpRoute2
   } = await Promise.resolve().then(() => (init_remote_mcp(), exports_remote_mcp));
   const { resolveRemoteConnectionsDbPath: resolveRemoteConnectionsDbPath2, openRemoteConnectionStore: openRemoteConnectionStore2 } = await Promise.resolve().then(() => (init_remote_connections(), exports_remote_connections));
@@ -135826,14 +135850,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       isRelayed: carriesRelayMarker2,
       demoConsent: () => resolveDemoConsent2(olympusConfig.remote, () => demoInstallMarked2(remoteAccessDir2(process.env))),
       connections: () => remoteConnections({ create: true })
-    }), withRemoteOpenApiRoutes2(remoteOpenApi, withRemoteMcpRoute2(createRemoteMcpHandler2({
+    }), withRemoteOpenApiRoutes2(withRemoteFailureBoundary2(remoteOpenApi), withRemoteMcpRoute2(withRemoteFailureBoundary2(createRemoteMcpHandler2({
       ...remoteAgentOptions,
       chatgpt: {
         servesRequest: (request, connection) => isRelayedRequest2(request) && isChatGptGrant2(connection),
         readOnlyFor: isDemoGrant2,
         ...chatgptSurface
       }
-    }), withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret })))))))
+    })), withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret })))))))
   });
   sourceScheduler?.start();
   await reconcileCaptures();

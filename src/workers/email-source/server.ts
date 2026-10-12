@@ -4554,6 +4554,7 @@ export async function main(): Promise<void> {
     createInProcessOperationContext,
     createRemoteMcpHandler,
     lazyRemoteConnectionStore,
+    withRemoteFailureBoundary,
     withRemoteMcpRoute,
   } = await import('../remote-mcp.ts');
   const { resolveRemoteConnectionsDbPath, openRemoteConnectionStore } = await import('../../core/remote-connections.ts');
@@ -5154,8 +5155,11 @@ export async function main(): Promise<void> {
         demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,
       }),
-      withRemoteOpenApiRoutes(remoteOpenApi, withRemoteMcpRoute(
-        createRemoteMcpHandler({
+      // Each remote agent route sits inside its own exception boundary, so a
+      // failure there is a fixed JSON error, never the runtime's error page;
+      // the worker-bearer routes keep their own handling.
+      withRemoteOpenApiRoutes(withRemoteFailureBoundary(remoteOpenApi), withRemoteMcpRoute(
+        withRemoteFailureBoundary(createRemoteMcpHandler({
           ...remoteAgentOptions,
           // Relayed requests get the ChatGPT surface (docs/design/chatgpt-plugin.md):
           // the hosted relay is the ChatGPT path, and the relay marker must
@@ -5169,7 +5173,7 @@ export async function main(): Promise<void> {
             readOnlyFor: isDemoGrant,
             ...chatgptSurface,
           },
-        }),
+        })),
         withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),
       )),
     )))),

@@ -53,7 +53,8 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visibility.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
-import { createInProcessOperationContext, createRemoteMcpHandler, withRemoteMcpRoute } from '../src/workers/remote-mcp.ts';
+import { createInProcessOperationContext, createRemoteMcpHandler, withRemoteFailureBoundary, withRemoteMcpRoute } from '../src/workers/remote-mcp.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../connect-relay/shared/tokens.ts';
 import {
   buildRemoteOpenApiSpec,
   createRemoteOpenApiHandler,
@@ -205,6 +206,31 @@ function expectSchemaValid(operation: keyof typeof REMOTE_OUTPUT_SCHEMAS, output
 function expectErrorSchema(body: unknown): void {
   const ok = validateError(body);
   expect({ body, ok, errors: ok ? null : validateError.errors }).toEqual({ body, ok: true, errors: null });
+}
+
+/** The store, with both credential checks throwing an error that names internal paths. */
+function throwingStore(store: RemoteConnectionStore): RemoteConnectionStore {
+  const fail = () => { throw new Error('verify failed at /Users/secret/LEAK.sqlite'); };
+  return Object.assign(Object.create(store), {
+    verifyToken: fail,
+    oauth: Object.assign(Object.create(store.oauth), { verifyAccessToken: fail }),
+  }) as RemoteConnectionStore;
+}
+
+/** A failure body carries no exception text or path, plainly or inside any base64-looking blob. */
+function expectNothingInternal(text: string): void {
+  const decoded = [...text.matchAll(/[A-Za-z0-9+/_-]{16,}={0,2}/g)].map((match) => {
+    try {
+      return Buffer.from(match[0], match[0].includes('-') || match[0].includes('_') ? 'base64url' : 'base64').toString('utf8');
+    } catch {
+      return '';
+    }
+  });
+  for (const candidate of [text, ...decoded]) {
+    for (const marker of ['LEAK', '/Users', 'verify failed', 'context failed', '    at ', '.ts:', 'Error:']) {
+      expect({ marker, found: candidate.includes(marker) }).toEqual({ marker, found: false });
+    }
+  }
 }
 
 /** A release check that judges every input as given. */
@@ -599,6 +625,8 @@ describe('over the wire', () => {
   let consult: () => Promise<unknown>;
   let releaseCheck: ReleaseCheck | undefined;
   let contextFails: boolean;
+  let verifyFails: boolean;
+  let relayed: boolean;
   let jobs: SourceAnswerJobRegistry;
 
   /** The fake answer pipeline records what the analyst handler would: the items it read. */
@@ -614,6 +642,8 @@ describe('over the wire', () => {
     consult = async () => NEEDS_CHOICE_RAW;
     releaseCheck = undefined;
     contextFails = false;
+    verifyFails = false;
+    relayed = false;
     jobs = new SourceAnswerJobRegistry({ limits: { handoffMs: 60, resultWaitMs: 40 } });
     const worker = createEmailSourceWorker({
       sourceAnswer: { answer: () => answer() },
@@ -622,8 +652,10 @@ describe('over the wire', () => {
       consultAsk: () => consult(),
     });
     const remote = {
-      connections: () => store,
+      // A store whose credential checks throw, as a locked or corrupt database would.
+      connections: () => (verifyFails ? throwingStore(store) : store),
       publicUrls: () => urls,
+      isRelayed: () => relayed,
       // Wired as email-source/server.ts wires it: the check rides the context.
       makeOperationContext: (caller: OperationCaller, signal: AbortSignal) => {
         if (contextFails) throw new Error('context failed at /Users/secret/LEAK');
@@ -879,6 +911,69 @@ describe('over the wire', () => {
     }
   });
 
+  test('MCP credential and context failures are fixed JSON, unmarked, for bearer and non-ChatGPT OAuth', async () => {
+    const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } };
+    for (const [kind, token] of tokens()) {
+      relayed = true;
+      // A healthy relayed request is marked, so the absence below is meaningful.
+      const healthy = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+        body: JSON.stringify(initialize),
+      });
+      await healthy.text();
+      expect({ kind, mark: healthy.headers.get(AUTHENTICATED_RESPONSE_HEADER) }).toEqual({ kind, mark: '1' });
+
+      for (const [label, arrange, status, error] of [
+        ['verification throws', () => { verifyFails = true; }, 503, 'remote_connections_unavailable'],
+        ['context throws', () => { contextFails = true; }, 500, 'internal_error'],
+      ] as const) {
+        verifyFails = false;
+        contextFails = false;
+        arrange();
+        for (const isRelayed of [true, false]) {
+          relayed = isRelayed;
+          const response = await fetch(`${base}/mcp`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+            body: JSON.stringify(initialize),
+          });
+          const text = await response.text();
+          expect({ kind, label, isRelayed, status: response.status, type: response.headers.get('Content-Type') })
+            .toEqual({ kind, label, isRelayed, status, type: 'application/json' });
+          const body = JSON.parse(text) as Record<string, unknown>;
+          expect({ kind, label, error: body.error }).toEqual({ kind, label, error });
+          expectErrorSchema(body);
+          expectNothingInternal(text);
+          expect(response.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
+          expect(response.headers.get(SURFACE_RESPONSE_HEADER)).toBeNull();
+        }
+      }
+      verifyFails = false;
+      contextFails = false;
+    }
+    relayed = false;
+  });
+
+  test('the outer remote boundary turns anything that escapes into a fixed JSON error', async () => {
+    const thrown = withRemoteFailureBoundary(() => { throw new Error('sync at /Users/secret/LEAK'); });
+    const rejected = withRemoteFailureBoundary(async () => { throw new Error('async at /Users/secret/LEAK'); });
+    for (const handler of [thrown, rejected]) {
+      const response = await handler(new Request(`${base}/mcp`, { method: 'POST' }));
+      const text = await response.text();
+      expect(response.status).toBe(500);
+      expect(response.headers.get('Content-Type')).toBe('application/json');
+      expect(JSON.parse(text)).toMatchObject({ error: 'internal_error' });
+      expectErrorSchema(JSON.parse(text));
+      expectNothingInternal(text);
+      expect(response.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
+      expect(response.headers.get(SURFACE_RESPONSE_HEADER)).toBeNull();
+    }
+    // A healthy response passes through untouched.
+    const ok = await withRemoteFailureBoundary(async () => new Response('fine', { status: 202 }))(new Request(`${base}/mcp`));
+    expect({ status: ok.status, text: await ok.text() }).toEqual({ status: 202, text: 'fine' });
+  });
+
   test('pre-handler failures on OpenAPI: every one is the published Error shape, nothing reflected', async () => {
     const { token } = store.create('Muse');
     const checks: Array<[string, () => Promise<{ status: number; text: string; headers: Headers }>, number]> = [
@@ -904,12 +999,18 @@ describe('over the wire', () => {
     const broken = await rest(token, 'source_answer', { question: 'q' });
     expect(broken.status).toBe(500);
     expectErrorSchema(JSON.parse(broken.text));
-    expect(broken.text).not.toContain('LEAK');
+    expectNothingInternal(broken.text);
     contextFails = false;
+    verifyFails = true;
+    const throwing = await rest(token, 'source_answer', { question: 'q' });
+    expect({ status: throwing.status, body: JSON.parse(throwing.text) }).toMatchObject({ status: 503, body: { error: 'remote_connections_unavailable' } });
+    expectNothingInternal(throwing.text);
+    verifyFails = false;
     store.close();
     const closed = await rest(token, 'source_answer', { question: 'q' });
-    expect(closed.status).toBe(500);
+    expect({ status: closed.status, body: JSON.parse(closed.text) }).toMatchObject({ status: 503, body: { error: 'remote_connections_unavailable' } });
     expectErrorSchema(JSON.parse(closed.text));
+    expectNothingInternal(closed.text);
     store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
   });
 });
