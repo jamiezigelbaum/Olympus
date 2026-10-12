@@ -21,10 +21,14 @@
  *   install that has not come back gets the remote list for its credentials
  *   until it reconnects and syncs again.
  *
- * Whether an install has synced at all is kept too: a relay serving an
- * engine that predates the feature falls back to the per-credential surface
- * the engine marked on its responses (limits.ts ConfirmedCredentials); one
- * that syncs never does, so a revocation is not undone by an older mark.
+ * Whether an install has synced at all is kept too, apart from its entries:
+ * a relay serving an engine that predates the feature falls back to the
+ * per-credential surface the engine marked on its responses (limits.ts
+ * ConfirmedCredentials); one that syncs never does, so a revocation is not
+ * undone by an older mark. That state outlives the eviction of the
+ * install's entries and lasts as long as its registration (cleared on
+ * revocation and registration expiry, `remove`); it is bounded by
+ * `maxSyncedInstalls`, the registry's own bound by default.
  */
 import { MAX_SURFACE_ENTRIES, type SurfaceEndpoint, type SurfaceEntry } from '../shared/protocol.ts';
 import type { CredentialSurface } from '../shared/tokens.ts';
@@ -36,15 +40,20 @@ interface InstallMap {
 
 /** Default bound across the relay; an install holds at most MAX_SURFACE_ENTRIES of it. */
 export const DEFAULT_MAX_SURFACE_MAP_ENTRIES = 200_000;
+/** Default bound on installs remembered as synced: the registry's own bound (registry.ts maxInstalls). */
+export const DEFAULT_MAX_SYNCED_INSTALLS = 100_000;
 
 export class SurfaceMap {
   /** Insertion order is sync order: the first install synced longest ago. */
   private readonly installs = new Map<string, InstallMap>();
+  /** Installs whose engine has synced, oldest sync first; kept when their entries are evicted. */
+  private readonly syncedInstalls = new Set<string>();
   private total = 0;
 
   constructor(
     private readonly maxEntries = DEFAULT_MAX_SURFACE_MAP_ENTRIES,
     private readonly now: () => number = Date.now,
+    private readonly maxSyncedInstalls = DEFAULT_MAX_SYNCED_INSTALLS,
   ) {}
 
   /**
@@ -59,7 +68,14 @@ export class SurfaceMap {
       .filter(({ expiresAtMs }) => expiresAtMs > at)
       .sort((a, b) => b.expiresAtMs - a.expiresAtMs)
       .slice(0, MAX_SURFACE_ENTRIES);
-    this.remove(installId);
+    this.dropEntries(installId);
+    this.syncedInstalls.delete(installId);
+    this.syncedInstalls.add(installId);
+    while (this.syncedInstalls.size > this.maxSyncedInstalls) {
+      const oldest = this.syncedInstalls.values().next().value;
+      if (oldest === undefined || oldest === installId) break;
+      this.remove(oldest);
+    }
     const map: InstallMap = { entries: new Map() };
     for (const { entry, expiresAtMs } of live) {
       map.entries.set(key(entry.endpoint, entry.fingerprint), { surface: entry.surface, expiresAtMs });
@@ -69,13 +85,14 @@ export class SurfaceMap {
     while (this.total > this.maxEntries) {
       const oldest = this.installs.keys().next().value;
       if (oldest === undefined || oldest === installId) break;
-      this.remove(oldest);
+      // Its entries go; that it synced stays.
+      this.dropEntries(oldest);
     }
   }
 
   /** Whether this install's engine has synced a mapping (an empty one included). */
   synced(installId: string): boolean {
-    return this.installs.has(installId);
+    return this.syncedInstalls.has(installId);
   }
 
   /** The surface the engine named for this credential, while it has not expired. */
@@ -93,8 +110,13 @@ export class SurfaceMap {
     return entry.surface;
   }
 
-  /** Forgets an install (revoked by the operator, or its registration expired). */
+  /** Forgets an install, synced state included (revoked by the operator, or its registration expired). */
   remove(installId: string): void {
+    this.dropEntries(installId);
+    this.syncedInstalls.delete(installId);
+  }
+
+  private dropEntries(installId: string): void {
     const map = this.installs.get(installId);
     if (!map) return;
     this.total -= map.entries.size;

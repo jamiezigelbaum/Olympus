@@ -120,6 +120,15 @@ import { createResponsePolicies, type RouteKind } from './response-policy.ts';
 import { InstallSession } from './session.ts';
 import { SurfaceMap } from './surface-map.ts';
 
+/**
+ * Whether a `surfaces` frame may change its install's mapping: it came over
+ * the install's current session, that session is open, and the install's
+ * registration is in force (not revoked, not expired).
+ */
+export function surfacesFrameAccepted(input: { session: object; current: object | undefined; open: boolean; revoked: boolean; registered: boolean }): boolean {
+  return input.current === input.session && input.open && !input.revoked && input.registered;
+}
+
 /** An OpenAI-hosted origin's host name, or a fixed class: callers can put anything in Origin. */
 export function panelOriginClass(origin: string | null | undefined): string {
   if (!origin) return 'none';
@@ -1068,10 +1077,20 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         if (message.type === 'ping') registry.seen(session.installId);
         if (message.type === 'surfaces') {
           // Stored under the install this session authenticated as, and no
-          // other. A malformed frame changes nothing (and keeps the session).
-          const entries = parseSurfacesMessage(message);
-          if (entries) surfaceMap.replace(session.installId, entries);
-          else log('surfaces_refused', { install: installTag(session.installId) });
+          // other, and only while it is that install's current, open session
+          // of a registration still in force: a late frame from a replaced
+          // or revoked session changes nothing. A malformed frame changes
+          // nothing either (and keeps the session).
+          const installId = session.installId;
+          const entries = surfacesFrameAccepted({
+            session,
+            current: sessions.get(installId),
+            open: session.open,
+            revoked: registry.isRevoked(installId),
+            registered: registry.get(installId) !== undefined,
+          }) ? parseSurfacesMessage(message) : undefined;
+          if (entries) surfaceMap.replace(installId, entries);
+          else log('surfaces_refused', { install: installTag(installId) });
           return;
         }
         if (session.onMessage(message, streamId(message.id)) === 'protocol_error') ws.close(4002, 'protocol_error');

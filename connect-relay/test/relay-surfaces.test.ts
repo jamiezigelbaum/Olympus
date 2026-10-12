@@ -12,13 +12,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RelayClient, type RelayClientStatus } from '../client/relay-client.ts';
 import { FORWARDED_PATHS } from '../client/forward.ts';
-import { loadOrCreateIdentity } from '../client/identity.ts';
-import { base64url, MAX_SURFACE_ENTRIES, parseSurfacesMessage, type SurfaceEntry } from '../shared/protocol.ts';
+import { loadOrCreateIdentity, type InstallIdentity } from '../client/identity.ts';
+import { AUTH_BOUND, base64url, installAuthMessage, MAX_SURFACE_ENTRIES, parseSurfacesMessage, type SurfaceEntry } from '../shared/protocol.ts';
 import { lastSeenPhrase, offlineErrorBody, offlineSentence } from '../shared/offline-result.ts';
-import { mintCredential } from '../shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, mintCredential } from '../shared/tokens.ts';
 import { MemoryInstallRegistry } from '../server/registry.ts';
 import { SurfaceMap } from '../server/surface-map.ts';
-import { startRelay, type RelayHandle } from '../server/relay.ts';
+import { startRelay, surfacesFrameAccepted, type RelayHandle } from '../server/relay.ts';
 import { toolsForSurface, DIRECTORY_MCP_PATH } from '../shared/directory-tools.ts';
 import chatgptSurface from '../server/generated/chatgpt-tools.json';
 import remoteSurface from '../server/generated/remote-tools.json';
@@ -55,14 +55,19 @@ function tempDir(): string {
   return dir;
 }
 
-function fakeWorker(): { url: string; paths: string[] } {
+/** A loopback worker; with `marks`, an engine from before syncing that marks each /mcp answer's credential surface. */
+function fakeWorker(marks?: 'chatgpt' | 'remote'): { url: string; paths: string[] } {
   const paths: string[] = [];
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
     fetch(request) {
-      paths.push(new URL(request.url).pathname);
-      return Response.json({ jsonrpc: '2.0', id: 1, result: { from: 'engine' } });
+      const path = new URL(request.url).pathname;
+      paths.push(path);
+      const headers: Record<string, string> = marks && path === '/mcp'
+        ? { [AUTHENTICATED_RESPONSE_HEADER]: '1', [SURFACE_RESPONSE_HEADER]: marks }
+        : {};
+      return Response.json({ jsonrpc: '2.0', id: 1, result: { from: 'engine' } }, { headers });
     },
   });
   cleanups.push(() => server.stop(true));
@@ -81,10 +86,14 @@ async function makeRelay(surfaceMap = new SurfaceMap()): Promise<RelayHandle> {
   return relay;
 }
 
-async function connectInstall(relay: RelayHandle, surfaces: () => Promise<readonly SurfaceEntry[] | undefined>) {
+async function connectInstall(
+  relay: RelayHandle,
+  surfaces: () => Promise<readonly SurfaceEntry[] | undefined>,
+  options: { marks?: 'chatgpt' | 'remote'; identity?: InstallIdentity } = {},
+) {
   const statuses: RelayClientStatus[] = [];
-  const identity = loadOrCreateIdentity(tempDir());
-  const worker = fakeWorker();
+  const identity = options.identity ?? loadOrCreateIdentity(tempDir());
+  const worker = fakeWorker(options.marks);
   const client = new RelayClient({
     relayHost: PUBLIC_HOST,
     relayUrl: `ws://127.0.0.1:${relay.port}/v2/connect`,
@@ -267,8 +276,12 @@ describe('bounds and content', () => {
     expect(map.lookup('install-a', 'default', fingerprintOf('token-0'))).toBeUndefined();
     expect(map.lookup('install-a', 'default', fingerprintOf(`token-${MAX_SURFACE_ENTRIES + 4}`))).toBe('remote');
     map.replace('install-b', many.slice(0, 20));
-    expect(map.synced('install-a')).toBe(false);
+    // Its entries go; that it synced stays, so it never falls back to an older per-credential mark.
+    expect(map.synced('install-a')).toBe(true);
+    expect(map.lookup('install-a', 'default', fingerprintOf(`token-${MAX_SURFACE_ENTRIES + 4}`))).toBeUndefined();
     expect(map.counts()).toEqual({ installs: 1, entries: 20 });
+    map.remove('install-a');
+    expect(map.synced('install-a')).toBe(false);
     // An entry already expired is never stored.
     map.replace('install-c', [entry('old', 'chatgpt', now - 1_000)]);
     expect(map.lookup('install-c', 'default', fingerprintOf('old'))).toBeUndefined();
@@ -350,5 +363,101 @@ describe('the offline tool result', () => {
       message: 'Olympus is off; last seen about 3 hours ago; try again later.',
       retry_after_seconds: 300,
     });
+  });
+});
+
+/** A raw install session (no RelayClient), so a test can send frames whenever it likes. */
+async function rawSession(relay: RelayHandle, identity: InstallIdentity) {
+  const socket = new WebSocket(`ws://127.0.0.1:${relay.port}/v2/connect`);
+  const errors: string[] = [];
+  const onError: Array<(code: string) => void> = [];
+  const closed = new Promise<void>((resolve) => socket.addEventListener('close', () => resolve()));
+  const ready = new Promise<void>((resolve, reject) => {
+    socket.addEventListener('message', (event) => {
+      const message = JSON.parse(String(event.data));
+      if (message.type === 'challenge') {
+        void installAuthMessage({ kind: 'hello', identity, nonce: String(message.nonce), powBits: 0, relayHost: PUBLIC_HOST, scheme: AUTH_BOUND })
+          .then((auth) => socket.send(JSON.stringify(auth)), reject);
+      } else if (message.type === 'ready') {
+        resolve();
+      } else if (message.type === 'error') {
+        errors.push(message.code);
+        for (const listener of onError) listener(message.code);
+      }
+    });
+  });
+  cleanups.push(() => socket.close());
+  await ready;
+  return { socket, errors, closed, onError: (listener: (code: string) => void) => onError.push(listener) };
+}
+
+describe('only the install\'s current session writes its mapping', () => {
+  async function registered(map: SurfaceMap) {
+    const relay = await makeRelay(map);
+    const { client, identity } = await connectInstall(relay, async () => []);
+    await until(() => map.synced(identity.installId));
+    await goOffline(relay, client);
+    return { relay, identity };
+  }
+
+  test('the fence: current, open session of a registration in force', () => {
+    const session = {};
+    const ok = { session, current: session, open: true, revoked: false, registered: true };
+    expect(surfacesFrameAccepted(ok)).toBe(true);
+    expect(surfacesFrameAccepted({ ...ok, current: {} })).toBe(false);
+    expect(surfacesFrameAccepted({ ...ok, current: undefined })).toBe(false);
+    expect(surfacesFrameAccepted({ ...ok, open: false })).toBe(false);
+    expect(surfacesFrameAccepted({ ...ok, revoked: true })).toBe(false);
+    expect(surfacesFrameAccepted({ ...ok, registered: false })).toBe(false);
+  });
+
+  test('a frame from a session another one replaced is refused', async () => {
+    const map = new SurfaceMap();
+    const { relay, identity } = await registered(map);
+    const token = mintCredential('access', identity.installId);
+    const stale = JSON.stringify({ type: 'surfaces', v: 1, entries: [entry(token, 'chatgpt')] });
+    const first = await rawSession(relay, identity);
+    // The replaced session answers its replacement with one more frame.
+    first.onError((code) => { if (code === 'replaced') first.socket.send(stale); });
+    await rawSession(relay, identity);
+    await first.closed;
+    await Bun.sleep(50);
+    expect(mappedSurfaces(map, identity.installId)[fingerprintOf(token)]).toBeUndefined();
+  });
+
+  test('a frame from a revoked install\'s session never recreates its mapping', async () => {
+    const map = new SurfaceMap();
+    const { relay, identity } = await registered(map);
+    const token = mintCredential('access', identity.installId);
+    const session = await rawSession(relay, identity);
+    session.onError((code) => {
+      if (code === 'revoked') session.socket.send(JSON.stringify({ type: 'surfaces', v: 1, entries: [entry(token, 'chatgpt')] }));
+    });
+    await relay.revoke(identity.installId);
+    await session.closed;
+    await Bun.sleep(50);
+    expect(map.synced(identity.installId)).toBe(false);
+  });
+});
+
+describe('a synced install keeps that state when its entries are evicted', () => {
+  test('an evicted install\'s revoked ChatGPT token does not regain ChatGPT\'s list from an older mark', async () => {
+    // Room for one entry across the relay: a second install's sync evicts the first's entries.
+    const map = new SurfaceMap(1);
+    const relay = await makeRelay(map);
+    let entriesA: SurfaceEntry[] = [];
+    const a = await connectInstall(relay, async () => entriesA, { marks: 'chatgpt' });
+    const tokenA = mintCredential('access', a.identity.installId);
+    // Online: the engine marks this credential ChatGPT's on its answer, and syncs it.
+    entriesA = [entry(tokenA, 'chatgpt')];
+    await until(() => mappedSurfaces(map, a.identity.installId)[fingerprintOf(tokenA)] === 'chatgpt');
+    await (await post(relay, tokenA, rpc('tools/list'))).text();
+    // The token is revoked on the engine; the next sync drops it.
+    entriesA = [];
+    await until(() => Object.keys(mappedSurfaces(map, a.identity.installId)).length === 0);
+    await goOffline(relay, a.client);
+    const b = await connectInstall(relay, async () => [entry('b-1', 'remote'), entry('b-2', 'remote')]);
+    await until(() => map.synced(b.identity.installId));
+    expect(await toolNames(relay, tokenA)).toEqual(remoteNames);
   });
 });
