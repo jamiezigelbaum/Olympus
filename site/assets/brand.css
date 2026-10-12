@@ -47,34 +47,13 @@
   --sheet-max: 1000px;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-turn: cubic-bezier(0.65, 0, 0.35, 1);
-  color-scheme: light dark;
+  /* The film's own curves: power2.out for entrances, power3.inOut for turns.
+     Jamie found the sharper expo-out jumpy next to the film (2026-10-12). */
+  --ease-film: cubic-bezier(0.33, 1, 0.68, 1);
+  --ease-film-turn: cubic-bezier(0.76, 0, 0.24, 1);
+  color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --sweep-peach: #3a2620;
-    --sweep-cream: #1a1314;
-    --paper: #2b2120;
-    --paper-raised: #352927;
-    --rule: #4a3a35;
-    --ink: #f3e8da;
-    --ink-soft: #cdb9a6;
-    --bar: #0d0809;
-    --clay: #c98f74;
-    --clay-deep: #c98f74;
-    --on-clay-deep: #1f1512;
-    --red: #ef6a52;
-    --on-red: #1f1512;
-    --button-cream: #e8dccd;
-    --button-lip: #9d8a77;
-    --button-label: #3a2b22;
-    --focus: #f3e8da;
-    --shadow-paper: 0 1px 2px rgba(0, 0, 0, 0.5), 0 22px 44px -14px rgba(0, 0, 0, 0.65);
-    --shadow-button: 0 5px 0 #9d8a77, 0 10px 18px -6px rgba(0, 0, 0, 0.6);
-    --shadow-button-pressed: 0 1px 0 #9d8a77, 0 3px 8px -4px rgba(0, 0, 0, 0.6);
-    --glow-block: 0 0 0 2px #ff8a70, 0 0 30px 8px rgba(239, 106, 82, 0.6);
-  }
-}
 
 @media (min-width: 720px) { :root { --gutter: 24px; } }
 
@@ -183,7 +162,6 @@ em { font-style: italic; }
 .stamp--small { font-size: 12px; border-width: 2px; padding: 0.32em 0.55em 0.3em; --tilt: 0deg; }
 .stamp--personal { color: var(--clay); }
 .stamp--url { text-transform: none; font-size: clamp(30px, 5vw, 48px); letter-spacing: 0.03em; border-width: 0.12em; --tilt: -4deg; }
-@media (prefers-color-scheme: dark) { .stamp { mix-blend-mode: normal; } }
 
 /* Redaction: the marker bar over withheld words. */
 .redact { position: relative; white-space: nowrap; }

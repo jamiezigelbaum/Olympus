@@ -87,7 +87,7 @@ export function renderOpenPage(target: OpenTarget): string {
   <title>Opening Olympus on your computer - Olympus</title>
   <meta name="description" content="Opens Olympus on your computer, or says how to open it by hand.">
   <meta name="robots" content="noindex">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="refresh" content="0; url=${link}">
   <link rel="stylesheet" href="/assets/brand.css">
