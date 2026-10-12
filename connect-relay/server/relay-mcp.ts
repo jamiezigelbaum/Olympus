@@ -10,20 +10,23 @@
  *   `_meta["mcp/www_authenticate"]`, which starts ChatGPT's account linking.
  *   Other tools also return an error.
  * - `mac_offline`: a routable credential for a registered install whose Mac
- *   has no live session. The dashboard tool shows when it was last seen; any
- *   other tool returns a plain "Your Mac is offline" error. The relay cannot
- *   check the credential (only the engine can), so nothing here reveals more
- *   than "this install exists and was last seen at about this minute".
- *   ChatGPT's tools are listed only to a credential its engine last marked
- *   as ChatGPT's (or on the directory endpoint); any other credential
- *   (Claude, Grok, a key, or one the engine has not marked) gets a plain
- *   offline error for every request, so a client never caches a tool list
- *   that is not its own.
+ *   has no live session (docs/design/background-agents.md, section E). The
+ *   tool list is the one the credential's engine confirmed for it while
+ *   online (server/surface-map.ts): ChatGPT's on the directory endpoint and
+ *   for a credential mapped to ChatGPT, the remote list (the tools Claude,
+ *   Grok and every other agent get) for any other credential, an unknown one
+ *   included. Never guessed from the credential's form. Every tool call gets
+ *   one fixed result, "Olympus is off; last seen …; try again later", with
+ *   a Retry-After as a header and in the result, so an always-on agent backs
+ *   off (shared/offline-result.ts); on ChatGPT's surface the dashboard tool
+ *   still renders the offline dashboard. The relay cannot check the
+ *   credential (only the engine can), so nothing here reveals more than
+ *   "this install exists and was last seen about this long ago".
  *
- * Both list the engine's full ChatGPT tool set and serve the engine's own
+ * Both list the engine's ChatGPT tool set and serve the engine's own
  * dashboard bundle, from files scripts/build-chatgpt-relay-assets.ts generates
- * out of src/workers/chatgpt (the relay builds separately and imports nothing
- * from src). Tool auth follows ChatGPT's per-tool `securitySchemes`
+ * out of the engine source (the relay builds separately and imports nothing
+ * from src); the remote list is generated the same way. Tool auth follows ChatGPT's per-tool `securitySchemes`
  * (developers.openai.com/plugins/build/auth): listing the protected tools to a
  * caller with no token is what lets ChatGPT's model pick one, and that tool's
  * `mcp/www_authenticate` error is the documented trigger for linking.
@@ -34,19 +37,22 @@
  */
 import { toolCallableOn, toolsForSurface, type McpSurface } from '../shared/directory-tools.ts';
 import type { CredentialSurface } from '../shared/tokens.ts';
+import { OFFLINE_RETRY_AFTER_SECONDS, offlineErrorBody, offlineSentence } from '../shared/offline-result.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notConnectedDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
 import DASHBOARD_RESOURCE_READ from './generated/chatgpt-dashboard.json';
 import PRIVATE_ANSWER_RESOURCE_READ from './generated/chatgpt-private-answer.json';
 import PRIVATE_QUESTION_RESOURCE_READ from './generated/chatgpt-private-question.json';
 import CHATGPT_SURFACE from './generated/chatgpt-tools.json';
+import REMOTE_SURFACE from './generated/remote-tools.json';
 
 /** Newest first; an `initialize` asking for one of these gets it back. */
 export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
-export const MAC_OFFLINE_MESSAGE = 'Your Mac is offline. Olympus answers again when your Mac is awake and online.';
 export const NOT_CONNECTED_MESSAGE = 'Olympus is not connected to ChatGPT yet. If Olympus is on your Mac, connect it; otherwise install it first.';
 
 /** The engine's ChatGPT tools, exactly as its tools/list declares them. */
 export const CHATGPT_TOOLS = CHATGPT_SURFACE.tools;
+/** The engine's remote tools (every non-ChatGPT connection), as its tools/list declares them. */
+export const REMOTE_TOOLS = REMOTE_SURFACE.tools;
 /** The engine's resources/list. */
 export const CHATGPT_RESOURCES = CHATGPT_SURFACE.resources;
 /** The engine's resources/read of ui://olympus/dashboard: the dashboard lane's real bundle. */
@@ -67,20 +73,20 @@ if (!DASHBOARD_TOOL) throw new Error('generated ChatGPT tool manifest has no das
 
 export type RelayMcpState =
   | { state: 'not_connected'; installUrl: string; protectedResourceMetadataUrl: string }
-  | { state: 'mac_offline'; lastSeenAt: number | undefined; credentialSurface?: CredentialSurface | undefined };
+  | { state: 'mac_offline'; lastSeenAt: number | undefined; credentialSurface: CredentialSurface };
 
 type JsonRpcId = string | number;
 
-function rpcResult(id: JsonRpcId, result: unknown): Response {
-  return json({ jsonrpc: '2.0', id, result });
+function rpcResult(id: JsonRpcId, result: unknown, headers: Record<string, string> = {}): Response {
+  return json({ jsonrpc: '2.0', id, result }, headers);
 }
 
 function rpcError(id: JsonRpcId | null, code: number, message: string): Response {
   return json({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
-function json(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+function json(body: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers } });
 }
 
 export function relayMcpResponse(input: { method: string; body: string; now: number; surface?: McpSurface } & RelayMcpState): Response {
@@ -102,9 +108,10 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
   if (id === undefined) return new Response(null, { status: 202 });
   if (typeof id !== 'string' && typeof id !== 'number') return rpcError(null, -32600, 'Invalid request');
   const args = params && typeof params === 'object' && !Array.isArray(params) ? (params as Record<string, unknown>) : {};
-  const notice = input.state === 'mac_offline' ? MAC_OFFLINE_MESSAGE : NOT_CONNECTED_MESSAGE;
-  // Offline, for a credential not known to be ChatGPT's: no tool list at all.
-  if (input.state === 'mac_offline' && input.credentialSurface !== 'chatgpt') return rpcError(id, -32000, MAC_OFFLINE_MESSAGE);
+  const offline = input.state === 'mac_offline' ? input : undefined;
+  const notice = offline ? offlineSentence(offline.lastSeenAt, input.now) : NOT_CONNECTED_MESSAGE;
+  // Offline, a credential not confirmed as ChatGPT's gets the remote surface.
+  const remote = offline !== undefined && offline.credentialSurface !== 'chatgpt' && surface === 'default';
 
   switch (method) {
     case 'initialize': {
@@ -120,12 +127,13 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
     case 'ping':
       return rpcResult(id, {});
     case 'tools/list':
-      return rpcResult(id, { tools: toolsForSurface(CHATGPT_TOOLS, surface) });
+      return rpcResult(id, { tools: remote ? REMOTE_TOOLS : toolsForSurface(CHATGPT_TOOLS, surface) });
     case 'resources/list':
-      return rpcResult(id, { resources: CHATGPT_RESOURCES });
+      return rpcResult(id, { resources: remote ? [] : CHATGPT_RESOURCES });
     case 'resources/templates/list':
       return rpcResult(id, { resourceTemplates: [] });
     case 'resources/read': {
+      if (remote) return rpcError(id, -32002, 'Resource not found');
       // The engine advertises content-versioned URIs (`<base>?v=<12 hex>`);
       // any version, or the bare URI, reads the bundle this relay carries.
       const base = resourceBaseUri(args.uri);
@@ -136,7 +144,7 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
     }
     case 'tools/call': {
       // A tool off this surface's list is answered like any unknown name.
-      if (args.name === DASHBOARD_TOOL_NAME && toolCallableOn(args.name, surface)) {
+      if (!remote && args.name === DASHBOARD_TOOL_NAME && toolCallableOn(args.name, surface)) {
         // The page renders only from structuredContent, so the dashboard
         // result always carries it, with the tool's own UI metadata. Without
         // a token it also carries the linking challenge, so ChatGPT offers
@@ -154,7 +162,13 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
           _meta: { ...DASHBOARD_TOOL._meta, ...linkingChallenge(input.protectedResourceMetadataUrl) },
         });
       }
-      if (input.state === 'mac_offline') return rpcError(id, -32000, MAC_OFFLINE_MESSAGE);
+      if (input.state === 'mac_offline') {
+        // Every tool, whatever its name: one fixed result to back off on.
+        return rpcResult(id, {
+          content: [{ type: 'text', text: JSON.stringify(offlineErrorBody(input.lastSeenAt, input.now), null, 2) }],
+          isError: true,
+        }, { 'Retry-After': String(OFFLINE_RETRY_AFTER_SECONDS) });
+      }
       // Any engine tool without a token: ask ChatGPT to link the account.
       return rpcResult(id, {
         content: [{ type: 'text', text: NOT_CONNECTED_MESSAGE }],

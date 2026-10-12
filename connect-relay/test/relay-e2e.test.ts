@@ -17,6 +17,7 @@ import { createOAuthRelayNonce, signOAuthRelayState } from '../../src/core/oauth
 import type { RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
 import { NOT_CONNECTED_MESSAGE } from '../server/relay-mcp.ts';
+import generatedRemoteSurface from '../server/generated/remote-tools.json';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 import generatedDashboard from '../server/generated/chatgpt-dashboard.json';
 import generatedSurface from '../server/generated/chatgpt-tools.json';
@@ -534,7 +535,9 @@ describe('streaming and cancellation', () => {
 });
 
 describe('offline fallback', () => {
-  test('a credential its engine never marked gets only a plain offline error, never a tool list', async () => {
+  // These installs predate the `surfaces` feature (their client syncs no
+  // mapping), so the relay falls back to the per-credential mark.
+  test('a credential its engine never marked gets the remote list and the fixed offline result, never ChatGPT\'s tools', async () => {
     const relay = await makeRelay();
     const worker = fakeWorker('A');
     cleanups.push(worker.stop);
@@ -542,16 +545,27 @@ describe('offline fallback', () => {
     await a.client.stop();
     await until(() => relay.onlineInstalls().length === 0);
     const token = mintCredential('access', a.identity.installId);
-    for (const method of ['initialize', 'tools/list', 'resources/list', 'tools/call']) {
-      const answer = await (await mcpPost(relay, token, rpc(method, { name: 'olympus_dashboard', arguments: {} }))).json();
-      expect(answer.result).toBeUndefined();
-      expect(answer.error.message).toContain('Your Mac is offline');
+    const init = await (await mcpPost(relay, token, rpc('initialize', { protocolVersion: '2025-06-18' }))).json();
+    expect(init.result.instructions).toBe('Olympus is off; last seen less than an hour ago; try again later.');
+    const list = await (await mcpPost(relay, token, rpc('tools/list'))).json();
+    expect(list.result.tools).toEqual(generatedRemoteSurface.tools);
+    expect((await (await mcpPost(relay, token, rpc('resources/list'))).json()).result.resources).toEqual([]);
+    for (const name of ['olympus_dashboard', 'source_answer']) {
+      const response = await mcpPost(relay, token, rpc('tools/call', { name, arguments: {} }));
+      expect(response.headers.get('retry-after')).toBe('300');
+      const call = await response.json();
+      expect(call.result.isError).toBe(true);
+      expect(JSON.parse(call.result.content[0].text)).toEqual({
+        error: 'olympus_offline',
+        message: 'Olympus is off; last seen less than an hour ago; try again later.',
+        retry_after_seconds: 300,
+      });
     }
     expect((await mcpPost(relay, token, JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }))).status).toBe(202);
     expect(worker.requests).toHaveLength(0);
   });
 
-  test('a credential its engine marked as a remote (Claude, Grok, key) connection gets the offline error too', async () => {
+  test('a credential its engine marked as a remote (Claude, Grok, key) connection gets the remote list', async () => {
     const relay = await makeRelay();
     const worker = fakeWorker('A', { surface: 'remote' });
     cleanups.push(worker.stop);
@@ -565,8 +579,8 @@ describe('offline fallback', () => {
     await a.client.stop();
     await until(() => relay.onlineInstalls().length === 0);
     const list = await (await mcpPost(relay, token, rpc('tools/list'))).json();
-    expect(list.result).toBeUndefined();
-    expect(list.error.message).toContain('Your Mac is offline');
+    expect(list.result.tools).toEqual(generatedRemoteSurface.tools);
+    expect(list.result.tools.map((tool: { name: string }) => tool.name)).not.toContain('olympus_dashboard');
   });
 
   test('a credential its engine marked as ChatGPT\'s gets the relay\'s own ChatGPT answers', async () => {
@@ -599,8 +613,11 @@ describe('offline fallback', () => {
     });
     expect(typeof dashboard.result.structuredContent.connection.lastSeenAt).toBe('string');
     expect(dashboard.result._meta).toEqual(generatedSurface.tools[0]!._meta);
-    const other = await (await mcpPost(relay, token, rpc('tools/call', { name: 'source_answer', arguments: {} }))).json();
-    expect(other.error.message).toContain('Your Mac is offline');
+    const otherResponse = await mcpPost(relay, token, rpc('tools/call', { name: 'source_answer', arguments: {} }));
+    expect(otherResponse.headers.get('retry-after')).toBe('300');
+    const other = await otherResponse.json();
+    expect(other.result.isError).toBe(true);
+    expect(JSON.parse(other.result.content[0].text)).toMatchObject({ error: 'olympus_offline', retry_after_seconds: 300 });
     const notification = await mcpPost(relay, token, JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }));
     expect(notification.status).toBe(202);
     // Only the one call made while the Mac was online reached it.

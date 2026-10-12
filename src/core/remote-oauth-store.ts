@@ -150,6 +150,19 @@ export interface RemoteOAuthStore {
   /** RFC 7009: an access token dies alone; a refresh token takes its grant with it. */
   revokeToken(token: string): void;
   revokeGrant(connectionId: string): void;
+  /**
+   * The live access tokens issued for `resource` under grants not revoked,
+   * latest expiry first, at most `limit`: each token's stored SHA-256 digest,
+   * the client it was issued to and its expiry, nothing else. For the relay's
+   * offline tool lists (workers/relay-surfaces.ts).
+   */
+  liveAccessTokens(resource: string, limit: number): LiveAccessToken[];
+}
+
+export interface LiveAccessToken {
+  tokenHash: Buffer;
+  clientId: string;
+  expiresAt: string;
 }
 
 export function isWellFormedOAuthAccessToken(token: string): boolean {
@@ -453,6 +466,17 @@ export function createRemoteOAuthStore(
     },
 
     revokeGrant,
+
+    liveAccessTokens(resource: string, limit: number): LiveAccessToken[] {
+      const rows = db.query(`
+        SELECT t.token_hash, t.client_id, t.expires_at
+        FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
+        WHERE t.kind = 'access' AND t.resource = ? AND t.expires_at > ? AND c.revoked_at IS NULL
+        ORDER BY t.expires_at DESC
+        LIMIT ?
+      `).all(resource, now().toISOString(), Math.max(0, Math.floor(limit))) as Array<{ token_hash: Uint8Array; client_id: string; expires_at: string }>;
+      return rows.map((row) => ({ tokenHash: Buffer.from(row.token_hash), clientId: row.client_id, expiresAt: row.expires_at }));
+    },
   };
 }
 
