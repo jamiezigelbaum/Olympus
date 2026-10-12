@@ -439,6 +439,7 @@ describe('routing', () => {
     const heading = async (clientId: string) => /<h1>([^<]*)<\/h1>/.exec(await (await fetch(`${relay.url}/connect/authorize?client_id=${encodeURIComponent(clientId)}`)).text())?.[1];
     expect(await heading('https://claude.ai/oauth/mcp-oauth-client-metadata')).toBe('Approve Claude on your Mac');
     expect(await heading('https://grok.com/oauth/mcp-client.json')).toBe('Approve Grok on your Mac');
+    expect(await heading('https://cursor.com/oauth/mcp-client.json')).toBe('Approve Grok Bot or Cursor on your Mac');
     expect(await heading('https://chatgpt.com/oauth/cb_1/client.json')).toBe('Approve ChatGPT on your Mac');
     expect(await heading('https://evil.example/<b>Claude</b>')).toBe('Approve on your Mac');
     expect(await (await fetch(`${relay.url}/connect/authorize?state=s`)).text()).toContain('<h1>Approve on your Mac</h1>');

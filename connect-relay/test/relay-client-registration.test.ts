@@ -14,6 +14,7 @@ const CALLBACK = 'https://chatgpt.com/connector/oauth/cb_Abc-123';
 const CLAUDE = 'https://claude.ai/api/mcp/auth_callback';
 const GROK = 'https://grok.com/connectors-oauth-exchange-code/';
 const GROK_CONSOLE = 'https://console.x.ai/connectors-oauth-exchange-code/';
+const CURSOR = 'https://www.cursor.com/agents/mcp/oauth/callback';
 const clientFor = (uri: string) => pinnedClientForRedirect(uri)?.clientId;
 
 const cleanups: Array<() => unknown> = [];
@@ -34,6 +35,7 @@ describe('pinnedClientForRedirect', () => {
     expect(pinnedClientForRedirect(CLAUDE)).toEqual({ clientId: 'https://claude.ai/oauth/mcp-oauth-client-metadata', clientName: 'Claude' });
     expect(pinnedClientForRedirect(GROK)).toEqual({ clientId: 'https://grok.com/oauth/mcp-client.json', clientName: 'Grok' });
     expect(pinnedClientForRedirect(GROK_CONSOLE)).toEqual({ clientId: 'https://grok.com/oauth/mcp-client.json', clientName: 'Grok' });
+    expect(pinnedClientForRedirect(CURSOR)).toEqual({ clientId: 'https://cursor.com/oauth/mcp-client.json', clientName: 'Grok Bot or Cursor' });
   });
 
   test('refuses everything else', () => {
@@ -56,7 +58,12 @@ describe('pinnedClientForRedirect', () => {
       'https://grok.com/connectors/oauth/callback',
       'https://grok.com.evil.example/connectors-oauth-exchange-code/',
       'https://x.ai/connectors-oauth-exchange-code/',
-      'https://www.cursor.com/agents/mcp/oauth/callback',
+      'https://www.cursor.com/agents/mcp/oauth/callback/',
+      'https://cursor.com/agents/mcp/oauth/callback',
+      'https://www.cursor.com/bot/mcp/oauth/callback',
+      'http://localhost:8787/callback',
+      'cursor://anysphere.cursor-mcp/oauth/callback',
+      'grokbot://mcp/oauth/callback',
       'constructor',
     ]) expect(clientFor(uri)).toBeUndefined();
   });
@@ -99,6 +106,27 @@ describe('registerPinnedClient', () => {
     expect(register({ redirect_uris: [GROK, GROK_CONSOLE] })).toMatchObject({ ok: true, body: { client_id: 'https://grok.com/oauth/mcp-client.json', redirect_uris: [GROK, GROK_CONSOLE] } });
     expect(register({ client_name: 'ChatGPT', redirect_uris: [CLAUDE], grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:jwt-bearer'] }))
       .toMatchObject({ ok: true, body: { client_id: 'https://claude.ai/oauth/mcp-oauth-client-metadata', client_name: 'Claude', grant_types: ['authorization_code', 'refresh_token'] } });
+  });
+
+  test('Grok Bot registers as Cursor with a loopback address beside the cloud one: only the cloud one is registered', () => {
+    // As Grok Bot sent it (relay log, 2026-10-12).
+    expect(register({ client_name: 'Cursor', redirect_uris: [CURSOR, 'http://localhost:8787/callback'], grant_types: ['authorization_code', 'refresh_token'], token_endpoint_auth_method: 'none' })).toEqual({
+      ok: true,
+      body: {
+        client_id: 'https://cursor.com/oauth/mcp-client.json',
+        client_id_issued_at: 1_700_000_000,
+        client_name: 'Grok Bot or Cursor',
+        redirect_uris: [CURSOR],
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        token_endpoint_auth_method: 'none',
+      },
+    });
+    expect(register({ redirect_uris: [CURSOR, 'http://127.0.0.1:8787/callback'] })).toMatchObject({ ok: true, body: { redirect_uris: [CURSOR] } });
+    // The loopback addresses alone, or beside another app, are not Cursor's pin.
+    for (const uris of [['http://localhost:8787/callback'], [CLAUDE, 'http://localhost:8787/callback'], [CURSOR, 'http://localhost:9999/callback'], [CURSOR, CLAUDE]]) {
+      expect(register({ redirect_uris: uris })).toMatchObject({ ok: false, error: 'invalid_redirect_uri' });
+    }
   });
 
   test('one registration names one app: mixing apps\' return addresses is refused', () => {

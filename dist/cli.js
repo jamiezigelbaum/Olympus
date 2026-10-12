@@ -122158,6 +122158,8 @@ __export(exports_pinned_clients, {
   isChatGptGrant: () => isChatGptGrant,
   GROK_REDIRECT_URIS: () => GROK_REDIRECT_URIS,
   GROK_CLIENT_ID: () => GROK_CLIENT_ID,
+  CURSOR_REDIRECT_URI: () => CURSOR_REDIRECT_URI,
+  CURSOR_CLIENT_ID: () => CURSOR_CLIENT_ID,
   CLAUDE_REDIRECT_URI: () => CLAUDE_REDIRECT_URI,
   CLAUDE_CLIENT_ID: () => CLAUDE_CLIENT_ID,
   CHATGPT_REDIRECT_URI: () => CHATGPT_REDIRECT_URI,
@@ -122183,6 +122185,9 @@ function pinnedClient(clientId) {
   if (clientId === GROK_CLIENT_ID) {
     return { clientId, clientName: "Grok", redirectUris: GROK_REDIRECT_URIS, verifiedHost: "grok.com", host: "grok" };
   }
+  if (clientId === CURSOR_CLIENT_ID) {
+    return { clientId, clientName: "Grok Bot or Cursor", redirectUris: [CURSOR_REDIRECT_URI], verifiedHost: "cursor.com", host: "cursor" };
+  }
   const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
   if (callback) {
     return {
@@ -122197,9 +122202,9 @@ function pinnedClient(clientId) {
 }
 function pinnedGrantProvider(connection) {
   const host = typeof connection.clientId === "string" ? pinnedClient(connection.clientId)?.host : undefined;
-  return host === "chatgpt" ? "openai" : host === "claude" ? "anthropic" : host === "grok" ? "xai" : undefined;
+  return host === "chatgpt" ? "openai" : host === "claude" ? "anthropic" : host === "grok" || host === "cursor" ? "xai" : undefined;
 }
-var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS;
+var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS, CURSOR_CLIENT_ID = "https://cursor.com/oauth/mcp-client.json", CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
 var init_pinned_clients = __esm(() => {
   CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
   CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
@@ -128434,7 +128439,7 @@ function createRemoteOAuthHandler(options) {
     if (pinned)
       return { ...pinned, redirectUris: [...pinned.redirectUris] };
     if (isClientIdMetadataUrl(clientId))
-      return "Olympus connects to ChatGPT, Claude and Grok. It does not recognize this app.";
+      return "Olympus connects to ChatGPT, Claude, Grok, and Grok Bot or Cursor. It does not recognize this app.";
     const registered3 = options.connections().oauth.getRegisteredClient(clientId);
     if (!registered3)
       return "This app is not registered with Olympus.";
@@ -128745,7 +128750,7 @@ function createRemoteOAuthHandler(options) {
       return oauthError(400, "invalid_redirect_uri", "redirect_uris must list https or loopback URLs.");
     }
     if (u.installId && !redirectUris.every(isLoopbackRedirectUri)) {
-      return oauthError(400, "invalid_redirect_uri", "Only local development clients register here; ChatGPT, Claude and Grok need no registration.");
+      return oauthError(400, "invalid_redirect_uri", "Only local development clients register here; ChatGPT, Claude, Grok, and Grok Bot or Cursor need no registration.");
     }
     const grantTypes = metadata.grant_types;
     if (grantTypes !== undefined && (!Array.isArray(grantTypes) || !grantTypes.includes("authorization_code"))) {

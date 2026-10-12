@@ -476,20 +476,26 @@ snippet has a copy button.
   page that opens in this computer's browser.
 - **Claude Code** and **Codex** on this computer: copy the prompt (or the
   `olympus serve` command) into the agent. This works without remote access.
-- **Claude**, **Grok**, the **Grok API** and other agents in the
-  cloud need a tunnel you run yourself (below); the panel says so until
-  remote access runs through one.
+- **Claude** (web, desktop and phone) and **Grok** (grok.com): add Olympus
+  as a connector with the address the panel shows, then click **Connect** on
+  the page that opens in this computer's browser.
+- **Grok Bot**: add Olympus as a custom server in Grok Bot and click
+  **Connect** on the same page. Grok Bot signs in as Cursor's cloud agents
+  do, so the page names it **Grok Bot or Cursor**.
+- The **Grok API** and other agents in the cloud need a tunnel you run
+  yourself (below); the panel says so until remote access runs through one.
 
 Agents in the cloud reach Olympus only when remote access is on; the Agents
 page says whether it is. To turn it on, press **Turn on remote access**
 there. Olympus then connects through the Olympus relay
 (`mcp.olympusplugin.ai`): you create no account and run no tunnel. The relay
-passes requests between ChatGPT and this computer; it stores and logs no
+passes requests between your agents and this computer; it stores and logs no
 questions, answers or tokens, but like any HTTPS endpoint it handles them in
-transit. The relay connects ChatGPT, Claude and Grok (grok.com), and approving
-one happens on this computer only, with one click on a page Olympus serves
-locally; there is no pairing code. A Claude connector approved on this
-computer then works in Claude on your phone too. **Turn off remote access** turns it off again. If the
+transit. The relay connects ChatGPT, Claude, Grok (grok.com) and Grok Bot,
+and approving one happens on this computer only, with one click on a page
+Olympus serves locally; there is no pairing code. A Claude connector
+approved on this computer then works in Claude on your phone too.
+**Turn off remote access** turns it off again. If the
 relay cannot be reached, the page says **Olympus relay unavailable** and
 Olympus keeps retrying on its own; agents on this computer are unaffected.
 
@@ -509,7 +515,8 @@ lists connected agents with when each was added and last used, and
 same from a terminal.
 
 Each agent's steps end with a short instruction that tells it when to ask
-Olympus. Paste it into Claude project instructions or Grok Bot skills, or
+Olympus. Paste it into Claude project instructions, Grok's custom
+instructions or Grok Bot's skills, or
 load the packaged Agent Skills folder
 [`integrations/agent-skills/ask-olympus/`](integrations/agent-skills/ask-olympus/SKILL.md).
 
