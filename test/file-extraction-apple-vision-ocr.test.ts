@@ -273,18 +273,15 @@ describe('apple vision ocr: the text lane routes scans and images to it', () => 
       .toMatchObject({ status: 'indexed', text: 'Label  42 mg' });
   });
 
-  test('off macOS an image stays names-only in the text lane, as before', async () => {
-    const calls: string[] = [];
-    const runner: ExtractionCommandRunner = async (request) => {
-      calls.push(request.command);
-      return { stdout: 'never', stderr: '' };
+  test('off macOS with no working tesseract an image stays names-only in the text lane', async () => {
+    const missing: ExtractionCommandRunner = async () => {
+      throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
     };
     const lane = createTextExtractor({
-      imageOcr: createImageOcr({ commandRunner: runner, engine: { platform: 'linux' } }),
+      imageOcr: createImageOcr({ commandRunner: missing, engine: { platform: 'linux' } }),
     });
     expect(await lane.extract(extractorInput({ bytes: PNG_BYTES, mimeType: PNG_MIME })))
       .toEqual({ status: 'metadata_only' });
-    expect(calls).toEqual([]);
   });
 
   test('neither engine available leaves a scan visibly ocr_required', async () => {

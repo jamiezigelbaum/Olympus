@@ -20,7 +20,14 @@
  * decoders live in `document-formats.ts` and this file has none of its own.
  */
 
-import type { ExtractedMedia, ExtractionDerivation, Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
+import type {
+  ExtractedMedia,
+  ExtractionDerivation,
+  Extractor,
+  ExtractorInput,
+  ExtractorOutput,
+  ExtractorRereadPolicy,
+} from '../types.ts';
 import {
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   DEFAULT_MAX_TABLE_SAMPLE_COLUMNS,
@@ -112,6 +119,21 @@ export interface TextExtractorOptions {
    */
   imageOcr?: ImageOcr;
   /**
+   * When items left unread for want of OCR are read again: the policy the
+   * runner asks (`Extractor.reread`). Injected by the registry with the OCR
+   * capability probe, like `pdfOcr`. A scanned PDF settled `ocr_required`
+   * while no OCR engine worked is read once more when one does.
+   */
+  ocrReread?: ExtractorRereadPolicy;
+  /**
+   * A suffix for image jobs' version while an OCR engine reads pictures (or
+   * undefined while none does). An image read before (names only) is queued
+   * once more under the suffixed version, so a picture of text becomes
+   * searchable when OCR starts working without any item being touched. The
+   * suffix may use only the job store's safe identifier characters.
+   */
+  imageOcrVersionSuffix?: () => string | undefined;
+  /**
    * Prepares an image for media search (a JPEG copy in the media cache).
    * Injected by the registry on macOS; absent elsewhere, which leaves images
    * exactly as they were. With it, an image is indexed: a short descriptor
@@ -165,20 +187,24 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   const pdfOcr = options.pdfOcr;
   const imageOcr = options.imageOcr;
   const imagePreparation = options.imagePreparation;
+  const imageOcrVersionSuffix = options.imageOcrVersionSuffix;
   return {
     kind,
     version,
     needsBytes: true,
     // Pictures read for media search are a new reading of an image: an image
     // read before (names only, or OCR text) is queued once more under this.
-    ...(imagePreparation
+    // The same holds when OCR starts reading pictures.
+    ...(imagePreparation || imageOcrVersionSuffix
       ? {
         versionFor(mimeType: string | undefined): string {
           const normalized = normalizeMimeType(mimeType);
-          return normalized && IMAGE_MIME_TYPES.has(normalized) ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}` : version;
+          if (!normalized || !IMAGE_MIME_TYPES.has(normalized)) return version;
+          return `${version}${imagePreparation ? IMAGE_MEDIA_VERSION_SUFFIX : ''}${imageOcrVersionSuffix?.() ?? ''}`;
         },
       }
       : {}),
+    ...(options.ocrReread ? { reread: options.ocrReread } : {}),
     egress: 'local',
     accepts(mimeType) {
       return textLaneAccepts(mimeType);

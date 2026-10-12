@@ -73,6 +73,39 @@ describe('olympus setup wizard', () => {
     }
   });
 
+  test('reports whether scans and pictures of text are read as an optional finding that never blocks setup', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-ocr-test-'));
+    try {
+      const result = await runIsolatedSetupWizard({
+        preset: 'no-sensitive',
+        yes: true,
+        sovereigntyPath: join(dir, 'sovereignty.json'),
+        platform: 'linux',
+        homeDir: dir,
+        olympusBin: '/usr/local/bin/olympus',
+        workingDirectory: dir,
+        tokenGenerator: () => 'test-worker-token',
+        dependencyCheck: healthyDependencyCheck,
+        ocrReadiness: () => ({
+          state: 'missing',
+          detail: 'Scans and pictures of text are not read yet: tesseract is not installed.',
+          remedy: 'sudo pacman -S --needed tesseract tesseract-data-eng poppler',
+        }),
+      });
+      expect(result.ok).toBe(true);
+      expect(result.dependencyCheck.ok).toBe(true);
+      expect(result.dependencyCheck.checks.find((check) => check.id === 'ocr')).toMatchObject({
+        required: false,
+        ok: false,
+        repairHint: 'sudo pacman -S --needed tesseract tesseract-data-eng poppler',
+      });
+      // The dependency check itself runs no OCR probe: the finding exists only when asked for.
+      expect(healthyDependencyCheck().checks.some((check) => check.id === 'ocr')).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('keeps subscription cloud lane first by default and supports explicit API-key cloud alternative', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-cloud-lane-test-'));
     const subscriptionPath = join(dir, 'subscription.json');

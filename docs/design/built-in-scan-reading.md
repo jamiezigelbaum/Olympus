@@ -24,9 +24,53 @@ is given; it asks for no privacy permission.
 | Host | Engine |
 |---|---|
 | macOS (default, `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE` unset or `auto`) | Vision via the packaged script |
-| macOS, Vision unavailable (no script, old macOS, framework missing) | `ocrmypdf` / `tesseract` if installed, else names-only (`ocr_required`) |
-| macOS with `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE=tesseract` | `ocrmypdf` / `tesseract` |
-| Linux and everywhere else | `ocrmypdf` / `tesseract`, as before |
+| macOS, Vision unavailable (no script, old macOS, framework missing) | the probed command engines below, else names-only (`ocr_required`) |
+| macOS with `OLYMPUS_FILE_EXTRACTION_OCR_ENGINE=tesseract` | `ocrmypdf` run directly, no probe, no fallback engine |
+| Linux and everywhere else | the probed command engines below |
+
+### Command engines are probed, not presumed
+
+Where Vision does not read, the text lane runs each command once on a tiny
+generated fixture (`extractors/ocr-capability.ts`): the word OLYMPUS as a
+picture, wrapped in a one-page PDF with no text layer. A command that exists
+but cannot read it is not an engine. The answer picks the engine:
+
+| Scanned PDF | When |
+|---|---|
+| `ocrmypdf` | its real command, `--clean` included, reads the fixture PDF |
+| `pdftoppm` pages read by `tesseract` | otherwise, when both pass (Arch and Omarchy have no `ocrmypdf` in their repositories) |
+| not read | otherwise: the PDF stays `ocr_required` |
+
+A picture is read by `tesseract` when it reads the fixture picture, and is
+otherwise names-only. The raster engine renders grayscale PNG pages at 200 dpi
+(lowered so the first page's long edge stays within the same 3,000-pixel cap
+as Vision) in ranges of eight pages, reads each page with `tesseract
+--psm 3`, and keeps Vision's bounds: 100 pages, the text cap, a 600-second
+whole-file deadline, each cut recorded as a warning. It marks its text
+`ocr_engine_tesseract`. A PDF `pdftoppm` refuses settles with the lane's
+`ocrmypdf_pdf_encrypted` / `ocrmypdf_pdf_invalid` kinds.
+
+The probe result is cached: ten minutes while an engine works, one minute
+while none does, so an install is noticed without a process per file.
+
+### Recovery
+
+* A scan settled `ocr_required` (no engine worked) is requeued once, unchanged,
+  when the probe passes: the text extractor carries the runner's `reread`
+  policy (`unreadWarnings: ['ocr_required']`). The requeue is once ever per
+  job, so a reader that works and then still fails a file costs one more try.
+* A picture is queued afresh under an extractor version suffixed
+  `.image-ocr-<date>` while tesseract reads pictures. Pictures read names-only
+  before are therefore read once tesseract works, with no marker needed. A Mac
+  that reads with Vision never gets the suffix, so no picture there is read
+  again.
+
+`olympus doctor` (`ocr_reading`) and `olympus setup` (an optional `ocr`
+finding) report the engines, or one install command by distribution from
+`/etc/os-release`: `sudo pacman -S --needed tesseract tesseract-data-eng
+poppler` (Arch, Omarchy), `sudo apt install tesseract-ocr poppler-utils`
+(Debian, Ubuntu), `sudo dnf install tesseract poppler-utils` (Fedora), else the
+package names. `ocrmypdf` is never required. Olympus does not bundle tesseract.
 
 The lane keeps its `local_ocr_tesseract` kind and `ocr-v1` version: stored
 jobs, terminal-reclassification rules and operator tooling key on them. The
@@ -38,9 +82,10 @@ engine that read a file is recorded on its derivation as the
 There is no new lane. The shared text lane already hands a PDF with no usable
 text layer (empty, or text the inline decoder cannot decode) to the OCR lane's
 PDF reader; it now also hands every image to the OCR lane's image reader. Both
-use the built-in engine when it is selected. Off macOS the image hook answers
-nothing and images stay names-only in the text lane exactly as before; the
-explicit OCR lane still reads them with tesseract when a job asks for it.
+use the built-in engine when it is selected, else the probed command engines.
+With no working tesseract the image hook answers nothing and images stay
+names-only in the text lane; the explicit OCR lane still runs the commands
+directly when a job asks for it.
 
 Recognized text is ordinary extracted text. It goes through the same sink, the
 same bounded-text cap and the same per-item four-tier classification (the

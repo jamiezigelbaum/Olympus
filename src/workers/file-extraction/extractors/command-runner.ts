@@ -37,6 +37,11 @@ export interface ExtractionCommandRunRequest {
   command: string;
   args: string[];
   timeoutMs: number;
+  /**
+   * Extra environment for the child, laid over the process environment.
+   * Absent leaves the child with the process environment exactly as before.
+   */
+  env?: Readonly<Record<string, string>>;
 }
 
 export interface ExtractionCommandRunResult {
@@ -234,6 +239,7 @@ export async function runExtractionCommand(
     const child = spawn(command, request.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
+      ...(request.env ? { env: { ...process.env, ...request.env } } : {}),
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
