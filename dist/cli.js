@@ -109883,7 +109883,7 @@ function localBody(agent) {
   return `<p>These run on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>` + copyBox("agent-local-prompt", LOCAL_AGENT_PROMPT, "Copy prompt", true) + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>` + `<p>The olympus path is the full path of the olympus command. On a Mac set up with the Olympus installer it is <b>~/.local/bin/olympus</b>, written out from your home folder. With OpenClaw it is <b>bin/olympus</b> inside the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>` + copyBox("agent-local-claude", CLAUDE_CODE_SNIPPET, "Copy command") + `<p>For Codex, add this to ~/.codex/config.toml:</p>` + copyBox("agent-local-codex", CODEX_SNIPPET, "Copy snippet") + `</details>` + instructionsStep(agent, false);
 }
 function tunnelNeeded() {
-  const text2 = "Olympus's relay connects only ChatGPT, so this agent needs a tunnel you run yourself. " + "Advanced: set remote.publicBaseUrl in Olympus's settings to your tunnel's https address and turn on remote access; this agent's steps then appear here. " + "Claude Code and Codex on this computer need no tunnel.";
+  const text2 = "Olympus's relay connects only ChatGPT, Claude and Grok, so this agent needs a tunnel you run yourself. " + "Advanced: set remote.publicBaseUrl in Olympus's settings to your tunnel's https address and turn on remote access; this agent's steps then appear here. " + "Claude Code and Codex on this computer need no tunnel.";
   return `<p class="why" data-agent-needs-tunnel>${escapeHtml2(text2)}</p>`;
 }
 function remoteUnavailable(access) {
@@ -109968,7 +109968,9 @@ var init_agents = __esm(() => {
       method: "oauth",
       add: "In Claude, open Customize, then Connectors. Choose +, then Add custom connector, name it Olympus, and paste this address as the URL:",
       approve: "Choose Add, then Connect on the Olympus connector. An Olympus approval page opens, on your phone too.",
-      instructionsWhere: "Paste this into a Claude project's instructions."
+      approveViaRelay: "Choose Add, then Connect on the Olympus connector. An Olympus page opens in this computer's browser asking to connect Claude to Olympus: choose Connect. Do this in Claude on this computer; the page opens only here. After that, Olympus works in Claude on your phone too.",
+      instructionsWhere: "Paste this into a Claude project's instructions.",
+      viaRelay: true
     },
     {
       id: "chatgpt",
@@ -109982,11 +109984,14 @@ var init_agents = __esm(() => {
     },
     {
       id: "grok",
-      label: "Grok or Grok Bot",
+      label: "Grok",
+      detail: "grok.com",
       method: "oauth",
       add: "In Grok, go to grok.com/connectors, choose New Connector, then Custom, and paste this address as the MCP server URL:",
       approve: "Continue to sign in. An Olympus approval page opens.",
-      instructionsWhere: "Paste this into your Grok Bot's skills or into Grok's custom instructions."
+      approveViaRelay: "Continue to sign in. An Olympus page opens in this computer's browser asking to connect Grok to Olympus: choose Connect. Do this on grok.com on this computer; the page opens only here.",
+      instructionsWhere: "Paste this into Grok's custom instructions.",
+      viaRelay: true
     },
     {
       id: "grok-api",

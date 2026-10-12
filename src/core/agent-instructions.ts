@@ -4,8 +4,8 @@
  * Connecting an agent gives it the tools; this text is what makes it use them
  * "in the background", without the owner naming Olympus in every question.
  * One text serves every vendor (owner ruling: no per-vendor policy): the
- * dashboard shows it for pasting into Claude project instructions, Grok Bot
- * skills or Muse instructions, and the packaged Agent Skills file
+ * dashboard shows it for pasting into Claude project instructions or Grok's
+ * custom instructions, and the packaged Agent Skills file
  * (`integrations/agent-skills/ask-olympus/SKILL.md`) carries it verbatim for
  * vendors that load skills. A test holds the two equal.
  *
