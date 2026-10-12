@@ -300,10 +300,10 @@ export function openWaitingPrivateQuestionStore(
   try {
     chmodSync(dbPath, 0o600);
     const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
-    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA secure_delete = ON;`);
     // A file left in WAL mode (by a build before 2026-10-12) leaves it here,
     // which needs the only connection; until then the store stays unopened.
-    const mode = (db.query('PRAGMA journal_mode = DELETE').get() as { journal_mode?: string } | null)?.journal_mode;
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE;`);
+    const mode = (db.query('PRAGMA journal_mode').get() as { journal_mode?: string } | null)?.journal_mode;
     if (mode !== 'delete') throw new Error('The waiting private questions store could not use its rollback journal yet.');
     // Under one write lock: two processes opening a new file at once (the
     // worker and the CLI) cannot both see version 0 and both migrate.
