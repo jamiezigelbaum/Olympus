@@ -27,7 +27,7 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
       approval?: string;
       screenshot_commit?: string;
       rendered_from_commit?: string;
-      prior_approval?: { rendered_html_sha256: string; approved_on: string; approval: string; screenshot_commit: string; rendered_from_commit: string };
+      prior_approval?: { rendered_html_sha256: string; approved_on: string; approval: string; screenshot_commit?: string; rendered_from_commit: string };
       pending_review?: { requested_on: string; reason: string; candidate_rendered_html_sha256: string };
     }>;
     decisions: string[];
@@ -82,43 +82,52 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
         // The panel ChatGPT loads (ui://olympus/dashboard), which the
         // computer's /dashboard and the OpenClaw tab frame unchanged.
         id: 'panel',
-        rendered_html_sha256: '553d74d777ed00b07fe5982480f882fd023f550bddd20428d33ca9273ab6df1c',
+        rendered_html_sha256: 'c1e97993c9ad82e45e8b4ee78d46d7ec56b749db27db8ccf887a142a29709c6f',
         approved_by: 'jamie',
         approved_on: '2026-10-12',
-        approval: "In chat: yes, approved (Private answers page replacing Anonymous answers: Ask privately, the waiting list with Answer and Dismiss, the answer in its own panel under a bold question with sources and left-out beneath; the computer-only Needs you line; screenshots sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).",
-        rendered_from_commit: 'fe51681f903b284dbf1d6ec47abc049cae723949',
-        pending_review: {
-          requested_on: '2026-10-12',
-          reason: "Away from the computer, the panel now ends with one quiet line after Models: More controls on your computer: Private answers, anonymous answers, keys and agents, with Open on the olympusplugin.ai page that opens Olympus there (owner request, 2026-10-12); it awaits Jamie's re-approval.",
-          candidate_rendered_html_sha256: 'c1e97993c9ad82e45e8b4ee78d46d7ec56b749db27db8ccf887a142a29709c6f',
+        approval: "In chat: I approve the more controls (ChatGPT panel line 'More controls on your computer', Open to /open/dashboard/)",
+        screenshot_commit: '7e70fad576e29f10214fe4e9b9ab47fbbfd8df5a',
+        rendered_from_commit: '7e70fad576e29f10214fe4e9b9ab47fbbfd8df5a',
+        // The earlier approval (2026-10-12, Private answers page), superseded by this one.
+        prior_approval: {
+          rendered_html_sha256: '553d74d777ed00b07fe5982480f882fd023f550bddd20428d33ca9273ab6df1c',
+          approved_on: '2026-10-12',
+          approval: 'In chat: yes, approved (Private answers page replacing Anonymous answers: Ask privately, the waiting list with Answer and Dismiss, the answer in its own panel under a bold question with sources and left-out beneath; the computer-only Needs you line; screenshots sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).',
+          rendered_from_commit: 'fe51681f903b284dbf1d6ec47abc049cae723949',
         },
       },
       {
         // The computer's /dashboard with the controls open.
         id: 'computer_host',
-        rendered_html_sha256: '8c243876fe68b4da4c7a9fd53867e86722c87e70ecfd645b22f2463512c506da',
+        rendered_html_sha256: 'e65975dff5ef79d7418683a71873fadb796f179919322b14f13887ac3e86e7c3',
         approved_by: 'jamie',
         approved_on: '2026-10-12',
-        approval: "In chat: yes, approved (Private answers page replacing Anonymous answers: Ask privately, the waiting list with Answer and Dismiss, the answer in its own panel under a bold question with sources and left-out beneath; the computer-only Needs you line; screenshots sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).",
-        rendered_from_commit: 'fe51681f903b284dbf1d6ec47abc049cae723949',
-        pending_review: {
-          requested_on: '2026-10-12',
-          reason: "The computer's /dashboard frames the panel, whose source gained the line pointing ChatGPT at the computer's own controls; the line is not shown on the computer, where On this computer stands instead, so the page should look unchanged; it awaits Jamie's re-approval.",
-          candidate_rendered_html_sha256: 'e65975dff5ef79d7418683a71873fadb796f179919322b14f13887ac3e86e7c3',
+        approval: "In chat: I approve the more controls (ChatGPT panel line 'More controls on your computer', Open to /open/dashboard/)",
+        screenshot_commit: '7e70fad576e29f10214fe4e9b9ab47fbbfd8df5a',
+        rendered_from_commit: '7e70fad576e29f10214fe4e9b9ab47fbbfd8df5a',
+        // The earlier approval (2026-10-12, Private answers page), superseded by this one.
+        prior_approval: {
+          rendered_html_sha256: '8c243876fe68b4da4c7a9fd53867e86722c87e70ecfd645b22f2463512c506da',
+          approved_on: '2026-10-12',
+          approval: 'In chat: yes, approved (Private answers page replacing Anonymous answers: Ask privately, the waiting list with Answer and Dismiss, the answer in its own panel under a bold question with sources and left-out beneath; the computer-only Needs you line; screenshots sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).',
+          rendered_from_commit: 'fe51681f903b284dbf1d6ec47abc049cae723949',
         },
       },
       {
         // The same page while locked: the Open dashboard controls banner.
         id: 'computer_host_locked',
-        rendered_html_sha256: '1a65cd2344d2ef5f992907f05604948f6d13159968f918f70722b75f1e0df384',
+        rendered_html_sha256: '37fe7b274faced01334dff40ad1a23484069f2677f3516f54c1572bdef6cc07f',
         approved_by: 'jamie',
         approved_on: '2026-10-12',
-        approval: "In chat: yes, approved (Private answers page replacing Anonymous answers: Ask privately, the waiting list with Answer and Dismiss, the answer in its own panel under a bold question with sources and left-out beneath; the computer-only Needs you line; screenshots sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).",
-        rendered_from_commit: 'fe51681f903b284dbf1d6ec47abc049cae723949',
-        pending_review: {
-          requested_on: '2026-10-12',
-          reason: "The computer's /dashboard frames the panel, whose source gained the line pointing ChatGPT at the computer's own controls; the line is not shown on the computer, where On this computer stands instead, so the page should look unchanged; it awaits Jamie's re-approval.",
-          candidate_rendered_html_sha256: '37fe7b274faced01334dff40ad1a23484069f2677f3516f54c1572bdef6cc07f',
+        approval: "In chat: I approve the more controls (ChatGPT panel line 'More controls on your computer', Open to /open/dashboard/)",
+        screenshot_commit: '7e70fad576e29f10214fe4e9b9ab47fbbfd8df5a',
+        rendered_from_commit: '7e70fad576e29f10214fe4e9b9ab47fbbfd8df5a',
+        // The earlier approval (2026-10-12, Private answers page), superseded by this one.
+        prior_approval: {
+          rendered_html_sha256: '1a65cd2344d2ef5f992907f05604948f6d13159968f918f70722b75f1e0df384',
+          approved_on: '2026-10-12',
+          approval: 'In chat: yes, approved (Private answers page replacing Anonymous answers: Ask privately, the waiting list with Answer and Dismiss, the answer in its own panel under a bold question with sources and left-out beneath; the computer-only Needs you line; screenshots sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).',
+          rendered_from_commit: 'fe51681f903b284dbf1d6ec47abc049cae723949',
         },
       },
       {
