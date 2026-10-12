@@ -1,0 +1,77 @@
+<!doctype html>
+<html><head><meta charset="UTF-8" /></head>
+<body>
+<template>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Newsreader";font-style:italic;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader-italic.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    #root { position: absolute; inset: 0; overflow: hidden; }
+    .s03-row { position: absolute; width: 560px; height: 112px; }
+    .s03-row .rule { position: absolute; left: 0; right: 0; bottom: 0; height: 2.5px; background: var(--rule); transform-origin: 0 50%; }
+    .s03-row .name { position: absolute; left: 78px; bottom: 18px; font-family: "Newsreader"; font-weight: 400; font-size: 60px;
+      line-height: 1; color: var(--ink); white-space: nowrap; }
+    .s03-row svg { position: absolute; left: 2px; bottom: 26px; width: 46px; height: 46px; overflow: visible; }
+    .s03-row path { fill: none; stroke: var(--clay); stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
+    #s03-sources-more { width: 1228px; }
+    #s03-sources-more .rule { background: repeating-linear-gradient(90deg, var(--muted) 0 16px, transparent 16px 28px); }
+    #s03-sources-more svg rect { fill: none; stroke: var(--muted); stroke-width: 3; stroke-dasharray: 7 6; }
+    #s03-sources-more .name { color: var(--mid); }
+    #s03-sources-more em { font-style: italic; color: var(--ink); display: inline-block; }
+  </style>
+  <div id="root" data-composition-id="s03-sources" data-width="1920" data-height="1080">
+    <div class="pan" id="s03-sources-pan"><div class="cam" id="s03-sources-cam"><div class="shake" id="s03-sources-shake"></div></div></div>
+  </div>
+  <script>
+    (function () {
+      const O = window.OLY, T = window.OLY_TL, C = T.scenes["s03-sources"], B = C.beats;
+      const $ = (id) => document.getElementById("s03-sources-" + id);
+      const P = O.page($("shake"), { header: ["Sources", "Indexed on your Mac"] });
+      const S = P.sheet;
+      // Two ledger columns (sheet coordinates), then an eighth, empty row across both.
+      const NAMES = ["Gmail", "Google Drive", "Dropbox", "Telegram", "WhatsApp", "X bookmarks", "Readwise"];
+      const TICK = '<svg viewBox="0 0 46 46"><path d="M6 25 L18 37 L41 8" pathLength="1" /></svg>';
+      const rows = NAMES.map((n, i) => {
+        const r = O.make("div", "s03-row", S, `${TICK}<div class="rule"></div><div class="name">${n}</div>`);
+        gsap.set(r, { left: i < 4 ? 96 : 736, top: 150 + (i % 4) * 128 });
+        return r;
+      });
+      const more = O.make("div", "s03-row", S, `<svg viewBox="0 0 46 46"><rect x="3" y="3" width="40" height="40" rx="6" /></svg><div class="rule"></div><div class="name">More coming. <em id="s03-sources-own">Or build your own.</em></div>`);
+      more.id = "s03-sources-more";
+      gsap.set(more, { left: 96, top: 150 + 4 * 128 + 24 });
+
+      O.ready(() => {
+        const tl = gsap.timeline({ paused: true });
+        const end = C.dur + C.tail;
+        // no drift here: the next page (the classification feed) continues this sheet exactly
+        O.drift(tl, $("cam"), end, { dx: 0, s1: 1, breath: 0 });
+        // The camera pan from the hero page continues: this page comes up from below on the same curve.
+        tl.fromTo(P.page, { y: 1100 }, { y: 0, duration: T.scenes["s02-hero"].tail, ease: "power3.inOut" }, 0);  // the same curve as the pan
+
+        // Each row: the hairline draws left to right, the name slides in from 24 px right, the tick draws as a stroke.
+        const step = (B.rowsLast - B.rows) / (rows.length - 1);  // timeline.json: first and last row
+        rows.forEach((r, i) => {
+          const land = B.rows + i * step;
+          const nm = r.querySelector(".name"), rl = r.querySelector(".rule"), pk = r.querySelector("path");
+          tl.fromTo(rl, { scaleX: 0 }, { scaleX: 1, duration: 0.4, ease: "expo.out" }, land - 0.12);
+          tl.fromTo(nm, { x: 24, opacity: 0 }, { x: 0, opacity: 1, duration: 0.45, ease: "expo.out" }, land - O.AT * 0.45);
+          tl.fromTo(pk, { strokeDashoffset: 1, strokeDasharray: 1 }, { strokeDashoffset: 0, duration: 0.16, ease: "power2.in" }, land);
+        });
+        // The eighth row is a dashed empty line; "Or build your own." lands in italic beside it, on the beat.
+        const mr = more.querySelector(".rule"), mn = more.querySelector(".name"), own = $("own");
+        tl.fromTo(mr, { scaleX: 0 }, { scaleX: 1, duration: 0.5, ease: "expo.out" }, B.more - 0.15);
+        tl.fromTo(more.querySelector("svg"), { opacity: 0, scale: 0.6, transformOrigin: "50% 50%" }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2)" }, B.more - 0.1);
+        tl.fromTo(mn, { x: 24, opacity: 0 }, { x: 0, opacity: 1, duration: 0.45, ease: "expo.out" }, B.more - O.AT * 0.45);
+        gsap.set(own, { opacity: 0 });
+        tl.fromTo(own, { y: 26, opacity: 0, rotation: -2 }, { y: 0, opacity: 1, rotation: 0, duration: 0.5, ease: O.spring(0.75) }, B.own - O.spring(0.75).land * 0.5);
+
+        // Out: the list scrolls up and away; the feed on the next page streams up into the same sheet.
+        const all = [...rows, more];
+        all.forEach((r, i) => tl.to(r, { y: -40, opacity: 0, duration: 0.3, ease: "power2.in" }, B.out + (i % 4) * 0.025 + (i >= 4 ? 0.04 : 0)));  // clear of the header
+        tl.set({}, {}, end);
+        window.__timelines["s03-sources"] = tl;
+      });
+    })();
+  </script>
+</template>
+</body></html>

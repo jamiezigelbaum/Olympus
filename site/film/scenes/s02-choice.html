@@ -1,0 +1,89 @@
+<!doctype html>
+<html><head><meta charset="UTF-8" /></head>
+<body>
+<template>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Newsreader";font-style:italic;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader-italic.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    @font-face{font-family:"Nunito";font-weight:200 1000;font-display:block;src:url("assets/fonts/nunito.woff2") format("woff2");}
+    #root { position: absolute; inset: 0; overflow: hidden; }
+    #s02-choice-line { position: absolute; left: 96px; top: 116px; margin: 0; font-family: "Newsreader"; font-weight: 300;
+      font-size: 140px; line-height: 1.02; letter-spacing: -0.025em; color: var(--ink); }
+    #s02-choice-line .row { display: block; white-space: nowrap; }
+    #s02-choice-line em { font-style: italic; }
+    #s02-choice-or { font-weight: 400; }  /* the word the line turns on: a touch heavier than the rest */
+    /* "or" alone on its row, with air below it: the AND stamp lands in that gap without touching the lines around it */
+    #s02-choice-line .row.or { margin-bottom: 84px; }
+    #s02-choice-and { left: 0; top: 0; font-size: 128px; border-width: 10px; border-radius: 38px; padding: 2px 36px 12px 44px; }  /* less on the right: the letter-spacing trails the D */
+    /* the hand-off from the Her film's last frame: shot 15's last frame, graded and upscaled by the Her session (grade 2,
+       2026-10-11), 4K so it maps 1:1 at --resolution 4k; 8-bit, no colour chunks, so Chrome passes its values through */
+    #s02-choice-her { position: absolute; inset: 0; width: 1920px; height: 1080px; object-fit: cover; }
+    #s02-choice-veil { position: absolute; inset: 0; opacity: 0;
+      background: radial-gradient(120% 90% at 30% 0%, var(--peach) 0%, var(--sweep) 45%, var(--cream) 100%); }
+    #s02-choice-lift { position: absolute; left: 330px; top: 200px; width: 1260px; height: 760px; border-radius: 40px;
+      background: rgba(150, 90, 50, 0.32); filter: blur(60px); opacity: 0; }
+  </style>
+  <div id="root" data-composition-id="s02-choice" data-width="1920" data-height="1080">
+    <img id="s02-choice-her" src="assets/handoff/her-shot15-last-graded-4k.png" alt="" /><div id="s02-choice-veil"></div>
+    <div class="pan" id="s02-choice-pan"><div class="cam" id="s02-choice-cam"><div class="shake" id="s02-choice-shake">
+      <div id="s02-choice-lift"></div>
+    </div></div></div>
+  </div>
+  <script>
+    (function () {
+      // The short cut's opening page (Jamie, 2026-10-11): the choice everyone is offered, then the answer.
+      // "Your privacy or the best AI, pick one." -> "pick one." is typed out, AND is stamped over "or" on the drop.
+      const O = window.OLY, T = window.OLY_TL, C = T.scenes["s02-choice"], B = C.beats;
+      const $ = (id) => document.getElementById("s02-choice-" + id);
+      const shake = $("shake");
+      const P = O.page(shake, { flap: true, header: ["Access request", "Status: blocked"] });
+      const S = P.sheet;
+      S.insertAdjacentHTML("beforeend", `
+        <h1 id="s02-choice-line"><span class="row">Your privacy</span><span class="row or"><em id="s02-choice-or">or</em></span><span class="row">the best AI,</span><span class="row"><span id="s02-choice-pick">pick one.</span></span></h1>`);
+      // the stamp is on the paper, so it turns away with the page
+      const and = O.make("div", "stamp solid", S, "AND"); and.id = "s02-choice-and";
+
+      O.ready(() => {
+        const tl = gsap.timeline({ paused: true });
+        const end = C.dur + C.tail;
+        O.drift(tl, $("cam"), end, { dx: -10, s1: 1.012 });
+
+        // the Her frame blurs and warms into the desk while this page rises onto it
+        tl.fromTo($("her"), { filter: "blur(0px)" }, { filter: "blur(28px)", duration: B.land, ease: "power1.in" }, 0);
+        tl.fromTo($("veil"), { opacity: 0 }, { opacity: 1, duration: B.land - 0.08, ease: "power1.in" }, 0.08);
+        tl.set($("her"), { opacity: 0 }, B.land + 0.05);
+        tl.to($("veil"), { opacity: 0, duration: 0.8, ease: "power1.inOut" }, B.land + 0.1);
+        const sp = O.spring(0.8), RD = 1.0, r0 = Math.max(0, B.land - sp.land * RD);
+        // from 1160 (not 1010): tilted and scaled, the page's top corner must still be below the frame at frame 0,
+        // which has to match the Her film's last frame exactly (a 1010 start showed a sliver of paper, 2026-10-11)
+        tl.fromTo(P.page, { y: 1160, rotation: -2, scale: 1.035, transformOrigin: "50% 60%" }, { y: 0, rotation: 0, scale: 1, duration: RD, ease: sp }, r0);
+        tl.fromTo($("lift"), { opacity: 0.9, y: 1160, scale: 1.08 }, { opacity: 0, y: 0, scale: 0.94, duration: RD * 0.75, ease: sp }, r0);
+
+        // The line is delivered phrase by phrase, a row per beat: "Your privacy" ... "or" ... "the best AI," ... "pick one."
+        [...$("line").querySelectorAll(".row")].forEach((r, i) =>
+          O.rise(tl, O.split(r), B[["line", "or", "best", "pick"][i]], { dur: 0.6, stagger: 0.07 }));
+
+        // "pick one." is typed out (the film's redaction style) ...
+        O.redact(tl, $("pick"), B.strike, { shake });
+
+        // ... HERO, on the drop: AND slams down over "or" (alone on its row, so the stamp has room; its ink covers it).
+        // centred in the gap between the line above's descenders and the line below's ascenders
+        const r = O.box($("or"), S), row = $("or").parentNode, nx = O.box(row.nextElementSibling, S);
+        const cy = (O.box(row, S).y + nx.y + 0.1 * parseFloat(getComputedStyle(row).fontSize)) / 2;
+        gsap.set(and, { x: r.x - 22, y: cy - and.offsetHeight / 2 });
+        O.stamp(tl, and, B.and, { rot: -4, from: 1.45, squash: 0.12, fall: 0.14, jolt: [shake], amp: 11, ink: 1 });
+        // the hit: the camera punches in a hair and settles
+        tl.fromTo($("pan"), { scale: 1 }, { scale: 1.014, duration: 2 * O.FR, ease: "power2.out", immediateRender: false }, B.and);
+        tl.to($("pan"), { scale: 1, duration: 0.45, ease: "power2.inOut" }, B.and + 2 * O.FR);
+        tl.set($("or"), { opacity: 0 }, B.and);
+
+        // then the page turns to the one under it
+        O.peel(tl, P, B.turn, { dur: C.tail });
+        tl.set({}, {}, end);
+        window.__timelines["s02-choice"] = tl;
+      });
+    })();
+  </script>
+</template>
+</body></html>

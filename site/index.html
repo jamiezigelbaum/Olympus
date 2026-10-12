@@ -10,7 +10,6 @@
   <meta property="og:title" content="Olympus: your privacy and the best AI">
   <meta property="og:description" content="A private second brain that lives on your computer and works with any AI.">
   <meta property="og:image" content="https://olympusplugin.ai/assets/img/banner-1200.jpg">
-  <link rel="preload" href="/assets/fonts/Newsreader-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/assets/brand.css">
   <link rel="stylesheet" href="/assets/home.css">
   <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
@@ -40,165 +39,87 @@
     </picture>
   </div>
 
-  <main id="main" class="desk">
+  <!-- The long launch film, scene by scene down the page. Each stage is one of the film's own scenes (/film/), played
+       once when it reaches the middle of the screen; the words are here too, for screen readers and search. -->
+  <main id="main" class="reel">
 
-    <!-- 1. Introducing Olympus -->
-    <section class="sheet sheet--intro" aria-labelledby="intro-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>File 0001 · Olympus</span><span>Owner: you</span></div>
-      <div class="intro">
-        <div class="intro__text">
-          <p class="eyebrow" data-do="rise" data-at="0">Introducing</p>
-          <h1 id="intro-title" class="display-xl" data-do="rise" data-at="120">Olympus.</h1>
-          <p class="lede" data-do="rise" data-at="320">A private second brain that lives on your computer and works with any AI.</p>
-          <div class="actions" data-do="rise" data-at="520">
-            <a class="btn" href="/install/">Add Olympus to your AI</a>
-            <button class="btn btn--quiet" type="button" data-film="olympus-film">Watch the film <span class="small">1:06</span></button>
-          </div>
-        </div>
-        <figure class="plate intro__plate" data-do="develop" data-at="200">
-          <img src="/assets/img/mountain-warm-720.jpg" alt="The Olympus mountain, its summit lit in warm light" width="720" height="720">
-          <figcaption>Exhibit A · Where your things live</figcaption>
-        </figure>
-        <span class="stamp intro__stamp" data-do="stamp" data-at="1100" style="--tilt:-6deg">Not for sale</span>
+    <section class="scene" aria-labelledby="s01-open-title" data-scene id="intro">
+      <div class="visually-hidden">
+        <h1 id="s01-open-title">Introducing Olympus.</h1>
+        <p>A private second brain that lives on your computer and works with your AI.</p>
+      </div>
+      <div class="stage" data-film-scene="s01-open" aria-hidden="true"></div>
+      <div class="actions">
+        <a class="btn" href="/install/">Add Olympus to your AI</a>
+        <button class="btn btn--quiet" type="button" data-film="olympus-film">Watch the film <span class="small">1:06</span></button>
       </div>
     </section>
 
-    <!-- 2. The logline: "or" is stamped over with AND -->
-    <section class="sheet sheet--choice" aria-labelledby="choice-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>Access request</span><span>Status: <span data-do="status" data-at="1700" data-to="Granted">Pending</span></span></div>
-      <h2 id="choice-title" class="visually-hidden">Your privacy and the best AI.</h2>
-      <p class="display-l choice" aria-hidden="true">
-        <span data-do="rise" data-at="0">Your privacy</span>
-        <span class="choice__turn"><em class="choice__or" data-do="fade-under" data-at="1500">or</em><span class="stamp choice__and" data-do="stamp" data-at="1500" style="--tilt:-8deg">AND</span></span>
-        <span data-do="rise" data-at="250">the best AI,</span> <span class="choice__pick" data-do="strike" data-at="2300"><span class="redact">pick one</span></span><span data-do="rise" data-at="250">.</span>
-      </p>
-      <p class="lede choice__lede" data-do="rise" data-at="3100">The best models for your biggest questions. Your own machine for your most private ones.</p>
-    </section>
-
-    <!-- 3. Sources -->
-    <section class="sheet" id="how" aria-labelledby="sources-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>Sources</span><span>Indexed on your Mac</span></div>
-      <h2 id="sources-title" class="headline" data-do="rise" data-at="0">Your whole life, <em>in one place.</em></h2>
-      <p class="lede" data-do="rise" data-at="150">Olympus reads the sources you choose and builds its index on your own computer.</p>
-      <ul class="sources">
-        <li data-do="tick" data-at="350">Gmail</li>
-        <li data-do="tick" data-at="450">Google Drive</li>
-        <li data-do="tick" data-at="550">Dropbox</li>
-        <li data-do="tick" data-at="650">Telegram</li>
-        <li data-do="tick" data-at="750">WhatsApp</li>
-        <li data-do="tick" data-at="850">X bookmarks</li>
-        <li data-do="tick" data-at="950">Readwise</li>
-        <li class="sources__more" data-do="rise" data-at="1200">More coming. <em>Or build your own.</em></li>
-      </ul>
-    </section>
-
-    <!-- 4. Every item judged -->
-    <section class="sheet" aria-labelledby="judged-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>Classification</span><span>Every item judged</span></div>
-      <div class="split">
-        <div>
-          <h2 id="judged-title" class="headline" data-do="rise" data-at="0">Every item, <em>judged on its own.</em></h2>
-          <p class="lede" data-do="rise" data-at="150">Not each folder or account: every email, file and message gets its own tier. Personal things can help any AI answer you. Private things are never handed to it.</p>
-          <p class="lede secret-line" data-do="rise" data-at="300">Secrets like passwords never go anywhere.</p>
-        </div>
-        <ul class="tiers" aria-label="Example items and their tiers">
-          <li><span class="file">Re: test results</span><span class="stamp stamp--small" data-do="stamp" data-at="500">Private</span></li>
-          <li><span class="file">Re: dinner Saturday</span><span class="stamp stamp--small stamp--personal" data-do="stamp" data-at="680">Personal</span></li>
-          <li><span class="file">passport-scan.jpg</span><span class="stamp stamp--small" data-do="stamp" data-at="840">Private</span></li>
-          <li><span class="file">voice-memo-0412.m4a</span><span class="stamp stamp--small stamp--personal" data-do="stamp" data-at="980">Personal</span></li>
-          <li><span class="file">mortgage-statement.pdf</span><span class="stamp stamp--small" data-do="stamp" data-at="1100">Private</span></li>
-          <li><span class="file">IMG_2038.heic</span><span class="stamp stamp--small stamp--personal" data-do="stamp" data-at="1200">Personal</span></li>
-          <li><span class="file">lab-results.pdf</span><span class="stamp stamp--small" data-do="stamp" data-at="1290">Private</span></li>
-          <li><span class="file">Re: offer letter</span><span class="stamp stamp--small" data-do="stamp" data-at="1370">Private</span></li>
-          <!-- A secret is struck before its text renders, so it is never shown. -->
-          <li class="tiers__secret"><span class="file"><span class="redact redact--blank" aria-label="A secret, never shown"></span></span><span class="label">Secret · never shown</span></li>
-        </ul>
+    <section class="scene" aria-labelledby="s02-choice-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s02-choice-title">Your privacy and the best AI.</h2>
+        <p>Not one or the other: both.</p>
       </div>
+      <div class="stage" data-film-scene="s02-choice" aria-hidden="true"></div>
     </section>
 
-    <!-- 5. Not your machine, not your memory -->
-    <section class="sheet sheet--rally" aria-labelledby="rally-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>Access request</span><span>Status: <span data-do="status" data-at="2600" data-to="Blocked">Open</span></span></div>
-      <h2 id="rally-title" class="visually-hidden">Your machine, your memory.</h2>
-      <p class="display-l rally" aria-hidden="true">
-        <span class="rally__line"><span data-do="strike-collapse" data-at="1500"><span class="redact">Not </span></span><span data-do="rise" data-at="0">your machine,</span></span>
-        <span class="rally__line"><span data-do="strike-collapse" data-at="1750"><span class="redact">not </span></span><span data-do="rise" data-at="200">your memory.</span></span>
-      </p>
-      <div class="request" aria-hidden="true">
-        <span class="label">Request</span>
-        <span class="request__bar" data-do="strike" data-at="2250"><span class="redact">all of your mail, files and messages</span></span>
-        <span class="request__buttons">
-          <span class="btn btn--cream" data-do="light" data-at="2600">Block</span>
-          <span class="btn btn--cream" data-do="dim" data-at="2600">Allow</span>
-        </span>
+    <section class="scene" aria-labelledby="s03-sources-title" data-scene id="how">
+      <div class="visually-hidden">
+        <h2 id="s03-sources-title">Your whole life, in one place.</h2>
+        <p>Gmail, Google Drive, Dropbox, Telegram, WhatsApp, X bookmarks and Readwise, indexed on your Mac. More coming, or build your own.</p>
       </div>
+      <div class="stage" data-film-scene="s03-sources" aria-hidden="true"></div>
     </section>
 
-    <!-- 6. Your Mac answers first -->
-    <section class="sheet" aria-labelledby="mac-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>Route: this Mac</span><span>Built-in models · No account</span></div>
-      <div class="split">
-        <div>
-          <h2 id="mac-title" class="display-l" data-do="rise" data-at="0">Your Mac <em>answers first.</em></h2>
-          <ul class="ledger models" aria-label="Built-in models">
-            <li data-do="rise" data-at="300"><span>Qwen3.5 4B</span><span class="note">private answers</span></li>
-            <li data-do="rise" data-at="400"><span>EmbeddingGemma 2</span><span class="note">search · photos</span></li>
-            <li data-do="rise" data-at="500"><span>Qwen3-ASR</span><span class="note">voice notes</span></li>
-            <li data-do="rise" data-at="600"><span>Apple Vision</span><span class="note">scans</span></li>
-          </ul>
-          <p class="small models__foot" data-do="rise" data-at="750"><em>Small models · built in · run on your Mac</em></p>
-        </div>
-        <aside class="panel answer" data-do="slide" data-at="1100" aria-label="Example private answer">
-          <p class="label">Private answer · from your Mac</p>
-          <p class="answer__q">How much did I lose on my brokerage account this year?</p>
-          <p class="answer__a">$35,000. Your accountant flagged it in March.</p>
-          <p class="answer__foot"><em>Not sent to the cloud.</em></p>
-        </aside>
+    <section class="scene" aria-labelledby="s04-classify-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s04-classify-title">Every item, judged on its own.</h2>
+        <p>Each email, file and message is marked Personal, Private or Secret. Secrets like passwords never go anywhere.</p>
       </div>
+      <div class="stage" data-film-scene="s04-classify" aria-hidden="true"></div>
     </section>
 
-    <!-- 7. Venice.ai -->
-    <section class="sheet" aria-labelledby="venice-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>Route: Venice.ai</span><span>Ask privately</span></div>
-      <h2 id="venice-title" class="headline" data-do="rise" data-at="0">Venice.ai hides <em>what</em> you ask.</h2>
-      <p class="label sub" data-do="rise" data-at="150">Private models · nothing stored</p>
-      <div class="question" data-do="rise" data-at="450">
-        <p class="label">Question</p>
-        <p class="question__text"><span data-do="strike" data-at="1600"><span class="redact">“I lost $35,000 this year. How do I report it on my taxes?”</span></span></p>
-        <span class="stamp question__stamp" data-do="stamp" data-at="2200" style="--tilt:-5deg">Sealed</span>
+    <section class="scene" aria-labelledby="s02-hero-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s02-hero-title">Your machine, your memory.</h2>
+        <p>When an app asks for full access to everything, Olympus blocks it.</p>
       </div>
+      <div class="stage" data-film-scene="s02-hero" aria-hidden="true"></div>
     </section>
 
-    <!-- 8. zkAPI -->
-    <section class="sheet" aria-labelledby="zk-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>Ask anonymously · Strict</span><span>zkAPI · Tor</span></div>
-      <h2 id="zk-title" class="headline" data-do="rise" data-at="0">zkAPI hides <em>who’s</em> asking.</h2>
-      <p class="label sub" data-do="rise" data-at="150">Paid anonymously · sent over Tor</p>
-      <div class="zk">
-        <div class="question" data-do="rise" data-at="400">
-          <p class="label">Your words</p>
-          <p class="question__text">“I’m <span data-do="strike" data-at="1400"><span class="redact">Sam Rivera</span></span>. I lost <span data-do="strike" data-at="1600"><span class="redact">$35,000</span></span> on my <span data-do="strike" data-at="1800"><span class="redact">brokerage account</span></span> this year. How do I report it on my taxes?”</p>
-        </div>
-        <div class="question question--out" data-do="rise" data-at="2300">
-          <p class="label">Rewritten on your Mac · what leaves</p>
-          <p class="question__text">“How are capital losses reported on a US tax return?”</p>
-        </div>
-        <div class="route" data-do="route" data-at="2800">
-          <span class="route__end">Your Mac</span>
-          <span class="route__line" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span class="route__end">Answering model</span>
-          <span class="route__caption"><em>three Tor hops</em></span>
-        </div>
-        <dl class="ident" data-do="rise" data-at="3000">
-          <div><dt class="label">From</dt><dd><span data-do="strike" data-at="3500"><span class="redact">Sam’s MacBook</span></span></dd></div>
-          <div><dt class="label">IP</dt><dd><span data-do="strike" data-at="3650"><span class="redact">203.0.113.42</span></span></dd></div>
-          <div><dt class="label">Key</dt><dd>fresh for this question</dd></div>
-        </dl>
-        <span class="stamp zk__stamp" data-do="stamp" data-at="4100" style="--tilt:-6deg">Paid · zkAPI</span>
+    <section class="scene" aria-labelledby="s05-local-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s05-local-title">Your Mac answers first.</h2>
+        <p>Small models built into Olympus run on your Mac: Qwen3.5 4B for private answers, EmbeddingGemma 2 for search and photos, Qwen3-ASR for voice notes and Apple Vision for scans. Private answers are not sent to the cloud.</p>
       </div>
+      <div class="stage" data-film-scene="s05-local" aria-hidden="true"></div>
     </section>
 
-    <!-- 9. The launch film: a live-action moment between sheets -->
+    <section class="scene" aria-labelledby="s06-venice-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s06-venice-title">Venice.ai hides what you ask.</h2>
+        <p>Private models, and nothing stored.</p>
+      </div>
+      <div class="stage" data-film-scene="s06-venice" aria-hidden="true"></div>
+    </section>
+
+    <section class="scene" aria-labelledby="s07-zk-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s07-zk-title">zkAPI hides who&rsquo;s asking.</h2>
+        <p>Paid anonymously and sent over Tor.</p>
+      </div>
+      <div class="stage" data-film-scene="s07-zk" aria-hidden="true"></div>
+    </section>
+
+    <section class="scene" aria-labelledby="s08-zkq-title" data-scene>
+      <div class="visually-hidden">
+        <h3 id="s08-zkq-title">How an anonymous question leaves your Mac.</h3>
+        <p>Your Mac rewrites the question without your name, your numbers or your accounts, pays for it anonymously and sends it over three Tor hops, with a fresh key for each question.</p>
+      </div>
+      <div class="stage" data-film-scene="s08-zkq" aria-hidden="true"></div>
+    </section>
+
+    <!-- The launch film: a live-action moment between scenes -->
     <section class="film" aria-labelledby="film-title">
       <h2 id="film-title" class="visually-hidden">The launch film</h2>
       <button class="film__frame" type="button" data-film="launch-film" aria-label="Play the launch film, 1 minute 20 seconds">
@@ -208,33 +129,20 @@
       <p class="film__caption label">The launch film · 1:20</p>
     </section>
 
-    <!-- 10. Terms -->
-    <section class="sheet" aria-labelledby="terms-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>Olympus</span><span>Terms</span></div>
-      <h2 id="terms-title" class="visually-hidden">Open source. No account. Any agent.</h2>
-      <ul class="terms">
-        <li><span class="display-l" data-do="rise" data-at="0">Open source.</span><span class="stamp" data-do="stamp" data-at="350" style="--tilt:-6deg">MIT</span></li>
-        <li><span class="display-l" data-do="rise" data-at="600">No account.</span><span class="stamp" data-do="stamp" data-at="950" style="--tilt:3deg">No sign-up</span></li>
-        <li><span class="display-l" data-do="rise" data-at="1200">Any agent.</span><span class="stamp" data-do="stamp" data-at="1550" style="--tilt:-5deg">Any MCP</span></li>
-      </ul>
-      <p class="lede works" data-do="rise" data-at="1900">Works with ChatGPT, Claude, Claude Code, Codex, Dots, Grok, OpenClaw and Hermes, or any app that speaks MCP. <a href="https://github.com/jamiezigelbaum/Olympus">Read the code on GitHub</a>.</p>
+    <section class="scene" aria-labelledby="s09-terms-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s09-terms-title">Open source. No account. Any agent.</h2>
+      </div>
+      <div class="stage" data-film-scene="s09-terms" aria-hidden="true"></div>
+      <p class="works">Works with ChatGPT, Claude, Claude Code, Codex, Dots, Grok, OpenClaw and Hermes, or any app that speaks MCP. <a href="https://github.com/jamiezigelbaum/Olympus">Read the code on GitHub</a>.</p>
     </section>
 
-    <!-- 11. Close -->
-    <section class="sheet sheet--close" aria-labelledby="close-title" data-scene>
-      <div class="sheet__head" aria-hidden="true"><span>Olympus</span><span>Open source · No account</span></div>
-      <div class="split split--close">
-        <div>
-          <h2 id="close-title" class="display-l" data-do="rise" data-at="0">Keep your private things <em>private.</em></h2>
-          <div class="actions" data-do="rise" data-at="400">
-            <a class="btn" href="/install/">Add Olympus to your AI</a>
-          </div>
-        </div>
-        <figure class="plate close__plate" style="--tilt:-2deg" data-do="develop" data-at="200">
-          <img src="/assets/img/mountain-warm-720.jpg" alt="" width="720" height="720" loading="lazy">
-        </figure>
+    <section class="scene" aria-labelledby="s10-close-title" data-scene>
+      <div class="visually-hidden">
+        <h2 id="s10-close-title">Keep your private things private.</h2>
       </div>
-      <a class="stamp stamp--url close__url" href="/install/" data-do="stamp" data-at="1100">olympusplugin.ai</a>
+      <div class="stage" data-film-scene="s10-close" aria-hidden="true"></div>
+      <a class="stage__link" href="/install/">Add Olympus to your AI</a>
     </section>
   </main>
 

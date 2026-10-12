@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- One scene of the launch film, played on the home page. The scene files, paper.js and the clock are the film's own
+       (marketing repo, projects/olympus/launch-video at a2772ab): same type, same typewriter redaction, same timing.
+       The home page frames this at 1920x1080, scales it, and sends "play" when the scene reaches the middle of the
+       screen. ?s=<scene id> picks the scene; &still shows its last frame. -->
+  <meta name="viewport" content="width=1920, height=1080">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <script src="lib/gsap.min.js"></script>
+  <script src="lib/timeline.js"></script>
+  <script src="lib/paper.js"></script>
+  <style>
+    @font-face{font-family:"Newsreader";font-style:normal;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader.woff2") format("woff2");}
+    @font-face{font-family:"Newsreader";font-style:italic;font-weight:200 800;font-display:block;src:url("assets/fonts/newsreader-italic.woff2") format("woff2");}
+    @font-face{font-family:"Martian Mono";font-weight:100 800;font-display:block;src:url("assets/fonts/martian-mono.woff2") format("woff2");}
+    @font-face{font-family:"Nunito";font-weight:200 1000;font-display:block;src:url("assets/fonts/nunito.woff2") format("woff2");}
+    @font-face{font-family:"Arimo";font-weight:700;font-display:block;src:url("assets/fonts/arimo-700.woff2") format("woff2");}
+    :root { --peach: #fcd0a8; --sweep: #f8d9bb; --cream: #efe4d5; --paper: #f7f0e4; --ink: #33251d; --bar: #3b2430;
+      --clay: #b27e65; --red: #d8432f; --muted: #9b8573; --rule: #d9cbb8; --rule-soft: #e2d5c2; --plate: #e9dccb;
+      --card: #fffaf2; --card-rule: #dccbb4; --mid: #77504a; --type: #1d1613; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* No desk: the page's own background shows through, so the paper lies on the website itself. */
+    html, body { width: 1920px; height: 1080px; overflow: hidden; background: transparent; }
+    #stage { position: absolute; inset: 0; }
+    /* The film's hand-offs from the Her film's last frame have no place on the page. */
+    #s02-choice-her, #s02-choice-veil, #s01-open-her { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+  <script>
+    (function () {
+      "use strict";
+      var q = new URLSearchParams(location.search), id = q.get("s"), still = q.has("still");
+      if (!/^s\d\d-[a-z]+$/.test(id || "") || !window.OLY_TL.scenes[id]) return;
+      window.__timelines = {};
+
+      // A scene ends where the film moves on from it (its page turn, pan or slide-off), not at the end of its clip.
+      var C = window.OLY_TL.scenes[id], B = C.beats;
+      var end = [B.out, B.turn, B.pan, B.push].filter(function (t) { return t != null; })[0];
+      if (end == null) end = C.dur;
+
+      var tl = null, wantPlay = false;
+      function tell(state) { parent.postMessage({ olympusScene: id, state: state }, location.origin); }
+      function play() {
+        if (!tl) { wantPlay = true; return; }
+        tl.play(0);
+      }
+
+      fetch("scenes/" + id + ".html").then(function (r) { return r.text(); }).then(function (html) {
+        var doc = new DOMParser().parseFromString(html, "text/html");
+        var frag = doc.querySelector("template").content;
+        // keep the hand-off elements (the scene's timeline addresses them) but never fetch their frames
+        Array.prototype.forEach.call(frag.querySelectorAll('img[src*="handoff/"]'), function (img) { img.removeAttribute("src"); });
+        var stage = document.getElementById("stage");
+        Array.prototype.forEach.call(frag.childNodes, function (n) {
+          if (n.nodeName === "SCRIPT") {
+            var s = document.createElement("script");
+            s.textContent = n.textContent;
+            stage.appendChild(s);
+          } else {
+            stage.appendChild(document.importNode(n, true));
+          }
+        });
+        // OLY.ready waits for the fonts, then the scene registers its timeline.
+        (function wait() {
+          tl = window.__timelines[id];
+          if (!tl) return requestAnimationFrame(wait);
+          tl.addPause(end, function () { tell("done"); });
+          if (still) { tl.seek(end, false); tl.pause(); tell("done"); return; }
+          tl.seek(0, false);
+          tell("ready");
+          if (wantPlay) play();
+        })();
+      });
+
+      window.addEventListener("message", function (e) {
+        if (e.origin !== location.origin || !e.data) return;
+        if (e.data.olympusScene === "play") play();
+        if (e.data.olympusScene === "still" && tl) { tl.seek(end, false); tl.pause(); }
+      });
+    })();
+  </script>
+</body>
+</html>
