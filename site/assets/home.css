@@ -152,7 +152,7 @@ html.motion .choice__or { opacity: 1; transition: opacity 0.18s; }
 html.motion .choice__or.on { opacity: 0; }
 
 html.motion [data-do="tick"] { transition: opacity 0.4s; }
-html.motion [data-do="tick"]::before { transition: transform 0.35s cubic-bezier(0.3, 1.6, 0.5, 1); }
+html.motion [data-do="tick"]::before { transition: transform 0.35s var(--ease-out); }
 html.motion [data-do="tick"]:not(.on) { opacity: 0.35; }
 html.motion [data-do="tick"]:not(.on)::before { transform: scale(0); }
 
@@ -168,7 +168,7 @@ html.motion [data-do="dim"]:not(.on) { opacity: 1; }
 
 html.motion [data-do="route"] .route__line { transition: transform 0.9s var(--ease-turn); }
 html.motion [data-do="route"]:not(.on) .route__line { transform: scaleX(0); }
-html.motion [data-do="route"] .route__line i { transition: transform 0.3s cubic-bezier(0.3, 1.6, 0.5, 1); }
+html.motion [data-do="route"] .route__line i { transition: transform 0.3s var(--ease-out); }
 html.motion [data-do="route"] .route__line i:nth-child(1) { transition-delay: 0.3s; }
 html.motion [data-do="route"] .route__line i:nth-child(2) { transition-delay: 0.5s; }
 html.motion [data-do="route"] .route__line i:nth-child(3) { transition-delay: 0.7s; }
