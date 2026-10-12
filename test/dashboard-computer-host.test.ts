@@ -46,7 +46,7 @@ const ORIGIN = 'http://127.0.0.1:8787';
 const LINKS = {
   keys: `${ORIGIN}/dashboard?keys`,
   agents: `${ORIGIN}/dashboard?agents`,
-  outsideHelp: `${ORIGIN}/dashboard?outside-help`,
+  privateAnswers: `${ORIGIN}/dashboard?private-answers`,
   connector: `${ORIGIN}/dashboard?connector`,
 };
 
@@ -519,7 +519,7 @@ describe('the panel on the computer', () => {
     expect(section).not.toBeNull();
     expect(section.querySelector('h2')!.textContent).toBe(`${C.section} ${C.onlyHere}`);
     const titles = Array.from(section.querySelectorAll('li.row .row-text p:first-child')).map((node) => node.textContent);
-    expect(titles).toEqual([C.rows.keys.title, C.rows.agents.title, C.rows.outsideHelp.title, C.rows.connector.title]);
+    expect(titles).toEqual([C.rows.keys.title, C.rows.agents.title, C.rows.privateAnswers.title, C.rows.connector.title]);
     // It is the last section on the page.
     const sections = Array.from(page.win.document.querySelectorAll('#app section'));
     expect(sections[sections.length - 1]).toBe(section);
@@ -923,5 +923,39 @@ describe('the host page when its session expires', () => {
     page.send({ id: 1, method: 'tools/call', params: { name: DASHBOARD_TOOL_NAME, arguments: {} } });
     await settle();
     expect(page.assigned).toEqual(['/dashboard?token=dash_reader']);
+  });
+});
+
+// ---- Needs you: private questions waiting, on the computer only --------------
+
+describe('the computer\'s Needs you line for waiting private questions', () => {
+  test('on the computer: one line with the count, opening Private answers', async () => {
+    const page = await onHost(COMPUTER, model(), { waitingPrivateQuestions: 2 });
+    const line = page.win.document.querySelector('[data-waiting-private]')!;
+    expect(line).not.toBeNull();
+    expect(line.closest('section')!.querySelector('h2')!.textContent).toBe('Needs you');
+    expect(line.textContent).toContain(C.waiting.many.replace('{count}', '2'));
+    const open = Array.from(line.querySelectorAll('button')).find((node) => node.getAttribute('aria-label') === `${C.open} ${C.rows.privateAnswers.title}`)!;
+    open.click();
+    expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([LINKS.privateAnswers]);
+    const one = await onHost(COMPUTER, model(), { waitingPrivateQuestions: 1 });
+    expect(one.text()).toContain(C.waiting.one);
+  });
+
+  test('nothing waiting, or no link to the page: no line', async () => {
+    for (const meta of [undefined, { waitingPrivateQuestions: 0 }, { indexFaster: { on: false } }]) {
+      const page = await onHost(COMPUTER, model(), meta);
+      expect(page.win.document.querySelector('[data-waiting-private]')).toBeNull();
+    }
+    const unlinked = await onHost({ kind: 'computer', readOnly: false, links: { keys: LINKS.keys } }, model(), { waitingPrivateQuestions: 2 });
+    expect(unlinked.win.document.querySelector('[data-waiting-private]')).toBeNull();
+  });
+
+  test('in ChatGPT, and in the OpenClaw tab, never: even if a count were present', async () => {
+    for (const host of [undefined, { kind: 'openclaw', readOnly: false }]) {
+      const page = await onHost(host, model(), { waitingPrivateQuestions: 2 });
+      expect(page.win.document.querySelector('[data-waiting-private]')).toBeNull();
+      expect(page.text()).not.toContain('private question');
+    }
   });
 });

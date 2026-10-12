@@ -66,6 +66,24 @@ export interface DashboardPageOptions {
   outsideHelp?: DashboardOutsideHelpStatus;
   /** True when the live control session was minted locally (the only grade the consult routes take). */
   outsideHelpLocalSession?: boolean;
+  /**
+   * The Private answers page's facts. `waiting` only for a local control
+   * session; undefined when the record of waiting questions cannot be read.
+   */
+  privateAnswers?: {
+    available: boolean;
+    waiting?: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean };
+  };
+}
+
+/** One question waiting for this computer, as the Private answers page lists it. */
+export interface DashboardWaitingQuestion {
+  id: string;
+  question: string;
+  /** Who asked: the connection's name. */
+  from: string;
+  askedAt: string;
+  unchecked: boolean;
 }
 
 const CONNECTOR_SHEET_ID = 'connector-sheet';

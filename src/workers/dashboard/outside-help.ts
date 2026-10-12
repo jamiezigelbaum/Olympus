@@ -4,7 +4,7 @@
  * card's facts come from the worker's adapter (email-source/dashboard-consult.ts)
  * as content-free codes and counts; this module holds the shapes, the words
  * and the inert markup. The page is served only to a reader holding the
- * local dashboard's control session (pages/outside-help.ts): the native
+ * local dashboard's control session (pages/private-answers.ts): the native
  * OpenClaw and ChatGPT surfaces get one sentence, never the controls.
  *
  * Content-free by construction: no question, reply, key or daemon
@@ -141,7 +141,10 @@ export interface DashboardOutsideHelpStatus {
   };
 }
 
-/** The query flag the page answers to; same /dashboard path and auth as every page. */
+/**
+ * The old Anonymous answers page's query flag. The card now sits under
+ * Private answers (pages/private-answers.ts); this address redirects there.
+ */
 export const DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = 'outside-help';
 
 /** The worker's four control routes, in one place for the page, the HTTP boundary and the public route list. */
@@ -161,10 +164,6 @@ export const DASHBOARD_OUTSIDE_HELP_PATHS = {
   /** The writer check: started only by the owner's click; sends nothing to zkAPI. */
   writerTest: '/dashboard/consult/writer/test',
 } as const;
-
-export function outsideHelpHref(basePath = '/dashboard'): string {
-  return `${basePath}${basePath.includes('?') ? '&' : '?'}${DASHBOARD_OUTSIDE_HELP_QUERY_PARAM}`;
-}
 
 /** The one-line state the card opens with. */
 export function outsideHelpStateLine(summary: DashboardOutsideHelpSummary): string {
@@ -233,7 +232,7 @@ const SETUP_BLOCKERS: ReadonlySet<string> = new Set(['daemon_not_found', 'daemon
  * statements in full only until they are accepted; everything else one line
  * each, collapsed, showing its current value. Nothing is asked from this page.
  */
-export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input: { csrfToken?: string; localSession?: boolean; basePath?: string }): string {
+export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input: { csrfToken?: string; localSession?: boolean; basePath?: string; untitled?: boolean }): string {
   const summary = summaryOf(status);
   // Controls only for a local-grade session: a bearer-grade session (the
   // launch flow, or a bearer mint) reads the card and is offered the local
@@ -244,7 +243,8 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const route = status.route;
   const on = status.settings.state === 'on';
   const parts: string[] = [];
-  parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
+  // Under the Private answers page's own "Anonymous answers" heading, no second title.
+  if (input.untitled !== true) parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
   if (canUnlock) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>`
       + `<button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button><span class="hint">${escapeHtml(W.unlockIntro)}</span>`

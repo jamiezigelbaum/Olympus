@@ -8886,7 +8886,8 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/consult/tools/install" },
     { method: "POST", path: "/dashboard/consult/writer" },
     { method: "POST", path: "/dashboard/consult/writer/test" },
-    { method: "POST", path: "/dashboard/consult/standard" }
+    { method: "POST", path: "/dashboard/consult/standard" },
+    { method: "POST", path: "/dashboard/private-answers" }
   ];
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
@@ -12014,12 +12015,15 @@ var init_config = __esm(() => {
 function allOpenTargets() {
   return [
     { kind: "dashboard" },
+    { kind: "private_answers" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
     ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
   ];
 }
 function openTargetPath(target) {
+  if (target.kind === "private_answers")
+    return "private";
   if (target.kind === "connect")
     return `connect/${target.source}`;
   if (target.kind === "fix")
@@ -12057,6 +12061,8 @@ function parseOlympusOpenUrl(raw) {
   return { kind: "dashboard", fallback: true };
 }
 function openTargetToken(target) {
+  if (target.kind === "private_answers")
+    return "page.private";
   if (target.kind === "connect")
     return `connect.${target.source}`;
   if (target.kind === "fix")
@@ -12075,6 +12081,9 @@ function isKeysOpenTarget(target) {
 function keysOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function privateAnswersOpenTargetTokenPattern() {
+  return `^${openTargetToken({ kind: "private_answers" }).replace(".", "\\.")}$`;
 }
 function isPanelOpenTarget(target) {
   return target.kind === "unreadable";
@@ -12220,6 +12229,7 @@ var init_dashboard_launch = __esm(() => {
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
         var PANEL = /${panelOpenTargetTokenPattern()}/;
+        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -12248,10 +12258,12 @@ var init_dashboard_launch = __esm(() => {
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
+            // Private answers lands on that page, carrying nothing.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
             window.location.replace(KEYS.test(open)
               ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PRIVATE.test(open) ? '/dashboard?private-answers' : '/dashboard');
             return;
           }
           status.textContent = response.status === 403
@@ -14529,6 +14541,15 @@ import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
 function isApprovedSecureSourceEmbeddingProvider(provider) {
   return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
+}
+function builtInEmbeddingOnly(provider, loadedOnly) {
+  if (!provider || provider.backend !== "local")
+    return;
+  try {
+    return loadedOnly(provider);
+  } catch {
+    return;
+  }
 }
 function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
   const tries = `${attempts} attempt${attempts === 1 ? "" : "s"}`;
@@ -30986,6 +31007,9 @@ import { createHash as createHash15 } from "node:crypto";
 import { readFileSync as readFileSync20 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname22, join as join26 } from "node:path";
+function loadedBuiltInEmbedding(provider) {
+  return provider instanceof BuiltInSourceEmbeddingProvider ? provider.loadedOnly() : undefined;
+}
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -31090,6 +31114,24 @@ class BuiltInSourceEmbeddingProvider {
     }
     const model = this.loaded ?? await this.load();
     return this.embedLoaded(model, inputs, options.taskType);
+  }
+  loadedOnly() {
+    return {
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      configHash: this.configHash,
+      epochId: this.epochId,
+      backend: this.backend,
+      embed: async (inputs, options) => {
+        if (inputs.length === 0)
+          return [];
+        const model = this.loaded;
+        if (!model)
+          throw new BuiltInEmbeddingNotReadyError(this.status());
+        return this.embedLoaded(model, inputs, options.taskType);
+      }
+    };
   }
   load() {
     if (this.loading)
@@ -59376,7 +59418,7 @@ function degradedInput(degraded) {
 function unknownStatus(value) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -59703,9 +59745,10 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      outsideHelp: { title: "Anonymous answers", line: "Ask top AI models without saying who you are" },
+      privateAnswers: { title: "Private answers", line: "Questions answered only on this computer" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
+    waiting: { one: "1 private question is waiting", many: "{count} private questions are waiting" },
     locked: "Open dashboard controls first",
     readOnlyOpenClaw: "Reconnect OpenClaw with operator.write access to change this",
     indexFaster: DASHBOARD_INDEX_FASTER
@@ -60136,6 +60179,42 @@ var init_vocabulary = __esm(() => {
       pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
       unreadable: "Olympus could not read your privacy settings."
     }
+  };
+  DASHBOARD_PRIVATE_ANSWERS_COPY = {
+    crumb: "Private answers",
+    title: "Private answers",
+    intro: "Answered on this computer by the model built into Olympus. Nothing here leaves this computer.",
+    askLabel: "Ask privately",
+    askPlaceholder: "Ask about your private things",
+    ask: "Ask",
+    waitingTitle: "Waiting",
+    waitingIntro: "Agents asked these, and the answer needs your private things. Answer them here.",
+    noneWaiting: "Nothing is waiting.",
+    olderRemoved: "Older questions were removed.",
+    answer: "Answer",
+    dismiss: "Dismiss",
+    dismissAll: "Dismiss all",
+    dismissAllConfirm: "Dismiss every waiting question?",
+    unchecked: "not checked yet",
+    answering: "Answering on this computer…",
+    sources: "Sources",
+    open: "Open",
+    leftOut: "Left out: {sources}. Olympus cannot search them on this computer.",
+    unanswered: "Not found here: {parts}.",
+    notFound: "Nothing on this computer answers this.",
+    noModel: "The model built into Olympus is not set up yet.",
+    downloading: "The model built into Olympus is still downloading. Try again soon.",
+    changed: "Something it read changed. Ask again.",
+    failed: "Olympus could not answer this. Try again.",
+    unreachable: "Olympus is not responding. Try again in a moment.",
+    dismissed: "Dismissed.",
+    locked: "Open dashboard controls to see and answer private questions.",
+    openControls: "Open dashboard controls →",
+    unlockIntro: "Private answers need a session opened here, not by an agent or the launch link.",
+    unlock: "Unlock on this computer",
+    unavailable: "Private answers are not available from this worker.",
+    anonymousTitle: "Anonymous answers",
+    anonymousSum: "Outside help"
   };
   DASHBOARD_OUTSIDE_HELP_COPY = {
     crumb: "Anonymous answers",
@@ -61414,6 +61493,29 @@ var init_status = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
+var exports_source_dashboard = {};
+__export(exports_source_dashboard, {
+  withActiveStep: () => withActiveStep,
+  publisherConnectIntro: () => publisherConnectIntro,
+  isGoogleOAuthSource: () => isGoogleOAuthSource2,
+  defaultSourceDashboardHistoryDbPath: () => defaultSourceDashboardHistoryDbPath,
+  dashboardSchedulerTaskFailing: () => dashboardSchedulerTaskFailing,
+  dashboardManualSyncOutcome: () => dashboardManualSyncOutcome,
+  dashboardLiveManualSync: () => dashboardLiveManualSync,
+  dashboardGuidedSessionAgentPrompt: () => dashboardGuidedSessionAgentPrompt,
+  buildSourceDashboardViewModel: () => buildSourceDashboardViewModel,
+  SqliteSourceDashboardHistory: () => SqliteSourceDashboardHistory,
+  PUBLISHER_ADVANCED_BYO_SUMMARY: () => PUBLISHER_ADVANCED_BYO_SUMMARY,
+  DASHBOARD_UNREADABLE_ALARM_SHARE: () => DASHBOARD_UNREADABLE_ALARM_SHARE,
+  DASHBOARD_SUPPORTED_SOURCES: () => DASHBOARD_SUPPORTED_SOURCES,
+  DASHBOARD_SENSITIVITY_TIERS: () => DASHBOARD_SENSITIVITY_TIERS,
+  DASHBOARD_SAVED_SECRET_FIELD_VALUE: () => DASHBOARD_SAVED_SECRET_FIELD_VALUE,
+  DASHBOARD_PERSISTENT_FAILURE_RUNS: () => DASHBOARD_PERSISTENT_FAILURE_RUNS,
+  DASHBOARD_NEEDS_REVIEW_REASONS: () => DASHBOARD_NEEDS_REVIEW_REASONS,
+  DASHBOARD_MANUAL_SYNC_SHOWN_MS: () => DASHBOARD_MANUAL_SYNC_SHOWN_MS,
+  DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS: () => DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS,
+  DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL: () => DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL
+});
 import { mkdirSync as mkdirSync28 } from "node:fs";
 import { homedir as homedir40 } from "node:os";
 import { dirname as dirname39, join as join53 } from "node:path";
@@ -70424,7 +70526,7 @@ async function openRemote(ctx, params, deps = {}) {
   return {
     ok: true,
     target: openTargetPath(target),
-    lands_on: isKeysOpenTarget(target) ? "/dashboard?keys" : "/dashboard",
+    lands_on: isKeysOpenTarget(target) ? "/dashboard?keys" : target.kind === "private_answers" ? "/dashboard?private-answers" : "/dashboard",
     computer,
     engine_port: port,
     ssh_target: sshTarget,
@@ -106515,7 +106617,8 @@ function renderOutsideHelpCard(status, input) {
   const route = status.route;
   const on = status.settings.state === "on";
   const parts = [];
-  parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
+  if (input.untitled !== true)
+    parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
   if (canUnlock) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
@@ -107213,7 +107316,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     state.hostReadOnly = value.readOnly === true;
     const links = {};
     const given = value.links && typeof value.links === "object" ? value.links : {};
-    for (const key2 of ["keys", "agents", "outsideHelp", "connector"]) {
+    for (const key2 of ["keys", "agents", "privateAnswers", "connector"]) {
       const href = given[key2];
       if (typeof href === "string" && /^https?:\/\//.test(href))
         links[key2] = href;
@@ -107842,16 +107945,35 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
   }
   function needsYouSection(items) {
-    if (!items.length)
+    const waiting = waitingRow();
+    if (!items.length && !waiting)
       return null;
     const section = add(el("section", "section"), el("h2", "", P.needsYou));
     const list = el("ul", "rows");
+    add(list, waiting);
     items.forEach((item, index) => {
       const key2 = "need:" + String(item.id || index);
       const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key2, "warn", true, itemSource(item)));
       add(list, add(el("li", "row need"), body));
     });
     return add(section, list);
+  }
+  function waitingRow() {
+    const meta2 = state.computerMeta;
+    if (!onComputer() || !meta2)
+      return null;
+    const count2 = meta2.waitingPrivateQuestions;
+    const href = state.hostLinks.privateAnswers;
+    if (typeof count2 !== "number" || !isFinite(count2) || count2 < 1 || !href)
+      return null;
+    const W = H.copy;
+    const sentence = count2 === 1 ? W.waiting.one : fill2(W.waiting.many, { count: Math.floor(count2) });
+    const open7 = button(W.open, "need:waiting", () => openLink(href), "warn");
+    open7.setAttribute("aria-label", W.open + " " + W.rows.privateAnswers.title);
+    const body = add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open7));
+    const row = add(el("li", "row need"), body);
+    row.setAttribute("data-waiting-private", String(Math.floor(count2)));
+    return row;
   }
   function sourceItem(source) {
     const items = state.data && Array.isArray(state.data.needsYou) ? state.data.needsYou : [];
@@ -108515,7 +108637,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!onComputer())
       return null;
     const W = H.copy;
-    const keys = ["keys", "agents", "outsideHelp", "connector"].filter((key2) => !!state.hostLinks[key2]);
+    const keys = ["keys", "agents", "privateAnswers", "connector"].filter((key2) => !!state.hostLinks[key2]);
     if (!keys.length)
       return null;
     const heading = add(el("h2"), doc2.createTextNode(W.section + " "), el("span", "tag", W.onlyHere));
@@ -111658,6 +111780,8 @@ function computerOpenTargets(origin, token) {
     const path = openTargetPath(target);
     if (target.kind === "dashboard")
       out[path] = `${origin}${dashboardHomeHref(token)}`;
+    else if (target.kind === "private_answers")
+      out[path] = `${origin}${dashboardLocalPageHref("privateAnswers", token)}`;
     else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref("keys", token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     } else if (isPanelOpenTarget(target)) {
@@ -111866,7 +111990,7 @@ var init_host_page = __esm(() => {
   DASHBOARD_LOCAL_PAGES = {
     keys: "keys",
     agents: "agents",
-    outsideHelp: "outside-help",
+    privateAnswers: "private-answers",
     connector: "connector"
   };
   HOST_CSS = `
@@ -112800,16 +112924,16 @@ var init_local = __esm(() => {
   W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
 });
 
-// src/workers/dashboard/pages/outside-help.ts
-function renderDashboardOutsideHelpPage(options) {
+// src/workers/dashboard/pages/private-answers.ts
+function renderDashboardPrivateAnswersPage(options) {
   const basePath = options?.basePath;
   return pageShell({
     title: "Olympus",
-    crumb: DASHBOARD_OUTSIDE_HELP_COPY.crumb,
+    crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
     ...basePath === undefined ? {} : { basePath },
     meta: "",
-    body: renderOutsideHelpBody(options),
-    styles: [LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS]
+    body: renderPrivateAnswersBody(options),
+    styles: [LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS]
   });
 }
 function readToken(basePath) {
@@ -112820,24 +112944,322 @@ function readToken(basePath) {
     return;
   return new URLSearchParams(basePath.slice(query + 1)).get("token") ?? undefined;
 }
-function renderOutsideHelpBody(options) {
-  const head = `<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`;
+function renderPrivateAnswersBody(options) {
+  const head = `<h2 class="ptitle">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.title)}</h2><p class="pintro">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.intro)}</p>`;
   const csrfToken = options?.controlSessionCsrfToken;
+  const localSession = csrfToken !== undefined && options?.outsideHelpLocalSession === true;
+  const parts = [head];
+  let script2 = "";
   if (csrfToken === undefined) {
     const gate = `${dashboardLocalPageHref("keys", readToken(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
-    return `<div class="privacy outside" data-outside-locked>${head}` + `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.locked)} <a href="${escapeHtml2(gate)}">Open dashboard controls →</a></p></div>`;
+    parts.push(`<p class="pnote" data-pa-locked>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
+  } else if (!localSession) {
+    parts.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
+    script2 = `<script>${privateAnswersClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
+  } else if (options?.privateAnswers?.available !== true) {
+    parts.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
+  } else {
+    parts.push(renderAsk());
+    parts.push(renderWaiting(options.privateAnswers.waiting, options.now ?? new Date));
+    script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
-  const status = options?.outsideHelp;
-  if (!status) {
-    return `<div class="privacy outside" data-outside-unavailable>${head}<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unavailable)}</p></div>`;
-  }
-  return renderOutsideHelpCard(status, {
-    csrfToken,
-    localSession: options?.outsideHelpLocalSession === true,
-    ...options?.basePath === undefined ? {} : { basePath: options.basePath }
-  });
+  parts.push(renderAnonymous(options, csrfToken));
+  return `<div class="privacy pa" data-private-answers>${parts.join("")}</div>${script2}`;
 }
-var init_outside_help2 = __esm(() => {
+function renderAsk() {
+  return `<form class="paask" data-pa-ask>` + `<label class="plabel" for="pa-question">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</label>` + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"></textarea>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></form>`;
+}
+function renderWaiting(waiting, now) {
+  const parts = [`<div class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</div>`];
+  if (!waiting) {
+    parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
+    return parts.join("");
+  }
+  if (waiting.questions.length === 0) {
+    parts.push(`<p class="pnote" data-pa-none>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
+  } else {
+    parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingIntro)}</p>`);
+    const rows = waiting.questions.map((question) => {
+      const asked = Date.parse(question.askedAt);
+      const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
+      const from = [question.from, when, question.unchecked ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : ""].filter((part) => part !== "").join(" · ");
+      return `<li class="srow nodot" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><div class="paq">${escapeHtml2(question.question)}</div><div class="pafrom">${escapeHtml2(from)}</div></div>` + `<div class="sact"><button type="button" class="btn primary" data-pa-answer>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.answer)}</button>` + `<button type="button" class="btn" data-pa-dismiss>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.dismiss)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+    });
+    parts.push(`<ul class="srows palist">${rows.join("")}</ul>`);
+    if (waiting.questions.length > 1) {
+      parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-dismiss-all>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.dismissAll)}</button></div>`);
+    }
+  }
+  if (waiting.olderRemoved)
+    parts.push(`<p class="pnote hint" data-pa-older-removed>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
+  return parts.join("");
+}
+function renderAnonymous(options, csrfToken) {
+  const status = options?.outsideHelp;
+  let body;
+  let sum2 = DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousSum;
+  if (csrfToken === undefined) {
+    body = `<div class="outside"><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p></div>`;
+  } else if (!status) {
+    body = `<div class="outside" data-outside-unavailable><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unavailable)}</p></div>`;
+  } else {
+    const row = DASHBOARD_OUTSIDE_HELP_COPY.row[summaryOf(status).state];
+    sum2 = `${DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousSum} · ${row.replace(/^[^:]*:\s*/, "")}`;
+    body = renderOutsideHelpCard(status, {
+      csrfToken,
+      localSession: options?.outsideHelpLocalSession === true,
+      untitled: true,
+      ...options?.basePath === undefined ? {} : { basePath: options.basePath }
+    });
+  }
+  return `<details class="paanon" id="${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}" data-pa-anonymous>` + `<summary><span class="paanon-title">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</span><span class="paanon-sum">${escapeHtml2(sum2)}</span></summary>` + `<div class="paanon-body">${body}</div></details>`;
+}
+function privateAnswersClientScript(input) {
+  const config2 = {
+    csrfToken: input.csrfToken,
+    path: POST_PATH,
+    unlockPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock,
+    unlockOnly: input.unlockOnly,
+    fragment: DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT,
+    copy: {
+      answering: DASHBOARD_PRIVATE_ANSWERS_COPY.answering,
+      sources: DASHBOARD_PRIVATE_ANSWERS_COPY.sources,
+      open: DASHBOARD_PRIVATE_ANSWERS_COPY.open,
+      leftOut: DASHBOARD_PRIVATE_ANSWERS_COPY.leftOut,
+      unanswered: DASHBOARD_PRIVATE_ANSWERS_COPY.unanswered,
+      notFound: DASHBOARD_PRIVATE_ANSWERS_COPY.notFound,
+      noModel: DASHBOARD_PRIVATE_ANSWERS_COPY.noModel,
+      downloading: DASHBOARD_PRIVATE_ANSWERS_COPY.downloading,
+      changed: DASHBOARD_PRIVATE_ANSWERS_COPY.changed,
+      failed: DASHBOARD_PRIVATE_ANSWERS_COPY.failed,
+      unreachable: DASHBOARD_PRIVATE_ANSWERS_COPY.unreachable,
+      dismissed: DASHBOARD_PRIVATE_ANSWERS_COPY.dismissed,
+      dismissAllConfirm: DASHBOARD_PRIVATE_ANSWERS_COPY.dismissAllConfirm
+    }
+  };
+  return `(function () {
+  var config = ${escapeScriptJson(JSON.stringify(config2))};
+  var root = document.querySelector('[data-private-answers]');
+  if (!root) return;
+  function openAnonymous() {
+    if (window.location.hash !== '#' + config.fragment) return;
+    var section = document.getElementById(config.fragment);
+    if (section) { section.open = true; if (section.scrollIntoView) section.scrollIntoView({ block: 'start' }); }
+  }
+  openAnonymous();
+  window.addEventListener('hashchange', openAnonymous);
+  var unlock = root.querySelector('form[data-pa-unlock]');
+  if (unlock) {
+    unlock.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var button = unlock.querySelector('button');
+      if (button) button.disabled = true;
+      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+        if (response.ok) { window.location.reload(); return; }
+        var msg = unlock.querySelector('[data-pa-msg]');
+        if (msg) { msg.textContent = config.copy.failed; msg.setAttribute('data-state', 'error'); }
+        if (button) button.disabled = false;
+      }, function () {
+        var msg = unlock.querySelector('[data-pa-msg]');
+        if (msg) { msg.textContent = config.copy.unreachable; msg.setAttribute('data-state', 'error'); }
+        if (button) button.disabled = false;
+      });
+    });
+  }
+  if (config.unlockOnly) return;
+  async function send(body) {
+    var response;
+    try {
+      response = await fetch(config.path, {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      return { ok: false, status: 0, result: { error: { message: config.copy.unreachable } } };
+    }
+    var result = {};
+    try { result = await response.json(); } catch (error) { result = {}; }
+    return { ok: response.ok && result && result.ok === true, status: response.status, result: result || {} };
+  }
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+  function message(out, text, bad) {
+    out.textContent = '';
+    var line = el('p', 'pamsg', text);
+    if (bad) line.setAttribute('data-state', 'error');
+    out.appendChild(line);
+  }
+  function errorText(outcome) {
+    var error = outcome.result && outcome.result.error;
+    if (error && typeof error.message === 'string' && error.message) return error.message;
+    return outcome.status === 0 ? config.copy.unreachable : config.copy.failed;
+  }
+  function openFile(token, button) {
+    button.disabled = true;
+    send({ action: 'open', token: token }).then(function (outcome) {
+      button.disabled = false;
+      if (!outcome.ok) { button.textContent = errorText(outcome); button.disabled = true; }
+    });
+  }
+  // The answer, drawn in place with plain text nodes: nothing from the model is parsed as HTML.
+  function render(out, result) {
+    out.textContent = '';
+    var status = result.status;
+    var leftOut = Array.isArray(result.left_out) ? result.left_out : [];
+    if (status === 'answered') {
+      var card = el('div', 'pacard');
+      var box = el('div', 'paanswer');
+      String(result.answer || '').split(/\\n{2,}/).forEach(function (para) {
+        if (para.trim() !== '') box.appendChild(el('p', '', para.trim()));
+      });
+      card.appendChild(box);
+      out.appendChild(card);
+      var meta = el('div', 'pameta');
+      var citations = Array.isArray(result.citations) ? result.citations : [];
+      if (citations.length > 0) {
+        meta.appendChild(el('div', 'palabel', config.copy.sources));
+        var list = el('ol', 'pasrc');
+        citations.forEach(function (citation) {
+          var item = el('li');
+          var label = [citation.title, citation.source, citation.date].filter(function (part) { return typeof part === 'string' && part !== ''; }).join(' · ');
+          if (typeof citation.url === 'string' && /^https:\\/\\//.test(citation.url)) {
+            var link = el('a', '', label || citation.url);
+            link.href = citation.url;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            item.appendChild(link);
+          } else {
+            item.appendChild(document.createTextNode(label));
+          }
+          if (typeof citation.open === 'string') {
+            var button = el('button', 'paopen', config.copy.open);
+            button.type = 'button';
+            button.addEventListener('click', function () { openFile(citation.open, button); });
+            item.appendChild(button);
+          }
+          list.appendChild(item);
+        });
+        meta.appendChild(list);
+      }
+      if (Array.isArray(result.unanswered) && result.unanswered.length > 0) {
+        meta.appendChild(el('p', 'pamsg', config.copy.unanswered.replace('{parts}', result.unanswered.join('; '))));
+      }
+      if (leftOut.length > 0) meta.appendChild(el('p', 'pamsg', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+      if (meta.childNodes.length > 0) card.appendChild(meta);
+      return;
+    } else if (status === 'not_found') {
+      out.appendChild(el('p', 'pamsg', config.copy.notFound));
+    } else {
+      var words = status === 'no_model' ? config.copy.noModel
+        : status === 'model_downloading' ? config.copy.downloading
+        : status === 'changed' ? config.copy.changed
+        : config.copy.failed;
+      message(out, words, true);
+    }
+    if (leftOut.length > 0) out.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
+  }
+  var ask = root.querySelector('form[data-pa-ask]');
+  if (ask) {
+    ask.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var field = ask.querySelector('textarea[name="question"]');
+      var out = ask.querySelector('[data-pa-out]');
+      var button = ask.querySelector('button[type="submit"]');
+      var question = field ? String(field.value || '').trim() : '';
+      if (!question || !out) return;
+      if (button) button.disabled = true;
+      message(out, config.copy.answering, false);
+      var outcome = await send({ action: 'ask', question: question });
+      if (button) button.disabled = false;
+      if (!outcome.ok) { message(out, errorText(outcome), true); return; }
+      render(out, outcome.result);
+    });
+  }
+  root.querySelectorAll('[data-pa-question]').forEach(function (row) {
+    var id = row.getAttribute('data-pa-question');
+    var out = row.querySelector('[data-pa-out]');
+    var actions = row.querySelector('.sact');
+    var answer = row.querySelector('[data-pa-answer]');
+    var dismiss = row.querySelector('[data-pa-dismiss]');
+    function busy(on) {
+      if (answer) answer.disabled = on;
+      if (dismiss) dismiss.disabled = on;
+    }
+    if (answer) answer.addEventListener('click', async function () {
+      busy(true);
+      message(out, config.copy.answering, false);
+      var outcome = await send({ action: 'answer', id: id });
+      if (!outcome.ok) {
+        message(out, errorText(outcome), true);
+        if (outcome.status === 410 && actions) actions.remove(); else busy(false);
+        return;
+      }
+      render(out, outcome.result);
+      if (outcome.result.status === 'answered') row.classList.add('answered');
+      // The answer is on screen: only now may the question be cleared.
+      if (typeof outcome.result.ack === 'string') {
+        var seen = await send({ action: 'seen', ack: outcome.result.ack });
+        if (seen.ok && seen.result.status === 'cleared' && actions) { actions.remove(); return; }
+      }
+      busy(false);
+    });
+    if (dismiss) dismiss.addEventListener('click', async function () {
+      busy(true);
+      var outcome = await send({ action: 'dismiss', id: id });
+      if (!outcome.ok) { message(out, errorText(outcome), true); busy(false); return; }
+      row.remove();
+    });
+  });
+  var all = root.querySelector('[data-pa-dismiss-all]');
+  if (all) all.addEventListener('click', async function () {
+    if (!window.confirm(config.copy.dismissAllConfirm)) return;
+    all.disabled = true;
+    var outcome = await send({ action: 'dismiss_all' });
+    if (outcome.ok) { window.location.reload(); return; }
+    all.disabled = false;
+  });
+})();`;
+}
+var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
+.pa .paask { display: grid; gap: 8px; margin: 0 0 8px; }
+.pa .paask textarea { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 8px 10px; min-height: 64px; resize: vertical; width: 100%; box-sizing: border-box; }
+.pa .paask textarea:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.pa ul.palist { list-style: none; padding: 0; margin-top: 0; }
+.pa .paq { color: var(--t1); font-size: var(--fs-row); overflow-wrap: anywhere; }
+.pa .pafrom { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
+.pa .paout { grid-column: 1 / -1; }
+.pa .paout:empty { display: none; }
+.pa .srow.answered .paq { font-weight: 600; }
+.pa .pacard { margin: 10px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.pa .paanswer p { margin: 0 0 10px; color: var(--t1); line-height: 1.55; max-width: 72ch; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pa .paanswer p:last-child { margin-bottom: 0; }
+.pa .pameta { margin: 12px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); color: var(--t3); font-size: var(--fs-body); }
+.pa .pameta .palabel { margin: 0 0 4px; color: var(--t3); }
+.pa .pasrc { margin: 0; padding-left: 18px; color: var(--t2); }
+.pa .pasrc li { margin: 0 0 2px; overflow-wrap: anywhere; }
+.pa .pasrc .paopen { margin-left: 8px; padding: 0; background: none; border: 0; color: var(--link); font: inherit; cursor: pointer; }
+.pa .pasrc .paopen:disabled { color: var(--t3); cursor: default; }
+.pa .pameta .pamsg { margin: 8px 0 0; color: var(--t3); }
+.pa .pamsg { color: var(--t2); margin: 0 0 8px; }
+.pa .pamsg[data-state="error"] { color: var(--bad); }
+.pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.pa .paunlock .hint { color: var(--t2); }
+.pa details.paanon { margin-top: 28px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.pa details.paanon > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
+.pa details.paanon > summary::-webkit-details-marker { display: none; }
+.pa details.paanon > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
+.pa details.paanon[open] > summary::before { content: '\\25BE'; }
+.pa details.paanon > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+.pa .paanon-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
+.pa .paanon-sum { color: var(--t3); font-size: var(--fs-body); }
+.pa .paanon-body { padding: 0 0 16px; }
+`;
+var init_private_answers = __esm(() => {
   init_components();
   init_host_page();
   init_outside_help();
@@ -112855,8 +113277,10 @@ function dashboardHtmlRoutePage(url) {
     return "keys";
   if (params.has(DASHBOARD_LOCAL_PAGES.agents))
     return "agents";
+  if (params.has(DASHBOARD_LOCAL_PAGES.privateAnswers))
+    return "private_answers";
   if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM))
-    return "outside_help";
+    return "outside_help_moved";
   if (params.has(DASHBOARD_LOCAL_PAGES.connector))
     return "connector";
   return "host";
@@ -112868,6 +113292,9 @@ function dashboardReadToken(url) {
 function dashboardLegacyRedirect(url) {
   return dashboardHomeHref(dashboardReadToken(url));
 }
+function dashboardOutsideHelpRedirect(url) {
+  return `${dashboardLocalPageHref("privateAnswers", dashboardReadToken(url))}#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`;
+}
 function renderDashboardLocalPage(page, input) {
   const options = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
   switch (page) {
@@ -112877,8 +113304,8 @@ function renderDashboardLocalPage(page, input) {
       return renderDashboardKeysPage(input.view, options);
     case "agents":
       return renderDashboardAgentsPage(options);
-    case "outside_help":
-      return renderDashboardOutsideHelpPage(options);
+    case "private_answers":
+      return renderDashboardPrivateAnswersPage(options);
     case "connector":
       return renderDashboardConnectorPage(options);
   }
@@ -112888,7 +113315,7 @@ var init_dashboard = __esm(() => {
   init_outside_help();
   init_host_page();
   init_local();
-  init_outside_help2();
+  init_private_answers();
   init_host_page();
   init_vocabulary();
   DASHBOARD_LEGACY_QUERY_PARAMS = ["source", "background", "sensitivity", "setup", "privacy", "embedding-ledger"];
@@ -113088,8 +113515,8 @@ function withWorkerBearerAuth(fetchHandler, options) {
       return fetchHandler(request);
     }
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
-      if (isDashboardConsultControlRoute(request))
-        return dashboardConsultMacOnlyResponse();
+      if (isDashboardLocalGradeRoute(request))
+        return dashboardLocalGradeRefusal(request);
       if (isAgentMintRoute(request) && !agentMintAllowed("bearer"))
         return agentMintLimitedResponse();
       if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed("bearer"))
@@ -113115,9 +113542,9 @@ function withWorkerBearerAuth(fetchHandler, options) {
         if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed(`session:${authorization.sessionId}`)) {
           return remoteAccessToggleLimitedResponse();
         }
-        if (isDashboardConsultControlRoute(request)) {
+        if (isDashboardLocalGradeRoute(request)) {
           if (authorization.grade !== "local")
-            return dashboardConsultMacOnlyResponse();
+            return dashboardLocalGradeRefusal(request);
           return withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
         }
         if (isDashboardToolsCallRoute(request)) {
@@ -113317,6 +113744,26 @@ function agentMintLimitedResponse() {
 function isDashboardConsultControlRoute(request) {
   return request.method === "POST" && DASHBOARD_CONSULT_CONTROL_PATHS.includes(new URL(request.url).pathname);
 }
+function isDashboardPrivateAnswersRoute(request) {
+  return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_PRIVATE_ANSWERS_PATH;
+}
+function isDashboardLocalGradeRoute(request) {
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request);
+}
+function dashboardLocalGradeRefusal(request) {
+  if (!isDashboardPrivateAnswersRoute(request))
+    return dashboardConsultMacOnlyResponse();
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: "mac_dashboard_only",
+      message: "Private answers open only in the dashboard on this computer, in an unlocked browser."
+    }
+  }), {
+    status: 403,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+  });
+}
 function dashboardConsultMacOnlyResponse() {
   return new Response(JSON.stringify({
     ok: false,
@@ -113335,7 +113782,7 @@ function isDashboardToolsCallRoute(request) {
 function isDashboardControlRoute(request) {
   if (request.method !== "POST")
     return false;
-  if (isDashboardConsultControlRoute(request))
+  if (isDashboardLocalGradeRoute(request))
     return true;
   return new Set([
     "/dashboard/dispositions",
@@ -113691,7 +114138,7 @@ function optionalEnv(value) {
   const trimmed2 = value?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, GRADE_CODES;
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", GRADE_CODES;
 var init_http = __esm(() => {
   init_request_peer();
   init_worker_auth();
@@ -114690,6 +115137,9 @@ function createEmailSourceWorker(options = {}) {
           if (page === "legacy") {
             return new Response(null, { status: 302, headers: { Location: dashboardLegacyRedirect(url), "Cache-Control": "no-store" } });
           }
+          if (page === "outside_help_moved") {
+            return new Response(null, { status: 302, headers: { Location: dashboardOutsideHelpRedirect(url), "Cache-Control": "no-store" } });
+          }
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
           if (page === "host") {
             return new Response(renderComputerHostPage({
@@ -114725,16 +115175,22 @@ function createEmailSourceWorker(options = {}) {
               }
             }));
           }
-          if (page === "outside_help") {
+          if (page === "private_answers") {
+            const localSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local";
             const outsideHelp = sourceDashboard?.consult && controlSessionCsrfToken !== undefined ? await sourceDashboard.consult.status().catch(() => {
               return;
             }) : undefined;
-            const outsideHelpLocalSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local";
-            return html2(renderDashboardLocalPage("outside_help", {
+            const waiting = controlSessionCsrfToken !== undefined && localSession ? sourceDashboard?.privateAnswers?.waiting() : undefined;
+            return html2(renderDashboardLocalPage("private_answers", {
               url,
               options: {
                 ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
-                ...outsideHelp ? { outsideHelp, outsideHelpLocalSession } : {}
+                ...outsideHelp ? { outsideHelp } : {},
+                outsideHelpLocalSession: localSession,
+                privateAnswers: {
+                  available: sourceDashboard?.privateAnswers !== undefined,
+                  ...waiting ? { waiting } : {}
+                }
               }
             }));
           }
@@ -114834,7 +115290,8 @@ function createEmailSourceWorker(options = {}) {
           }
           return json(await sourceDashboard.panelTools.call(name, args, {
             ...dashboardPanelCallContext(url, request),
-            opener: dashboardPanelOpener(request)
+            opener: dashboardPanelOpener(request),
+            ...request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local" ? { localSession: true } : {}
           }));
         }
         const oauthCallbackDone = /^\/oauth\/callback\/([^/]+)\/done$/.exec(url.pathname);
@@ -115051,6 +115508,21 @@ function createEmailSourceWorker(options = {}) {
             return;
           });
           return json({ ok: true, status_message: "Readiness check requested. See the Models cards above for the result." });
+        }
+        if (request.method === "POST" && url.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {
+          const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+          if (!csrf || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
+            return json({ ok: false, error: { code: "mac_dashboard_only", message: "Private answers open only in the dashboard on this computer, in an unlocked browser." } }, 403);
+          }
+          if (!sourceDashboard?.privateAnswers) {
+            throw new EmailSourceWorkerError(501, "private_answers_not_supported", "Private answers are not available in this worker.");
+          }
+          const record3 = await parseObjectBody(request);
+          const outcome = await sourceDashboard.privateAnswers.handle(record3, dashboardPanelOpener(request));
+          return new Response(JSON.stringify(outcome.body), {
+            status: outcome.status,
+            headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+          });
         }
         if (request.method === "POST" && DASHBOARD_CONSULT_CONTROL_PATHS.includes(url.pathname)) {
           if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
@@ -119086,6 +119558,93 @@ var QUERY_PLANNER_SYSTEM, MAX_PLANNED_QUERIES = 3, MAX_PLANNER_OUTPUT_CHARS = 40
 var init_query_planner = __esm(() => {
   init_answer_latency_trace();
   QUERY_PLANNER_SYSTEM = "Generate up to 3 short, diverse search queries for finding documents that answer this question. " + "Return ONLY a JSON array of strings.";
+});
+
+// src/workers/email-source/source-answer-lanes.ts
+function createSourceAnswerLanes(deps) {
+  return (request, embedding) => {
+    const searchScopes = new Map;
+    const requestEmbeddings = new Map;
+    const requestEmbedding = (store) => {
+      if (!requestEmbeddings.has(store.corpusId)) {
+        const configured = deps.embeddingProvider(store);
+        const provider = embedding === "built_in_only" ? builtInEmbeddingOnly(configured, deps.localEmbedding) : configured;
+        requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
+      }
+      return requestEmbeddings.get(store.corpusId);
+    };
+    const excludedCorpusIds = new Set;
+    const connectorStoreAdapter = (store) => {
+      const mandatoryScope = deps.readScope(store);
+      if (!mandatoryScope.allowed) {
+        excludedCorpusIds.add(store.corpusId);
+        return;
+      }
+      const scope = deps.answerScope(store, request);
+      if (scope.kind === "skip") {
+        excludedCorpusIds.add(store.corpusId);
+        return;
+      }
+      const connectorStoreEmbedding = requestEmbedding(store);
+      const connectorStoreAccount = scope.accountScope ?? mandatoryScope.accountScope ?? (request.account?.trim() || deps.accountScope(store));
+      const filters = scope.filters || mandatoryScope.filters ? { ...scope.filters, ...mandatoryScope.filters } : undefined;
+      searchScopes.set(store.corpusId, {
+        ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
+        ...filters ? { filters } : {}
+      });
+      const semanticRelevanceBar = deps.semanticRelevanceBar?.(store);
+      return createConnectorStoreCorpusAdapter({
+        store,
+        retrievalMode: request.retrieval_mode ?? "keyword",
+        ...semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {},
+        ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
+        ...filters ? { filters } : {},
+        ...connectorStoreEmbedding ? { embeddingProvider: connectorStoreEmbedding } : {}
+      });
+    };
+    const stores = deps.stores();
+    return {
+      registry: deps.registry(),
+      ...deps.visibilityGate ? { visibilityGate: deps.visibilityGate } : {},
+      ...deps.secretLocations ? {
+        secretLocations: (query, searchedCorpora) => deps.secretLocations(query, searchedCorpora.flatMap((corpusId) => {
+          const scope = searchScopes.get(corpusId);
+          return scope ? [{ corpusId, ...scope }] : [];
+        }))
+      } : {},
+      ...deps.heldItems ? {
+        classificationCoverage: (searchedCorpora) => searchedCorpora.flatMap((corpusId) => {
+          try {
+            const held = deps.heldItems(corpusId);
+            return held > 0 ? [{ corpusId, pendingClassificationItems: held }] : [];
+          } catch {
+            return [];
+          }
+        })
+      } : {},
+      adapters: Object.fromEntries(stores.flatMap((store) => {
+        const adapter = connectorStoreAdapter(store);
+        return adapter ? [[store.corpusId, adapter]] : [];
+      })),
+      excludedCorpusIds,
+      contentProviders: Object.fromEntries(stores.flatMap((store) => {
+        const mandatoryScope = deps.readScope(store);
+        const passageEmbedding = request.retrieval_mode === "hybrid" ? requestEmbedding(store) : undefined;
+        return mandatoryScope.allowed ? [[store.corpusId, createConnectorStoreContentProvider({
+          store,
+          ...passageEmbedding ? { embeddingProvider: passageEmbedding } : {},
+          ...mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {},
+          ...mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {},
+          ...mandatoryScope.filters ? { metadataFilters: mandatoryScope.filters } : {},
+          contentAllowed: mandatoryScope.contentAllowed !== false
+        })]] : [];
+      }))
+    };
+  };
+}
+var init_source_answer_lanes = __esm(() => {
+  init_embeddings();
+  init_connector_store();
 });
 
 // src/workers/connector-store/tier-visibility.ts
@@ -132250,7 +132809,7 @@ function createBuiltInPrivateAnswerModel(options) {
           items: items.length,
           unreadable,
           bytes: items.reduce((sum2, item) => sum2 + utf8Bytes3(item.text), 0),
-          used: picked.map((index) => read.sources[index])
+          used: [...picked, ...eligibleSiblings].map((index) => read.sources[index])
         });
       } catch {}
       if (items.length === 0) {
@@ -132713,6 +133272,443 @@ var init_private_answer_model = __esm(() => {
     deepPromptBytes: 11500,
     deepAnswerChars: 2700
   };
+});
+
+// src/workers/source-index/local-answer.ts
+function localAnswerRequest(question, selectors = {}) {
+  const { retrieval_mode: mode, selected_items: selected, ...rest } = selectors;
+  return {
+    ...rest,
+    ...selected?.length ? { selected_items: selected } : {},
+    question,
+    retrieval_mode: mode === "keyword" ? "keyword" : "hybrid",
+    include_internal: true,
+    include_internal_content: true,
+    include_secure_local: true,
+    include_secure_local_content: true,
+    max_results: LOCAL_MAX_RESULTS
+  };
+}
+async function answerOnThisComputer(input, options) {
+  const question = input.question.trim();
+  if (!question)
+    return { status: "failed" };
+  const status = options.model.status();
+  if (status.state === "no_model")
+    return { status: "no_model" };
+  if (status.state === "model_downloading") {
+    return { status: "model_downloading", ...typeof status.percent === "number" ? { percent: status.percent } : {} };
+  }
+  const request = localAnswerRequest(question, input.selectors);
+  const lanes = options.lanes(request);
+  const corpusIds = sourceAnswerCorpusIds(request);
+  const selectedItems = selectedEvidenceItemsFromRequest(request);
+  const explicitQuery = request.query?.trim();
+  const detail = await buildEvidencePackDetailed({
+    question,
+    ...explicitQuery ? { searchQuery: explicitQuery } : {},
+    ...selectedItems.length > 0 ? { selectedItems } : {},
+    maxResults: LOCAL_MAX_RESULTS,
+    searchContext: {
+      allowedTrustDomains: LOCAL_TRUST_DOMAINS,
+      allowCloudQueries: false,
+      ...corpusIds ? { allowedCorpusIds: corpusIds } : {}
+    },
+    ...corpusIds ? { corpusIds } : {},
+    registry: lanes.registry,
+    adapters: lanes.adapters,
+    contentProviders: lanes.contentProviders,
+    maxCharsPerCandidate: LOCAL_MAX_CHARS_PER_CANDIDATE,
+    evidenceByteBudget: LOCAL_EVIDENCE_BYTE_BUDGET,
+    ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {},
+    ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}
+  });
+  assertEvidencePackModelEligible(detail.pack);
+  const leftOut = leftOutSources(detail.skippedCorpora, lanes.excludedCorpusIds, options.sourceName);
+  const skip = new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []]);
+  const candidates = detail.pack.candidates.flatMap((candidate, index) => {
+    const corpusId = detail.candidateCorpusIds[index] ?? "";
+    if (skip.has(index) || !corpusId || !LOCAL_TRUST_DOMAINS.includes(candidate.trustDomain))
+      return [];
+    return [{ ...candidate, corpusId }];
+  });
+  if (candidates.length === 0)
+    return { status: "not_found", leftOut };
+  let used;
+  let result;
+  try {
+    result = await options.model.answerPrivately(question, candidates, input.signal, {
+      evidence: (stats) => {
+        used = stats.used;
+      }
+    }, { detail: input.detail === "full" ? "full" : "summary" });
+  } catch (error2) {
+    if (error2 instanceof NoPrivateEvidenceError)
+      return { status: "not_found", leftOut };
+    return { status: "failed" };
+  }
+  const read = (used ?? candidates.map((_, index) => index)).map((index) => candidates[index]).filter((item) => item !== undefined);
+  if (read.length > 0) {
+    let ok;
+    try {
+      ok = await options.eligible(read);
+    } catch {
+      ok = read.map(() => false);
+    }
+    if (ok.length !== read.length || !ok.every((value) => value === true))
+      return { status: "changed" };
+  }
+  return {
+    status: "answered",
+    answer: result.answer,
+    citations: result.citations,
+    unanswered: result.unanswered ?? [],
+    leftOut,
+    read
+  };
+}
+function leftOutSources(skipped2, excluded, sourceName) {
+  const names = new Set;
+  for (const skip of skipped2) {
+    if (IN_SCOPE_SKIPS.has(skip.reason))
+      continue;
+    if (skip.reason === "no_adapter" && excluded?.has(skip.corpusId))
+      continue;
+    let name;
+    try {
+      name = sourceName?.(skip.corpusId);
+    } catch {
+      name = undefined;
+    }
+    names.add(name ?? "One source");
+  }
+  return [...names].sort();
+}
+async function checkLocalEvidenceItems(input) {
+  if (input.items.length === 0)
+    return [];
+  let lanes;
+  try {
+    lanes = input.lanes(localAnswerRequest("eligibility", { retrieval_mode: "keyword" }));
+  } catch {
+    return input.items.map(() => false);
+  }
+  return Promise.all(input.items.map(async (item) => {
+    try {
+      const corpusId = typeof item.corpusId === "string" ? item.corpusId : undefined;
+      const provenance = item.provenance;
+      const trustDomain = item.trustDomain;
+      if (!corpusId || !provenance?.sourceItem?.localItemId || !trustDomain || !LOCAL_TRUST_DOMAINS.includes(trustDomain))
+        return false;
+      if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain)
+        return false;
+      const provider = lanes.contentProviders[corpusId];
+      if (!provider)
+        return false;
+      if (typeof provider.contentServable === "function") {
+        return provider.contentServable({ provenance, trustDomain }) === true;
+      }
+      const content = await provider.fetchLocalContent({ provenance, trustDomain, maxChars: 1 });
+      if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
+        return false;
+      if (content.sensitivity.trustDomain !== trustDomain)
+        return false;
+      assertModelTrustTierAllowed(content.sensitivity.trustTier);
+      return true;
+    } catch {
+      return false;
+    }
+  }));
+}
+async function readLocalEvidenceItem(input) {
+  const corpusId = typeof input.item.corpusId === "string" ? input.item.corpusId : undefined;
+  const provenance = input.item.provenance;
+  const trustDomain = input.item.trustDomain;
+  if (!corpusId || !provenance?.sourceItem || !trustDomain || !LOCAL_TRUST_DOMAINS.includes(trustDomain))
+    return;
+  const lanes = input.lanes(localAnswerRequest(input.question));
+  if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain)
+    return;
+  const provider = lanes.contentProviders[corpusId];
+  if (!provider)
+    return;
+  const content = await provider.fetchLocalContent({
+    provenance,
+    trustDomain,
+    maxChars: Math.max(1, Math.floor(input.maxChars)),
+    query: input.question,
+    maxPassages: LOCAL_DEPTH_MAX_PASSAGES
+  });
+  if (!content || content.namesOnly || content.contentPrivate)
+    return;
+  return content.chunks;
+}
+var LOCAL_TRUST_DOMAINS, LOCAL_MAX_RESULTS = 16, LOCAL_MAX_CHARS_PER_CANDIDATE = 3000, LOCAL_EVIDENCE_BYTE_BUDGET = 24000, LOCAL_DEPTH_MAX_PASSAGES = 24, IN_SCOPE_SKIPS;
+var init_local_answer = __esm(() => {
+  init_evidence_pack();
+  init_source_model_policy();
+  init_private_answer_contract();
+  init_analyst_answer();
+  init_embeddings();
+  LOCAL_TRUST_DOMAINS = ["internal", "secure_local"];
+  IN_SCOPE_SKIPS = new Set(["not_requested", "trust_domain_not_allowed", "corpus_not_allowed"]);
+});
+
+// src/workers/email-source/local-private-answers.ts
+var exports_local_private_answers = {};
+__export(exports_local_private_answers, {
+  createLocalPrivateAnswers: () => createLocalPrivateAnswers,
+  createLocalAnswerPath: () => createLocalAnswerPath,
+  LOCAL_PRIVATE_ANSWERS_PATH: () => LOCAL_PRIVATE_ANSWERS_PATH
+});
+import { lstatSync as lstatSync26 } from "node:fs";
+import { randomBytes as randomBytes23 } from "node:crypto";
+function createLocalAnswerPath(options) {
+  const lanes = (request) => options.lanes(request, "built_in_only");
+  const eligible = (items) => checkLocalEvidenceItems({ lanes, items });
+  const model = createBuiltInPrivateAnswerModel({
+    model: options.model,
+    eligible,
+    available: options.available,
+    answer: answerPrivately,
+    relevance: embeddingPanelRelevance(options.relevanceEmbedding),
+    readItem: (item, request) => readLocalEvidenceItem({ lanes, item, ...request }),
+    ...options.sourceLinks ? { sourceLinks: options.sourceLinks } : {},
+    ...options.limits ? { limits: options.limits } : {}
+  });
+  return {
+    eligible,
+    answer: (input) => answerOnThisComputer(input, {
+      lanes,
+      model,
+      eligible,
+      ...options.sourceName ? { sourceName: options.sourceName } : {}
+    })
+  };
+}
+function refused(status, code, message) {
+  return { status, body: { ok: false, error: { code, message } } };
+}
+function createLocalPrivateAnswers(options) {
+  const now = options.now ?? Date.now;
+  const acks = new Map;
+  const opens = new Map;
+  let running = false;
+  const sweep = () => {
+    const at = now();
+    for (const map2 of [acks, opens]) {
+      for (const [key2, entry] of map2)
+        if (entry.expiresAt <= at)
+          map2.delete(key2);
+      while (map2.size > MAX_TOKENS2) {
+        const oldest = map2.keys().next().value;
+        if (oldest === undefined)
+          break;
+        map2.delete(oldest);
+      }
+    }
+  };
+  const token = () => randomBytes23(24).toString("base64url");
+  const nameOf = (question) => {
+    let name;
+    try {
+      name = options.connectionName?.(question.connectionId)?.trim();
+    } catch {
+      name = undefined;
+    }
+    return name || (question.surface === "chatgpt" ? "ChatGPT" : "An agent");
+  };
+  const store = () => {
+    try {
+      return options.store();
+    } catch {
+      return;
+    }
+  };
+  const answerBody = (result, session) => {
+    if (result.status !== "answered") {
+      return {
+        status: result.status,
+        ...result.status === "not_found" ? { left_out: result.leftOut } : {},
+        ...result.status === "model_downloading" && result.percent !== undefined ? { percent: Math.round(result.percent) } : {}
+      };
+    }
+    sweep();
+    const citations = result.citations.map((citation) => {
+      const view = {
+        ...citation.title ? { title: citation.title } : {},
+        ...citation.source ? { source: citation.source } : {},
+        ...citation.date ? { date: citation.date } : {},
+        ...typeof citation.url === "string" && /^https:\/\//.test(citation.url) ? { url: citation.url } : {}
+      };
+      if (citation.localPath && options.openFile) {
+        const id = token();
+        opens.set(id, { session, path: citation.localPath, read: result.read, expiresAt: now() + TOKEN_TTL_MS });
+        view.open = id;
+      }
+      return view;
+    });
+    return {
+      status: "answered",
+      answer: result.answer,
+      citations,
+      unanswered: result.unanswered,
+      left_out: result.leftOut
+    };
+  };
+  const exclusive = async (run) => {
+    if (running)
+      return refused(429, "busy", "Olympus is answering another question. Try again in a moment.");
+    running = true;
+    try {
+      return await run();
+    } finally {
+      running = false;
+    }
+  };
+  const answerFor = async (input) => {
+    try {
+      return await options.answer(input);
+    } catch {
+      return { status: "failed" };
+    }
+  };
+  return {
+    waiting() {
+      const current = store();
+      if (!current)
+        return;
+      try {
+        const listed = current.list();
+        return {
+          questions: listed.questions.map((question) => ({
+            id: question.id,
+            question: question.question,
+            from: nameOf(question),
+            askedAt: question.askedAt,
+            unchecked: question.state === "unchecked"
+          })),
+          olderRemoved: listed.olderRemoved
+        };
+      } catch {
+        return;
+      }
+    },
+    waitingCount() {
+      try {
+        return store()?.list().questions.length ?? 0;
+      } catch {
+        return 0;
+      }
+    },
+    async handle(body, session) {
+      const action = body.action;
+      if (action === "ask") {
+        const question = typeof body.question === "string" ? body.question.trim() : "";
+        if (!question || question.length > MAX_QUESTION_CHARS2)
+          return refused(400, "invalid_params", "Type a question first.");
+        const detail = body.detail === "full" ? "full" : "summary";
+        return exclusive(async () => ({ status: 200, body: { ok: true, ...answerBody(await answerFor({ question, detail }), session) } }));
+      }
+      if (action === "answer") {
+        const id = typeof body.id === "string" ? body.id : "";
+        const current = store();
+        if (!current)
+          return refused(503, "unavailable", "Waiting questions cannot be read right now.");
+        const record4 = id ? current.get(id) : undefined;
+        if (!record4)
+          return refused(410, "gone", "This question is no longer waiting.");
+        return exclusive(async () => {
+          const result = await answerFor({ question: record4.question, selectors: record4.selectors, detail: record4.detail });
+          const out = answerBody(result, session);
+          if (result.status === "answered" || result.status === "not_found") {
+            sweep();
+            const ack = token();
+            acks.set(ack, {
+              session,
+              ref: { id: record4.id, generation: record4.generation, connectionId: record4.connectionId },
+              expiresAt: now() + TOKEN_TTL_MS
+            });
+            out.ack = ack;
+          }
+          return { status: 200, body: { ok: true, ...out } };
+        });
+      }
+      if (action === "seen") {
+        sweep();
+        const ack = typeof body.ack === "string" && TOKEN_PATTERN3.test(body.ack) ? body.ack : "";
+        const entry = ack ? acks.get(ack) : undefined;
+        if (!entry || entry.session !== session)
+          return refused(410, "gone", "This answer can no longer be marked seen.");
+        acks.delete(ack);
+        let cleared = false;
+        try {
+          cleared = store()?.acknowledge(entry.ref) === true;
+        } catch {
+          cleared = false;
+        }
+        return { status: 200, body: { ok: true, status: cleared ? "cleared" : "kept" } };
+      }
+      if (action === "dismiss") {
+        const id = typeof body.id === "string" ? body.id : "";
+        let removed = false;
+        try {
+          removed = id ? store()?.dismiss(id) === true : false;
+        } catch {
+          return refused(503, "unavailable", "Waiting questions cannot be changed right now.");
+        }
+        return { status: 200, body: { ok: true, status: removed ? "dismissed" : "gone" } };
+      }
+      if (action === "dismiss_all") {
+        try {
+          const removed = store()?.dismissAll() ?? 0;
+          return { status: 200, body: { ok: true, status: "dismissed", removed } };
+        } catch {
+          return refused(503, "unavailable", "Waiting questions cannot be changed right now.");
+        }
+      }
+      if (action === "open") {
+        sweep();
+        const id = typeof body.token === "string" && TOKEN_PATTERN3.test(body.token) ? body.token : "";
+        const entry = id ? opens.get(id) : undefined;
+        if (!entry || entry.session !== session || !options.openFile)
+          return refused(410, "gone", "Ask again to open this file.");
+        let ok = [];
+        try {
+          ok = options.eligible ? await options.eligible(entry.read) : entry.read.map(() => false);
+        } catch {
+          ok = [];
+        }
+        if (ok.length !== entry.read.length || !ok.every((value) => value === true)) {
+          opens.delete(id);
+          return refused(410, "gone", "This file changed since the answer. Ask again.");
+        }
+        let isFile = false;
+        try {
+          isFile = lstatSync26(entry.path).isFile();
+        } catch {
+          isFile = false;
+        }
+        if (!isFile)
+          return refused(410, "gone", "This file is no longer on this computer.");
+        try {
+          await options.openFile(entry.path);
+        } catch {
+          return refused(500, "failed", "The file could not be opened.");
+        }
+        return { status: 200, body: { ok: true, status: "opened" } };
+      }
+      return refused(400, "invalid_params", "Unknown action.");
+    }
+  };
+}
+var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS2 = 2000, TOKEN_PATTERN3;
+var init_local_private_answers = __esm(() => {
+  init_analyst_built_in();
+  init_private_answer_model();
+  init_local_answer();
+  TOKEN_TTL_MS = 30 * 60000;
+  TOKEN_PATTERN3 = /^[A-Za-z0-9_-]{32,64}$/;
 });
 
 // src/core/remote-private-part.ts
@@ -133559,7 +134555,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync26, lstatSync as lstatSync26, mkdirSync as mkdirSync46, statSync as statSync27 } from "node:fs";
+import { chmodSync as chmodSync26, lstatSync as lstatSync27, mkdirSync as mkdirSync46, statSync as statSync27 } from "node:fs";
 import { dirname as dirname64, isAbsolute as isAbsolute21 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   const path = location.path ?? consultSettingsPath(location.env ?? process.env);
@@ -133635,7 +134631,7 @@ function writeConsultSettings(input, location = {}) {
 function ensureSettingsDirectory(directory) {
   let stats;
   try {
-    stats = lstatSync26(directory);
+    stats = lstatSync27(directory);
   } catch (error2) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
@@ -133651,7 +134647,7 @@ function ensureSettingsDirectory(directory) {
       return "directory_unavailable";
     }
     try {
-      stats = lstatSync26(directory);
+      stats = lstatSync27(directory);
     } catch {
       return "directory_unavailable";
     }
@@ -134138,7 +135134,7 @@ function createDashboardConsultAdapter(options) {
         zkapi[key2] = raw;
       }
       try {
-        const refused = writePolicy((current) => {
+        const refused2 = writePolicy((current) => {
           const next = structuredClone(current);
           const profile = next.modelProfiles[route.id];
           if (!profile || profile.provider !== "zkapi")
@@ -134149,8 +135145,8 @@ function createDashboardConsultAdapter(options) {
           profile.zkapi = block;
           return next;
         });
-        if (refused)
-          return refused;
+        if (refused2)
+          return refused2;
       } catch (error2) {
         return { ok: false, httpStatus: 400, code: "config_error", message: error2.message };
       }
@@ -134164,7 +135160,7 @@ function createDashboardConsultAdapter(options) {
       if (zkapiProfile())
         return { ok: false, httpStatus: 409, code: "route_exists", message: MESSAGES2.routeExists };
       try {
-        const refused = writePolicy((current) => {
+        const refused2 = writePolicy((current) => {
           if (Object.values(current.modelProfiles).some((profile) => profile.provider === "zkapi")) {
             throw new OperationError("config_error", "A zkAPI route is already in the policy file.");
           }
@@ -134180,8 +135176,8 @@ function createDashboardConsultAdapter(options) {
           };
           return next;
         });
-        if (refused)
-          return refused;
+        if (refused2)
+          return refused2;
       } catch (error2) {
         return { ok: false, httpStatus: 400, code: "config_error", message: error2.message };
       }
@@ -134327,7 +135323,7 @@ __export(exports_dashboard_panel_tools, {
   computerUnreadableEntries: () => computerUnreadableEntries,
   computerUnpairEntries: () => computerUnpairEntries
 });
-function refused(text4, code) {
+function refused2(text4, code) {
   return { content: [{ type: "text", text: text4 }], structuredContent: { error: code }, isError: true };
 }
 function computerSetup(options, context2, privacyConfirmationScope) {
@@ -134363,14 +135359,14 @@ function computerSetup(options, context2, privacyConfirmationScope) {
 async function indexFaster(options, args) {
   const keys = Object.keys(args);
   if (typeof args.on !== "boolean" || keys.some((key2) => key2 !== "on"))
-    return refused("on must be true or false.", "invalid_params");
+    return refused2("on must be true or false.", "invalid_params");
   const response = await options.workerFetch(new Request("http://olympus-worker.internal/dashboard/embedding-priority", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ on: args.on })
   }));
   if (!response.ok)
-    return refused("Could not change indexing speed.", "internal");
+    return refused2("Could not change indexing speed.", "internal");
   return {
     content: [{ type: "text", text: args.on ? "Indexing faster." : "Indexing at the normal pace." }],
     structuredContent: { status: "saved", on: args.on }
@@ -134379,7 +135375,7 @@ async function indexFaster(options, args) {
 async function unpairSource(options, args) {
   const keys = Object.keys(args);
   if (typeof args.source_id !== "string" || !UNPAIR_SOURCE_IDS.has(args.source_id) || keys.some((key2) => key2 !== "source_id")) {
-    return refused("source_id must be a paired chat app.", "invalid_params");
+    return refused2("source_id must be a paired chat app.", "invalid_params");
   }
   const response = await options.workerFetch(new Request("http://olympus-worker.internal/dashboard/unpair", {
     method: "POST",
@@ -134391,7 +135387,7 @@ async function unpairSource(options, args) {
   });
   if (!response.ok || !parsed || parsed.ok !== true) {
     const error2 = parsed?.error;
-    return refused(typeof error2?.message === "string" ? error2.message : "Could not unpair.", typeof error2?.code === "string" ? error2.code : "internal");
+    return refused2(typeof error2?.message === "string" ? error2.message : "Could not unpair.", typeof error2?.code === "string" ? error2.code : "internal");
   }
   const text4 = typeof parsed.status_message === "string" ? parsed.status_message : "Unpaired.";
   return { content: [{ type: "text", text: text4 }], structuredContent: { status: "saved", source_id: args.source_id } };
@@ -134399,10 +135395,10 @@ async function unpairSource(options, args) {
 async function openUnreadableFile(options, args, context2) {
   const keys = Object.keys(args);
   if (typeof args.token !== "string" || keys.some((key2) => key2 !== "token"))
-    return refused("token must be a file token from the dashboard.", "invalid_params");
+    return refused2("token must be a file token from the dashboard.", "invalid_params");
   const files = options.unreadableFiles?.();
   if (!files || !context2.opener)
-    return refused("Olympus cannot open this file here.", "unavailable");
+    return refused2("Olympus cannot open this file here.", "unavailable");
   const opened = await files.open(args.token, context2.opener);
   switch (opened.status) {
     case "opened":
@@ -134410,31 +135406,31 @@ async function openUnreadableFile(options, args, context2) {
     case "open_link":
       return { content: [{ type: "text", text: "Opening the file's page." }], structuredContent: { status: "open_link", url: opened.url } };
     case "invalid":
-      return refused("token must be a file token from the dashboard.", "invalid_params");
+      return refused2("token must be a file token from the dashboard.", "invalid_params");
     case "rate_limited":
-      return refused("Too many files opened at once. Try again in a moment.", "rate_limited");
+      return refused2("Too many files opened at once. Try again in a moment.", "rate_limited");
     case "failed":
-      return refused("The file could not be opened.", "internal");
+      return refused2("The file could not be opened.", "internal");
     default:
-      return refused("This file is no longer in the list. Refresh the dashboard.", "gone");
+      return refused2("This file is no longer in the list. Refresh the dashboard.", "gone");
   }
 }
 async function unreadableFilesPage(options, args, context2) {
   const keys = Object.keys(args);
   const after = args.after;
   if (typeof args.source_id !== "string" || !isUnreadablePageCursor(after) || keys.some((key2) => key2 !== "source_id" && key2 !== "after")) {
-    return refused("source_id and after must come from the dashboard.", "invalid_params");
+    return refused2("source_id and after must come from the dashboard.", "invalid_params");
   }
   const files = options.unreadableFiles?.();
   if (!files || !context2.opener)
-    return refused("Olympus cannot list these files here.", "unavailable");
+    return refused2("Olympus cannot list these files here.", "unavailable");
   const sourceId = args.source_id;
   const view = await options.surface().dashboardView(context2.signal).catch(() => {
     return;
   });
   const corpusIds = view?.sources.find((card) => card.source_id === sourceId)?.unreadable_files?.corpus_ids;
   if (!corpusIds?.length)
-    return refused("This list changed. Refresh the dashboard.", "gone");
+    return refused2("This list changed. Refresh the dashboard.", "gone");
   const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { after, opener: context2.opener });
   const page2 = entriesOf(listed.files);
   return {
@@ -134483,6 +135479,14 @@ function computerUnpairEntries(view) {
     return [{ sourceId: action.source_id, label: action.label, confirmation: action.confirmation }];
   });
 }
+function waitingCount(options) {
+  try {
+    const count2 = options.waitingPrivateQuestions?.() ?? 0;
+    return Number.isInteger(count2) && count2 > 0 ? count2 : 0;
+  } catch {
+    return 0;
+  }
+}
 function createDashboardPanelTools(options) {
   const allowed = new Set(COMPUTER_HOST_TOOL_NAMES);
   const privacyConfirmationScope = {};
@@ -134490,7 +135494,7 @@ function createDashboardPanelTools(options) {
     allows: (name) => allowed.has(name),
     async call(name, args, context2) {
       if (!allowed.has(name))
-        return refused("This tool is not available here.", "unknown_tool");
+        return refused2("This tool is not available here.", "unknown_tool");
       if (name === INDEX_FASTER_TOOL_NAME)
         return await indexFaster(options, args);
       if (name === UNPAIR_SOURCE_TOOL_NAME)
@@ -134515,12 +135519,14 @@ function createDashboardPanelTools(options) {
       });
       const unpair = computerUnpairEntries(view);
       const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context2.opener);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0)
+      const waiting = context2.localSession === true ? waitingCount(options) : 0;
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0)
         return result;
       const meta2 = {
         ...on !== undefined ? { indexFaster: { on } } : {},
         ...unpair.length > 0 ? { unpair } : {},
-        ...unreadable.length > 0 ? { unreadable } : {}
+        ...unreadable.length > 0 ? { unreadable } : {},
+        ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {}
       };
       const existing = result._meta && typeof result._meta === "object" ? result._meta : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta2 } };
@@ -136419,89 +137425,22 @@ async function main() {
       },
       secureAnalystPoolState,
       ...secureDerivativeDefault !== undefined ? { secureDerivativeDefault } : {},
-      lanes: sourceAnswerLanes = (request) => {
-        const searchScopes = new Map;
-        const requestEmbeddings = new Map;
-        const requestEmbedding = (store) => {
-          if (!requestEmbeddings.has(store.corpusId)) {
-            const provider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
-            requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
-          }
-          return requestEmbeddings.get(store.corpusId);
-        };
-        const excludedCorpusIds = new Set;
-        const connectorStoreAdapter = (store) => {
-          const mandatoryScope = connectorStoreReadScope(store);
-          if (!mandatoryScope.allowed) {
-            excludedCorpusIds.add(store.corpusId);
-            return;
-          }
+      lanes: sourceAnswerLanes = createSourceAnswerLanes({
+        stores: () => readConnectorStores,
+        registry: () => buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId))),
+        embeddingProvider: (store) => connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider,
+        localEmbedding: loadedBuiltInEmbedding,
+        readScope: connectorStoreReadScope,
+        answerScope: (store, request) => {
           const principal = connectorStorePrincipals.get(store.corpusId);
-          const scope = connectorStoreAnswerScope({
-            store,
-            request,
-            ...principal ? { principal } : {}
-          });
-          if (scope.kind === "skip") {
-            excludedCorpusIds.add(store.corpusId);
-            return;
-          }
-          const connectorStoreEmbedding = requestEmbedding(store);
-          const connectorStoreAccount = scope.accountScope ?? mandatoryScope.accountScope ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
-          searchScopes.set(store.corpusId, {
-            ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
-            ...scope.filters || mandatoryScope.filters ? { filters: { ...scope.filters, ...mandatoryScope.filters } } : {}
-          });
-          return createConnectorStoreCorpusAdapter({
-            store,
-            retrievalMode: request.retrieval_mode ?? "keyword",
-            ...store.corpusId === X_BOOKMARKS_CORPUS_ID ? { semanticRelevanceBar: xBookmarksSemanticRelevanceBar } : {},
-            ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
-            ...scope.filters || mandatoryScope.filters ? { filters: { ...scope.filters, ...mandatoryScope.filters } } : {},
-            ...connectorStoreEmbedding ? { embeddingProvider: connectorStoreEmbedding } : {}
-          });
-        };
-        return {
-          registry: buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId))),
-          visibilityGate: tierVisibilityGate,
-          secretLocations: (query, searchedCorpora) => tierSecretLocations(query, searchedCorpora.flatMap((corpusId) => {
-            const scope = searchScopes.get(corpusId);
-            return scope ? [{ corpusId, ...scope }] : [];
-          })),
-          classificationCoverage: (searchedCorpora) => searchedCorpora.flatMap((corpusId) => {
-            const lane = tierLanes.find((candidate) => candidate.corpusIds.has(corpusId));
-            if (!lane)
-              return [];
-            try {
-              const held = lane.ledger.corpusCopyCounts(corpusId).held;
-              return held > 0 ? [{ corpusId, pendingClassificationItems: held }] : [];
-            } catch {
-              return [];
-            }
-          }),
-          adapters: {
-            ...Object.fromEntries(readConnectorStores.flatMap((store) => {
-              const adapter = connectorStoreAdapter(store);
-              return adapter ? [[store.corpusId, adapter]] : [];
-            }))
-          },
-          excludedCorpusIds,
-          contentProviders: {
-            ...Object.fromEntries(readConnectorStores.flatMap((store) => {
-              const mandatoryScope = connectorStoreReadScope(store);
-              const passageEmbedding = request.retrieval_mode === "hybrid" ? requestEmbedding(store) : undefined;
-              return mandatoryScope.allowed ? [[store.corpusId, createConnectorStoreContentProvider({
-                store,
-                ...passageEmbedding ? { embeddingProvider: passageEmbedding } : {},
-                ...mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {},
-                ...mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {},
-                ...mandatoryScope.filters ? { metadataFilters: mandatoryScope.filters } : {},
-                contentAllowed: mandatoryScope.contentAllowed !== false
-              })]] : [];
-            }))
-          }
-        };
-      }
+          return connectorStoreAnswerScope({ store, request, ...principal ? { principal } : {} });
+        },
+        accountScope: (store) => connectorStoreAccountScopes.get(store.corpusId),
+        semanticRelevanceBar: (store) => store.corpusId === X_BOOKMARKS_CORPUS_ID ? xBookmarksSemanticRelevanceBar : undefined,
+        visibilityGate: tierVisibilityGate,
+        secretLocations: tierSecretLocations,
+        heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0
+      })
     });
   })() : undefined;
   const sourceAnswer = analystSourceAnswer ? {
@@ -137152,6 +138091,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     return;
   };
   let dashboardPanelTools;
+  let localPrivateAnswers;
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
@@ -137219,6 +138159,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return dashboardPanelTools.call(name, args, context2);
           }
         },
+        ...sourceAnswerLanes ? {
+          privateAnswers: {
+            waiting: () => localPrivateAnswers?.waiting(),
+            waitingCount: () => localPrivateAnswers?.waitingCount() ?? 0,
+            handle: (body, session) => localPrivateAnswers ? localPrivateAnswers.handle(body, session) : Promise.resolve({ status: 503, body: { ok: false, error: { code: "unavailable", message: "Olympus is still starting. Try again in a moment." } } })
+          }
+        } : {},
         consult: {
           status: () => dashboardConsult.status(),
           setEnabled: (update) => dashboardConsult.setEnabled(update),
@@ -137374,6 +138321,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     dropbox: createDropboxOpenTargets2()
   };
   const privateEvidenceEligible = async (items) => sourceAnswerLanes ? checkPrivateEvidenceItems({ lanes: sourceAnswerLanes, items }) : items.map(() => false);
+  const openCitedFile = process.platform === "darwin" ? (path) => new Promise((resolve11, reject) => {
+    const args = localOpenArguments2(path, localDropboxRoots2());
+    if (!args) {
+      reject(new Error("open refused"));
+      return;
+    }
+    execFile2("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve11());
+  }) : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel2({
     model: workerBuiltInModel?.model,
     eligible: privateEvidenceEligible,
@@ -137401,17 +138356,40 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     acknowledge: (ref) => {
       waitingQuestionStore()?.acknowledge(ref);
     },
-    ...process.platform === "darwin" ? {
-      openFile: (path) => new Promise((resolve11, reject) => {
-        const args = localOpenArguments2(path, localDropboxRoots2());
-        if (!args) {
-          reject(new Error("open refused"));
-          return;
-        }
-        execFile2("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve11());
-      })
-    } : {}
+    ...openCitedFile ? { openFile: openCitedFile } : {}
   });
+  if (sourceAnswerLanes) {
+    const { createLocalAnswerPath: createLocalAnswerPath2, createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
+    const { DASHBOARD_SUPPORTED_SOURCES: DASHBOARD_SUPPORTED_SOURCES2 } = await Promise.resolve().then(() => (init_source_dashboard(), exports_source_dashboard));
+    const sourceName = (corpusId) => {
+      const sourceId = sourceCorpusRegistry2.list().find((corpus) => corpus.corpusId === corpusId)?.sourceId;
+      if (!sourceId)
+        return;
+      return DASHBOARD_SUPPORTED_SOURCES2.find((source) => source.corpus_source_ids.includes(sourceId))?.label;
+    };
+    const local = createLocalAnswerPath2({
+      lanes: sourceAnswerLanes,
+      model: workerBuiltInModel?.model,
+      available: () => workerBuiltInModel?.available() ?? false,
+      relevanceEmbedding: () => builtInEmbeddingOnly(secureLocalPolicyEmbeddingProvider ?? sourceIndexEmbeddingProvider, loadedBuiltInEmbedding),
+      sourceLinks: (item) => {
+        const provenance = item.provenance;
+        const provider = provenance?.sourceItem?.provider;
+        const locator = provenance?.citation?.uri;
+        if (typeof provider !== "string" || typeof locator !== "string")
+          return;
+        return Object.hasOwn(sourceOpenTargets, provider) ? sourceOpenTargets[provider](locator) : undefined;
+      },
+      sourceName
+    });
+    localPrivateAnswers = createLocalPrivateAnswers2({
+      answer: (input) => answerActivity.run(() => local.answer(input)),
+      store: waitingQuestionStore,
+      connectionName: (connectionId) => remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
+      eligible: local.eligible,
+      ...openCitedFile ? { openFile: openCitedFile } : {}
+    });
+  }
   const privateQuestions = new PrivateQuestionJobs2({
     installId: () => remotePublicUrls()?.installId,
     ask: (input) => askAnonymouslyNow ? askAnonymouslyNow({
@@ -137741,7 +138719,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       const runtime = await readEmbeddingRuntime({ env: process.env });
       return runtime.state === "unknown" ? undefined : runtime.overrideOn;
     },
-    unreadableFiles: () => unreadableFiles
+    unreadableFiles: () => unreadableFiles,
+    waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0
   });
   const server = Bun.serve({
     hostname,
@@ -138418,6 +139397,7 @@ var init_server5 = __esm(async () => {
   init_telegram_messages();
   init_connector_store();
   init_principal();
+  init_source_answer_lanes();
   init_tiered_store_set();
   init_tier_set2();
   init_tier_set3();
@@ -138805,7 +139785,7 @@ init_messaging_capture();
 init_config();
 init_dashboard_opening();
 init_open_targets();
-import { randomBytes as randomBytes23 } from "node:crypto";
+import { randomBytes as randomBytes24 } from "node:crypto";
 import { readFileSync as readFileSync56, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -143921,7 +144901,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes23(32).toString("base64url");
+  return randomBytes24(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};

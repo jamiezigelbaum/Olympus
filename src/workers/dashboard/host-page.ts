@@ -53,7 +53,7 @@ export const DASHBOARD_PANEL_READ_QUERY_PARAM = 'panel-read';
 export const DASHBOARD_LOCAL_PAGES = {
   keys: 'keys',
   agents: 'agents',
-  outsideHelp: 'outside-help',
+  privateAnswers: 'private-answers',
   connector: 'connector',
 } as const;
 
@@ -82,6 +82,7 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
   for (const target of allOpenTargets()) {
     const path = openTargetPath(target);
     if (target.kind === 'dashboard') out[path] = `${origin}${dashboardHomeHref(token)}`;
+    else if (target.kind === 'private_answers') out[path] = `${origin}${dashboardLocalPageHref('privateAnswers', token)}`;
     else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref('keys', token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     } else if (isPanelOpenTarget(target)) {

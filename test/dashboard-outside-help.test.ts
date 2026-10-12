@@ -1,6 +1,6 @@
 /**
  * The Outside help card (src/workers/dashboard/outside-help.ts,
- * pages/outside-help.ts) and its worker side (email-source/dashboard-consult.ts,
+ * pages/private-answers.ts) and its worker side (email-source/dashboard-consult.ts,
  * the writer's one caller): the page states and copy, the Mac-only boundary
  * (control session in, Gateway bearer out, nothing native), and the adapter's
  * rules over a temp HOME. Design docs/design/frontier-consult-lane.md §A.9,
@@ -28,7 +28,7 @@ import {
   summaryOf,
   type DashboardOutsideHelpStatus,
 } from '../src/workers/dashboard/outside-help.ts';
-import { renderDashboardOutsideHelpPage } from '../src/workers/dashboard/pages/outside-help.ts';
+import { renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardConsultAdapter, DASHBOARD_ZKAPI_PROFILE_ID, type DashboardConsultBackend } from '../src/workers/email-source/dashboard-consult.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -138,7 +138,7 @@ function configuredRoute(input: { complete?: boolean; ready?: ZkapiConsultReadin
 }
 
 function page(value: DashboardOutsideHelpStatus, extra: Record<string, unknown> = {}): string {
-  return renderDashboardOutsideHelpPage({ now: NOW, controlSessionCsrfToken: 'csrf', outsideHelpLocalSession: true, outsideHelp: value, ...extra });
+  return renderDashboardPrivateAnswersPage({ now: NOW, controlSessionCsrfToken: 'csrf', outsideHelpLocalSession: true, outsideHelp: value, ...extra });
 }
 
 /** Every word a reader sees: visible text plus accessible names, scripts and styles removed. */
@@ -183,7 +183,8 @@ function runCardScript(html: string, answer: (url: string, body: unknown) => Car
 describe('the Outside help page: states and copy', () => {
   test('off, route ready, acknowledged: one status line, no problems, everything else one collapsed line with its value', () => {
     const html = page(status());
-    expect(html).toContain('<title>Olympus / Anonymous answers</title>');
+    // The card sits under Private answers, the page that replaced Anonymous answers.
+    expect(html).toContain('<title>Olympus / Private answers</title>');
     expect(html).toContain(`data-outside-state="off">${W.state.off}<`);
     // Above the sections: the title and the status line only (owner 2026-10-10: "way too complicated").
     const firstView = html.slice(html.indexOf('data-outside-help '), html.indexOf('<div class="ohmore">'));
@@ -717,7 +718,7 @@ describe('the worker serves the card only inside a local control session', () =>
     const { cookie, csrf } = await localSession(fetcher);
     const response = await fetcher(post(DASHBOARD_OUTSIDE_HELP_PATHS.enable, { enabled: true, revision: 0 }, { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }));
     expect(response.status).toBe(501);
-    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(html).toContain('data-outside-unavailable');
   });
 
@@ -727,7 +728,7 @@ describe('the worker serves the card only inside a local control session', () =>
     const counted: DashboardConsultBackend = { ...backend, status: async () => { calls.push('status'); return status(); } };
     const fetcher = worker(counted);
     const { cookie } = await localSession(fetcher);
-    const session = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const session = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(session).toContain('data-outside-help ');
     expect(session).toContain('data-statement="only_when_asked"');
     expect(session).toContain('data-outside-enabled="true"');
@@ -735,13 +736,13 @@ describe('the worker serves the card only inside a local control session', () =>
     expect(calls).toEqual(['status']);
     // A bearer-minted session reads the same facts but is offered the local unlock, no controls.
     const bearerMinted = await controlSession(fetcher);
-    const offered = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: bearerMinted.cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const offered = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: bearerMinted.cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(offered).toContain('data-outside-unlock');
     expect(offered).not.toContain('data-outside-enabled="true">');
     expect(calls).toEqual(['status', 'status']);
     // The bearer's own GET has write authority elsewhere, but this card needs the control session.
-    const bearer = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Authorization: 'Bearer worker-secret' } }))).text();
-    expect(bearer).toContain('data-outside-locked');
+    const bearer = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Authorization: 'Bearer worker-secret' } }))).text();
+    expect(bearer).toContain('data-pa-locked');
     expect(calls).toEqual(['status', 'status']);
   });
 });
@@ -966,7 +967,7 @@ describe('the adapter: turning outside help on and off', () => {
     writeFileSync(join(home, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
     const fetcher = worker(stale.backend);
     const { cookie, csrf } = await localSession(fetcher);
-    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(html).toContain(`data-outside-state="needs_acceptance"`);
     const { document, window, posts, settle } = runCardScript(html, async (url, body) => {
       const response = await fetcher(post(url, body, { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }));
