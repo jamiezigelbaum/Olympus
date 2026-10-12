@@ -2614,16 +2614,34 @@ function probeStillImageReadiness(options = {}) {
 function readyStillImageFormats(readiness = stillImageReadiness()) {
   return new Set(STILL_IMAGE_FORMATS.filter((format) => readiness.formats[format].ready));
 }
-function stillImageReadiness() {
-  current ??= probeStillImageReadiness();
-  return current;
+function withVision(readiness, vision) {
+  const blocked = vision === "unavailable";
+  const formats = Object.fromEntries(STILL_IMAGE_FORMATS.map((format) => {
+    const entry = readiness.formats[format];
+    const decoded = entry.ready || entry.reason === "vision_unavailable";
+    return [format, !decoded ? entry : blocked ? { ready: false, reason: "vision_unavailable" } : { ready: true }];
+  }));
+  return { ...readiness, formats, vision };
 }
-var DEFAULT_PROBE_TIMEOUT_MS = 15000, current;
+function stillImageReadiness() {
+  if (!current)
+    current = { readiness: probeStillImageReadiness({ vision: visionReader() }), pinned: false, checkedAt: clock() };
+  if (!current.pinned && clock() - current.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS) {
+    current.checkedAt = clock();
+    const vision = visionReader();
+    if (vision !== current.readiness.vision)
+      current.readiness = withVision(current.readiness, vision);
+  }
+  return current.readiness;
+}
+var DEFAULT_PROBE_TIMEOUT_MS = 15000, current, STILL_IMAGE_VISION_RECHECK_MS = 2000, visionReader, clock;
 var init_still_image_readiness = __esm(() => {
   init_image_preparers();
   init_still_image_probe_fixtures();
   init_still_image_formats();
   init_assets();
+  visionReader = readVision;
+  clock = Date.now;
 });
 
 // src/core/source-ingestion-policy.ts
@@ -2744,11 +2762,12 @@ function normalizePath(path) {
   const trimmed = path.trim();
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
-var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1;
+var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1, READINESS_FOLLOWING_POLICIES;
 var init_source_ingestion_policy = __esm(() => {
   init_operation_error();
   init_still_image_readiness();
   init_still_image_formats();
+  READINESS_FOLLOWING_POLICIES = new WeakMap;
 });
 
 // src/core/source-ingestion-exclusions.ts
@@ -24132,6 +24151,7 @@ function defaultDropboxConnectorStoreDbPath(env = process.env) {
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
   init_source_ingestion_exclusions();
+  init_still_image_readiness();
   init_source_ingestion_policy();
   init_connector_store();
   init_corpus_adapter();
@@ -33382,7 +33402,17 @@ init_command_runner();
 
 // src/workers/file-extraction/extractors/text.ts
 init_command_runner();
+
+// src/workers/file-extraction/extractors/image-prepare.ts
 init_media_cache();
+init_still_image_formats();
+init_command_runner();
+init_image_preparers();
+var DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+
+// src/workers/file-extraction/extractors/text.ts
+init_media_cache();
+init_still_image_formats();
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 init_command_runner();
@@ -33397,13 +33427,6 @@ var DEFAULT_REMOTE_EXTRACTION_PROMPT = [
   "For tables, reports, receipts, screenshots, or scans, preserve labels, values, dates, units, and row context.",
   "Do not infer private facts beyond the document."
 ].join(" ");
-
-// src/workers/file-extraction/extractors/image-prepare.ts
-init_media_cache();
-init_still_image_formats();
-init_command_runner();
-init_image_preparers();
-var DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
 
 // src/workers/file-extraction/registry.ts
 init_image_preparers();

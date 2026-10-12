@@ -9700,7 +9700,7 @@ function stillImageFormatFromBytes(bytes) {
     return "gif";
   if (bytes.length >= 2 && bytes[0] === 66 && bytes[1] === 77)
     return "bmp";
-  if (bytes.length >= 4 && (ascii(bytes, 0, 2) === "II" && bytes[2] === 42 && bytes[3] === 0 || ascii(bytes, 0, 2) === "MM" && bytes[2] === 0 && bytes[3] === 42))
+  if (bytes.length >= 4 && (ascii(bytes, 0, 2) === "II" && (bytes[2] === 42 || bytes[2] === 43) && bytes[3] === 0 || ascii(bytes, 0, 2) === "MM" && bytes[2] === 0 && (bytes[3] === 42 || bytes[3] === 43)))
     return "tiff";
   if (bytes.length >= 12 && ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WEBP")
     return "webp";
@@ -9742,21 +9742,27 @@ function jpegPixelSize(bytes) {
 function tiffDimensions(bytes) {
   const data = view(bytes);
   const little = ascii(bytes, 0, 2) === "II";
-  const ifd = data.getUint32(4, little);
-  if (ifd + 2 > bytes.length)
+  const big = data.getUint16(2, little) === 43;
+  if (big && (bytes.length < 16 || data.getUint16(4, little) !== 8))
     return;
-  const count = data.getUint16(ifd, little);
+  const ifdOffset = big ? Number(data.getBigUint64(8, little)) : data.getUint32(4, little);
+  const countSize = big ? 8 : 2;
+  const entrySize = big ? 20 : 12;
+  if (!Number.isSafeInteger(ifdOffset) || ifdOffset + countSize > bytes.length)
+    return;
+  const count = big ? Number(data.getBigUint64(ifdOffset, little)) : data.getUint16(ifdOffset, little);
   let width;
   let height;
   for (let index = 0;index < count; index += 1) {
-    const entry = ifd + 2 + index * 12;
-    if (entry + 12 > bytes.length)
+    const entry = ifdOffset + countSize + index * entrySize;
+    if (entry + entrySize > bytes.length)
       break;
     const tag = data.getUint16(entry, little);
     if (tag !== 256 && tag !== 257)
       continue;
     const type = data.getUint16(entry + 2, little);
-    const value = type === 3 ? data.getUint16(entry + 8, little) : type === 4 ? data.getUint32(entry + 8, little) : undefined;
+    const valueAt = entry + (big ? 12 : 8);
+    const value = type === 3 ? data.getUint16(valueAt, little) : type === 4 ? data.getUint32(valueAt, little) : big && type === 16 ? Number(data.getBigUint64(valueAt, little)) : undefined;
     if (value === undefined)
       continue;
     if (tag === 256)
@@ -9790,20 +9796,48 @@ function webpDimensions(bytes) {
   }
   return;
 }
+function boxesIn(bytes, start, end) {
+  const data = view(bytes);
+  const boxes = [];
+  let at = start;
+  while (at + 8 <= end && boxes.length < MAX_BOXES_PER_LEVEL) {
+    let size = data.getUint32(at);
+    let header = 8;
+    if (size === 1) {
+      if (at + 16 > end)
+        break;
+      const wide = data.getBigUint64(at + 8);
+      if (wide > BigInt(Number.MAX_SAFE_INTEGER))
+        break;
+      size = Number(wide);
+      header = 16;
+    } else if (size === 0) {
+      size = end - at;
+    }
+    if (size < header || at + size > end)
+      break;
+    boxes.push({ type: ascii(bytes, at + 4, 4), body: at + header, end: at + size });
+    at += size;
+  }
+  return boxes;
+}
 function heicDimensions(bytes) {
   const data = view(bytes);
-  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let best;
-  let from = 0;
-  for (;; ) {
-    const at = buffer.indexOf("ispe", from, "latin1");
-    if (at < 0 || at + 16 > bytes.length)
-      break;
-    const width = data.getUint32(at + 8);
-    const height = data.getUint32(at + 12);
-    if (!best || width * height > best.width * best.height)
-      best = { width, height };
-    from = at + 4;
+  const meta = boxesIn(bytes, 0, bytes.length).find((box) => box.type === "meta");
+  if (!meta)
+    return;
+  for (const iprp of boxesIn(bytes, meta.body + 4, meta.end).filter((box) => box.type === "iprp")) {
+    for (const ipco of boxesIn(bytes, iprp.body, iprp.end).filter((box) => box.type === "ipco")) {
+      for (const property of boxesIn(bytes, ipco.body, ipco.end)) {
+        if (property.type !== "ispe" || property.end - property.body < 12)
+          continue;
+        const width = data.getUint32(property.body + 4);
+        const height = data.getUint32(property.body + 8);
+        if (!best || width * height > best.width * best.height)
+          best = { width, height };
+      }
+    }
   }
   return best;
 }
@@ -9836,7 +9870,7 @@ function imageDeclaredDimensions(bytes) {
     return;
   }
 }
-var STILL_IMAGE_FORMATS, FORMAT_MIME_TYPES, FORMAT_EXTENSIONS, HEIC_BRANDS, IMAGE_MAX_DECLARED_PIXELS;
+var STILL_IMAGE_FORMATS, FORMAT_MIME_TYPES, FORMAT_EXTENSIONS, HEIC_BRANDS, IMAGE_MAX_DECLARED_PIXELS, MAX_BOXES_PER_LEVEL = 4096;
 var init_still_image_formats = __esm(() => {
   STILL_IMAGE_FORMATS = ["jpeg", "png", "heic", "webp", "gif", "tiff", "bmp"];
   FORMAT_MIME_TYPES = {
@@ -10753,16 +10787,34 @@ function probeStillImageReadiness(options = {}) {
 function readyStillImageFormats(readiness = stillImageReadiness()) {
   return new Set(STILL_IMAGE_FORMATS.filter((format) => readiness.formats[format].ready));
 }
-function stillImageReadiness() {
-  current ??= probeStillImageReadiness();
-  return current;
+function withVision(readiness, vision) {
+  const blocked = vision === "unavailable";
+  const formats = Object.fromEntries(STILL_IMAGE_FORMATS.map((format) => {
+    const entry = readiness.formats[format];
+    const decoded = entry.ready || entry.reason === "vision_unavailable";
+    return [format, !decoded ? entry : blocked ? { ready: false, reason: "vision_unavailable" } : { ready: true }];
+  }));
+  return { ...readiness, formats, vision };
 }
-var DEFAULT_PROBE_TIMEOUT_MS = 15000, current;
+function stillImageReadiness() {
+  if (!current)
+    current = { readiness: probeStillImageReadiness({ vision: visionReader() }), pinned: false, checkedAt: clock() };
+  if (!current.pinned && clock() - current.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS) {
+    current.checkedAt = clock();
+    const vision = visionReader();
+    if (vision !== current.readiness.vision)
+      current.readiness = withVision(current.readiness, vision);
+  }
+  return current.readiness;
+}
+var DEFAULT_PROBE_TIMEOUT_MS = 15000, current, STILL_IMAGE_VISION_RECHECK_MS = 2000, visionReader, clock;
 var init_still_image_readiness = __esm(() => {
   init_image_preparers();
   init_still_image_probe_fixtures();
   init_still_image_formats();
   init_assets();
+  visionReader = readVision;
+  clock = Date.now;
 });
 
 // src/core/source-ingestion-policy.ts
@@ -10791,7 +10843,17 @@ function unreadStillImageMatch(read) {
     extensions: unread.flatMap((format) => [...stillImageExtensions(format)])
   };
 }
+function followsStillImageReadiness(policy) {
+  return READINESS_FOLLOWING_POLICIES.get(policy) === policy.rules;
+}
 function defaultDropboxIngestionPolicy(options = {}) {
+  const policy = buildDefaultDropboxIngestionPolicy(options);
+  if (options.stillImagesRead === undefined && options.stillImageFormats === undefined) {
+    READINESS_FOLLOWING_POLICIES.set(policy, policy.rules);
+  }
+  return policy;
+}
+function buildDefaultDropboxIngestionPolicy(options) {
   const unread = unreadStillImageMatch(options.stillImageFormats ?? options.stillImagesRead);
   return {
     schemaVersion: SOURCE_INGESTION_POLICY_SCHEMA_VERSION,
@@ -10974,7 +11036,7 @@ function normalizePath(path) {
   const trimmed = path.trim();
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
-var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1, DEFAULT_DROPBOX_ROOT = "/", DEFAULT_DEFERRED_VIDEO_EXTENSIONS, DEFAULT_DEFERRED_BOOK_EXTENSIONS, DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS, DROPBOX_LANE_CORPUS_IDS;
+var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1, DEFAULT_DROPBOX_ROOT = "/", DEFAULT_DEFERRED_VIDEO_EXTENSIONS, DEFAULT_DEFERRED_BOOK_EXTENSIONS, DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS, READINESS_FOLLOWING_POLICIES, DROPBOX_LANE_CORPUS_IDS;
 var init_source_ingestion_policy = __esm(() => {
   init_operation_error();
   init_still_image_readiness();
@@ -11016,6 +11078,7 @@ var init_source_ingestion_policy = __esm(() => {
     "ebooks",
     "kindle"
   ];
+  READINESS_FOLLOWING_POLICIES = new WeakMap;
   DROPBOX_LANE_CORPUS_IDS = [
     "secure_local.dropbox.files",
     "internal.dropbox.files",
@@ -34620,6 +34683,49 @@ function dropboxIngestionExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), DROPBOX_INGESTION_EXCLUSION_SOURCE, { enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA });
 }
 function dropboxCanonicalIngestionMatcher(policy, env = process.env) {
+  if (!followsStillImageReadiness(policy))
+    return buildDropboxCanonicalIngestionMatcher(policy, env);
+  let formatsKey;
+  let built;
+  const current2 = () => {
+    if (!followsStillImageReadiness(policy)) {
+      built = buildDropboxCanonicalIngestionMatcher(policy, env);
+      formatsKey = undefined;
+      return built;
+    }
+    const ready = readyStillImageFormats();
+    const key2 = [...ready].sort().join(",");
+    if (built === undefined || key2 !== formatsKey) {
+      formatsKey = key2;
+      built = buildDropboxCanonicalIngestionMatcher({ ...policy, rules: defaultDropboxIngestionPolicy({ stillImagesRead: ready }).rules }, env);
+    }
+    return built;
+  };
+  return {
+    get active() {
+      return current2().active;
+    },
+    get pathActive() {
+      return current2().pathActive;
+    },
+    get identityActive() {
+      return current2().identityActive;
+    },
+    get mediaActive() {
+      return current2().mediaActive;
+    },
+    get unenforceableRuleIds() {
+      return current2().unenforceableRuleIds;
+    },
+    get criteria() {
+      return current2().criteria;
+    },
+    evaluatePath: (path) => current2().evaluatePath(path),
+    evaluateMetadata: (metadata) => current2().evaluateMetadata(metadata),
+    evaluateItem: (facts) => current2().evaluateItem(facts)
+  };
+}
+function buildDropboxCanonicalIngestionMatcher(policy, env) {
   const standing = dropboxIngestionExclusionMatcher(env);
   const policyRules = policy.rules.filter((rule) => rule.action !== "full_extract");
   const policyCriteria = policyRules.flatMap((rule, index) => dropboxPolicyCriteria(rule, index));
@@ -34747,6 +34853,7 @@ function dropboxPolicyDecision(rules, facts) {
 var DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH", DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH", DROPBOX_TIER_CORPUS_IDS, DROPBOX_INGESTION_EXCLUSION_SOURCE = "dropbox.personal", DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
   init_source_ingestion_exclusions();
+  init_still_image_readiness();
   init_source_ingestion_policy();
   init_connector_store();
   init_corpus_adapter();
@@ -49184,7 +49291,7 @@ function createXBookmarksApiSourceConnector(options) {
     throw new TypeError("X bookmark account must be non-empty.");
   const attemptedAt = validDate5(options.attemptedAt);
   const rawClock = options.now ?? (() => new Date);
-  const clock = () => {
+  const clock2 = () => {
     const current2 = validDate5(rawClock());
     return current2.getTime() < attemptedAt.getTime() ? new Date(attemptedAt) : current2;
   };
@@ -49231,14 +49338,14 @@ function createXBookmarksApiSourceConnector(options) {
       if (acquired)
         return latest;
       const provenance = xApiInvocationProvenance(options.provenance);
-      const acquisition = options.mode === "incremental" ? await acquireIncremental(client, cursor, options.usageStore, account, config, clock, provenance) : await withReconcileStateStore(options, env, (stateStore) => acquireReconciliation(client, options.usageStore, stateStore, account, userId, config, attemptedAt, clock, provenance, options.preservationFloorAuthorizationSha256, options.providerWindowBoundaryPolicy ?? X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY));
+      const acquisition = options.mode === "incremental" ? await acquireIncremental(client, cursor, options.usageStore, account, config, clock2, provenance) : await withReconcileStateStore(options, env, (stateStore) => acquireReconciliation(client, options.usageStore, stateStore, account, userId, config, attemptedAt, clock2, provenance, options.preservationFloorAuthorizationSha256, options.providerWindowBoundaryPolicy ?? X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY));
       latest = acquisition.status;
       completedSnapshotAt = acquisition.completedAt;
       snapshot = createXBookmarksSourceConnector({
         account,
         posts: acquisition.posts,
         ...acquisition.foldersByPostId ? { foldersByPostId: acquisition.foldersByPostId } : {},
-        fetchedAt: acquisition.completedAt ?? clock().toISOString()
+        fetchedAt: acquisition.completedAt ?? clock2().toISOString()
       });
       acquired = true;
       return latest;
@@ -49269,7 +49376,7 @@ function createXBookmarksApiSourceConnector(options) {
     },
     assertGrantCurrent: () => assertGrantCurrent(),
     status: () => latest,
-    apiUsageStatus: () => options.usageStore.status({ account, config, now: clock() }),
+    apiUsageStatus: () => options.usageStore.status({ account, config, now: clock2() }),
     async markReconciliationDisposition(disposition, outcome) {
       if (options.mode !== "reconcile" || !completedSnapshotAt) {
         throw new Error("X reconciliation has no completed snapshot to mark.");
@@ -49280,7 +49387,7 @@ function createXBookmarksApiSourceConnector(options) {
         deferredPostIds: outcome.deferredWindowRemovalLocalItemIds.map((localItemId) => postIdFromLocalItemId(account, localItemId)),
         observedAt
       } : undefined;
-      return withReconcileStateStore(options, env, async (stateStore) => stateStore.markCompletedSnapshotDisposition(account, completedSnapshotAt, disposition, clock(), settlement));
+      return withReconcileStateStore(options, env, async (stateStore) => stateStore.markCompletedSnapshotDisposition(account, completedSnapshotAt, disposition, clock2(), settlement));
     }
   };
   return connector;
@@ -49304,7 +49411,7 @@ function grantFencedClient(client, assertGrantCurrent) {
     }
   };
 }
-async function acquireIncremental(client, checkpoint, usage, account, config, clock, provenance) {
+async function acquireIncremental(client, checkpoint, usage, account, config, clock2, provenance) {
   const previous = usage.headCheckpoint(account) || checkpoint?.trim();
   const catchupItemLimit = config.maxCatchupItems;
   const deferralStanding = previous !== undefined && usage.headTruncationDeferredAt(account) !== undefined;
@@ -49319,7 +49426,7 @@ async function acquireIncremental(client, checkpoint, usage, account, config, cl
     const ladderIndex = deferralStanding ? 0 : Math.min(headPageSizesUsed.length, config.headPageSizeLadder.length - 1);
     const maxResults = Math.min(config.headPageSizeLadder[ladderIndex], catchupItemLimit - posts.length);
     let providerPageSize = 0;
-    const page = await guardedPage(usage, account, config, clock(), maxResults, false, provenance, config.richResourceExpansionMultiplier, (reservedMaxResults) => {
+    const page = await guardedPage(usage, account, config, clock2(), maxResults, false, provenance, config.richResourceExpansionMultiplier, (reservedMaxResults) => {
       providerPageSize = reservedMaxResults;
       return client.fetchBookmarks({
         maxResults: reservedMaxResults,
@@ -49348,7 +49455,7 @@ async function acquireIncremental(client, checkpoint, usage, account, config, cl
   const warnings = truncationDeferred ? ["x_head_truncation_suspected_deferred_checkpoint_preserved"] : previous && !foundPrevious && nextToken ? ["x_head_catchup_bounded_daily_reconcile_required"] : [];
   return acquisition(posts, true, posts.length > 0, truncationDeferred ? previous : newestId ?? previous, headPageSizesUsed.length, warnings, posts.length, headPageSizesUsed, Number(truncationDeferred));
 }
-async function acquireReconciliation(client, usage, stateStore, account, providerUserId, config, startedAt, clock, provenance, preservationFloorAuthorizationSha256, providerWindowBoundaryPolicy = X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY) {
+async function acquireReconciliation(client, usage, stateStore, account, providerUserId, config, startedAt, clock2, provenance, preservationFloorAuthorizationSha256, providerWindowBoundaryPolicy = X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY) {
   const limits = reconcileLimits(config);
   const pending = stateStore.pendingCompletedSnapshot(account, providerUserId);
   if (pending) {
@@ -49380,7 +49487,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
             phase: progress.phase,
             ...progress.globalNextToken ? { expectedToken: progress.globalNextToken } : {},
             config,
-            now: clock(),
+            now: clock2(),
             provenance,
             maxResults,
             resourceExpansionMultiplier: config.richResourceExpansionMultiplier,
@@ -49408,7 +49515,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
                 expectedToken: progress.globalNextToken,
                 boundaryFingerprintSha256: boundary.fingerprintSha256,
                 algorithmVersion: boundary.algorithmVersion,
-                settledAt: clock()
+                settledAt: clock2()
               });
               continue;
             }
@@ -49421,7 +49528,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
           page: page2,
           requestedSize: providerPageSize2,
           limits,
-          settledAt: clock()
+          settledAt: clock2()
         });
         continue;
       }
@@ -49439,7 +49546,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
             phase: progress.phase,
             ...progress.globalVerifyNextToken ? { expectedToken: progress.globalVerifyNextToken } : {},
             config,
-            now: clock(),
+            now: clock2(),
             provenance,
             maxResults,
             resourceExpansionMultiplier: 1,
@@ -49468,7 +49575,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
                 expectedToken: progress.globalVerifyNextToken,
                 boundaryFingerprintSha256: boundary.fingerprintSha256,
                 algorithmVersion: boundary.algorithmVersion,
-                settledAt: clock()
+                settledAt: clock2()
               });
               continue;
             }
@@ -49481,7 +49588,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
           page: page2,
           requestedSize: providerPageSize2,
           limits,
-          settledAt: clock()
+          settledAt: clock2()
         });
         continue;
       }
@@ -49489,7 +49596,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
         assertPageCapacity(progress.folderPages, config.reconcileMaxPagesPerScope, "folder_pages");
         const maxResults = availablePageSize(config.reconcileMaxFolders, progress.foldersStaged, "folders", config.reconcilePageSize);
         let providerPageSize2 = 0;
-        const page2 = await boundedFolderProviderPage(() => guardedPage(usage, account, config, clock(), maxResults, true, provenance, 1, (reservedMaxResults) => {
+        const page2 = await boundedFolderProviderPage(() => guardedPage(usage, account, config, clock2(), maxResults, true, provenance, 1, (reservedMaxResults) => {
           stateStore.recordProviderPageRequest(account, reservedMaxResults);
           apiRequests += 1;
           providerPageSize2 = reservedMaxResults;
@@ -49505,7 +49612,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
           page: page2,
           requestedSize: providerPageSize2,
           limits,
-          settledAt: clock()
+          settledAt: clock2()
         });
         continue;
       }
@@ -49517,7 +49624,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
       }
       assertPageCapacity(progress.membershipPages, config.reconcileMaxPagesPerScope, "membership_pages");
       let providerPageSize = 0;
-      const page = await boundedFolderProviderPage(() => guardedPage(usage, account, config, clock(), config.reconcilePageSize, true, provenance, config.richResourceExpansionMultiplier, (reservedMaxResults) => {
+      const page = await boundedFolderProviderPage(() => guardedPage(usage, account, config, clock2(), config.reconcilePageSize, true, provenance, config.richResourceExpansionMultiplier, (reservedMaxResults) => {
         stateStore.recordProviderPageRequest(account, reservedMaxResults);
         apiRequests += 1;
         providerPageSize = reservedMaxResults;
@@ -49534,41 +49641,41 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
         page,
         requestedSize: providerPageSize,
         limits,
-        settledAt: clock()
+        settledAt: clock2()
       });
     }
-    const completed = stateStore.promoteCompletedSnapshot(account, clock(), {
+    const completed = stateStore.promoteCompletedSnapshot(account, clock2(), {
       ...preservationFloorAuthorizationSha256 ? { preservationFloorAuthorizationSha256 } : {}
     });
     return completedReconciliationAcquisition(completed, apiRequests, openedWarnings, account);
   } catch (error) {
     if (isFolderProviderOutageError(error)) {
-      const degraded = stateStore.completeFolderTraversalFromBaseline(account, clock());
+      const degraded = stateStore.completeFolderTraversalFromBaseline(account, clock2());
       if (degraded) {
-        const completed = stateStore.promoteCompletedSnapshot(account, clock(), {
+        const completed = stateStore.promoteCompletedSnapshot(account, clock2(), {
           ...preservationFloorAuthorizationSha256 ? { preservationFloorAuthorizationSha256 } : {}
         });
         return completedReconciliationAcquisition(completed, apiRequests, openedWarnings, account);
       }
     }
     if (error instanceof ReconcileStageLimitError) {
-      throw incompleteReconcileError(config, clock(), openedWarnings, error.limitKind);
+      throw incompleteReconcileError(config, clock2(), openedWarnings, error.limitKind);
     }
     if (error instanceof ReconcilePaginationCycleError) {
-      const failure = stateStore.recordStagedFailure(account, "pagination_cycle", clock());
+      const failure = stateStore.recordStagedFailure(account, "pagination_cycle", clock2());
       throw stagedRecoveryRequiredError({
         config,
-        now: clock(),
+        now: clock2(),
         failureClass: "pagination_cycle",
         warnings: openedWarnings,
         failureCount: failure.failure_count ?? 1
       });
     }
     if (error instanceof ReconcileStagedRecoveryRequiredError) {
-      const failure = stateStore.stagedRecoveryStatus(account, clock());
+      const failure = stateStore.stagedRecoveryStatus(account, clock2());
       throw stagedRecoveryRequiredError({
         config,
-        now: clock(),
+        now: clock2(),
         failureClass: error.failureClass,
         warnings: openedWarnings,
         failureCount: failure.failure_count ?? 1
@@ -49578,7 +49685,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
       throw new XBookmarksLiveSyncError({
         errorKind: "reconcile_incomplete",
         message: error.message,
-        retryAt: new Date(clock().getTime() + config.degradedIntervalMs).toISOString(),
+        retryAt: new Date(clock2().getTime() + config.degradedIntervalMs).toISOString(),
         degradedReason: "x_reconcile_preservation_floor_refused",
         warnings: [
           ...openedWarnings,
@@ -49598,7 +49705,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
         failureClass: "window_boundary_drift",
         message: "X bookmarks provider-window boundary proof drifted from its staged traversal.",
         config,
-        now: clock(),
+        now: clock2(),
         warnings: [...openedWarnings, "x_reconcile_window_boundary_inconsistent_no_authority"]
       });
     }
@@ -49611,7 +49718,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
           failureClass,
           message: "X bookmarks staged traversal hit a recoverable provider cursor or scope failure.",
           config,
-          now: clock(),
+          now: clock2(),
           warnings: openedWarnings
         });
       }
@@ -49619,7 +49726,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
         throw new XBookmarksLiveSyncError({
           errorKind: "provider_rate_limited",
           message: "X bookmarks provider rate limit reached.",
-          retryAt: error.rateLimit?.resetAt ?? new Date(clock().getTime() + config.degradedIntervalMs).toISOString(),
+          retryAt: error.rateLimit?.resetAt ?? new Date(clock2().getTime() + config.degradedIntervalMs).toISOString(),
           degradedReason: "provider_rate_limit",
           warnings: [...openedWarnings, "x_reconcile_progress_staged_restart_safe"]
         });
@@ -49628,7 +49735,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
         throw new XBookmarksLiveSyncError({
           errorKind: "provider_temporary",
           message: "Temporary X bookmarks provider failure.",
-          retryAt: new Date(clock().getTime() + config.degradedIntervalMs).toISOString(),
+          retryAt: new Date(clock2().getTime() + config.degradedIntervalMs).toISOString(),
           degradedReason: "x_reconcile_provider_temporary",
           warnings: [...openedWarnings, "x_reconcile_progress_staged_restart_safe"]
         });
@@ -57028,8 +57135,8 @@ async function openSession(options, control, recovery) {
   zkapiConsultInFlight = true;
   const statePath = options.statePath ?? defaultZkapiStatePath();
   const sent = { dispatched: false };
-  const clock = options.clock ?? (() => performance.now());
-  const startedAt = sampleClock(clock);
+  const clock2 = options.clock ?? (() => performance.now());
+  const startedAt = sampleClock(clock2);
   const bridge = {
     state: "opening",
     openSignal: control.signal,
@@ -57056,17 +57163,17 @@ async function openSession(options, control, recovery) {
       mkdirSync25(dirname35(statePath), { recursive: true, mode: 448 });
       const result2 = await withFileLease(`${statePath}.session`, () => {
         leaseHeld = true;
-        return runSession(recovery, options, statePath, bridge, sent, clock, startedAt);
+        return runSession(recovery, options, statePath, bridge, sent, clock2, startedAt);
       }, { acquireTimeoutMs: 50 });
       const receipt = result2.ok ? result2.receipt : result2.error.receipt;
       if (receipt && receipt.stageMs?.totalMs === undefined) {
-        receipt.stageMs = withTiming(receipt.stageMs ?? {}, "totalMs", elapsedMs(clock, startedAt));
+        receipt.stageMs = withTiming(receipt.stageMs ?? {}, "totalMs", elapsedMs(clock2, startedAt));
         if (Object.keys(receipt.stageMs).length === 0)
           delete receipt.stageMs;
       }
       return result2;
     } catch (error) {
-      const total = elapsedMs(clock, startedAt);
+      const total = elapsedMs(clock2, startedAt);
       let stageMs = withTiming({}, "totalMs", total);
       if (!leaseHeld)
         stageMs = withTiming(stageMs, "leaseAcquireMs", total);
@@ -57120,12 +57227,12 @@ async function openSession(options, control, recovery) {
   const result = await finished;
   return result.ok ? failure("internal_error", "unknown", result.networkIdentity, { receipt: result.receipt }) : result;
 }
-async function runSession(recovery, options, statePath, bridge, sent, clock, startedAt) {
-  let timings = withTiming({}, "leaseAcquireMs", elapsedMs(clock, startedAt));
+async function runSession(recovery, options, statePath, bridge, sent, clock2, startedAt) {
+  let timings = withTiming({}, "leaseAcquireMs", elapsedMs(clock2, startedAt));
   let openStage;
   let lastSampleAt;
   const stage = (key2) => {
-    const at = sampleClock(clock);
+    const at = sampleClock(clock2);
     lastSampleAt = at;
     if (openStage)
       timings = withTiming(timings, openStage.key, durationMs(openStage.at, at));
@@ -57634,7 +57741,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
   }
   stage(undefined);
   settleExitFacts();
-  timings = withTiming(timings, "totalMs", elapsedMs(clock, startedAt));
+  timings = withTiming(timings, "totalMs", elapsedMs(clock2, startedAt));
   const final = result;
   const finalReceipt = final.ok ? final.receipt : final.error.receipt;
   if (finalReceipt && Object.keys(timings).length > 0)
@@ -57677,9 +57784,9 @@ function releaseZkapiReservation(path, scope, earlierFence, now, allowanceMicroU
     };
   });
 }
-function sampleClock(clock) {
+function sampleClock(clock2) {
   try {
-    const value = clock();
+    const value = clock2();
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
   } catch {
     return;
@@ -57691,8 +57798,8 @@ function durationMs(from, to) {
   const ms = Math.round(to - from);
   return Number.isFinite(ms) ? Math.max(0, ms) : undefined;
 }
-function elapsedMs(clock, since) {
-  return since === undefined ? undefined : durationMs(since, sampleClock(clock));
+function elapsedMs(clock2, since) {
+  return since === undefined ? undefined : durationMs(since, sampleClock(clock2));
 }
 function withTiming(timings, key2, ms) {
   return ms === undefined ? timings : { ...timings, [key2]: ms };
@@ -96775,10 +96882,118 @@ var init_document_formats = __esm(() => {
   };
 });
 
-// src/workers/file-extraction/extractors/text.ts
+// src/workers/file-extraction/extractors/image-prepare.ts
 import { mkdtemp as mkdtemp2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir7 } from "node:os";
-import { dirname as dirname54, join as join76 } from "node:path";
+import { join as join76 } from "node:path";
+function imageDecoderUnavailableWarning(format) {
+  return `image_decoder_unavailable_${format}`;
+}
+function createImagePreparation(options) {
+  const commandRunner = options.commandRunner ?? runExtractionCommand;
+  const fixedPreparer = typeof options.preparer === "function" ? undefined : options.preparer;
+  const defaultPreparer = fixedPreparer ?? (options.preparer === undefined ? createSipsPreparer(options.sipsPath !== undefined ? { path: options.sipsPath } : {}) : undefined);
+  const currentPreparer = () => defaultPreparer ?? options.preparer();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_IMAGE_PREPARE_TIMEOUT_MS;
+  const maxInputBytes = options.maxInputBytes ?? DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES;
+  const maxPixels = options.maxPixels ?? IMAGE_MAX_DECLARED_PIXELS;
+  const admitted = (format) => {
+    if (options.formats === undefined || format === undefined)
+      return true;
+    const formats = typeof options.formats === "function" ? options.formats() : options.formats;
+    return formats.has(format);
+  };
+  const prepare = async (input) => {
+    const sniffed = stillImageFormatFromBytes(input.bytes);
+    const format = sniffed ?? stillImageFormatForMimeType(input.mimeType);
+    if (!admitted(format)) {
+      return { kind: "unavailable", ...format ? { format } : {} };
+    }
+    if (Math.max(input.sizeBytes, input.bytes.byteLength) > maxInputBytes) {
+      return { kind: "settled", output: { status: "skipped_too_large" } };
+    }
+    const declared = imageDeclaredDimensions(input.bytes);
+    if (declared && declared.width * declared.height > maxPixels) {
+      return { kind: "settled", output: { status: "skipped_too_large" } };
+    }
+    if (input.bytes.byteLength < MIN_INPUT_BYTES)
+      return { kind: "too_small" };
+    if (sniffed !== undefined && declared === undefined || sniffed === undefined && currentPreparer().kind === "vips") {
+      return { kind: "settled", output: { status: "failed_terminal", errorKind: IMAGE_PREPARE_ERROR_FAILED } };
+    }
+    if (declared && Math.min(declared.width, declared.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) {
+      return { kind: "too_small" };
+    }
+    const tempDir = await mkdtemp2(join76(tmpdir7(), TEMP_DIR_PREFIX2));
+    try {
+      const inputPath = join76(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+      await writeFile2(inputPath, input.bytes, { mode: 384 });
+      let prepared;
+      try {
+        prepared = await currentPreparer().prepare({ inputPath, tempDir, timeoutMs, commandRunner });
+      } catch (error2) {
+        if (error2?.code === "ENOENT")
+          return { kind: "unavailable" };
+        if (error2 instanceof ExtractionCommandTimeoutError) {
+          return { kind: "settled", output: { status: "failed_retryable", errorKind: IMAGE_PREPARE_ERROR_TIMEOUT } };
+        }
+        if (error2 instanceof ExtractionCommandError || error2 instanceof PreparedOutputError) {
+          return { kind: "settled", output: { status: "failed_terminal", errorKind: IMAGE_PREPARE_ERROR_FAILED } };
+        }
+        return { kind: "settled", output: { status: "failed_retryable", errorKind: IMAGE_PREPARE_ERROR_FAILED } };
+      }
+      if (!isJpeg2(prepared)) {
+        return { kind: "settled", output: { status: "failed_terminal", errorKind: IMAGE_PREPARE_ERROR_FAILED } };
+      }
+      const size = jpegPixelSize(prepared);
+      if (size && Math.min(size.width, size.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE)
+        return { kind: "too_small" };
+      try {
+        const stored = writeMediaCacheFile(options.cacheDir, prepared, "image/jpeg");
+        return {
+          kind: "media",
+          media: { path: stored.path, sha256: stored.sha256, mimeType: "image/jpeg", stagingHolder: stored.stagingHolder }
+        };
+      } catch {
+        return { kind: "settled", output: { status: "failed_retryable", errorKind: IMAGE_PREPARE_ERROR_CACHE_WRITE } };
+      }
+    } finally {
+      await rm3(tempDir, { recursive: true, force: true });
+    }
+  };
+  prepare.ready = (mimeType) => admitted(stillImageFormatForMimeType(mimeType));
+  if (options.formats !== undefined) {
+    const readyMarkers = () => STILL_IMAGE_FORMATS.filter((format) => admitted(format)).map(imageDecoderUnavailableWarning);
+    prepare.rereadPolicy = {
+      get unreadWarnings() {
+        return readyMarkers();
+      },
+      unreadTerminalErrorKinds: [],
+      get notReadyWarnings() {
+        return readyMarkers();
+      },
+      prepare: () => "ready"
+    };
+  }
+  return prepare;
+}
+function isJpeg2(bytes) {
+  return bytes.length > 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+}
+var DEFAULT_IMAGE_PREPARE_TIMEOUT_MS = 60000, DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES, TEMP_DIR_PREFIX2 = "olympus-image-prepare-", IMAGE_PREPARE_MIN_PIXEL_EDGE = 64, MIN_INPUT_BYTES = 1024, IMAGE_PREPARE_ERROR_FAILED = "image_prepare_failed", IMAGE_PREPARE_ERROR_TIMEOUT = "image_prepare_timeout", IMAGE_PREPARE_ERROR_CACHE_WRITE = "media_cache_write_failed";
+var init_image_prepare = __esm(() => {
+  init_media_cache();
+  init_still_image_formats();
+  init_command_runner();
+  init_image_preparers();
+  init_ocr();
+  DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/file-extraction/extractors/text.ts
+import { mkdtemp as mkdtemp3, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
+import { tmpdir as tmpdir8 } from "node:os";
+import { dirname as dirname54, join as join77 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -96802,6 +97017,7 @@ function createTextExtractor(options = {}) {
         return normalized && IMAGE_MIME_TYPES.has(normalized) && (imagePreparation.ready?.(normalized) ?? true) ? `${version2}${IMAGE_MEDIA_VERSION_SUFFIX}` : version2;
       }
     } : {},
+    ...imagePreparation?.rereadPolicy ? { extraReread: [imagePreparation.rereadPolicy] } : {},
     egress: "local",
     accepts(mimeType) {
       return textLaneAccepts(mimeType);
@@ -96838,8 +97054,9 @@ function createTextExtractor(options = {}) {
         });
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
+        let prepared;
         if (imagePreparation) {
-          const prepared = await imagePreparation({ bytes, mimeType, sizeBytes: context2.sizeBytes });
+          prepared = await imagePreparation({ bytes, mimeType, sizeBytes: context2.sizeBytes });
           if (prepared.kind === "settled")
             return prepared.output;
           if (prepared.kind === "media") {
@@ -96859,6 +97076,16 @@ function createTextExtractor(options = {}) {
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context2.sizeBytes });
         if (ocrOutput)
           return ocrOutput;
+        if (prepared?.kind === "unavailable" && prepared.format && prepared.format !== stillImageFormatForMimeType(mimeType)) {
+          return mediaDescriptorOutput({
+            mimeType,
+            sizeBytes: context2.sizeBytes,
+            maxBoundedTextChars,
+            kind: "image",
+            label: "image file",
+            warnings: [imageDecoderUnavailableWarning(prepared.format)]
+          });
+        }
         if (!imageMediaDescriptor) {
           return { status: "metadata_only" };
         }
@@ -97095,10 +97322,10 @@ function pdfTextLooksUndecoded(text2) {
   return total > 0 && unreadable / total > 0.1;
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp2(join76(tmpdir7(), TEMP_DIR_PREFIX2));
+  const tempDir = await mkdtemp3(join77(tmpdir8(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join76(tempDir, "input.pdf");
-    await writeFile2(inputPath, input.context.bytes);
+    const inputPath = join77(tempDir, "input.pdf");
+    await writeFile3(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
       args: [
@@ -97125,7 +97352,7 @@ async function extractPdfTextWithCommand(input) {
       ...input.ocr ? { ocr: input.ocr } : {}
     });
   } finally {
-    await rm3(tempDir, { recursive: true, force: true });
+    await rm4(tempDir, { recursive: true, force: true });
   }
 }
 function isCommandMissing(error2) {
@@ -97339,22 +97566,24 @@ function extractDelimitedText(input) {
     ...bounded.warnings.length > 0 ? { warnings: appendBoundedTextWarnings(undefined, bounded) } : {}
   };
 }
-var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07";
+var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX3 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07";
 var init_text = __esm(() => {
   init_bounded_text();
   init_command_runner();
   init_document_formats();
+  init_image_prepare();
   init_media_cache();
+  init_still_image_formats();
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync49 } from "node:fs";
-import { dirname as dirname55, join as join77 } from "node:path";
+import { dirname as dirname55, join as join78 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync49) {
   let directory = dirname55(fileURLToPath10(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
-    const candidate = join77(directory, APPLE_VISION_OCR_SCRIPT);
+    const candidate = join78(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
     const parent = dirname55(directory);
@@ -97597,9 +97826,9 @@ var init_apple_vision_ocr = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr.ts
-import { mkdtemp as mkdtemp3, readFile as readFile8, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
-import { tmpdir as tmpdir8 } from "node:os";
-import { join as join78 } from "node:path";
+import { mkdtemp as mkdtemp4, readFile as readFile8, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
+import { tmpdir as tmpdir9 } from "node:os";
+import { join as join79 } from "node:path";
 function createOcrEngine(input) {
   const options = input.options ?? {};
   let vision;
@@ -97627,7 +97856,7 @@ function createOcrEngine(input) {
     }
   };
 }
-async function withVision(engine, read) {
+async function withVision2(engine, read) {
   const vision = engine.vision;
   if (!vision)
     return;
@@ -97677,10 +97906,10 @@ function createOcrExtractor(options = {}) {
       const sizeBytes = input.sizeBytes ?? bytes.byteLength;
       const laneInput = { bytes, mimeType: mimeType ?? "", sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs };
       if (mimeType === PDF_MIME_TYPE) {
-        return runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision)) ?? extractPdfOcr(laneInput));
+        return runOcrLane(async () => await withVision2(engine, (vision) => visionPdf(laneInput, vision)) ?? extractPdfOcr(laneInput));
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
-        return runOcrLane(async () => await withVision(engine, (vision) => visionImage(laneInput, vision)) ?? extractImageOcr(laneInput));
+        return runOcrLane(async () => await withVision2(engine, (vision) => visionImage(laneInput, vision)) ?? extractImageOcr(laneInput));
       }
       return textExtractor.extract(input);
     }
@@ -97709,7 +97938,7 @@ function createPdfOcr(options = {}) {
       timeoutMs
     };
     try {
-      return await runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision)) ?? extractPdfOcr(laneInput));
+      return await runOcrLane(async () => await withVision2(engine, (vision) => visionPdf(laneInput, vision)) ?? extractPdfOcr(laneInput));
     } catch (error2) {
       if (error2 instanceof OcrUnavailableError)
         return;
@@ -97726,7 +97955,7 @@ function createImageOcr(options = {}) {
     if (!engine.vision)
       return;
     const laneInput = { bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs };
-    return runOcrLane(() => withVision(engine, (vision) => visionImage(laneInput, vision)));
+    return runOcrLane(() => withVision2(engine, (vision) => visionImage(laneInput, vision)));
   };
 }
 async function visionPdf(input, vision) {
@@ -97744,13 +97973,13 @@ async function visionImage(input, vision) {
   }, vision));
 }
 async function withTempInput(bytes, extension, read) {
-  const tempDir = await mkdtemp3(join78(tmpdir8(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp4(join79(tmpdir9(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join78(tempDir, `input${extension}`);
-    await writeFile3(inputPath, bytes);
+    const inputPath = join79(tempDir, `input${extension}`);
+    await writeFile4(inputPath, bytes);
     return await read(inputPath);
   } finally {
-    await rm4(tempDir, { recursive: true, force: true });
+    await rm5(tempDir, { recursive: true, force: true });
   }
 }
 async function runOcrLane(run) {
@@ -97766,12 +97995,12 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp3(join78(tmpdir8(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp4(join79(tmpdir9(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join78(tempDir, "input.pdf");
-    const outputPath = join78(tempDir, "output.pdf");
-    const sidecarPath = join78(tempDir, "sidecar.txt");
-    await writeFile3(inputPath, input.bytes);
+    const inputPath = join79(tempDir, "input.pdf");
+    const outputPath = join79(tempDir, "output.pdf");
+    const sidecarPath = join79(tempDir, "sidecar.txt");
+    await writeFile4(inputPath, input.bytes);
     try {
       await input.commandRunner({
         command: OCR_PDF_COMMAND,
@@ -97823,14 +98052,14 @@ async function extractPdfOcr(input) {
       ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
     };
   } finally {
-    await rm4(tempDir, { recursive: true, force: true });
+    await rm5(tempDir, { recursive: true, force: true });
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp3(join78(tmpdir8(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp4(join79(tmpdir9(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join78(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
-    await writeFile3(inputPath, input.bytes);
+    const inputPath = join79(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    await writeFile4(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
       args: [
@@ -97867,7 +98096,7 @@ async function extractImageOcr(input) {
       ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
     };
   } finally {
-    await rm4(tempDir, { recursive: true, force: true });
+    await rm5(tempDir, { recursive: true, force: true });
   }
 }
 function classifyOcrDeterministicPdfRejection(error2) {
@@ -97912,7 +98141,7 @@ function imageExtensionForMimeType(mimeType) {
     return ".heif";
   return ".img";
 }
-var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND = "ocrmypdf", OCR_IMAGE_COMMAND = "tesseract", TEMP_DIR_PREFIX3 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
+var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND = "ocrmypdf", OCR_IMAGE_COMMAND = "tesseract", TEMP_DIR_PREFIX4 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -98110,93 +98339,6 @@ var init_remote_vlm = __esm(() => {
     "For tables, reports, receipts, screenshots, or scans, preserve labels, values, dates, units, and row context.",
     "Do not infer private facts beyond the document."
   ].join(" ");
-});
-
-// src/workers/file-extraction/extractors/image-prepare.ts
-import { mkdtemp as mkdtemp4, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
-import { tmpdir as tmpdir9 } from "node:os";
-import { join as join79 } from "node:path";
-function createImagePreparation(options) {
-  const commandRunner = options.commandRunner ?? runExtractionCommand;
-  const fixedPreparer = typeof options.preparer === "function" ? undefined : options.preparer;
-  const defaultPreparer = fixedPreparer ?? (options.preparer === undefined ? createSipsPreparer(options.sipsPath !== undefined ? { path: options.sipsPath } : {}) : undefined);
-  const currentPreparer = () => defaultPreparer ?? options.preparer();
-  const timeoutMs = options.timeoutMs ?? DEFAULT_IMAGE_PREPARE_TIMEOUT_MS;
-  const maxInputBytes = options.maxInputBytes ?? DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES;
-  const maxPixels = options.maxPixels ?? IMAGE_MAX_DECLARED_PIXELS;
-  const admitted = (format) => {
-    if (options.formats === undefined || format === undefined)
-      return true;
-    const formats = typeof options.formats === "function" ? options.formats() : options.formats;
-    return formats.has(format);
-  };
-  const prepare = async (input) => {
-    if (!admitted(stillImageFormatFromBytes(input.bytes) ?? stillImageFormatForMimeType(input.mimeType))) {
-      return { kind: "unavailable" };
-    }
-    if (Math.max(input.sizeBytes, input.bytes.byteLength) > maxInputBytes) {
-      return { kind: "settled", output: { status: "skipped_too_large" } };
-    }
-    const declared = imageDeclaredDimensions(input.bytes);
-    if (declared && declared.width * declared.height > maxPixels) {
-      return { kind: "settled", output: { status: "skipped_too_large" } };
-    }
-    if (input.bytes.byteLength < MIN_INPUT_BYTES)
-      return { kind: "too_small" };
-    if (declared && Math.min(declared.width, declared.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) {
-      return { kind: "too_small" };
-    }
-    const tempDir = await mkdtemp4(join79(tmpdir9(), TEMP_DIR_PREFIX4));
-    try {
-      const inputPath = join79(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
-      await writeFile4(inputPath, input.bytes, { mode: 384 });
-      let prepared;
-      try {
-        prepared = await currentPreparer().prepare({ inputPath, tempDir, timeoutMs, commandRunner });
-      } catch (error2) {
-        if (error2?.code === "ENOENT")
-          return { kind: "unavailable" };
-        if (error2 instanceof ExtractionCommandTimeoutError) {
-          return { kind: "settled", output: { status: "failed_retryable", errorKind: IMAGE_PREPARE_ERROR_TIMEOUT } };
-        }
-        if (error2 instanceof ExtractionCommandError || error2 instanceof PreparedOutputError) {
-          return { kind: "settled", output: { status: "failed_terminal", errorKind: IMAGE_PREPARE_ERROR_FAILED } };
-        }
-        return { kind: "settled", output: { status: "failed_retryable", errorKind: IMAGE_PREPARE_ERROR_FAILED } };
-      }
-      if (!isJpeg2(prepared)) {
-        return { kind: "settled", output: { status: "failed_terminal", errorKind: IMAGE_PREPARE_ERROR_FAILED } };
-      }
-      const size = jpegPixelSize(prepared);
-      if (size && Math.min(size.width, size.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE)
-        return { kind: "too_small" };
-      try {
-        const stored = writeMediaCacheFile(options.cacheDir, prepared, "image/jpeg");
-        return {
-          kind: "media",
-          media: { path: stored.path, sha256: stored.sha256, mimeType: "image/jpeg", stagingHolder: stored.stagingHolder }
-        };
-      } catch {
-        return { kind: "settled", output: { status: "failed_retryable", errorKind: IMAGE_PREPARE_ERROR_CACHE_WRITE } };
-      }
-    } finally {
-      await rm5(tempDir, { recursive: true, force: true });
-    }
-  };
-  prepare.ready = (mimeType) => admitted(stillImageFormatForMimeType(mimeType));
-  return prepare;
-}
-function isJpeg2(bytes) {
-  return bytes.length > 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
-}
-var DEFAULT_IMAGE_PREPARE_TIMEOUT_MS = 60000, DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES, TEMP_DIR_PREFIX4 = "olympus-image-prepare-", IMAGE_PREPARE_MIN_PIXEL_EDGE = 64, MIN_INPUT_BYTES = 1024, IMAGE_PREPARE_ERROR_FAILED = "image_prepare_failed", IMAGE_PREPARE_ERROR_TIMEOUT = "image_prepare_timeout", IMAGE_PREPARE_ERROR_CACHE_WRITE = "media_cache_write_failed";
-var init_image_prepare = __esm(() => {
-  init_media_cache();
-  init_still_image_formats();
-  init_command_runner();
-  init_image_preparers();
-  init_ocr();
-  DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
 });
 
 // src/workers/source-index/built-in-reasoning/manifest.ts
@@ -100332,7 +100474,7 @@ function defaultTerminalReclassificationRules(registry2, options = {}) {
 function terminalRetryPaths(registry2, rules) {
   const paths = [];
   for (const extractor of registry2.list()) {
-    const kinds = extractor.reread?.unreadTerminalErrorKinds ?? [];
+    const kinds = [extractor.reread, ...extractor.extraReread ?? []].flatMap((policy) => policy?.unreadTerminalErrorKinds ?? []);
     if (kinds.length > 0)
       paths.push({ extractorKind: extractor.kind, lastErrorKinds: [...kinds] });
   }
@@ -100582,6 +100724,9 @@ function evaluateExtractionEgress(input) {
   }
   return { allowed: true };
 }
+function rereadPoliciesOf(extractor) {
+  return [...extractor.reread ? [extractor.reread] : [], ...extractor.extraReread ?? []];
+}
 function createFileExtractionRunner(options) {
   const jobs = options.jobs;
   const registry2 = options.registry;
@@ -100649,24 +100794,23 @@ function createFileExtractionRunner(options) {
   function rereadUnread(lane) {
     let requeued = 0;
     for (const extractor of registry2.list()) {
-      const policy = extractor.reread;
-      if (!policy)
-        continue;
-      const request = {
-        ...lane,
-        extractorKind: extractor.kind,
-        warnings: policy.unreadWarnings,
-        terminalErrorKinds: policy.unreadTerminalErrorKinds,
-        ...policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}
-      };
-      try {
-        if (jobs.unreadJobCount(request) === 0)
-          continue;
-        if (policy.prepare() !== "ready")
-          continue;
-        requeued += jobs.requeueUnread({ ...request, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
-      } catch (error2) {
-        console.error(`Extraction reread check failed for ${extractor.kind}: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      for (const policy of rereadPoliciesOf(extractor)) {
+        const request = {
+          ...lane,
+          extractorKind: extractor.kind,
+          warnings: policy.unreadWarnings,
+          terminalErrorKinds: policy.unreadTerminalErrorKinds,
+          ...policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}
+        };
+        try {
+          if (jobs.unreadJobCount(request) === 0)
+            continue;
+          if (policy.prepare() !== "ready")
+            continue;
+          requeued += jobs.requeueUnread({ ...request, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
+        } catch (error2) {
+          console.error(`Extraction reread check failed for ${extractor.kind}: ${error2 instanceof Error ? error2.message : String(error2)}`);
+        }
       }
     }
     return requeued;
@@ -100674,23 +100818,23 @@ function createFileExtractionRunner(options) {
   function prepareReadersWithWaitingWork(work) {
     const asked = [];
     for (const extractor of registry2.list()) {
-      const policy = extractor.reread;
-      if (!policy)
-        continue;
-      try {
-        const waiting = "queuedKinds" in work ? work.queuedKinds.has(extractor.kind) : work.lanes.some((lane) => jobs.hasWorkWaitingForReader({
-          ...lane,
-          extractorKind: extractor.kind,
-          warnings: policy.unreadWarnings,
-          terminalErrorKinds: policy.unreadTerminalErrorKinds,
-          ...policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}
-        }));
-        if (!waiting)
-          continue;
-        policy.prepare();
-        asked.push(extractor.kind);
-      } catch (error2) {
-        console.error(`Extraction reader check failed for ${extractor.kind}: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      for (const policy of rereadPoliciesOf(extractor)) {
+        try {
+          const waiting = "queuedKinds" in work ? work.queuedKinds.has(extractor.kind) : work.lanes.some((lane) => jobs.hasWorkWaitingForReader({
+            ...lane,
+            extractorKind: extractor.kind,
+            warnings: policy.unreadWarnings,
+            terminalErrorKinds: policy.unreadTerminalErrorKinds,
+            ...policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}
+          }));
+          if (!waiting)
+            continue;
+          policy.prepare();
+          if (!asked.includes(extractor.kind))
+            asked.push(extractor.kind);
+        } catch (error2) {
+          console.error(`Extraction reader check failed for ${extractor.kind}: ${error2 instanceof Error ? error2.message : String(error2)}`);
+        }
       }
     }
     return asked;

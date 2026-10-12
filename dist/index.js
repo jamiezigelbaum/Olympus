@@ -1468,16 +1468,34 @@ function probeStillImageReadiness(options = {}) {
   ]));
   return { tool: tool.kind, toolPath: tool.path, formats, vision, probedAt };
 }
-function stillImageReadiness() {
-  current ??= probeStillImageReadiness();
-  return current;
+function withVision(readiness, vision) {
+  const blocked = vision === "unavailable";
+  const formats = Object.fromEntries(STILL_IMAGE_FORMATS.map((format) => {
+    const entry = readiness.formats[format];
+    const decoded = entry.ready || entry.reason === "vision_unavailable";
+    return [format, !decoded ? entry : blocked ? { ready: false, reason: "vision_unavailable" } : { ready: true }];
+  }));
+  return { ...readiness, formats, vision };
 }
-var DEFAULT_PROBE_TIMEOUT_MS = 15000, current;
+function stillImageReadiness() {
+  if (!current)
+    current = { readiness: probeStillImageReadiness({ vision: visionReader() }), pinned: false, checkedAt: clock() };
+  if (!current.pinned && clock() - current.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS) {
+    current.checkedAt = clock();
+    const vision = visionReader();
+    if (vision !== current.readiness.vision)
+      current.readiness = withVision(current.readiness, vision);
+  }
+  return current.readiness;
+}
+var DEFAULT_PROBE_TIMEOUT_MS = 15000, current, STILL_IMAGE_VISION_RECHECK_MS = 2000, visionReader, clock;
 var init_still_image_readiness = __esm(() => {
   init_image_preparers();
   init_still_image_probe_fixtures();
   init_still_image_formats();
   init_assets();
+  visionReader = readVision;
+  clock = Date.now;
 });
 
 // src/core/source-ingestion-policy.ts
@@ -1589,11 +1607,12 @@ function normalizePath(path) {
   const trimmed = path.trim();
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
-var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1;
+var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1, READINESS_FOLLOWING_POLICIES;
 var init_source_ingestion_policy = __esm(() => {
   init_operation_error();
   init_still_image_readiness();
   init_still_image_formats();
+  READINESS_FOLLOWING_POLICIES = new WeakMap;
 });
 
 // src/core/source-ingestion-exclusions.ts
@@ -11722,6 +11741,7 @@ var init_corpus_adapter3 = __esm(() => {
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
   init_source_ingestion_exclusions();
+  init_still_image_readiness();
   init_source_ingestion_policy();
   init_connector_store();
   init_corpus_adapter3();
