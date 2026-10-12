@@ -5041,6 +5041,16 @@ export async function main(): Promise<void> {
         });
       }
     : undefined;
+  // The same search for every other remote agent, with the tiers read once
+  // more right before the result leaves (workers/remote-search.ts).
+  const remoteEvidenceSearch = sourceAnswerLanes
+    ? async (input: { question: string; limit?: number }) => searchReleasedEvidence({
+        lanes: sourceAnswerLanes!,
+        question: input.question,
+        ...(input.limit ? { maxResults: input.limit } : {}),
+        releaseCheck: remoteReleaseCheck,
+      })
+    : undefined;
   // Which Private items match, for the private answer panel: the shared
   // EvidencePack build over Private corpora only, so each item carries its
   // own passages, read from the local store. The candidates go only to the
@@ -5187,6 +5197,12 @@ export async function main(): Promise<void> {
           // self-registered connections keep the remote operation surface; a
           // demo sign-in grant gets the read-only tools. The dashboard tool
           // reads the view `/dashboard.json` serves, in-process.
+          // Every other caller (Claude, Grok, Grok Bot or Cursor, keys)
+          // gets the same evidence search, so it can answer on an install
+          // with no answer model (workers/remote-search.ts).
+          ...(remoteEvidenceSearch
+            ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } }
+            : {}),
           chatgpt: {
             servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),
             readOnlyFor: isDemoGrant,
