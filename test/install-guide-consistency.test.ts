@@ -122,7 +122,7 @@ describe('pilot installation entry points', () => {
     expect(document).toContain('dashboard\nhandoff that lets them choose is required');
     expect(document).toContain('/plugin?plugin=olympus&id=dashboard');
     expect(document).toContain('> Olympus is as useful as the sources you give it.');
-    expect(document).toContain('**Background** shows syncing, extraction, and embeddings');
+    expect(document).toContain('**Progress** shows reading and indexing');
     expect(document).toContain('Come back here if');
   });
 
@@ -135,7 +135,7 @@ describe('pilot installation entry points', () => {
     expect(step3).toContain('**Model keys are entered in the dashboard, not collected by you.**');
     expect(step3).toContain("not through OpenClaw's own secret prompt or store");
     expect(document).toContain('Gemini API key (only when the operator opted into Gemini embeddings instead\n  of the built-in model; headless fallback only)');
-    expect(document).toContain('report\nit as "finished in the dashboard\'s Models section" and continue');
+    expect(document).toContain('report\nit as "finished on the dashboard\'s Keys page" and continue');
   });
 
   test('the agent guide requires the gateway restart and gates the private classifier', () => {

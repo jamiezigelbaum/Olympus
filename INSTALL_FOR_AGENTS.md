@@ -21,14 +21,17 @@ section is the user guide. That path needs no OpenClaw.
 
 Choose the privacy posture with the operator, run setup (which registers and
 starts the base worker), ask for the privacy classifier approval, verify the
-worker, run the required gateway restart, and open the dashboard's Setup page. Search indexing needs no setup: the
-embedding model is built into Olympus and downloads itself once on first use. Its **Models** section comes first: Venice
-and any opt-in Gemini keys are entered there, and existing local models have an
-agent-assisted configuration starting point plus **Check readiness**. Missing
-model keys are expected at this stage; do not block the dashboard handoff or
-send browser users to terminal key commands. Source connections unlock only
-when the selected posture's model requirements are ready. Olympus does not
-install, download, or maintain local models.
+worker, run the required gateway restart, and hand over the dashboard. Search indexing needs no setup: the
+embedding model is built into Olympus and downloads itself once on first use. The
+dashboard's **Models** section shows each model's state; its **Change** button,
+and the **Keys** row under **On this computer** when the dashboard is opened on
+the Olympus computer, open the **Keys** page. Venice and any opt-in Gemini keys
+are entered there, and existing local models have an agent-assisted
+configuration starting point plus **Check readiness**. Missing model keys are
+expected at this stage; do not block the dashboard handoff or send browser users
+to terminal key commands. Source connections unlock only when the selected
+posture's model requirements are ready. Olympus does not install, download, or
+maintain local models.
 
 ## Installation completion requires a dashboard handoff
 
@@ -759,19 +762,20 @@ normal browser flow do not ask for, fetch, or store a Venice or Gemini key —
 not in chat, not through OpenClaw's own secret prompt or store, and not
 through an Olympus terminal prompt. A missing model key at this point is
 expected and never blocks the handoff. The operator pastes each key into its
-**Models** card, which validates it and stores it privately. Use the headless
+card on the dashboard's **Keys** page, which validates it and stores it
+privately. Use the headless
 fallback below only when the operator explicitly asks for a setup without the
 browser dashboard.
 
 For the normal browser flow, skip the headless fallback below but first
 complete the [privacy classifier approval](#privacy-classifier-approval--its-own-consent-gate)
 at the end of this step; it applies in both flows. Then continue through
-base-worker and Gateway activation in Steps 4–5, and hand over the Setup link
+base-worker and Gateway activation in Steps 4–5, and hand over the dashboard
 in Step 6. Do not require
-keys to be present before that link: the operator enters them in **Models**.
+keys to be present before that handoff: the operator enters them on **Keys**.
 Connect validates and stores the key privately. After all required keys are
-saved, the managed worker applies them automatically; wait for the Models
-cards to show Ready. Source buttons remain disabled until then. Local-model
+saved, the managed worker applies them automatically; wait for the model cards
+on Keys to show Ready. Source buttons remain disabled until then. Local-model
 users choose **Connect existing local models**, follow the concrete agent
 prompt, and use **Check readiness** after their configuration is applied.
 
@@ -868,7 +872,7 @@ knowing where a credential lives never authorizes fetching it. Hard limits:
 
 Setup prints `unmet_prerequisites` with an exact remedy per item. In the
 normal browser flow a missing Gemini or Venice key there is expected: report
-it as "finished in the dashboard's Models section" and continue. Follow the
+it as "finished on the dashboard's Keys page" and continue. Follow the
 key remedies below only in the headless fallback. Typical items:
 
 - Gemini API key (only when the operator opted into Gemini embeddings instead
@@ -1078,9 +1082,9 @@ gate cannot be skipped on the way to the handoff.
 ## Step 4 — Verify the worker
 
 Separate base activation from model readiness. A running worker and reachable
-dashboard are enough to hand over Models in Setup. Missing model credentials
-are pending dashboard work, not a reason to loop through terminal commands or
-reinstall. Source ingestion remains gated until Models is ready.
+dashboard are enough to hand over the dashboard and its Keys page. Missing model
+credentials are pending dashboard work, not a reason to loop through terminal
+commands or reinstall. Source ingestion remains gated until Models is ready.
 
 **This step verifies; it does not install.** `olympus setup` in Step 2
 already registered the background service, wrote `worker.env`, AND started
@@ -1446,15 +1450,16 @@ steps 2 to 4; the dashboard then shows the owner only the two lines to copy.
 ## Step 6 — Finish installation: dashboard handoff
 
 **Pre-source completion receipt — mandatory before inviting Connect.** This
-gate applies to source connections, not to opening the Models section. Always
-provide the Setup link after base activation, even when model keys are still
-missing. Do not invite a source Connect until Models is Ready. It proves that the selected posture's
+gate applies to source connections, not to opening the dashboard or its Keys
+page. Always hand over the dashboard after base activation, even when model
+keys are still missing. Do not invite a source Connect until Models is Ready. It proves that the selected posture's
 model/provider wiring is usable by the worker; it does not choose a source,
 and it does not require any source to be connected yet.
 
-In the browser flow, model readiness means the **Models** section reads
-"Models are ready. You can connect sources below." (each ready model shrinks
-to one compact row); in the headless fallback, use the provider-specific connect and
+In the browser flow, model readiness means the **Keys** page's Models section
+reads "Models are ready. You can connect sources below." (each ready model
+shrinks to one compact row), and the dashboard's **Models** section shows no
+model as Needs you or Not working; in the headless fallback, use the provider-specific connect and
 readiness checks documented in Step 3. Then prove the worker consumes that wiring with the existing
 `olympus doctor` and `olympus worker status` checks. The receipt must name:
 
@@ -1505,7 +1510,8 @@ before the source handoff, adapting only the observed facts:
 > invite Connect until every required provider check is green.
 
 Deliver the dashboard handoff below after base activation. If Models is not
-ready, direct the operator to finish that section before connecting sources.
+ready, direct the operator to finish the keys on **Keys** before connecting
+sources.
 
 **Base installation is complete before source choice.** Report the selected
 posture, model prerequisites, worker health, and successful plugin/tool and
@@ -1552,13 +1558,15 @@ sentence after the block may say the link works once within fifteen minutes.
 > Olympus is as useful as the sources you give it. Each one you connect —
 > email, files, chats, bookmarks, reading — becomes something I can search and
 > answer from with citations, handled under the privacy tiers you just chose.
-> In **Setup**, first finish the **Models** cards at the top; that is where
-> your model keys go. Then connect the sources you want and choose what each
-> one may read. Start with whichever holds what you most want answers from;
-> you can add more at any time.
-> **Home** shows each source's readiness and anything needing attention, and
-> **Background** shows syncing, extraction, and embeddings. Come back here if
-> a connection gets stuck or its progress is unclear.
+> If the dashboard asks for a model key, add it first on **Keys** (under
+> **On this computer**, or through **Change** under **Models**); that is where
+> your model keys go. Then connect the sources you want under **Sources** and
+> choose what each one may read. Start with whichever holds what you most want
+> answers from; you can add more at any time.
+> **Needs you** lists anything waiting on you, each source's row shows its
+> readiness, and **Progress** shows reading and indexing, stage by stage under
+> **Details**. Come back here if a connection gets stuck or its progress is
+> unclear.
 
 Source selection happens in the dashboard. Do not turn all supported providers
 into a checklist, choose Gmail to satisfy a health hint, or add a chat question
@@ -1621,7 +1629,11 @@ loading a URL. Only when a link is needed, resolve that page against the same Ga
 operator is actually using: `/plugin?plugin=olympus&id=dashboard`. Copy the working page's URL; do
 not assume port 18789, reuse the agent host's localhost origin for a remote
 operator, or link only to the OpenClaw chat homepage. Verify that the page loads
-and exposes Setup, Home, and Background before handing it over. Native plugin pages need
+and shows the Olympus panel (its Sources and Models sections; Progress appears
+only while something is being found, read or indexed) before handing it over.
+The Control UI panel has no **On this computer** section; there, **Change**
+under **Models** offers **Do this on your computer**, which opens **Keys** on
+the Olympus computer. Native plugin pages need
 the Custom plugin UI opt-in, which Step 5 asks for before the restart; reload
 the browser if the sidebar entry is still missing. If the operator declined it
 there, the native page is not available: use the standalone opening link. It
