@@ -164,8 +164,8 @@ testers have exercised the normal product journey without custom engineering.
   and the standalone engine without OpenClaw); where the AI client runs does
   not matter. Omarchy is the first target; Ubuntu may be dropped if it proves
   disproportionately hard, and Sparta may move to Omarchy. Built-in models
-  are on by default on Linux, with a measured floor below which a machine is
-  told it is too small. Photos in formats the host cannot decode are
+  are on by default on Linux, sized by memory as on the Mac, with no speed
+  floor. Photos in formats the host cannot decode are
   reported and the rest indexed. The zkAPI lane on a host that cannot run
   the network-namespace confinement is refused, with a one-time admin step
   offered; there is no weaker mode. Plan: `docs/design/linux-parity.md`.
