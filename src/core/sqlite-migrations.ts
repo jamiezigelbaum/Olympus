@@ -80,13 +80,28 @@ export function runSqliteMigrations(
 
   ensureSchemaVersionTable(db);
   const applied: Array<{ version: number; name: string }> = [];
-  db.transaction(() => {
-    for (const migration of ordered.filter((entry) => entry.version > currentVersion)) {
-      migration.up(db);
-      writeSqliteSchemaVersion(db, storeId, migration.version);
-      applied.push({ version: migration.version, name: migration.name });
-    }
-  })();
+  if (pending.length > 0) {
+    // Another process may open the same file at the same moment (the CLI and
+    // the worker). Take the write lock before reading the version again, and
+    // apply only what is still pending under it: the loser of the race waits
+    // (busy_timeout) and then finds nothing to do, rather than running a
+    // migration twice or failing on a stale snapshot.
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion) {
+        throw new OperationError(
+          'config_error',
+          `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`,
+          'Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.',
+        );
+      }
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        writeSqliteSchemaVersion(db, storeId, migration.version);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+  }
 
   return {
     storeId,
