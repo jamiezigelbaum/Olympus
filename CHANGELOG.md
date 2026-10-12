@@ -7,7 +7,8 @@
   `https://mcp.olympusplugin.ai/mcp` and are approved with one click in a
   browser on the computer, as ChatGPT is; no tunnel and no pairing code.
   They get Olympus's remote tools only, never ChatGPT's surface or the
-  directory endpoint, and Grok's anonymous answers never go to an xAI model.
+  directory endpoint, and their anonymous answers never go to a model from
+  their own provider (no Anthropic model for Claude, no xAI model for Grok).
 - **Setup steps say what the screens say.** The approval button is
   **Connect**; the Agents page (On this computer → Agents) gives each agent
   steps that work through the relay, says which agents need a tunnel of your
