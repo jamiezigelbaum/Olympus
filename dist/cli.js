@@ -12978,6 +12978,10 @@ function normalizeWaitingSelectors(raw) {
     if (items.length > 0)
       out.selected_items = items;
   }
+  const mode = raw.retrieval_mode ?? "hybrid";
+  if (mode !== "keyword" && mode !== "hybrid")
+    return;
+  out.retrieval_mode = mode;
   return out;
 }
 function canonicalSelectors(selectors) {
@@ -22288,10 +22292,13 @@ function createConnectorStoreCorpusAdapter(options) {
     const keywordLane = connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, hybrid ? { prefix: false, locate: false } : { locate: false });
     const rows = [...keywordLane.rows];
     let semanticOnly = 0;
+    let incomplete = false;
     if (hybrid) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
       if (bar !== undefined) {
         const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false });
+        if (lane.skippedReason !== undefined)
+          incomplete = true;
         for (const row of lane.rows) {
           if (row.bestCosine < bar || keywordLane.matchedItemIds.has(row.sourceItem.localItemId))
             continue;
@@ -22308,6 +22315,7 @@ function createConnectorStoreCorpusAdapter(options) {
         matchedItems: keywordLane.matchCount.matchedItems + semanticOnly,
         contentMatchedItems: keywordLane.matchCount.contentMatchedItems + semanticOnly
       },
+      ...incomplete ? { incomplete: true } : {},
       rawExposed: false
     };
   };
@@ -36647,6 +36655,7 @@ async function routePreparedSourceIndexSearch(options) {
   const corpusTimings = [];
   const lanes = [];
   const matchCounts = [];
+  const incompleteCorpora = [];
   let encounteredSecureLocal = false;
   const secureLaneAudits = [];
   const startedAt = Date.now();
@@ -36719,6 +36728,8 @@ async function routePreparedSourceIndexSearch(options) {
       outcome: "success"
     });
     searchedCorpora.push(corpus.corpusId);
+    if (response.incomplete === true)
+      incompleteCorpora.push(corpus.corpusId);
     const corpusLaneAuditsStart = laneAudits.length;
     laneAudits.push(...response.laneAudits ?? []);
     const contributedSecure = corpusContributedSecure(corpus, response);
@@ -36777,6 +36788,7 @@ async function routePreparedSourceIndexSearch(options) {
     degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
     corpusTimings,
     ...matchCounts.length > 0 ? { matchCounts } : {},
+    ...incompleteCorpora.length > 0 ? { incompleteCorpora } : {},
     encounteredSecureLocal,
     secureLaneAudits,
     latencyMs: Date.now() - startedAt,
@@ -39271,6 +39283,7 @@ async function probePrivateMatch(input) {
     const request = {
       ...input.request,
       question,
+      retrieval_mode: input.request.retrieval_mode ?? "hybrid",
       include_internal: false,
       include_secure_local: true,
       include_secure_local_content: false
@@ -39332,7 +39345,7 @@ async function probePrivateMatch(input) {
     });
     if (routed.hits.some((hit) => hit.trustDomain === "secure_local"))
       return "match";
-    const unchecked = routed.skippedCorpora.some((skip) => skip.trustDomain === "secure_local" && (skip.reason === "lane_timeout" || skip.reason === "metadata_search_unsupported" || skip.reason === "no_adapter" && !excluded.has(skip.corpusId)));
+    const unchecked = (routed.incompleteCorpora?.length ?? 0) > 0 || routed.skippedCorpora.some((skip) => skip.trustDomain === "secure_local" && (skip.reason === "lane_timeout" || skip.reason === "metadata_search_unsupported" || skip.reason === "no_adapter" && !excluded.has(skip.corpusId)));
     return unchecked ? "unknown" : "no_match";
   };
   try {
@@ -92139,11 +92152,13 @@ async function handleRemoteCallTool(request, makeOperationContext) {
   });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
-    const output = remoteOperationOutput(operation.name, result, {
+    const release = () => remoteOperationOutput(operation.name, result, {
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       releaseManifests: manifests.manifests
     });
-    const privateMayAnswer = privatePart ? await privatePart.settle(result, output) : false;
+    const approved = release();
+    const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
+    const output = privatePart ? release() : approved;
     return { content: text(privateMayAnswer ? withRemotePrivateNote(output) : output) };
   } catch (error2) {
     return { content: text(remoteErrorOutput(error2, { declaredParams })), isError: true };
@@ -132192,11 +132207,13 @@ async function callTool(request, name, options) {
   });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
-    const output = remoteOperationOutput(operation.name, result, {
+    const release = () => remoteOperationOutput(operation.name, result, {
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       releaseManifests: manifests.manifests
     });
-    const privateMayAnswer = privatePart ? await privatePart.settle(result, output) : false;
+    const approved = release();
+    const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
+    const output = privatePart ? release() : approved;
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output) : output);
   } catch (error2) {
     return operationErrorResponse(error2, declaredParams);
