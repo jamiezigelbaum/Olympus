@@ -3,81 +3,256 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Olympus: ask ChatGPT about your own mail, files and notes</title>
-  <meta name="description" content="Olympus is a private knowledge engine on your Mac. ChatGPT can ask it questions; your data stays on your Mac.">
+  <title>Olympus: your privacy and the best AI</title>
+  <meta name="description" content="Olympus is a private second brain that lives on your computer and works with any AI. You decide what each model sees.">
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="no-referrer">
-  <link rel="stylesheet" href="/style.css">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <meta property="og:title" content="Olympus: your privacy and the best AI">
+  <meta property="og:description" content="A private second brain that lives on your computer and works with any AI.">
+  <meta property="og:image" content="https://olympusplugin.ai/assets/img/banner-1200.jpg">
+  <link rel="preload" href="/assets/fonts/Newsreader-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/assets/brand.css">
+  <link rel="stylesheet" href="/assets/home.css">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <script>if (window.matchMedia && !matchMedia("(prefers-reduced-motion: reduce)").matches && "IntersectionObserver" in window && !/[?&]still\b/.test(location.search)) document.documentElement.classList.add("motion");</script>
+  <script src="/assets/home.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-  <header class="site">
-    <div class="wrap">
-      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M2 27 12.5 9l4.2 7.2L20 11l10 16Z" fill="currentColor"/></svg><span>Olympus</span></a>
-      <nav class="site" aria-label="Main">
-        <ul>
-        <li><a href="/" aria-current="page">Home</a></li>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/help/mac-offline/">Help</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        </ul>
-      </nav>
-    </div>
+
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><img src="/assets/img/icon-plain-64.png" alt="" width="32" height="32">Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="#how">How it works</a>
+      <a href="/help/mac-offline/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
   </header>
-  <main id="main">
-    <div class="wrap">
-      <h1>Ask ChatGPT about your own mail, files and notes.</h1>
-      <p class="lede">Olympus is a private knowledge engine that runs on your Mac. ChatGPT can ask it questions. Your data stays on your Mac.</p>
-      <div class="cta">
-        <a class="button" href="/install/">Install on your Mac</a>
-        <a class="button secondary" href="/privacy/">How your data is handled</a>
+
+  <!-- The heavens: the banner is artwork only, full-bleed, nothing written on it. -->
+  <div class="heavens" role="img" aria-label="The Olympus mountain crowned by its palace, with gods in the sky and climbers at their camps">
+    <picture>
+      <source media="(min-width: 1100px)" srcset="/assets/img/banner-2160.jpg">
+      <img src="/assets/img/banner-1200.jpg" alt="" width="2157" height="729" fetchpriority="high">
+    </picture>
+  </div>
+
+  <main id="main" class="desk">
+
+    <!-- 1. Introducing Olympus -->
+    <section class="sheet sheet--intro" aria-labelledby="intro-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>File 0001 · Olympus</span><span>Owner: you</span></div>
+      <div class="intro">
+        <div class="intro__text">
+          <p class="eyebrow" data-do="rise" data-at="0">Introducing</p>
+          <h1 id="intro-title" class="display-xl" data-do="rise" data-at="120">Olympus.</h1>
+          <p class="lede" data-do="rise" data-at="320">A private second brain that lives on your computer and works with any AI.</p>
+          <div class="actions" data-do="rise" data-at="520">
+            <a class="btn" href="/install/">Add Olympus to your AI</a>
+            <button class="btn btn--quiet" type="button" data-film="olympus-film">Watch the film <span class="small">1:06</span></button>
+          </div>
+        </div>
+        <figure class="plate intro__plate" data-do="develop" data-at="200">
+          <img src="/assets/img/mountain-warm-720.jpg" alt="The Olympus mountain, its summit lit in warm light" width="720" height="720">
+          <figcaption>Exhibit A · Where your things live</figcaption>
+        </figure>
+        <span class="stamp intro__stamp" data-do="stamp" data-at="1100" style="--tilt:-6deg">Not for sale</span>
       </div>
+    </section>
 
-      <h2>What it does</h2>
-      <p>Olympus reads the sources you choose: accounts you already have such as Dropbox, Gmail and Google Drive, and sources such as X bookmarks or Readwise that you set up on your Mac. It builds a search index on your Mac. When you ask ChatGPT something like "what did Sam send me about the lease?", ChatGPT asks Olympus, and Olympus answers with citations to your own items.</p>
+    <!-- 2. The logline: "or" is stamped over with AND -->
+    <section class="sheet sheet--choice" aria-labelledby="choice-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>Access request</span><span>Status: <span data-do="status" data-at="1700" data-to="Granted">Pending</span></span></div>
+      <h2 id="choice-title" class="visually-hidden">Your privacy and the best AI.</h2>
+      <p class="display-l choice" aria-hidden="true">
+        <span data-do="rise" data-at="0">Your privacy</span>
+        <span class="choice__turn"><em class="choice__or" data-do="fade-under" data-at="1500">or</em><span class="stamp choice__and" data-do="stamp" data-at="1500" style="--tilt:-8deg">AND</span></span>
+        <span data-do="rise" data-at="250">the best AI</span><span class="choice__pick" data-do="strike-collapse" data-at="2300"><span class="redact">, pick one</span></span><span data-do="rise" data-at="250">.</span>
+      </p>
+      <p class="lede choice__lede" data-do="rise" data-at="3100">The best models for your biggest questions. Your own machine for your most private ones.</p>
+    </section>
 
-      <ul class="points">
-        <li><strong>Your index stays on your Mac.</strong> Olympus has no cloud copy of your mail, files or notes. Only what a question needs leaves the Mac, and only to the ChatGPT conversation you are in.</li>
-        <li><strong>Private and Secret items never go to ChatGPT.</strong> Olympus sorts every item into one of three tiers: Personal, Private or Secret. ChatGPT only ever receives Personal material. Private items are answered on your Mac and shown only to you, in a private Olympus panel that is never sent to ChatGPT. Secrets such as passwords and keys are never read by any model.</li>
-        <li><strong>You approve ChatGPT on your Mac.</strong> Connecting ChatGPT takes one click on an approval page that opens on your Mac. There is no Olympus account and no password to create.</li>
-        <li><strong>One secure connection.</strong> ChatGPT reaches your Mac through the Olympus relay at <code>mcp.olympusplugin.ai</code>. The relay forwards requests over an encrypted connection your Mac opens. It stores no content and logs no content or tokens.</li>
+    <!-- 3. Sources -->
+    <section class="sheet" id="how" aria-labelledby="sources-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>Sources</span><span>Indexed on your Mac</span></div>
+      <h2 id="sources-title" class="headline" data-do="rise" data-at="0">Your whole life, <em>in one place.</em></h2>
+      <p class="lede" data-do="rise" data-at="150">Olympus reads the sources you choose and builds its index on your own computer.</p>
+      <ul class="sources">
+        <li data-do="tick" data-at="350">Gmail</li>
+        <li data-do="tick" data-at="450">Google Drive</li>
+        <li data-do="tick" data-at="550">Dropbox</li>
+        <li data-do="tick" data-at="650">Telegram</li>
+        <li data-do="tick" data-at="750">WhatsApp</li>
+        <li data-do="tick" data-at="850">X bookmarks</li>
+        <li data-do="tick" data-at="950">Readwise</li>
+        <li class="sources__more" data-do="rise" data-at="1200">More coming. <em>Or build your own.</em></li>
       </ul>
+    </section>
 
-      <h2>The three tiers</h2>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr><th scope="col">Tier</th><th scope="col">Examples</th><th scope="col">Can ChatGPT see it?</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>Personal</td><td>Everyday mail, meeting notes, plans, receipts for ordinary purchases, newsletters and saved articles</td><td>Yes, when it helps answer your question</td></tr>
-            <tr><td>Private</td><td>Health, money, legal and identity matters, and whatever you tell Olympus is private for you</td><td>No. Answered on your Mac, in a private panel only you see</td></tr>
-            <tr><td>Secret</td><td>Passwords, recovery codes, private keys</td><td>No. Never read by any model</td></tr>
-          </tbody>
-        </table>
+    <!-- 4. Every item judged -->
+    <section class="sheet" aria-labelledby="judged-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>Classification</span><span>Every item judged</span></div>
+      <div class="split">
+        <div>
+          <h2 id="judged-title" class="headline" data-do="rise" data-at="0">Every item, <em>judged on its own.</em></h2>
+          <p class="lede" data-do="rise" data-at="150">Not each folder or account: every email, file and message gets its own tier. Personal things can help any AI answer you. Private things are never handed to it.</p>
+          <p class="lede secret-line" data-do="rise" data-at="300">Secrets like passwords never go anywhere.</p>
+        </div>
+        <ul class="tiers" aria-label="Example items and their tiers">
+          <li><span class="file">Re: test results</span><span class="stamp stamp--small" data-do="stamp" data-at="500">Private</span></li>
+          <li><span class="file">Re: dinner Saturday</span><span class="stamp stamp--small stamp--personal" data-do="stamp" data-at="680">Personal</span></li>
+          <li><span class="file">passport-scan.jpg</span><span class="stamp stamp--small" data-do="stamp" data-at="840">Private</span></li>
+          <li><span class="file">voice-memo-0412.m4a</span><span class="stamp stamp--small stamp--personal" data-do="stamp" data-at="980">Personal</span></li>
+          <li><span class="file">mortgage-statement.pdf</span><span class="stamp stamp--small" data-do="stamp" data-at="1100">Private</span></li>
+          <li><span class="file">IMG_2038.heic</span><span class="stamp stamp--small stamp--personal" data-do="stamp" data-at="1200">Personal</span></li>
+          <li><span class="file">lab-results.pdf</span><span class="stamp stamp--small" data-do="stamp" data-at="1290">Private</span></li>
+          <li><span class="file">Re: offer letter</span><span class="stamp stamp--small" data-do="stamp" data-at="1370">Private</span></li>
+          <!-- A secret is struck before its text renders, so it is never shown. -->
+          <li class="tiers__secret"><span class="file"><span class="redact redact--blank" aria-label="A secret, never shown"></span></span><span class="label">Secret · never shown</span></li>
+        </ul>
       </div>
-      <p class="meta">Olympus judges each item on its own, not each folder or account. When Private items match a question, ChatGPT is told only that some matching items are Private; the answer from them appears in the Olympus panel under ChatGPT's reply, visible only to you. A Private item's file name can still be visible to ChatGPT; what it says never is.</p>
+    </section>
 
-      <h2>What you need</h2>
-      <ul>
-        <li>A Mac running a recent version of macOS.</li>
-        <li>ChatGPT, with the Olympus plugin added. Installing uses the ChatGPT desktop app for Mac.</li>
-        <li>Your Mac awake and online when you ask. If it is asleep, ChatGPT will say <a href="/help/mac-offline/">your Mac is offline</a>.</li>
+    <!-- 5. Not your machine, not your memory -->
+    <section class="sheet sheet--rally" aria-labelledby="rally-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>Access request</span><span>Status: <span data-do="status" data-at="2600" data-to="Blocked">Open</span></span></div>
+      <h2 id="rally-title" class="visually-hidden">Your machine, your memory.</h2>
+      <p class="display-l rally" aria-hidden="true">
+        <span class="rally__line"><span data-do="strike-collapse" data-at="1500"><span class="redact">Not </span></span><span data-do="rise" data-at="0">your machine,</span></span>
+        <span class="rally__line"><span data-do="strike-collapse" data-at="1750"><span class="redact">not </span></span><span data-do="rise" data-at="200">your memory.</span></span>
+      </p>
+      <div class="request" aria-hidden="true">
+        <span class="label">Request</span>
+        <span class="request__bar" data-do="strike" data-at="2250"><span class="redact">all of your mail, files and messages</span></span>
+        <span class="request__buttons">
+          <span class="btn btn--cream" data-do="light" data-at="2600">Block</span>
+          <span class="btn btn--cream" data-do="dim" data-at="2600">Allow</span>
+        </span>
+      </div>
+    </section>
+
+    <!-- 6. Your Mac answers first -->
+    <section class="sheet" aria-labelledby="mac-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>Route: this Mac</span><span>Built-in models · No account</span></div>
+      <div class="split">
+        <div>
+          <h2 id="mac-title" class="display-l" data-do="rise" data-at="0">Your Mac <em>answers first.</em></h2>
+          <ul class="ledger models" aria-label="Built-in models">
+            <li data-do="rise" data-at="300"><span>Qwen3.5 4B</span><span class="note">private answers</span></li>
+            <li data-do="rise" data-at="400"><span>EmbeddingGemma 2</span><span class="note">search · photos</span></li>
+            <li data-do="rise" data-at="500"><span>Qwen3-ASR</span><span class="note">voice notes</span></li>
+            <li data-do="rise" data-at="600"><span>Apple Vision</span><span class="note">scans</span></li>
+          </ul>
+          <p class="small models__foot" data-do="rise" data-at="750"><em>Small models · built in · run on your Mac</em></p>
+        </div>
+        <aside class="panel answer" data-do="slide" data-at="1100" aria-label="Example private answer">
+          <p class="label">Private answer · from your Mac</p>
+          <p class="answer__q">How much did I lose on my brokerage account this year?</p>
+          <p class="answer__a">$35,000. Your accountant flagged it in March.</p>
+          <p class="answer__foot"><em>Not sent to the cloud.</em></p>
+        </aside>
+      </div>
+    </section>
+
+    <!-- 7. Venice.ai -->
+    <section class="sheet" aria-labelledby="venice-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>Route: Venice.ai</span><span>Ask privately</span></div>
+      <h2 id="venice-title" class="headline" data-do="rise" data-at="0">Venice.ai hides <em>what</em> you ask.</h2>
+      <p class="label sub" data-do="rise" data-at="150">Private models · nothing stored</p>
+      <div class="question" data-do="rise" data-at="450">
+        <p class="label">Question</p>
+        <p class="question__text"><span data-do="strike" data-at="1600"><span class="redact">“I lost $35,000 this year. How do I report it on my taxes?”</span></span></p>
+        <span class="stamp question__stamp" data-do="stamp" data-at="2200" style="--tilt:-5deg">Sealed</span>
+      </div>
+    </section>
+
+    <!-- 8. zkAPI -->
+    <section class="sheet" aria-labelledby="zk-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>Ask anonymously · Strict</span><span>zkAPI · Tor</span></div>
+      <h2 id="zk-title" class="headline" data-do="rise" data-at="0">zkAPI hides <em>who’s</em> asking.</h2>
+      <p class="label sub" data-do="rise" data-at="150">Paid anonymously · sent over Tor</p>
+      <div class="zk">
+        <div class="question" data-do="rise" data-at="400">
+          <p class="label">Your words</p>
+          <p class="question__text">“I’m <span data-do="strike" data-at="1400"><span class="redact">Sam Rivera</span></span>. I lost <span data-do="strike" data-at="1600"><span class="redact">$35,000</span></span> on my <span data-do="strike" data-at="1800"><span class="redact">brokerage account</span></span> this year. How do I report it on my taxes?”</p>
+        </div>
+        <div class="question question--out" data-do="rise" data-at="2300">
+          <p class="label">Rewritten on your Mac · what leaves</p>
+          <p class="question__text">“How are capital losses reported on a US tax return?”</p>
+        </div>
+        <div class="route" data-do="route" data-at="2800">
+          <span class="route__end">Your Mac</span>
+          <span class="route__line" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="route__end">Answering model</span>
+          <span class="route__caption"><em>three Tor hops</em></span>
+        </div>
+        <dl class="ident" data-do="rise" data-at="3000">
+          <div><dt class="label">From</dt><dd><span data-do="strike" data-at="3500"><span class="redact">Sam’s MacBook</span></span></dd></div>
+          <div><dt class="label">IP</dt><dd><span data-do="strike" data-at="3650"><span class="redact">203.0.113.42</span></span></dd></div>
+          <div><dt class="label">Key</dt><dd>fresh for this question</dd></div>
+        </dl>
+        <span class="stamp zk__stamp" data-do="stamp" data-at="4100" style="--tilt:-6deg">Paid · zkAPI</span>
+      </div>
+    </section>
+
+    <!-- 9. The launch film: a live-action moment between sheets -->
+    <section class="film" aria-labelledby="film-title">
+      <h2 id="film-title" class="visually-hidden">The launch film</h2>
+      <button class="film__frame" type="button" data-film="launch-film" aria-label="Play the launch film, 1 minute 20 seconds">
+        <img src="/media/launch-film-poster.jpg" alt="" width="1280" height="720" loading="lazy">
+        <span class="film__play" aria-hidden="true"></span>
+      </button>
+      <p class="film__caption label">The launch film · 1:20</p>
+    </section>
+
+    <!-- 10. Terms -->
+    <section class="sheet" aria-labelledby="terms-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>Olympus</span><span>Terms</span></div>
+      <h2 id="terms-title" class="visually-hidden">Open source. No account. Any agent.</h2>
+      <ul class="terms">
+        <li><span class="display-l" data-do="rise" data-at="0">Open source.</span><span class="stamp" data-do="stamp" data-at="350" style="--tilt:-6deg">MIT</span></li>
+        <li><span class="display-l" data-do="rise" data-at="600">No account.</span><span class="stamp" data-do="stamp" data-at="950" style="--tilt:3deg">No sign-up</span></li>
+        <li><span class="display-l" data-do="rise" data-at="1200">Any agent.</span><span class="stamp" data-do="stamp" data-at="1550" style="--tilt:-5deg">Any MCP</span></li>
       </ul>
-    </div>
+      <p class="lede works" data-do="rise" data-at="1900">Works with ChatGPT, Claude, Claude Code, Codex, Dots, Grok, OpenClaw and Hermes, or any app that speaks MCP. <a href="https://github.com/jamiezigelbaum/Olympus">Read the code on GitHub</a>.</p>
+    </section>
+
+    <!-- 11. Close -->
+    <section class="sheet sheet--close" aria-labelledby="close-title" data-scene>
+      <div class="sheet__head" aria-hidden="true"><span>Olympus</span><span>Open source · No account</span></div>
+      <div class="split split--close">
+        <div>
+          <h2 id="close-title" class="display-l" data-do="rise" data-at="0">Keep your private things <em>private.</em></h2>
+          <div class="actions" data-do="rise" data-at="400">
+            <a class="btn" href="/install/">Add Olympus to your AI</a>
+          </div>
+        </div>
+        <figure class="plate close__plate" style="--tilt:-2deg" data-do="develop" data-at="200">
+          <img src="/assets/img/mountain-warm-720.jpg" alt="" width="720" height="720" loading="lazy">
+        </figure>
+      </div>
+      <a class="stamp stamp--url close__url" href="/install/" data-do="stamp" data-at="1100">olympusplugin.ai</a>
+    </section>
   </main>
-  <footer class="site">
-    <div class="wrap">
-      <ul>
-        <li><a href="/install/">Install</a></li>
-        <li><a href="/support/">Support</a></li>
-        <li><a href="/privacy/">Privacy</a></li>
-        <li><a href="/terms/">Terms</a></li>
-      </ul>
-      <p>Olympus is published by Open Coordination Unlimited, Inc. Olympus is not made by or affiliated with OpenAI.</p>
-    </div>
+
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/mac-offline/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
   </footer>
+
+  <dialog class="player" aria-label="Film">
+    <form method="dialog"><button class="player__close">Close</button></form>
+    <video controls playsinline preload="none"></video>
+  </dialog>
 </body>
 </html>

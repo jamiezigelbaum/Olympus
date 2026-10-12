@@ -1,0 +1,218 @@
+/* Olympus brand layer for olympusplugin.ai. Values follow the Olympus brand
+   guide (Design System artifact): the paper world for every interface, the
+   heavens (the banner) as artwork only. Fonts are self-hosted, so the site
+   makes no third-party requests. */
+
+@font-face { font-family: "Newsreader"; font-style: normal; font-weight: 300 400; font-display: swap; src: url("/assets/fonts/Newsreader-normal.woff2") format("woff2"); }
+@font-face { font-family: "Newsreader"; font-style: italic; font-weight: 300 400; font-display: swap; src: url("/assets/fonts/Newsreader-italic.woff2") format("woff2"); }
+@font-face { font-family: "Martian Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("/assets/fonts/MartianMono-normal.woff2") format("woff2"); }
+@font-face { font-family: "Nunito"; font-style: normal; font-weight: 900; font-display: swap; src: url("/assets/fonts/Nunito-normal.woff2") format("woff2"); }
+@font-face { font-family: "Arimo"; font-style: normal; font-weight: 700; font-display: swap; src: url("/assets/fonts/Arimo-normal.woff2") format("woff2"); }
+
+:root {
+  --sweep-peach: #fcd0a8;
+  --sweep-cream: #efe4d5;
+  --paper: #f7f0e4;
+  --paper-raised: #fffaf2;
+  --rule: #e2d5c2;
+  --ink: #33251d;
+  --ink-soft: #6e5a4c;
+  --bar: #3b2430;
+  --clay: #b27e65;
+  --clay-deep: #8f5a43;
+  --on-clay-deep: #fff6ec;
+  --red: #d8432f;
+  --on-red: #fff6ec;
+  --button-cream: #f3e9dc;
+  --button-lip: #d9c7b2;
+  --button-label: #5b4535;
+  --focus: #3b2430;
+
+  --shadow-paper: 0 1px 2px rgba(80, 45, 25, 0.08), 0 22px 44px -14px rgba(120, 70, 40, 0.30);
+  --shadow-button: 0 5px 0 #d9c7b2, 0 10px 18px -6px rgba(90, 50, 30, 0.35);
+  --shadow-button-pressed: 0 1px 0 #d9c7b2, 0 3px 8px -4px rgba(90, 50, 30, 0.35);
+  --glow-block: 0 0 0 2px #f06a50, 0 0 26px 6px rgba(216, 67, 47, 0.55);
+
+  --font-display: "Newsreader", Georgia, serif;
+  --font-mono: "Martian Mono", ui-monospace, Menlo, monospace;
+  --font-stamp: "Nunito", "Arial Rounded MT Bold", sans-serif;
+  --font-button: "Arimo", Arial, sans-serif;
+
+  --radius-paper: 6px;
+  --radius-panel: 18px;
+  --radius-button: 0.42em;
+  --radius-stamp: 0.45em;
+
+  --gutter: 16px;
+  --sheet-max: 1000px;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-turn: cubic-bezier(0.65, 0, 0.35, 1);
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sweep-peach: #3a2620;
+    --sweep-cream: #1a1314;
+    --paper: #2b2120;
+    --paper-raised: #352927;
+    --rule: #4a3a35;
+    --ink: #f3e8da;
+    --ink-soft: #cdb9a6;
+    --bar: #0d0809;
+    --clay: #c98f74;
+    --clay-deep: #c98f74;
+    --on-clay-deep: #1f1512;
+    --red: #ef6a52;
+    --on-red: #1f1512;
+    --button-cream: #e8dccd;
+    --button-lip: #9d8a77;
+    --button-label: #3a2b22;
+    --focus: #f3e8da;
+    --shadow-paper: 0 1px 2px rgba(0, 0, 0, 0.5), 0 22px 44px -14px rgba(0, 0, 0, 0.65);
+    --shadow-button: 0 5px 0 #9d8a77, 0 10px 18px -6px rgba(0, 0, 0, 0.6);
+    --shadow-button-pressed: 0 1px 0 #9d8a77, 0 3px 8px -4px rgba(0, 0, 0, 0.6);
+    --glow-block: 0 0 0 2px #ff8a70, 0 0 30px 8px rgba(239, 106, 82, 0.6);
+  }
+}
+
+@media (min-width: 720px) { :root { --gutter: 24px; } }
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(120% 90% at 0% 0%, var(--sweep-peach) 0%, var(--sweep-cream) 70%) fixed;
+  background-color: var(--sweep-cream);
+  color: var(--ink);
+  font: 400 18px/1.55 var(--font-display);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: inherit; text-decoration-color: var(--clay); text-underline-offset: 0.16em; text-decoration-thickness: 1.5px; }
+a:hover { text-decoration-color: currentColor; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; border-radius: 3px; }
+
+.visually-hidden {
+  position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.skip {
+  position: absolute; left: -999px; top: 8px; z-index: 20;
+  background: var(--paper-raised); color: var(--ink); padding: 8px 12px; border-radius: var(--radius-paper);
+}
+.skip:focus { left: var(--gutter); }
+
+/* Header: the file's own label across the top of the desk. */
+.site-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap;
+  max-width: 1200px; margin: 0 auto; padding: 14px var(--gutter);
+}
+.wordmark { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 300; font-size: 28px; letter-spacing: -0.02em; line-height: 1; }
+.wordmark img { width: 32px; height: 32px; }
+.site-nav { display: flex; align-items: center; gap: 8px 22px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.site-nav a { text-decoration: none; color: var(--ink-soft); }
+.site-nav a:hover, .site-nav a[aria-current="page"] { color: var(--ink); text-decoration: underline; text-decoration-color: var(--clay); }
+.site-nav .btn { font-size: 15px; min-height: 40px; text-transform: none; letter-spacing: 0.01em; color: var(--on-clay-deep); }
+@media (max-width: 599px) {
+  .site-nav a:not(.btn) { display: none; }
+  .site-nav .btn { min-height: 40px; padding: 0 14px; font-size: 14px; }
+  .wordmark { font-size: 24px; }
+}
+
+/* Sheet: one idea per sheet, a mono file header across the top. */
+.sheet {
+  position: relative;
+  max-width: var(--sheet-max);
+  margin: 0 auto;
+  background: var(--paper);
+  border-radius: var(--radius-paper);
+  box-shadow: var(--shadow-paper);
+  padding: 24px 24px 32px;
+}
+@media (min-width: 720px) { .sheet { padding: 40px 72px 72px; } }
+.sheet__head {
+  display: flex; justify-content: space-between; gap: 16px;
+  margin: 0 0 32px;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.4; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--ink-soft);
+}
+@media (min-width: 720px) { .sheet__head { margin-bottom: 48px; } }
+
+.eyebrow { margin: 0 0 8px; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--clay-deep); }
+.display-xl { margin: 0; font-weight: 300; font-size: clamp(64px, 11vw, 132px); line-height: 0.92; letter-spacing: -0.035em; }
+.display-l { margin: 0; font-weight: 300; font-size: clamp(42px, 7vw, 84px); line-height: 1; letter-spacing: -0.03em; text-wrap: balance; }
+.headline { margin: 0; font-weight: 300; font-size: clamp(34px, 5vw, 56px); line-height: 1.04; letter-spacing: -0.025em; text-wrap: balance; }
+.lede { margin: 16px 0 0; font-size: clamp(19px, 2vw, 22px); line-height: 1.45; max-width: 34em; text-wrap: pretty; }
+.small { font-size: 15px; color: var(--ink-soft); }
+.label { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+em { font-style: italic; }
+
+/* Buttons. */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 48px; padding: 0 24px;
+  font: 700 17px/1 var(--font-button); letter-spacing: 0.01em;
+  border: 0; border-radius: var(--radius-button);
+  background: var(--clay-deep); color: var(--on-clay-deep);
+  text-decoration: none; cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.btn:hover { transform: translateY(-1px); }
+.btn--quiet { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--rule); }
+.btn--quiet:hover { box-shadow: inset 0 0 0 1.5px var(--clay); }
+.btn--cream {
+  min-width: 112px; min-height: 44px; font-size: 15px; letter-spacing: 0.04em; text-transform: uppercase;
+  background: var(--button-cream); color: var(--button-label); box-shadow: var(--shadow-button); cursor: default;
+}
+.btn--lit { background: var(--red); color: var(--on-red); box-shadow: var(--glow-block); transform: translateY(4px); }
+.btn--cream.is-dim { opacity: 0.55; }
+
+/* Stamp: a claim sealed beside the line that makes it. */
+.stamp {
+  display: inline-block; width: max-content;
+  font: 900 22px/1 var(--font-stamp); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--red); border: 0.14em solid currentColor; border-radius: var(--radius-stamp);
+  padding: 0.2em 0.6em 0.24em;
+  transform: rotate(var(--tilt, -7deg));
+  mix-blend-mode: multiply; opacity: 0.92; white-space: nowrap;
+}
+.stamp--small { font-size: 12px; border-width: 2px; padding: 0.32em 0.55em 0.3em; --tilt: 0deg; }
+.stamp--personal { color: var(--clay); }
+.stamp--url { text-transform: none; font-size: clamp(30px, 5vw, 48px); letter-spacing: 0.03em; border-width: 0.12em; --tilt: -4deg; }
+@media (prefers-color-scheme: dark) { .stamp { mix-blend-mode: normal; } }
+
+/* Redaction: the marker bar over withheld words. */
+.redact { position: relative; white-space: nowrap; }
+.redact::after {
+  content: ""; position: absolute; left: -0.06em; top: 0.14em; bottom: 0.04em; width: calc(100% + 0.12em);
+  background: var(--bar); border-radius: 0.06em 0.18em 0.14em 0.08em;
+  transform: scaleX(var(--strike, 1)); transform-origin: left center;
+}
+
+/* Plate: the mountain as an exhibit on paper. */
+.plate {
+  margin: 0; display: inline-block;
+  background: var(--paper-raised); padding: 10px 10px 8px;
+  border-radius: var(--radius-paper); box-shadow: var(--shadow-paper);
+  transform: rotate(var(--tilt, 2deg));
+}
+.plate img { display: block; width: 100%; height: auto; border-radius: 2px; }
+.plate figcaption { margin-top: 6px; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+
+/* Ledger: rows on hairlines. */
+.ledger { list-style: none; margin: 0; padding: 0; }
+.ledger li { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 10px 0; border-bottom: 1.5px solid var(--rule); }
+.ledger .note { font-style: italic; color: var(--ink-soft); font-size: 0.9em; text-align: right; }
+
+.panel { background: var(--paper-raised); border: 1.5px solid var(--rule); border-radius: var(--radius-panel); padding: 20px 24px; }
+
+/* Footer. */
+.site-foot { max-width: var(--sheet-max); margin: 0 auto; padding: 48px var(--gutter) 56px; color: var(--ink-soft); font-size: 15px; }
+.site-foot ul { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 20px; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.site-foot a { text-decoration: none; }
+.site-foot a:hover { text-decoration: underline; }
+.site-foot p { margin: 0; }

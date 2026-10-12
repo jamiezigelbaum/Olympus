@@ -1,0 +1,4 @@
+# Films for the site. Large binaries stay out of Git: copy them from
+# the Olympus Brand folder before deploying (see deploy/deploy.sh).
+*
+!.gitignore
