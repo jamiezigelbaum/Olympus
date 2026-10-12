@@ -96,5 +96,5 @@ export function demoGrantDisplayName(clientName: string): string {
  */
 export function isDemoGrant(connection: { clientId?: string | null; displayName: string }): boolean {
   const pinned = connection.clientId ? pinnedClient(connection.clientId) : undefined;
-  return pinned !== undefined && connection.displayName === demoGrantDisplayName(pinned.clientName);
+  return pinned?.host === 'chatgpt' && connection.displayName === demoGrantDisplayName(pinned.clientName);
 }

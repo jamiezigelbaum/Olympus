@@ -12,7 +12,7 @@ import { RelayClient, type RelayClientStatus } from '../client/relay-client.ts';
 import { DEMO_AUTHORIZE_PATH, FORWARDED_PATHS } from '../client/forward.ts';
 import { loadOrCreateIdentity, type InstallIdentity } from '../client/identity.ts';
 import { PROTOCOL_VERSION, base64url, installIdForPublicKey, signInstallMessage, spkiOf } from '../shared/protocol.ts';
-import { AUTHENTICATED_RESPONSE_HEADER, mintCredential } from '../shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, mintCredential, type CredentialSurface } from '../shared/tokens.ts';
 import { createOAuthRelayNonce, signOAuthRelayState } from '../../src/core/oauth-relay.ts';
 import type { RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
@@ -26,9 +26,9 @@ import generatedPrivateQuestion from '../server/generated/chatgpt-private-questi
 setDefaultTimeout(15_000);
 
 const PUBLIC_HOST = 'mcp.olympus.test';
-/** The account-linking challenge every tool sends a caller without a token. */
+/** The account-linking challenge every tool sends a caller without a token (on the directory endpoint, the only one that answers one). */
 const LINKING_CHALLENGE = [
-  `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp", error="invalid_token", `
+  `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/openai/mcp", error="invalid_token", `
     + 'error_description="Connect Olympus on your Mac to use this tool."',
 ];
 
@@ -56,7 +56,7 @@ function tempDir(): string {
 }
 
 /** A loopback Olympus worker stand-in that records what reached it. */
-function fakeWorker(name: string, options: { bigBodyBytes?: number; validToken?: string } = {}): FakeWorker {
+function fakeWorker(name: string, options: { bigBodyBytes?: number; validToken?: string; surface?: CredentialSurface } = {}): FakeWorker {
   const requests: WorkerRecord[] = [];
   const aborted: string[] = [];
   const server = Bun.serve({
@@ -79,6 +79,7 @@ function fakeWorker(name: string, options: { bigBodyBytes?: number; validToken?:
         const response = await engineFor(request, url, body);
         const marked = new Headers(response.headers);
         marked.set(AUTHENTICATED_RESPONSE_HEADER, '1');
+        if (options.surface) marked.set(SURFACE_RESPONSE_HEADER, options.surface);
         return new Response(response.body, { status: response.status, headers: marked });
       }
       return engineFor(request, url, body);
@@ -288,12 +289,29 @@ describe('routing', () => {
     expect((await fetch(`${relay.url}/dashboard`)).status).toBe(404);
   });
 
-  test('a caller with no token gets the relay\'s not-connected surface and never reaches an engine', async () => {
+  test('a caller with no token gets the standard challenge on /mcp and never reaches an engine', async () => {
     const relay = await makeRelay();
     const worker = fakeWorker('A');
     cleanups.push(worker.stop);
     await connectInstall(relay, worker);
-    const anonymous = (body: string) => fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    // How Claude, Grok and ChatGPT developer-mode connectors start signing in:
+    // a 401 naming the protected-resource document, never an answer.
+    for (const body of [rpc('initialize', { protocolVersion: '2025-11-25' }), rpc('tools/list'), rpc('tools/call', { name: 'olympus_dashboard', arguments: {} })]) {
+      const challenged = await fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      expect(challenged.status).toBe(401);
+      expect(challenged.headers.get('www-authenticate')).toBe(`Bearer realm="olympus", resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp"`);
+      expect(challenged.headers.get('access-control-allow-origin')).toBeNull();
+    }
+    expect((await fetch(`${relay.url}/mcp`)).status).toBe(401);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  test('a caller with no token on the directory endpoint gets the relay\'s not-connected surface and never reaches an engine', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    await connectInstall(relay, worker);
+    const anonymous = (body: string) => fetch(`${relay.url}/openai/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
     const init = await (await anonymous(rpc('initialize', { protocolVersion: '2025-11-25' }))).json();
     expect(init.result.protocolVersion).toBe('2025-11-25');
     expect(init.result.instructions).toBe(NOT_CONNECTED_MESSAGE);
@@ -371,7 +389,7 @@ describe('routing', () => {
       expect(engineTool.result.isError).toBe(true);
       expect(engineTool.result._meta['mcp/www_authenticate']).toEqual(LINKING_CHALLENGE);
     }
-    expect((await fetch(`${relay.url}/mcp`)).status).toBe(405);
+    expect((await fetch(`${relay.url}/openai/mcp`)).status).toBe(405);
     expect(worker.requests).toHaveLength(0);
   });
 
@@ -414,7 +432,16 @@ describe('routing', () => {
     const html = await bridge.text();
     expect(html).toContain('href="http://127.0.0.1:8010/connect/authorize?response_type=code&amp;client_id=https%3A%2F%2Fchatgpt.com%2Foauth%2Fclient.json&amp;state=a%22%3Cb"');
     expect(html).toContain('Install Olympus');
+    expect(html).toContain('<h1>Approve ChatGPT on your Mac</h1>');
     expect(bridge.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+
+    // The heading names a pinned app from a fixed list; anything else is unnamed and never echoed.
+    const heading = async (clientId: string) => /<h1>([^<]*)<\/h1>/.exec(await (await fetch(`${relay.url}/connect/authorize?client_id=${encodeURIComponent(clientId)}`)).text())?.[1];
+    expect(await heading('https://claude.ai/oauth/mcp-oauth-client-metadata')).toBe('Approve Claude on your Mac');
+    expect(await heading('https://grok.com/oauth/mcp-client.json')).toBe('Approve Grok on your Mac');
+    expect(await heading('https://chatgpt.com/oauth/cb_1/client.json')).toBe('Approve ChatGPT on your Mac');
+    expect(await heading('https://evil.example/<b>Claude</b>')).toBe('Approve on your Mac');
+    expect(await (await fetch(`${relay.url}/connect/authorize?state=s`)).text()).toContain('<h1>Approve on your Mac</h1>');
   });
 });
 
@@ -506,7 +533,7 @@ describe('streaming and cancellation', () => {
 });
 
 describe('offline fallback', () => {
-  test('an authorized request for a registered install with no session gets the relay\'s own MCP answers', async () => {
+  test('a credential its engine never marked gets only a plain offline error, never a tool list', async () => {
     const relay = await makeRelay();
     const worker = fakeWorker('A');
     cleanups.push(worker.stop);
@@ -514,6 +541,39 @@ describe('offline fallback', () => {
     await a.client.stop();
     await until(() => relay.onlineInstalls().length === 0);
     const token = mintCredential('access', a.identity.installId);
+    for (const method of ['initialize', 'tools/list', 'resources/list', 'tools/call']) {
+      const answer = await (await mcpPost(relay, token, rpc(method, { name: 'olympus_dashboard', arguments: {} }))).json();
+      expect(answer.result).toBeUndefined();
+      expect(answer.error.message).toContain('Your Mac is offline');
+    }
+    expect((await mcpPost(relay, token, JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }))).status).toBe(202);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  test('a credential its engine marked as a remote (Claude, Grok, key) connection gets the offline error too', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A', { surface: 'remote' });
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const token = mintCredential('access', a.identity.installId);
+    expect((await mcpPost(relay, token, rpc('tools/list'))).status).toBe(200);
+    await a.client.stop();
+    await until(() => relay.onlineInstalls().length === 0);
+    const list = await (await mcpPost(relay, token, rpc('tools/list'))).json();
+    expect(list.result).toBeUndefined();
+    expect(list.error.message).toContain('Your Mac is offline');
+  });
+
+  test('a credential its engine marked as ChatGPT\'s gets the relay\'s own ChatGPT answers', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A', { surface: 'chatgpt' });
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const token = mintCredential('access', a.identity.installId);
+    // Used once while the Mac is online: the engine marks it as ChatGPT's.
+    expect((await mcpPost(relay, token, rpc('tools/list'))).status).toBe(200);
+    await a.client.stop();
+    await until(() => relay.onlineInstalls().length === 0);
 
     const init = await (await mcpPost(relay, token, rpc('initialize', { protocolVersion: '2025-06-18' }))).json();
     expect(init.result.protocolVersion).toBe('2025-06-18');
@@ -535,7 +595,8 @@ describe('offline fallback', () => {
     expect(other.error.message).toContain('Your Mac is offline');
     const notification = await mcpPost(relay, token, JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }));
     expect(notification.status).toBe(202);
-    expect(worker.requests).toHaveLength(0);
+    // Only the one call made while the Mac was online reached it.
+    expect(worker.requests).toHaveLength(1);
   });
 });
 

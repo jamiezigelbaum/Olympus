@@ -6,8 +6,9 @@
  * Approval happens only there: the engine accepts consent from direct
  * loopback requests and refuses anything that came through the relay, so
  * possession of the Mac plus a click is the proof of ownership. The relay
- * neither reads nor stores the query; it copies it into the link verbatim
- * (escaped for HTML).
+ * stores nothing from the query and copies it into the link verbatim
+ * (escaped for HTML); it reads only `client_id`, to name a pinned app
+ * (ChatGPT, Claude, Grok) in the heading from a fixed list, never echoing it.
  *
  * The page tries to reach the engine first and continues automatically when
  * something answers; otherwise it keeps the link and offers to install
@@ -29,6 +30,15 @@ export interface BridgeOptions {
   readonly demo?: boolean;
 }
 
+/** The pinned apps' names by client id (src/workers/remote-oauth/pinned-clients.ts); anything else is unnamed. */
+export function bridgeAppName(clientId: string | null): string | undefined {
+  if (clientId === null) return undefined;
+  if (/^https:\/\/chatgpt\.com\/oauth\/(?:[A-Za-z0-9_-]{1,128}\/)?client\.json$/.test(clientId)) return 'ChatGPT';
+  if (clientId === 'https://claude.ai/oauth/mcp-oauth-client-metadata') return 'Claude';
+  if (clientId === 'https://grok.com/oauth/mcp-client.json') return 'Grok';
+  return undefined;
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 }
@@ -41,6 +51,8 @@ export function authorizeBridge(url: URL, options: BridgeOptions): Response {
   const engineOrigin = `http://127.0.0.1:${options.enginePort}`;
   const target = `${engineOrigin}/connect/authorize${query}`;
   const nonce = randomBytes(16).toString('base64');
+  const app = bridgeAppName(url.searchParams.get('client_id'));
+  const heading = app ? `Approve ${app} on your Mac` : 'Approve on your Mac';
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -64,7 +76,7 @@ export function authorizeBridge(url: URL, options: BridgeOptions): Response {
 </head>
 <body>
 <main>
-  <h1>Approve ChatGPT on your Mac</h1>
+  <h1>${heading}</h1>
   <p>Olympus asks for approval on the Mac where it runs, so only you can connect it.</p>
   <a class="button" id="continue" href="${escapeHtml(target)}">Continue on this Mac</a>
   ${options.demo ? `<section class="demo">

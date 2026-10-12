@@ -36,7 +36,8 @@ import { readBoundedRequestText } from '../src/workers/remote-request-body.ts';
 import { parseRemotePublicBaseUrl, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
 import { credentialInstallId, mintCredential } from '../connect-relay/shared/tokens.ts';
 import { authorizationServerMetadata as relayAuthorizationServerMetadata, relayOrigin } from '../connect-relay/server/oauth-metadata.ts';
-import { chatGptClientForRedirect, registerChatGptClient } from '../connect-relay/server/client-registration.ts';
+import { pinnedClientForRedirect, registerPinnedClient } from '../connect-relay/server/client-registration.ts';
+import { bridgeAppName } from '../connect-relay/server/authorize-bridge.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
@@ -44,7 +45,7 @@ import {
   createRemoteMcpHandler,
   withRemoteMcpRoute,
 } from '../src/workers/remote-mcp.ts';
-import { CHATGPT_CLIENT_ID, CHATGPT_CODEX_CLIENT_ID, CHATGPT_REDIRECT_URI, isChatGptGrant, pinnedClient } from '../src/workers/remote-oauth/pinned-clients.ts';
+import { CHATGPT_CLIENT_ID, CHATGPT_CODEX_CLIENT_ID, CHATGPT_REDIRECT_URI, CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URI, GROK_CLIENT_ID, GROK_REDIRECT_URIS, isChatGptGrant, pinnedClient } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { DEMO_SIGN_IN_BURST, isDemoGrant, resolveDemoConsent, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
 import { withRequestPeer } from '../src/core/request-peer.ts';
 import { demoInstallMarked, DEMO_INSTALL_MARKER_FILE, DEMO_INSTALL_MARKER_TEXT } from '../src/core/remote-access.ts';
@@ -399,8 +400,8 @@ describe('end to end with the MCP SDK OAuth client', () => {
   test('an arbitrary metadata-document client is refused without any fetch', async () => {
     const url = new URL(`${base}/connect/authorize`);
     url.search = new URLSearchParams({
-      response_type: 'code', client_id: 'https://claude.ai/oauth/mcp-oauth-client-metadata',
-      redirect_uri: 'https://claude.ai/api/mcp/auth_callback', code_challenge: 'x'.repeat(43), code_challenge_method: 'S256',
+      response_type: 'code', client_id: 'https://agent.example/oauth/client.json',
+      redirect_uri: 'https://agent.example/callback', code_challenge: 'x'.repeat(43), code_challenge_method: 'S256',
     }).toString();
     const response = await fetch(url, { redirect: 'manual' });
     expect(response.status).toBe(400);
@@ -504,6 +505,9 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
   test('only pinned ChatGPT grants count as ChatGPT; the owner\'s grant is not a demo grant', () => {
     expect(isChatGptGrant({ clientId: CHATGPT_CLIENT_ID })).toBe(true);
     expect(isChatGptGrant({ clientId: CHATGPT_CODEX_CLIENT_ID })).toBe(true);
+    // Pinned is not ChatGPT.
+    expect(isChatGptGrant({ clientId: CLAUDE_CLIENT_ID })).toBe(false);
+    expect(isChatGptGrant({ clientId: GROK_CLIENT_ID })).toBe(false);
     expect(isChatGptGrant({ clientId: 'olympus_client_x' })).toBe(false);
     expect(isChatGptGrant({ clientId: null })).toBe(false);
     expect(isChatGptGrant({})).toBe(false);
@@ -525,16 +529,26 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
     expect(authorizationServerMetadata(urls)).toEqual(relayAuthorizationServerMetadata(relayOrigin('mcp.olympus.test')));
   });
 
-  test('every client the relay\'s registration names is pinned here with that return address', () => {
-    for (const redirect of [CHATGPT_REDIRECT_URI, 'https://chatgpt.com/connector/oauth/cb_Abc-123']) {
-      const outcome = registerChatGptClient(JSON.stringify({ redirect_uris: [redirect] }), 0);
+  test('every client the relay\'s registration names is pinned here with that return address and name', () => {
+    for (const redirect of [CHATGPT_REDIRECT_URI, 'https://chatgpt.com/connector/oauth/cb_Abc-123', CLAUDE_REDIRECT_URI, ...GROK_REDIRECT_URIS]) {
+      const outcome = registerPinnedClient(JSON.stringify({ client_name: 'Anything', redirect_uris: [redirect] }), 0);
       expect(outcome.ok).toBe(true);
       const clientId = outcome.ok ? String(outcome.body.client_id) : '';
-      expect(pinnedClient(clientId)?.redirectUris).toEqual([redirect]);
+      const pinned = pinnedClient(clientId);
+      expect(pinned?.redirectUris).toContain(redirect);
+      // The name comes from the pin, never from what the registration said.
+      expect(outcome.ok && outcome.body.client_name).toBe(pinned!.clientName);
+      // The relay's bridge page names the same app.
+      expect(bridgeAppName(clientId)).toBe(pinned!.clientName);
     }
-    expect(chatGptClientForRedirect(CHATGPT_REDIRECT_URI)).toBe(CHATGPT_CLIENT_ID);
+    // Every pinned https return address registers at the relay as its own client.
+    for (const clientId of [CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, GROK_CLIENT_ID]) {
+      for (const redirect of pinnedClient(clientId)!.redirectUris) expect(pinnedClientForRedirect(redirect)?.clientId).toBe(clientId);
+    }
+    expect(pinnedClientForRedirect(CHATGPT_REDIRECT_URI)?.clientId).toBe(CHATGPT_CLIENT_ID);
     // The desktop client's id is never handed out: its callbacks are loopback.
-    expect(chatGptClientForRedirect('https://chatgpt.com/connector/oauth/codex')).toBeUndefined();
+    expect(pinnedClientForRedirect('https://chatgpt.com/connector/oauth/codex')).toBeUndefined();
+    expect(bridgeAppName(CHATGPT_CODEX_CLIENT_ID)).toBe('ChatGPT');
     expect(pinnedClient(CHATGPT_CODEX_CLIENT_ID)?.redirectUris.some((uri) => uri.startsWith('https://'))).toBe(false);
   });
 
@@ -546,6 +560,7 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
     });
     expect((await register('http://127.0.0.1/callback', { 'x-olympus-relay': 'x' })).status).toBe(403);
     expect((await register('https://grok.com/connectors/oauth/callback')).status).toBe(400);
+    expect((await register(CLAUDE_REDIRECT_URI)).status).toBe(400);
     const local = await register('http://127.0.0.1/callback');
     expect(local.status).toBe(201);
   });

@@ -283,6 +283,19 @@ describe('Ask anonymously', () => {
     expect(await askAnonymously({ question: 'What is a deposit?', model: 'openai/gpt-5.5' }, allowed.value)).toMatchObject({ ok: true, model: 'openai/gpt-5.5' });
   });
 
+  test('Grok (xAI) takes the ChatGPT setting, never an xAI model: one-off or configured', async () => {
+    const fromGrok = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai' }, fromGrok.value)).toMatchObject({ ok: true, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai', model: 'x-ai/grok-5' }, fromGrok.value)).toMatchObject({ code: 'model_same_provider' });
+    // An xAI model set for ChatGPT questions is refused for Grok before any work, and still used for ChatGPT.
+    const xaiChosen = () => deps(settings({ standardMode: 'as_written', levelChosen: true, chatgptFrontierModel: 'x-ai/grok-5' }));
+    const refused = xaiChosen();
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'xai' }, refused.value))
+      .toEqual({ ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.configuredModelSameProvider });
+    expect(refused.calls.send).toEqual([]);
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'openai' }, xaiChosen().value)).toMatchObject({ ok: true, model: 'x-ai/grok-5' });
+  });
+
   test('remember stores the choice through the writer before the send and reports it; without a writer the question still goes, once', async () => {
     let current = settings({ standardMode: 'light_cleanup' });
     const d = deps(current);

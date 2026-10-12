@@ -1426,7 +1426,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Usage: olympus connections <command>',
     'Commands:',
     '  olympus connections add <name>      Approve a remote agent; prints its URL and token once',
-    '  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok',
+    '  olympus connections pair            Print a one-time code to approve an agent through your own tunnel',
     '  olympus connections list',
     '  olympus connections revoke <id>',
     '  olympus connections status          Remote access: relay session and public URLs',

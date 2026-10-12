@@ -20,8 +20,9 @@
  *   The approval page is reached through the public address, so it asks for a
  *   pairing code from `olympus connections pair`.
  *
- * Clients: ChatGPT by its pinned client metadata URL (pinned-clients.ts; no
- * metadata document is ever fetched), or a dynamically registered client.
+ * Clients: ChatGPT, Claude or Grok by their pinned client metadata URLs
+ * (pinned-clients.ts; no metadata document is ever fetched), or a dynamically
+ * registered client. Claude and Grok are authorized for `/mcp` only.
  *
  * A demo install (synthetic sample data, demo marker present) may also let a
  * directory reviewer approve with a username and password through the relay,
@@ -72,7 +73,7 @@ import {
   type RemotePublicUrls,
   type RemotePublicUrlsSource,
 } from '../../core/remote-public-url.ts';
-import { isClientIdMetadataUrl, pinnedClient } from './pinned-clients.ts';
+import { isClientIdMetadataUrl, pinnedClient, type PinnedHost } from './pinned-clients.ts';
 import { readBoundedRequestText } from '../remote-request-body.ts';
 import { renderConsentErrorPage, renderConsentPage, renderDemoSignInPage, renderLoopbackConsentPage } from './consent-page.ts';
 import { demoGrantDisplayName, demoSignInLimiter, verifyDemoSignIn, type DemoConsentSettings } from './demo-consent.ts';
@@ -142,6 +143,8 @@ interface ResolvedClient {
   clientName: string;
   redirectUris: readonly string[];
   verifiedHost: string | undefined;
+  /** The hosted agent of a pinned client; undefined for a registered one. */
+  host?: PinnedHost;
 }
 
 interface PendingConsent {
@@ -251,7 +254,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (pinned) return { ...pinned, redirectUris: [...pinned.redirectUris] };
     // Never fetched: an arbitrary metadata URL would make this Mac contact a
     // host a stranger chose.
-    if (isClientIdMetadataUrl(clientId)) return 'Olympus connects to ChatGPT. It does not recognize this app.';
+    if (isClientIdMetadataUrl(clientId)) return 'Olympus connects to ChatGPT, Claude and Grok. It does not recognize this app.';
     const registered = options.connections().oauth.getRegisteredClient(clientId);
     if (!registered) return 'This app is not registered with Olympus.';
     // Relay mode: self-registered clients are local development tools only.
@@ -288,8 +291,9 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (!redirectUri) return errorPage(400, 'The request did not say where to return (redirect_uri).');
     const client = resolveClient(clientId, u);
     if (typeof client === 'string') return errorPage(400, client);
-    // The demo serves pinned clients (ChatGPT) only.
-    if (demo && !client.verifiedHost) return errorPage(400, 'The demo connects ChatGPT only.');
+    // The demo serves ChatGPT's pinned clients only: its read-only limit is
+    // enforced on the ChatGPT surface, which no other client gets.
+    if (demo && client.host !== 'chatgpt') return errorPage(400, 'The demo connects ChatGPT only.');
     // Until the redirect URI is known to belong to the client, errors stay on
     // this page: redirecting them would make Olympus an open redirector.
     if (!redirectUriMatches(redirectUri, client.redirectUris)) {
@@ -310,6 +314,11 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     const resource = requestedResource === null ? u.resource : matchConfiguredResource(requestedResource, u);
     if (resource === undefined) {
       return fail('invalid_target', 'The requested resource is not this Olympus.');
+    }
+    // Only ChatGPT reaches the plugin directory's endpoint; every other
+    // client's grant is for `/mcp` (connect-relay/shared/directory-tools.ts).
+    if (client.host !== 'chatgpt' && resource !== u.resource) {
+      return fail('invalid_target', 'This app connects to Olympus at its /mcp address.');
     }
     sweep();
     admitPending();
@@ -584,7 +593,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       return oauthError(400, 'invalid_redirect_uri', 'redirect_uris must list https or loopback URLs.');
     }
     if (u.installId && !(redirectUris as string[]).every(isLoopbackRedirectUri)) {
-      return oauthError(400, 'invalid_redirect_uri', 'Only local development clients register; ChatGPT needs no registration.');
+      return oauthError(400, 'invalid_redirect_uri', 'Only local development clients register here; ChatGPT, Claude and Grok need no registration.');
     }
     const grantTypes = metadata.grant_types;
     if (grantTypes !== undefined && (!Array.isArray(grantTypes) || !grantTypes.includes('authorization_code'))) {

@@ -348,7 +348,8 @@ describe('2: upload bytes are charged as they arrive, per address too', () => {
       cleanups.push(() => socket.destroy());
     }
     await until(() => relay.status().uploading === 64).catch(() => { throw new Error(`uploading ${relay.status().uploading}`); });
-    const victim = await fetch(`${relay.url}/mcp`, {
+    // The directory endpoint's anonymous answers read a body; /mcp without a token is a bare 401.
+    const victim = await fetch(`${relay.url}/openai/mcp`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-forwarded-for': '198.51.100.7' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
@@ -369,7 +370,7 @@ describe('2: upload bytes are charged as they arrive, per address too', () => {
       socket.on('data', (data) => (state.received += data.toString('latin1')));
       socket.on('error', () => {});
       socket.connect(relay.port, '127.0.0.1', () => {
-        socket.write(`POST /mcp HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: ${xff}\r\nContent-Type: application/json\r\nContent-Length: 65536\r\n\r\n${'x'.repeat(bytes)}`);
+        socket.write(`POST /openai/mcp HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: ${xff}\r\nContent-Type: application/json\r\nContent-Length: 65536\r\n\r\n${'x'.repeat(bytes)}`);
       });
       cleanups.push(() => socket.destroy());
       return { status: () => Number(/^HTTP\/1\.1 (\d{3})/.exec(state.received)?.[1] ?? 0) };
@@ -386,12 +387,15 @@ describe('2: upload bytes are charged as they arrive, per address too', () => {
     expect(other.status()).toBe(0);
   });
 
-  test('a body for the relay\'s own anonymous /mcp answers is capped small', async () => {
+  test('a body for the relay\'s own anonymous /openai/mcp answers is capped small; /mcp reads none', async () => {
     const relay = await makeRelay();
-    const big = await fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: 'x'.repeat(100 * 1024) });
+    const big = await fetch(`${relay.url}/openai/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: 'x'.repeat(100 * 1024) });
     expect(big.status).toBe(413);
-    const small = await fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) });
+    const small = await fetch(`${relay.url}/openai/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) });
     expect(small.status).toBe(200);
+    const challenged = await fetch(`${relay.url}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: 'x'.repeat(100 * 1024) });
+    expect(challenged.status).toBe(401);
+    expect(relay.status().uploading).toBe(0);
   });
 });
 

@@ -129,6 +129,9 @@ describe('parseConsultSettings', () => {
     expect(consultModelProvider('openai/gpt-5.5')).toBe('openai');
     expect(consultModelProvider('Anthropic/claude-sonnet-5.5')).toBe('anthropic');
     expect(consultModelProvider('google/some-model')).toBeUndefined();
+    expect(consultModelProvider('x-ai/grok-5')).toBe('xai');
+    expect(consultModelProvider('xAI/grok-5')).toBe('xai');
+    expect(consultModelProvider('constructor/x')).toBeUndefined();
     expect(consultModelProvider('no-slash')).toBeUndefined();
   });
 

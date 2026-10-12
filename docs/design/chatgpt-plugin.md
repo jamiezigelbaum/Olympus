@@ -20,7 +20,9 @@ with citations, with the dashboard rendered inside ChatGPT.
 
 ## Decisions (owner, 2026-10-01)
 
-- ChatGPT only for now; Claude, Grok and Muse are out of scope.
+- ChatGPT only for now; Claude, Grok and Muse are out of scope. (Superseded
+  2026-10-12: Claude and Grok connect through the relay at `/mcp`;
+  [V0_4_RELEASE.md](../V0_4_RELEASE.md), Decisions.)
 - The engine runs on the user's Mac. No hosted Olympus.
 - No extra installs (no Tailscale) and no new accounts except optional Venice.
 - Default embeddings: a small model built into Olympus, zero setup. Other
@@ -303,8 +305,11 @@ Three things the directory requires that the design above did not cover:
 **The directory's own endpoint (added 2026-10-10).** A published plugin's
 MCP URL can never change, and OpenAI rescans it daily (a tool change reaches
 directory users without another review). The directory therefore uses
-`https://mcp.olympusplugin.ai/openai/mcp`, never `/mcp`, which stays exactly
-as it was for developer-mode connectors and is where new tools ship first.
+`https://mcp.olympusplugin.ai/openai/mcp`, never `/mcp`, which serves
+developer-mode connectors (and, since 2026-10-12, Claude and Grok) and is
+where new tools ship first. Since 2026-10-12 a tokenless request to `/mcp`
+at the relay gets the standard 401 challenge rather than the relay's
+not-connected answers, which only `/openai/mcp` keeps.
 Both serve the same implementation; `/openai/mcp` lists and calls only the
 tools in `DIRECTORY_TOOL_NAMES` (`connect-relay/shared/directory-tools.ts`), so
 a new tool is on `/mcp` only until a deliberate change adds it there. It is

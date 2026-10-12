@@ -30,7 +30,7 @@
  * caller: a value the platform would refuse fails the stream with a 502
  * instead of leaving the request waiting.
  */
-import { AUTHENTICATED_RESPONSE_HEADER } from '../shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, type CredentialSurface } from '../shared/tokens.ts';
 
 export type RouteKind = 'api' | 'browser' | 'demo';
 
@@ -122,7 +122,7 @@ export function createResponsePolicies(input: { relayOrigin: string; enginePort:
 export const DEFAULT_RESPONSE_POLICY: ResponsePolicy = createResponsePolicies({ relayOrigin: 'https://relay.invalid', enginePort: 8010 }).api;
 
 export type ResponseHeadCheck =
-  | { ok: true; headers: Headers; authenticated: boolean }
+  | { ok: true; headers: Headers; authenticated: boolean; surface?: CredentialSurface }
   | { ok: false; reason: 'invalid_header' | 'content_type' | 'redirect' };
 
 /**
@@ -136,10 +136,15 @@ export function checkResponseHead(
   bodyless: boolean,
 ): ResponseHeadCheck {
   let authenticated = false;
+  let surface: CredentialSurface | undefined;
   const kept: Array<[string, string]> = [];
   for (const [name, value] of wireHeaders) {
     if (name === AUTHENTICATED_RESPONSE_HEADER) {
       authenticated = value === '1';
+      continue;
+    }
+    if (name === SURFACE_RESPONSE_HEADER) {
+      if (value === 'chatgpt' || value === 'remote') surface = value;
       continue;
     }
     if (!RESPONSE_HEADER_ALLOWLIST.has(name)) continue;
@@ -182,7 +187,7 @@ export function checkResponseHead(
   } catch {
     return { ok: false, reason: 'invalid_header' };
   }
-  return { ok: true, headers, authenticated };
+  return { ok: true, headers, authenticated, ...(authenticated && surface ? { surface } : {}) };
 }
 
 export { BODYLESS_STATUSES };

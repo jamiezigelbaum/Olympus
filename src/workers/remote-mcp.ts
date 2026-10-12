@@ -34,7 +34,7 @@ import type { OlympusConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../core/email.ts';
 import { callerProviderFromLabel, markInProcessRemoteRequest, type OperationCaller } from '../core/operation-caller.ts';
-import { isChatGptGrant } from './remote-oauth/pinned-clients.ts';
+import { pinnedGrantProvider } from './remote-oauth/pinned-clients.ts';
 import type { OperationContext } from '../core/operations.ts';
 import {
   isWellFormedRemoteConnectionToken,
@@ -50,7 +50,7 @@ import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mc
 import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts';
 import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
-import { AUTHENTICATED_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
 /** The ChatGPT plugin directory's endpoint. */
@@ -125,7 +125,8 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     if (!verification.ok) return verification.response;
     const response = await serveAuthenticated(request, verification, surface);
     // Only the relay reads the mark; a direct caller never sees it.
-    return isRelayed(request) ? markAuthenticated(response) : response;
+    if (!isRelayed(request)) return response;
+    return markAuthenticated(response, options.chatgpt?.servesRequest(request, verification.connection) === true ? 'chatgpt' : 'remote');
   };
 
   async function serveAuthenticated(
@@ -183,11 +184,15 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
  * relay uses the mark only to keep that credential's later requests in the
  * owner's admission lane, so forged secrets cannot spend the owner's budget
  * (connect-relay/server/limits.ts); it grants nothing. Only relayed requests
- * get it, and the relay drops it before its public response.
+ * get it, and the relay drops it before its public response. The surface
+ * mark tells the relay which tool list this credential gets, so its own
+ * answers while the Mac is offline never show one client another's tools
+ * (connect-relay/server/relay-mcp.ts).
  */
-function markAuthenticated(response: Response): Response {
+function markAuthenticated(response: Response, surface: 'chatgpt' | 'remote'): Response {
   const headers = new Headers(response.headers);
   headers.set(AUTHENTICATED_RESPONSE_HEADER, '1');
+  headers.set(SURFACE_RESPONSE_HEADER, surface);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -249,11 +254,12 @@ export function lazyRemoteConnectionStore(
 }
 
 /**
- * The remote caller: a ChatGPT grant (pinned client id) is OpenAI-hosted;
- * any other connection is placed by the name it was approved under.
+ * The remote caller: a pinned client's grant is placed by its client id
+ * (ChatGPT → OpenAI, Claude → Anthropic, Grok → xAI); any other connection
+ * by the name it was approved under.
  */
 export function remoteOperationCaller(connection: RemoteMcpConnection): OperationCaller {
-  const provider = isChatGptGrant(connection) ? 'openai' : callerProviderFromLabel(connection.displayName);
+  const provider = pinnedGrantProvider(connection) ?? callerProviderFromLabel(connection.displayName);
   return { surface: 'remote', connectionId: connection.id, displayName: connection.displayName, ...(provider ? { provider } : {}) };
 }
 

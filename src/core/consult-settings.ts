@@ -200,12 +200,14 @@ export function consultClaudeFrontierModel(settings: ConsultSettings): string {
 }
 
 /**
- * The provider hosting the agent that asks: OpenAI (ChatGPT, through the
- * relay's pinned client ids) or Anthropic (a Claude client, by its MCP
- * client name). Unknown callers (OpenClaw, the CLI) have none.
+ * The provider hosting the agent that asks: OpenAI, Anthropic or xAI (by a
+ * pinned OAuth client id, or a client's MCP name). Unknown callers
+ * (OpenClaw, the CLI) have none.
  */
-export type ConsultCallerProvider = 'openai' | 'anthropic';
-export const CONSULT_CALLER_PROVIDERS: readonly ConsultCallerProvider[] = ['openai', 'anthropic'];
+export type ConsultCallerProvider = 'openai' | 'anthropic' | 'xai';
+export const CONSULT_CALLER_PROVIDERS: readonly ConsultCallerProvider[] = ['openai', 'anthropic', 'xai'];
+/** zkAPI model id prefixes by provider; xAI's models are listed as `x-ai/…`. */
+const CONSULT_MODEL_PREFIXES: Readonly<Record<string, ConsultCallerProvider>> = { openai: 'openai', anthropic: 'anthropic', 'x-ai': 'xai', xai: 'xai' };
 
 /**
  * The zkAPI model for an agent's question by who hosts the agent: an
@@ -219,13 +221,13 @@ export function consultFrontierModelFor(settings: ConsultSettings, provider: Con
 }
 
 /**
- * The provider a zkAPI model id names (`openai/gpt-5.5` → `openai`), for
- * the cross-provider rule on a one-off `model`; undefined when the id names
- * neither of the hosting providers.
+ * The provider a zkAPI model id names (`openai/gpt-5.5` → `openai`,
+ * `x-ai/grok-5` → `xai`), for the cross-provider rule; undefined when the id
+ * names none of the hosting providers.
  */
 export function consultModelProvider(model: string): ConsultCallerProvider | undefined {
   const prefix = model.slice(0, model.indexOf('/')).toLowerCase();
-  return (CONSULT_CALLER_PROVIDERS as readonly string[]).includes(prefix) ? prefix as ConsultCallerProvider : undefined;
+  return Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix) ? CONSULT_MODEL_PREFIXES[prefix] : undefined;
 }
 
 /**

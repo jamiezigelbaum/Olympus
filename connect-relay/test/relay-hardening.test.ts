@@ -245,7 +245,8 @@ describe('F1: bodyless responses finish their stream at once', () => {
 });
 
 /** A raw HTTP request that sends its head and only part of its body. */
-async function partialUpload(port: number, headers: Record<string, string>, declared: number, sent: number) {
+/** Without a token, `/mcp` is a bare 401 that reads no body; the directory endpoint's anonymous answers read one. */
+async function partialUpload(port: number, headers: Record<string, string>, declared: number, sent: number, path = headers.Authorization ? '/mcp' : '/openai/mcp') {
   let received = '';
   const socket = await Bun.connect({
     hostname: '127.0.0.1',
@@ -256,7 +257,7 @@ async function partialUpload(port: number, headers: Record<string, string>, decl
       },
     },
   });
-  const head = [`POST /mcp HTTP/1.1`, `Host: 127.0.0.1:${port}`, `Content-Type: application/json`, `Content-Length: ${declared}`]
+  const head = [`POST ${path} HTTP/1.1`, `Host: 127.0.0.1:${port}`, `Content-Type: application/json`, `Content-Length: ${declared}`]
     .concat(Object.entries(headers).map(([name, value]) => `${name}: ${value}`))
     .join('\r\n');
   socket.write(`${head}\r\n\r\n${'x'.repeat(sent)}`);
@@ -613,10 +614,12 @@ describe('R1: every refusal and timed-out upload ends its transport', () => {
     const fabricated = `Bearer ${mintCredential('access', loadOrCreateIdentity(tempDir()).installId)}`;
     const cases = {
       unknownId: heldUpload(relay.port, '/mcp', { Authorization: fabricated }, 8_000, 10),
-      rateLimited: heldUpload(throttled.port, '/mcp', {}, 8_000, 10),
-      oversized: heldUpload(relay.port, '/mcp', {}, 1024 * 1024, 10),
-      byteBudget: heldUpload(small.port, '/mcp', {}, 32 * 1024, 20 * 1024),
-      uploadTimeout: heldUpload(relay.port, '/mcp', {}, 8_000, 10),
+      rateLimited: heldUpload(throttled.port, '/openai/mcp', {}, 8_000, 10),
+      oversized: heldUpload(relay.port, '/openai/mcp', {}, 1024 * 1024, 10),
+      byteBudget: heldUpload(small.port, '/openai/mcp', {}, 32 * 1024, 20 * 1024),
+      uploadTimeout: heldUpload(relay.port, '/openai/mcp', {}, 8_000, 10),
+      // No token on /mcp: the challenge, without waiting for the body.
+      challenged: heldUpload(relay.port, '/mcp', {}, 8_000, 10),
     };
     const all = Object.values(cases);
     await until(() => all.every((c) => c.state.closed), 9_000);
@@ -626,6 +629,7 @@ describe('R1: every refusal and timed-out upload ends its transport', () => {
       oversized: 413,
       byteBudget: 503,
       uploadTimeout: 408,
+      challenged: 401,
     });
     // Bounded: gone within the idle limit plus Bun's timer granularity (about 4 s), however long the caller trickles.
     for (const c of all) expect(c.state.closedAfterMs).toBeLessThan(6_500);
