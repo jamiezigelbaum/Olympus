@@ -158,15 +158,19 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
-- **2026-10-12 — W5 SVC local implementation for rc.7.** Layout/receipt,
-  systemd user lifecycle/status and maintenance admission are implemented in
-  the SVC worktree as three local commits. Focused remote proof: 136 tests,
-  build and TypeScript checks; Mac plist bytes and lifecycle regressions pass.
-  Not merged, published or host-qualified. The systemd-as-PID-1 CI harness
-  remains a follow-up, and Omarchy acceptance remains owner-run. Activation
-  waits for the neighbouring owner-only socket package integration; Linux
-  zkAPI stays off. Integration seams and residual host proof are recorded in
-  `docs/design/linux-engine-service.md`, under SVC implementation handoff.
+- **2026-10-12 — W5 integration for rc.7.** The five local tracks are merged
+  in the integration worktree. Shared receipt paths, owner-only socket
+  transport, the outbound relay, Linux agent approval instructions and
+  Grok API key routing are integrated. Install recovery and Bun-free,
+  receipt-bound removal replace the track drafts. The local-tarball bundle
+  uses the real pinned installer; public Linux publication remains blocked
+  pending qualification. Local proof passed 748 focused tests, the three guards, build and typecheck,
+  with four platform/live skips and a rebuilt dist. The exact owner-run
+  laptop procedure and validation limits live in `docs/design/linux-engine-service.md`, under
+  “W5 integration handoff” and “Omarchy acceptance runbook”. Real systemd,
+  logout/reboot, second-UID isolation and Hyprland qualification remain
+  owner-run; no live install, publication or GitHub delivery is included.
+  Linux zkAPI stays off. The PID-1 CI harness remains deferred.
 
 - **2026-10-12 — Linux parity, Omarchy first.** Owner decision: Olympus
   itself runs on Linux with the Mac's capabilities (scan and image text,

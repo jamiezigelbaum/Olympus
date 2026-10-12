@@ -1,9 +1,7 @@
 # Standalone Olympus engine on Linux (W5)
 
-Status: lifecycle design, 2026-10-12. SVC rows 1a–1c implemented locally;
-unit proof recorded below. Not host-qualified or published.
-Status: lifecycle design, 2026-10-12. PR 2 implemented in the SECRETS track;
-remaining landing rows and real-host qualification are pending.
+Status: W5 tracks integrated locally, 2026-10-12. Integration proof and
+Omarchy acceptance are recorded below. Not published or host-qualified.
 Code baseline: `12ccfcae62a695d0a3db8021e6c79b409cb52c77`. All repository
 `file:line` references below refer to that revision. Statements under
 “Current contract” describe inspected code; subsequent sections specify work
@@ -33,10 +31,10 @@ never selects a weaker mode. No speed floor is added to the owner's W2
 choice. Apple Messages remains outside Linux scope.
 
 The demo stays frozen at `de0b32e2`. Listing claims, public copy and demo
-configuration remain untouched until OpenAI review closes. This document
-and its documentation inventory registration are the only changes in this
-work order; implementation, release publication and live installation are
-separate work.
+configuration remain untouched until OpenAI review closes. The original
+design-only work order is complete; the owner subsequently authorized the
+five-track integration and a local acceptance artifact. Publication and live
+installation remain separate work.
 
 ## Current contract, verified against code
 
@@ -966,3 +964,299 @@ found and closed two P2s before this proof: linger observed outside lifecycle
 custody, and the Mac publisher overwriting an archive already pinned by Linux.
 The final reviewed implementation had no remaining P1/P2 findings; that is
 not a substitute for the deferred host qualification above.
+
+## W5 integration handoff
+
+The local integration retains the SVC, SECRETS, PINS and OPENER handoffs above;
+the AGENTS audit and Mac copy fixtures are in `docs/design/linux-agents.md`.
+Historical handoff deferrals describe those track revisions, not the completed
+integration seams:
+
+- Secrets and worker transport consume `resolveLinuxEngineLayout`; installed
+  receipt roots take precedence over shell drift. The service selects the durable
+  secret backend before launching consumers. Linux zkAPI remains unavailable.
+- Linux worker HTTP runs only over the private Unix socket. HTTP loopback origins
+  remain identifiers for cookies and OAuth; they do not create a TCP listener.
+  The outbound relay child uses that socket for forwarded requests. OAuth grants
+  for ChatGPT, Claude, Grok, Grok Bot and Cursor retain their existing pins.
+- Linux Grok API keys use the existing routable access-credential envelope,
+  store only a digest in the bearer connection table, and stay revocable. They
+  are accepted only on the default remote surface for the current install ID,
+  never as a ChatGPT directory grant. Existing Mac key generation is unchanged.
+- The live agent page receives the opener's resolved SSH socket handoff. A Linux
+  desktop also needs that route for browser approval; the engine never opens an
+  unauthenticated TCP approval listener. Missing SSH configuration is shown as
+  not ready. The trusted browser computer's loopback port must be free.
+- Install, upgrade, rollback and removal use the same runtime kernel lock.
+  The installation receipt inventories machine artifacts for removal without
+  executing an installed Bun or package. Data retention is the default.
+- `--linux-local` in `scripts/publish-release-to-site.ts` prepares a local bundle
+  from the ordinary release artifact and the real Linux installer template.
+  It does not publish to the site or mark pending runtime pins qualified.
+
+The release version is read from the repository manifests. This integration
+is intended for rc.7; constructing a local candidate does not bump the release,
+publish it, or imply that the current version has passed laptop acceptance.
+
+## Omarchy acceptance runbook
+
+Use a dedicated ordinary account on an x86_64 Omarchy laptop with a real
+systemd user session. Never run Olympus as root. These commands assume the
+standard XDG roots; a separate fresh account can repeat them with absolute, non-overlapping
+nondefault `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and
+`XDG_CACHE_HOME`. Keep the same config selector when addressing that install.
+Ubuntu is not qualified by this run: capability checks must succeed or refuse
+before activation. No distro packages are installed automatically.
+
+### Prepare and transfer the local candidate
+
+From the source worktree, after committing the rebuilt `dist`, use the build
+runner to create the normal public artifact and local bundle. The output
+directory must not already exist. Substitute the source worktree path locally;
+no remote host name is part of this procedure.
+
+```sh
+~/.local/bin/remote-build run --cwd "$PWD" --artifact release-artifacts -- sh -c '
+  bun run release:artifact &&
+  VERSION=$(bun -p "require(\"./package.json\").version") &&
+  bun scripts/publish-release-to-site.ts --linux-local \
+    --artifact "release-artifacts/olympus-$VERSION.tgz" \
+    --output release-artifacts/omarchy-acceptance
+'
+```
+
+Copy the complete `release-artifacts/omarchy-acceptance` directory to the
+laptop using your normal file transfer. It includes the exact tarball,
+`install-linux.sh`, `uninstall-linux.sh`, and `SHA256SUMS`. The delivered acceptance bundle also contains the verified
+`bun-linux-x64-baseline.zip`. Add
+`--bun-archive "$BUNDLE/bun-linux-x64-baseline.zip"` to use it offline;
+archive size/hash and executable hash are still enforced. A bundle prepared
+with the command above alone downloads that exact pinned runtime over HTTPS
+unless you supply its verified archive yourself.
+
+### Fresh installation and engine proof
+
+In a terminal inside the copied bundle:
+
+```sh
+BUNDLE=$PWD
+sha256sum -c SHA256SUMS
+set -- olympus-*.tgz
+test "$#" -eq 1
+sh ./install-linux.sh --tarball "$BUNDLE/$1"
+export PATH="$HOME/.local/bin:$PATH"
+olympus engine status
+olympus engine verify
+systemctl --user show olympus-engine.service \
+  --property=FragmentPath,ActiveState,UnitFileState,MainPID,ControlGroup,Result,ExecMainStatus
+loginctl show-user "$(id -u)" --property=Linger --value
+stat -c '%a %u %n' "$XDG_RUNTIME_DIR/olympus" "$XDG_RUNTIME_DIR/olympus/worker.sock"
+ss -xl
+ss -ltn
+olympus doctor
+```
+
+Expect a private directory/socket (0700/0600, this UID), a healthy exact build,
+an enabled unit, verified linger, and no worker TCP listener on the engine
+host. Relay online is a separate status fact. Model download/warm-up is not
+engine health; wait for the model readiness the panel reports before testing
+Private answers. The installer refuses missing tools, old systemd, no user
+bus, unsupported CPU/glibc or denied linger with a remedy; do not work around
+those refusals by inventing an XDG runtime directory or running as root.
+
+### Owner approval and agent access
+
+Configure an SSH alias/account that authenticates as the Olympus owner on
+the laptop. Verify it with your SSH client first. The browser computer must
+be trusted and must have port 8010 available. For a browser on the laptop,
+use an SSH configuration that authenticates back to the owner's local account;
+there is still no engine TCP approval listener. If SSH service setup is needed,
+use the distro's documented SSH setup before continuing.
+
+On the laptop:
+
+```sh
+printf 'SSH target as reached from the browser computer: '
+IFS= read -r OLYMPUS_ACCEPTANCE_SSH_TARGET
+olympus server-mode on --ssh-target "$OLYMPUS_ACCEPTANCE_SSH_TARGET"
+olympus dashboard --no-open
+```
+
+Run the printed `ssh -N -o ExitOnForwardFailure=yes -L ...` command on the
+browser computer and keep it running. Open the printed one-time dashboard
+link there. In **Agents**, connect ChatGPT, Claude, Grok, Grok Bot and Cursor
+one at a time. Keep the original OAuth query intact; choose Connect only in
+the page opened through the forward. Denied consent and a replay of a used
+approval must fail. Complete one authenticated tool call from each client.
+Create a Grok API key in Agents, configure its shown MCP URL and bearer key
+in the API client, and complete a tool call; revoke that key and verify a
+subsequent call fails. Never paste keys into the shell runbook or logs.
+
+From a separate ordinary Linux account, try reaching the recorded socket
+using `curl --unix-socket "$SOCKET" http://localhost/health` after setting
+`SOCKET` to the path printed above. Expect permission denied, including when
+browser-like headers are supplied. Do not relax directory/socket permissions.
+Complete one Personal and one Private question; Private content stays in the
+private panel. Source-open UI under the legacy Mac payload remains deferred
+to the post-review consumer work; do not treat absent controls as a failed
+install or claim that Linux source opening is fully qualified.
+
+### Restart, logout, reboot and upgrade
+
+```sh
+olympus engine restart
+olympus engine verify
+olympus engine stop
+systemctl --user is-enabled olympus-engine.service
+olympus engine start
+olympus engine verify
+```
+
+After stop, `is-enabled` must report disabled (nonzero is expected). Confirm
+the stopped worker cannot be reached. Log out fully and reconnect through the
+owner SSH account: the running engine must survive logout with linger. Reboot
+normally, then repeat `engine status`, `engine verify` and an authenticated
+agent call. Confirm credentials remain usable without a desktop keyring unlock.
+Hyprland login/logout and a viewer surviving engine restart require real-host
+observation; unit fixtures are not this evidence.
+
+Re-run the same installer/tarball for same-release repair:
+
+```sh
+cd "$BUNDLE"
+set -- olympus-*.tgz
+sh ./install-linux.sh --tarball "$BUNDLE/$1"
+olympus engine verify
+```
+
+For a real upgrade, prepare a second bundle from a different build with the
+same release-artifact procedure; reusing identical bytes tests repair only.
+On the laptop select that bundle and install it, then roll back:
+
+```sh
+printf 'Absolute path to the second candidate bundle: '
+IFS= read -r UPGRADE_BUNDLE
+cd "$UPGRADE_BUNDLE"
+sha256sum -c SHA256SUMS
+set -- olympus-*.tgz
+test "$#" -eq 1
+sh ./install-linux.sh --tarball "$UPGRADE_BUNDLE/$1"
+olympus engine verify
+olympus engine rollback
+olympus engine verify
+```
+
+Check the reported build returns to the prior candidate and its matching Bun.
+A failed upgrade must return nonzero and explicitly distinguish a healthy
+restoration from a failed restoration. Do not call a successful file exchange
+a successful rollback.
+
+### Interrupted installation and contention
+
+In the dedicated test account, start the second-candidate installer. In a
+second terminal, inspect the owner-only transaction record under
+`${XDG_STATE_HOME:-$HOME/.local/state}/olympus/engine/`. At a recorded prepare
+or activation stage, terminate the actual installer CLI process with SIGKILL
+(select its exact PID using `ps -u "$(id -u)" -o pid,ppid,args`; never kill by
+name). Re-run the same pinned installer twice and verify the result each time.
+Repeat at each durable boundary exercised by the automated fault fixtures.
+Also interrupt with a normal reboot and retry after login; actual storage
+power-loss durability remains a separate test, not implied by SIGKILL.
+
+While an install is in progress, try `olympus engine rollback` and the
+uninstaller in a second terminal. They must refuse the busy lock without
+mutating active references. Killing the calling shell must not release the
+lock while a mutation child survives. Never delete the lock file to retry.
+
+### Uninstall, retained data and full removal
+
+Copy the bundle outside the managed installation so its uninstaller remains
+available even if Bun or the app has disappeared. First prove normal removal:
+
+```sh
+cd "$BUNDLE"
+sh ./uninstall-linux.sh
+systemctl --user show olympus-engine.service --property=LoadState,ActiveState
+command -v olympus || true
+ss -xl
+```
+
+Expect no engine service, worker listener, owned launcher or package/runtime
+generation, with settings, credentials, indexes, models and logs retained.
+A user-requested desktop viewer is not an engine child and may remain. Repeat
+the uninstaller: interrupted cleanup must safely resume or report a concrete
+retained replacement. In another fresh acceptance cycle, remove only the
+recorded installed Bun/app generation as a deliberate corruption test, then
+run this same bundle uninstaller; it must not execute either missing artifact.
+
+For the explicit full-removal case in this dedicated account:
+
+```sh
+sh ./uninstall-linux.sh --purge --yes
+```
+
+If the receipt says Olympus enabled linger, and this account has no other
+user services that need it, choose its account-wide restoration explicitly:
+
+```sh
+sh ./uninstall-linux.sh --purge --yes --restore-linger
+```
+
+Choose the restoration command instead of the preceding purge-only command
+when that is the intended acceptance case. The final receipt is removed only
+when requested cleanup completes. Locked/unavailable explicitly selected
+Secret Service items must be reported as incomplete, never silently retained
+under a full-removal success. Original provider files/mail are never removed.
+Disconnect Olympus separately in each agent account; local deletion does not
+revoke a cloud account connection. OS audit metadata can remain. The held
+kernel-lock inode is left until the real runtime directory is torn down at
+final logout/reboot; check again after that teardown for full-removal proof.
+
+
+### Integration proof and remaining qualification
+
+Local remote-build proof: **748 passed, 0 failed, 4 skipped across 35 focused
+files**, including architecture, public-surface and private-ops guards. The
+canonical documentation inventory is 48 files. Build and
+`bunx tsc --noEmit -p .` passed; a subsequent `--artifact dist` rebuild returned
+the generated bundles. The four skips are the native Mac zombie-group case,
+the native Mac applet case, live Keychain write, and actual second-UID socket
+access. Mac plist, rendered agent copy, secret fixture and shell-script bytes
+remain covered; no native Mac execution is claimed by the Linux runner.
+Built-in-reasoning installer tests were excluded as directed.
+
+The crash matrix kills real subprocesses at **16 install and 10 rollback
+boundaries**, then repeats recovery twice. Its service manager is a fixture;
+this proves persistent-file transaction behavior, not systemd-as-PID-1 or
+physical power-loss behavior. The manager harness remains deferred; laptop
+cgroup, linger/logout/reboot, second-UID, desktop and real-vendor checks above
+are still required. Independent scoped reviews and their repair rechecks have
+no remaining P1/P2 findings. No GitHub CI, publication or live rollout was run.
+
+Implementation details that supersede the earlier track seams:
+
+- Direct CLI operations use Linux kernel `flock` through Bun FFI; the shell
+  uses util-linux `flock` on the same inode. Nested CLI mutation proves and
+  retains the inherited open-file-description lock, marks it close-on-exec,
+  and never trusts an environment marker. The bootstrap must not use
+  `flock --close`, which would remove the child's independent lock custody.
+- The locked CLI durably records original linger before enabling it. Shell
+  bootstrap no longer mutates logind or supplies ambient linger provenance.
+- Failed first installs preserve a zero-machinery `recovery_pending` receipt
+  for retry/removal. Explicit keep-data uninstall instead writes
+  `data_retained`; fresh installation refuses that state until the owner
+  purges or backs up and moves the retained data. Overlapping managed roots
+  refuse before mutation so purge cannot consume its own recovery receipt.
+- Journals carry paths, hashes, modes and custody identities. Config backup
+  bytes live in separate private files; worker bearer material is not put in
+  transaction JSON. Terminal receipt commits precede irreversible cleanup.
+- Generation-directory identity and a private marker permit Bun-free removal
+  of missing/corrupt runtime or app constituents while replaced roots and
+  markers refuse. Unknown remaining machinery or an unfinished install
+  transaction produces incomplete removal, with the receipt retained.
+- Explicit libsecret full purge refuses when item ownership cannot be proved;
+  it never deletes a whole keyring or claims those secrets were removed.
+- CLI/local-agent configuration discovery and desktop launching follow the
+  receipt. The desktop entry invokes the managed launcher, which exports the
+  recorded roots and enters the trusted package directory. Environment-only
+  setup preflight does not initialize an unused credential backend.
