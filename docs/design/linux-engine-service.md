@@ -82,7 +82,7 @@ needed to address it. A marked launcher carries that layout, not secrets.
 | Existing indexes, model files, remote registration and child/status records | `$XDG_DATA_HOME/openclaw/olympus/` (compatibility namespace, no OpenClaw dependency) |
 | Install transactions, rollback receipts, engine/install logs | `$XDG_STATE_HOME/olympus/engine/` |
 | Disposable downloads | `$XDG_CACHE_HOME/olympus/engine/` |
-| Lifecycle lock and proposed private worker socket (owner decision pending) | `$XDG_RUNTIME_DIR/olympus/` |
+| Lifecycle lock and private worker socket (owner decision 2026-10-12) | `$XDG_RUNTIME_DIR/olympus/` |
 | Marked CLI launcher; desktop URL handler | `~/.local/bin/olympus`; `$XDG_DATA_HOME/applications/ai.olympusplugin.open.desktop` |
 
 Unset config/data/state/cache roots use the standard home-relative
@@ -482,7 +482,7 @@ say that no desktop is available on the engine host. W5 adds no general file
 transfer endpoint and exposes no filesystem path in model-visible output.
 Private answers remain in the private panel.
 
-### Open owner decision: Linux approval boundary (finding 1)
+### Owner decision: Linux approval boundary (finding 1, decided 2026-10-12)
 
 Loopback is not an owner identity. A different local UNIX account can fetch
 the consent page and forge navigation headers, and can occupy the TCP port
@@ -490,10 +490,10 @@ while the engine is down. The existing checks establish direct loopback,
 CSRF and browser navigation, not UID ownership
 (`src/workers/remote-oauth/handler.ts:278`, `:285`, `:746`;
 `docs/design/chatgpt-plugin.md:1371`). SSH authentication alone does not remove
-that engine-host risk. **OPEN OWNER DECISION:** choose the Linux owner-held
-approval boundary before enabling PR 4's approval path.
+that engine-host risk. **Owner decision 2026-10-12: only the owner's account
+can reach approval on Linux.**
 
-Recommendation: put the Linux approval/worker endpoint on a Unix socket at
+Decided design: put the Linux approval/worker endpoint on a Unix socket at
 `$XDG_RUNTIME_DIR/olympus/worker.sock`, inside an owner-owned 0700 directory
 with a 0600 socket. Validate ancestors/ownership and refuse unsafe or occupied
 paths; no parallel unauthenticated TCP approval listener. Remote browsers
@@ -511,13 +511,13 @@ worker health, relay/CLI clients and direct-transport validation for the socket,
 without treating a forged HTTP header as proof of socket origin. A browser on
 the engine host also needs the approved socket-to-browser route or code factor.
 
-Fallback option: retain loopback but require a short-lived, single-use code
+Rejected alternative (kept for the record): retain loopback but require a short-lived, single-use code
 issued only by the owner's CLI, bound to the pending install/client/redirect/
 state/PKCE approval transaction. Never expose it through an unauthenticated
 HTTP endpoint or logs. Bound attempts and atomically consume it; CSRF, origin
 checks and explicit consent still apply. This protects approval but does not
 by itself prevent TCP port squatting; fail on collisions and never submit an
-owner code to an unverified worker. These options are proposals, not approval.
+owner code to an unverified worker.
 
 Conditional headless connection sequence after the owner's choice:
 
@@ -582,14 +582,14 @@ checks belong to Omarchy acceptance, not claimed unit coverage.
 | 3a. Runtime pins and publisher | Verified Linux architecture pins, archive/executable checks and publisher filling; no install transaction. | Missing pin, tampered archive and tampered cached executable refuse before execution; publisher fixture cannot emit an unfilled template or overwrite prior assets. | Each architecture needs real CPU/glibc/loadability proof before publication; x64 does not qualify arm64. |
 | 3b. Install/upgrade transaction | Depends on 1a–1c, 2 and 3a; Linux installer, util-linux flock supervisor, durable recovery and lifecycle doctor. | Fault injection at every durable boundary recovers twice; same-release repair retains previous; failed upgrade versus failed rollback health are distinct; missing tools/bus/linger refuses before active mutation. | CI subprocess contention for install/rollback and cancellation keeps the lock through mutation; PID-1 container proves real activation/recovery. Shell syntax/ShellCheck; reboot/power-loss acceptance on Omarchy. |
 | 3c. Uninstall and purge | Depends on 3b; receipt-bounded shell removal without Bun/app; optional explicit data purge. | Receipt fixtures preserve unrelated files/replacements, retain data by default, remove only enumerated owned artifacts with consent, and refuse deletion on unknown custody; repeat interrupted removal safely. | PID-1 container: uninstall without Bun/app, install/rollback/uninstall lock contention, cgroup/listener release and purge inventory. Omarchy: final runtime-directory teardown and explicit linger restoration. |
-| 4. Desktop opener and headless handoff | Depends on 1a/1b; live graphical readiness, separate viewer scope and bounded tunnel reuse. Approval transport awaits the open owner decision. Public capabilities wait for 5. | Shared private/unreadable dispatch rejects symlink swaps/traversal/argv injection/revoked eligibility. HTML/script disguised as `.pdf` and unknown MIME open only the folder. Inactive graphical target/stale display refuses; manager environment can prove desktop readiness when engine env lacks DISPLAY. **Conditional on the decision:** owner proof required, other local user cannot approve, including forged headers/replay. | PID-1 container: viewer fixture in its own scope survives engine restart; selected socket permission boundary tested with a second UID, or code-factor rejection/atomic consumption if selected. Omarchy: actual Hyprland viewer, login/logout readiness and second-computer OAuth/tool call. |
+| 4. Desktop opener and headless handoff | Depends on 1a/1b; live graphical readiness, separate viewer scope and bounded tunnel reuse. Approval transport is the owner-only Unix socket. Public capabilities wait for 5. | Shared private/unreadable dispatch rejects symlink swaps/traversal/argv injection/revoked eligibility. HTML/script disguised as `.pdf` and unknown MIME open only the folder. Inactive graphical target/stale display refuses; manager environment can prove desktop readiness when engine env lacks DISPLAY. **Owner-only socket:** other local user cannot approve, including forged headers/replay. | PID-1 container: viewer fixture in its own scope survives engine restart; socket permission boundary tested with a second UID. Omarchy: actual Hyprland viewer, login/logout readiness and second-computer OAuth/tool call. |
 | 5. Consumer integration and qualification | Depends on all prior parts and relevant W1–W4 proof; **after OpenAI review closes**. Host-neutral payload/decoder, copy inventory and supported entrypoints. | Old/new payload compatibility, Linux never says “opened on Mac,” unsupported architecture/optional lanes remain unavailable, frozen demo/listing fixtures unchanged until authorized publication. | Omarchy acceptance below; independent review and required exact-head/exact-main CI remain required for each critical implementation PR. |
 
 PRs 1a–4 can land internally without altering the reviewed listing or serving
-changed plugin bundles; the owner-dependent approval behavior stays disabled
-until decided and proven. Publication is a separate explicitly authorized
+changed plugin bundles; the owner-only approval route stays disabled
+until proven. Publication is a separate explicitly authorized
 action after review closure. Runtime pin qualification and schema compatibility
-are engineering proof tasks; finding 1 is an unresolved product decision.
+are engineering proof tasks; finding 1 was decided by the owner on 2026-10-12.
 
 ### Deferred copy inventory (PR 5 only)
 
@@ -657,12 +657,10 @@ lanes remain required regardless of the skipped distro run.
 
 ## Owner decisions
 
-**OPEN — finding 1:** choose the Linux owner-held approval boundary. Recommend
-the private Unix worker socket and SSH socket forwarding; the fallback is a
-transaction-bound one-time code from the owner's CLI. PR 4 must carry the
-conditional “other local user cannot approve” test for the selected route.
-This document records the decision request; it does not resolve it or block
-independent layout, lifecycle, secrets and installer work.
+**Decided 2026-10-12 — finding 1:** only the owner's account can reach
+approval on Linux: the private Unix worker socket with SSH socket forwarding
+for a second computer. PR 4 carries the “other local user cannot approve”
+test.
 
 Settled scope: fresh installs with existing-data refusal (no migrations),
 default retention with explicitly chosen full removal, the OpenAI-review
@@ -670,7 +668,7 @@ freeze, and Omarchy qualification with Ubuntu proof skipped.
 
 ## Review disposition against the code baseline
 
-Findings 1–10 are incorporated above: 1 remains an open owner decision;
+Findings 1–10 are incorporated above: 1 was decided by the owner (owner-only socket);
 2–9 require design changes; 10 requires shutdown/settlement recovery proof.
 Two review claims need narrower wording, without dismissing their risks:
 
