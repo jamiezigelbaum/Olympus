@@ -38,10 +38,12 @@
       if (!/^s\d\d-[a-z]+$/.test(id || "") || !window.OLY_TL.scenes[id]) return;
       window.__timelines = {};
 
-      // A scene ends where the film moves on from it (its page turn, pan or slide-off), not at the end of its clip.
+      // A scene ends where the film moves on from it (its page turn, pan or slide-off), not at the end of its clip:
+      // a frame before that beat, since whatever the beat sets (zkAPI's redaction growing into the cut) is the next
+      // scene's.
       var C = window.OLY_TL.scenes[id], B = C.beats;
       var end = [B.out, B.turn, B.pan, B.push].filter(function (t) { return t != null; })[0];
-      if (end == null) end = C.dur;
+      end = end == null ? C.dur : end - 0.02;
 
       fetch("scenes/" + id + ".html").then(function (r) { return r.text(); }).then(function (html) {
         var doc = new DOMParser().parseFromString(html, "text/html");
@@ -110,20 +112,34 @@
             Array.prototype.forEach.call(document.querySelectorAll("#stage .w"), function (w) { w.style.visibility = ""; });
           }
 
-          // Some scenes open on a stretch where nothing moves (in the film the page before was still leaving over
-          // them: the Venice letter folds away over the first two seconds of zkAPI). On the page a scene starts at
-          // its first movement, less a beat.
+          // Some scenes open on a stretch where nothing shows moving (in the film the page before was still leaving
+          // over them: the Venice letter folds away over the first two seconds of zkAPI; the anonymous question's
+          // words rise inside a bubble that only fades in later). On the page a scene starts at its first visible
+          // movement, less a frame or two.
           function at0(tw) { var t = tw.startTime(), p = tw.parent; while (p && p !== tl) { t += p.startTime(); p = p.parent; } return t; }
-          var first = end;
+          function shown(x, t) {    // at time t, is x laid out and inside something not faded out?
+            if (x.nodeType !== 1 || getComputedStyle(x).display === "none") return false;
+            for (var p = x.parentElement; p && p !== stage; p = p.parentElement) {
+              var cs = getComputedStyle(p);
+              if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.05) return false;
+            }
+            return true;
+          }
+          var moves = [];
           tl.getChildren(true, true, false).forEach(function (tw) {
             var t = at0(tw);
             if (tw.duration() >= end - 0.01) return;                                     // the camera's drift
             if (tw.duration() === 0 && t < 0.001) return;                                 // starting states
             if (tw.targets().some(function (x) { return /-(cam|pan)$/.test(x.id || ""); })) return;
-            if (tw.targets().every(function (x) { return x.nodeType === 1 && getComputedStyle(x).display === "none"; })) return;  // the Her frame
-            first = Math.min(first, t);
+            moves.push({ t: t, tw: tw });
           });
-          var start = Math.max(0, Math.min(first, end) - 0.15);
+          moves.sort(function (a, b) { return a.t - b.t; });
+          var first = end;
+          for (var i = 0; i < moves.length && moves[i].t < first; i++) {
+            tl.seek(moves[i].t + 0.05, false);
+            if (moves[i].tw.targets().some(function (x) { return shown(x); })) first = moves[i].t;
+          }
+          var start = Math.max(0, Math.min(first, end) - 0.05);
 
           var at = parseFloat(q.get("at"));
           tl.seek(still ? end : isNaN(at) ? start : at, false);

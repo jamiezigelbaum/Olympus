@@ -191,6 +191,7 @@ em { font-style: italic; }
 /* Footer. */
 .site-foot { max-width: var(--sheet-max); margin: 0 auto; padding: 48px var(--gutter) 56px; color: var(--ink-soft); font-size: 15px; }
 .site-foot ul { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 20px; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.site-foot li { margin: 0; }  /* page list spacing (style.css li + li) stays out of the footer row */
 .site-foot a { text-decoration: none; }
 .site-foot a:hover { text-decoration: underline; }
 .site-foot p { margin: 0; }

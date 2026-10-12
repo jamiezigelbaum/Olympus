@@ -72,8 +72,10 @@
 
   if (motion) {
     // Arrive: the stage's top has come a little way into the screen. Play: the stage's middle (tall stages count only
-    // their first 70% of a screen) has reached the middle of the screen. The first scene does both on load; a scene
-    // already scrolled past does both at once; at the very bottom every scene in view does both.
+    // their first 70% of a screen) is just past the middle of the screen, or the whole stage is on screen and close
+    // to it (a reader who stops with the card in full view shouldn't have to nudge it the last few lines). The first
+    // scene does both on load; a scene already scrolled past does both at once; at the very bottom every scene in
+    // view does both.
     var pending = scenes.filter(function (s) { return frames.has(s); });
     var ticking = false;
     var check = function () {
@@ -83,7 +85,8 @@
       pending = pending.filter(function (scene) {
         var r = scene.querySelector(".stage").getBoundingClientRect();
         var mid = r.top + Math.min(r.height, vh * 0.7) / 2;
-        if (scene === scenes[0] || mid <= vh / 2 || r.bottom < 0 || (atBottom && r.top < vh)) {
+        if (scene === scenes[0] || mid <= vh * 0.55 || (r.top >= 0 && r.bottom <= vh && mid <= vh * 0.62) ||
+            r.bottom < 0 || (atBottom && r.top < vh)) {
           want(scene, "play");
           return false;
         }
