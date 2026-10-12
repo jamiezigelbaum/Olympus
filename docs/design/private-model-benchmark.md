@@ -130,9 +130,10 @@ at the end of its run. The two Qwen3.5-4B runs show the spread: 2.9 versus
   set it scored the same as the 4B model (11/12, also missing p08) at about
   2.5 times the latency and 1.8 times the memory, so it is not a default. The same
   variable accepts `small`, `standard`, or an exact model id.
-- **On or off.** `OLYMPUS_BUILT_IN_ANALYST=on|off`. The default is on for
-  Apple silicon and off elsewhere, so a Linux host never starts a download it
-  did not ask for.
+- **On or off.** `OLYMPUS_BUILT_IN_ANALYST=on|off`. The default is on
+  wherever a runtime is pinned (Apple silicon and Linux); memory picks the
+  size or rules the model out, and speed is the owner's call (owner decision
+  2026-10-12).
 
 ## How it is wired
 

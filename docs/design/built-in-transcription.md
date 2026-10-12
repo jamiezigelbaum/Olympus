@@ -32,7 +32,7 @@ lane, and the model server listens on loopback only.
   minutes and never touches the reasoning server.
 - **Engine order** (transcription.ts, mirroring OCR): the owner's
   `OLYMPUS_TRANSCRIBE_COMMAND` first; else the built-in engine where enabled
-  (`OLYMPUS_BUILT_IN_TRANSCRIPTION`, default on for `darwin-arm64` only);
+  (`OLYMPUS_BUILT_IN_TRANSCRIPTION`, default on where a runtime is pinned and the audio decoder exists);
   else audio is a named gap (`transcription_required`).
 
 ## One file
@@ -163,5 +163,5 @@ Ogg Opus fixture was made with ffmpeg, which is not used by the product.
 - The dashboard does not yet show the transcription model's install row; the
   status file (`models/built-in-transcription/status.json`) carries the same
   shape as the reasoning model's.
-- Linux needs `ffmpeg` on PATH and `OLYMPUS_BUILT_IN_TRANSCRIPTION=on`.
+- Linux needs `ffmpeg` on PATH; without it the default is off.
 - No speaker labels or timestamps; transcripts are plain text.
