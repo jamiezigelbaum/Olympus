@@ -11438,8 +11438,162 @@ var init_dropbox = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/command-runner.ts
-var resolvedCommands;
+import { Buffer as Buffer2 } from "node:buffer";
+import { spawn as spawn3 } from "node:child_process";
+import { accessSync as accessSync6, constants as fsConstants3, statSync as statSync14 } from "node:fs";
+import { delimiter as delimiter6, join as join22 } from "node:path";
+function errnoCode(error) {
+  const code = error?.code;
+  return typeof code === "string" && code.length > 0 ? code : "UNKNOWN";
+}
+function killExtractionProcessGroup(child, signal = "SIGKILL", kill = process.kill) {
+  const pid = child.pid;
+  if (pid === undefined || pid <= 0) {
+    return { ok: true };
+  }
+  let groupFailure;
+  if (process.platform !== "win32") {
+    try {
+      kill(-pid, signal);
+      return { ok: true };
+    } catch (error) {
+      const code = errnoCode(error);
+      if (code !== "ESRCH")
+        groupFailure = code;
+    }
+  }
+  try {
+    kill(pid, signal);
+    return { ok: true };
+  } catch (error) {
+    const code = errnoCode(error);
+    if (code === "ESRCH") {
+      return groupFailure ? { ok: false, code: groupFailure } : { ok: true };
+    }
+    return { ok: false, code: groupFailure ?? code };
+  }
+}
+function resolveExtractionCommand(command, options = {}) {
+  if (!command || command.includes("/") || command.includes("\\"))
+    return command;
+  const path = options.path ?? process.env.PATH ?? "";
+  const fallbackDirs = options.fallbackDirs ?? EXTRACTION_COMMAND_FALLBACK_DIRS;
+  const cacheable = options.path === undefined && options.fallbackDirs === undefined && options.isExecutable === undefined;
+  const cacheKey = `${path}\x00${command}`;
+  if (cacheable) {
+    const cached2 = resolvedCommands.get(cacheKey);
+    if (cached2)
+      return cached2;
+  }
+  const isExecutable = options.isExecutable ?? executableFile;
+  const directories = [...path.split(delimiter6).filter(Boolean), ...fallbackDirs];
+  for (const directory of directories) {
+    const candidate = join22(directory, command);
+    if (isExecutable(candidate)) {
+      if (cacheable)
+        resolvedCommands.set(cacheKey, candidate);
+      return candidate;
+    }
+  }
+  return command;
+}
+function executableFile(path) {
+  try {
+    if (!statSync14(path).isFile())
+      return false;
+    accessSync6(path, fsConstants3.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function runExtractionCommand(request, internals = {}) {
+  const kill = internals.kill ?? process.kill;
+  const command = resolveExtractionCommand(request.command);
+  return new Promise((resolve3, reject) => {
+    const child = spawn3(command, request.args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      ...request.env ? { env: { ...process.env, ...request.env } } : {}
+    });
+    const stdout = [];
+    const stderr = [];
+    let settled = false;
+    const useTimeout = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0;
+    const timer = useTimeout ? setTimeout(() => {
+      if (settled)
+        return;
+      settled = true;
+      const outcome = killExtractionProcessGroup(child, "SIGKILL", kill);
+      reject(new ExtractionCommandTimeoutError({
+        command: request.command,
+        timeoutMs: request.timeoutMs,
+        ...outcome.ok ? {} : { terminationFailed: outcome.code }
+      }));
+    }, request.timeoutMs) : undefined;
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error) => {
+      if (settled)
+        return;
+      settled = true;
+      if (timer)
+        clearTimeout(timer);
+      killExtractionProcessGroup(child, "SIGKILL", kill);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled)
+        return;
+      settled = true;
+      if (timer)
+        clearTimeout(timer);
+      const result = {
+        stdout: Buffer2.concat(stdout).toString("utf8"),
+        stderr: Buffer2.concat(stderr).toString("utf8")
+      };
+      if (code === 0) {
+        resolve3(result);
+        return;
+      }
+      reject(new ExtractionCommandError({
+        command: request.command,
+        exitCode: code,
+        stdout: result.stdout,
+        stderr: result.stderr
+      }));
+    });
+  });
+}
+var ExtractionCommandError, ExtractionCommandTimeoutError, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands;
 var init_command_runner = __esm(() => {
+  ExtractionCommandError = class ExtractionCommandError extends Error {
+    command;
+    exitCode;
+    stdout;
+    stderr;
+    constructor(input) {
+      super(input.exitCode === null ? `${input.command} exited without an exit code.` : `${input.command} exited with status ${input.exitCode}.`);
+      this.name = "ExtractionCommandError";
+      this.command = input.command;
+      this.exitCode = input.exitCode;
+      this.stdout = input.stdout;
+      this.stderr = input.stderr;
+    }
+  };
+  ExtractionCommandTimeoutError = class ExtractionCommandTimeoutError extends Error {
+    command;
+    timeoutMs;
+    terminationFailed;
+    constructor(input) {
+      super(input.terminationFailed ? `${input.command} timed out and could not be terminated (${input.terminationFailed}); it may still be running.` : `${input.command} timed out.`);
+      this.name = "ExtractionCommandTimeoutError";
+      this.command = input.command;
+      this.timeoutMs = input.timeoutMs;
+      this.terminationFailed = input.terminationFailed;
+    }
+  };
+  EXTRACTION_COMMAND_FALLBACK_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
   resolvedCommands = new Map;
 });
 
@@ -11703,10 +11857,10 @@ var init_public_source_capabilities = __esm(() => {
 
 // src/workers/source-dashboard.ts
 import { homedir as homedir14 } from "node:os";
-import { dirname as dirname17, join as join22 } from "node:path";
+import { dirname as dirname17, join as join23 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join22(homedir14(), ".local", "share");
-  return join22(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir14(), ".local", "share");
+  return join23(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
@@ -16613,7 +16767,7 @@ init_model_transport();
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync13, mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname19, join as join25 } from "node:path";
+import { dirname as dirname19, join as join26 } from "node:path";
 import { homedir as homedir16 } from "node:os";
 
 // src/core/engine-service.ts
@@ -18175,9 +18329,9 @@ init_secret_store();
 
 // src/core/consult-gate.ts
 import { createHash as createHash7 } from "node:crypto";
-import { existsSync as existsSync12, readFileSync as readFileSync16, statSync as statSync14 } from "node:fs";
+import { existsSync as existsSync12, readFileSync as readFileSync16, statSync as statSync15 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
-import { basename as basename4, dirname as dirname18, join as join23 } from "node:path";
+import { basename as basename4, dirname as dirname18, join as join24 } from "node:path";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 init_opsec();
 init_types();
@@ -18413,14 +18567,14 @@ var VOCABULARY_DIR = ["assets", "consult", "vocabulary"];
 var CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 var CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
 function consultUserVocabularyDir(env = process.env) {
-  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join23(env.HOME?.trim() || homedir15(), ".olympus", "consult", "vocabulary");
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join24(env.HOME?.trim() || homedir15(), ".olympus", "consult", "vocabulary");
 }
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
     if (!existsSync12(path))
       return "missing";
-    if (statSync14(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
+    if (statSync15(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync16(path);
     return createHash7("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
@@ -18431,13 +18585,13 @@ function verifiedPackFile(path, sha256) {
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname18(fileURLToPath6(moduleUrl));
   const root = basename4(here) === "core" && basename4(dirname18(here)) === "src" ? dirname18(dirname18(here)) : basename4(here) === "dist" ? dirname18(here) : undefined;
-  return root !== undefined && existsSync12(join23(root, ...VOCABULARY_DIR)) ? root : undefined;
+  return root !== undefined && existsSync12(join24(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
   const root = consultVocabularyRoot();
   const status = selection.shipped.map((id) => {
-    const result = root ? verifiedPackFile(join23(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
+    const result = root ? verifiedPackFile(join24(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
     return { id, origin: "shipped", state: typeof result === "string" ? result : "verified" };
   });
   if (selection.user.length > 0) {
@@ -18445,7 +18599,7 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
     const manifest = new Map(userManifestEntries(userDir));
     for (const id of selection.user) {
       const sha256 = manifest.get(id);
-      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join23(userDir, `${id}.txt.gz`), sha256);
+      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join24(userDir, `${id}.txt.gz`), sha256);
       status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
     }
   }
@@ -18455,8 +18609,8 @@ function userManifestEntries(userDir) {
   if (!userDir)
     return [];
   try {
-    const path = join23(userDir, "manifest.json");
-    if (!existsSync12(path) || statSync14(path).size > 1024 * 1024)
+    const path = join24(userDir, "manifest.json");
+    if (!existsSync12(path) || statSync15(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync16(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -19523,7 +19677,7 @@ var STREET_SUFFIXES = new Set([
 // src/core/consult-settings.ts
 init_secret_store();
 import { closeSync as closeSync3, constants as constants4, fstatSync, openSync as openSync3, readSync } from "node:fs";
-import { join as join24 } from "node:path";
+import { join as join25 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
@@ -19557,7 +19711,7 @@ var OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
 var LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
 function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
-  return home ? join24(home, ".olympus", "consult.json") : undefined;
+  return home ? join25(home, ".olympus", "consult.json") : undefined;
 }
 var __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 function parseConsultSettings(value) {
@@ -19825,6 +19979,7 @@ async function runDoctor(input) {
   const checks = [
     ...deps.hostProbe ? [await safeCheck("host", () => hostCheck(deps))] : [],
     await safeCheck("dependencies", () => dependencyCheck(deps)),
+    ...deps.ocrProbe ? [await safeCheck("ocr_reading", () => ocrReadingCheck(deps))] : [],
     await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck("sovereignty_prerequisites", () => sovereigntyPrerequisiteCheck(deps)),
     await safeCheck("credential_handles", () => credentialHandleCheck(deps)),
@@ -19891,7 +20046,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join25(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join26(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -19986,6 +20141,18 @@ async function dependencyCheck(deps) {
     name: "dependencies",
     ok: true,
     detail: `Required dependencies are present. Optional dependency gaps: ${optionalMissing.join(", ") || "none"}.`
+  };
+}
+async function ocrReadingCheck(deps) {
+  const readiness = await deps.ocrProbe();
+  if (readiness.state === "ready") {
+    return { name: "ocr_reading", ok: true, detail: readiness.detail };
+  }
+  return {
+    name: "ocr_reading",
+    ok: false,
+    detail: readiness.detail,
+    hint: `${readiness.remedy ?? "Install tesseract and poppler."} Scans and pictures left unread are read again automatically once it is installed.`
   };
 }
 async function hostCheck(deps) {
@@ -20893,7 +21060,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join25(dirname19(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join26(dirname19(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -21151,7 +21318,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync13(join25(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync13(join26(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -21165,6 +21332,476 @@ function asCount(value) {
 }
 function errorDetail(error) {
   return error instanceof Error && error.message ? error.message : String(error);
+}
+
+// src/core/ocr-readiness.ts
+import { existsSync as existsSync15, readFileSync as readFileSync18 } from "node:fs";
+
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+import { existsSync as existsSync14 } from "node:fs";
+import { dirname as dirname20, join as join27 } from "node:path";
+import { fileURLToPath as fileURLToPath7 } from "node:url";
+
+// src/workers/file-extraction/extractors/bounded-text.ts
+var TEXT_MIME_TYPES = new Set([
+  "application/json",
+  "application/x-ndjson",
+  "application/xml",
+  "text/csv",
+  "text/html",
+  "text/markdown",
+  "text/plain",
+  "text/tab-separated-values",
+  "text/xml"
+]);
+var TABLE_MIME_TYPES = new Set([
+  "text/csv",
+  "text/tab-separated-values"
+]);
+var IMAGE_MIME_TYPES = new Set([
+  "image/bmp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+  "image/jpeg",
+  "image/png",
+  "image/tiff",
+  "image/webp"
+]);
+var GENERIC_MIME_TYPES = new Set([
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/binary"
+]);
+
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+init_command_runner();
+var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js";
+var APPLE_VISION_OSASCRIPT = "/usr/bin/osascript";
+var OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync14) {
+  let directory = dirname20(fileURLToPath7(moduleUrl));
+  for (let depth = 0;depth < 6; depth += 1) {
+    const candidate = join27(directory, APPLE_VISION_OCR_SCRIPT);
+    if (exists(candidate))
+      return candidate;
+    const parent = dirname20(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function appleVisionOcrSelected(preference, platform2 = process.platform) {
+  return preference === "auto" && platform2 === "darwin";
+}
+function parseOcrEnginePreference(value) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized)
+    return;
+  if (OCR_ENGINE_PREFERENCES.includes(normalized)) {
+    return normalized;
+  }
+  throw new Error(`OCR engine must be one of ${OCR_ENGINE_PREFERENCES.join(", ")}; got ${value}.`);
+}
+
+// src/workers/file-extraction/extractors/ocr-capability.ts
+init_command_runner();
+import { mkdtemp, readFile as readFile3, readdir, rm as rm2, writeFile } from "node:fs/promises";
+import { tmpdir as tmpdir3 } from "node:os";
+import { join as join28 } from "node:path";
+
+// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
+var OCR_PROBE_WORD = "OLYMPUS";
+var OCR_PROBE_IMAGE_WIDTH = 360;
+var OCR_PROBE_IMAGE_HEIGHT = 96;
+var OCR_PROBE_IMAGE_BASE64 = [
+  "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"
+].join("");
+function ocrProbeJpeg() {
+  return new Uint8Array(Buffer.from(OCR_PROBE_IMAGE_BASE64, "base64"));
+}
+
+// src/workers/file-extraction/extractors/ocr-capability.ts
+var OCRMYPDF_COMMAND = "ocrmypdf";
+var TESSERACT_COMMAND = "tesseract";
+var PDFTOPPM_COMMAND = "pdftoppm";
+var TESSERACT_ENV = { OMP_THREAD_LIMIT: "1" };
+var OCR_READY_TTL_MS = 10 * 60000;
+var PROBE_TESSERACT_TIMEOUT_MS = 30000;
+var PROBE_PDFTOPPM_TIMEOUT_MS = 30000;
+var PROBE_OCRMYPDF_TIMEOUT_MS = 90000;
+var PROBE_TEMP_PREFIX = "olympus-ocr-probe-";
+var PROBE_RENDER_DPI = 150;
+function ocrmypdfArguments(input) {
+  return [
+    "--force-ocr",
+    "--rotate-pages",
+    "--deskew",
+    "--clean",
+    "--jobs",
+    "1",
+    "--optimize",
+    "0",
+    "--output-type",
+    "pdf",
+    "--sidecar",
+    input.sidecarPath,
+    input.inputPath,
+    input.outputPath
+  ];
+}
+function tesseractArguments(inputPath) {
+  return [inputPath, "stdout", "-l", "eng", "--psm", "3"];
+}
+function probeWordRead(text) {
+  let letters = "";
+  for (const char of text.toUpperCase()) {
+    if (char >= "A" && char <= "Z" || char >= "0" && char <= "9")
+      letters += char;
+  }
+  return letters.includes(OCR_PROBE_WORD);
+}
+function commandMissing(error) {
+  return error?.code === "ENOENT";
+}
+function buildOcrProbePdf() {
+  const jpeg = ocrProbeJpeg();
+  const pageWidth = OCR_PROBE_IMAGE_WIDTH * 72 / PROBE_RENDER_DPI;
+  const pageHeight = OCR_PROBE_IMAGE_HEIGHT * 72 / PROBE_RENDER_DPI;
+  const content = `q ${pageWidth} 0 0 ${pageHeight} 0 0 cm /Im0 Do Q`;
+  const chunks = [];
+  const offsets = [];
+  let length = 0;
+  const push = (chunk) => {
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk, "latin1") : chunk;
+    chunks.push(buffer);
+    length += buffer.length;
+  };
+  push(`%PDF-1.4
+`);
+  const object = (number2, body, stream) => {
+    offsets[number2] = length;
+    push(`${number2} 0 obj
+`);
+    push(body);
+    if (stream) {
+      push(`
+stream
+`);
+      push(stream);
+      push(`
+endstream`);
+    }
+    push(`
+endobj
+`);
+  };
+  object(1, "<< /Type /Catalog /Pages 2 0 R >>");
+  object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  object(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` + "/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>");
+  object(4, `<< /Type /XObject /Subtype /Image /Width ${OCR_PROBE_IMAGE_WIDTH} /Height ${OCR_PROBE_IMAGE_HEIGHT} ` + `/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>`, Buffer.from(jpeg));
+  object(5, `<< /Length ${content.length} >>`, Buffer.from(content, "latin1"));
+  const xrefOffset = length;
+  push(`xref
+0 6
+0000000000 65535 f
+`);
+  for (let number2 = 1;number2 <= 5; number2 += 1) {
+    push(`${String(offsets[number2]).padStart(10, "0")} 00000 n
+`);
+  }
+  push(`trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+${xrefOffset}
+%%EOF
+`);
+  return new Uint8Array(Buffer.concat(chunks));
+}
+async function probeTesseract(input) {
+  try {
+    const result = await input.runner({
+      command: TESSERACT_COMMAND,
+      args: tesseractArguments(input.imagePath),
+      timeoutMs: PROBE_TESSERACT_TIMEOUT_MS,
+      env: TESSERACT_ENV
+    });
+    return probeWordRead(result.stdout) ? "ok" : "failed";
+  } catch (error) {
+    return commandMissing(error) ? "missing" : "failed";
+  }
+}
+async function probePdftoppm(input) {
+  const prefix = join28(input.directory, "render");
+  try {
+    await input.runner({
+      command: PDFTOPPM_COMMAND,
+      args: ["-f", "1", "-l", "1", "-r", String(PROBE_RENDER_DPI), "-png", input.pdfPath, prefix],
+      timeoutMs: PROBE_PDFTOPPM_TIMEOUT_MS
+    });
+  } catch (error) {
+    return commandMissing(error) ? "missing" : "failed";
+  }
+  const rendered = (await readdir(input.directory)).filter((name) => name.startsWith("render") && name.endsWith(".png"));
+  const first = rendered[0];
+  if (!first)
+    return "failed";
+  if (input.tesseract === "ok") {
+    const read = await probeTesseract({ runner: input.runner, imagePath: join28(input.directory, first) });
+    if (read !== "ok")
+      return "failed";
+  }
+  return "ok";
+}
+async function probeOcrmypdf(input) {
+  const sidecarPath = join28(input.directory, "probe-sidecar.txt");
+  try {
+    await input.runner({
+      command: OCRMYPDF_COMMAND,
+      args: ocrmypdfArguments({
+        inputPath: input.pdfPath,
+        outputPath: join28(input.directory, "probe-output.pdf"),
+        sidecarPath
+      }),
+      timeoutMs: PROBE_OCRMYPDF_TIMEOUT_MS
+    });
+  } catch (error) {
+    return commandMissing(error) ? "missing" : "failed";
+  }
+  try {
+    return probeWordRead(await readFile3(sidecarPath, "utf8")) ? "ok" : "failed";
+  } catch {
+    return "failed";
+  }
+}
+async function probeOcrCapability(options = {}) {
+  const runner = options.commandRunner ?? runExtractionCommand;
+  const now = options.now ?? Date.now;
+  let tesseract = "failed";
+  let pdftoppm = "failed";
+  let ocrmypdf = "failed";
+  let directory;
+  try {
+    directory = await mkdtemp(join28(tmpdir3(), PROBE_TEMP_PREFIX));
+    const imagePath = join28(directory, "probe.jpg");
+    const pdfPath = join28(directory, "probe.pdf");
+    await writeFile(imagePath, ocrProbeJpeg());
+    await writeFile(pdfPath, buildOcrProbePdf());
+    tesseract = await probeTesseract({ runner, imagePath });
+    pdftoppm = await probePdftoppm({ runner, directory, pdfPath, tesseract });
+    ocrmypdf = tesseract === "ok" ? await probeOcrmypdf({ runner, directory, pdfPath }) : "skipped";
+  } catch {} finally {
+    if (directory)
+      await rm2(directory, { recursive: true, force: true }).catch(() => {});
+  }
+  return {
+    tesseract,
+    pdftoppm,
+    ocrmypdf,
+    pdfEngine: ocrmypdf === "ok" ? "ocrmypdf" : tesseract === "ok" && pdftoppm === "ok" ? "pdftoppm_tesseract" : undefined,
+    imageEngine: tesseract === "ok" ? "tesseract" : undefined,
+    checkedAt: now()
+  };
+}
+
+// src/core/ocr-readiness.ts
+var ARCH_IDS = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
+var DEBIAN_IDS = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
+var FEDORA_IDS = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
+function osReleaseValue(text, key) {
+  for (const line of text.split(`
+`)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith(`${key}=`))
+      continue;
+    const raw = trimmed.slice(key.length + 1).trim();
+    const quoted = raw.length >= 2 && (raw.startsWith('"') || raw.startsWith("'")) && raw.endsWith(raw[0]);
+    return (quoted ? raw.slice(1, -1) : raw).toLowerCase();
+  }
+  return "";
+}
+function linuxFamilyFromOsRelease(text) {
+  if (!text)
+    return "other";
+  const words = [
+    osReleaseValue(text, "ID"),
+    ...osReleaseValue(text, "ID_LIKE").split(" ")
+  ].filter((word) => word.length > 0);
+  for (const word of words) {
+    if (ARCH_IDS.includes(word))
+      return "arch";
+    if (DEBIAN_IDS.includes(word))
+      return "debian";
+    if (FEDORA_IDS.includes(word))
+      return "fedora";
+  }
+  return "other";
+}
+function readOsRelease() {
+  for (const path of ["/etc/os-release", "/usr/lib/os-release"]) {
+    try {
+      return readFileSync18(path, "utf8");
+    } catch {}
+  }
+  return;
+}
+function ocrInstallRemedy(input) {
+  if (input.platform === "darwin")
+    return "brew install tesseract poppler";
+  if (input.platform !== "linux") {
+    return "Install tesseract (with its English language data) and poppler (pdftoppm) with your package manager.";
+  }
+  if (input.family === "arch")
+    return "sudo pacman -S --needed tesseract tesseract-data-eng poppler";
+  if (input.family === "debian")
+    return "sudo apt install tesseract-ocr poppler-utils";
+  if (input.family === "fedora")
+    return "sudo dnf install tesseract poppler-utils";
+  return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
+}
+function visionReady(platform2, preference) {
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync15(APPLE_VISION_OSASCRIPT);
+}
+function describeOcrReadiness(input) {
+  if (input.preference === "tesseract")
+    return describePinnedReadiness(input);
+  if (input.vision) {
+    return {
+      state: "ready",
+      pdfEngine: "Apple Vision",
+      imageEngine: "Apple Vision",
+      detail: "Scans and pictures of text are read with the Mac's built-in Apple Vision; nothing needs installing."
+    };
+  }
+  const remedy = ocrInstallRemedy({ platform: input.platform, family: input.family });
+  const snapshot = input.snapshot;
+  if (snapshot?.imageEngine && snapshot.pdfEngine) {
+    const pdfEngine = snapshot.pdfEngine === "ocrmypdf" ? "ocrmypdf" : "pdftoppm + tesseract";
+    return {
+      state: "ready",
+      pdfEngine,
+      imageEngine: "tesseract",
+      detail: `Scans and pictures of text are read: scanned PDFs with ${pdfEngine}, pictures with tesseract.`
+    };
+  }
+  if (snapshot?.imageEngine) {
+    const why2 = snapshot.pdftoppm === "missing" ? "pdftoppm (poppler) is not installed" : "pdftoppm (poppler) did not render a test page";
+    return {
+      state: "partial",
+      imageEngine: "tesseract",
+      detail: `Pictures of text are read with tesseract, but scanned PDFs are not: ${why2}.`,
+      remedy
+    };
+  }
+  const why = snapshot === undefined ? "the check did not run" : snapshot.tesseract === "missing" ? "tesseract is not installed" : "tesseract is installed but could not read a test picture (is its English language data installed?)";
+  return {
+    state: "missing",
+    detail: `Scans and pictures of text are not read yet: ${why}. Files waiting for it are read automatically once it works.`,
+    remedy
+  };
+}
+var PINNED_SETTING = "OLYMPUS_FILE_EXTRACTION_OCR_ENGINE";
+function describePinnedReadiness(input) {
+  const remedy = `Set ${PINNED_SETTING}=auto (or remove it) for the worker.`;
+  if (input.snapshot?.ocrmypdf === "ok") {
+    return {
+      state: "partial",
+      pdfEngine: "ocrmypdf",
+      detail: `${PINNED_SETTING} is set to tesseract: scanned PDFs are read with ocrmypdf, but pictures of text are not read.`,
+      remedy: `Set ${PINNED_SETTING}=auto (or remove it) for the worker to read pictures too.`
+    };
+  }
+  return {
+    state: "missing",
+    detail: `${PINNED_SETTING} is set to tesseract, which needs a working ocrmypdf, and ocrmypdf ${input.snapshot === undefined ? "could not be checked" : input.snapshot.ocrmypdf === "missing" ? "is not installed" : "does not work here"}. Scans and pictures of text are not read.`,
+    remedy
+  };
+}
+function effectivePreference(env) {
+  try {
+    return parseOcrEnginePreference(env[PINNED_SETTING]) ?? "auto";
+  } catch {
+    return "auto";
+  }
+}
+async function checkOcrReadiness(options = {}) {
+  const platform2 = options.platform ?? process.platform;
+  const family = platform2 === "linux" ? linuxFamilyFromOsRelease(options.osRelease ?? readOsRelease()) : "other";
+  const preference = options.preference ?? effectivePreference(options.env ?? process.env);
+  const vision = options.vision ?? visionReady(platform2, preference);
+  if (vision)
+    return describeOcrReadiness({ platform: platform2, family, snapshot: undefined, vision: true, preference });
+  const snapshot = await (options.probe ?? (() => probeOcrCapability()))().catch(() => {
+    return;
+  });
+  return describeOcrReadiness({ platform: platform2, family, snapshot, preference });
 }
 
 // src/core/operations.ts
@@ -21687,7 +22324,7 @@ var operations = [
     mutating: false,
     nativeExposure: "always",
     cliHints: { name: "doctor" },
-    handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === "native" })) })
+    handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, ocrProbe: ctx.doctorOcrProbe ?? (() => checkOcrReadiness()), hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === "native" })) })
   },
   {
     name: "ask_anonymously",

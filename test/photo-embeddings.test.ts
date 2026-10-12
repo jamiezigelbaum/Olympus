@@ -291,7 +291,9 @@ describe('image preparation in the shared text lane', () => {
     expect(await extractor.extract(extractorInput(picture(8)))).toEqual({ status: 'metadata_only' });
     const registry = createDefaultExtractorRegistry({
       media: { cacheDir: join(temporaryDir(), 'media-cache'), platform: 'linux' },
-      ocr: { platform: 'linux' },
+      // Pinned to the tesseract command engine, which reads no pictures, so
+      // this checks preparation alone whatever OCR tools the host has.
+      ocr: { platform: 'linux', engine: 'tesseract' },
     });
     const text = registry.get('local_text')!;
     expect(await text.extract(extractorInput(picture(8), 'image/jpeg'))).toEqual({ status: 'metadata_only' });

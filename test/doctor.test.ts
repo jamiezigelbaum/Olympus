@@ -1105,6 +1105,33 @@ describe('runDoctor', () => {
     expect(check.detail).toContain('warning at half of 6h');
   });
 
+  test('ocr_reading: ready names the engines; missing is red with the one command and says files are read later', async () => {
+    const run = (ocrProbe: DoctorDeps['ocrProbe']) => runDoctor(doctorDeps({
+      config: defaultConfig(),
+      delphi: healthyDelphi(),
+      ...(ocrProbe ? { ocrProbe } : {}),
+    }));
+    const ready = checkByName((await run(() => ({
+      state: 'ready', pdfEngine: 'pdftoppm + tesseract', imageEngine: 'tesseract',
+      detail: 'Scans and pictures of text are read: scanned PDFs with pdftoppm + tesseract, pictures with tesseract.',
+    }))).checks, 'ocr_reading');
+    expect(ready).toMatchObject({ ok: true });
+    expect(ready.detail).toContain('pdftoppm + tesseract');
+    expect(ready.hint).toBeUndefined();
+
+    const missing = checkByName((await run(async () => ({
+      state: 'missing',
+      detail: 'Scans and pictures of text are not read yet: tesseract is not installed.',
+      remedy: 'sudo pacman -S --needed tesseract tesseract-data-eng poppler',
+    }))).checks, 'ocr_reading');
+    expect(missing.ok).toBe(false);
+    expect(missing.hint).toContain('sudo pacman -S --needed tesseract tesseract-data-eng poppler');
+    expect(missing.hint).toContain('read again automatically');
+
+    // A deps object with no probe (every other test) runs no OCR check at all.
+    expect((await run(undefined)).checks.some((check) => check.name === 'ocr_reading')).toBe(false);
+  });
+
   test('flags missing required dependencies with public repair hints', async () => {
     const result = await runDoctor(doctorDeps({
       config: defaultConfig(),

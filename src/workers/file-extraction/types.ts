@@ -32,6 +32,7 @@
  */
 
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
+import type { OcrCapabilityProbe } from './extractors/ocr-capability.ts';
 
 // --- Seam 1: the source ----------------------------------------------------
 
@@ -394,6 +395,14 @@ export interface ExtractorRereadPolicy {
    * background (a first-use download); answers whether it is ready now.
    */
   prepare(): 'ready' | 'pending' | 'unavailable';
+  /**
+   * Optional. Which of `unreadWarnings` / `notReadyWarnings` have a reader
+   * that is ready now, asked after `prepare()` answered `ready`, for a lane
+   * whose kinds of item need different readers (a picture needs the image
+   * reader, a PDF the PDF reader). Items carrying only other warnings keep
+   * waiting. Absent means every listed warning.
+   */
+  readyWarnings?(): readonly string[];
 }
 
 export interface ExtractorRegistry {
@@ -456,7 +465,9 @@ export interface ExtractorRegistryConfig {
     pdfRenderTimeoutMs?: number;
     /**
      * `auto` (default): the built-in Vision engine on macOS, tesseract
-     * elsewhere. `tesseract`: the installed commands even on a Mac.
+     * elsewhere, with the command engine chosen by a real probe (ocrmypdf, else
+     * pdftoppm and tesseract). `tesseract`: the installed `ocrmypdf` command
+     * even on a Mac, run directly with no probe and no fallback engine.
      */
     engine?: 'auto' | 'tesseract';
     /**
@@ -467,6 +478,11 @@ export interface ExtractorRegistryConfig {
      * Overrides `process.platform` for engine selection, for tests.
      */
     platform?: NodeJS.Platform;
+    /**
+     * The probe of the OCR commands. Defaults to the process-wide probe over
+     * the real commands; tests inject one with a fake runner.
+     */
+    capability?: OcrCapabilityProbe;
   };
   vlmPdf?: {
     client?: VlmClient;

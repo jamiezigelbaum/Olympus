@@ -34676,7 +34676,8 @@ async function runExtractionCommand(request, internals = {}) {
   return new Promise((resolve6, reject) => {
     const child = spawn3(command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32"
+      detached: process.platform !== "win32",
+      ...request.env ? { env: { ...process.env, ...request.env } } : {}
     });
     const stdout = [];
     const stderr = [];
@@ -68123,6 +68124,7 @@ async function runDoctor(input) {
   const checks = [
     ...deps.hostProbe ? [await safeCheck("host", () => hostCheck(deps))] : [],
     await safeCheck("dependencies", () => dependencyCheck(deps)),
+    ...deps.ocrProbe ? [await safeCheck("ocr_reading", () => ocrReadingCheck(deps))] : [],
     await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck("sovereignty_prerequisites", () => sovereigntyPrerequisiteCheck(deps)),
     await safeCheck("credential_handles", () => credentialHandleCheck(deps)),
@@ -68284,6 +68286,18 @@ async function dependencyCheck(deps) {
     name: "dependencies",
     ok: true,
     detail: `Required dependencies are present. Optional dependency gaps: ${optionalMissing.join(", ") || "none"}.`
+  };
+}
+async function ocrReadingCheck(deps) {
+  const readiness = await deps.ocrProbe();
+  if (readiness.state === "ready") {
+    return { name: "ocr_reading", ok: true, detail: readiness.detail };
+  }
+  return {
+    name: "ocr_reading",
+    ok: false,
+    detail: readiness.detail,
+    hint: `${readiness.remedy ?? "Install tesseract and poppler."} Scans and pictures left unread are read again automatically once it is installed.`
   };
 }
 async function hostCheck(deps) {
@@ -69490,6 +69504,861 @@ var init_doctor = __esm(() => {
   DAY_MS2 = 24 * 60 * 60 * 1000;
 });
 
+// src/workers/file-extraction/extractors/bounded-text.ts
+function artifactKindForStructuralKind(kind) {
+  return ARTIFACT_KIND_BY_STRUCTURAL_KIND[kind];
+}
+function normalizeExtractedText(input) {
+  return input.replace(/\u0000/g, "").replace(/\r\n/g, `
+`).replace(/\n{3,}/g, `
+
+`).trim();
+}
+function boundText(normalizedText, maxBoundedTextChars, reason = BOUNDED_TEXT_TRUNCATION_REASON) {
+  const sourceChars = normalizedText.length;
+  const truncated = sourceChars > maxBoundedTextChars;
+  const text = truncated ? normalizedText.slice(0, maxBoundedTextChars) : normalizedText;
+  return {
+    text,
+    truncated,
+    chars: text.length,
+    sourceChars,
+    ...truncated ? { truncationReason: reason } : {},
+    warnings: truncated ? [BOUNDED_TEXT_TRUNCATED_WARNING] : []
+  };
+}
+function appendWarning(warnings, warning) {
+  const next = warnings ? [...warnings] : [];
+  if (!next.includes(warning))
+    next.push(warning);
+  return next;
+}
+function appendBoundedTextWarnings(warnings, bounded) {
+  let next = warnings ? [...warnings] : [];
+  for (const warning of bounded.warnings) {
+    next = appendWarning(next, warning);
+  }
+  return next;
+}
+function buildDerivation(input) {
+  const warnings = appendBoundedTextWarnings(input.warnings, input.bounded);
+  return {
+    artifactKind: input.artifactKind ?? artifactKindForStructuralKind(input.structural.kind),
+    structuralRef: {
+      kind: input.structural.kind,
+      ...input.structural.label !== undefined ? { label: input.structural.label } : {},
+      ...input.structural.index !== undefined ? { index: input.structural.index } : {},
+      artifact: input.artifact,
+      ...input.bounded.truncated ? {
+        sourceChars: input.bounded.sourceChars,
+        ...input.bounded.truncationReason !== undefined ? { truncationReason: input.bounded.truncationReason } : {}
+      } : {}
+    },
+    ...input.confidence !== undefined ? { confidence: input.confidence } : {},
+    ...warnings.length > 0 ? { warnings } : {},
+    chars: input.bounded.chars
+  };
+}
+function mediaDescriptorOutput(input) {
+  const descriptor = boundText(normalizeExtractedText([
+    input.kind === "image" ? "Image file" : "PDF visual content",
+    input.mimeType ? `MIME type: ${input.mimeType}` : undefined,
+    Number.isFinite(input.sizeBytes) ? `Size bytes: ${input.sizeBytes}` : undefined,
+    "No local OCR text has been extracted.",
+    "OCR or vision-language processing is required before content-level retrieval."
+  ].filter((value) => Boolean(value)).join(`
+`)), input.maxBoundedTextChars);
+  const derivation = buildDerivation({
+    artifact: "media_descriptor",
+    structural: { kind: input.kind, label: input.label },
+    bounded: descriptor,
+    confidence: 0.3,
+    warnings: input.warnings
+  });
+  return {
+    status: "metadata_only",
+    derivations: [{
+      ...derivation,
+      structuralRef: {
+        ...derivation.structuralRef,
+        ...input.mimeType !== undefined ? { mimeType: input.mimeType } : {},
+        ...Number.isFinite(input.sizeBytes) ? { sizeBytes: input.sizeBytes } : {}
+      }
+    }]
+  };
+}
+function normalizeMimeType2(input) {
+  const value = input?.split(";", 1)[0]?.trim().toLowerCase();
+  return value || undefined;
+}
+function resolveExtractionMimeType(refMimeType, fetchedMimeType) {
+  const enqueued = normalizeMimeType2(refMimeType);
+  if (enqueued && !GENERIC_MIME_TYPES.has(enqueued))
+    return enqueued;
+  return normalizeMimeType2(fetchedMimeType) ?? enqueued;
+}
+function hasPdfSignature(bytes) {
+  return bytes.length >= 5 && bytes[0] === 37 && bytes[1] === 80 && bytes[2] === 68 && bytes[3] === 70 && bytes[4] === 45;
+}
+function sanitizeErrorDetail(body, maxChars = 120) {
+  return body.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, maxChars);
+}
+function sanitizeThrownError(error, maxChars = 120) {
+  const detail = error instanceof Error ? `${error.name || "Error"}: ${error.message}` : String(error);
+  return sanitizeErrorDetail(detail, maxChars);
+}
+var DEFAULT_MAX_BOUNDED_TEXT_CHARS = 2000000, BOUNDED_TEXT_TRUNCATED_WARNING = "bounded_text_truncated", BOUNDED_TEXT_TRUNCATION_REASON = "max_bounded_text_chars", DEFAULT_MAX_TABLE_SAMPLE_ROWS = 25, DEFAULT_MAX_TABLE_SAMPLE_COLUMNS = 25, PDF_MIME_TYPE = "application/pdf", DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document", XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation", TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, ARTIFACT_KIND_BY_STRUCTURAL_KIND, GENERIC_MIME_TYPES;
+var init_bounded_text = __esm(() => {
+  TEXT_MIME_TYPES = new Set([
+    "application/json",
+    "application/x-ndjson",
+    "application/xml",
+    "text/csv",
+    "text/html",
+    "text/markdown",
+    "text/plain",
+    "text/tab-separated-values",
+    "text/xml"
+  ]);
+  TABLE_MIME_TYPES = new Set([
+    "text/csv",
+    "text/tab-separated-values"
+  ]);
+  IMAGE_MIME_TYPES = new Set([
+    "image/bmp",
+    "image/gif",
+    "image/heic",
+    "image/heif",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp"
+  ]);
+  ARTIFACT_KIND_BY_STRUCTURAL_KIND = {
+    whole_file: "document",
+    section: "document",
+    range: "document",
+    page: "page",
+    sheet: "sheet",
+    slide: "slide",
+    image: "image_description",
+    media: "image_description"
+  };
+  GENERIC_MIME_TYPES = new Set([
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/binary"
+  ]);
+});
+
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+import { existsSync as existsSync40 } from "node:fs";
+import { dirname as dirname43, join as join58 } from "node:path";
+import { fileURLToPath as fileURLToPath7 } from "node:url";
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync40) {
+  let directory = dirname43(fileURLToPath7(moduleUrl));
+  for (let depth = 0;depth < 6; depth += 1) {
+    const candidate = join58(directory, APPLE_VISION_OCR_SCRIPT);
+    if (exists(candidate))
+      return candidate;
+    const parent = dirname43(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function appleVisionOcrSelected(preference, platform2 = process.platform) {
+  return preference === "auto" && platform2 === "darwin";
+}
+function parseOcrEnginePreference(value) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized)
+    return;
+  if (OCR_ENGINE_PREFERENCES.includes(normalized)) {
+    return normalized;
+  }
+  throw new Error(`OCR engine must be one of ${OCR_ENGINE_PREFERENCES.join(", ")}; got ${value}.`);
+}
+async function appleVisionPdfOcr(input, options) {
+  const maxPages = Math.max(1, Math.floor(options.maxPages ?? DEFAULT_APPLE_VISION_MAX_PAGES));
+  const pagesPerRun = Math.max(1, Math.floor(options.pagesPerRun ?? DEFAULT_APPLE_VISION_PAGES_PER_RUN));
+  const maxPixelEdge = options.pdfMaxPixelEdge ?? DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE;
+  const now = options.now ?? Date.now;
+  const deadline = now() + (options.fileDeadlineMs ?? DEFAULT_APPLE_VISION_FILE_DEADLINE_MS);
+  const pages = [];
+  let totalPages;
+  let chars = 0;
+  let stopReason;
+  let firstPage = 1;
+  for (;; ) {
+    const lastPage = Math.min(firstPage + pagesPerRun - 1, maxPages, totalPages ?? maxPages);
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      stopReason = "time";
+      break;
+    }
+    const result = await runScript({
+      args: ["pdf", input.inputPath, String(firstPage), String(lastPage), String(maxPixelEdge)],
+      timeoutMs: Math.min(options.timeoutMs, remainingMs),
+      options,
+      deterministic: "pdf"
+    }).catch((error) => {
+      if (error instanceof ExtractionCommandTimeoutError && pages.length > 0 && remainingMs < options.timeoutMs) {
+        return;
+      }
+      throw error;
+    });
+    if (!result) {
+      stopReason = "time";
+      break;
+    }
+    if ("settled" in result)
+      return result.settled;
+    totalPages = result.totalPages;
+    for (const page of result.pages) {
+      pages.push(page);
+      chars += page.text.length;
+    }
+    if (lastPage >= totalPages)
+      break;
+    if (lastPage >= maxPages) {
+      stopReason = "pages";
+      break;
+    }
+    if (chars >= options.maxBoundedTextChars) {
+      stopReason = "text";
+      break;
+    }
+    firstPage = lastPage + 1;
+  }
+  const read = pages.filter((page) => normalizeExtractedText(page.text).length > 0);
+  if (read.length === 0) {
+    return mediaDescriptorOutput({
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      maxBoundedTextChars: options.maxBoundedTextChars,
+      kind: "media",
+      label: "scanned or image-only pdf",
+      warnings: ["ocr_empty", "pdf_image_only", APPLE_VISION_ENGINE_WARNING]
+    });
+  }
+  const joined = read.map((page) => `--- Page ${page.page} ---
+${normalizeExtractedText(page.text)}`).join(`
+
+`);
+  const bounded = boundText(joined, options.maxBoundedTextChars);
+  let warnings = ["ocr_text", APPLE_VISION_ENGINE_WARNING, "ocr_source_rasterized_pdf"];
+  if (stopReason === "pages")
+    warnings = appendWarning(warnings, "ocr_pdf_pages_capped");
+  if (stopReason === "time")
+    warnings = appendWarning(warnings, "ocr_pdf_time_capped");
+  if (pages.some((page) => page.unreadable))
+    warnings = appendWarning(warnings, "ocr_pdf_page_unreadable");
+  const derivation = buildDerivation({
+    artifact: "image_ocr",
+    structural: { kind: "whole_file", label: "pdf ocr text" },
+    bounded,
+    confidence: weightedConfidence(read),
+    warnings
+  });
+  const capped = stopReason === "pages" || stopReason === "time";
+  return {
+    status: "indexed",
+    text: bounded.text,
+    derivations: [{
+      ...derivation,
+      structuralRef: {
+        ...derivation.structuralRef,
+        readPages: pages.length,
+        ...totalPages !== undefined ? { totalPages } : {}
+      }
+    }],
+    ...capped || bounded.warnings.length > 0 ? {
+      warnings: [
+        ...stopReason === "pages" ? ["ocr_pdf_pages_capped"] : [],
+        ...stopReason === "time" ? ["ocr_pdf_time_capped"] : [],
+        ...bounded.warnings
+      ]
+    } : {}
+  };
+}
+async function appleVisionImageOcr(input, options) {
+  const maxPixelEdge = options.imageMaxPixelEdge ?? DEFAULT_APPLE_VISION_IMAGE_MAX_PIXEL_EDGE;
+  const result = await runScript({
+    args: ["image", input.inputPath, String(maxPixelEdge)],
+    timeoutMs: options.timeoutMs,
+    options,
+    deterministic: "image"
+  });
+  if ("settled" in result)
+    return result.settled;
+  const page = result.pages[0];
+  const bounded = boundText(normalizeExtractedText(page?.text ?? ""), options.maxBoundedTextChars);
+  if (!page || !bounded.text) {
+    return mediaDescriptorOutput({
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      maxBoundedTextChars: options.maxBoundedTextChars,
+      kind: "image",
+      label: "image file",
+      warnings: ["ocr_empty", "image_only", APPLE_VISION_ENGINE_WARNING]
+    });
+  }
+  return {
+    status: "indexed",
+    text: bounded.text,
+    derivations: [buildDerivation({
+      artifact: "image_ocr",
+      structural: { kind: "image", label: "image ocr text" },
+      bounded,
+      confidence: weightedConfidence([page]),
+      warnings: ["ocr_text", APPLE_VISION_ENGINE_WARNING]
+    })],
+    ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
+  };
+}
+async function runScript(input) {
+  const scriptPath = input.options.scriptPath;
+  if (!scriptPath)
+    throw new AppleVisionOcrUnavailableError("the packaged script was not found");
+  let stdout;
+  try {
+    ({ stdout } = await input.options.commandRunner({
+      command: input.options.osascriptPath ?? APPLE_VISION_OSASCRIPT,
+      args: ["-l", "JavaScript", scriptPath, ...input.args],
+      timeoutMs: input.timeoutMs
+    }));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new AppleVisionOcrUnavailableError("osascript is not present");
+    }
+    if (error instanceof ExtractionCommandError) {
+      if (error.exitCode === APPLE_VISION_EXIT_ENGINE_UNAVAILABLE) {
+        throw new AppleVisionOcrUnavailableError("Vision text recognition is not available on this macOS");
+      }
+      if (error.exitCode === APPLE_VISION_EXIT_PDF_LOCKED && input.deterministic === "pdf") {
+        return { settled: { status: "failed_terminal", errorKind: "ocrmypdf_pdf_encrypted" } };
+      }
+      if (error.exitCode === APPLE_VISION_EXIT_INPUT_UNREADABLE) {
+        return {
+          settled: {
+            status: "failed_terminal",
+            errorKind: input.deterministic === "pdf" ? "ocrmypdf_pdf_invalid" : "ocr_image_unreadable"
+          }
+        };
+      }
+    }
+    throw error;
+  }
+  return parseScriptResult(stdout);
+}
+function parseScriptResult(stdout) {
+  const parsed = JSON.parse(stdout);
+  if (!parsed || typeof parsed !== "object")
+    throw new Error("OCR script answered no object.");
+  const record = parsed;
+  const totalPages = Number(record.totalPages);
+  if (!Number.isInteger(totalPages) || totalPages < 1 || !Array.isArray(record.pages)) {
+    throw new Error("OCR script answered an unexpected shape.");
+  }
+  const pages = record.pages.map((entry) => {
+    const page = entry;
+    const pageNumber = Number(page.page);
+    if (!Number.isInteger(pageNumber) || typeof page.text !== "string") {
+      throw new Error("OCR script answered an unexpected page.");
+    }
+    const confidence = Number(page.confidence);
+    return {
+      page: pageNumber,
+      text: page.text,
+      confidence: Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : 0,
+      ...page.unreadable === true ? { unreadable: true } : {}
+    };
+  });
+  return { totalPages, pages };
+}
+function weightedConfidence(pages) {
+  let weighted = 0;
+  let weight = 0;
+  for (const page of pages) {
+    weighted += page.confidence * page.text.length;
+    weight += page.text.length;
+  }
+  return weight > 0 ? Math.round(weighted / weight * 1000) / 1000 : 0;
+}
+var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js", APPLE_VISION_OSASCRIPT = "/usr/bin/osascript", APPLE_VISION_ENGINE_WARNING = "ocr_engine_apple_vision", DEFAULT_APPLE_VISION_MAX_PAGES = 100, DEFAULT_APPLE_VISION_PAGES_PER_RUN = 8, DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE = 3000, DEFAULT_APPLE_VISION_IMAGE_MAX_PIXEL_EDGE = 4096, DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = 600000, APPLE_VISION_EXIT_INPUT_UNREADABLE = 65, APPLE_VISION_EXIT_PDF_LOCKED = 66, APPLE_VISION_EXIT_ENGINE_UNAVAILABLE = 69, OCR_ENGINE_PREFERENCES, AppleVisionOcrUnavailableError;
+var init_apple_vision_ocr = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
+  AppleVisionOcrUnavailableError = class AppleVisionOcrUnavailableError extends Error {
+    constructor(reason) {
+      super(`Built-in macOS scan reading is unavailable: ${reason}.`);
+      this.name = "AppleVisionOcrUnavailableError";
+    }
+  };
+});
+
+// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
+function ocrProbeJpeg() {
+  return new Uint8Array(Buffer.from(OCR_PROBE_IMAGE_BASE64, "base64"));
+}
+var OCR_PROBE_WORD = "OLYMPUS", OCR_PROBE_IMAGE_WIDTH = 360, OCR_PROBE_IMAGE_HEIGHT = 96, OCR_PROBE_IMAGE_BASE64;
+var init_ocr_probe_fixture = __esm(() => {
+  OCR_PROBE_IMAGE_BASE64 = [
+    "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"
+  ].join("");
+});
+
+// src/workers/file-extraction/extractors/ocr-capability.ts
+import { mkdtemp as mkdtemp2, readFile as readFile6, readdir as readdir2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
+import { tmpdir as tmpdir4 } from "node:os";
+import { join as join59 } from "node:path";
+function ocrmypdfArguments(input) {
+  return [
+    "--force-ocr",
+    "--rotate-pages",
+    "--deskew",
+    "--clean",
+    "--jobs",
+    "1",
+    "--optimize",
+    "0",
+    "--output-type",
+    "pdf",
+    "--sidecar",
+    input.sidecarPath,
+    input.inputPath,
+    input.outputPath
+  ];
+}
+function tesseractArguments(inputPath) {
+  return [inputPath, "stdout", "-l", "eng", "--psm", "3"];
+}
+function probeWordRead(text) {
+  let letters = "";
+  for (const char of text.toUpperCase()) {
+    if (char >= "A" && char <= "Z" || char >= "0" && char <= "9")
+      letters += char;
+  }
+  return letters.includes(OCR_PROBE_WORD);
+}
+function commandMissing(error) {
+  return error?.code === "ENOENT";
+}
+function buildOcrProbePdf() {
+  const jpeg = ocrProbeJpeg();
+  const pageWidth = OCR_PROBE_IMAGE_WIDTH * 72 / PROBE_RENDER_DPI;
+  const pageHeight = OCR_PROBE_IMAGE_HEIGHT * 72 / PROBE_RENDER_DPI;
+  const content = `q ${pageWidth} 0 0 ${pageHeight} 0 0 cm /Im0 Do Q`;
+  const chunks = [];
+  const offsets = [];
+  let length = 0;
+  const push = (chunk) => {
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk, "latin1") : chunk;
+    chunks.push(buffer);
+    length += buffer.length;
+  };
+  push(`%PDF-1.4
+`);
+  const object = (number2, body, stream) => {
+    offsets[number2] = length;
+    push(`${number2} 0 obj
+`);
+    push(body);
+    if (stream) {
+      push(`
+stream
+`);
+      push(stream);
+      push(`
+endstream`);
+    }
+    push(`
+endobj
+`);
+  };
+  object(1, "<< /Type /Catalog /Pages 2 0 R >>");
+  object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  object(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` + "/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>");
+  object(4, `<< /Type /XObject /Subtype /Image /Width ${OCR_PROBE_IMAGE_WIDTH} /Height ${OCR_PROBE_IMAGE_HEIGHT} ` + `/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>`, Buffer.from(jpeg));
+  object(5, `<< /Length ${content.length} >>`, Buffer.from(content, "latin1"));
+  const xrefOffset = length;
+  push(`xref
+0 6
+0000000000 65535 f
+`);
+  for (let number2 = 1;number2 <= 5; number2 += 1) {
+    push(`${String(offsets[number2]).padStart(10, "0")} 00000 n
+`);
+  }
+  push(`trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+${xrefOffset}
+%%EOF
+`);
+  return new Uint8Array(Buffer.concat(chunks));
+}
+async function probeTesseract(input) {
+  try {
+    const result = await input.runner({
+      command: TESSERACT_COMMAND,
+      args: tesseractArguments(input.imagePath),
+      timeoutMs: PROBE_TESSERACT_TIMEOUT_MS,
+      env: TESSERACT_ENV
+    });
+    return probeWordRead(result.stdout) ? "ok" : "failed";
+  } catch (error) {
+    return commandMissing(error) ? "missing" : "failed";
+  }
+}
+async function probePdftoppm(input) {
+  const prefix = join59(input.directory, "render");
+  try {
+    await input.runner({
+      command: PDFTOPPM_COMMAND,
+      args: ["-f", "1", "-l", "1", "-r", String(PROBE_RENDER_DPI), "-png", input.pdfPath, prefix],
+      timeoutMs: PROBE_PDFTOPPM_TIMEOUT_MS
+    });
+  } catch (error) {
+    return commandMissing(error) ? "missing" : "failed";
+  }
+  const rendered = (await readdir2(input.directory)).filter((name) => name.startsWith("render") && name.endsWith(".png"));
+  const first = rendered[0];
+  if (!first)
+    return "failed";
+  if (input.tesseract === "ok") {
+    const read = await probeTesseract({ runner: input.runner, imagePath: join59(input.directory, first) });
+    if (read !== "ok")
+      return "failed";
+  }
+  return "ok";
+}
+async function probeOcrmypdf(input) {
+  const sidecarPath = join59(input.directory, "probe-sidecar.txt");
+  try {
+    await input.runner({
+      command: OCRMYPDF_COMMAND,
+      args: ocrmypdfArguments({
+        inputPath: input.pdfPath,
+        outputPath: join59(input.directory, "probe-output.pdf"),
+        sidecarPath
+      }),
+      timeoutMs: PROBE_OCRMYPDF_TIMEOUT_MS
+    });
+  } catch (error) {
+    return commandMissing(error) ? "missing" : "failed";
+  }
+  try {
+    return probeWordRead(await readFile6(sidecarPath, "utf8")) ? "ok" : "failed";
+  } catch {
+    return "failed";
+  }
+}
+async function probeOcrCapability(options = {}) {
+  const runner = options.commandRunner ?? runExtractionCommand;
+  const now = options.now ?? Date.now;
+  let tesseract = "failed";
+  let pdftoppm = "failed";
+  let ocrmypdf = "failed";
+  let directory;
+  try {
+    directory = await mkdtemp2(join59(tmpdir4(), PROBE_TEMP_PREFIX));
+    const imagePath = join59(directory, "probe.jpg");
+    const pdfPath = join59(directory, "probe.pdf");
+    await writeFile2(imagePath, ocrProbeJpeg());
+    await writeFile2(pdfPath, buildOcrProbePdf());
+    tesseract = await probeTesseract({ runner, imagePath });
+    pdftoppm = await probePdftoppm({ runner, directory, pdfPath, tesseract });
+    ocrmypdf = tesseract === "ok" ? await probeOcrmypdf({ runner, directory, pdfPath }) : "skipped";
+  } catch {} finally {
+    if (directory)
+      await rm3(directory, { recursive: true, force: true }).catch(() => {});
+  }
+  return {
+    tesseract,
+    pdftoppm,
+    ocrmypdf,
+    pdfEngine: ocrmypdf === "ok" ? "ocrmypdf" : tesseract === "ok" && pdftoppm === "ok" ? "pdftoppm_tesseract" : undefined,
+    imageEngine: tesseract === "ok" ? "tesseract" : undefined,
+    checkedAt: now()
+  };
+}
+function createOcrCapabilityProbe(options = {}) {
+  const now = options.now ?? Date.now;
+  const readyTtlMs = options.readyTtlMs ?? OCR_READY_TTL_MS;
+  const missingTtlMs = options.missingTtlMs ?? OCR_MISSING_TTL_MS;
+  const run = options.probe ?? (() => probeOcrCapability({
+    ...options.commandRunner ? { commandRunner: options.commandRunner } : {},
+    now
+  }));
+  let cached2;
+  let inFlight;
+  let generation = 0;
+  const fresh = () => {
+    if (!cached2)
+      return false;
+    const ttl = cached2.pdfEngine ? readyTtlMs : missingTtlMs;
+    return now() - cached2.checkedAt < ttl;
+  };
+  const refresh = () => {
+    if (inFlight)
+      return inFlight;
+    const startedIn = generation;
+    const probing = run().catch(() => ({
+      tesseract: "failed",
+      pdftoppm: "failed",
+      ocrmypdf: "failed",
+      pdfEngine: undefined,
+      imageEngine: undefined,
+      checkedAt: now()
+    })).then((snapshot) => {
+      if (startedIn === generation)
+        cached2 = snapshot;
+      if (inFlight === probing)
+        inFlight = undefined;
+      return snapshot;
+    });
+    inFlight = probing;
+    return probing;
+  };
+  return {
+    async snapshot() {
+      if (cached2 && fresh())
+        return cached2;
+      return refresh();
+    },
+    peek: () => cached2,
+    peekFresh: () => cached2 && fresh() ? cached2 : undefined,
+    invalidate() {
+      generation += 1;
+      cached2 = undefined;
+      inFlight = undefined;
+    },
+    warm() {
+      if (!fresh())
+        refresh();
+    }
+  };
+}
+function sharedOcrCapabilityProbe() {
+  sharedProbe ??= createOcrCapabilityProbe();
+  return sharedProbe;
+}
+var OCRMYPDF_COMMAND = "ocrmypdf", TESSERACT_COMMAND = "tesseract", PDFTOPPM_COMMAND = "pdftoppm", PDFINFO_COMMAND = "pdfinfo", TESSERACT_ENV, OCR_READY_TTL_MS, OCR_MISSING_TTL_MS = 60000, PROBE_TESSERACT_TIMEOUT_MS = 30000, PROBE_PDFTOPPM_TIMEOUT_MS = 30000, PROBE_OCRMYPDF_TIMEOUT_MS = 90000, PROBE_TEMP_PREFIX = "olympus-ocr-probe-", PROBE_RENDER_DPI = 150, sharedProbe;
+var init_ocr_capability = __esm(() => {
+  init_command_runner();
+  init_ocr_probe_fixture();
+  TESSERACT_ENV = { OMP_THREAD_LIMIT: "1" };
+  OCR_READY_TTL_MS = 10 * 60000;
+});
+
+// src/core/ocr-readiness.ts
+import { existsSync as existsSync41, readFileSync as readFileSync35 } from "node:fs";
+function osReleaseValue(text, key2) {
+  for (const line of text.split(`
+`)) {
+    const trimmed2 = line.trim();
+    if (!trimmed2.startsWith(`${key2}=`))
+      continue;
+    const raw = trimmed2.slice(key2.length + 1).trim();
+    const quoted = raw.length >= 2 && (raw.startsWith('"') || raw.startsWith("'")) && raw.endsWith(raw[0]);
+    return (quoted ? raw.slice(1, -1) : raw).toLowerCase();
+  }
+  return "";
+}
+function linuxFamilyFromOsRelease(text) {
+  if (!text)
+    return "other";
+  const words2 = [
+    osReleaseValue(text, "ID"),
+    ...osReleaseValue(text, "ID_LIKE").split(" ")
+  ].filter((word) => word.length > 0);
+  for (const word of words2) {
+    if (ARCH_IDS.includes(word))
+      return "arch";
+    if (DEBIAN_IDS.includes(word))
+      return "debian";
+    if (FEDORA_IDS.includes(word))
+      return "fedora";
+  }
+  return "other";
+}
+function readOsRelease() {
+  for (const path of ["/etc/os-release", "/usr/lib/os-release"]) {
+    try {
+      return readFileSync35(path, "utf8");
+    } catch {}
+  }
+  return;
+}
+function ocrInstallRemedy(input) {
+  if (input.platform === "darwin")
+    return "brew install tesseract poppler";
+  if (input.platform !== "linux") {
+    return "Install tesseract (with its English language data) and poppler (pdftoppm) with your package manager.";
+  }
+  if (input.family === "arch")
+    return "sudo pacman -S --needed tesseract tesseract-data-eng poppler";
+  if (input.family === "debian")
+    return "sudo apt install tesseract-ocr poppler-utils";
+  if (input.family === "fedora")
+    return "sudo dnf install tesseract poppler-utils";
+  return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
+}
+function visionReady(platform2, preference) {
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync41(APPLE_VISION_OSASCRIPT);
+}
+function describeOcrReadiness(input) {
+  if (input.preference === "tesseract")
+    return describePinnedReadiness(input);
+  if (input.vision) {
+    return {
+      state: "ready",
+      pdfEngine: "Apple Vision",
+      imageEngine: "Apple Vision",
+      detail: "Scans and pictures of text are read with the Mac's built-in Apple Vision; nothing needs installing."
+    };
+  }
+  const remedy = ocrInstallRemedy({ platform: input.platform, family: input.family });
+  const snapshot = input.snapshot;
+  if (snapshot?.imageEngine && snapshot.pdfEngine) {
+    const pdfEngine = snapshot.pdfEngine === "ocrmypdf" ? "ocrmypdf" : "pdftoppm + tesseract";
+    return {
+      state: "ready",
+      pdfEngine,
+      imageEngine: "tesseract",
+      detail: `Scans and pictures of text are read: scanned PDFs with ${pdfEngine}, pictures with tesseract.`
+    };
+  }
+  if (snapshot?.imageEngine) {
+    const why2 = snapshot.pdftoppm === "missing" ? "pdftoppm (poppler) is not installed" : "pdftoppm (poppler) did not render a test page";
+    return {
+      state: "partial",
+      imageEngine: "tesseract",
+      detail: `Pictures of text are read with tesseract, but scanned PDFs are not: ${why2}.`,
+      remedy
+    };
+  }
+  const why = snapshot === undefined ? "the check did not run" : snapshot.tesseract === "missing" ? "tesseract is not installed" : "tesseract is installed but could not read a test picture (is its English language data installed?)";
+  return {
+    state: "missing",
+    detail: `Scans and pictures of text are not read yet: ${why}. Files waiting for it are read automatically once it works.`,
+    remedy
+  };
+}
+function describePinnedReadiness(input) {
+  const remedy = `Set ${PINNED_SETTING}=auto (or remove it) for the worker.`;
+  if (input.snapshot?.ocrmypdf === "ok") {
+    return {
+      state: "partial",
+      pdfEngine: "ocrmypdf",
+      detail: `${PINNED_SETTING} is set to tesseract: scanned PDFs are read with ocrmypdf, but pictures of text are not read.`,
+      remedy: `Set ${PINNED_SETTING}=auto (or remove it) for the worker to read pictures too.`
+    };
+  }
+  return {
+    state: "missing",
+    detail: `${PINNED_SETTING} is set to tesseract, which needs a working ocrmypdf, and ocrmypdf ${input.snapshot === undefined ? "could not be checked" : input.snapshot.ocrmypdf === "missing" ? "is not installed" : "does not work here"}. Scans and pictures of text are not read.`,
+    remedy
+  };
+}
+function effectivePreference(env) {
+  try {
+    return parseOcrEnginePreference(env[PINNED_SETTING]) ?? "auto";
+  } catch {
+    return "auto";
+  }
+}
+async function checkOcrReadiness(options = {}) {
+  const platform2 = options.platform ?? process.platform;
+  const family = platform2 === "linux" ? linuxFamilyFromOsRelease(options.osRelease ?? readOsRelease()) : "other";
+  const preference = options.preference ?? effectivePreference(options.env ?? process.env);
+  const vision = options.vision ?? visionReady(platform2, preference);
+  if (vision)
+    return describeOcrReadiness({ platform: platform2, family, snapshot: undefined, vision: true, preference });
+  const snapshot = await (options.probe ?? (() => probeOcrCapability()))().catch(() => {
+    return;
+  });
+  return describeOcrReadiness({ platform: platform2, family, snapshot, preference });
+}
+var ARCH_IDS, DEBIAN_IDS, FEDORA_IDS, PINNED_SETTING = "OLYMPUS_FILE_EXTRACTION_OCR_ENGINE";
+var init_ocr_readiness = __esm(() => {
+  init_apple_vision_ocr();
+  init_ocr_capability();
+  ARCH_IDS = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
+  DEBIAN_IDS = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
+  FEDORA_IDS = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
+});
+
 // src/core/source-index/selected-item-safety.ts
 function selectedItemContentFieldPath(value) {
   return selectedItemContentFieldPathInner(value, "selected_items");
@@ -70045,6 +70914,7 @@ function optionalAttachmentType(value) {
 var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, ASK_ANONYMOUSLY_PARAMS, operations;
 var init_operations = __esm(() => {
   init_doctor();
+  init_ocr_readiness();
   init_email();
   init_config();
   init_config();
@@ -70513,7 +71383,7 @@ var init_operations = __esm(() => {
       mutating: false,
       nativeExposure: "always",
       cliHints: { name: "doctor" },
-      handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === "native" })) })
+      handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, ocrProbe: ctx.doctorOcrProbe ?? (() => checkOcrReadiness()), hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === "native" })) })
     },
     {
       name: "ask_anonymously",
@@ -70568,31 +71438,31 @@ var init_operations = __esm(() => {
 });
 
 // src/version.ts
-import { readFileSync as readFileSync35 } from "node:fs";
-import { dirname as dirname43, join as join58 } from "node:path";
-import { fileURLToPath as fileURLToPath7 } from "node:url";
+import { readFileSync as readFileSync36 } from "node:fs";
+import { dirname as dirname44, join as join60 } from "node:path";
+import { fileURLToPath as fileURLToPath8 } from "node:url";
 var repoRoot, manifest, VERSION;
 var init_version = __esm(() => {
-  repoRoot = dirname43(dirname43(fileURLToPath7(import.meta.url)));
-  manifest = JSON.parse(readFileSync35(join58(repoRoot, "openclaw.plugin.json"), "utf8"));
+  repoRoot = dirname44(dirname44(fileURLToPath8(import.meta.url)));
+  manifest = JSON.parse(readFileSync36(join60(repoRoot, "openclaw.plugin.json"), "utf8"));
   VERSION = manifest.version;
 });
 
 // src/workers/classification-ledger.ts
 import { homedir as homedir45 } from "node:os";
-import { mkdir as mkdir4, open as open5, readFile as readFile6 } from "node:fs/promises";
-import { dirname as dirname45, join as join62 } from "node:path";
+import { mkdir as mkdir4, open as open5, readFile as readFile7 } from "node:fs/promises";
+import { dirname as dirname46, join as join64 } from "node:path";
 function resolveClassificationLedgerPath(env = process.env) {
   const configured = env[CLASSIFICATION_LEDGER_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join62(homedir45(), ".local", "share");
-  return join62(dataHome, "openclaw", "olympus", "classification-ledger.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join64(homedir45(), ".local", "share");
+  return join64(dataHome, "openclaw", "olympus", "classification-ledger.jsonl");
 }
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname45(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname46(path), { recursive: true, mode: 448 });
   const handle = await open5(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -70616,7 +71486,7 @@ async function appendClassificationLedgerEntryOnce(path, entry) {
 async function readClassificationLedger(path) {
   let raw = "";
   try {
-    raw = await readFile6(path, "utf8");
+    raw = await readFile7(path, "utf8");
   } catch (error) {
     if (error?.code !== "ENOENT")
       throw error;
@@ -70754,8 +71624,8 @@ var init_delphi_scorer = __esm(() => {
 // src/workers/classification/sniffer-store.ts
 import { Database as Database13 } from "bun:sqlite";
 import { createHash as createHash45 } from "node:crypto";
-import { chmodSync as chmodSync18, existsSync as existsSync43, mkdirSync as mkdirSync32 } from "node:fs";
-import { dirname as dirname46 } from "node:path";
+import { chmodSync as chmodSync18, existsSync as existsSync45, mkdirSync as mkdirSync32 } from "node:fs";
+import { dirname as dirname47 } from "node:path";
 function snifferMaterialHash(pass, material) {
   return createHash45("sha256").update(`${pass}
 ${material}`).digest("hex");
@@ -70778,7 +71648,7 @@ class TierSnifferStore {
     this.readOnly = false;
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
-      mkdirSync32(dirname46(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync32(dirname47(this.dbPath), { recursive: true, mode: 448 });
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
@@ -70912,7 +71782,7 @@ function subjectParams(subject) {
 }
 function restrictFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync43(path))
+    if (existsSync45(path))
       chmodSync18(path, 384);
   }
 }
@@ -71291,7 +72161,7 @@ var init_sniffer = __esm(() => {
 });
 
 // src/core/owner-config-read.ts
-import { readFileSync as readFileSync39, statSync as statSync21 } from "node:fs";
+import { readFileSync as readFileSync40, statSync as statSync21 } from "node:fs";
 function ownerConfigStamp(path) {
   try {
     return stampOf(statSync21(path));
@@ -71312,7 +72182,7 @@ function readOwnerConfigFile(path) {
   }
   let text;
   try {
-    text = readFileSync39(path, "utf8");
+    text = readFileSync40(path, "utf8");
   } catch {
     return { status: "refused", reason: "unreadable", stamp };
   }
@@ -71339,9 +72209,9 @@ var init_owner_config_read = () => {};
 // src/workers/classification/tier-rules.ts
 import { chmodSync as chmodSync19, lstatSync as lstatSync20, mkdirSync as mkdirSync33 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
-import { dirname as dirname47, join as join63 } from "node:path";
+import { dirname as dirname48, join as join65 } from "node:path";
 function defaultTierRulesPath() {
-  return join63(homedir46(), ".olympus", "tier-rules.json");
+  return join65(homedir46(), ".olympus", "tier-rules.json");
 }
 function resolveTierRulesPath(options = {}) {
   const env = options.env ?? process.env;
@@ -71467,7 +72337,7 @@ function writeOwnerTierRules(rules, options = {}) {
   const path = resolveTierRulesPath(options);
   const document2 = { schemaVersion: TIER_RULES_SCHEMA_VERSION, rules: rules.map(serializeOwnerTierRule) };
   parseOwnerTierRules(document2, "tier rules");
-  mkdirSync33(dirname47(path), { recursive: true, mode: 448 });
+  mkdirSync33(dirname48(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify(document2, null, 2)}
 `);
   return path;
@@ -71548,22 +72418,22 @@ var init_tier_rules = __esm(() => {
 
 // src/workers/classification/tier-migration.ts
 import { createHash as createHash47 } from "node:crypto";
-import { chmodSync as chmodSync20, existsSync as existsSync44, mkdirSync as mkdirSync34, readFileSync as readFileSync40, renameSync as renameSync13, writeFileSync as writeFileSync13 } from "node:fs";
+import { chmodSync as chmodSync20, existsSync as existsSync46, mkdirSync as mkdirSync34, readFileSync as readFileSync41, renameSync as renameSync13, writeFileSync as writeFileSync13 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
-import { dirname as dirname48, join as join64 } from "node:path";
+import { dirname as dirname49, join as join66 } from "node:path";
 function domainTier(domain) {
   return domain === "public_safe" ? "public" : domain === "internal" ? "private" : "secure";
 }
 function resolveTierMigrationPaths(env, embeddingLedgerPath) {
   const configured = env[TIER_MIGRATION_DIR_ENV]?.trim();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join64(homedir47(), ".local", "share");
-  const dir = configured || join64(dataHome, "openclaw", "olympus", "tier-migration");
-  return { statePath: join64(dir, "state.json"), reportDir: join64(dir, "reports"), embeddingLedgerPath };
+  const dataHome = env.XDG_DATA_HOME?.trim() || join66(homedir47(), ".local", "share");
+  const dir = configured || join66(dataHome, "openclaw", "olympus", "tier-migration");
+  return { statePath: join66(dir, "state.json"), reportDir: join66(dir, "reports"), embeddingLedgerPath };
 }
 function readTierMigrationState(statePath) {
-  if (!existsSync44(statePath))
+  if (!existsSync46(statePath))
     return { schemaVersion: TIER_MIGRATION_STATE_SCHEMA_VERSION, plans: [] };
-  const parsed = JSON.parse(readFileSync40(statePath, "utf8"));
+  const parsed = JSON.parse(readFileSync41(statePath, "utf8"));
   if (parsed.schemaVersion !== TIER_MIGRATION_STATE_SCHEMA_VERSION || !Array.isArray(parsed.plans)) {
     throw new OperationError("config_error", `The tier migration state at ${statePath} is not readable.`);
   }
@@ -71574,7 +72444,7 @@ function writeTierMigrationState(statePath, state) {
 `);
 }
 function writeOwnerOnlyFile(path, text) {
-  mkdirSync34(dirname48(path), { recursive: true, mode: 448 });
+  mkdirSync34(dirname49(path), { recursive: true, mode: 448 });
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync13(temp, text, { mode: 384 });
   chmodSync20(temp, 384);
@@ -71903,7 +72773,7 @@ async function planTierMigration(options) {
     ].join("\x01")).sort()
   ].join("\x00")).slice(0, 16)}`;
   const top = topPatterns(patterns, options.topPatterns ?? 20);
-  const reportPath = join64(options.paths.reportDir, `${planId}.json`);
+  const reportPath = join66(options.paths.reportDir, `${planId}.json`);
   const noteEntryId = `tier-migration-plan:${planId}`;
   const existing = state.plans.find((plan) => plan.planId === planId);
   const reused = existing !== undefined;
@@ -72948,7 +73818,7 @@ var init_tier_migration = __esm(() => {
 });
 
 // src/workers/classification/tier-migration-lanes.ts
-import { existsSync as existsSync45 } from "node:fs";
+import { existsSync as existsSync47 } from "node:fs";
 function installedTierMigrationLaneSpecs(env = process.env) {
   return [
     {
@@ -73052,7 +73922,7 @@ function openTierMigrationLanes(specs, options) {
   try {
     for (const spec of specs) {
       const legs = Object.entries(spec.legs);
-      if (!legs.some(([, leg]) => leg.dbPath !== ":memory:" && existsSync45(leg.dbPath)))
+      if (!legs.some(([, leg]) => leg.dbPath !== ":memory:" && existsSync47(leg.dbPath)))
         continue;
       const secure = spec.legs.secure_local;
       const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(secure.dbPath) });
@@ -73464,11 +74334,11 @@ var init_tier_migration_cli = __esm(() => {
 // src/workers/source-scheduler-state.ts
 import { chmodSync as chmodSync21, mkdirSync as mkdirSync35 } from "node:fs";
 import { homedir as homedir49 } from "node:os";
-import { dirname as dirname49, join as join65 } from "node:path";
+import { dirname as dirname50, join as join67 } from "node:path";
 import { Database as Database15 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join65(homedir49(), ".local", "share");
-  return join65(dataHome, "openclaw", "olympus", "source-scheduler.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join67(homedir49(), ".local", "share");
+  return join67(dataHome, "openclaw", "olympus", "source-scheduler.sqlite");
 }
 
 class LocalSourceSchedulerStateStore {
@@ -73477,7 +74347,7 @@ class LocalSourceSchedulerStateStore {
   constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
-      mkdirSync35(dirname49(dbPath), { recursive: true, mode: 448 });
+      mkdirSync35(dirname50(dbPath), { recursive: true, mode: 448 });
     }
     this.db = new Database15(dbPath, { create: true });
     if (dbPath !== ":memory:")
@@ -74470,35 +75340,35 @@ var init_native_process_service = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync36, readFileSync as readFileSync41, rmSync as rmSync14, writeFileSync as writeFileSync14 } from "node:fs";
-import { dirname as dirname50, join as join66 } from "node:path";
+import { mkdirSync as mkdirSync36, readFileSync as readFileSync42, rmSync as rmSync14, writeFileSync as writeFileSync14 } from "node:fs";
+import { dirname as dirname51, join as join68 } from "node:path";
 import { homedir as homedir50 } from "node:os";
 function guardStateDir(env) {
   const configured = env[GUARD_STATE_DIR_ENV]?.trim();
   if (configured)
     return configured;
-  return join66(env.HOME?.trim() || homedir50(), ...GUARD_STATE_DIR_SEGMENTS);
+  return join68(env.HOME?.trim() || homedir50(), ...GUARD_STATE_DIR_SEGMENTS);
 }
 function resolveEmbeddingOverridePath(env = process.env) {
   const explicit = env[GUARD_OVERRIDE_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
-  return join66(guardStateDir(env), "operator-override");
+  return join68(guardStateDir(env), "operator-override");
 }
 function resolveGuardReportPath(env = process.env) {
-  return join66(guardStateDir(env), "latest.json");
+  return join68(guardStateDir(env), "latest.json");
 }
 function resolveEmbeddingDrainReportPath(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
   const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
-  return join66(dir, "source-embedding-drain-current.json");
+  return join68(dir, "source-embedding-drain-current.json");
 }
 function readEmbeddingOperatorOverride(path) {
   let raw;
   try {
-    raw = readFileSync41(path, "utf8");
+    raw = readFileSync42(path, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT")
       return "none";
@@ -74518,7 +75388,7 @@ function writeEmbeddingOperatorOverride(path, on) {
     rmSync14(path, { force: true });
     return;
   }
-  mkdirSync36(dirname50(path), { recursive: true, mode: 448 });
+  mkdirSync36(dirname51(path), { recursive: true, mode: 448 });
   writeFileSync14(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
@@ -74537,7 +75407,7 @@ function fresh(at, now, maxAgeMs) {
 }
 function readJsonFile(path) {
   try {
-    return asRecord11(JSON.parse(readFileSync41(path, "utf8")));
+    return asRecord11(JSON.parse(readFileSync42(path, "utf8")));
   } catch {
     return;
   }
@@ -74727,9 +75597,9 @@ var init_embedding_runtime = __esm(() => {
 
 // src/core/native-embedding-drain-service.ts
 import { randomUUID as randomUUID20 } from "node:crypto";
-import { readFileSync as readFileSync42, statSync as statSync22 } from "node:fs";
-import { delimiter as delimiter5, dirname as dirname51, isAbsolute as isAbsolute16, join as join67 } from "node:path";
-import { fileURLToPath as fileURLToPath8 } from "node:url";
+import { readFileSync as readFileSync43, statSync as statSync22 } from "node:fs";
+import { delimiter as delimiter5, dirname as dirname52, isAbsolute as isAbsolute16, join as join69 } from "node:path";
+import { fileURLToPath as fileURLToPath9 } from "node:url";
 function createNativeEmbeddingDrainService(options) {
   return createNativeProcessService({
     id: SERVICE_ID,
@@ -74771,12 +75641,12 @@ async function prepareEmbeddingDrainStart(input, options) {
   env.GEMINI_API_KEY ??= env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY;
   env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY ??= env.GEMINI_API_KEY;
   const runtimePath = resolveBunRuntimePath(drain.runtimePath, env);
-  const executablePath = assertUsableFile(fileURLToPath8(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
+  const executablePath = assertUsableFile(fileURLToPath9(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
   const reportPath = drain.reportPath ?? resolveEmbeddingDrainReportPath(env);
   if (!isAbsolute16(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
-  const readinessPath = join67(dirname51(reportPath), READINESS_FILE);
+  const readinessPath = join69(dirname52(reportPath), READINESS_FILE);
   const instanceId = randomUUID20();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
@@ -74820,7 +75690,7 @@ function resolveBunRuntimePath(configured, env) {
     return assertUsableFile(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...(env.PATH ?? "").split(delimiter5).filter(Boolean).map((dir) => join67(dir, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...(env.PATH ?? "").split(delimiter5).filter(Boolean).map((dir) => join69(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute16(candidate))
@@ -74849,7 +75719,7 @@ async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
     const stat3 = statSync22(readinessPath);
     if (!stat3.isFile() || stat3.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync42(readinessPath, "utf8"));
+    const receipt = JSON.parse(readFileSync43(readinessPath, "utf8"));
     return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.options_validated === true && receipt.content_free === true;
   } catch {
     return false;
@@ -74948,8 +75818,8 @@ var init_native_embedding_drain_service = __esm(() => {
 // src/core/native-worker-service.ts
 import { randomUUID as randomUUID21 } from "node:crypto";
 import { statSync as statSync23 } from "node:fs";
-import { basename as basename10, delimiter as delimiter6, isAbsolute as isAbsolute17, join as join68 } from "node:path";
-import { fileURLToPath as fileURLToPath9 } from "node:url";
+import { basename as basename10, delimiter as delimiter6, isAbsolute as isAbsolute17, join as join70 } from "node:path";
+import { fileURLToPath as fileURLToPath10 } from "node:url";
 function createNativeWorkerService(options) {
   let readyChild;
   let proofGeneration = 0;
@@ -75127,8 +75997,8 @@ function resolveBunRuntimePath2(configured, env) {
     return assertExecutableFile(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...env.BUN_INSTALL ? [join68(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
-    ...(env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join68(directory, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...env.BUN_INSTALL ? [join70(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
+    ...(env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join70(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
     if (!isAbsolute17(candidate) || !isBunExecutableName2(candidate))
@@ -75141,7 +76011,7 @@ function resolveBunRuntimePath2(configured, env) {
   throw new Error("Olympus worker service could not resolve an absolute Bun runtime path.");
 }
 function resolveWorkerExecutablePath(configured, moduleUrl) {
-  const candidate = configured ?? fileURLToPath9(new URL("./cli.js", moduleUrl));
+  const candidate = configured ?? fileURLToPath10(new URL("./cli.js", moduleUrl));
   return assertExecutableFile(candidate, "worker executable");
 }
 function assertExecutableFile(path, label) {
@@ -75453,7 +76323,7 @@ __export(exports_engine_host, {
   ENGINE_STATUS_SCHEMA: () => ENGINE_STATUS_SCHEMA
 });
 import { mkdirSync as mkdirSync37 } from "node:fs";
-import { join as join69 } from "node:path";
+import { join as join71 } from "node:path";
 function engineHostServices(pluginConfig, moduleUrl) {
   const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl });
   return [
@@ -75515,7 +76385,7 @@ async function startEngineHost(options) {
   const writeStatus = () => {
     status.updated_at = now();
     try {
-      mkdirSync37(join69(statusPath, ".."), { recursive: true, mode: 448 });
+      mkdirSync37(join71(statusPath, ".."), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(statusPath, `${JSON.stringify(status, null, 2)}
 `);
     } catch {}
@@ -75612,8 +76482,8 @@ import { spawn as spawn6 } from "node:child_process";
 import { randomBytes as randomBytes11 } from "node:crypto";
 import { mkdtempSync as mkdtempSync3, rmSync as rmSync15, writeFileSync as writeFileSync15 } from "node:fs";
 import { createServer as createServer3 } from "node:net";
-import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir5 } from "node:os";
-import { join as join70 } from "node:path";
+import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir6 } from "node:os";
+import { join as join72 } from "node:path";
 function llamaServerEnvironment(parent, alias) {
   const env = {};
   for (const name of LLAMA_SERVER_ENV_ALLOWLIST) {
@@ -75768,8 +76638,8 @@ function createLlamaServerHandle(launch, options = {}) {
     superseded();
     const token = randomBytes11(24).toString("base64url");
     const alias = `olympus-${randomBytes11(12).toString("hex")}`;
-    const tokenDir = mkdtempSync3(join70(tmpdir5(), "olympus-built-in-model-"));
-    const tokenFile = join70(tokenDir, "token");
+    const tokenDir = mkdtempSync3(join72(tmpdir6(), "olympus-built-in-model-"));
+    const tokenFile = join72(tokenDir, "token");
     let spawnedProcess;
     try {
       writeFileSync15(tokenFile, `${token}
@@ -76101,7 +76971,7 @@ __export(exports_consult_writer, {
   CONSULT_STANDARD_REPLY_FORMAT: () => CONSULT_STANDARD_REPLY_FORMAT
 });
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync44 } from "node:fs";
+import { readFileSync as readFileSync45 } from "node:fs";
 import { freemem, platform as osPlatform5, totalmem } from "node:os";
 function consultWriterSystem(level, options = {}) {
   if (level === "unnamed")
@@ -76271,11 +77141,11 @@ function meminfoBytes(meminfo, field) {
 }
 function defaultConsultMemoryProbe(deps = {}) {
   const exec = deps.exec ?? ((file, args) => execFileSync3(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
-  const readFile7 = deps.readFile ?? ((path) => readFileSync44(path, "utf8"));
+  const readFile8 = deps.readFile ?? ((path) => readFileSync45(path, "utf8"));
   const platform2 = deps.platform ?? osPlatform5();
   const readOptional = (path) => {
     try {
-      return readFile7(path);
+      return readFile8(path);
     } catch {
       return;
     }
@@ -92519,11 +93389,11 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync22, existsSync as existsSync47, lstatSync as lstatSync21, mkdirSync as mkdirSync38, readFileSync as readFileSync45, renameSync as renameSync14, writeFileSync as writeFileSync16 } from "node:fs";
-import { join as join71 } from "node:path";
+import { chmodSync as chmodSync22, existsSync as existsSync49, lstatSync as lstatSync21, mkdirSync as mkdirSync38, readFileSync as readFileSync46, renameSync as renameSync14, writeFileSync as writeFileSync16 } from "node:fs";
+import { join as join73 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync38(stateDir, { recursive: true, mode: 448 });
-  const dir = join71(stateDir, "connect-relay");
+  const dir = join73(stateDir, "connect-relay");
   mkdirSync38(dir, { recursive: true, mode: 448 });
   const stat3 = lstatSync21(dir);
   if (!stat3.isDirectory() || stat3.isSymbolicLink() || typeof process.getuid === "function" && stat3.uid !== process.getuid()) {
@@ -92539,10 +93409,10 @@ function writePrivateFile(path, contents) {
   renameSync14(temporary, path);
 }
 function loadOrCreateIdentity(stateDir) {
-  const path = join71(ensureStateDir(stateDir), "install-key.pem");
+  const path = join73(ensureStateDir(stateDir), "install-key.pem");
   let privateKey;
-  if (existsSync47(path)) {
-    privateKey = createPrivateKey(readFileSync45(path));
+  if (existsSync49(path)) {
+    privateKey = createPrivateKey(readFileSync46(path));
   } else {
     privateKey = generateKeyPairSync("ed25519").privateKey;
     writePrivateFile(path, privateKey.export({ format: "pem", type: "pkcs8" }));
@@ -93569,10 +94439,10 @@ function createModelKeyReload(options) {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes15 } from "node:crypto";
-import { chmodSync as chmodSync23, lstatSync as lstatSync22, mkdirSync as mkdirSync39, readFileSync as readFileSync46 } from "node:fs";
-import { dirname as dirname52, join as join72 } from "node:path";
+import { chmodSync as chmodSync23, lstatSync as lstatSync22, mkdirSync as mkdirSync39, readFileSync as readFileSync47 } from "node:fs";
+import { dirname as dirname53, join as join74 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
-  return join72(dirname52(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
+  return join74(dirname53(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
 }
 function newDashboardSessionSecret() {
   return randomBytes15(32).toString("base64url");
@@ -93589,7 +94459,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
     else if ((stats.mode & 63) !== 0)
       existing = "invalid";
     else {
-      const text = readFileSync46(path, "utf8").trim();
+      const text = readFileSync47(path, "utf8").trim();
       if (SECRET_PATTERN.test(text))
         return { secret: text, source: "file", path };
       existing = "invalid";
@@ -93599,7 +94469,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
   }
   const secret = newDashboardSessionSecret();
   try {
-    mkdirSync39(dirname52(path), { recursive: true, mode: 448 });
+    mkdirSync39(dirname53(path), { recursive: true, mode: 448 });
     writePrivateFileAtomicSync(path, `${secret}
 `);
     chmodSync23(path, 384);
@@ -93616,7 +94486,7 @@ var init_dashboard_session_secret = __esm(() => {
 });
 
 // src/workers/dropbox-files/extraction-source.ts
-import { readFile as readFile7, realpath as realpath2, stat as stat3 } from "node:fs/promises";
+import { readFile as readFile8, realpath as realpath2, stat as stat3 } from "node:fs/promises";
 import { relative as relative6, resolve as resolve9, sep as sep7 } from "node:path";
 
 class DropboxExtractionSource {
@@ -93878,7 +94748,7 @@ async function readVerifiedCandidate(input) {
   if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
     return;
   }
-  const bytes = new Uint8Array(await readFile7(input.candidatePath));
+  const bytes = new Uint8Array(await readFile8(input.candidatePath));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
     throw new FileExtractionSourceError("source_too_large");
   }
@@ -94106,7 +94976,7 @@ var init_drive_extraction_source = __esm(() => {
 import { chmodSync as chmodSync24, mkdirSync as mkdirSync40 } from "node:fs";
 import { createHash as createHash51, randomUUID as randomUUID22 } from "node:crypto";
 import { homedir as homedir52 } from "node:os";
-import { dirname as dirname53, join as join73 } from "node:path";
+import { dirname as dirname54, join as join75 } from "node:path";
 import { Database as Database16 } from "bun:sqlite";
 function settleUnreadable(candidates, classify) {
   const items = [];
@@ -94142,8 +95012,8 @@ function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override)
     return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join73(homedir52(), ".local", "share");
-  return join73(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join75(homedir52(), ".local", "share");
+  return join75(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
 }
 
 class LocalFileExtractionJobStore {
@@ -94156,7 +95026,7 @@ class LocalFileExtractionJobStore {
     this.readonly = options.readonly === true;
     const inMemory = dbPath === ":memory:";
     if (!inMemory && !this.readonly) {
-      mkdirSync40(dirname53(dbPath), { recursive: true, mode: 448 });
+      mkdirSync40(dirname54(dbPath), { recursive: true, mode: 448 });
     }
     this.db = this.readonly ? new Database16(dbPath, { readonly: true }) : new Database16(dbPath, { create: true });
     if (!inMemory && !this.readonly)
@@ -95461,153 +96331,6 @@ var init_job_store = __esm(() => {
   };
 });
 
-// src/workers/file-extraction/extractors/bounded-text.ts
-function artifactKindForStructuralKind(kind) {
-  return ARTIFACT_KIND_BY_STRUCTURAL_KIND[kind];
-}
-function normalizeExtractedText(input) {
-  return input.replace(/\u0000/g, "").replace(/\r\n/g, `
-`).replace(/\n{3,}/g, `
-
-`).trim();
-}
-function boundText(normalizedText, maxBoundedTextChars, reason = BOUNDED_TEXT_TRUNCATION_REASON) {
-  const sourceChars = normalizedText.length;
-  const truncated = sourceChars > maxBoundedTextChars;
-  const text = truncated ? normalizedText.slice(0, maxBoundedTextChars) : normalizedText;
-  return {
-    text,
-    truncated,
-    chars: text.length,
-    sourceChars,
-    ...truncated ? { truncationReason: reason } : {},
-    warnings: truncated ? [BOUNDED_TEXT_TRUNCATED_WARNING] : []
-  };
-}
-function appendWarning(warnings, warning) {
-  const next = warnings ? [...warnings] : [];
-  if (!next.includes(warning))
-    next.push(warning);
-  return next;
-}
-function appendBoundedTextWarnings(warnings, bounded) {
-  let next = warnings ? [...warnings] : [];
-  for (const warning of bounded.warnings) {
-    next = appendWarning(next, warning);
-  }
-  return next;
-}
-function buildDerivation(input) {
-  const warnings = appendBoundedTextWarnings(input.warnings, input.bounded);
-  return {
-    artifactKind: input.artifactKind ?? artifactKindForStructuralKind(input.structural.kind),
-    structuralRef: {
-      kind: input.structural.kind,
-      ...input.structural.label !== undefined ? { label: input.structural.label } : {},
-      ...input.structural.index !== undefined ? { index: input.structural.index } : {},
-      artifact: input.artifact,
-      ...input.bounded.truncated ? {
-        sourceChars: input.bounded.sourceChars,
-        ...input.bounded.truncationReason !== undefined ? { truncationReason: input.bounded.truncationReason } : {}
-      } : {}
-    },
-    ...input.confidence !== undefined ? { confidence: input.confidence } : {},
-    ...warnings.length > 0 ? { warnings } : {},
-    chars: input.bounded.chars
-  };
-}
-function mediaDescriptorOutput(input) {
-  const descriptor = boundText(normalizeExtractedText([
-    input.kind === "image" ? "Image file" : "PDF visual content",
-    input.mimeType ? `MIME type: ${input.mimeType}` : undefined,
-    Number.isFinite(input.sizeBytes) ? `Size bytes: ${input.sizeBytes}` : undefined,
-    "No local OCR text has been extracted.",
-    "OCR or vision-language processing is required before content-level retrieval."
-  ].filter((value) => Boolean(value)).join(`
-`)), input.maxBoundedTextChars);
-  const derivation = buildDerivation({
-    artifact: "media_descriptor",
-    structural: { kind: input.kind, label: input.label },
-    bounded: descriptor,
-    confidence: 0.3,
-    warnings: input.warnings
-  });
-  return {
-    status: "metadata_only",
-    derivations: [{
-      ...derivation,
-      structuralRef: {
-        ...derivation.structuralRef,
-        ...input.mimeType !== undefined ? { mimeType: input.mimeType } : {},
-        ...Number.isFinite(input.sizeBytes) ? { sizeBytes: input.sizeBytes } : {}
-      }
-    }]
-  };
-}
-function normalizeMimeType2(input) {
-  const value = input?.split(";", 1)[0]?.trim().toLowerCase();
-  return value || undefined;
-}
-function resolveExtractionMimeType(refMimeType, fetchedMimeType) {
-  const enqueued = normalizeMimeType2(refMimeType);
-  if (enqueued && !GENERIC_MIME_TYPES.has(enqueued))
-    return enqueued;
-  return normalizeMimeType2(fetchedMimeType) ?? enqueued;
-}
-function hasPdfSignature(bytes) {
-  return bytes.length >= 5 && bytes[0] === 37 && bytes[1] === 80 && bytes[2] === 68 && bytes[3] === 70 && bytes[4] === 45;
-}
-function sanitizeErrorDetail(body, maxChars = 120) {
-  return body.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, maxChars);
-}
-function sanitizeThrownError(error2, maxChars = 120) {
-  const detail = error2 instanceof Error ? `${error2.name || "Error"}: ${error2.message}` : String(error2);
-  return sanitizeErrorDetail(detail, maxChars);
-}
-var DEFAULT_MAX_BOUNDED_TEXT_CHARS = 2000000, BOUNDED_TEXT_TRUNCATED_WARNING = "bounded_text_truncated", BOUNDED_TEXT_TRUNCATION_REASON = "max_bounded_text_chars", DEFAULT_MAX_TABLE_SAMPLE_ROWS = 25, DEFAULT_MAX_TABLE_SAMPLE_COLUMNS = 25, PDF_MIME_TYPE = "application/pdf", DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document", XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation", TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, ARTIFACT_KIND_BY_STRUCTURAL_KIND, GENERIC_MIME_TYPES;
-var init_bounded_text = __esm(() => {
-  TEXT_MIME_TYPES = new Set([
-    "application/json",
-    "application/x-ndjson",
-    "application/xml",
-    "text/csv",
-    "text/html",
-    "text/markdown",
-    "text/plain",
-    "text/tab-separated-values",
-    "text/xml"
-  ]);
-  TABLE_MIME_TYPES = new Set([
-    "text/csv",
-    "text/tab-separated-values"
-  ]);
-  IMAGE_MIME_TYPES = new Set([
-    "image/bmp",
-    "image/gif",
-    "image/heic",
-    "image/heif",
-    "image/jpeg",
-    "image/png",
-    "image/tiff",
-    "image/webp"
-  ]);
-  ARTIFACT_KIND_BY_STRUCTURAL_KIND = {
-    whole_file: "document",
-    section: "document",
-    range: "document",
-    page: "page",
-    sheet: "sheet",
-    slide: "slide",
-    image: "image_description",
-    media: "image_description"
-  };
-  GENERIC_MIME_TYPES = new Set([
-    "application/octet-stream",
-    "binary/octet-stream",
-    "application/binary"
-  ]);
-});
-
 // src/workers/file-extraction/extractors/document-formats.ts
 import { inflateRawSync as inflateRawSync2, inflateSync } from "node:zlib";
 function decodeUtf8(bytes) {
@@ -96115,9 +96838,9 @@ var init_document_formats = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/text.ts
-import { mkdtemp as mkdtemp2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
-import { tmpdir as tmpdir6 } from "node:os";
-import { dirname as dirname54, join as join74 } from "node:path";
+import { mkdtemp as mkdtemp3, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
+import { tmpdir as tmpdir7 } from "node:os";
+import { dirname as dirname55, join as join76 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -96131,16 +96854,20 @@ function createTextExtractor(options = {}) {
   const pdfOcr = options.pdfOcr;
   const imageOcr = options.imageOcr;
   const imagePreparation = options.imagePreparation;
+  const imageOcrVersion = options.imageOcrVersion === true;
   return {
     kind,
     version: version2,
     needsBytes: true,
-    ...imagePreparation ? {
+    ...imagePreparation || imageOcrVersion ? {
       versionFor(mimeType) {
         const normalized = normalizeMimeType2(mimeType);
-        return normalized && IMAGE_MIME_TYPES.has(normalized) ? `${version2}${IMAGE_MEDIA_VERSION_SUFFIX}` : version2;
+        if (!normalized || !IMAGE_MIME_TYPES.has(normalized))
+          return version2;
+        return `${version2}${imagePreparation ? IMAGE_MEDIA_VERSION_SUFFIX : ""}${imageOcrVersion ? IMAGE_OCR_VERSION_SUFFIX : ""}`;
       }
     } : {},
+    ...options.ocrReread ? { reread: options.ocrReread } : {},
     egress: "local",
     accepts(mimeType) {
       return textLaneAccepts(mimeType);
@@ -96198,7 +96925,8 @@ function createTextExtractor(options = {}) {
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context2.sizeBytes });
         if (ocrOutput)
           return ocrOutput;
-        if (!imageMediaDescriptor) {
+        const waitingForOcr = imageOcr !== undefined;
+        if (!imageMediaDescriptor && !waitingForOcr) {
           return { status: "metadata_only" };
         }
         return mediaDescriptorOutput({
@@ -96207,7 +96935,7 @@ function createTextExtractor(options = {}) {
           maxBoundedTextChars,
           kind: "image",
           label: "image file",
-          warnings: ["ocr_required", "image_only"]
+          warnings: ["ocr_required", "image_only", ...waitingForOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []]
         });
       }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
@@ -96243,7 +96971,7 @@ function createTextExtractor(options = {}) {
 }
 function releaseStaged(media) {
   if (media.stagingHolder)
-    releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname54(media.path));
+    releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname55(media.path));
 }
 function preparedImageOutput(media, ocr, maxBoundedTextChars) {
   if (ocr && (ocr.status === "failed_retryable" || ocr.status === "failed_terminal"))
@@ -96434,10 +97162,10 @@ function pdfTextLooksUndecoded(text) {
   return total > 0 && unreadable / total > 0.1;
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp2(join74(tmpdir6(), TEMP_DIR_PREFIX2));
+  const tempDir = await mkdtemp3(join76(tmpdir7(), TEMP_DIR_PREFIX2));
   try {
-    const inputPath = join74(tempDir, "input.pdf");
-    await writeFile2(inputPath, input.context.bytes);
+    const inputPath = join76(tempDir, "input.pdf");
+    await writeFile3(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
       args: [
@@ -96464,7 +97192,7 @@ async function extractPdfTextWithCommand(input) {
       ...input.ocr ? { ocr: input.ocr } : {}
     });
   } finally {
-    await rm3(tempDir, { recursive: true, force: true });
+    await rm4(tempDir, { recursive: true, force: true });
   }
 }
 function isCommandMissing(error2) {
@@ -96486,7 +97214,12 @@ async function pdfTextExtractionResult(input) {
         maxBoundedTextChars: input.context.maxBoundedTextChars,
         kind: "media",
         label: "scanned or image-only pdf",
-        warnings: ["ocr_required", "pdf_image_only", "no_selectable_text_layer"]
+        warnings: [
+          "ocr_required",
+          "pdf_image_only",
+          "no_selectable_text_layer",
+          ...input.ocr ? [OCR_UNAVAILABLE_PDF_WARNING] : []
+        ]
       });
     }
     return { status: "empty_output" };
@@ -96678,7 +97411,7 @@ function extractDelimitedText(input) {
     ...bounded.warnings.length > 0 ? { warnings: appendBoundedTextWarnings(undefined, bounded) } : {}
   };
 }
-var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07";
+var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OCR_UNAVAILABLE_PDF_WARNING = "ocr_unavailable_pdf", OCR_UNAVAILABLE_IMAGE_WARNING = "ocr_unavailable_image";
 var init_text = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -96686,88 +97419,218 @@ var init_text = __esm(() => {
   init_media_cache();
 });
 
-// src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync48 } from "node:fs";
-import { dirname as dirname55, join as join75 } from "node:path";
-import { fileURLToPath as fileURLToPath10 } from "node:url";
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync48) {
-  let directory = dirname55(fileURLToPath10(moduleUrl));
-  for (let depth = 0;depth < 6; depth += 1) {
-    const candidate = join75(directory, APPLE_VISION_OCR_SCRIPT);
-    if (exists(candidate))
-      return candidate;
-    const parent = dirname55(directory);
-    if (parent === directory)
-      break;
-    directory = parent;
+// src/workers/file-extraction/extractors/pdf-raster-ocr.ts
+import { mkdtemp as mkdtemp4, readdir as readdir3, rm as rm5 } from "node:fs/promises";
+import { tmpdir as tmpdir8 } from "node:os";
+import { join as join77 } from "node:path";
+function parseSizePoints(text) {
+  const [first, second] = text.split("x");
+  const width = Number.parseFloat(first ?? "");
+  const height = Number.parseFloat(second ?? "");
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    return Math.max(width, height);
   }
   return;
 }
-function appleVisionOcrSelected(preference, platform2 = process.platform) {
-  return preference === "auto" && platform2 === "darwin";
-}
-function parseOcrEnginePreference(value) {
-  const normalized = value?.trim().toLowerCase();
-  if (!normalized)
-    return;
-  if (OCR_ENGINE_PREFERENCES.includes(normalized)) {
-    return normalized;
+function parsePageSizes(stdout) {
+  const sizes = new Map;
+  for (const line of stdout.split(`
+`)) {
+    if (line.startsWith("Page size:")) {
+      const edge2 = parseSizePoints(line.slice("Page size:".length));
+      if (edge2 !== undefined && !sizes.has(1))
+        sizes.set(1, edge2);
+      continue;
+    }
+    const words2 = line.trim().split(" ").filter((word) => word.length > 0);
+    if (words2[0] !== "Page" || words2[2] !== "size:")
+      continue;
+    const page = Number(words2[1]);
+    const edge = parseSizePoints(words2.slice(3).join(" "));
+    if (Number.isInteger(page) && page > 0 && edge !== undefined)
+      sizes.set(page, edge);
   }
-  throw new Error(`OCR engine must be one of ${OCR_ENGINE_PREFERENCES.join(", ")}; got ${value}.`);
+  return sizes;
 }
-async function appleVisionPdfOcr(input, options) {
+async function readPdfInfo(input) {
+  try {
+    const { stdout } = await input.options.commandRunner({
+      command: PDFINFO_COMMAND,
+      args: ["-f", "1", "-l", String(input.maxPages), input.inputPath],
+      timeoutMs: input.options.timeoutMs
+    });
+    const totalPages = parsePdfInfoPageCount(stdout);
+    return {
+      ...totalPages !== undefined ? { totalPages } : {},
+      pageLongEdges: parsePageSizes(stdout)
+    };
+  } catch {
+    return { pageLongEdges: new Map };
+  }
+}
+function rasterEdgeFor(longEdgePoints, maxPixelEdge) {
+  const cap = Math.max(1, Math.floor(maxPixelEdge));
+  if (longEdgePoints === undefined)
+    return Math.min(cap, UNKNOWN_SIZE_RASTER_EDGE);
+  return Math.min(cap, Math.max(1, Math.ceil(longEdgePoints * DEFAULT_RASTER_OCR_DPI / 72)));
+}
+function renderSpecFor(longEdgePoints, maxPixelEdge) {
+  return ["-cropbox", "-scale-to", String(rasterEdgeFor(longEdgePoints, maxPixelEdge))];
+}
+function isPastLastPage(error2) {
+  return error2 instanceof ExtractionCommandError && error2.command === PDFTOPPM_COMMAND && `${error2.stderr}
+${error2.stdout}`.toLowerCase().includes("wrong page range given");
+}
+function classifyRasterPdfRejection(error2) {
+  if (!(error2 instanceof ExtractionCommandError) || error2.command !== PDFTOPPM_COMMAND)
+    return;
+  const detail = `${error2.stderr}
+${error2.stdout}`.toLowerCase();
+  if (detail.includes("incorrect password") || detail.includes("encrypted"))
+    return "ocrmypdf_pdf_encrypted";
+  if (error2.exitCode === 1)
+    return "ocrmypdf_pdf_invalid";
+  return;
+}
+function renderedPageNumber(name) {
+  const lead = `${RASTER_PAGE_PREFIX}-`;
+  if (!name.startsWith(lead) || !name.endsWith(".png"))
+    return;
+  const number5 = Number(name.slice(lead.length, -".png".length));
+  return Number.isInteger(number5) && number5 > 0 ? number5 : undefined;
+}
+async function rasterPdfOcr(input, options) {
   const maxPages = Math.max(1, Math.floor(options.maxPages ?? DEFAULT_APPLE_VISION_MAX_PAGES));
   const pagesPerRun = Math.max(1, Math.floor(options.pagesPerRun ?? DEFAULT_APPLE_VISION_PAGES_PER_RUN));
   const maxPixelEdge = options.pdfMaxPixelEdge ?? DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE;
   const now = options.now ?? Date.now;
   const deadline = now() + (options.fileDeadlineMs ?? DEFAULT_APPLE_VISION_FILE_DEADLINE_MS);
+  const info = await readPdfInfo({ inputPath: input.inputPath, maxPages, options });
+  const tempDir = await mkdtemp4(join77(tmpdir8(), RASTER_TEMP_PREFIX));
   const pages = [];
-  let totalPages;
+  let attempted = 0;
+  let failed = 0;
+  let lastFailure;
   let chars = 0;
   let stopReason;
-  let firstPage = 1;
-  for (;; ) {
-    const lastPage = Math.min(firstPage + pagesPerRun - 1, maxPages, totalPages ?? maxPages);
-    const remainingMs = deadline - now();
-    if (remainingMs <= 0) {
-      stopReason = "time";
-      break;
-    }
-    const result = await runScript({
-      args: ["pdf", input.inputPath, String(firstPage), String(lastPage), String(maxPixelEdge)],
-      timeoutMs: Math.min(options.timeoutMs, remainingMs),
-      options,
-      deterministic: "pdf"
-    }).catch((error2) => {
-      if (error2 instanceof ExtractionCommandTimeoutError && pages.length > 0 && remainingMs < options.timeoutMs) {
-        return;
+  try {
+    let firstPage = 1;
+    rangeLoop:
+      for (;; ) {
+        const lastPage = Math.min(firstPage + pagesPerRun - 1, maxPages, info.totalPages ?? maxPages);
+        const remainingMs = deadline - now();
+        if (remainingMs <= 0) {
+          stopReason = "time";
+          break;
+        }
+        let renderLeftMs = remainingMs;
+        try {
+          let groupStart = firstPage;
+          while (groupStart <= lastPage) {
+            renderLeftMs = deadline - now();
+            if (renderLeftMs <= 0) {
+              stopReason = "time";
+              break;
+            }
+            const spec = renderSpecFor(info.pageLongEdges.get(groupStart), maxPixelEdge);
+            let groupEnd = groupStart;
+            while (groupEnd < lastPage && renderSpecFor(info.pageLongEdges.get(groupEnd + 1), maxPixelEdge).join(" ") === spec.join(" "))
+              groupEnd += 1;
+            await options.commandRunner({
+              command: PDFTOPPM_COMMAND,
+              args: [
+                "-f",
+                String(groupStart),
+                "-l",
+                String(groupEnd),
+                ...spec,
+                "-gray",
+                "-png",
+                input.inputPath,
+                join77(tempDir, RASTER_PAGE_PREFIX)
+              ],
+              timeoutMs: Math.min(options.timeoutMs, renderLeftMs)
+            });
+            groupStart = groupEnd + 1;
+          }
+        } catch (error2) {
+          const rejection = classifyRasterPdfRejection(error2);
+          if (rejection)
+            return { status: "failed_terminal", errorKind: rejection };
+          if (error2 instanceof ExtractionCommandTimeoutError && pages.length > 0 && renderLeftMs < options.timeoutMs) {
+            stopReason = "time";
+            break;
+          }
+          if (info.totalPages === undefined && firstPage > 1 && isPastLastPage(error2))
+            break;
+          throw error2;
+        }
+        const files = (await readdir3(tempDir)).map((name) => ({ name, page: renderedPageNumber(name) })).filter((entry) => entry.page !== undefined).sort((left, right) => left.page - right.page);
+        if (files.length === 0) {
+          if (stopReason === "time")
+            break;
+          if (firstPage === 1)
+            throw new Error("Local PDF rendering produced no page images.");
+          break;
+        }
+        for (const file of files) {
+          const left = deadline - now();
+          if (left <= 0) {
+            stopReason = "time";
+            break rangeLoop;
+          }
+          attempted += 1;
+          const path = join77(tempDir, file.name);
+          try {
+            const { stdout } = await options.commandRunner({
+              command: TESSERACT_COMMAND,
+              args: tesseractArguments(path),
+              timeoutMs: Math.min(options.timeoutMs, left),
+              env: TESSERACT_ENV
+            });
+            pages.push({ page: file.page, text: stdout });
+            chars += stdout.length;
+          } catch (error2) {
+            if (error2 instanceof ExtractionCommandTimeoutError && pages.length > 0 && left < options.timeoutMs) {
+              stopReason = "time";
+              break rangeLoop;
+            }
+            if (!(error2 instanceof ExtractionCommandError || error2 instanceof ExtractionCommandTimeoutError))
+              throw error2;
+            failed += 1;
+            lastFailure = error2;
+            pages.push({ page: file.page, text: "", unreadable: true });
+          }
+          await rm5(path, { force: true });
+        }
+        if (stopReason === "time")
+          break;
+        const renderedLast = files[files.length - 1].page;
+        if (info.totalPages !== undefined ? renderedLast >= info.totalPages : renderedLast < lastPage)
+          break;
+        if (renderedLast >= maxPages) {
+          stopReason = "pages";
+          break;
+        }
+        if (chars >= options.maxBoundedTextChars) {
+          stopReason = "text";
+          break;
+        }
+        firstPage = renderedLast + 1;
       }
-      throw error2;
-    });
-    if (!result) {
-      stopReason = "time";
-      break;
-    }
-    if ("settled" in result)
-      return result.settled;
-    totalPages = result.totalPages;
-    for (const page of result.pages) {
-      pages.push(page);
-      chars += page.text.length;
-    }
-    if (lastPage >= totalPages)
-      break;
-    if (lastPage >= maxPages) {
-      stopReason = "pages";
-      break;
-    }
-    if (chars >= options.maxBoundedTextChars) {
-      stopReason = "text";
-      break;
-    }
-    firstPage = lastPage + 1;
+  } finally {
+    await rm5(tempDir, { recursive: true, force: true });
   }
   const read = pages.filter((page) => normalizeExtractedText(page.text).length > 0);
+  if (read.length === 0 && failed > 0)
+    throw lastFailure;
+  if (pages.length === 0)
+    throw new Error("Local PDF rendering ran out of time before any page was read.");
+  const incompleteWarnings = () => [
+    ...stopReason === "pages" ? ["ocr_pdf_pages_capped"] : [],
+    ...stopReason === "time" ? ["ocr_pdf_time_capped"] : [],
+    ...pages.some((page) => page.unreadable) ? ["ocr_pdf_page_unreadable"] : []
+  ];
   if (read.length === 0) {
     return mediaDescriptorOutput({
       mimeType: input.mimeType,
@@ -96775,7 +97638,7 @@ async function appleVisionPdfOcr(input, options) {
       maxBoundedTextChars: options.maxBoundedTextChars,
       kind: "media",
       label: "scanned or image-only pdf",
-      warnings: ["ocr_empty", "pdf_image_only", APPLE_VISION_ENGINE_WARNING]
+      warnings: ["ocr_empty", "pdf_image_only", RASTER_OCR_ENGINE_WARNING, ...incompleteWarnings()]
     });
   }
   const joined = read.map((page) => `--- Page ${page.page} ---
@@ -96783,7 +97646,12 @@ ${normalizeExtractedText(page.text)}`).join(`
 
 `);
   const bounded = boundText(joined, options.maxBoundedTextChars);
-  let warnings = ["ocr_text", APPLE_VISION_ENGINE_WARNING, "ocr_source_rasterized_pdf"];
+  let warnings = [
+    "ocr_text",
+    RASTER_OCR_ENGINE_WARNING,
+    "ocr_confidence_unavailable",
+    "ocr_source_rasterized_pdf"
+  ];
   if (stopReason === "pages")
     warnings = appendWarning(warnings, "ocr_pdf_pages_capped");
   if (stopReason === "time")
@@ -96794,7 +97662,7 @@ ${normalizeExtractedText(page.text)}`).join(`
     artifact: "image_ocr",
     structural: { kind: "whole_file", label: "pdf ocr text" },
     bounded,
-    confidence: weightedConfidence(read),
+    confidence: 0.5,
     warnings
   });
   const capped = stopReason === "pages" || stopReason === "time";
@@ -96806,7 +97674,7 @@ ${normalizeExtractedText(page.text)}`).join(`
       structuralRef: {
         ...derivation.structuralRef,
         readPages: pages.length,
-        ...totalPages !== undefined ? { totalPages } : {}
+        ...info.totalPages !== undefined ? { totalPages: info.totalPages } : {}
       }
     }],
     ...capped || bounded.warnings.length > 0 ? {
@@ -96818,127 +97686,19 @@ ${normalizeExtractedText(page.text)}`).join(`
     } : {}
   };
 }
-async function appleVisionImageOcr(input, options) {
-  const maxPixelEdge = options.imageMaxPixelEdge ?? DEFAULT_APPLE_VISION_IMAGE_MAX_PIXEL_EDGE;
-  const result = await runScript({
-    args: ["image", input.inputPath, String(maxPixelEdge)],
-    timeoutMs: options.timeoutMs,
-    options,
-    deterministic: "image"
-  });
-  if ("settled" in result)
-    return result.settled;
-  const page = result.pages[0];
-  const bounded = boundText(normalizeExtractedText(page?.text ?? ""), options.maxBoundedTextChars);
-  if (!page || !bounded.text) {
-    return mediaDescriptorOutput({
-      mimeType: input.mimeType,
-      sizeBytes: input.sizeBytes,
-      maxBoundedTextChars: options.maxBoundedTextChars,
-      kind: "image",
-      label: "image file",
-      warnings: ["ocr_empty", "image_only", APPLE_VISION_ENGINE_WARNING]
-    });
-  }
-  return {
-    status: "indexed",
-    text: bounded.text,
-    derivations: [buildDerivation({
-      artifact: "image_ocr",
-      structural: { kind: "image", label: "image ocr text" },
-      bounded,
-      confidence: weightedConfidence([page]),
-      warnings: ["ocr_text", APPLE_VISION_ENGINE_WARNING]
-    })],
-    ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
-  };
-}
-async function runScript(input) {
-  const scriptPath = input.options.scriptPath;
-  if (!scriptPath)
-    throw new AppleVisionOcrUnavailableError("the packaged script was not found");
-  let stdout;
-  try {
-    ({ stdout } = await input.options.commandRunner({
-      command: input.options.osascriptPath ?? APPLE_VISION_OSASCRIPT,
-      args: ["-l", "JavaScript", scriptPath, ...input.args],
-      timeoutMs: input.timeoutMs
-    }));
-  } catch (error2) {
-    if (error2?.code === "ENOENT") {
-      throw new AppleVisionOcrUnavailableError("osascript is not present");
-    }
-    if (error2 instanceof ExtractionCommandError) {
-      if (error2.exitCode === APPLE_VISION_EXIT_ENGINE_UNAVAILABLE) {
-        throw new AppleVisionOcrUnavailableError("Vision text recognition is not available on this macOS");
-      }
-      if (error2.exitCode === APPLE_VISION_EXIT_PDF_LOCKED && input.deterministic === "pdf") {
-        return { settled: { status: "failed_terminal", errorKind: "ocrmypdf_pdf_encrypted" } };
-      }
-      if (error2.exitCode === APPLE_VISION_EXIT_INPUT_UNREADABLE) {
-        return {
-          settled: {
-            status: "failed_terminal",
-            errorKind: input.deterministic === "pdf" ? "ocrmypdf_pdf_invalid" : "ocr_image_unreadable"
-          }
-        };
-      }
-    }
-    throw error2;
-  }
-  return parseScriptResult(stdout);
-}
-function parseScriptResult(stdout) {
-  const parsed = JSON.parse(stdout);
-  if (!parsed || typeof parsed !== "object")
-    throw new Error("OCR script answered no object.");
-  const record3 = parsed;
-  const totalPages = Number(record3.totalPages);
-  if (!Number.isInteger(totalPages) || totalPages < 1 || !Array.isArray(record3.pages)) {
-    throw new Error("OCR script answered an unexpected shape.");
-  }
-  const pages = record3.pages.map((entry) => {
-    const page = entry;
-    const pageNumber = Number(page.page);
-    if (!Number.isInteger(pageNumber) || typeof page.text !== "string") {
-      throw new Error("OCR script answered an unexpected page.");
-    }
-    const confidence = Number(page.confidence);
-    return {
-      page: pageNumber,
-      text: page.text,
-      confidence: Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : 0,
-      ...page.unreadable === true ? { unreadable: true } : {}
-    };
-  });
-  return { totalPages, pages };
-}
-function weightedConfidence(pages) {
-  let weighted = 0;
-  let weight = 0;
-  for (const page of pages) {
-    weighted += page.confidence * page.text.length;
-    weight += page.text.length;
-  }
-  return weight > 0 ? Math.round(weighted / weight * 1000) / 1000 : 0;
-}
-var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js", APPLE_VISION_OSASCRIPT = "/usr/bin/osascript", APPLE_VISION_ENGINE_WARNING = "ocr_engine_apple_vision", DEFAULT_APPLE_VISION_MAX_PAGES = 100, DEFAULT_APPLE_VISION_PAGES_PER_RUN = 8, DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE = 3000, DEFAULT_APPLE_VISION_IMAGE_MAX_PIXEL_EDGE = 4096, DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = 600000, APPLE_VISION_EXIT_INPUT_UNREADABLE = 65, APPLE_VISION_EXIT_PDF_LOCKED = 66, APPLE_VISION_EXIT_ENGINE_UNAVAILABLE = 69, OCR_ENGINE_PREFERENCES, AppleVisionOcrUnavailableError;
-var init_apple_vision_ocr = __esm(() => {
+var RASTER_OCR_ENGINE_WARNING = "ocr_engine_tesseract", DEFAULT_RASTER_OCR_DPI = 200, UNKNOWN_SIZE_RASTER_EDGE = 2400, RASTER_PAGE_PREFIX = "page", RASTER_TEMP_PREFIX = "olympus-extraction-raster-ocr-";
+var init_pdf_raster_ocr = __esm(() => {
   init_bounded_text();
+  init_apple_vision_ocr();
   init_command_runner();
-  OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
-  AppleVisionOcrUnavailableError = class AppleVisionOcrUnavailableError extends Error {
-    constructor(reason) {
-      super(`Built-in macOS scan reading is unavailable: ${reason}.`);
-      this.name = "AppleVisionOcrUnavailableError";
-    }
-  };
+  init_ocr_capability();
+  init_pdf_render();
 });
 
 // src/workers/file-extraction/extractors/ocr.ts
-import { mkdtemp as mkdtemp3, readFile as readFile8, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
-import { tmpdir as tmpdir7 } from "node:os";
-import { join as join76 } from "node:path";
+import { mkdtemp as mkdtemp5, readFile as readFile9, rm as rm6, writeFile as writeFile4 } from "node:fs/promises";
+import { tmpdir as tmpdir9 } from "node:os";
+import { join as join78 } from "node:path";
 function createOcrEngine(input) {
   const options = input.options ?? {};
   let vision;
@@ -96955,6 +97715,14 @@ function createOcrEngine(input) {
     };
   }
   return {
+    pinned: options.preference === "tesseract",
+    capability: options.capability ?? (input.commandRunnerInjected ? createOcrCapabilityProbe({ commandRunner: input.commandRunner }) : sharedOcrCapabilityProbe()),
+    limits: {
+      ...options.maxPages !== undefined ? { maxPages: options.maxPages } : {},
+      ...options.pagesPerRun !== undefined ? { pagesPerRun: options.pagesPerRun } : {},
+      ...options.fileDeadlineMs !== undefined ? { fileDeadlineMs: options.fileDeadlineMs } : {},
+      ...options.now !== undefined ? { now: options.now } : {}
+    },
     get vision() {
       return vision;
     },
@@ -96980,6 +97748,35 @@ async function withVision(engine, read) {
     throw error2;
   }
 }
+function createOcrRereadPolicy(options) {
+  const pinned = options.preference === "tesseract";
+  const readyKinds = () => {
+    const seen = options.capability.peekFresh();
+    if (!seen)
+      return;
+    return pinned ? { pdf: seen.ocrmypdf === "ok", image: false } : { pdf: seen.pdfEngine !== undefined, image: seen.imageEngine !== undefined };
+  };
+  return {
+    unreadWarnings: ["ocr_required", OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
+    unreadTerminalErrorKinds: [],
+    notReadyWarnings: [OCR_UNAVAILABLE_PDF_WARNING, OCR_UNAVAILABLE_IMAGE_WARNING],
+    prepare() {
+      const ready = readyKinds();
+      if (!ready) {
+        options.capability.warm();
+        return "pending";
+      }
+      return ready.pdf || ready.image ? "ready" : "unavailable";
+    },
+    readyWarnings() {
+      const ready = readyKinds();
+      return [
+        ...ready?.pdf ? ["ocr_required", OCR_UNAVAILABLE_PDF_WARNING] : [],
+        ...ready?.image ? [OCR_UNAVAILABLE_IMAGE_WARNING] : []
+      ];
+    }
+  };
+}
 function createOcrExtractor(options = {}) {
   const kind = options.kind ?? OCR_EXTRACTOR_KIND;
   const version2 = options.version ?? OCR_EXTRACTOR_VERSION;
@@ -96989,6 +97786,7 @@ function createOcrExtractor(options = {}) {
   const engine = createOcrEngine({
     options: options.engine,
     commandRunner,
+    commandRunnerInjected: options.commandRunner !== undefined,
     timeoutMs,
     maxBoundedTextChars
   });
@@ -97029,26 +97827,25 @@ function createPdfOcr(options = {}) {
   const commandRunner = options.commandRunner ?? runExtractionCommand;
   const maxBoundedTextChars = options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS;
   const timeoutMs = options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS;
-  const engine = createOcrEngine({ options: options.engine, commandRunner, timeoutMs, maxBoundedTextChars });
+  const engine = createOcrEngine({
+    options: options.engine,
+    commandRunner,
+    commandRunnerInjected: options.commandRunner !== undefined,
+    timeoutMs,
+    maxBoundedTextChars
+  });
   return async ({ bytes, mimeType, sizeBytes }) => {
-    const laneInput = {
+    const laneInput = commandLaneInput({
       bytes,
       mimeType,
       sizeBytes,
       maxBoundedTextChars,
-      commandRunner: async (request) => {
-        try {
-          return await commandRunner(request);
-        } catch (error2) {
-          if (isCommandMissing(error2))
-            throw new OcrUnavailableError;
-          throw error2;
-        }
-      },
-      timeoutMs
-    };
+      commandRunner,
+      timeoutMs,
+      capability: engine.capability
+    });
     try {
-      return await runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision)) ?? extractPdfOcr(laneInput));
+      return await runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision)) ?? await commandPdfOcr(engine, laneInput));
     } catch (error2) {
       if (error2 instanceof OcrUnavailableError)
         return;
@@ -97060,13 +97857,78 @@ function createImageOcr(options = {}) {
   const commandRunner = options.commandRunner ?? runExtractionCommand;
   const maxBoundedTextChars = options.maxBoundedTextChars ?? DEFAULT_MAX_BOUNDED_TEXT_CHARS;
   const timeoutMs = options.ocrTimeoutMs ?? DEFAULT_OCR_TIMEOUT_MS;
-  const engine = createOcrEngine({ options: options.engine, commandRunner, timeoutMs, maxBoundedTextChars });
+  const engine = createOcrEngine({
+    options: options.engine,
+    commandRunner,
+    commandRunnerInjected: options.commandRunner !== undefined,
+    timeoutMs,
+    maxBoundedTextChars
+  });
   return async ({ bytes, mimeType, sizeBytes }) => {
-    if (!engine.vision)
+    if (!engine.vision && engine.pinned)
       return;
-    const laneInput = { bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs };
-    return runOcrLane(() => withVision(engine, (vision) => visionImage(laneInput, vision)));
+    const laneInput = commandLaneInput({
+      bytes,
+      mimeType,
+      sizeBytes,
+      maxBoundedTextChars,
+      commandRunner,
+      timeoutMs,
+      capability: engine.capability
+    });
+    try {
+      return await runOcrLane(async () => await withVision(engine, (vision) => visionImage(laneInput, vision)) ?? await commandImageOcr(engine, laneInput));
+    } catch (error2) {
+      if (error2 instanceof OcrUnavailableError)
+        return;
+      throw error2;
+    }
   };
+}
+function commandLaneInput(input) {
+  const { capability, ...laneInput } = input;
+  return {
+    ...laneInput,
+    commandRunner: async (request) => {
+      try {
+        return await input.commandRunner(request);
+      } catch (error2) {
+        if (isCommandMissing(error2)) {
+          capability.invalidate();
+          throw new OcrUnavailableError;
+        }
+        throw error2;
+      }
+    }
+  };
+}
+async function commandPdfOcr(engine, input) {
+  if (engine.pinned)
+    return extractPdfOcr(input);
+  const { pdfEngine } = await engine.capability.snapshot();
+  if (pdfEngine === "ocrmypdf")
+    return extractPdfOcr(input);
+  if (pdfEngine === "pdftoppm_tesseract") {
+    return withTempInput(input.bytes, ".pdf", (inputPath) => rasterPdfOcr({
+      inputPath,
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes
+    }, {
+      commandRunner: input.commandRunner,
+      timeoutMs: input.timeoutMs,
+      maxBoundedTextChars: input.maxBoundedTextChars,
+      ...engine.limits
+    }));
+  }
+  throw new OcrUnavailableError;
+}
+async function commandImageOcr(engine, input) {
+  if (engine.pinned)
+    throw new OcrUnavailableError;
+  const { imageEngine } = await engine.capability.snapshot();
+  if (imageEngine !== "tesseract")
+    throw new OcrUnavailableError;
+  return extractImageOcr({ ...input, env: TESSERACT_ENV });
 }
 async function visionPdf(input, vision) {
   return withTempInput(input.bytes, ".pdf", (inputPath) => appleVisionPdfOcr({
@@ -97083,13 +97945,13 @@ async function visionImage(input, vision) {
   }, vision));
 }
 async function withTempInput(bytes, extension, read) {
-  const tempDir = await mkdtemp3(join76(tmpdir7(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp5(join78(tmpdir9(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join76(tempDir, `input${extension}`);
-    await writeFile3(inputPath, bytes);
+    const inputPath = join78(tempDir, `input${extension}`);
+    await writeFile4(inputPath, bytes);
     return await read(inputPath);
   } finally {
-    await rm4(tempDir, { recursive: true, force: true });
+    await rm6(tempDir, { recursive: true, force: true });
   }
 }
 async function runOcrLane(run) {
@@ -97105,31 +97967,16 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp3(join76(tmpdir7(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp5(join78(tmpdir9(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join76(tempDir, "input.pdf");
-    const outputPath = join76(tempDir, "output.pdf");
-    const sidecarPath = join76(tempDir, "sidecar.txt");
-    await writeFile3(inputPath, input.bytes);
+    const inputPath = join78(tempDir, "input.pdf");
+    const outputPath = join78(tempDir, "output.pdf");
+    const sidecarPath = join78(tempDir, "sidecar.txt");
+    await writeFile4(inputPath, input.bytes);
     try {
       await input.commandRunner({
         command: OCR_PDF_COMMAND,
-        args: [
-          "--force-ocr",
-          "--rotate-pages",
-          "--deskew",
-          "--clean",
-          "--jobs",
-          "1",
-          "--optimize",
-          "0",
-          "--output-type",
-          "pdf",
-          "--sidecar",
-          sidecarPath,
-          inputPath,
-          outputPath
-        ],
+        args: ocrmypdfArguments({ inputPath, outputPath, sidecarPath }),
         timeoutMs: input.timeoutMs
       });
     } catch (error2) {
@@ -97138,7 +97985,7 @@ async function extractPdfOcr(input) {
         throw error2;
       return { status: "failed_terminal", errorKind: rejectionKind };
     }
-    const bounded = boundText(normalizeExtractedText(await readFile8(sidecarPath, "utf8")), input.maxBoundedTextChars);
+    const bounded = boundText(normalizeExtractedText(await readFile9(sidecarPath, "utf8")), input.maxBoundedTextChars);
     if (!bounded.text) {
       return mediaDescriptorOutput({
         mimeType: input.mimeType,
@@ -97162,25 +98009,19 @@ async function extractPdfOcr(input) {
       ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
     };
   } finally {
-    await rm4(tempDir, { recursive: true, force: true });
+    await rm6(tempDir, { recursive: true, force: true });
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp3(join76(tmpdir7(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp5(join78(tmpdir9(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join76(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
-    await writeFile3(inputPath, input.bytes);
+    const inputPath = join78(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    await writeFile4(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
-      args: [
-        inputPath,
-        "stdout",
-        "-l",
-        "eng",
-        "--psm",
-        "3"
-      ],
-      timeoutMs: input.timeoutMs
+      args: tesseractArguments(inputPath),
+      timeoutMs: input.timeoutMs,
+      ...input.env ? { env: input.env } : {}
     });
     const bounded = boundText(normalizeExtractedText(result.stdout), input.maxBoundedTextChars);
     if (!bounded.text) {
@@ -97206,7 +98047,7 @@ async function extractImageOcr(input) {
       ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
     };
   } finally {
-    await rm4(tempDir, { recursive: true, force: true });
+    await rm6(tempDir, { recursive: true, force: true });
   }
 }
 function classifyOcrDeterministicPdfRejection(error2) {
@@ -97251,12 +98092,16 @@ function imageExtensionForMimeType(mimeType) {
     return ".heif";
   return ".img";
 }
-var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND = "ocrmypdf", OCR_IMAGE_COMMAND = "tesseract", TEMP_DIR_PREFIX3 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
+var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND, OCR_IMAGE_COMMAND, TEMP_DIR_PREFIX3 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
   init_text();
   init_apple_vision_ocr();
+  init_ocr_capability();
+  init_pdf_raster_ocr();
+  OCR_PDF_COMMAND = OCRMYPDF_COMMAND;
+  OCR_IMAGE_COMMAND = TESSERACT_COMMAND;
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS = [
     "ocrmypdf_pdf_encrypted",
     "ocrmypdf_pdf_signed",
@@ -97452,9 +98297,9 @@ var init_remote_vlm = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/image-prepare.ts
-import { mkdtemp as mkdtemp4, readFile as readFile9, rm as rm5, stat as stat4, writeFile as writeFile4 } from "node:fs/promises";
-import { tmpdir as tmpdir8 } from "node:os";
-import { join as join77 } from "node:path";
+import { mkdtemp as mkdtemp6, readFile as readFile10, rm as rm7, stat as stat4, writeFile as writeFile5 } from "node:fs/promises";
+import { tmpdir as tmpdir10 } from "node:os";
+import { join as join79 } from "node:path";
 function createImagePreparation(options) {
   const commandRunner = options.commandRunner ?? runExtractionCommand;
   const sipsPath = options.sipsPath ?? SIPS_PATH;
@@ -97466,11 +98311,11 @@ function createImagePreparation(options) {
     }
     if (input.bytes.byteLength < MIN_INPUT_BYTES)
       return { kind: "too_small" };
-    const tempDir = await mkdtemp4(join77(tmpdir8(), TEMP_DIR_PREFIX4));
+    const tempDir = await mkdtemp6(join79(tmpdir10(), TEMP_DIR_PREFIX4));
     try {
-      const inputPath = join77(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
-      const outputPath = join77(tempDir, "prepared.jpg");
-      await writeFile4(inputPath, input.bytes, { mode: 384 });
+      const inputPath = join79(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+      const outputPath = join79(tempDir, "prepared.jpg");
+      await writeFile5(inputPath, input.bytes, { mode: 384 });
       try {
         await commandRunner({
           command: sipsPath,
@@ -97502,7 +98347,7 @@ function createImagePreparation(options) {
         const info = await stat4(outputPath);
         if (!info.isFile() || info.size === 0 || info.size > MAX_PREPARED_BYTES)
           throw new Error("unusable output");
-        prepared = new Uint8Array(await readFile9(outputPath));
+        prepared = new Uint8Array(await readFile10(outputPath));
       } catch {
         return { kind: "settled", output: { status: "failed_terminal", errorKind: IMAGE_PREPARE_ERROR_FAILED } };
       }
@@ -97522,7 +98367,7 @@ function createImagePreparation(options) {
         return { kind: "settled", output: { status: "failed_retryable", errorKind: IMAGE_PREPARE_ERROR_CACHE_WRITE } };
       }
     } finally {
-      await rm5(tempDir, { recursive: true, force: true });
+      await rm7(tempDir, { recursive: true, force: true });
     }
   };
 }
@@ -97695,10 +98540,10 @@ import { createHash as createHash52, randomUUID as randomUUID23 } from "node:cry
 import {
   closeSync as closeSync13,
   createReadStream as createReadStream2,
-  existsSync as existsSync49,
+  existsSync as existsSync50,
   mkdirSync as mkdirSync41,
   openSync as openSync13,
-  readFileSync as readFileSync47,
+  readFileSync as readFileSync48,
   readdirSync as readdirSync9,
   renameSync as renameSync15,
   rmSync as rmSync16,
@@ -97708,33 +98553,33 @@ import {
   writeSync as writeSync3
 } from "node:fs";
 import { homedir as homedir53 } from "node:os";
-import { dirname as dirname56, isAbsolute as isAbsolute18, join as join78 } from "node:path";
+import { dirname as dirname56, isAbsolute as isAbsolute18, join as join80 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = builtInReasoningRoot(env);
   return {
     root,
-    modelDir: join78(root, model.modelId),
+    modelDir: join80(root, model.modelId),
     runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
-    statusPath: join78(root, "status.json"),
-    lockPath: join78(root, "install.lock"),
-    runtimeLockPath: join78(root, "runtime.lock")
+    statusPath: join80(root, "status.json"),
+    lockPath: join80(root, "install.lock"),
+    runtimeLockPath: join80(root, "runtime.lock")
   };
 }
 function builtInReasoningRoot(env) {
-  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join78(olympusModelsDir(env), "built-in-reasoning");
+  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join80(olympusModelsDir(env), "built-in-reasoning");
   if (!isAbsolute18(root))
     throw new TypeError("The built-in reasoning directory must be an absolute path.");
   return root;
 }
 function olympusModelsDir(env = process.env) {
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join78(env.HOME?.trim() || homedir53(), ".local", "share");
-  return join78(dataRoot, "openclaw", "olympus", "models");
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join80(env.HOME?.trim() || homedir53(), ".local", "share");
+  return join80(dataRoot, "openclaw", "olympus", "models");
 }
 function llamaServerRuntimeDir(env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
-  return join78(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
+  return join80(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform2}`);
 }
 function llamaServerRuntimeLockPath(env = process.env) {
-  return join78(builtInReasoningRoot(env), "runtime.lock");
+  return join80(builtInReasoningRoot(env), "runtime.lock");
 }
 function currentPlatform2() {
   return `${process.platform}-${process.arch}`;
@@ -97753,7 +98598,7 @@ function readPinnedModelStatus(statusPath, modelId, noun) {
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync47(statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync48(statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -97776,8 +98621,8 @@ async function installPinnedModel(options) {
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform2 = options.platform ?? currentPlatform2();
   const reporter = new ProgressReporter2(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
-  const files = bundle.files.map((file) => ({ file, path: join78(paths.modelDir, file.name) }));
-  const filesPresent = () => files.every(({ path }) => existsSync49(path));
+  const files = bundle.files.map((file) => ({ file, path: join80(paths.modelDir, file.name) }));
+  const filesPresent = () => files.every(({ path }) => existsSync50(path));
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS2,
@@ -97842,7 +98687,7 @@ async function installPinnedModel(options) {
       if (filesPresent() && runtimeInstalled2(paths.runtimeDir, archive))
         return;
       const fetchImpl = options.fetchImpl ?? fetch;
-      const missing = files.filter(({ path }) => !existsSync49(path));
+      const missing = files.filter(({ path }) => !existsSync50(path));
       const needRuntime = !runtimeInstalled2(paths.runtimeDir, archive);
       const missingBytes = missing.reduce((total, { file, path }) => total + Math.max(0, file.bytes - fileSize(`${path}.partial`)), 0);
       assertSpaceFor(paths.root, space, missingBytes + (needRuntime ? archive.bytes * RUNTIME_UNPACK_FACTOR : 0));
@@ -97932,7 +98777,7 @@ function reportPinnedModelState(target, state, failure2) {
 function findServerBinary(runtimeDir) {
   const marker = readRuntimeMarker(runtimeDir);
   if (marker?.serverPath)
-    return join78(runtimeDir, marker.serverPath);
+    return join80(runtimeDir, marker.serverPath);
   throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
 }
 async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
@@ -97952,20 +98797,20 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
 }
 function readRuntimeMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync47(join78(runtimeDir, RUNTIME_MARKER2), "utf8"));
+    return JSON.parse(readFileSync48(join80(runtimeDir, RUNTIME_MARKER2), "utf8"));
   } catch {
     return;
   }
 }
 function runtimeInstalled2(runtimeDir, archive) {
   const marker = readRuntimeMarker(runtimeDir);
-  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync49(join78(runtimeDir, marker.serverPath));
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync50(join80(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
   const staging = `${runtimeDir}.staging-${randomUUID23()}`;
   ensureDirectory2(staging);
   try {
-    const archivePath = join78(staging, archive.name);
+    const archivePath = join80(staging, archive.name);
     await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
     reporter.set("verifying", "Unpacking the built-in model server");
     try {
@@ -97982,7 +98827,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync17(join78(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync17(join80(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync16(runtimeDir, { recursive: true, force: true });
     renameSync15(staging, runtimeDir);
@@ -98005,14 +98850,14 @@ function extractWithTar(archivePath, targetDir) {
 function locateFile(root, name, depth = 0, prefix = "") {
   let entries;
   try {
-    entries = readdirSync9(join78(root, prefix));
+    entries = readdirSync9(join80(root, prefix));
   } catch {
     return;
   }
   if (entries.includes(name)) {
     const relative7 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync24(join78(root, relative7)).isFile())
+      if (statSync24(join80(root, relative7)).isFile())
         return relative7;
     } catch {}
   }
@@ -98021,7 +98866,7 @@ function locateFile(root, name, depth = 0, prefix = "") {
   for (const entry of entries) {
     const child = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync24(join78(root, child)).isDirectory())
+      if (!statSync24(join80(root, child)).isDirectory())
         continue;
     } catch {
       continue;
@@ -98036,7 +98881,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   const partial2 = `${target}.partial`;
   const hash = createHash52("sha256");
   let received = 0;
-  if (existsSync49(partial2)) {
+  if (existsSync50(partial2)) {
     const size = statSync24(partial2).size;
     if (size > 0 && size < expectedBytes) {
       await hashInto(partial2, hash, VERIFY_TIMEOUT_MS);
@@ -98211,7 +99056,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
 }
 function lockHolder(lockPath) {
   try {
-    return JSON.parse(readFileSync47(lockPath, "utf8"));
+    return JSON.parse(readFileSync48(lockPath, "utf8"));
   } catch {
     return;
   }
@@ -98241,7 +99086,7 @@ function tryAcquireLock2(lockPath, token) {
 }
 function lockIsStale2(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync47(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync48(lockPath, "utf8"));
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
       try {
         process.kill(holder.pid, 0);
@@ -98361,19 +99206,19 @@ var init_install = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { accessSync as accessSync6, constants as constants6, readFileSync as readFileSync48 } from "node:fs";
-import { delimiter as delimiter7, isAbsolute as isAbsolute19, join as join79 } from "node:path";
+import { accessSync as accessSync6, constants as constants6, readFileSync as readFileSync49 } from "node:fs";
+import { delimiter as delimiter7, isAbsolute as isAbsolute19, join as join81 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
-  const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join79(olympusModelsDir(env), "built-in-transcription");
+  const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join81(olympusModelsDir(env), "built-in-transcription");
   if (!isAbsolute19(root))
     throw new TypeError("The built-in transcription directory must be an absolute path.");
   return {
     root,
-    modelDir: join79(root, model.modelId),
+    modelDir: join81(root, model.modelId),
     runtimeDir: llamaServerRuntimeDir(env, runtime, platform2),
     runtimeLockPath: llamaServerRuntimeLockPath(env),
-    statusPath: join79(root, "status.json"),
-    lockPath: join79(root, "install.lock"),
+    statusPath: join81(root, "status.json"),
+    lockPath: join81(root, "install.lock"),
     noun: BUILT_IN_TRANSCRIPTION_NOUN
   };
 }
@@ -98404,7 +99249,7 @@ function readBuiltInTranscriptionStatusFile(env = process.env, model = QWEN3_ASR
   const status = readBuiltInTranscriptionStatus(env, model);
   let raw;
   try {
-    raw = readFileSync48(builtInTranscriptionLayout(model, env).statusPath, "utf8");
+    raw = readFileSync49(builtInTranscriptionLayout(model, env).statusPath, "utf8");
   } catch (error2) {
     return { file: error2.code === "ENOENT" ? "missing" : "unreadable", status };
   }
@@ -98445,7 +99290,7 @@ function audioDecoderPresent(platform2 = currentPlatform2(), env = process.env) 
   };
   if (platform2.startsWith("darwin-"))
     return executable("/usr/bin/afconvert");
-  return (env.PATH ?? "").split(delimiter7).some((dir) => dir.length > 0 && isAbsolute19(dir) && executable(join79(dir, "ffmpeg")));
+  return (env.PATH ?? "").split(delimiter7).some((dir) => dir.length > 0 && isAbsolute19(dir) && executable(join81(dir, "ffmpeg")));
 }
 function modelLoadFailedReason(message) {
   const text = message ?? "";
@@ -98600,10 +99445,10 @@ var init_audio_wav = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
-import { existsSync as existsSync50 } from "node:fs";
-import { mkdtemp as mkdtemp5, readFile as readFile10, rm as rm6 } from "node:fs/promises";
-import { tmpdir as tmpdir9, totalmem as totalmem2 } from "node:os";
-import { join as join80 } from "node:path";
+import { existsSync as existsSync51 } from "node:fs";
+import { mkdtemp as mkdtemp7, readFile as readFile11, rm as rm8 } from "node:fs/promises";
+import { tmpdir as tmpdir11, totalmem as totalmem2 } from "node:os";
+import { join as join82 } from "node:path";
 function defaultAudioConverter(platform2, runner = runExtractionCommand, timeoutMs = DEFAULT_CONVERT_TIMEOUT_MS) {
   const darwin = platform2.startsWith("darwin-");
   return async (inputPath, outputPath) => {
@@ -98668,7 +99513,7 @@ function createBuiltInTranscriber(options = {}) {
   const filesOnDisk = options.filesOnDisk ?? (() => {
     try {
       const layout = builtInTranscriptionLayout(model, env, options.installOptions?.runtime, platform2);
-      return model.files.every((file) => existsSync50(join80(layout.modelDir, file.name)));
+      return model.files.every((file) => existsSync51(join82(layout.modelDir, file.name)));
     } catch {
       return false;
     }
@@ -98787,9 +99632,9 @@ function createBuiltInTranscriber(options = {}) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
       const paths = installed;
-      const tempDir = await mkdtemp5(join80(tmpdir9(), TEMP_DIR_PREFIX5));
+      const tempDir = await mkdtemp7(join82(tmpdir11(), TEMP_DIR_PREFIX5));
       try {
-        const wavPath = join80(tempDir, "audio.wav");
+        const wavPath = join82(tempDir, "audio.wav");
         try {
           await convert(input.inputPath, wavPath);
         } catch (error2) {
@@ -98799,13 +99644,13 @@ function createBuiltInTranscriber(options = {}) {
         }
         let audio;
         try {
-          audio = parseWav16Mono(new Uint8Array(await readFile10(wavPath)));
+          audio = parseWav16Mono(new Uint8Array(await readFile11(wavPath)));
         } catch (error2) {
           if (error2 instanceof WavFormatError)
             throw new AudioUndecodableError(error2.message);
           throw error2;
         }
-        await rm6(wavPath, { force: true });
+        await rm8(wavPath, { force: true });
         const chunks2 = planAudioChunks(audio, { maxSeconds: chunkSeconds });
         const parts = [];
         const languages = new Map;
@@ -98849,7 +99694,7 @@ function createBuiltInTranscriber(options = {}) {
           ...warnings.length > 0 ? { warnings } : {}
         };
       } finally {
-        await rm6(tempDir, { recursive: true, force: true }).catch(() => {
+        await rm8(tempDir, { recursive: true, force: true }).catch(() => {
           return;
         });
       }
@@ -98940,9 +99785,9 @@ var init_built_in_transcriber = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/transcription.ts
-import { mkdtemp as mkdtemp6, readFile as readFile11, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
-import { tmpdir as tmpdir10 } from "node:os";
-import { extname, join as join81 } from "node:path";
+import { mkdtemp as mkdtemp8, readFile as readFile12, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
+import { tmpdir as tmpdir12 } from "node:os";
+import { extname, join as join83 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
   if (argv.length === 0) {
@@ -99021,9 +99866,9 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp6(join81(tmpdir10(), tempDirPrefix));
-          inputPath = join81(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
-          await writeFile5(inputPath, bytes);
+          tempDir = await mkdtemp8(join83(tmpdir12(), tempDirPrefix));
+          inputPath = join83(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
+          await writeFile6(inputPath, bytes);
         }
         const deadlineAt = transcriptionDeadlineFromLease(input.job.leaseExpiresAt);
         const transcribed = await engine.transcribe({
@@ -99086,7 +99931,7 @@ function createTranscriptionExtractor(options = {}) {
         return { status: "failed_retryable", errorKind: "transcribe_command_failed" };
       } finally {
         if (tempDir) {
-          await rm7(tempDir, { recursive: true, force: true }).catch(() => {});
+          await rm9(tempDir, { recursive: true, force: true }).catch(() => {});
         }
       }
     }
@@ -99153,7 +99998,7 @@ function sidecarPathForInput(inputPath) {
 async function readFirstExisting(paths) {
   for (const path of [...new Set(paths)]) {
     try {
-      return await readFile11(path, "utf8");
+      return await readFile12(path, "utf8");
     } catch {}
   }
   return;
@@ -99556,16 +100401,21 @@ var init_vlm = __esm(() => {
 
 // src/workers/file-extraction/registry.ts
 function createDefaultExtractorRegistry(config2 = {}) {
+  const ocrCapability = config2.ocr?.capability ?? sharedOcrCapabilityProbe();
+  ocrCapability.warm();
   const ocrEngine = {
     ...config2.ocr?.engine !== undefined ? { preference: config2.ocr.engine } : {},
     ...config2.ocr?.maxPages !== undefined ? { maxPages: config2.ocr.maxPages } : {},
-    ...config2.ocr?.platform !== undefined ? { platform: config2.ocr.platform } : {}
+    ...config2.ocr?.platform !== undefined ? { platform: config2.ocr.platform } : {},
+    capability: ocrCapability
   };
   const ocrShared = {
     engine: ocrEngine,
     ...config2.ocr?.ocrTimeoutMs !== undefined ? { ocrTimeoutMs: config2.ocr.ocrTimeoutMs } : {},
     ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {}
   };
+  const pinnedToTesseract = config2.ocr?.engine === "tesseract";
+  const imagePreparationOn = Boolean(config2.media?.cacheDir && (config2.media.platform !== undefined ? config2.media.platform === "darwin" : stillImagePreparationAvailable()));
   const extractors = [
     createTranscriptionExtractor({
       ...config2.transcription?.command !== undefined ? { command: config2.transcription.command } : {},
@@ -99578,14 +100428,19 @@ function createDefaultExtractorRegistry(config2 = {}) {
       ...config2.text?.pdfTextTimeoutMs !== undefined ? { pdfTextTimeoutMs: config2.text.pdfTextTimeoutMs } : {},
       ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {},
       pdfOcr: createPdfOcr(ocrShared),
-      imageOcr: createImageOcr(ocrShared),
-      ...config2.media?.cacheDir && (config2.media.platform !== undefined ? config2.media.platform === "darwin" : stillImagePreparationAvailable()) ? {
+      ...pinnedToTesseract ? {} : { imageOcr: createImageOcr(ocrShared) },
+      ocrReread: createOcrRereadPolicy({
+        capability: ocrCapability,
+        ...config2.ocr?.engine !== undefined ? { preference: config2.ocr.engine } : {}
+      }),
+      ...imagePreparationOn ? {
         imagePreparation: createImagePreparation({
           cacheDir: config2.media.cacheDir,
           ...config2.media.timeoutMs !== undefined ? { timeoutMs: config2.media.timeoutMs } : {},
           ...config2.media.maxInputBytes !== undefined ? { maxInputBytes: config2.media.maxInputBytes } : {}
         })
-      } : {}
+      } : {},
+      ...!pinnedToTesseract && !appleVisionOcrSelected(config2.ocr?.engine ?? "auto", config2.ocr?.platform ?? process.platform) && !imagePreparationOn ? { imageOcrVersion: true } : {}
     }),
     createOcrExtractor(ocrShared),
     createVlmPdfExtractor({
@@ -99693,6 +100548,8 @@ function terminalRetryPaths(registry2, rules) {
 var DEFAULT_EXTRACTOR_SELECTION_ORDER;
 var init_registry = __esm(() => {
   init_ocr();
+  init_apple_vision_ocr();
+  init_ocr_capability();
   init_remote_vlm();
   init_text();
   init_image_prepare();
@@ -100008,7 +100865,15 @@ function createFileExtractionRunner(options) {
           continue;
         if (policy.prepare() !== "ready")
           continue;
-        requeued += jobs.requeueUnread({ ...request, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
+        const ready = policy.readyWarnings ? new Set(policy.readyWarnings()) : undefined;
+        const readyRequest = ready ? {
+          ...request,
+          warnings: request.warnings.filter((warning) => ready.has(warning)),
+          ...request.notReadyWarnings ? { notReadyWarnings: request.notReadyWarnings.filter((warning) => ready.has(warning)) } : {}
+        } : request;
+        if (readyRequest.warnings.length === 0 && readyRequest.terminalErrorKinds.length === 0)
+          continue;
+        requeued += jobs.requeueUnread({ ...readyRequest, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
       } catch (error2) {
         console.error(`Extraction reread check failed for ${extractor.kind}: ${error2 instanceof Error ? error2.message : String(error2)}`);
       }
@@ -102021,20 +102886,20 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync51,
+  existsSync as existsSync52,
   mkdirSync as mkdirSync42,
-  readFileSync as readFileSync49,
+  readFileSync as readFileSync50,
   renameSync as renameSync16,
   rmSync as rmSync17,
   writeFileSync as writeFileSync18
 } from "node:fs";
 import { randomUUID as randomUUID24 } from "node:crypto";
 import { homedir as homedir54 } from "node:os";
-import { dirname as dirname58, isAbsolute as isAbsolute20, join as join82 } from "node:path";
+import { dirname as dirname58, isAbsolute as isAbsolute20, join as join84 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir54(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute20(configuredRoot) ? configuredRoot : join82(homeDir, ".cache");
-  return join82(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute20(configuredRoot) ? configuredRoot : join84(homeDir, ".cache");
+  return join84(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -102204,11 +103069,11 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync51(path))
+  if (!existsSync52(path))
     return;
   let payload;
   try {
-    payload = JSON.parse(readFileSync49(path, "utf8"));
+    payload = JSON.parse(readFileSync50(path, "utf8"));
   } catch {
     return;
   }
@@ -102958,7 +103823,7 @@ import {
   unlink as unlink2
 } from "node:fs/promises";
 import { homedir as homedir55 } from "node:os";
-import { dirname as dirname59, join as join83 } from "node:path";
+import { dirname as dirname59, join as join85 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
   const audit = result.audit;
   const skipped2 = audit.skipped_corpora.map((skip) => ({
@@ -103125,8 +103990,8 @@ function resolveSourceAnswerLatencyLogPath(env = process.env) {
     }
     return raw;
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join83(homedir55(), ".local", "share");
-  return join83(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join85(homedir55(), ".local", "share");
+  return join85(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
 }
 async function makeExistingLedgerPrivate(path) {
   try {
@@ -103229,7 +104094,7 @@ var init_answer_latency_log = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash56 } from "node:crypto";
-import { readFileSync as readFileSync50 } from "node:fs";
+import { readFileSync as readFileSync51 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir56 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
@@ -103396,7 +104261,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync50(trustPath, "utf8");
+        this.caPem = readFileSync51(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -103499,7 +104364,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url, init, timeoutMs, readFileSync50(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync51(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
 }
@@ -113553,13 +114418,13 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync25, copyFileSync, existsSync as existsSync52, lstatSync as lstatSync23, mkdirSync as mkdirSync43, readFileSync as readFileSync51 } from "node:fs";
+import { chmodSync as chmodSync25, copyFileSync, existsSync as existsSync53, lstatSync as lstatSync23, mkdirSync as mkdirSync43, readFileSync as readFileSync52 } from "node:fs";
 import { dirname as dirname60 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync52(path)) {
+  if (!existsSync53(path)) {
     return {
       path,
       present: false,
@@ -113567,7 +114432,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text2 = readFileSync51(path, "utf8");
+  const text2 = readFileSync52(path, "utf8");
   const raw = JSON.parse(text2);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -113608,7 +114473,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync52(path)) {
+  if (existsSync53(path)) {
     const stat6 = lstatSync23(path);
     if (stat6.isSymbolicLink() || !stat6.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -113890,9 +114755,9 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
 import { createHash as createHash60, randomBytes as randomBytes19, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
-import { readFileSync as readFileSync52, statSync as statSync25 } from "node:fs";
+import { readFileSync as readFileSync53, statSync as statSync25 } from "node:fs";
 import { homedir as homedir57 } from "node:os";
-import { join as join84, resolve as resolve10 } from "node:path";
+import { join as join86, resolve as resolve10 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -117270,7 +118135,7 @@ function dashboardSourceAccountBindings(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync52(join84(homedir57(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync53(join86(homedir57(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -120856,12 +121721,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname61, join as join85 } from "node:path";
+import { dirname as dirname61, join as join87 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join85(dirname61(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join87(dirname61(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -121495,9 +122360,9 @@ var init_answer_activity = __esm(() => {
 import { createHash as createHash63 } from "node:crypto";
 import { mkdirSync as mkdirSync44 } from "node:fs";
 import { homedir as homedir58 } from "node:os";
-import { dirname as dirname62, join as join86 } from "node:path";
+import { dirname as dirname62, join as join88 } from "node:path";
 function defaultPrivacyProfilePath() {
-  return join86(homedir58(), ".olympus", "privacy.json");
+  return join88(homedir58(), ".olympus", "privacy.json");
 }
 function resolvePrivacyProfilePath(options = {}) {
   const env = options.env ?? process.env;
@@ -121686,7 +122551,7 @@ var init_privacy_profile = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync45, readFileSync as readFileSync53 } from "node:fs";
+import { mkdirSync as mkdirSync45, readFileSync as readFileSync54 } from "node:fs";
 import { dirname as dirname63 } from "node:path";
 function defaultSnifferMaxCallsPerPass(kind) {
   return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
@@ -121704,7 +122569,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync53(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync54(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -121985,7 +122850,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { existsSync as existsSync53 } from "node:fs";
+import { existsSync as existsSync54 } from "node:fs";
 
 class TierSnifferService {
   options;
@@ -122037,7 +122902,7 @@ class TierSnifferService {
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ":memory:" || !existsSync53(path))
+      if (path === ":memory:" || !existsSync54(path))
         continue;
       let store;
       try {
@@ -122208,11 +123073,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync53(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync54(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync53(own3))
+      if (existsSync54(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -122616,9 +123481,9 @@ __export(exports_open_target, {
   createDropboxOpenTargets: () => createDropboxOpenTargets,
   OPENABLE_EXTENSIONS: () => OPENABLE_EXTENSIONS
 });
-import { existsSync as existsSync54, lstatSync as lstatSync24, readFileSync as readFileSync54, readdirSync as readdirSync10, realpathSync as realpathSync5, statSync as statSync26 } from "node:fs";
+import { existsSync as existsSync55, lstatSync as lstatSync24, readFileSync as readFileSync55, readdirSync as readdirSync10, realpathSync as realpathSync5, statSync as statSync26 } from "node:fs";
 import { homedir as homedir59 } from "node:os";
-import { extname as extname2, join as join87, sep as sep8 } from "node:path";
+import { extname as extname2, join as join89, sep as sep8 } from "node:path";
 function dropboxPreviewUrl(displayPath) {
   const segments = dropboxSegments(displayPath);
   if (!segments || segments.length === 0)
@@ -122643,7 +123508,7 @@ function localDropboxRoots(options = {}) {
     }
   } catch {}
   try {
-    const info = JSON.parse(readFileSync54(join87(home2, ".dropbox", "info.json"), "utf8"));
+    const info = JSON.parse(readFileSync55(join89(home2, ".dropbox", "info.json"), "utf8"));
     if (info && typeof info === "object") {
       for (const account of Object.values(info)) {
         const path = account && typeof account === "object" ? account.path : undefined;
@@ -122653,13 +123518,13 @@ function localDropboxRoots(options = {}) {
     }
   } catch {}
   try {
-    const cloud = join87(home2, "Library", "CloudStorage");
+    const cloud = join89(home2, "Library", "CloudStorage");
     for (const entry of readdirSync10(cloud).sort()) {
       if (/^Dropbox/.test(entry))
-        candidates.push(join87(cloud, entry));
+        candidates.push(join89(cloud, entry));
     }
   } catch {}
-  candidates.push(join87(home2, "Dropbox"));
+  candidates.push(join89(home2, "Dropbox"));
   const roots = [];
   for (const candidate of candidates) {
     try {
@@ -122710,9 +123575,9 @@ function localOpenArguments(path, roots) {
   return OPENABLE_EXTENSIONS.has(extension) ? [path] : ["-R", path];
 }
 function localFileUnder(root, segments) {
-  const path = join87(root, ...segments);
+  const path = join89(root, ...segments);
   try {
-    if (!existsSync54(path))
+    if (!existsSync55(path))
       return;
     const real = realpathSync5.native(path);
     if (!real.startsWith(root.endsWith(sep8) ? root : `${root}${sep8}`))
@@ -129251,7 +130116,7 @@ __export(exports_remote_mcp, {
   REMOTE_MCP_PATH: () => REMOTE_MCP_PATH,
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH
 });
-import { existsSync as existsSync55 } from "node:fs";
+import { existsSync as existsSync56 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
 }
@@ -129368,7 +130233,7 @@ function lazyRemoteConnectionStore(resolvePath4, open7) {
     if (store)
       return store;
     const dbPath = resolvePath4();
-    if (!options.create && !existsSync55(dbPath))
+    if (!options.create && !existsSync56(dbPath))
       return;
     store = open7(dbPath);
     return store;
@@ -134728,8 +135593,8 @@ __export(exports_server2, {
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync56 } from "node:fs";
-import { dirname as dirname65, isAbsolute as isAbsolute22, join as join88 } from "node:path";
+import { existsSync as existsSync57 } from "node:fs";
+import { dirname as dirname65, isAbsolute as isAbsolute22, join as join90 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -135061,7 +135926,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync56(store.dbPath))
+        if (!existsSync57(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -137900,7 +138765,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join88(dirname65(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join90(dirname65(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -138921,7 +139786,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes24 } from "node:crypto";
-import { readFileSync as readFileSync55, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
+import { readFileSync as readFileSync56, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve11 } from "node:path";
@@ -140159,9 +141024,9 @@ init_remote_open();
 init_atomic_file();
 import { createHash as createHash44 } from "node:crypto";
 import { spawnSync as spawnSync9 } from "node:child_process";
-import { existsSync as existsSync42, lstatSync as lstatSync19, mkdirSync as mkdirSync31, readFileSync as readFileSync38 } from "node:fs";
+import { existsSync as existsSync44, lstatSync as lstatSync19, mkdirSync as mkdirSync31, readFileSync as readFileSync39 } from "node:fs";
 import { homedir as homedir44, platform as osPlatform4 } from "node:os";
-import { dirname as dirname44, isAbsolute as isAbsolute15, join as join61 } from "node:path";
+import { dirname as dirname45, isAbsolute as isAbsolute15, join as join63 } from "node:path";
 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
@@ -140171,32 +141036,32 @@ import { spawnSync as spawnSync8 } from "node:child_process";
 import {
   chmodSync as chmodSync17,
   closeSync as closeSync12,
-  existsSync as existsSync40,
+  existsSync as existsSync42,
   fsyncSync as fsyncSync4,
   lstatSync as lstatSync17,
   mkdtempSync as mkdtempSync2,
   openSync as openSync12,
-  readFileSync as readFileSync36,
+  readFileSync as readFileSync37,
   readdirSync as readdirSync8,
   renameSync as renameSync12,
   rmSync as rmSync13,
   statSync as statSync20,
   writeFileSync as writeFileSync12
 } from "node:fs";
-import { tmpdir as tmpdir4 } from "node:os";
-import { basename as basename9, isAbsolute as isAbsolute14, join as join59 } from "node:path";
+import { tmpdir as tmpdir5 } from "node:os";
+import { basename as basename9, isAbsolute as isAbsolute14, join as join61 } from "node:path";
 var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var MAX_UPGRADE_ARCHIVE_ENTRIES = 20000;
 var MAX_UPGRADE_EXPANDED_BYTES = 64 * 1024 * 1024;
 function prepareWorkerUpgradeArtifact(options) {
   const sourcePath = validateArtifactPath(options.artifactPath);
-  const artifactBytes = readFileSync36(sourcePath);
+  const artifactBytes = readFileSync37(sourcePath);
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
   const artifactSha256 = createHash43("sha256").update(artifactBytes).digest("hex");
-  const snapshotDir = mkdtempSync2(join59(tmpdir4(), ".olympus-artifact-snapshot-"));
-  const artifactPath = join59(snapshotDir, "artifact.tgz");
+  const snapshotDir = mkdtempSync2(join61(tmpdir5(), ".olympus-artifact-snapshot-"));
+  const artifactPath = join61(snapshotDir, "artifact.tgz");
   const descriptor = openSync12(artifactPath, "wx", 384);
   try {
     writeFileSync12(descriptor, artifactBytes);
@@ -140207,13 +141072,13 @@ function prepareWorkerUpgradeArtifact(options) {
   syncDirectorySync(snapshotDir);
   try {
     inspectArchive(artifactPath);
-    const versionsDir = join59(options.homeDir, ".local", "share", "olympus", "versions");
-    const workingDirectory = join59(versionsDir, artifactSha256);
+    const versionsDir = join61(options.homeDir, ".local", "share", "olympus", "versions");
+    const workingDirectory = join61(versionsDir, artifactSha256);
     assertVersionParentSafety(options.homeDir, workingDirectory);
-    const stagingParent = options.dryRun ? tmpdir4() : versionsDir;
+    const stagingParent = options.dryRun ? tmpdir5() : versionsDir;
     if (!options.dryRun)
       ensurePrivateDirectoryTreeSync(options.homeDir, versionsDir);
-    const staging = mkdtempSync2(join59(stagingParent, ".olympus-upgrade-"));
+    const staging = mkdtempSync2(join61(stagingParent, ".olympus-upgrade-"));
     try {
       extractArchive(artifactPath, staging);
       assertRegularTree(staging);
@@ -140225,7 +141090,7 @@ function prepareWorkerUpgradeArtifact(options) {
       }
       if (options.dryRun)
         return { artifactSha256, packageVersion, workingDirectory };
-      const metadataPath = join59(staging, ".olympus-artifact-v1.json");
+      const metadataPath = join61(staging, ".olympus-artifact-v1.json");
       writePrivateFileAtomicSync(metadataPath, `${JSON.stringify({
         schema_version: 1,
         artifact_sha256: artifactSha256,
@@ -140234,7 +141099,7 @@ function prepareWorkerUpgradeArtifact(options) {
 `);
       makeVersionTreeReadOnly(staging);
       syncVersionTree(staging);
-      if (existsSync40(workingDirectory)) {
+      if (existsSync42(workingDirectory)) {
         assertManagedVersionRoot(workingDirectory, artifactSha256);
         const expectedDigest = versionTreeDigest(staging);
         const existingMode = lstatSync17(workingDirectory).mode & 511;
@@ -140247,13 +141112,13 @@ function prepareWorkerUpgradeArtifact(options) {
       publishVersionTree(staging, workingDirectory, versionsDir);
       return { artifactSha256, packageVersion, workingDirectory };
     } catch (error) {
-      if (existsSync40(staging))
+      if (existsSync42(staging))
         removeStagingTree(staging);
       if (error instanceof OperationError)
         throw error;
       throw new OperationError("config_error", "Could not prepare the Olympus upgrade artifact.", error instanceof Error ? error.message : undefined);
     } finally {
-      if (options.dryRun && existsSync40(staging))
+      if (options.dryRun && existsSync42(staging))
         rmSync13(staging, { recursive: true, force: true });
     }
   } finally {
@@ -140350,7 +141215,7 @@ function runTar(args, action) {
 }
 function assertRegularTree(root, budget = { bytes: 0 }) {
   for (const entry of readdirSync8(root, { withFileTypes: true })) {
-    const path = join59(root, entry.name);
+    const path = join61(root, entry.name);
     const stats = lstatSync17(path);
     if (stats.isSymbolicLink() || !stats.isDirectory() && !stats.isFile()) {
       throw new OperationError("invalid_params", `Upgrade artifact extracted an unsafe entry: ${entry.name}`);
@@ -140366,9 +141231,9 @@ function assertRegularTree(root, budget = { bytes: 0 }) {
   }
 }
 function validateExtractedPackage(root, bunBin, executePreflight) {
-  const packageJson = readJsonRecord(join59(root, "package.json"), "package.json");
-  const manifest2 = readJsonRecord(join59(root, "openclaw.plugin.json"), "openclaw.plugin.json");
-  const cliPath = join59(root, "dist", "cli.js");
+  const packageJson = readJsonRecord(join61(root, "package.json"), "package.json");
+  const manifest2 = readJsonRecord(join61(root, "openclaw.plugin.json"), "openclaw.plugin.json");
+  const cliPath = join61(root, "dist", "cli.js");
   assertRegularFile(cliPath, "dist/cli.js");
   const version = typeof packageJson.version === "string" ? packageJson.version.trim() : "";
   if (packageJson.name !== "olympus" || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
@@ -140395,7 +141260,7 @@ function assertManagedVersionRoot(root, artifactSha256) {
 function readJsonRecord(path, label) {
   assertRegularFile(path, label);
   try {
-    const value = JSON.parse(readFileSync36(path, "utf8"));
+    const value = JSON.parse(readFileSync37(path, "utf8"));
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error("not an object");
     return value;
@@ -140413,7 +141278,7 @@ function assertRegularFile(path, label) {
 }
 function makeVersionTreeReadOnly(root) {
   for (const entry of readdirSync8(root, { withFileTypes: true })) {
-    const path = join59(root, entry.name);
+    const path = join61(root, entry.name);
     if (entry.isDirectory()) {
       makeVersionTreeReadOnly(path);
       chmodSync17(path, 365);
@@ -140429,7 +141294,7 @@ function makeVersionTreeReadOnly(root) {
 }
 function syncVersionTree(root) {
   for (const entry of readdirSync8(root, { withFileTypes: true })) {
-    const path = join59(root, entry.name);
+    const path = join61(root, entry.name);
     if (entry.isDirectory()) {
       syncVersionTree(path);
       continue;
@@ -140452,7 +141317,7 @@ function hashVersionTree(root, relativeRoot, digest2) {
   const entries = readdirSync8(root, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
     const relativePath = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
-    const path = join59(root, entry.name);
+    const path = join61(root, entry.name);
     const stats = lstatSync17(path);
     if (stats.isDirectory() && !stats.isSymbolicLink()) {
       digest2.update(`d\x00${relativePath}\x00${stats.mode & 511}\x00`);
@@ -140463,15 +141328,15 @@ function hashVersionTree(root, relativeRoot, digest2) {
       throw new OperationError("config_error", `Managed upgrade version contains an unsafe entry: ${relativePath}`);
     }
     digest2.update(`f\x00${relativePath}\x00${stats.mode & 511}\x00${stats.size}\x00`);
-    digest2.update(readFileSync36(path));
+    digest2.update(readFileSync37(path));
   }
 }
 function publishVersionTree(staging, workingDirectory, versionsDir, syncDirectory2 = syncDirectorySync) {
   let replacedPath;
   let published = false;
   try {
-    if (existsSync40(workingDirectory)) {
-      replacedPath = join59(versionsDir, `.olympus-replaced-${basename9(workingDirectory)}-${randomUUID18()}`);
+    if (existsSync42(workingDirectory)) {
+      replacedPath = join61(versionsDir, `.olympus-replaced-${basename9(workingDirectory)}-${randomUUID18()}`);
       renameSync12(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
     }
@@ -140482,9 +141347,9 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
     syncDirectory2(versionsDir);
   } catch (error) {
     try {
-      if (published && existsSync40(workingDirectory))
+      if (published && existsSync42(workingDirectory))
         removeStagingTree(workingDirectory);
-      if (replacedPath && existsSync40(replacedPath) && !existsSync40(workingDirectory)) {
+      if (replacedPath && existsSync42(replacedPath) && !existsSync42(workingDirectory)) {
         renameSync12(replacedPath, workingDirectory);
       }
       syncDirectory2(versionsDir);
@@ -140495,7 +141360,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
     }
     throw error;
   }
-  if (replacedPath && existsSync40(replacedPath)) {
+  if (replacedPath && existsSync42(replacedPath)) {
     removeStagingTree(replacedPath);
     syncDirectory2(versionsDir);
   }
@@ -140504,7 +141369,7 @@ function removeStagingTree(root) {
   chmodSync17(root, 448);
   for (const entry of readdirSync8(root, { withFileTypes: true })) {
     if (entry.isDirectory())
-      removeStagingTree(join59(root, entry.name));
+      removeStagingTree(join61(root, entry.name));
   }
   rmSync13(root, { recursive: true, force: true });
 }
@@ -140514,11 +141379,11 @@ init_atomic_file();
 init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID19 } from "node:crypto";
-import { existsSync as existsSync41, linkSync, lstatSync as lstatSync18, readFileSync as readFileSync37 } from "node:fs";
-import { join as join60 } from "node:path";
+import { existsSync as existsSync43, linkSync, lstatSync as lstatSync18, readFileSync as readFileSync38 } from "node:fs";
+import { join as join62 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
-  const dir = join60(homeDir, ".local", "state", "olympus", "lifecycle");
-  const lockPath = join60(dir, "mutation-v1.lock");
+  const dir = join62(homeDir, ".local", "state", "olympus", "lifecycle");
+  const lockPath = join62(dir, "mutation-v1.lock");
   ensurePrivateDirectoryTreeSync(homeDir, dir);
   const ownerProcessInstance = processInstanceIdentity(process.pid);
   if (!ownerProcessInstance) {
@@ -140533,7 +141398,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       action,
       started_at: now().toISOString()
     };
-    const candidate = join60(dir, `mutation-owner-${owner.nonce}.tmp`);
+    const candidate = join62(dir, `mutation-owner-${owner.nonce}.tmp`);
     writePrivateFileAtomicSync(candidate, `${JSON.stringify(owner, null, 2)}
 `);
     try {
@@ -140544,20 +141409,20 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         release: () => releaseLifecycleMutationLock(lockPath, owner.nonce)
       };
     } catch (error) {
-      if (existsSync41(candidate))
+      if (existsSync43(candidate))
         removeFileDurablySync(candidate);
       if (!isAlreadyExists(error))
         throw error;
       let activeOwner;
-      withFileLeaseSync(join60(dir, "mutation-v1-recovery"), () => {
+      withFileLeaseSync(join62(dir, "mutation-v1-recovery"), () => {
         const current = readLifecycleMutationOwner(lockPath);
         if (recordedProcessOwnerIsAlive(current.pid, current.process_instance)) {
           activeOwner = current;
           return;
         }
         removeFileDurablySync(lockPath);
-        const staleCandidate = join60(dir, `mutation-owner-${current.nonce}.tmp`);
-        if (existsSync41(staleCandidate))
+        const staleCandidate = join62(dir, `mutation-owner-${current.nonce}.tmp`);
+        if (existsSync43(staleCandidate))
           removeFileDurablySync(staleCandidate);
       }, {
         acquireTimeoutMs: 1000,
@@ -140584,7 +141449,7 @@ function readLifecycleMutationOwner(path) {
     const stats = lstatSync18(path);
     if (!stats.isFile() || stats.isSymbolicLink())
       throw new Error("not a regular lock file");
-    const value = JSON.parse(readFileSync37(path, "utf8"));
+    const value = JSON.parse(readFileSync38(path, "utf8"));
     const processInstance = parseProcessInstanceIdentity(value.process_instance);
     if (value.schema_version !== 1 || !Number.isSafeInteger(value.pid) || (value.pid ?? 0) <= 0 || !processInstance || typeof value.nonce !== "string" || !/^[0-9a-f-]{36}$/i.test(value.nonce) || typeof value.action !== "string" || !value.action || typeof value.started_at !== "string" || !Number.isFinite(Date.parse(value.started_at))) {
       throw new Error("invalid lock owner shape");
@@ -140994,12 +141859,12 @@ function readTransaction(options) {
   const homeDir = validateHomeDir(options.homeDir ?? homedir44());
   const paths = transactionPaths(homeDir);
   assertTransactionParentSafety(homeDir, paths);
-  if (!existsSync42(paths.transaction))
+  if (!existsSync44(paths.transaction))
     return;
   assertRegularFile2(paths.transaction, "lifecycle transaction");
   let value;
   try {
-    value = JSON.parse(readFileSync38(paths.transaction, "utf8"));
+    value = JSON.parse(readFileSync39(paths.transaction, "utf8"));
   } catch {
     throw new OperationError("config_error", "The Olympus lifecycle transaction is unreadable; refusing to guess recovery state.");
   }
@@ -141013,8 +141878,8 @@ function readTransaction(options) {
     throw new OperationError("config_error", "The Olympus lifecycle transaction does not match this installation; refusing recovery.");
   }
   if (transaction.action === "upgrade") {
-    const expectedVersionsDir = join61(homeDir, ".local", "share", "olympus", "versions");
-    if (typeof transaction.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(transaction.artifact_sha256) || typeof transaction.package_version !== "string" || typeof transaction.desired_working_directory !== "string" || transaction.desired_working_directory !== join61(expectedVersionsDir, transaction.artifact_sha256)) {
+    const expectedVersionsDir = join63(homeDir, ".local", "share", "olympus", "versions");
+    if (typeof transaction.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(transaction.artifact_sha256) || typeof transaction.package_version !== "string" || typeof transaction.desired_working_directory !== "string" || transaction.desired_working_directory !== join63(expectedVersionsDir, transaction.artifact_sha256)) {
       throw new OperationError("config_error", "The Olympus upgrade transaction is not bound to valid managed artifact bytes.");
     }
   }
@@ -141024,22 +141889,22 @@ function clearTransaction(options) {
   const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir44()));
   assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir44()), paths);
   for (const path of [paths.unitBackup, paths.envBackup, paths.transaction]) {
-    if (!existsSync42(path))
+    if (!existsSync44(path))
       continue;
     assertRegularFile2(path, "lifecycle transaction artifact");
     removeFileDurablySync(path);
   }
 }
 function readManagedFileSnapshot(path) {
-  if (!existsSync42(path)) {
+  if (!existsSync44(path)) {
     return;
   }
   assertRegularFile2(path, "managed lifecycle file");
-  return readFileSync38(path, "utf8");
+  return readFileSync39(path, "utf8");
 }
 function writeSnapshotBackup(path, text) {
   if (text === undefined) {
-    if (existsSync42(path)) {
+    if (existsSync44(path)) {
       assertRegularFile2(path, "lifecycle backup");
       removeFileDurablySync(path);
     }
@@ -141049,33 +141914,33 @@ function writeSnapshotBackup(path, text) {
 }
 function restoreManagedFile(homeDir, path, backupPath, previousPresent, expectedDigest) {
   if (!previousPresent) {
-    if (existsSync42(path)) {
+    if (existsSync44(path)) {
       assertRegularFile2(path, "managed lifecycle file");
       removeFileDurablySync(path);
     }
     return;
   }
   assertRegularFile2(backupPath, "lifecycle backup");
-  const text = readFileSync38(backupPath, "utf8");
+  const text = readFileSync39(backupPath, "utf8");
   if (!expectedDigest || sha2563(text) !== expectedDigest) {
     throw new OperationError("config_error", "Lifecycle rollback backup integrity check failed.");
   }
   if (pathIsWithin(homeDir, path))
-    ensurePrivateDirectoryTreeSync(homeDir, dirname44(path));
+    ensurePrivateDirectoryTreeSync(homeDir, dirname45(path));
   else
-    mkdirSync31(dirname44(path), { recursive: true });
+    mkdirSync31(dirname45(path), { recursive: true });
   writePrivateFileAtomicSync(path, text);
 }
 function isRecordedManagedPath(value) {
   return typeof value === "string" && value.trim() !== "" && isAbsolute15(value) && !/[\0\r\n]/.test(value);
 }
 function transactionPaths(homeDir) {
-  const dir = join61(homeDir, ".local", "state", "olympus", "lifecycle");
+  const dir = join63(homeDir, ".local", "state", "olympus", "lifecycle");
   return {
     dir,
-    transaction: join61(dir, "transaction-v1.json"),
-    unitBackup: join61(dir, "worker-unit.backup"),
-    envBackup: join61(dir, "worker-env.backup")
+    transaction: join63(dir, "transaction-v1.json"),
+    unitBackup: join63(dir, "worker-unit.backup"),
+    envBackup: join63(dir, "worker-env.backup")
   };
 }
 function assertTransactionParentSafety(homeDir, paths) {
@@ -141139,10 +142004,10 @@ function workerReadinessPort(options) {
   if (options.port !== undefined)
     return validateWorkerReadinessPort(options.port);
   const envPath = options.envPath ?? workerServicePaths(options.platform ?? "linux", options.homeDir).envPath;
-  if (!existsSync42(envPath))
+  if (!existsSync44(envPath))
     return 8010;
   assertRegularFile2(envPath, "worker environment");
-  const line = /^OLYMPUS_EMAIL_SOURCE_PORT=(.*)$/m.exec(readFileSync38(envPath, "utf8"))?.[1];
+  const line = /^OLYMPUS_EMAIL_SOURCE_PORT=(.*)$/m.exec(readFileSync39(envPath, "utf8"))?.[1];
   const configured = line === undefined ? undefined : unquoteEnvValue(line);
   return configured ? validateWorkerReadinessPort(Number(configured)) : 8010;
 }
@@ -141415,7 +142280,7 @@ init_sovereignty();
 
 // src/workers/classification/tier-cli.ts
 import { Database as Database14 } from "bun:sqlite";
-import { existsSync as existsSync46 } from "node:fs";
+import { existsSync as existsSync48 } from "node:fs";
 init_mail_source_scope();
 init_connected_handles();
 init_operation_error();
@@ -141457,7 +142322,7 @@ async function runTierCommand(args, context2 = {}) {
 }
 function knownStorePaths(context2) {
   const paths = context2.storePaths ?? lifecycleSourceSpecs().flatMap((spec) => spec.connectorStorePaths?.(context2) ?? []);
-  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync46(path));
+  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync48(path));
 }
 function matchStore(dbPath, needle) {
   const db = new Database14(dbPath, { readonly: true });
@@ -141511,11 +142376,11 @@ function locateTierItem(locator, context2 = {}) {
   const ledgerPaths = new Set;
   for (const dbPath of stores) {
     const path = tierLedgerPathForStore(dbPath);
-    if (existsSync46(path))
+    if (existsSync48(path))
       ledgerPaths.add(path);
   }
   for (const match of matches)
-    if (match.boundLedgerPath && existsSync46(match.boundLedgerPath))
+    if (match.boundLedgerPath && existsSync48(match.boundLedgerPath))
       ledgerPaths.add(match.boundLedgerPath);
   const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined));
   if (deciding.length > 0)
@@ -141621,7 +142486,7 @@ function runTierExplain(args, context2 = {}) {
     }));
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn = [];
-    if (existsSync46(snifferPath)) {
+    if (existsSync48(snifferPath)) {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath });
       try {
         waitingOn = ["metadata", "content"].filter((pass) => sniffer.questionFor(item.identity, pass) !== undefined);
@@ -141680,7 +142545,7 @@ function runTierRules(args, context2 = {}) {
   if (command === "list") {
     const path = resolveTierRulesPath({ env });
     const mailScopeRules = mailScopeTierRules(env);
-    if (!existsSync46(path)) {
+    if (!existsSync48(path)) {
       return { path, rules: [], mailScopeRules, note: "No tier rules file yet; add one with olympus tier rules add." };
     }
     const validation = validateTierRulesFile({ env });
@@ -141937,8 +142802,9 @@ async function runSetupWizard(options) {
   if (options.yes !== true) {
     throw new OperationError("invalid_params", "olympus setup non-interactive mode requires --yes.", `Run olympus setup --preset ${SOVEREIGNTY_PRESETS.join("|")} --yes.`);
   }
-  const dependencyCheck2 = options.dependencyCheck?.() ?? runSetupDependencyCheck();
-  assertSetupDependenciesOk(dependencyCheck2);
+  const requiredCheck = options.dependencyCheck?.() ?? runSetupDependencyCheck();
+  assertSetupDependenciesOk(requiredCheck);
+  const dependencyCheck2 = options.ocrReadiness ? { ...requiredCheck, checks: [...requiredCheck.checks, ocrDependencyFinding(await options.ocrReadiness())] } : requiredCheck;
   const cloudLane = options.cloudLane ?? "subscription";
   const presetConfig = applyCloudLane(loadSovereigntyPreset(options.preset), cloudLane);
   const unmetPrerequisites = await setupPreflight({
@@ -142066,6 +142932,16 @@ function secureTierDecisionForPreset(preset) {
 function dependencyFinding(input) {
   return input;
 }
+function ocrDependencyFinding(readiness) {
+  return dependencyFinding({
+    id: "ocr",
+    label: "Reading scans and pictures of text",
+    required: false,
+    ok: readiness.state === "ready",
+    detail: readiness.detail,
+    repairHint: readiness.state === "ready" ? "" : readiness.remedy ?? ""
+  });
+}
 function normalizeSetupPlatform(platform2) {
   if (platform2 === "darwin" || platform2 === "linux")
     return platform2;
@@ -142117,6 +142993,7 @@ function shellQuote2(value) {
 }
 
 // src/cli.ts
+init_ocr_readiness();
 init_worker_auth();
 init_source_ingestion_ledger();
 init_reconcile_state();
@@ -142134,7 +143011,7 @@ init_engine_host();
 init_engine_service();
 import { spawn as spawn5 } from "node:child_process";
 import { createInterface as createInterface2 } from "node:readline";
-import { readFileSync as readFileSync43 } from "node:fs";
+import { readFileSync as readFileSync44 } from "node:fs";
 import { homedir as homedir51 } from "node:os";
 init_openclaw_executable();
 init_operation_error();
@@ -142287,7 +143164,7 @@ async function engineStatusReport(deps = {}) {
 }
 function readEngineStatusFile(env) {
   try {
-    const parsed = JSON.parse(readFileSync43(engineStatusPath(env), "utf8"));
+    const parsed = JSON.parse(readFileSync44(engineStatusPath(env), "utf8"));
     return parsed?.schema === "olympus.engine.status.v1" ? parsed : undefined;
   } catch {
     return;
@@ -142525,6 +143402,10 @@ async function main2() {
       console.log(JSON.stringify(result, null, 2));
       if (!result.ok)
         process.exitCode = 1;
+      const ocr = result.dependencyCheck.checks.find((check) => check.id === "ocr");
+      if (ocr && !ocr.ok)
+        console.error(`${ocr.label}: ${ocr.detail}
+Run: ${ocr.repairHint}`);
       if (result.unmet_prerequisites.length > 0) {
         console.error("Unmet preset prerequisites:");
         for (const item of result.unmet_prerequisites) {
@@ -142997,7 +143878,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync55("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync56("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -143342,7 +144223,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync55(resolve11(input2), "utf8");
+    raw = readFileSync56(resolve11(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -144128,7 +145009,8 @@ function parseSetupArgs(args) {
     ...homeDir ? { homeDir } : {},
     ...olympusBin ? { olympusBin } : {},
     ...workingDirectory ? { workingDirectory } : {},
-    ...envPath ? { envPath } : {}
+    ...envPath ? { envPath } : {},
+    ocrReadiness: () => checkOcrReadiness()
   };
 }
 function parseSetupPreset(value) {
