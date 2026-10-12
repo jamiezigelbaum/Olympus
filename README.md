@@ -8,7 +8,7 @@
 
 *A private knowledge engine on your Mac for ChatGPT, and a sovereignty-aware source brain for [OpenClaw](https://openclaw.ai) agents.*
 
-[![version](https://img.shields.io/badge/version-0.4.0-534AB7)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.0.0--rc.4-534AB7)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-0F6E56)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-3400%2B%20passing-1D9E75)](CONTRIBUTING.md)
 [![openclaw](https://img.shields.io/badge/OpenClaw-2026.7.1%2B-378ADD)](https://openclaw.ai)
@@ -251,9 +251,10 @@ fork:
 | **Do not add secure data to Olympus** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
 
 “Private cloud only” describes **Private-data handling**: Venice answers
-Private questions. Search indexing for every tier uses a small embedding model
-built into Olympus: it downloads once, runs on your computer, needs no account
-or key, and sends nothing anywhere. Gemini, local, or Venice Private embeddings
+Private questions. Search indexing for every tier uses EmbeddingGemma 2,
+Google's small embedding model, built into Olympus: it downloads once, runs on
+your computer, needs no account or key, and sends nothing anywhere. On a Mac it
+also reads pictures, so photos are searchable by what is in them. Gemini, local, or Venice Private embeddings
 stay an opt-in choice, and Private content never goes to Gemini. Public and Personal
 questions use OpenClaw's own configured default model.
 
@@ -310,7 +311,7 @@ starting with the automatic download and existing-install checks. Its install
 command for a clean machine is:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.11.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-1.0.0-rc.4.tgz --force --accept-capabilities
 # On OpenClaw 2026.7.1, omit both flags for a clean install.
 # On newer hosts, --force also overwrites an existing plugin: check first.
 openclaw plugins enable olympus
@@ -356,9 +357,9 @@ requirements for each route.
 
 | Source | Connect flow | Notes |
 |---|---|---|
-| Gmail | browser OAuth | one account in v0.4 |
+| Gmail | browser OAuth | one account |
 | Google Drive | browser OAuth | docs + files |
-| Dropbox | browser OAuth | full file spine: metadata, extraction, OCR |
+| Dropbox | browser OAuth | full file spine: metadata, extraction, OCR, audio transcribed on your machine |
 | Telegram | guided phone login | forward sync of active chats |
 | WhatsApp | QR pairing | live bridge |
 | X bookmarks | browser OAuth with a user-owned developer app | folder provenance and provider cost ceilings |
@@ -366,13 +367,13 @@ requirements for each route.
 
 Model-lane credentials such as Venice are security-preset prerequisites, not
 source connectors. Domain-agent imports and other source families are outside
-the v0.4 public roster.
+the 1.0 public roster.
 
 Tokens live in an encrypted local secret store by default, or in an explicitly
 configured OS secret store when supported, never in plain text.
 Ingestion, classification, and indexing all run in one supervised local
 worker — `olympus worker install` makes it start on login. All seven declared
-sources sync through the canonical connector-store runtime; v0.4 supports one
+sources sync through the canonical connector-store runtime; Olympus supports one
 connected account per provider. After base activation, dashboard onboarding
 guides the source you choose from credentials and scope through initial sync
 and cited-answer readiness, with the next supported action on blocked or
