@@ -47,6 +47,8 @@ import {
   type DashboardSourceAction,
 } from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { resetGooglePublisherCapacityCache } from '../src/core/google-publisher-capacity.ts';
+import { renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
 import { packagedGooglePilotClientId } from '../src/core/google-pilot-client.ts';
 import { CONNECT_SOURCE_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 import type { ModelSetupView } from '../src/core/model-setup.ts';
@@ -84,6 +86,7 @@ const dirs: string[] = [];
 let previousAppKey: string | undefined;
 
 beforeEach(() => {
+  resetGooglePublisherCapacityCache();
   previousAppKey = process.env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY;
   process.env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY = PUBLISHER_APP_KEY;
 });
@@ -110,6 +113,7 @@ function fixture(
     secretWrites?: string[];
     handback?: { origin: string; installId: string };
     modelSetup?: () => ModelSetupView;
+    googleCapacityFetch?: typeof fetch;
   } = {},
 ): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-worker-'));
@@ -171,6 +175,7 @@ function fixture(
       panelTools,
       ...(options.handback ? { oauthHandback: () => options.handback } : {}),
       ...(options.modelSetup ? { modelSetup: options.modelSetup } : {}),
+      ...(options.googleCapacityFetch ? { googleCapacityFetch: options.googleCapacityFetch } : {}),
       // Only used by the 'expired state' scenario below: the real starter,
       // with its honest ~10-minute expiry replaced by a near-immediate one, so
       // the test can wait a few milliseconds instead of ten real minutes to
@@ -1620,4 +1625,278 @@ function googleIdentityResponse(): Response {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+// Olympus's own Google app is unverified with restricted scopes, so Google
+// serves at most 100 distinct users and sends the 101st to its own error page,
+// never back to Olympus. The exchange Worker counts users and answers
+// GET /exchange/capacity; the engine must stop sending NEW people to Google
+// when it says "full", say so in the owner's words, and lead them into their
+// own Google app. Every doubt fails open.
+describe('Google sign-in capacity: the full state before the wall', () => {
+  // The owner's copy, verbatim (2026-10-12): written here from the spec so a
+  // wording drift in the source is caught.
+  const FULL_COPY = 'Google sign-in is full for the moment. We\'re working on it. For now, you can still connect Google by using your own Google app.';
+
+  interface CapacityFake {
+    fetch: typeof fetch;
+    calls: string[];
+  }
+
+  function capacityFake(answer: (url: string, init?: RequestInit) => Promise<Response> | Response): CapacityFake {
+    const calls: string[] = [];
+    const fake = (async (input: unknown, init?: RequestInit) => {
+      calls.push(String(input));
+      return await answer(String(input), init);
+    }) as unknown as typeof fetch;
+    return { fetch: fake, calls };
+  }
+
+  const jsonBody = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const full = () => capacityFake(() => jsonBody({ google: 'full' }));
+  const open = () => capacityFake(() => jsonBody({ google: 'open' }));
+
+  function googleCard(view: { sources: Array<Record<string, any>> }, sourceId: 'gmail.email' | 'google_drive.docs') {
+    return view.sources.find((source) => source.source_id === sourceId)!;
+  }
+
+  async function startRaw(instance: Fixture, body: Record<string, string>): Promise<Response> {
+    return startConnect(instance, body);
+  }
+
+  test('asks the exchange Worker\'s capacity route, and nothing else, before drawing the Google cards', async () => {
+    await withoutPilotClient(async () => {
+      const fake = open();
+      await dashboardJson(fixture({}, { googleCapacityFetch: fake.fetch }));
+      expect(fake.calls).toEqual(['https://auth.olympusplugin.ai/exchange/capacity']);
+    });
+  });
+
+  test('full: Gmail and Drive say so in the owner\'s words and lead into the own-app steps; Dropbox is untouched', async () => {
+    await withoutPilotClient(async () => {
+      const view = await dashboardJson(fixture({}, { googleCapacityFetch: full().fetch }));
+      for (const sourceId of ['gmail.email', 'google_drive.docs'] as const) {
+        const action = googleCard(view, sourceId).connection.action;
+        expect(action.kind).toBe('needs_setup');
+        expect(action.publisher_full).toBe(true);
+        expect(action.publisher_client).toBeUndefined();
+        expect(action.instructions.plain_intro.startsWith(FULL_COPY)).toBe(true);
+        // A route the owner can finish from the dashboard: a Client ID field...
+        expect(action.instructions.fields.map((field: { name: string }) => field.name)).toEqual(['client_id']);
+        // ...with the Google Cloud Console steps, including the production
+        // publish that keeps a refresh token alive past seven days.
+        expect(action.instructions.diy_steps.length).toBeGreaterThan(3);
+        expect(action.instructions.diy_steps.map((step: { text: string }) => step.text).join(' ')).toContain('Testing mode stops working after 7 days');
+        expect(action.instructions.agent_prompt).toContain('Client ID');
+      }
+      expect(dropboxAction(view).publisher_client).toBe(true);
+      // No waitlist, no email field, anywhere on the card.
+      expect(JSON.stringify(googleCard(view, 'gmail.email').connection.action).toLowerCase()).not.toContain('waitlist');
+    });
+  });
+
+  test('open: nothing changes, the cards are the ordinary one-click publisher Connect', async () => {
+    await withoutPilotClient(async () => {
+      const view = await dashboardJson(fixture({}, { googleCapacityFetch: open().fetch }));
+      for (const sourceId of ['gmail.email', 'google_drive.docs'] as const) {
+        expect(googleCard(view, sourceId).connection.action).toMatchObject({ kind: 'oauth', label: 'Connect', publisher_client: true });
+        expect(googleCard(view, sourceId).connection.action.publisher_full).toBeUndefined();
+      }
+    });
+  });
+
+  test('full: starting a publisher Google flow is refused before any Google URL is produced', async () => {
+    await withoutPilotClient(async () => {
+      const instance = fixture({}, { googleCapacityFetch: full().fetch });
+      for (const source of ['gmail', 'google-drive']) {
+        const refused = await startRaw(instance, { source });
+        expect(refused.status).toBe(409);
+        const body = await refused.json();
+        expect(body.error.code).toBe('google_signin_full');
+        expect(body.error.message).toBe(FULL_COPY);
+        expect(body.authorization_url).toBeUndefined();
+      }
+      expect(instance.exchangeUrls).toEqual([]);
+    });
+  });
+
+  test('full: the bring-your-own route still works from the dashboard, with the owner\'s own Client ID', async () => {
+    await withoutPilotClient(async () => {
+      const instance = fixture({}, { googleCapacityFetch: full().fetch });
+      const url = await authorizationUrl(await startRaw(instance, { source: 'gmail', client_id: 'owner-own-app.apps.googleusercontent.com' }));
+      expect(url.searchParams.get('client_id')).toBe('owner-own-app.apps.googleusercontent.com');
+      expect(url.searchParams.get('redirect_uri')).toBe(`${DASHBOARD_ORIGIN}/oauth/callback/gmail`);
+      expect(url.origin).toBe('https://accounts.google.com');
+      expect(await instance.secretStore.get('gmail.personal.oauth.client_id_source')).toBe('byo');
+    });
+  });
+
+  test('full: an install that already has its own Google client id keeps its ordinary card and never asks', async () => {
+    await withoutPilotClient(async () => {
+      const fake = full();
+      const instance = fixture({ 'gmail.personal.oauth.client_id': 'stored-own-app.apps.googleusercontent.com' }, { googleCapacityFetch: fake.fetch });
+      const action = googleCard(await dashboardJson(instance), 'gmail.email').connection.action;
+      expect(action.kind).toBe('oauth');
+      expect(action.publisher_full).toBeUndefined();
+      const url = await authorizationUrl(await startRaw(instance, { source: 'gmail' }));
+      expect(url.searchParams.get('client_id')).toBe('stored-own-app.apps.googleusercontent.com');
+    });
+  });
+
+  test('full: Dropbox and X never ask the capacity route and never change', async () => {
+    const fake = full();
+    const instance = fixture({}, { googleCapacityFetch: fake.fetch });
+    const url = await authorizationUrl(await startRaw(instance, { source: 'dropbox' }));
+    expect(url.searchParams.get('client_id')).toBe(PUBLISHER_APP_KEY);
+    const x = await startRaw(instance, { source: 'x' });
+    expect((await x.json()).error.code).toBe('oauth_client_id_missing');
+    expect(fake.calls).toEqual([]);
+  });
+
+  test('full: a ChatGPT sign-in is refused with the same code, and the ChatGPT panel says so and points at the computer', async () => {
+    await withoutPilotClient(async () => {
+      const instance = fixture({}, {
+        googleCapacityFetch: full().fetch,
+        handback: { origin: 'https://mcp.olympusplugin.ai', installId: 'abcdefghijklmnopqrstuvwxyz234567' },
+      });
+      const refused = await startRaw(instance, { source: 'gmail', handback: 'relay' });
+      expect(refused.status).toBe(409);
+      expect((await refused.json()).error.code).toBe('google_signin_full');
+
+      const view = buildChatGptDashboardViewModel(await dashboardJson(instance) as SourceDashboardViewModel);
+      for (const sourceId of ['gmail.email', 'google_drive.docs']) {
+        const row = view.sources.find((source) => source.id === sourceId)!;
+        expect(row.detail).toBe(FULL_COPY);
+        expect(row.primary?.tool).not.toBe(CONNECT_SOURCE_TOOL_NAME);
+        expect(row.primary?.openHref).toBe(true);
+        expect(row.primary?.label).toBe('Use your own Google app');
+      }
+      // Dropbox keeps its one-click Connect in ChatGPT.
+      expect(view.sources.find((source) => source.id === 'dropbox.files')!.primary?.tool).toBe(CONNECT_SOURCE_TOOL_NAME);
+    });
+  });
+
+  test('full: the ChatGPT connect tool\'s failure is the surface\'s own google_signin_full code', async () => {
+    await withoutPilotClient(async () => {
+      const instance = fixture({}, {
+        googleCapacityFetch: full().fetch,
+        handback: { origin: 'https://mcp.olympusplugin.ai', installId: 'abcdefghijklmnopqrstuvwxyz234567' },
+      });
+      const backend = createChatGptSetupBackend({
+        workerFetch: (request) => {
+          const headers = new Headers(request.headers);
+          headers.set('Authorization', 'Bearer dashboard-secret');
+          return instance.fetch(new Request(request, { headers }));
+        },
+        handoffs: createChatGptHandoffs(),
+        publicUrls: () => undefined,
+        sovereignty: { config: loadSovereigntyPreset('no-sensitive'), source: 'preset' },
+        credentialPresent: () => false,
+        requestReload: () => false,
+      });
+      const failure = await backend.startOAuth('gmail').catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(SetupBackendError);
+      expect((failure as SetupBackendError).code).toBe('google_signin_full');
+    });
+  });
+
+  const failOpenCases: Array<[string, () => CapacityFake]> = [
+    ['a network error', () => capacityFake(() => { throw new Error('offline'); })],
+    ['a non-200 answer', () => capacityFake(() => jsonBody({ google: 'full' }, 503))],
+    ['the route not existing yet (404)', () => capacityFake(() => jsonBody({ error: 'not_found' }, 404))],
+    ['a body that is not JSON', () => capacityFake(() => new Response('<html>full</html>', { status: 200 }))],
+    ['an unexpected value', () => capacityFake(() => jsonBody({ google: 'maybe' }))],
+    ['an answer with extra fields', () => capacityFake(() => jsonBody({ google: 'full', users: 97 }))],
+    ['an array', () => capacityFake(() => jsonBody([{ google: 'full' }]))],
+    ['a redirect', () => capacityFake(() => { throw new TypeError('redirect mode is set to error'); })],
+    ['an oversized body', () => capacityFake(() => new Response(JSON.stringify({ google: 'full', pad: 'x'.repeat(4000) }), { status: 200 }))],
+  ];
+  for (const [name, make] of failOpenCases) {
+    test(`fails open on ${name}: the card and the start are the ordinary publisher Connect`, async () => {
+      await withoutPilotClient(async () => {
+        const instance = fixture({}, { googleCapacityFetch: make().fetch });
+        const action = googleCard(await dashboardJson(instance), 'gmail.email').connection.action;
+        expect(action).toMatchObject({ kind: 'oauth', label: 'Connect', publisher_client: true });
+        const url = await authorizationUrl(await startRaw(instance, { source: 'gmail' }));
+        expect(url.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+      });
+    });
+  }
+
+  test('fails open on a Worker that never answers, within a short timeout', async () => {
+    await withoutPilotClient(async () => {
+      const hung = capacityFake((_url, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      }));
+      const startedAt = Date.now();
+      const action = googleCard(await dashboardJson(fixture({}, { googleCapacityFetch: hung.fetch })), 'gmail.email').connection.action;
+      expect(action).toMatchObject({ kind: 'oauth', publisher_client: true });
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+    });
+  });
+
+  test('one answer is reused for the next minute, so page polls do not hammer the Worker', async () => {
+    await withoutPilotClient(async () => {
+      const fake = open();
+      const instance = fixture({}, { googleCapacityFetch: fake.fetch });
+      await dashboardJson(instance);
+      await dashboardJson(instance);
+      await startRaw(instance, { source: 'gmail' });
+      expect(fake.calls.length).toBe(1);
+    });
+  });
+
+  test('a person who already has Gmail connected is never held back: adding Drive is not a new Google user', async () => {
+    await withoutPilotClient(async () => {
+      const fake = open();
+      const instance = fixture({}, { googleCapacityFetch: fake.fetch });
+      const started = await authorizationUrl(await startRaw(instance, { source: 'gmail' }));
+      const callback = await instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=gmail-code&state=${encodeURIComponent(started.searchParams.get('state')!)}`,
+      ));
+      expect(callback.status).toBe(303);
+      // The wall goes up after Gmail is connected.
+      resetGooglePublisherCapacityCache();
+      const fullFake = full();
+      const wall = fixtureWithRegistry(instance.registryPath, instance.secretStore, fullFake.fetch);
+      const driveUrl = await authorizationUrl(await startRaw(wall, { source: 'google-drive' }));
+      expect(driveUrl.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+      const driveCard = googleCard(await dashboardJson(wall), 'google_drive.docs');
+      expect(driveCard.connection.action.publisher_full).toBeUndefined();
+      expect(fullFake.calls).toEqual([]);
+    });
+  });
+
+  test('full: the computer\'s Sources page leads Gmail with the owner\'s sentence, offers Set up with a Client ID field, and drops the shared-app warning', async () => {
+    await withoutPilotClient(async () => {
+      const view = await dashboardJson(fixture({}, { googleCapacityFetch: full().fetch })) as SourceDashboardViewModel;
+      const html = renderDashboardLocalPage('keys', { url: new URL(`${DASHBOARD_ORIGIN}/dashboard?keys`), view, options: {} });
+      expect(html).toContain(FULL_COPY.replace("'", '&#39;'));
+      expect(html).toContain('name="client_id"');
+      expect(html).toContain('Set up');
+      expect(html).not.toContain('unverified app');
+      expect(html.toLowerCase()).not.toContain('waitlist');
+    });
+  });
+});
+
+/** The same install (registry and secrets) behind a worker whose capacity route has changed its answer. */
+function fixtureWithRegistry(registryPath: string, secretStore: SecretStore, googleCapacityFetch: typeof fetch): Fixture {
+  const worker = createEmailSourceWorker({
+    sourceIndexStatus: { async status() { return fixtureStatus(); } },
+    sourceDashboard: {
+      sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+      registryPath,
+      secretStore,
+      googleCapacityFetch,
+      oauthFetch: async () => new Response('{}', { status: 400 }),
+    },
+  });
+  return {
+    fetch: withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' }),
+    secretStore,
+    exchanges: [],
+    exchangeUrls: [],
+    registryPath,
+  };
 }

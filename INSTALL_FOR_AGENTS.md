@@ -1756,7 +1756,28 @@ described above.
 If Gmail or Drive says **Needs setup** on a packaged install, treat that as a
 broken or unqualified artifact and run `olympus doctor`; do not send the
 operator to Google Cloud Console. Creating a personal Google client is an
-advanced BYO fallback only when the operator explicitly chooses it.
+advanced BYO fallback only when the operator explicitly chooses it. The one
+exception is the full state below.
+
+**When Google sign-in is full.** Olympus's own Google app is unverified, so
+Google serves at most 100 distinct users over its whole lifetime and stops the
+101st on Google's own page, where Olympus never hears from them again. Olympus
+watches the count and, before the wall, the Gmail and Drive cards stop sending
+new people to Google. They say "Google sign-in is full for the moment. We're
+working on it. For now, you can still connect Google by using your own Google
+app." with a **Set up** button (in ChatGPT the row says the same and its
+**Use your own Google app** button opens Olympus on the computer; a Connect
+attempt from ChatGPT answers `google_signin_full`). This is expected, not a
+broken artifact: do not run `olympus doctor` for it, do not promise a wait list
+or a date, and do not suggest retrying the one-click Connect. Using the
+operator's own Google app is the sanctioned route, so help them through the
+next section: **Set up** on the card opens the Client ID field and the same
+steps. They must publish their own app to production, because a Google app
+left in Testing expires its refresh tokens after 7 days. The full state holds
+back only a first Google connection; an install that already has Gmail or
+Drive connected keeps reconnecting, and adding Drive beside Gmail, through the
+one-click path. If the operator tells you the card no longer says full, the
+one-click Connect is back; use it.
 
 **Helper-binary rule (hard-learned):** never install or upgrade a
 credential-helper binary (`gogcli`, keychain-touching CLIs, or similar)
@@ -1773,7 +1794,8 @@ calm, then start it again.
 
 ### Advanced Google BYO fallback
 
-Use this only when the operator explicitly chooses BYO. A Google Desktop
+Use this when the operator explicitly chooses BYO, or when the Gmail or Drive
+card says Google sign-in is full (above). A Google Desktop
 client ID is public application identity and can be entered locally. Olympus
 uses S256 PKCE; Google documents `client_secret` as optional for installed-app
 authorization-code exchange and refresh, so the BYO path does not ask for or

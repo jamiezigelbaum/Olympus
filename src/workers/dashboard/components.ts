@@ -810,6 +810,9 @@ export function dashboardGoogleProviderNote(
   action: Extract<DashboardSourceAction, { kind: 'oauth' | 'needs_setup' }>,
 ): string | undefined {
   if (view.google_pilot?.mode !== 'shared_pilot' || !isGoogleOAuthSource(action.source)) return undefined;
+  // Olympus's own Google app is full, so the owner is being asked to use their
+  // own: the shared app's unverified-app warning has nothing to do with them.
+  if (action.kind === 'needs_setup' && action.publisher_full === true) return undefined;
   return `${view.google_pilot.warning} Gmail and Drive ask for their read access separately.`;
 }
 
