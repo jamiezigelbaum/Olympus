@@ -24476,12 +24476,15 @@ var init_connect = __esm(() => {
 function allOpenTargets() {
   return [
     { kind: "dashboard" },
+    { kind: "private_answers" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
     ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
   ];
 }
 function openTargetToken(target) {
+  if (target.kind === "private_answers")
+    return "page.private";
   if (target.kind === "connect")
     return `connect.${target.source}`;
   if (target.kind === "fix")
@@ -24500,6 +24503,9 @@ function isKeysOpenTarget(target) {
 function keysOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function privateAnswersOpenTargetTokenPattern() {
+  return `^${openTargetToken({ kind: "private_answers" }).replace(".", "\\.")}$`;
 }
 function isPanelOpenTarget(target) {
   return target.kind === "unreadable";
@@ -26680,9 +26686,10 @@ var init_vocabulary = __esm(() => {
     rows: {
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      outsideHelp: { title: "Anonymous answers", line: "Ask top AI models without saying who you are" },
+      privateAnswers: { title: "Private answers", line: "Questions answered only on this computer" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
+    waiting: { one: "1 private question is waiting", many: "{count} private questions are waiting" },
     locked: "Open dashboard controls first",
     readOnlyOpenClaw: "Reconnect OpenClaw with operator.write access to change this",
     indexFaster: DASHBOARD_INDEX_FASTER
@@ -27361,7 +27368,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.hostReadOnly = value.readOnly === true;
     const links = {};
     const given = value.links && typeof value.links === "object" ? value.links : {};
-    for (const key2 of ["keys", "agents", "outsideHelp", "connector"]) {
+    for (const key2 of ["keys", "agents", "privateAnswers", "connector"]) {
       const href = given[key2];
       if (typeof href === "string" && /^https?:\/\//.test(href))
         links[key2] = href;
@@ -27990,16 +27997,35 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
   }
   function needsYouSection(items) {
-    if (!items.length)
+    const waiting = waitingRow();
+    if (!items.length && !waiting)
       return null;
     const section = add(el("section", "section"), el("h2", "", P.needsYou));
     const list = el("ul", "rows");
+    add(list, waiting);
     items.forEach((item, index) => {
       const key2 = "need:" + String(item.id || index);
       const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key2, "warn", true, itemSource(item)));
       add(list, add(el("li", "row need"), body));
     });
     return add(section, list);
+  }
+  function waitingRow() {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta)
+      return null;
+    const count2 = meta.waitingPrivateQuestions;
+    const href = state.hostLinks.privateAnswers;
+    if (typeof count2 !== "number" || !isFinite(count2) || count2 < 1 || !href)
+      return null;
+    const W = H.copy;
+    const sentence = count2 === 1 ? W.waiting.one : fill2(W.waiting.many, { count: Math.floor(count2) });
+    const open4 = button(W.open, "need:waiting", () => openLink(href), "warn");
+    open4.setAttribute("aria-label", W.open + " " + W.rows.privateAnswers.title);
+    const body = add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open4));
+    const row = add(el("li", "row need"), body);
+    row.setAttribute("data-waiting-private", String(Math.floor(count2)));
+    return row;
   }
   function sourceItem(source) {
     const items = state.data && Array.isArray(state.data.needsYou) ? state.data.needsYou : [];
@@ -28663,7 +28689,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!onComputer())
       return null;
     const W = H.copy;
-    const keys = ["keys", "agents", "outsideHelp", "connector"].filter((key2) => !!state.hostLinks[key2]);
+    const keys = ["keys", "agents", "privateAnswers", "connector"].filter((key2) => !!state.hostLinks[key2]);
     if (!keys.length)
       return null;
     const heading = add(el("h2"), doc.createTextNode(W.section + " "), el("span", "tag", W.onlyHere));
@@ -31774,6 +31800,7 @@ var init_dashboard_launch = __esm(() => {
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
         var PANEL = /${panelOpenTargetTokenPattern()}/;
+        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -31802,10 +31829,12 @@ var init_dashboard_launch = __esm(() => {
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
+            // Private answers lands on that page, carrying nothing.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
             window.location.replace(KEYS.test(open)
               ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PRIVATE.test(open) ? '/dashboard?private-answers' : '/dashboard');
             return;
           }
           status.textContent = response.status === 403
@@ -33960,7 +33989,7 @@ var CONNECTOR_PROMPT = [
 `);
 var W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
 
-// src/workers/dashboard/pages/outside-help.ts
+// src/workers/dashboard/pages/private-answers.ts
 init_vocabulary();
 
 // src/workers/dashboard/index.ts
