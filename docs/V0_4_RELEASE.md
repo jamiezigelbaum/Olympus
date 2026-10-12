@@ -163,7 +163,7 @@ testers have exercised the normal product journey without custom engineering.
   photo content, transcription, built-in private model, confined zkAPI lane,
   and the standalone engine without OpenClaw); where the AI client runs does
   not matter. Omarchy is the first target; Ubuntu may be dropped if it proves
-  disproportionately hard, and Sparta may move to Omarchy. Built-in models
+  disproportionately hard, and the owner's Linux host may move to Omarchy. Built-in models
   are on by default on Linux, sized by memory as on the Mac, with no speed
   floor. Photos in formats the host cannot decode are
   reported and the rest indexed. The zkAPI lane on a host that cannot run
