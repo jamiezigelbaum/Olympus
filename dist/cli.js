@@ -109649,7 +109649,7 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
       return refusal(400, "invalid_request", "A key takes only a name.");
     const name = sanitizeCallerDisplayName(body.name);
     if (!name)
-      return refusal(400, "invalid_request", "Give the connection a name, for example Muse.");
+      return refusal(400, "invalid_request", "Give the connection a name, for example Grok API.");
     const store2 = openStore(backend);
     if (!store2)
       return storeUnavailable();
@@ -109815,7 +109815,7 @@ function renderDashboardAgentsSection(input) {
     remoteAccessRow(view.remoteAccess),
     setupRow({
       label: "Connect an agent",
-      blurb: "Let Claude, ChatGPT, Grok, Muse or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.",
+      blurb: "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.",
       action: { label: "Connect an agent", kind: "none", sheet: AGENT_CONNECT_SHEET_ID, primary: true }
     }),
     connectSheet(view.remoteAccess),
@@ -109984,16 +109984,6 @@ var init_agents = __esm(() => {
       add: "In Grok, go to grok.com/connectors, choose New Connector, then Custom, and paste this address as the MCP server URL:",
       approve: "Continue to sign in. An Olympus approval page opens.",
       instructionsWhere: "Paste this into your Grok Bot's skills or into Grok's custom instructions."
-    },
-    {
-      id: "muse",
-      label: "Muse",
-      method: "key",
-      keyName: "Muse",
-      address: "openapi",
-      add: "In Muse, ask it to create a custom connector for Olympus, and give it this OpenAPI address:",
-      keyUse: "When Muse asks for credentials, give it the key as a bearer token.",
-      instructionsWhere: "Paste this into Muse's instructions for the Olympus connector."
     },
     {
       id: "grok-api",

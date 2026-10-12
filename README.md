@@ -476,7 +476,7 @@ snippet has a copy button.
   page that opens in this computer's browser.
 - **Claude Code** and **Codex** on this computer: copy the prompt (or the
   `olympus serve` command) into the agent. This works without remote access.
-- **Claude**, **Grok**, **Muse**, the **Grok API** and other agents in the
+- **Claude**, **Grok**, the **Grok API** and other agents in the
   cloud need a tunnel you run yourself (below); the panel says so until
   remote access runs through one.
 
@@ -496,8 +496,8 @@ Advanced: to use a tunnel you run yourself instead of the relay, set
 `plugins.entries.olympus.config.remote.publicBaseUrl` to its https origin
 (`openclaw config set …`) and turn remote access on. Through your own tunnel,
 Claude, ChatGPT and Grok approve Olympus on its approval page with a one-time
-pairing code from the Agents page, and Muse and the Grok API take an address
-plus a key from **Create key** (shown once).
+pairing code from the Agents page, and the Grok API takes an address plus a
+key from **Create key** (shown once).
 
 Every connected agent gets the same privacy rules
 as your OpenClaw agent. It never sees Private source text or Secrets. For
@@ -508,8 +508,8 @@ lists connected agents with when each was added and last used, and
 same from a terminal.
 
 Each agent's steps end with a short instruction that tells it when to ask
-Olympus. Paste it into Claude project instructions, Grok Bot skills or Muse
-instructions, or load the packaged Agent Skills folder
+Olympus. Paste it into Claude project instructions or Grok Bot skills, or
+load the packaged Agent Skills folder
 [`integrations/agent-skills/ask-olympus/`](integrations/agent-skills/ask-olympus/SKILL.md).
 
 ### Using Olympus from other agents (MCP)

@@ -325,9 +325,11 @@ function render(access: DashboardRemoteAccess, store?: RemoteConnectionStore): s
 describe('the panel', () => {
   test('through your own tunnel, offers every agent with its own method', () => {
     const html = render(REMOTE_TUNNEL);
-    for (const label of ['Claude', 'ChatGPT', 'Grok or Grok Bot', 'Muse', 'Grok API', 'Claude Code or Codex', 'Other']) {
+    for (const label of ['Claude', 'ChatGPT', 'Grok or Grok Bot', 'Grok API', 'Claude Code or Codex', 'Other']) {
       expect(html).toContain(`<span class="name">${label}</span>`);
     }
+    // Muse waits for a Meta catalog connector (owner decision, 2026-10-12).
+    expect(html).not.toContain('Muse');
     const doc = new Window().document;
     doc.body.innerHTML = html;
     const agent = (id: string) => doc.querySelector(`[data-agent="${id}"]`)!;
@@ -336,8 +338,6 @@ describe('the panel', () => {
       expect(agent(id).querySelector('form[data-agent-kind="key"]')).toBeNull();
       expect(agent(id).textContent).toContain(`${PUBLIC}/mcp`);
     }
-    expect(agent('muse').querySelector('form[data-agent-kind="key"]')).not.toBeNull();
-    expect(agent('muse').textContent).toContain(`${PUBLIC}/openapi.json`);
     expect(agent('grok-api').querySelector('form[data-agent-kind="key"]')).not.toBeNull();
     expect(agent('grok-api').textContent).toContain(`${PUBLIC}/mcp`);
     expect(agent('local').textContent).toContain('<olympus path> serve');
@@ -370,7 +370,7 @@ describe('the panel', () => {
     expect(chatgpt.textContent).not.toContain('pairing code');
     expect(chatgpt.querySelector('form')).toBeNull();
     expect(chatgpt.querySelector('[data-agent-needs-tunnel]')).toBeNull();
-    for (const id of ['claude', 'grok', 'muse', 'grok-api', 'other']) {
+    for (const id of ['claude', 'grok', 'grok-api', 'other']) {
       expect(agent(id).querySelector('[data-agent-needs-tunnel]')).not.toBeNull();
       expect(agent(id).querySelector('summary')!.textContent).toContain('needs your own tunnel');
       expect(agent(id).querySelector('form')).toBeNull();
@@ -527,14 +527,14 @@ describe('the controller shows a secret once', () => {
         ? { status: 409, body: { ok: false, error: { message: 'Remote access is off.' } } }
         : { status: 200, body: { ok: true, token: 'olympus_conn_secret' } };
     });
-    const muse = root.querySelector<HTMLElement>('[data-agent="muse"]')!;
-    const form = muse.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!;
+    const grokApi = root.querySelector<HTMLElement>('[data-agent="grok-api"]')!;
+    const form = grokApi.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!;
     form.requestSubmit();
     await Bun.sleep(0);
     await Bun.sleep(0);
-    expect(calls[0]).toEqual({ action: 'create_agent_key', name: 'Muse' });
-    expect(muse.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
-    expect(muse.querySelector('[data-agent-secret-note]')!.textContent).toContain('cannot show it again');
+    expect(calls[0]).toEqual({ action: 'create_agent_key', name: 'Grok API' });
+    expect(grokApi.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
+    expect(grokApi.querySelector('[data-agent-secret-note]')!.textContent).toContain('cannot show it again');
     refuse = true;
     const claude = root.querySelector<HTMLElement>('[data-agent="claude"]')!;
     claude.querySelector<HTMLFormElement>('form[data-agent-kind="pair"]')!.requestSubmit();
@@ -566,11 +566,11 @@ describe('the controller shows a secret once', () => {
     });
     // The sheet is open with fields in it: a full refresh would be held off.
     root.querySelector<HTMLElement>('[data-sheet-toggle="#agent-connect"]')!.click();
-    const muse = root.querySelector<HTMLElement>('[data-agent="muse"]')!;
-    muse.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!.requestSubmit();
+    const grokApi = root.querySelector<HTMLElement>('[data-agent="grok-api"]')!;
+    grokApi.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!.requestSubmit();
     for (let tick = 0; tick < 5; tick++) await Bun.sleep(0);
     expect(root.querySelector('[data-agent-connection]')?.getAttribute('data-agent-connection')).toBe('f'.repeat(18));
-    expect(muse.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
+    expect(grokApi.querySelector<HTMLInputElement>('[data-agent-secret]')!.value).toBe('olympus_conn_secret');
     expect(root.querySelector('#agent-connect')!.classList.contains('on')).toBe(true);
   });
 

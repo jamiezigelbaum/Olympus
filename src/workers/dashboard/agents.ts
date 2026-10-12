@@ -12,11 +12,15 @@
  *   on Olympus's page in this computer's browser, with no pairing code.
  * - Through a tunnel the owner runs (`remote.publicBaseUrl`), Claude, ChatGPT
  *   and Grok add Olympus as a connector and approve it on the Olympus approval
- *   page with a one-time pairing code minted right here; Muse and the Grok API
- *   take an address plus a key, and Create key shows the key once. Under the
+ *   page with a one-time pairing code minted right here; the Grok API takes
+ *   an address plus a key, and Create key shows the key once. Under the
  *   relay these agents say they need such a tunnel, and show no steps that
  *   cannot work.
  * - Claude Code and Codex on this computer run `olympus serve` locally.
+ *
+ * Muse is not offered (owner decision, 2026-10-12): consumer Muse adds
+ * connectors only from Meta's catalog, so it waits for an Olympus catalog
+ * connector (docs/design/background-agents.md, build step 5).
  *
  * Pairing codes and keys never enter this markup. The controller puts them
  * into a read-only field after the control route answers, and clears it on
@@ -89,16 +93,6 @@ const AGENTS: readonly AgentChoice[] = [
     instructionsWhere: 'Paste this into your Grok Bot\'s skills or into Grok\'s custom instructions.',
   },
   {
-    id: 'muse',
-    label: 'Muse',
-    method: 'key',
-    keyName: 'Muse',
-    address: 'openapi',
-    add: 'In Muse, ask it to create a custom connector for Olympus, and give it this OpenAPI address:',
-    keyUse: 'When Muse asks for credentials, give it the key as a bearer token.',
-    instructionsWhere: 'Paste this into Muse\'s instructions for the Olympus connector.',
-  },
-  {
     id: 'grok-api',
     label: 'Grok API',
     detail: 'xAI API and scripts',
@@ -155,7 +149,7 @@ export function renderDashboardAgentsSection(input: DashboardAgentsSectionInput)
     remoteAccessRow(view.remoteAccess),
     setupRow({
       label: 'Connect an agent',
-      blurb: 'Let Claude, ChatGPT, Grok, Muse or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.',
+      blurb: 'Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.',
       action: { label: 'Connect an agent', kind: 'none', sheet: AGENT_CONNECT_SHEET_ID, primary: true },
     }),
     connectSheet(view.remoteAccess),

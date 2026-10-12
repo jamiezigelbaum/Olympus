@@ -611,7 +611,7 @@ Olympus connects through the Olympus relay (`mcp.olympusplugin.ai`) with no
 account, tunnel or certificate agreement to set up. The relay connects ChatGPT
 only; ChatGPT itself uses the Olympus plugin: see the README's
 [Olympus for ChatGPT](../README.md#olympus-for-chatgpt). (Advanced: Claude,
-Grok, Muse, the Grok API and other cloud agents need a tunnel of your own in
+Grok, the Grok API and other cloud agents need a tunnel of your own in
 `remote.publicBaseUrl`, approved with a pairing code or a key.)
 
 ## Anytime

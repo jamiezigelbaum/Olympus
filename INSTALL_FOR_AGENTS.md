@@ -2080,7 +2080,7 @@ Only when the operator asks for it. Do not offer it as part of installation.
   into chat.
 - Through the relay (the default) only ChatGPT connects, approved with one
   click on a page Olympus serves on this computer, with no pairing code.
-  Claude, Grok, Muse, the Grok API and other cloud agents need the operator's
+  Claude, Grok, the Grok API and other cloud agents need the operator's
   own tunnel (`remote.publicBaseUrl`); the panel says so.
 - Under the operator's own tunnel, pairing codes and connection keys are
   minted by the operator in that panel (or `olympus connections pair` /

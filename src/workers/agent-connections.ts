@@ -242,7 +242,7 @@ export async function handleDashboardAgentRequest(
     const unknown = Object.keys(body).filter((key) => key !== 'name');
     if (unknown.length > 0) return refusal(400, 'invalid_request', 'A key takes only a name.');
     const name = sanitizeCallerDisplayName(body.name);
-    if (!name) return refusal(400, 'invalid_request', 'Give the connection a name, for example Muse.');
+    if (!name) return refusal(400, 'invalid_request', 'Give the connection a name, for example Grok API.');
     const store = openStore(backend);
     if (!store) return storeUnavailable();
     const created = store.create(name);
