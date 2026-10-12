@@ -65,9 +65,62 @@
         sc.tl.seek(st.t, false);
       }
       if (st.t < target || (sc.enter && st.arrived && st.e < ENTER)) busy = true;
+      cursors(frames.get(scene));
     });
     if (busy) requestAnimationFrame(tick);
     else running = false;
+  }
+
+  // The film's mouse cursor (the hero's BLOCK click) is drawn over the whole window rather than inside its card:
+  // it swoops in from the window's edge and leaves off it (Jamie, 2026-10-12). The scene still moves its own cursor
+  // (hidden); each frame this copies where it is, and stretches its way in and out along the same line and ease to
+  // reach the edge.
+  var layer = null, drawn = new Map();
+  function cursors(f) {
+    var w = f.contentWindow, list = w && w.OLY_CURSORS;
+    if (!list || !list.length) return;
+    var g = w.gsap, k = f.getBoundingClientRect().width / 1920, vw = window.innerWidth, vh = window.innerHeight;
+    list.forEach(function (C) {
+      var d = drawn.get(C);
+      if (!d) {
+        if (!layer) {
+          layer = document.createElement("div");
+          layer.className = "cursor-layer";
+          layer.setAttribute("aria-hidden", "true");
+          document.body.appendChild(layer);
+        }
+        d = document.createElement("div");
+        d.innerHTML = C.el.innerHTML;
+        layer.appendChild(d);
+        drawn.set(C, d);
+        C.el.style.visibility = "hidden";
+      }
+      var op = +g.getProperty(C.el, "opacity");
+      if (op < 0.01) { d.style.opacity = "0"; return; }
+      var tip = C.el.getBoundingClientRect(), fr = f.getBoundingClientRect();
+      var px = fr.left + tip.left * k, py = fr.top + tip.top * k;
+      var x = +g.getProperty(C.el, "x"), y = +g.getProperty(C.el, "y"), m = 360 * k;
+      // inside a leg: how far along it is (per axis, so each keeps its own ease), stretched to the window's edge
+      var now = w.olympusScene.tl.time();
+      C.legs.forEach(function (L) {
+        if (now < L.t || now > L.t + L.dur) return;
+        var dx = L.out ? L.to[0] - L.from[0] : L.from[0] - L.to[0], dy = L.out ? L.to[1] - L.from[1] : L.from[1] - L.to[1];
+        var ex = dx ? (x - L.from[0]) / (L.to[0] - L.from[0]) : 1, ey = dy ? (y - L.from[1]) / (L.to[1] - L.from[1]) : 1;
+        // the leg's still end, in the window: where the tip lands (in) or sets off from (out)
+        var ax = px + (L.out ? -(x - L.from[0]) : L.to[0] - x) * k, ay = py + (L.out ? -(y - L.from[1]) : L.to[1] - y) * k;
+        var lx = dx > 0 ? (vw + m - ax) / (dx * k) : dx < 0 ? (ax + m) / (-dx * k) : Infinity;
+        var ly = dy > 0 ? (vh + m - ay) / (dy * k) : dy < 0 ? (ay + m) / (-dy * k) : Infinity;
+        var lam = Math.max(1, Math.min(lx, ly));
+        var fx = L.out ? ex : 1 - ex, fy = L.out ? ey : 1 - ey;   // share of the leg still to come (in) or done (out)
+        px += (lam - 1) * dx * fx * k;
+        py += (lam - 1) * dy * fy * k;
+      });
+      d.style.opacity = String(op);
+      d.style.transform = "translate(" + px.toFixed(1) + "px," + py.toFixed(1) + "px) rotate(" + g.getProperty(C.el, "rotation") +
+        "deg) scale(" + (g.getProperty(C.el, "scale") * k).toFixed(4) + ")";
+      var sh = d.querySelector(".csh");
+      if (sh) sh.setAttribute("transform", "translate(" + g.getProperty(C.sh, "x") + " " + g.getProperty(C.sh, "y") + ")");
+    });
   }
 
   if (motion) {

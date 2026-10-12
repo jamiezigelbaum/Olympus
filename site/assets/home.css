@@ -41,3 +41,8 @@
 .player form { position: absolute; right: 8px; top: 8px; z-index: 1; margin: 0; }
 .player__close { font: 400 11px/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: #f3e8da; background: rgba(26, 19, 20, 0.7); border: 0; border-radius: 4px; padding: 8px 10px; cursor: pointer; }
 
+
+/* The hero's mouse cursor, drawn over the whole window (home.js) so it can come in from the window's edge. */
+.cursor-layer { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 20; }
+.cursor-layer > div { position: absolute; left: 0; top: 0; width: 1px; height: 1px; transform-origin: 0 0; opacity: 0; }
+.cursor-layer svg { position: absolute; left: 0; top: 0; overflow: visible; }

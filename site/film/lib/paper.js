@@ -416,13 +416,16 @@
       <polygon points="${pts()}" fill="url(#oly-cur-face)" stroke="rgba(255,255,255,.85)" stroke-width="2" stroke-linejoin="round"/>
     </svg>`;
     const sh = el.querySelector(".csh");
-    const C = { el, x: 2200, y: 400 };
+    const C = { el, sh, x: 2200, y: 400, legs: [] };
+    // (website) the home page draws the cursor over the whole window and stretches these legs to its edges
+    (window.OLY_CURSORS = window.OLY_CURSORS || []).push(C);
     gsap.set(el, { x: C.x, y: C.y, opacity: 0, transformOrigin: "0px 0px" });
     gsap.set(sh, { x: 26, y: 34 });
     // Swoop in from the right on a curve, settle, then click at T (the press dips it 9% about the tip).
     // From above right: x arrives first, then the tip comes down onto the target (it never crosses a neighbour).
     C.click = (tl, x, y, T, { from = [x + 520, y - 560], dur = 0.6 } = {}) => {
       const A = T - 0.16, t0 = A - dur;
+      C.legs.push({ t: t0, dur, from, to: [x, y] });
       tl.set(el, { opacity: 1 }, t0);
       tl.fromTo(el, { x: from[0], rotation: 8 }, { x, rotation: 0, duration: dur, ease: "power3.out", immediateRender: false }, t0);
       tl.fromTo(el, { y: from[1] }, { y, duration: dur, ease: "power2.inOut", immediateRender: false }, t0);
@@ -434,6 +437,7 @@
       C.x = x + 10; C.y = y + 5;
     };
     C.leave = (tl, t, { to = [2200, C.y + 300], dur = 0.45 } = {}) => {
+      C.legs.push({ t, dur, from: [C.x, C.y], to, out: true });
       tl.to(el, { x: to[0], duration: dur, ease: "power2.in" }, t);
       tl.to(el, { y: to[1], rotation: 6, duration: dur, ease: "power1.in" }, t);
       tl.set(el, { opacity: 0 }, t + dur);

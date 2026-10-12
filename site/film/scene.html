@@ -97,6 +97,15 @@
             if (shake && ends.some(function (e) { return Math.abs(tw.startTime() - e) < 0.1; })) { tw.progress(1); tw.kill(); }
           });
 
+          // On the page a few beats come sooner than in the film (Jamie, 2026-10-12: Venice.ai's typewriter and the
+          // anonymous question's red marks should start a beat faster). Everything from that beat on moves up.
+          var SOONER = { "s06-venice": ["strike", 0.6], "s08-zkq": ["hl1", 0.75] };
+          if (SOONER[id]) {
+            var from = B[SOONER[id][0]], by = SOONER[id][1];
+            tl.getChildren(false, true, true).forEach(function (c) { if (c.startTime() >= from - 0.001) c.startTime(c.startTime() - by); });
+            end -= by;
+          }
+
           // The stand-in entry: the card rises in the way the film's sources page does (y 1100 -> 0, power3.inOut).
           var enter = gsap.fromTo(stage, { y: 1100 }, { y: 0, duration: 0.6, ease: "power3.inOut", paused: true });
 
