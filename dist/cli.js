@@ -14542,11 +14542,11 @@ import { isIP as isIP2 } from "node:net";
 function isApprovedSecureSourceEmbeddingProvider(provider) {
   return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
 }
-function builtInEmbeddingOnly(provider, isBuiltInReady) {
+function builtInEmbeddingOnly(provider, loadedOnly) {
   if (!provider || provider.backend !== "local")
     return;
   try {
-    return isBuiltInReady(provider) ? provider : undefined;
+    return loadedOnly(provider);
   } catch {
     return;
   }
@@ -31007,6 +31007,9 @@ import { createHash as createHash15 } from "node:crypto";
 import { readFileSync as readFileSync20 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname22, join as join26 } from "node:path";
+function loadedBuiltInEmbedding(provider) {
+  return provider instanceof BuiltInSourceEmbeddingProvider ? provider.loadedOnly() : undefined;
+}
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -31111,6 +31114,24 @@ class BuiltInSourceEmbeddingProvider {
     }
     const model = this.loaded ?? await this.load();
     return this.embedLoaded(model, inputs, options.taskType);
+  }
+  loadedOnly() {
+    return {
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      configHash: this.configHash,
+      epochId: this.epochId,
+      backend: this.backend,
+      embed: async (inputs, options) => {
+        if (inputs.length === 0)
+          return [];
+        const model = this.loaded;
+        if (!model)
+          throw new BuiltInEmbeddingNotReadyError(this.status());
+        return this.embedLoaded(model, inputs, options.taskType);
+      }
+    };
   }
   load() {
     if (this.loading)
@@ -114377,7 +114398,8 @@ function createEmailSourceWorker(options = {}) {
           }
           return json(await sourceDashboard.panelTools.call(name, args, {
             ...dashboardPanelCallContext(url, request),
-            opener: dashboardPanelOpener(request)
+            opener: dashboardPanelOpener(request),
+            ...request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local" ? { localSession: true } : {}
           }));
         }
         const oauthCallbackDone = /^\/oauth\/callback\/([^/]+)\/done$/.exec(url.pathname);
@@ -118646,6 +118668,93 @@ var QUERY_PLANNER_SYSTEM, MAX_PLANNED_QUERIES = 3, MAX_PLANNER_OUTPUT_CHARS = 40
 var init_query_planner = __esm(() => {
   init_answer_latency_trace();
   QUERY_PLANNER_SYSTEM = "Generate up to 3 short, diverse search queries for finding documents that answer this question. " + "Return ONLY a JSON array of strings.";
+});
+
+// src/workers/email-source/source-answer-lanes.ts
+function createSourceAnswerLanes(deps) {
+  return (request, embedding) => {
+    const searchScopes = new Map;
+    const requestEmbeddings = new Map;
+    const requestEmbedding = (store) => {
+      if (!requestEmbeddings.has(store.corpusId)) {
+        const configured = deps.embeddingProvider(store);
+        const provider = embedding === "built_in_only" ? builtInEmbeddingOnly(configured, deps.localEmbedding) : configured;
+        requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
+      }
+      return requestEmbeddings.get(store.corpusId);
+    };
+    const excludedCorpusIds = new Set;
+    const connectorStoreAdapter = (store) => {
+      const mandatoryScope = deps.readScope(store);
+      if (!mandatoryScope.allowed) {
+        excludedCorpusIds.add(store.corpusId);
+        return;
+      }
+      const scope = deps.answerScope(store, request);
+      if (scope.kind === "skip") {
+        excludedCorpusIds.add(store.corpusId);
+        return;
+      }
+      const connectorStoreEmbedding = requestEmbedding(store);
+      const connectorStoreAccount = scope.accountScope ?? mandatoryScope.accountScope ?? (request.account?.trim() || deps.accountScope(store));
+      const filters = scope.filters || mandatoryScope.filters ? { ...scope.filters, ...mandatoryScope.filters } : undefined;
+      searchScopes.set(store.corpusId, {
+        ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
+        ...filters ? { filters } : {}
+      });
+      const semanticRelevanceBar = deps.semanticRelevanceBar?.(store);
+      return createConnectorStoreCorpusAdapter({
+        store,
+        retrievalMode: request.retrieval_mode ?? "keyword",
+        ...semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {},
+        ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
+        ...filters ? { filters } : {},
+        ...connectorStoreEmbedding ? { embeddingProvider: connectorStoreEmbedding } : {}
+      });
+    };
+    const stores = deps.stores();
+    return {
+      registry: deps.registry(),
+      ...deps.visibilityGate ? { visibilityGate: deps.visibilityGate } : {},
+      ...deps.secretLocations ? {
+        secretLocations: (query, searchedCorpora) => deps.secretLocations(query, searchedCorpora.flatMap((corpusId) => {
+          const scope = searchScopes.get(corpusId);
+          return scope ? [{ corpusId, ...scope }] : [];
+        }))
+      } : {},
+      ...deps.heldItems ? {
+        classificationCoverage: (searchedCorpora) => searchedCorpora.flatMap((corpusId) => {
+          try {
+            const held = deps.heldItems(corpusId);
+            return held > 0 ? [{ corpusId, pendingClassificationItems: held }] : [];
+          } catch {
+            return [];
+          }
+        })
+      } : {},
+      adapters: Object.fromEntries(stores.flatMap((store) => {
+        const adapter = connectorStoreAdapter(store);
+        return adapter ? [[store.corpusId, adapter]] : [];
+      })),
+      excludedCorpusIds,
+      contentProviders: Object.fromEntries(stores.flatMap((store) => {
+        const mandatoryScope = deps.readScope(store);
+        const passageEmbedding = request.retrieval_mode === "hybrid" ? requestEmbedding(store) : undefined;
+        return mandatoryScope.allowed ? [[store.corpusId, createConnectorStoreContentProvider({
+          store,
+          ...passageEmbedding ? { embeddingProvider: passageEmbedding } : {},
+          ...mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {},
+          ...mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {},
+          ...mandatoryScope.filters ? { metadataFilters: mandatoryScope.filters } : {},
+          contentAllowed: mandatoryScope.contentAllowed !== false
+        })]] : [];
+      }))
+    };
+  };
+}
+var init_source_answer_lanes = __esm(() => {
+  init_embeddings();
+  init_connector_store();
 });
 
 // src/workers/connector-store/tier-visibility.ts
@@ -131810,7 +131919,7 @@ function createBuiltInPrivateAnswerModel(options) {
           items: items.length,
           unreadable,
           bytes: items.reduce((sum2, item) => sum2 + utf8Bytes3(item.text), 0),
-          used: picked.map((index) => read.sources[index])
+          used: [...picked, ...eligibleSiblings].map((index) => read.sources[index])
         });
       } catch {}
       if (items.length === 0) {
@@ -132276,14 +132385,6 @@ var init_private_answer_model = __esm(() => {
 });
 
 // src/workers/source-index/local-answer.ts
-var exports_local_answer = {};
-__export(exports_local_answer, {
-  readLocalEvidenceItem: () => readLocalEvidenceItem,
-  localAnswerRequest: () => localAnswerRequest,
-  checkLocalEvidenceItems: () => checkLocalEvidenceItems,
-  builtInEmbeddingOnly: () => builtInEmbeddingOnly,
-  answerOnThisComputer: () => answerOnThisComputer
-});
 function localAnswerRequest(question, selectors = {}) {
   const { retrieval_mode: mode, selected_items: selected, ...rest } = selectors;
   return {
@@ -132467,10 +132568,34 @@ var init_local_answer = __esm(() => {
 var exports_local_private_answers = {};
 __export(exports_local_private_answers, {
   createLocalPrivateAnswers: () => createLocalPrivateAnswers,
+  createLocalAnswerPath: () => createLocalAnswerPath,
   LOCAL_PRIVATE_ANSWERS_PATH: () => LOCAL_PRIVATE_ANSWERS_PATH
 });
 import { lstatSync as lstatSync26 } from "node:fs";
 import { randomBytes as randomBytes23 } from "node:crypto";
+function createLocalAnswerPath(options) {
+  const lanes = (request) => options.lanes(request, "built_in_only");
+  const eligible = (items) => checkLocalEvidenceItems({ lanes, items });
+  const model = createBuiltInPrivateAnswerModel({
+    model: options.model,
+    eligible,
+    available: options.available,
+    answer: answerPrivately,
+    relevance: embeddingPanelRelevance(options.relevanceEmbedding),
+    readItem: (item, request) => readLocalEvidenceItem({ lanes, item, ...request }),
+    ...options.sourceLinks ? { sourceLinks: options.sourceLinks } : {},
+    ...options.limits ? { limits: options.limits } : {}
+  });
+  return {
+    eligible,
+    answer: (input) => answerOnThisComputer(input, {
+      lanes,
+      model,
+      eligible,
+      ...options.sourceName ? { sourceName: options.sourceName } : {}
+    })
+  };
+}
 function refused(status, code, message) {
   return { status, body: { ok: false, error: { code, message } } };
 }
@@ -132689,6 +132814,9 @@ function createLocalPrivateAnswers(options) {
 }
 var LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS2 = 400, MAX_QUESTION_CHARS2 = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
+  init_analyst_built_in();
+  init_private_answer_model();
+  init_local_answer();
   TOKEN_TTL_MS = 30 * 60000;
   TOKEN_PATTERN3 = /^[A-Za-z0-9_-]{32,64}$/;
 });
@@ -134501,7 +134629,7 @@ function createDashboardPanelTools(options) {
       });
       const unpair = computerUnpairEntries(view);
       const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context2.opener);
-      const waiting = context2.opener?.startsWith("session:") ? waitingCount(options) : 0;
+      const waiting = context2.localSession === true ? waitingCount(options) : 0;
       if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0)
         return result;
       const meta2 = {
@@ -136328,12 +136456,6 @@ async function main() {
   });
   const sourceIndexAnalystPreflightTimeoutMs = parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PREFLIGHT_TIMEOUT_SECONDS, "OLYMPUS_SOURCE_INDEX_ANALYST_PREFLIGHT_TIMEOUT_SECONDS") ?? 0;
   const secureDerivativeDefault = parseSecureDerivativeDefault(process.env.OLYMPUS_SECURE_DERIVATIVE_DEFAULT);
-  const builtInEmbeddingInstalled = (provider) => {
-    if (!(provider instanceof BuiltInSourceEmbeddingProvider))
-      return false;
-    const state = provider.status().state;
-    return state === "ready" || state === "loading";
-  };
   let sourceAnswerLanes;
   const analystSourceAnswer = sourceIndexAnswerEnabled ? await (async () => {
     const analystLane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? parseLane(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE) : olympusConfig.argus.defaultLane;
@@ -136413,90 +136535,22 @@ async function main() {
       },
       secureAnalystPoolState,
       ...secureDerivativeDefault !== undefined ? { secureDerivativeDefault } : {},
-      lanes: sourceAnswerLanes = (request, embedding) => {
-        const searchScopes = new Map;
-        const requestEmbeddings = new Map;
-        const requestEmbedding = (store) => {
-          if (!requestEmbeddings.has(store.corpusId)) {
-            const configured = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
-            const provider = embedding === "built_in_only" ? builtInEmbeddingOnly(configured, builtInEmbeddingInstalled) : configured;
-            requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
-          }
-          return requestEmbeddings.get(store.corpusId);
-        };
-        const excludedCorpusIds = new Set;
-        const connectorStoreAdapter = (store) => {
-          const mandatoryScope = connectorStoreReadScope(store);
-          if (!mandatoryScope.allowed) {
-            excludedCorpusIds.add(store.corpusId);
-            return;
-          }
+      lanes: sourceAnswerLanes = createSourceAnswerLanes({
+        stores: () => readConnectorStores,
+        registry: () => buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId))),
+        embeddingProvider: (store) => connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider,
+        localEmbedding: loadedBuiltInEmbedding,
+        readScope: connectorStoreReadScope,
+        answerScope: (store, request) => {
           const principal = connectorStorePrincipals.get(store.corpusId);
-          const scope = connectorStoreAnswerScope({
-            store,
-            request,
-            ...principal ? { principal } : {}
-          });
-          if (scope.kind === "skip") {
-            excludedCorpusIds.add(store.corpusId);
-            return;
-          }
-          const connectorStoreEmbedding = requestEmbedding(store);
-          const connectorStoreAccount = scope.accountScope ?? mandatoryScope.accountScope ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
-          searchScopes.set(store.corpusId, {
-            ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
-            ...scope.filters || mandatoryScope.filters ? { filters: { ...scope.filters, ...mandatoryScope.filters } } : {}
-          });
-          return createConnectorStoreCorpusAdapter({
-            store,
-            retrievalMode: request.retrieval_mode ?? "keyword",
-            ...store.corpusId === X_BOOKMARKS_CORPUS_ID ? { semanticRelevanceBar: xBookmarksSemanticRelevanceBar } : {},
-            ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
-            ...scope.filters || mandatoryScope.filters ? { filters: { ...scope.filters, ...mandatoryScope.filters } } : {},
-            ...connectorStoreEmbedding ? { embeddingProvider: connectorStoreEmbedding } : {}
-          });
-        };
-        return {
-          registry: buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId))),
-          visibilityGate: tierVisibilityGate,
-          secretLocations: (query, searchedCorpora) => tierSecretLocations(query, searchedCorpora.flatMap((corpusId) => {
-            const scope = searchScopes.get(corpusId);
-            return scope ? [{ corpusId, ...scope }] : [];
-          })),
-          classificationCoverage: (searchedCorpora) => searchedCorpora.flatMap((corpusId) => {
-            const lane = tierLanes.find((candidate) => candidate.corpusIds.has(corpusId));
-            if (!lane)
-              return [];
-            try {
-              const held = lane.ledger.corpusCopyCounts(corpusId).held;
-              return held > 0 ? [{ corpusId, pendingClassificationItems: held }] : [];
-            } catch {
-              return [];
-            }
-          }),
-          adapters: {
-            ...Object.fromEntries(readConnectorStores.flatMap((store) => {
-              const adapter = connectorStoreAdapter(store);
-              return adapter ? [[store.corpusId, adapter]] : [];
-            }))
-          },
-          excludedCorpusIds,
-          contentProviders: {
-            ...Object.fromEntries(readConnectorStores.flatMap((store) => {
-              const mandatoryScope = connectorStoreReadScope(store);
-              const passageEmbedding = request.retrieval_mode === "hybrid" ? requestEmbedding(store) : undefined;
-              return mandatoryScope.allowed ? [[store.corpusId, createConnectorStoreContentProvider({
-                store,
-                ...passageEmbedding ? { embeddingProvider: passageEmbedding } : {},
-                ...mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {},
-                ...mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {},
-                ...mandatoryScope.filters ? { metadataFilters: mandatoryScope.filters } : {},
-                contentAllowed: mandatoryScope.contentAllowed !== false
-              })]] : [];
-            }))
-          }
-        };
-      }
+          return connectorStoreAnswerScope({ store, request, ...principal ? { principal } : {} });
+        },
+        accountScope: (store) => connectorStoreAccountScopes.get(store.corpusId),
+        semanticRelevanceBar: (store) => store.corpusId === X_BOOKMARKS_CORPUS_ID ? xBookmarksSemanticRelevanceBar : undefined,
+        visibilityGate: tierVisibilityGate,
+        secretLocations: tierSecretLocations,
+        heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0
+      })
     });
   })() : undefined;
   const sourceAnswer = analystSourceAnswer ? {
@@ -137415,19 +137469,19 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...openCitedFile ? { openFile: openCitedFile } : {}
   });
   if (sourceAnswerLanes) {
-    const { answerOnThisComputer: answerOnThisComputer2, checkLocalEvidenceItems: checkLocalEvidenceItems2, readLocalEvidenceItem: readLocalEvidenceItem2 } = await Promise.resolve().then(() => (init_local_answer(), exports_local_answer));
-    const { createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
+    const { createLocalAnswerPath: createLocalAnswerPath2, createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
     const { DASHBOARD_SUPPORTED_SOURCES: DASHBOARD_SUPPORTED_SOURCES2 } = await Promise.resolve().then(() => (init_source_dashboard(), exports_source_dashboard));
-    const allLanes = sourceAnswerLanes;
-    const localLanes = (request) => allLanes(request, "built_in_only");
-    const localEligible = (items) => checkLocalEvidenceItems2({ lanes: localLanes, items });
-    const localModel = createBuiltInPrivateAnswerModel2({
+    const sourceName = (corpusId) => {
+      const sourceId = sourceCorpusRegistry2.list().find((corpus) => corpus.corpusId === corpusId)?.sourceId;
+      if (!sourceId)
+        return;
+      return DASHBOARD_SUPPORTED_SOURCES2.find((source) => source.corpus_source_ids.includes(sourceId))?.label;
+    };
+    const local = createLocalAnswerPath2({
+      lanes: sourceAnswerLanes,
       model: workerBuiltInModel?.model,
-      eligible: localEligible,
       available: () => workerBuiltInModel?.available() ?? false,
-      answer: answerPrivately,
-      relevance: embeddingPanelRelevance2(() => builtInEmbeddingOnly(sourceIndexEmbeddingProvider, builtInEmbeddingInstalled)),
-      readItem: (item, request) => readLocalEvidenceItem2({ lanes: localLanes, item, ...request }),
+      relevanceEmbedding: () => builtInEmbeddingOnly(secureLocalPolicyEmbeddingProvider ?? sourceIndexEmbeddingProvider, loadedBuiltInEmbedding),
       sourceLinks: (item) => {
         const provenance = item.provenance;
         const provider = provenance?.sourceItem?.provider;
@@ -137435,24 +137489,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         if (typeof provider !== "string" || typeof locator !== "string")
           return;
         return Object.hasOwn(sourceOpenTargets, provider) ? sourceOpenTargets[provider](locator) : undefined;
-      }
+      },
+      sourceName
     });
-    const sourceName = (corpusId) => {
-      const sourceId = sourceCorpusRegistry2.list().find((corpus) => corpus.corpusId === corpusId)?.sourceId;
-      if (!sourceId)
-        return;
-      return DASHBOARD_SUPPORTED_SOURCES2.find((source) => source.corpus_source_ids.includes(sourceId))?.label;
-    };
     localPrivateAnswers = createLocalPrivateAnswers2({
-      answer: (input) => answerActivity.run(() => answerOnThisComputer2(input, {
-        lanes: localLanes,
-        model: localModel,
-        eligible: localEligible,
-        sourceName
-      })),
+      answer: (input) => answerActivity.run(() => local.answer(input)),
       store: waitingQuestionStore,
       connectionName: (connectionId) => remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
-      eligible: localEligible,
+      eligible: local.eligible,
       ...openCitedFile ? { openFile: openCitedFile } : {}
     });
   }
@@ -138463,6 +138507,7 @@ var init_server5 = __esm(async () => {
   init_telegram_messages();
   init_connector_store();
   init_principal();
+  init_source_answer_lanes();
   init_tiered_store_set();
   init_tier_set2();
   init_tier_set3();
