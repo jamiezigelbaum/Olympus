@@ -52,7 +52,7 @@ separate work.
 | Authorization to open | Private open capabilities are job/install-bound and recheck evidence eligibility before dispatch (`src/workers/chatgpt/private-answer-jobs.ts:642`); they are not consumed by that method. Unreadable capabilities are opener-bound, consumed before dispatch, and recheck the current unreadable verdict (`src/workers/file-extraction/unreadable-files.ts:413`). Preserve these distinct semantics. |
 | Desktop and remote handoff | Linux URL-handler registration already uses XDG paths and xdg-mime; removal edits only its MIME association (`src/core/open-handler.ts:89`, `:250`, `:272`, `:291`). Remote detection uses declared server mode or DISPLAY/WAYLAND_DISPLAY; manual instructions establish an SSH forward and mint a dashboard link on the engine host (`src/core/remote-open.ts:70`, `:125`). Opening-ticket minting refuses redirects and uses the worker bearer internally (`src/core/dashboard-opening.ts:108`). |
 | Approval | Relay bridge keeps the OAuth query and sends the browser to the engine's loopback authorize endpoint (`connect-relay/server/authorize-bridge.ts:47`). Real relay-mode GET and POST require a non-relayed loopback Host and peer; POST additionally requires browser navigation and matching CSRF cookie/form (`src/workers/remote-oauth/handler.ts:278`, `:448`). A dashboard opening ticket is not OAuth consent. |
-| Doctor | Host probing currently skips standalone engine inspection outside Darwin (`src/core/doctor.ts:135`); missing-host guidance recommends engine install only on Mac (`:481`). |
+| Doctor | Host probing currently skips standalone engine inspection outside Darwin (`src/core/doctor.ts:135`); missing-host guidance recommends engine install only on Mac (`:495`). |
 
 ## One lifecycle, platform-specific service management
 
@@ -61,7 +61,7 @@ operation results shared. Introduce narrow launchd/systemd adapters for unit
 rendering, installation, inspection, enable/start, disable/stop and removal.
 Do not start a second `olympus-worker.service`: the engine owns its worker,
 relay and embedding children. Refuse an existing competing host/data custodian
-with an exact stop/migration remedy; do not disable another install silently.
+with exact conflicting paths and a stop/fresh-install remedy; do not disable another install silently.
 
 ### Paths and environment
 
@@ -82,7 +82,7 @@ needed to address it. A marked launcher carries that layout, not secrets.
 | Existing indexes, model files, remote registration and child/status records | `$XDG_DATA_HOME/openclaw/olympus/` (compatibility namespace, no OpenClaw dependency) |
 | Install transactions, rollback receipts, engine/install logs | `$XDG_STATE_HOME/olympus/engine/` |
 | Disposable downloads | `$XDG_CACHE_HOME/olympus/engine/` |
-| Lifecycle lock and ephemeral desktop-session handoff | `$XDG_RUNTIME_DIR/olympus/` |
+| Lifecycle lock and proposed private worker socket (owner decision pending) | `$XDG_RUNTIME_DIR/olympus/` |
 | Marked CLI launcher; desktop URL handler | `~/.local/bin/olympus`; `$XDG_DATA_HOME/applications/ai.olympusplugin.open.desktop` |
 
 Unset config/data/state/cache roots use the standard home-relative
@@ -111,12 +111,14 @@ and secret defaults are separately hard-coded (`src/core/worker-service.ts:520`,
 (`src/core/sovereignty.ts:184`). Audit every consumer, including quiet-guard
 state and data-deletion custody. Mac paths remain unchanged.
 
-For existing Linux data, do not create a second empty store or overwrite a
-policy. Under stopped-host custody, discover legacy settings and offer an
-explicit, receipt-backed migration. Copy, flush, verify, switch references,
-and retain the original until rollback is no longer needed. Conflicting
-old/new settings cause refusal with paths. No automatic cross-host adoption
-or broad recursive deletion of an XDG root.
+Build for fresh-install new users, not migrations. Before any mutation, detect
+existing Linux settings, credentials, indexes and competing custodians in both
+legacy and selected roots. Refuse with the exact paths and a remedy: keep using
+the existing installation, or stop its custodian and explicitly back up and
+move the listed Olympus-owned data aside before retrying a fresh install.
+Never move, adopt, overwrite or delete that data automatically. A matching W5
+receipt permits repair/upgrade of that same installation; ambiguous or foreign
+data still refuses. No legacy migration or unlock-and-migrate feature is in W5.
 
 ### Unit and commands
 
@@ -126,8 +128,7 @@ not literal systemd environment expansion):
 ```ini
 [Unit]
 Description=Olympus standalone engine
-StartLimitIntervalSec=60
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 Type=exec
@@ -139,6 +140,9 @@ Environment="OLYMPUS_ENGINE_HOST=1" "OLYMPUS_ENGINE_BUILD=<build>"
 UMask=0077
 Restart=on-failure
 RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=300
+RestartPreventExitStatus=78
 KillMode=mixed
 TimeoutStopSec=30
 SendSIGKILL=yes
@@ -151,19 +155,30 @@ WantedBy=default.target
 
 Use the user manager, never a system unit, sudo, root worker, OpenClaw or a
 shell sourcing a login profile. `Type=exec` proves execution, not readiness;
-the CLI still waits for application health. The minimum is systemd 240 for
-this template, subject to real directive verification during preflight.
+the CLI still waits for application health. The minimum is systemd 254 for
+`RestartSteps`/`RestartMaxDelaySec`, subject to directive verification during
+preflight. Disable start-rate limiting so transient failures keep retrying with
+bounded backoff; exit 78 (`EXIT_CONFIG`, `src/core/engine-host.ts:41`, `:116`)
+stays failed until the configuration is repaired. Doctor explains the cause
+and offers `systemctl --user reset-failed olympus-engine.service`, followed
+by `olympus engine start`; a reboot is not required to recover a failed unit.
 See upstream [service semantics](https://github.com/systemd/systemd/blob/main/man/systemd.service.xml).
-Logs are private files with bounded rotation and redacted `engine logs`
-output; do not send application payloads to the shared journal. Manager
+Logs are private files with size/retention-bounded copytruncate rotation
+(the manager holds append descriptors open; renaming alone cannot reclaim
+the active file). Record the owned rotation mechanism in the receipt and
+prove continued writes reach the truncated file. Copytruncate can lose lines
+during its copy/truncate window; logs are not the durable transaction record.
+Provide redacted `engine logs` output; do not send application payloads to the shared journal. Manager
 metadata may still appear in the journal.
 
 `KillMode=mixed` lets the host handle SIGTERM and stop its children first;
 systemd then kills remaining unit-cgroup processes at main-process exit or
 stop timeout. Detached process groups do not justify killing by name.
 See upstream [kill semantics](https://github.com/systemd/systemd/blob/main/man/systemd.kill.xml).
-No child may escape into another unit/scope. Prove worker, model, relay and
-confinement-helper custody with real processes. Preserve identity checks for
+No engine service child may escape into another unit/scope. Prove worker,
+model, relay and confinement-helper custody with real processes. The explicit
+exception is a user-requested desktop viewer launched in its own user scope
+(see source opening); engine restart/removal must not kill that viewer. Preserve identity checks for
 legacy recorded children outside the cgroup; unverifiable leftovers are a
 failed cleanup with a remedy, never a successful “nothing running” result.
 
@@ -182,7 +197,15 @@ fence before checking in-flight work, reject new consults, drain, then stop.
 Timeout releases the fence and leaves the old engine running. `--now` is an
 explicit forced-stop choice, never an installer default. System shutdown
 cannot promise the same interactive wait; crash recovery must reconcile
-in-flight state rather than claim completion. Unknown custody blocks deletion.
+in-flight state rather than claim completion. The host currently calls service
+stop methods, waits for them or a 15-second deadline, then exits
+(`src/core/engine-host.ts:42`, `:204`, `:221`). Thus finding 10's “no grace”
+is too broad: stop is attempted, but children have no guaranteed *additional*
+grace after host exit, even with `TimeoutStopSec=30`. PR 1c must test shutdown
+during zkAPI settlement, forced child death and restart reconciliation: no
+false completion, duplicate settlement or lost pending state. Normal logout
+with verified linger must leave the engine running; test that on Omarchy.
+Unknown custody blocks deletion.
 
 ### Linger and honest privilege wording
 
@@ -258,9 +281,17 @@ zkapi-clientd has both but managed Tor lacks Linux arm64
 that lane has a verified runtime. Missing optional lanes must be explicitly
 unavailable; they must not make a false all-capabilities-ready result.
 
-All lifecycle writers, including CLI rollback and shell uninstall, share one
-nonblocking kernel flock in the user runtime directory. Never unlink a live
-lock inode or steal by PID/age. Child execs close the lock descriptor. The
+All Linux lifecycle writers, including CLI rollback and shell uninstall,
+share one nonblocking util-linux `flock` in the user runtime directory. Bun
+has no built-in flock API: the CLI launches a trusted `flock --nonblock
+--close <lock-path> <verified-operation-command> ...` supervisor, which holds
+the lock descriptor for the entire operation, including recovery. Shell entry
+points use the same supervisor/lock; nested operation calls reuse custody
+without reacquiring. Service children do not inherit the descriptor. Do not
+let cancellation release the supervisor while its mutation child still runs.
+Never unlink a live lock inode or steal by PID/age. This is new Linux work:
+Mac CLI rollback currently swaps without a lock (`src/core/engine-service.ts:1045`,
+`:1066`); do not claim it already shares this mechanism or change Mac behavior. The
 persistent transaction record lives in state, independent of the runtime
 directory's reboot lifetime. Recheck layout while locked. Journal only
 identities, paths, hashes, prior enabled state and stages, never secrets.
@@ -291,9 +322,8 @@ Same-release rerun compares installed content to the verified download,
 repairs corruption and verifies the running build without replacing a good
 previous generation. Failed first install disables/removes the new active
 unit and launcher; report any settings/downloads retained for retry.
-Rollback cannot safely undo arbitrary data migrations: each future release
-must declare backward-readable schemas or provide a verified reversible
-migration/snapshot. Refuse an incompatible rollback rather than corrupt data.
+W5 upgrades and rollback require backward-readable schemas. Refuse an
+incompatible version; data migration/snapshot machinery is outside W5.
 
 At the next invocation, lock before reading the journal. Reconcile observed
 hashes/references with the recorded stage: prepared/no switch discards only
@@ -354,41 +384,39 @@ removal result. Full-removal acceptance checks again after that teardown.
 
 ## Secrets on a desktop and a headless host
 
-Make backend selection durable per installation, shared by CLI and service.
-For a fresh standalone install choose encrypted-file storage directly,
-including desktops: a lingering service must work before desktop unlock.
-When qualifying an existing or explicitly selected Linux desktop libsecret
-backend, probe the actual Secret Service bus, service,
-collection unlock state and bounded read/write/delete access with a disposable
-random probe item; executable presence is insufficient. No interactive
-unlock prompt during engine boot. Remove the probe item and report failed
-cleanup. Absent, locked or unreachable service selects encrypted-file for a
-new install, visibly, rather than returning “missing”.
+A fresh standalone install durably writes `backend=file` (mapped to
+`OLYMPUS_SECRET_STORE_BACKEND=file`) before starting any credential consumer,
+including on desktops. Atomically publish and fsync the selection and its
+parent directory, share it between CLI/service, and refuse conflicting ambient
+overrides. Interrupted selection must not start a consumer in auto mode.
+Existing data follows the refusal/remedy above; W5 offers no credential
+migration. Desktop login never changes the persisted backend.
 
-Existing credentials need stronger semantics than opportunistic fallback:
-
-- Persist backend provenance. If a credential belongs to a locked/unavailable
-  keyring, report `backend_unavailable`/`locked`, not “not configured”. A new
-  empty encrypted store cannot recover a key it never held.
-- Offer explicit unlock-and-migrate or re-entry into the encrypted store.
-  Copy only owned known keys while accessible, verify values internally,
-  publish the backend switch atomically, then handle old-key cleanup. Never
-  log values or overwrite a divergent existing file-store key.
-- Once file storage is selected, continue using it when a desktop logs in;
-  do not switch back automatically. A backend disappearing mid-operation
-  fails that operation clearly; no split writes, shadow values or stale
-  credential resurrection on delete. Explicit `libsecret` configuration
-  fails visibly if unavailable, rather than violating that explicit choice.
-- Distinguish successful absent lookup from D-Bus/lock/permission/timeout
-  errors. Keep this distinction through both synchronous and asynchronous
-  callers and doctor; a caught exception must not become a false “missing”.
+Retain libsecret only as an explicit owner selection, never auto-detection or
+an automatic fallback. The current executable-presence test and swallowed
+lookup failures (`src/core/secret-store.ts:79`, `:285`, `:354`) are inadequate.
+For that opt-in, query the Secret Service collection/item D-Bus `Locked`
+property before access; do not try an interactive unlock. Bound all D-Bus and
+`secret-tool` operations to five seconds, terminate timed-out subprocesses,
+and return typed locked/unavailable/permission/timeout errors through sync
+and async callers and doctor. The current spawn has no timeout
+(`src/core/secret-store.ts:359`). Only a successful absent lookup means missing.
+A disposable random read/write/delete probe must be bounded and any failed
+cleanup reported. Explicit libsecret failure never selects a file store or
+claims unattended readiness. A backend disappearing mid-operation fails
+clearly, without split writes, shadow values or resurrection on delete.
 
 Keep the existing authenticated-encryption and lease/atomic-write machinery.
 Harden key reads so missing key with existing ciphertext is a corruption/
 recovery error, never generation of a replacement key. Reboot qualification
 uses the local random key protected by user-directory permissions. This
 protects a ciphertext-only copy, not against someone reading both files or
-running as the same user/root. Passphrase stores require an explicitly
+running as the same user/root. The local wrapping key `secrets.key` and the
+worker bearer token in `worker.env` are both plaintext secrets at rest,
+protected by 0700 directories/0600 files, not by ciphertext encryption
+(`src/core/engine-service.ts:442`, `:931`; `src/core/worker-service.ts:622`).
+Retention/removal reporting must list both; neither may enter logs or receipts.
+Passphrase stores require an explicitly
 provisioned unlock mechanism; a locked store is visibly unavailable after
 boot. No passphrase in unit text, argv, journal or persistent plaintext env
 file, and no unattended-readiness claim without proving unlock.
@@ -398,8 +426,16 @@ file, and no unattended-readiness claim without proving unlock.
 Share target validation with the Mac; platform adapters change dispatch only.
 The worker resolves a provider locator, never accepts a raw path or command
 from a browser/agent. Repeat realpath, containment and regular-file checks
-at dispatch. Keep `OPENABLE_EXTENSIONS` as the single allowlist. On Linux,
-spawn a trusted xdg-open executable with one absolute path argument and a
+at dispatch. Keep `OPENABLE_EXTENSIONS` as the single extension allowlist.
+For Linux, map each allowed extension to its expected MIME type(s), with
+explicit aliases where needed. Require `xdg-mime query filetype` using the
+same desktop environment/resolver as xdg-open to agree before file dispatch;
+unknown, failed, mismatched or unqualified resolver results open only the
+validated parent folder. An extension alone is insufficient: the current
+adapter checks only the suffix (`src/workers/dropbox-files/open-target.ts:155`).
+Include HTML/script content named `invoice.pdf` as a failing-first fixture;
+never dispatch it as a document. Revalidate the target after the bounded MIME
+probe. On Linux, spawn a trusted xdg-open executable with one absolute path argument and a
 bounded timeout, without a shell; do not pass Mac `-R` to xdg-open. A file
 outside the allowlist, including `.desktop`, scripts and link launchers, is
 never executed: reveal via a qualified file-manager API, or open its validated
@@ -416,15 +452,27 @@ backend PRs stay internal/disabled until that consumer lands.
 
 A lingering engine may boot before Hyprland and keep running after logout.
 Do not freeze the installer's DISPLAY/WAYLAND_DISPLAY into the engine unit.
-Provide an owned per-session handoff/helper started by the desktop session,
-validate its current UID/runtime socket, and remove/invalidate it at session
-end. The opener executes in that verified session. Do not import the whole
-shell environment or restart a busy engine merely to update DISPLAY.
-Probe an actual desktop opener; stale environment alone is not readiness.
-With no current desktop, route panel opening through remote open. If
-xdg-open is missing or fails, report the failure and offer the permitted
-provider web preview. An unsupported file type opens its folder, never the
-file itself. Changes to session handoff belong in the owned-artifact receipt.
+At each open, require an active `graphical-session.target` and read current
+`WAYLAND_DISPLAY`/`DISPLAY` from `systemctl --user show-environment`; validate
+and copy only the required desktop variables, never import the entire shell
+environment. Omarchy's uwsm and GNOME session integration are the intended
+providers; neither distro name alone proves readiness. Qualify the actual
+session/opener. Missing target, absent/stale display or unsupported integration
+refuses local opening with a remedy to start a systemd-integrated graphical
+session or use the remote panel/provider preview. No bespoke helper, XDG
+autostart assumption or edit of the user's Hyprland configuration is needed.
+
+Linux `resolveServerMode` must use this live readiness result rather than the
+lingering engine's boot environment (`src/core/remote-open.ts:86`), while
+preserving an explicit remote-mode choice. Dispatch via
+`systemd-run --user --scope -- <trusted-xdg-open> <validated-path>` with a
+sanitized session environment, separate from the engine cgroup. See upstream
+[scope semantics](https://github.com/systemd/systemd/blob/main/man/systemd-run.xml).
+This user-requested viewer is exempt from engine-child custody and uninstall
+cleanup. Bound the launch/probe without treating a long-lived viewer as a
+hung engine child; prove engine restart leaves the viewer alive. If dispatch
+fails, report failure and offer an authorized provider preview. An unsupported
+file type opens its folder, never the file itself.
 
 For headless sources, open the authenticated panel in the second computer's
 browser using the existing SSH-forward and one-time launch-ticket route.
@@ -434,33 +482,62 @@ say that no desktop is available on the engine host. W5 adds no general file
 transfer endpoint and exposes no filesystem path in model-visible output.
 Private answers remain in the private panel.
 
-Headless ChatGPT approval sequence:
+### Open owner decision: Linux approval boundary (finding 1)
 
-1. Establish the existing remote-open SSH forward from the user's computer
-   to the engine worker, bound only to local loopback on the engine's same
-   port. Require SSH authentication; refuse port collision/forward failure.
-   No public bind, firewall opening or invented hostname. If target is
-   unknown, ask the user to configure it through the existing server-mode
-   flow. Browser-only clients use the manual commands.
-2. Start/restart the ChatGPT connection flow while the forward is alive.
-   The existing relay bridge's loopback link reaches the headless engine
-   through that forward. Preserve its original OAuth query, client, redirect,
-   state and PKCE binding. A dashboard ticket opens the panel only; it does
-   not approve the client and is not a generic arbitrary-URL target.
-3. The engine receives a direct loopback connection, displays the consent
-   page and requires the existing same-origin navigation, CSRF cookie/form
-   and explicit user click. Keep relay/public approval rejected. The SSH
-   account now holds the same local capability as a desktop user; disclose
-   that boundary, do not add the demo password path to real installs.
-4. Follow the exact validated callback, exchange the code, and make one real
-   authenticated tool call. A consent page or systemd “active” is not proof
-   of connection. Expiry, wrong port/install, replay and denied consent must
-   fail without weakening any origin or client check.
+Loopback is not an owner identity. A different local UNIX account can fetch
+the consent page and forge navigation headers, and can occupy the TCP port
+while the engine is down. The existing checks establish direct loopback,
+CSRF and browser navigation, not UID ownership
+(`src/workers/remote-oauth/handler.ts:278`, `:285`, `:746`;
+`docs/design/chatgpt-plugin.md:1371`). SSH authentication alone does not remove
+that engine-host risk. **OPEN OWNER DECISION:** choose the Linux owner-held
+approval boundary before enabling PR 4's approval path.
 
-The headless connection helper should reuse the fixed remote-open tunnel
-mechanism and a connection instruction state, not broaden `OpenTarget` to
-arbitrary URLs. Linux-local client OAuth callbacks on the second computer
-must be tested separately from ChatGPT's web callback.
+Recommendation: put the Linux approval/worker endpoint on a Unix socket at
+`$XDG_RUNTIME_DIR/olympus/worker.sock`, inside an owner-owned 0700 directory
+with a 0600 socket. Validate ancestors/ownership and refuse unsafe or occupied
+paths; no parallel unauthenticated TCP approval listener. Remote browsers
+reach it through an authenticated owner SSH account, for example:
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:/run/user/<uid>/olympus/worker.sock <configured-ssh-target>
+```
+
+Use the validated runtime path, not an assumed UID/path. The TCP end is local
+to the second computer, so that computer must also be trusted against other
+local users (or use the owner-code factor there too). Same-UID processes and
+root remain trusted; socket permissions cannot separate them. PR 4 must adapt
+worker health, relay/CLI clients and direct-transport validation for the socket,
+without treating a forged HTTP header as proof of socket origin. A browser on
+the engine host also needs the approved socket-to-browser route or code factor.
+
+Fallback option: retain loopback but require a short-lived, single-use code
+issued only by the owner's CLI, bound to the pending install/client/redirect/
+state/PKCE approval transaction. Never expose it through an unauthenticated
+HTTP endpoint or logs. Bound attempts and atomically consume it; CSRF, origin
+checks and explicit consent still apply. This protects approval but does not
+by itself prevent TCP port squatting; fail on collisions and never submit an
+owner code to an unverified worker. These options are proposals, not approval.
+
+Conditional headless connection sequence after the owner's choice:
+
+1. Establish the selected owner-authenticated route with the configured SSH
+   target; refuse forward failures/collisions. Browser-only clients receive
+   manual commands. No public bind or firewall opening.
+2. Start/restart ChatGPT connection while the route is alive. Preserve the
+   relay bridge's original OAuth query, client, redirect, state and PKCE.
+   A dashboard launch ticket opens the panel only and is never consent.
+3. Require the selected owner proof, existing CSRF/navigation checks and an
+   explicit consent click; keep relay/public approval rejected. Do not reuse
+   the demo password path for real installs.
+4. Follow only the validated callback, exchange the code, and make one real
+   authenticated tool call. Wrong install, expiry, replay and denied consent
+   fail closed. Test Linux-local client callbacks separately from ChatGPT's
+   web callback.
+
+Reuse remote-open's bounded tunnel/instruction flow with the selected transport;
+do not broaden `OpenTarget` to arbitrary URLs. PR 4's conditional regression
+must prove “other local user cannot approve,” including forged browser headers.
 
 ## Doctor coverage
 
@@ -468,7 +545,7 @@ Doctor reports independent facts and remedies, without printing credentials:
 
 | Check | Required diagnostic/proof |
 |---|---|
-| Host and service | Standalone Linux recognized without OpenClaw; user bus accessible; unit owned and valid; enabled/active/build/health distinguished; conflicting worker or host refused. |
+| Host and service | Standalone Linux recognized without OpenClaw; user bus accessible; unit owned and valid; enabled/active/build/health distinguished; config-exit/backoff/start-limit diagnosed with repair and reset-failed/start commands; conflicting worker or host refused. |
 | Persistence | Linger known and enabled; login-only or unavailable state is unhealthy for this install contract; read-only doctor never enables linger. |
 | Paths and recovery | Effective XDG roots match receipt and every child; permissions/ownership safe; no unfinished transaction; previous generation/runtime usable; disk headroom reported. |
 | Process custody | Manager MainPID/cgroup agrees with current host; no stale competing listener or escaped recorded child; unknown observation is not healthy. |
@@ -485,19 +562,34 @@ its change. Critical PRs require fresh independent review under
 `docs/ENGINEERING_PROCESS.md:76`, focused proof, required head CI and exact-main
 CI. No deployment follows automatically. No new general-purpose process gate.
 
-| PR | Scope and dependency | Regression proof that must fail without it |
-|---|---|---|
-| 1. Linux layout and systemd lifecycle | Shared layout, narrow adapter, receipt, custody, status/start/stop/restart/verify and doctor host checks; no public installer yet. | Temporary nondefault XDG roots reach every child/CLI; manager access denied is unknown; symlink/foreign paths cause no mutation; real user systemd stop and main-process crash remove detached grandchildren; stale build/PID/HTTP health fails; quiet timeout changes nothing; admission race cannot accept new work while stopping. Mac launchd behavior remains covered. |
-| 2. Stable secret backend | Can proceed independently, integrates PR 1 paths. | `secret-tool` present with no bus, locked collection, timeout and permission error select file on fresh auto install or report existing-key unavailability; never false missing. Desktop login cannot switch backend. Concurrent writes, corrupt ciphertext, lost key, migration interruption and delete/restart cannot lose or revive credentials. Real locked-keyring and headless reboot proof. |
-| 3. Pinned install, upgrade and removal | Depends on 1–2; shell scripts, release pins/publisher, shared flock, durable transaction, full removal and lifecycle doctor. | Tampered archive/cached Bun never runs; missing pin/CPU/glibc/tool/bus/linger refuses before active mutation; concurrent install/rollback/uninstall serializes; same-release repair preserves previous; injected failure/crash at each durable boundary recovers twice; failed new and failed rollback health are distinct; uninstall works without Bun/app, leaves unrelated files/processes intact, and purge inventory is empty. Shell syntax/ShellCheck plus real systemd integration, not command mocks alone. |
-| 4. Desktop opener and headless handoff | Depends on 1; internal adapter/session helper and remote-open tunnel reuse. Public Linux source capabilities wait for PR 5. | Both private/unreadable paths reach the same dispatcher; allowlisted file opens, script/desktop file only reveals folder; symlink swaps, traversal, injected argv and revoked eligibility refuse; Hyprland login/logout updates readiness without restarting engine; headless launches no xdg-open; second-computer approval works and relay/public/cross-origin/replay requests still fail. |
-| 5. Consumer integration and qualification | Depends on 1–4 and relevant W1–W4 proof; **after OpenAI review closes**. Host-neutral payload/decoder, copy inventory below and supported install entrypoints. | Old/new payload compatibility; Linux never displays “opened on Mac”; install instructions select proven capability/architecture; missing optional lanes are visibly unavailable; Omarchy acceptance below. Tests preserve the frozen demo configuration and prohibit unsupported listing claims. |
+Every row below includes a unit-level failing-first test run by the existing
+Bun CI lanes; real service-manager proof is additional, never replaced by
+command mocks. PR 1b adds the **systemd-as-PID-1 container with linger** CI
+harness: a disposable container with its own cgroup namespace/delegation,
+logind, a dedicated ordinary account and enabled linger. The driver uses
+`systemctl --user -M <test-user>@.host` inside that container to reach the real
+user manager. Wire it into CI with prerequisite failures reported as failures,
+not skipped success. It uses no host user state or compositor. The current
+Ubuntu runner alone is not that harness. Real reboot, Hyprland and logout
+checks belong to Omarchy acceptance, not claimed unit coverage.
 
-New Linux functionality can land internally in the first four PRs without
-altering the reviewed listing or serving changed plugin bundles. Publication
-is a separate explicitly authorized action after review closure. Runtime pin
-qualification and schema compatibility are engineering proof tasks, not owner
-product decisions.
+| PR | Scope and dependency | Unit-level failing-first proof in CI | Additional proof |
+|---|---|---|---|
+| 1a. Layout and receipt | Shared path plumbing and private receipt; refuse pre-existing unowned data; no systemd adapter or admission changes. | Nondefault XDG fixtures reach each consumer; ambiguous receipts and legacy data refuse before writes with exact paths/remedy. Mac path/output fixtures remain byte-for-byte unchanged. | Audit all CLI/worker/secret/doctor path consumers; symlink/foreign-owner fixtures leave the filesystem unchanged. |
+| 1b. Systemd adapter and status | Depends on 1a; rendering, lifecycle commands, custody, backoff, copytruncate and doctor host/status checks. Adds the CI harness above. | Inject inaccessible manager, stale PID/build/HTTP result and config exit 78; status must be unknown/unhealthy, renderer must prevent config restart and use backoff. Rotation fixture writes through an already-open descriptor after truncation. | PID-1 container: real start/stop/crash removes detached engine grandchildren, repeated transient failures continue retrying, exit 78 stays stopped, enabled state and log rotation match the contract. |
+| 1c. Maintenance admission fence | Depends on 1b; shared worker admission/drain and lifecycle fence on both platforms. | A deterministic admission/drain race rejects new work; timeout releases the fence without stop. Inject shutdown during zkAPI settlement and replay recovery twice: no false completion, duplicate settlement or lost pending record. | PID-1 container: kill host/children during settlement, then verify reconciliation. Omarchy: logout does not interrupt settlement; real shutdown/reboot recovery. |
+| 2. Durable secret backend | Can proceed independently; integrates 1a paths. Fresh file selection, explicit-only libsecret and typed failures; no migration. | Interrupt selection publication: no consumer may start in auto mode. A present `secret-tool` cannot change fresh `backend=file`; desktop login cannot switch it. Locked D-Bus property, timeout and permission fixtures fail explicitly, never false missing or file fallback. Lost key with ciphertext refuses. | CI private D-Bus fake Secret Service plus hung subprocess proves bounded calls/cleanup; concurrent write/delete/restart and corrupt-store fixtures. Omarchy reboot proves unattended file storage. |
+| 3a. Runtime pins and publisher | Verified Linux architecture pins, archive/executable checks and publisher filling; no install transaction. | Missing pin, tampered archive and tampered cached executable refuse before execution; publisher fixture cannot emit an unfilled template or overwrite prior assets. | Each architecture needs real CPU/glibc/loadability proof before publication; x64 does not qualify arm64. |
+| 3b. Install/upgrade transaction | Depends on 1a–1c, 2 and 3a; Linux installer, util-linux flock supervisor, durable recovery and lifecycle doctor. | Fault injection at every durable boundary recovers twice; same-release repair retains previous; failed upgrade versus failed rollback health are distinct; missing tools/bus/linger refuses before active mutation. | CI subprocess contention for install/rollback and cancellation keeps the lock through mutation; PID-1 container proves real activation/recovery. Shell syntax/ShellCheck; reboot/power-loss acceptance on Omarchy. |
+| 3c. Uninstall and purge | Depends on 3b; receipt-bounded shell removal without Bun/app; optional explicit data purge. | Receipt fixtures preserve unrelated files/replacements, retain data by default, remove only enumerated owned artifacts with consent, and refuse deletion on unknown custody; repeat interrupted removal safely. | PID-1 container: uninstall without Bun/app, install/rollback/uninstall lock contention, cgroup/listener release and purge inventory. Omarchy: final runtime-directory teardown and explicit linger restoration. |
+| 4. Desktop opener and headless handoff | Depends on 1a/1b; live graphical readiness, separate viewer scope and bounded tunnel reuse. Approval transport awaits the open owner decision. Public capabilities wait for 5. | Shared private/unreadable dispatch rejects symlink swaps/traversal/argv injection/revoked eligibility. HTML/script disguised as `.pdf` and unknown MIME open only the folder. Inactive graphical target/stale display refuses; manager environment can prove desktop readiness when engine env lacks DISPLAY. **Conditional on the decision:** owner proof required, other local user cannot approve, including forged headers/replay. | PID-1 container: viewer fixture in its own scope survives engine restart; selected socket permission boundary tested with a second UID, or code-factor rejection/atomic consumption if selected. Omarchy: actual Hyprland viewer, login/logout readiness and second-computer OAuth/tool call. |
+| 5. Consumer integration and qualification | Depends on all prior parts and relevant W1–W4 proof; **after OpenAI review closes**. Host-neutral payload/decoder, copy inventory and supported entrypoints. | Old/new payload compatibility, Linux never says “opened on Mac,” unsupported architecture/optional lanes remain unavailable, frozen demo/listing fixtures unchanged until authorized publication. | Omarchy acceptance below; independent review and required exact-head/exact-main CI remain required for each critical implementation PR. |
+
+PRs 1a–4 can land internally without altering the reviewed listing or serving
+changed plugin bundles; the owner-dependent approval behavior stays disabled
+until decided and proven. Publication is a separate explicitly authorized
+action after review closure. Runtime pin qualification and schema compatibility
+are engineering proof tasks; finding 1 is an unresolved product decision.
 
 ### Deferred copy inventory (PR 5 only)
 
@@ -506,7 +598,7 @@ product decisions.
 | Private answer payload/panel and source-open feedback | “your computer” when colocated; explicit engine-host kind/location when remote. Update `kind: mac` compatibly, decoder and localized labels (`src/workers/chatgpt/private-answer-jobs.ts:1243`, `src/workers/dashboard/chatgpt/private-answer.ts:138`, `:693`). |
 | Dashboard, doctor and setup status | Distinguish Mac, Linux desktop and headless host, including no-desktop/locked-store/persistence limitations. Mac-specific doctor text exists at `src/core/doctor.ts:495`, `:513`. |
 | Relay disconnected/offline/errors and approval bridge | Replace “Your Mac” with neutral text unless a verified host kind is available; no new machine identifier needed (`connect-relay/server/relay-mcp.ts:45`, `:174`; `connect-relay/server/authorize-bridge.ts:56`). |
-| OAuth consent/refusal | Explain remote-open approval while retaining identical authorization (`src/workers/remote-oauth/handler.ts:280`; `src/workers/remote-oauth/consent-page.ts:179`). |
+| OAuth consent/refusal | Explain the owner-selected remote approval route while preserving CSRF/client checks (`src/workers/remote-oauth/handler.ts:280`; `src/workers/remote-oauth/consent-page.ts:179`). |
 | Plugin skills and manifest | Setup/ask guidance, descriptions and review examples: approved Linux requirements, honest prerequisite/linger wording; no change now (`chatgpt-plugin/skills/olympus-setup/SKILL.md:3`, `:38`; `chatgpt-plugin/plugin.json:5`, `:27`). |
 | README, install guide and site | Platform-specific install/uninstall links, awake/online versus persistent-server explanation, tested architecture/capabilities and conditional no-admin wording (`README.md:60`, `:74`, `:154`; `site/install/index.html:6`, `:31`). Audit accompanying screenshots and translations in this PR. |
 
@@ -524,10 +616,13 @@ run; no such run is claimed by this design.
    allows it. Verify the unit and exact build, not just the installer message.
 2. In Hyprland, open one allowed document and one disallowed script's folder
    from both private-answer and unreadable-source flows. Prove the script did
-   not execute. Exercise symlink/revocation refusal and stale desktop session.
+   not execute. Also use HTML/script content disguised as a PDF and prove
+   only its folder opens. Exercise symlink/revocation refusal and stale desktop
+   session; a viewer in its separate scope must survive an engine restart.
 3. Use a second computer for the remote-open panel and ChatGPT approval.
    Complete OAuth plus a tool call; one Personal question yields cited
    evidence and one Private question is answered only in its private panel.
+   Under the chosen approval boundary, prove a second local UID cannot approve.
    After logout, source web previews still work and no server-local desktop
    action is falsely reported. Include denied, expired and replayed consent.
 4. Log out all graphical/SSH sessions and verify from the second computer
@@ -541,9 +636,12 @@ run; no such run is claimed by this design.
    Ctrl-C/SIGKILL and reboot at durable transaction boundaries.
 6. Stop/restart, then crash the main process with real worker/model children.
    Verify unit-cgroup cleanup and restart, no occupied stale listener, no
-   unrelated process killed. Stop remains stopped after reboot.
+   unrelated process killed. Interrupt zkAPI settlement during shutdown and
+   prove crash reconciliation on reboot without duplicate settlement or false
+   completion; ordinary logout must not interrupt it. Stop stays stopped after reboot.
 7. Normal uninstall leaves no installed machinery and accurately lists kept
-   data. Reinstall adopts it. Explicit full removal in this dedicated account
+   data. A fresh reinstall refuses retained data with exact paths and a remedy;
+   it never adopts it. Explicit full removal in this dedicated account
    removes every owned artifact, secret and pending transaction, restores
    the prior linger setting by explicit choice, and preserves unrelated
    services, source files, MIME entries and profile text. Repeat removal.
@@ -559,7 +657,34 @@ lanes remain required regardless of the skipped distro run.
 
 ## Owner decisions
 
-No additional product decision is needed to begin the scoped implementation.
-This design preserves default data retention and makes full removal an
-explicit choice, preserves the OpenAI-review freeze, and records Omarchy
-qualification with Ubuntu proof skipped.
+**OPEN — finding 1:** choose the Linux owner-held approval boundary. Recommend
+the private Unix worker socket and SSH socket forwarding; the fallback is a
+transaction-bound one-time code from the owner's CLI. PR 4 must carry the
+conditional “other local user cannot approve” test for the selected route.
+This document records the decision request; it does not resolve it or block
+independent layout, lifecycle, secrets and installer work.
+
+Settled scope: fresh installs with existing-data refusal (no migrations),
+default retention with explicitly chosen full removal, the OpenAI-review
+freeze, and Omarchy qualification with Ubuntu proof skipped.
+
+## Review disposition against the code baseline
+
+Findings 1–10 are incorporated above: 1 remains an open owner decision;
+2–9 require design changes; 10 requires shutdown/settlement recovery proof.
+Two review claims need narrower wording, without dismissing their risks:
+
+- Finding 6's “dead until reboot” means automatic retries can stop; reboot is
+  not the only recovery. Repair plus reset-failed/start is the documented
+  remedy. Config exits really are 78 (`src/core/engine-host.ts:41`, `:116`).
+- Finding 10's “no grace on shutdown or logout” overstates current host
+  behavior: service stop methods run before the 15-second deadline and exit
+  (`src/core/engine-host.ts:204`, `:206`, `:221`). Remaining children can still
+  be cut off immediately at host exit under mixed kill mode. A lingering
+  engine should not stop on ordinary logout; that is an acceptance invariant.
+
+Finding 5's existing CI limitation is visible in `.github/workflows/verify.yml`:
+it runs Ubuntu jobs without the proposed PID-1/linger harness. The new tests
+and harness are implementation obligations, not results claimed by this doc.
+The missing-host hint citation is corrected to `src/core/doctor.ts:495`;
+`:481` only appends the installed engine to the host list.
