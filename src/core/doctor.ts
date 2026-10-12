@@ -60,7 +60,7 @@ import {
   publicSourceDoctorLanes,
 } from './public-source-capabilities.ts';
 import { createSourceCorpusRegistry } from './source-corpus-registry.ts';
-import { createDefaultSecretStore, normalizeSecretRef } from './secret-store.ts';
+import { createDefaultSecretStore, normalizeSecretRef, SecretStoreError } from './secret-store.ts';
 import {
   defaultZkapiStatePath,
   zkapiConsultReadiness,
@@ -815,7 +815,8 @@ function secretRefPresent(
   const store = deps.secretStore ?? createDefaultSecretStore({ env });
   try {
     return Boolean(store.getSync?.(ref.key)?.trim());
-  } catch {
+  } catch (error) {
+    if (error instanceof SecretStoreError) throw error;
     return false;
   }
 }
