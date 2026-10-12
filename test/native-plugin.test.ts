@@ -490,7 +490,7 @@ describe('native OpenClaw plugin adapter', () => {
   test('keeps source-checkout licensing and release version metadata aligned', () => {
     expect(pkg).toMatchObject({ name: 'olympus-source-checkout', private: true });
     expect(pkg.license).toBe('MIT');
-    expect(pkg.version).toBe('1.0.0-rc.5');
+    expect(pkg.version).toBe('1.0.0-rc.6');
     expect(manifest.version).toBe(pkg.version);
   });
 
