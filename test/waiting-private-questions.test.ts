@@ -4,9 +4,9 @@
 // and that it survives a restart (a reopen).
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
 import {
   normalizeWaitingSelectors,
@@ -257,7 +257,7 @@ describe('waiting private questions: revocation', () => {
     expect(store.list().questions.map((q) => q.question)).toEqual(['b1']);
   });
 
-  test('the race across two processes: a store opened separately (the CLI) revokes while the worker\'s insert is in flight', () => {
+  test('two handles on one file (the CLI\'s and the worker\'s): a revocation while the worker\'s insert is in flight', () => {
     const { store: worker, path } = open();
     const cli = openWaitingPrivateQuestionStore(path);
     stores.push(cli);
@@ -288,6 +288,32 @@ describe('waiting private questions: revocation', () => {
     expect(waiting.record(inFlight, { question: 'a again', surface: 'remote', state: 'waiting' })).toBeUndefined();
   });
 
+  test('a recording for a connection the connection store does not vouch for is refused and cleans that connection up', () => {
+    const active = new Set([CONN_A, CONN_B]);
+    let readable = true;
+    const path = join(dir(), 'waiting-private-questions.sqlite');
+    const store = openWaitingPrivateQuestionStore(path, {
+      isActive: (id) => {
+        if (!readable) throw new Error('connection store unreadable');
+        return active.has(id);
+      },
+    });
+    stores.push(store);
+    const ticket = store.ticket(CONN_A);
+    store.record(ticket, { question: 'a', surface: 'remote', state: 'waiting' });
+    store.record(store.ticket(CONN_B), { question: 'b', surface: 'remote', state: 'waiting' });
+    // Unreadable: refused, and nothing is removed on a read failure.
+    readable = false;
+    expect(store.record(ticket, { question: 'a2', surface: 'remote', state: 'waiting' })).toBeUndefined();
+    expect(store.list().questions.map((q) => q.question).sort()).toEqual(['a', 'b']);
+    // Revoked elsewhere, its cleanup here lost: the ticket is still current, yet refused.
+    readable = true;
+    active.delete(CONN_A);
+    expect(store.ticket(CONN_A)).toEqual(ticket);
+    expect(store.record(ticket, { question: 'a3', surface: 'chatgpt', state: 'waiting' })).toBeUndefined();
+    expect(store.list().questions.map((q) => q.question)).toEqual(['b']);
+  });
+
   test('reconcile removes the questions of connections that are no longer active', () => {
     const { store } = open();
     store.record(store.ticket(CONN_A), { question: 'a', surface: 'remote', state: 'waiting' });
@@ -308,4 +334,176 @@ describe('waiting private questions: restart', () => {
     expect(reopened.list().questions).toEqual([expect.objectContaining({ id: ref.id, question: 'kept', generation: 1 })]);
     expect(reopened.acknowledge(ref)).toBe(true);
   });
+});
+
+// ---------------------------------------------------------------------------
+// No recoverable question text, and separate processes
+
+const STORE_MODULE = join(import.meta.dir, '..', 'src', 'core', 'waiting-private-questions.ts');
+const CONNECTIONS_MODULE = join(import.meta.dir, '..', 'src', 'core', 'remote-connections.ts');
+
+/** Every file of the store (the database and any sidecar), as bytes. */
+function storeFiles(path: string): Array<{ name: string; bytes: Buffer }> {
+  const base = path.split('/').at(-1)!;
+  return readdirSync(dirname(path))
+    .filter((name) => name.startsWith(base))
+    .map((name) => ({ name, bytes: readFileSync(join(dirname(path), name)) }));
+}
+
+function holds(path: string, marker: string): string[] {
+  return storeFiles(path).filter((file) => file.bytes.includes(Buffer.from(marker))).map((file) => file.name);
+}
+
+/** A child script: a separate bun process, given the store path and arguments. */
+function script(root: string, name: string, body: string): string {
+  const file = join(root, `${name}.ts`);
+  writeFileSync(file, body);
+  return file;
+}
+
+async function run(file: string, ...args: string[]): Promise<{ code: number; out: string }> {
+  const child = Bun.spawn([process.execPath, file, ...args], { stdout: 'pipe', stderr: 'pipe' });
+  const [code, out] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+  return { code, out };
+}
+
+describe('waiting private questions: deleted text does not linger', () => {
+  test('a dismissed or acknowledged question is gone from the database and every sidecar, with the connection still open', () => {
+    const { store, path, clock } = open();
+    const reader = openWaitingPrivateQuestionStore(path, { now: () => clock.now });
+    stores.push(reader);
+    const dismissed = `dismissed-${crypto.randomUUID()}`;
+    const acknowledged = `acknowledged-${crypto.randomUUID()}`;
+    const kept = `kept-${crypto.randomUUID()}`;
+    const first = store.record(store.ticket(CONN_A), { question: dismissed, surface: 'remote', state: 'waiting' })!;
+    const second = store.record(store.ticket(CONN_A), { question: acknowledged, surface: 'chatgpt', state: 'waiting' })!;
+    store.record(store.ticket(CONN_B), { question: kept, surface: 'remote', state: 'waiting' });
+    expect(reader.list().questions).toHaveLength(3);
+    expect(holds(path, dismissed)).toContain('waiting-private-questions.sqlite');
+    expect(store.dismiss(first.id)).toBe(true);
+    expect(store.acknowledge(second)).toBe(true);
+    // Both connections still open: no WAL, no journal left, and the text zeroed in place.
+    expect(existsSync(`${path}-wal`)).toBe(false);
+    expect(existsSync(`${path}-journal`)).toBe(false);
+    expect(holds(path, dismissed)).toEqual([]);
+    expect(holds(path, acknowledged)).toEqual([]);
+    expect(holds(path, kept)).toEqual(['waiting-private-questions.sqlite']);
+    // Revocation and the bounds delete the same way.
+    store.revokeConnection(CONN_B);
+    expect(holds(path, kept)).toEqual([]);
+  });
+
+  test('after a crash mid-delete the delete never happened; the next delete leaves nothing behind', async () => {
+    const root = dir();
+    const path = join(root, 'waiting-private-questions.sqlite');
+    const marker = `crash-${crypto.randomUUID()}`;
+    const child = script(dirname(root), 'crash', `
+      import { Database } from 'bun:sqlite';
+      const { openWaitingPrivateQuestionStore } = await import(${JSON.stringify(STORE_MODULE)});
+      const [path, marker, mode] = process.argv.slice(2);
+      const store = openWaitingPrivateQuestionStore(path);
+      store.record(store.ticket(${JSON.stringify(CONN_A)}), { question: marker, surface: 'remote', state: 'waiting' });
+      if (mode === 'after-commit') {
+        store.dismissAll();
+      } else {
+        // The worker dies inside the deleting transaction.
+        const raw = new Database(path);
+        raw.exec('PRAGMA secure_delete = ON; BEGIN IMMEDIATE; DELETE FROM waiting_questions;');
+      }
+      process.kill(process.pid, 'SIGKILL');
+    `);
+    const crashed = await run(child, path, marker, 'mid-delete');
+    expect(crashed.code).not.toBe(0);
+    // The hot journal holds the pre-delete page until the next open rolls it back.
+    const reopened = openWaitingPrivateQuestionStore(path);
+    stores.push(reopened);
+    expect(reopened.list().questions.map((question) => question.question)).toEqual([marker]);
+    expect(reopened.dismissAll()).toBe(1);
+    expect(holds(path, marker)).toEqual([]);
+    expect(storeFiles(path).map((file) => file.name)).toEqual(['waiting-private-questions.sqlite']);
+    reopened.close();
+
+    const after = `after-${crypto.randomUUID()}`;
+    expect((await run(child, path, after, 'after-commit')).code).not.toBe(0);
+    expect(holds(path, after)).toEqual([]);
+    expect(storeFiles(path).map((file) => file.name)).toEqual(['waiting-private-questions.sqlite']);
+  }, 30_000);
+});
+
+describe('waiting private questions: separate processes', () => {
+  test('first open from several processes at once: one migration, every record kept', async () => {
+    const root = dir();
+    const path = join(root, 'waiting-private-questions.sqlite');
+    const child = script(dirname(root), 'first-open', `
+      const { openWaitingPrivateQuestionStore } = await import(${JSON.stringify(STORE_MODULE)});
+      const [path, connection] = process.argv.slice(2);
+      const store = openWaitingPrivateQuestionStore(path);
+      const ref = store.record(store.ticket(connection), { question: 'from ' + connection, surface: 'remote', state: 'waiting' });
+      store.close();
+      console.log(ref ? 'recorded' : 'refused');
+    `);
+    const connections = ['c'.repeat(18), 'd'.repeat(18), 'e'.repeat(18), 'f'.repeat(18)];
+    const results = await Promise.all(connections.map((connection) => run(child, path, connection)));
+    expect(results.map((result) => [result.code, result.out.trim()])).toEqual(connections.map(() => [0, 'recorded']));
+    const store = openWaitingPrivateQuestionStore(path);
+    stores.push(store);
+    expect(store.list().questions.map((question) => question.question).sort()).toEqual(connections.map((connection) => `from ${connection}`));
+  }, 30_000);
+
+  test('a revoke whose cleanup hits a held lock still revokes; recordings are refused at once and the worker cleans up after', async () => {
+    const root = dir();
+    const connectionsPath = join(root, 'remote-connections.sqlite');
+    const connections = openRemoteConnectionStore(connectionsPath);
+    stores.push(connections);
+    const grok = connections.create('Grok').connection;
+    const muse = connections.create('Muse').connection;
+    const isActive = (id: string) => connections.list().some((connection) => connection.id === id && connection.revokedAt === null);
+    const path = waitingPrivateQuestionsDbPath(connectionsPath);
+    const worker = openWaitingPrivateQuestionStore(path, { isActive });
+    stores.push(worker);
+    const inFlight = worker.ticket(grok.id);
+    worker.record(worker.ticket(grok.id), { question: 'grok question', surface: 'remote', state: 'waiting' });
+    worker.record(worker.ticket(muse.id), { question: 'muse question', surface: 'remote', state: 'waiting' });
+
+    const holder = Bun.spawn([process.execPath, script(dirname(root), 'hold', `
+      import { Database } from 'bun:sqlite';
+      const [path, ms] = process.argv.slice(2);
+      const db = new Database(path);
+      db.exec('BEGIN IMMEDIATE');
+      db.run("INSERT INTO waiting_meta (key, value) VALUES ('held', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+      console.log('locked');
+      await Bun.sleep(Number(ms));
+      db.exec('ROLLBACK');
+      db.close();
+    `), path, '3000'], { stdout: 'pipe', stderr: 'pipe' });
+    const reader = holder.stdout.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('locked');
+
+    // The CLI revokes from its own process while the lock is held.
+    const cli = await run(script(dirname(root), 'revoke', `
+      const { openRemoteConnectionStore } = await import(${JSON.stringify(CONNECTIONS_MODULE)});
+      const [path, id] = process.argv.slice(2);
+      const store = openRemoteConnectionStore(path);
+      const started = Date.now();
+      const revoked = store.revoke(id);
+      store.close();
+      console.log(JSON.stringify({ revoked: revoked.revokedAt !== null, ms: Date.now() - started }));
+    `), connectionsPath, grok.id);
+    expect(cli.code).toBe(0);
+    const outcome = JSON.parse(cli.out.trim().split('\n').at(-1)!) as { revoked: boolean; ms: number };
+    expect(outcome.revoked).toBe(true);
+    // Not held up by this store for long (its cleanup waits about a second).
+    expect(outcome.ms).toBeLessThan(2_900);
+    expect(await holder.exited).toBe(0);
+
+    // The cleanup failed: the record is still there and the old ticket is still current here.
+    expect(worker.list().questions.map((question) => question.question).sort()).toEqual(['grok question', 'muse question']);
+    expect(worker.ticket(grok.id)).toEqual(inFlight);
+    // The worker's reconcile (on open and on every re-check pass) retries the failed cleanup.
+    expect(worker.reconcileConnections(isActive)).toBe(1);
+    expect(worker.list().questions.map((question) => question.question)).toEqual(['muse question']);
+    expect(worker.record(inFlight, { question: 'grok again', surface: 'remote', state: 'waiting' })).toBeUndefined();
+    expect(worker.record(worker.ticket(grok.id), { question: 'grok later', surface: 'remote', state: 'waiting' })).toBeUndefined();
+    expect(worker.record(worker.ticket(muse.id), { question: 'muse later', surface: 'remote', state: 'waiting' })).toBeDefined();
+  }, 30_000);
 });

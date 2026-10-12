@@ -21,7 +21,7 @@ import type { AnswerPrivatelyOptions } from '../src/core/analyst-built-in.ts';
 import { createAnswerActivity } from '../src/workers/answer-activity.ts';
 import type { PrivateAnswerModel } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { generatePanelKeyPair } from '../src/workers/chatgpt/private-answer-crypto.ts';
-import { PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS, PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS, PRIVATE_ANSWER_CLAIM_COLLECT_MS, PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { createBuiltInPrivateAnswerModel, PANEL_ANSWER_LIMITS } from '../src/workers/chatgpt/private-answer-model.ts';
 import { CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 import { appendClassificationLedgerEntry } from '../src/workers/classification-ledger.ts';
@@ -146,7 +146,9 @@ describe('1. every claimed job settles within its deadline', () => {
     const panel = await generatePanelKeyPair();
     await jobs.claim(first, panel.publicKey);
     await jobs.claim(second, panel.publicKey);
-    clock.now = 2_000;
+    // A claimed job outlives the unclaimed TTL by its own bounded lifetime
+    // (its deadline plus the collect window); past that it is dropped.
+    clock.now = 500 + 10_000 + PRIVATE_ANSWER_CLAIM_COLLECT_MS;
     jobs.sweep();
     await Bun.sleep(10);
     // Two claims and the one analysis that started: every begin ended.

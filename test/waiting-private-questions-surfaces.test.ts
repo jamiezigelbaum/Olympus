@@ -18,7 +18,7 @@ import { defaultConfig } from '../src/core/config.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { createRemotePrivateParts, remotePrivateOutcome, type PrivateMatchVerdict } from '../src/core/remote-private-part.ts';
-import { REMOTE_OUTPUT_SCHEMAS, REMOTE_PRIVATE_NOTE, remoteOperationOutput } from '../src/core/remote-result.ts';
+import { REMOTE_OUTPUT_SCHEMAS, REMOTE_PRIVATE_NOTE, remoteOperationOutput, withRemotePrivateNote } from '../src/core/remote-result.ts';
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
@@ -68,18 +68,25 @@ function readyModel(): PrivateAnswerModel & { calls: string[] } {
   };
 }
 
-function answerResult(audit: Record<string, unknown> = {}): SourceIndexAnswerResult {
+function answerResult(audit: Record<string, unknown> = {}, decision = 'allow'): SourceIndexAnswerResult {
   return {
     answer: 'The released evidence does not answer this.',
     evidence: [],
     audit: { searched_corpora: [], skipped_corpora: [], lane_audits: [], latency_ms: 1, raw_source_exposed: false, ...audit },
     policy: { raw_source_exposed: false, source_packets_exposed: false, internal_content_exposed: false, secure_local_content_exposed: false, castor_safe_bridge: true },
+    opsec: { structured_evidence: [], release_decision: { decision, reasons: [] }, raw_source_exposed: false },
   } as unknown as SourceIndexAnswerResult;
 }
+
+/** The remote release the agent gets (core/remote-result.ts): answered, or withheld by slice 2's recheck. */
+const ANSWERED = { kind: 'source_answer', status: 'answered' };
+const WITHHELD = { kind: 'source_answer', status: 'withheld' };
 
 const POLICY_SKIP = { skipped_corpora: [{ corpus_id: 'secure_local.fixture.files', trust_domain: 'secure_local', reason: 'no_private_analyst_route' }] };
 const UNAVAILABLE_SKIP = { skipped_corpora: [{ corpus_id: 'secure_local.fixture.files', trust_domain: 'secure_local', reason: 'private_analyst_unavailable' }] };
 const DELIVERED = { answer_synthesis: { private_context_used: true, secure_local_items_consulted: 2, raw_source_exposed: false } };
+// The bulk-approval refusal (analyst-answer.ts): private_context_used with nothing read.
+const BULK_REFUSAL = { answer_synthesis: { private_context_used: true, secure_local_items_consulted: 0, raw_source_exposed: false } };
 
 // ---------------------------------------------------------------------------
 // ChatGPT surface
@@ -234,12 +241,21 @@ describe('ChatGPT: recorded at the match, never from the private question panel'
 // Summary-rule remote agents
 
 describe('remote: the Private part\'s typed outcome', () => {
-  test('delivered, excluded by policy, route unavailable, or none', () => {
-    expect(remotePrivateOutcome(answerResult(DELIVERED))).toBe('delivered');
-    expect(remotePrivateOutcome(answerResult(POLICY_SKIP))).toBe('excluded_by_policy');
-    expect(remotePrivateOutcome(answerResult({ skipped_corpora: [{ corpus_id: 'x', trust_domain: 'secure_local', reason: 'bulk_secure_local_release_requires_approval' }] }))).toBe('excluded_by_policy');
-    expect(remotePrivateOutcome(answerResult(UNAVAILABLE_SKIP))).toBe('route_unavailable');
-    expect(remotePrivateOutcome(answerResult())).toBe('none');
+  test('from the release decision and the final remote release, not from synthesis fields', () => {
+    expect(remotePrivateOutcome(answerResult(DELIVERED), ANSWERED)).toBe('delivered');
+    // Delivered only when the agent really gets it: slice 2's recheck withheld it, or no release is known.
+    expect(remotePrivateOutcome(answerResult(DELIVERED), WITHHELD)).toBe('withheld');
+    expect(remotePrivateOutcome(answerResult(DELIVERED))).toBe('none');
+    // The bulk-approval refusal sets private_context_used with zero items read: approval, not delivery.
+    expect(remotePrivateOutcome(answerResult(BULK_REFUSAL, 'needs_approval'), ANSWERED)).toBe('approval_required');
+    expect(remotePrivateOutcome(answerResult(DELIVERED, 'needs_approval'), ANSWERED)).toBe('approval_required');
+    expect(remotePrivateOutcome(answerResult({ skipped_corpora: [{ corpus_id: 'x', trust_domain: 'secure_local', reason: 'bulk_secure_local_release_requires_approval' }] }), ANSWERED)).toBe('approval_required');
+    expect(remotePrivateOutcome(answerResult(DELIVERED, 'deny'), ANSWERED)).toBe('withheld');
+    // Private context flagged but nothing read, released: not delivered, and nothing left out.
+    expect(remotePrivateOutcome(answerResult(BULK_REFUSAL), ANSWERED)).toBe('none');
+    expect(remotePrivateOutcome(answerResult(POLICY_SKIP), ANSWERED)).toBe('excluded_by_policy');
+    expect(remotePrivateOutcome(answerResult(UNAVAILABLE_SKIP), ANSWERED)).toBe('route_unavailable');
+    expect(remotePrivateOutcome(answerResult(), ANSWERED)).toBe('none');
     expect(remotePrivateOutcome({ status: 'working', job_id: 'saj_x' })).toBe('none');
     expect(remotePrivateOutcome(undefined)).toBe('none');
   });
@@ -263,7 +279,7 @@ describe('remote: probe states and records', () => {
   test('match: recorded as waiting with its selectors, and the fixed sentence; no_match: nothing', async () => {
     const calls: Array<Record<string, unknown>> = [];
     const call = parts('match', calls).forConnection('conn-a').start('source_answer', ARGS)!;
-    expect(await call.settle(answerResult(POLICY_SKIP))).toBe(true);
+    expect(await call.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(true);
     // The probe searched with the request's own selectors and question only.
     expect(calls).toEqual([{ question: 'When does the lease end?', corpus_ids: ['secure_local.fixture.files'], account: 'personal' }]);
     expect(store.list().questions).toEqual([expect.objectContaining({
@@ -271,21 +287,21 @@ describe('remote: probe states and records', () => {
       selectors: { corpus_ids: ['secure_local.fixture.files'], account: 'personal' },
     })]);
 
-    expect(await parts('no_match').forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(UNAVAILABLE_SKIP))).toBe(false);
+    expect(await parts('no_match').forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(UNAVAILABLE_SKIP), ANSWERED)).toBe(false);
     expect(store.list().questions).toHaveLength(1);
   });
 
   test('unknown (timeout or error): recorded as couldn\'t check yet, never reported as a match', async () => {
-    expect(await parts('hang').forConnection('conn-a').start('source_answer', ARGS)!.settle(answerResult(UNAVAILABLE_SKIP))).toBe(false);
-    expect(await parts('throw').forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP))).toBe(false);
+    expect(await parts('hang').forConnection('conn-a').start('source_answer', ARGS)!.settle(answerResult(UNAVAILABLE_SKIP), ANSWERED)).toBe(false);
+    expect(await parts('throw').forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(false);
     expect(store.list().questions.map((question) => [question.connectionId, question.state]).sort()).toEqual([['conn-a', 'unchecked'], ['conn-b', 'unchecked']]);
   });
 
   test('delivered or none: no probe, no record', async () => {
     const calls: Array<Record<string, unknown>> = [];
     const hook = parts('match', calls).forConnection('conn-a');
-    expect(await hook.start('source_answer', ARGS)!.settle(answerResult(DELIVERED))).toBe(false);
-    expect(await hook.start('source_answer', ARGS)!.settle(answerResult())).toBe(false);
+    expect(await hook.start('source_answer', ARGS)!.settle(answerResult(DELIVERED), ANSWERED)).toBe(false);
+    expect(await hook.start('source_answer', ARGS)!.settle(answerResult(), ANSWERED)).toBe(false);
     expect(calls).toEqual([]);
     expect(store.list().questions).toEqual([]);
     expect(hook.start('source_index_status', {})).toBeUndefined();
@@ -295,8 +311,8 @@ describe('remote: probe states and records', () => {
   test('selectors that cannot be stored exactly: not recorded, not probed', async () => {
     const calls: Array<Record<string, unknown>> = [];
     const hook = parts('match', calls).forConnection('conn-a');
-    expect(await hook.start('source_answer', { ...ARGS, account: 42 })!.settle(answerResult(POLICY_SKIP))).toBe(false);
-    expect(await hook.start('source_answer', { ...ARGS, selected_items: [{ corpus_id: 'x', local_item_id: 'y'.repeat(5_000) }] })!.settle(answerResult(POLICY_SKIP))).toBe(false);
+    expect(await hook.start('source_answer', { ...ARGS, account: 42 })!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(false);
+    expect(await hook.start('source_answer', { ...ARGS, selected_items: [{ corpus_id: 'x', local_item_id: 'y'.repeat(5_000) }] })!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(false);
     // The over-bound selectors were probed but the store refused them: nothing recorded, and no sentence.
     expect(store.list().questions).toEqual([]);
     expect(calls).toHaveLength(1);
@@ -306,24 +322,59 @@ describe('remote: probe states and records', () => {
     const call = parts('match').forConnection('conn-a').start('source_answer', ARGS)!;
     store.revokeConnection('conn-a');
     // Refused, so the agent is not told the answer can be seen on the computer.
-    expect(await call.settle(answerResult(POLICY_SKIP))).toBe(false);
+    expect(await call.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(false);
     expect(store.list().questions).toEqual([]);
   });
 
-  test('a handed-off answer settles when its own connection collects it, once', async () => {
+  test('approval required, or withheld at the final release: probed and recorded', async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const hook = parts('match', calls).forConnection('conn-a');
+    // The bulk-approval refusal: nothing Private was read, so the question waits.
+    expect(await hook.start('source_answer', ARGS)!.settle(answerResult(BULK_REFUSAL, 'needs_approval'), ANSWERED)).toBe(true);
+    // A summary that drew on Private, then withheld by slice 2's recheck: it waits too (no sentence on a withheld output).
+    expect(await hook.start('source_answer', { ...ARGS, question: 'Who signed the will?' })!.settle(answerResult(DELIVERED), WITHHELD)).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(store.list().questions.map((question) => question.question).sort()).toEqual(['When does the lease end?', 'Who signed the will?']);
+  });
+
+  test('a handed-off answer settles when its job finishes, collected or not; a collector only reads it', async () => {
     const calls: Array<Record<string, unknown>> = [];
     const remote = parts('match', calls);
-    const handed = remote.forConnection('conn-a').start('source_answer', ARGS)!;
-    expect(await handed.settle({ status: 'working', job_id: 'saj_job' })).toBe(false);
-    expect(store.list().questions).toEqual([]);
-    // Another connection naming the job, or a still-working collect: nothing.
-    expect(await remote.forConnection('conn-b').start('source_answer_result', { job_id: 'saj_job' })!.settle(answerResult(POLICY_SKIP))).toBe(false);
-    expect(await remote.forConnection('conn-a').start('source_answer_result', { job_id: 'saj_job' })!.settle({ status: 'working', job_id: 'saj_job' })).toBe(false);
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 5, resultWaitMs: 0 } });
+    const jobs = { registry, owner: 'remote:conn-a' };
+    let finish!: (value: unknown) => void;
+    const handed = remote.forConnection('conn-a').start('source_answer', ARGS, { jobs })!;
+    const pending = await registry.run(jobs, () => new Promise<unknown>((resolve) => { finish = resolve; })) as { status: string; job_id: string };
+    expect(pending.status).toBe('working');
+    expect(await handed.settle(pending, undefined)).toBe(false);
     expect(calls).toEqual([]);
-    expect(await remote.forConnection('conn-a').start('source_answer_result', { job_id: 'saj_job' })!.settle(answerResult(POLICY_SKIP))).toBe(true);
-    expect(await remote.forConnection('conn-a').start('source_answer_result', { job_id: 'saj_job' })!.settle(answerResult(POLICY_SKIP))).toBe(true);
+    // The job finishes; nobody collects it. The question still waits.
+    finish(answerResult(POLICY_SKIP));
+    for (let tries = 0; tries < 50 && store.list().questions.length === 0; tries += 1) await Bun.sleep(5);
+    expect(store.list().questions).toEqual([expect.objectContaining({ connectionId: 'conn-a', state: 'waiting', question: 'When does the lease end?' })]);
+    expect(calls).toHaveLength(1);
+    // Collectors read the settled verdict: no second probe or record; another connection gets nothing.
+    expect(await remote.forConnection('conn-a').start('source_answer_result', { job_id: pending.job_id })!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(true);
+    expect(await remote.forConnection('conn-a').start('source_answer_result', { job_id: pending.job_id })!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(true);
+    expect(await remote.forConnection('conn-b').start('source_answer_result', { job_id: pending.job_id })!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(false);
+    expect(await remote.forConnection('conn-a').start('source_answer_result', { job_id: pending.job_id })!.settle({ status: 'working', job_id: pending.job_id }, undefined)).toBe(false);
     expect(calls).toHaveLength(1);
     expect(store.list().questions).toHaveLength(1);
+  });
+
+  test('a handed-off job that fails or is dropped records nothing', async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const remote = parts('match', calls);
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 5, resultWaitMs: 0 } });
+    const jobs = { registry, owner: 'remote:conn-a' };
+    let fail!: (error: Error) => void;
+    const handed = remote.forConnection('conn-a').start('source_answer', ARGS, { jobs })!;
+    const pending = await registry.run(jobs, () => new Promise((_, reject) => { fail = reject; })) as { job_id: string };
+    await handed.settle(pending, undefined);
+    fail(new Error('analyst down'));
+    await Bun.sleep(20);
+    expect(calls).toEqual([]);
+    expect(store.list().questions).toEqual([]);
   });
 
   test('couldn\'t-check-yet records are re-probed locally: a match waits, no match is cleared, unknown stays', async () => {
@@ -336,14 +387,76 @@ describe('remote: probe states and records', () => {
       store: () => store,
       probeTimeoutMs: 20,
     });
-    await remote.forConnection('conn-a').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP));
-    await remote.forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP));
+    await remote.forConnection('conn-a').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP), ANSWERED);
+    await remote.forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP), ANSWERED);
     expect(store.unchecked()).toHaveLength(2);
     expect(await remote.retryUnchecked()).toEqual({ matched: 0, cleared: 0, still: 2 });
     verdicts = ['match', 'no_match'];
     expect(await remote.retryUnchecked()).toEqual({ matched: 1, cleared: 1, still: 0 });
     expect(store.unchecked()).toEqual([]);
     expect(store.list().questions.map((question) => question.state)).toEqual(['waiting']);
+  });
+
+  test('a connection no longer active: not probed, not recorded; each pass reconciles; an unreadable list removes nothing', async () => {
+    const active = new Set(['conn-a', 'conn-b']);
+    let listReadable = true;
+    const isActive = (id: string) => {
+      if (!listReadable) throw new Error('connection store unreadable');
+      return active.has(id);
+    };
+    const calls: Array<Record<string, unknown>> = [];
+    let verdict: PrivateMatchVerdict = 'unknown';
+    const remote = createRemotePrivateParts({
+      probe: async (request) => { calls.push(request); return verdict; },
+      store: () => store,
+      isActive,
+      probeTimeoutMs: 50,
+    });
+    await remote.forConnection('conn-a').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP), ANSWERED);
+    await remote.forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP), ANSWERED);
+    expect(store.unchecked()).toHaveLength(2);
+    // conn-b is revoked in another process whose cleanup here failed: its ticket is still current.
+    active.delete('conn-b');
+    calls.length = 0;
+    expect(await remote.forConnection('conn-b').start('source_answer', { ...ARGS, question: 'Another?' })!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(false);
+    expect(calls).toEqual([]);
+    // An unreadable connection list: the pass removes nothing and probes nothing it cannot vouch for.
+    listReadable = false;
+    expect(await remote.retryUnchecked()).toEqual({ matched: 0, cleared: 0, still: 2 });
+    expect(calls).toEqual([]);
+    expect(store.unchecked()).toHaveLength(2);
+    // Readable again: the pass reconciles conn-b away, then re-probes only conn-a.
+    listReadable = true;
+    verdict = 'match';
+    expect(await remote.retryUnchecked()).toEqual({ matched: 1, cleared: 0, still: 0 });
+    expect(calls).toHaveLength(1);
+    expect(store.list().questions.map((question) => [question.connectionId, question.state])).toEqual([['conn-a', 'waiting']]);
+  });
+
+  test('close stops a pass in flight and any settle still waiting', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const calls: Array<Record<string, unknown>> = [];
+    const remote = createRemotePrivateParts({
+      probe: async (request) => { calls.push(request); await gate; return 'match'; },
+      store: () => store,
+      probeTimeoutMs: 5_000,
+    });
+    store.record(store.ticket('conn-a'), { question: 'First?', surface: 'remote', state: 'unchecked' });
+    store.record(store.ticket('conn-a'), { question: 'Second?', surface: 'remote', state: 'unchecked' });
+    const pass = remote.retryUnchecked();
+    // One pass at a time: a second call joins the first.
+    expect(remote.retryUnchecked()).toBe(pass);
+    const settling = remote.forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(POLICY_SKIP), ANSWERED);
+    await Bun.sleep(5);
+    remote.close();
+    release();
+    expect(await pass).toEqual({ matched: 0, cleared: 0, still: 0 });
+    expect(await settling).toBe(false);
+    expect(calls).toHaveLength(2);
+    expect(store.unchecked()).toHaveLength(2);
+    expect(store.list().questions.map((question) => question.connectionId)).not.toContain('conn-b');
+    expect(await remote.retryUnchecked()).toEqual({ matched: 0, cleared: 0, still: 0 });
   });
 });
 
@@ -355,7 +468,7 @@ describe('remote: the fixed sentence in slice 2\'s closed schema', () => {
   test('only on a match; any other text in that field fails the schema', () => {
     const plain = remoteOperationOutput('source_answer', answerResult(POLICY_SKIP));
     expect(plain).not.toHaveProperty('private_note');
-    const noted = remoteOperationOutput('source_answer', answerResult(POLICY_SKIP), { privateMayAnswer: true });
+    const noted = withRemotePrivateNote(remoteOperationOutput('source_answer', answerResult(POLICY_SKIP)));
     expect(noted.private_note).toBe(REMOTE_PRIVATE_NOTE);
     expect(REMOTE_PRIVATE_NOTE).toBe('Private items may answer this; the person can see that answer in Olympus on their computer.');
     for (const operation of ['source_answer', 'source_answer_result'] as const) {
@@ -364,7 +477,7 @@ describe('remote: the fixed sentence in slice 2\'s closed schema', () => {
       expect(valid(operation, { ...noted, private_note: 'Private items: Lease.pdf' })).toBe(false);
     }
     // A withheld answer carries its own fixed sentence only.
-    const withheld = remoteOperationOutput('source_answer', { ...answerResult(POLICY_SKIP), answer: 'api_key=ABCDEFGHIJKLMNOPQRSTUV' }, { privateMayAnswer: true });
+    const withheld = withRemotePrivateNote(remoteOperationOutput('source_answer', { ...answerResult(POLICY_SKIP), answer: 'api_key=ABCDEFGHIJKLMNOPQRSTUV' }));
     expect(withheld).toMatchObject({ status: 'withheld' });
     expect(withheld).not.toHaveProperty('private_note');
   });
@@ -376,12 +489,22 @@ describe('remote: over /mcp and the REST surface', () => {
   let base: string;
   let audit: Record<string, unknown>;
   let probes: number;
+  let answerDelayMs: number;
 
   beforeEach(() => {
     connections = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
     audit = POLICY_SKIP;
     probes = 0;
-    const worker = createEmailSourceWorker({ sourceAnswer: { answer: async () => answerResult(audit) } });
+    answerDelayMs = 0;
+    const worker = createEmailSourceWorker({
+      sourceAnswer: {
+        answer: async () => {
+          if (answerDelayMs > 0) await Bun.sleep(answerDelayMs);
+          return answerResult(audit);
+        },
+      },
+    });
+    const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: { handoffMs: 250, resultWaitMs: 0 } });
     const remotePrivateParts = createRemotePrivateParts({
       probe: async () => { probes += 1; return 'match'; },
       store: () => store,
@@ -389,7 +512,7 @@ describe('remote: over /mcp and the REST surface', () => {
     const remote = {
       connections: () => connections,
       makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
-        ...createInProcessOperationContext({ config: CONFIG, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }),
+        ...createInProcessOperationContext({ config: CONFIG, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal, sourceAnswerJobs }),
         ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
       }),
     };
@@ -440,6 +563,22 @@ describe('remote: over /mcp and the REST surface', () => {
     expect(probes).toBe(2);
     expect(store.list().questions).toHaveLength(2);
   });
+
+  test('a handed-off answer nobody collects still waits on the computer', async () => {
+    const { token } = connections.create('Claude');
+    answerDelayMs = 400;
+    const rest = await fetch(`${base}/api/v1/tools/source_answer`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'When does the lease end?' }),
+    });
+    expect(await rest.json()).toMatchObject({ status: 'working' });
+    for (let tries = 0; tries < 100 && store.list().questions.length === 0; tries += 1) await Bun.sleep(10);
+    expect(store.list().questions.map((question) => [question.surface, question.question, question.state])).toEqual([
+      ['remote', 'When does the lease end?', 'waiting'],
+    ]);
+    expect(probes).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -447,33 +586,127 @@ describe('remote: over /mcp and the REST surface', () => {
 
 describe('probePrivateMatch: metadata only, the request\'s own selectors', () => {
   const CORPUS_ID = 'secure_local.fixture.files';
+  const LEASE_ITEM = {
+    corpus_id: CORPUS_ID,
+    family: 'file',
+    provider: 'fixture_files',
+    account_scope: 'personal',
+    provider_item_id: 'lease',
+    local_item_id: 'personal:lease',
+  };
 
-  async function withConnectorStore(run: (lanes: (request: unknown) => AnalystAnswerLanes, contentReads: () => number) => Promise<void>): Promise<void> {
+  interface Fixture {
+    connectorStore: LocalConnectorStore;
+    /** Every SQL statement the store's own connection prepared. */
+    sql: string[];
+    lanes: (overrides?: Partial<AnalystAnswerLanes>) => (request: unknown) => AnalystAnswerLanes;
+    contentReads: () => number;
+    adapter: ReturnType<typeof createConnectorStoreCorpusAdapter>;
+  }
+
+  async function withConnectorStore(run: (fixture: Fixture) => Promise<void>): Promise<void> {
     const connectorStore = new LocalConnectorStore({ dbPath: join(dir, 'files.sqlite'), corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
     let reads = 0;
+    const sql: string[] = [];
     try {
       await connectorStore.syncFromConnector(fixtureConnector(), { fetchContent: true });
-      const lanes = () => ({
+      const db = (connectorStore as unknown as { db: { query: (statement: string) => unknown } }).db;
+      const query = db.query.bind(db);
+      db.query = (statement: string) => {
+        sql.push(statement);
+        return query(statement);
+      };
+      const adapter = createConnectorStoreCorpusAdapter({ store: connectorStore, retrievalMode: 'keyword' });
+      const lanes = (overrides: Partial<AnalystAnswerLanes> = {}) => () => ({
         registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' })]),
-        adapters: { [CORPUS_ID]: createConnectorStoreCorpusAdapter({ store: connectorStore, retrievalMode: 'keyword' }) },
+        adapters: { [CORPUS_ID]: adapter },
         // Present so a read would be counted; the probe must never use it.
         contentProviders: { [CORPUS_ID]: { fetchLocalContent: async () => { reads += 1; return { chunks: ['lease text'] }; } } },
+        ...overrides,
       }) as unknown as AnalystAnswerLanes;
-      await run(lanes, () => reads);
+      await run({ connectorStore, sql, lanes, contentReads: () => reads, adapter });
     } finally {
       connectorStore.close();
     }
   }
 
-  test('match, no_match, a corpus the request did not name, and unknown on failure or timeout', async () => {
-    await withConnectorStore(async (lanes, contentReads) => {
-      expect(await probePrivateMatch({ lanes, request: { question: 'apartment lease renewal' }, timeoutMs: 5_000 })).toBe('match');
-      expect(await probePrivateMatch({ lanes, request: { question: 'zebra quantum saxophone' }, timeoutMs: 5_000 })).toBe('no_match');
-      expect(await probePrivateMatch({ lanes, request: { question: 'apartment lease renewal', corpus_ids: ['secure_local.other.files'] }, timeoutMs: 5_000 })).toBe('no_match');
+  const probe = (lanes: (request: unknown) => AnalystAnswerLanes, request: Record<string, unknown>, timeoutMs = 5_000) =>
+    probePrivateMatch({ lanes, request: request as never, timeoutMs });
+
+  test('match, no_match and a corpus the request did not name, with no item text read below the content provider', async () => {
+    await withConnectorStore(async ({ sql, lanes, contentReads, adapter }) => {
+      // The ordinary search reads chunk text to place its match: the spy sees it.
+      await adapter({ query: 'apartment lease renewal', maxResults: 5, corpus: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' })]).get(CORPUS_ID)!, context: { allowedTrustDomains: ['secure_local'] } });
+      expect(sql.some((statement) => statement.includes('bounded_text'))).toBe(true);
+      sql.length = 0;
+      expect(await probe(lanes(), { question: 'apartment lease renewal' })).toBe('match');
+      expect(await probe(lanes(), { question: 'zebra quantum saxophone' })).toBe('no_match');
+      expect(await probe(lanes(), { question: 'apartment lease renewal', corpus_ids: ['secure_local.other.files'] })).toBe('no_match');
+      // The probe's own statements: FTS and item rows, never a chunk's text, offsets or spans.
+      expect(sql.length).toBeGreaterThan(0);
+      expect(sql.filter((statement) => statement.includes('bounded_text'))).toEqual([]);
       expect(contentReads()).toBe(0);
-      expect(await probePrivateMatch({ lanes: () => { throw new Error('lanes down'); }, request: { question: 'apartment lease renewal' }, timeoutMs: 5_000 })).toBe('unknown');
-      const slow = () => ({ ...lanes({}), adapters: { [CORPUS_ID]: () => new Promise(() => {}) } }) as unknown as AnalystAnswerLanes;
-      expect(await probePrivateMatch({ lanes: slow, request: { question: 'apartment lease renewal' }, timeoutMs: 30 })).toBe('unknown');
+    });
+  });
+
+  test('a corpus that could not be checked is unknown; one left out on purpose is not; adapter loss then recovery', async () => {
+    await withConnectorStore(async ({ lanes, adapter }) => {
+      // Registered and in scope, but no adapter (unavailable retrieval).
+      expect(await probe(lanes({ adapters: {} }), { question: 'apartment lease renewal' })).toBe('unknown');
+      // The lanes left it out on purpose (owner read scope off, or the request's scope).
+      expect(await probe(lanes({ adapters: {}, excludedCorpusIds: new Set([CORPUS_ID]) }), { question: 'apartment lease renewal' })).toBe('no_match');
+      // An adapter that cannot match without reading text, or that fails.
+      const plain = Object.assign((request: Parameters<typeof adapter>[0]) => adapter(request), {});
+      expect(await probe(lanes({ adapters: { [CORPUS_ID]: plain } }), { question: 'apartment lease renewal' })).toBe('unknown');
+      const failing = Object.assign(() => { throw new Error('store locked'); }, { metadataMatches: async () => { throw new Error('store locked'); } });
+      expect(await probe(lanes({ adapters: { [CORPUS_ID]: failing } as never }), { question: 'apartment lease renewal' })).toBe('unknown');
+      expect(await probe(() => { throw new Error('lanes down'); }, { question: 'apartment lease renewal' })).toBe('unknown');
+      const slow = Object.assign(() => new Promise(() => {}), { metadataMatches: () => new Promise(() => {}) });
+      expect(await probe(lanes({ adapters: { [CORPUS_ID]: slow } as never }), { question: 'apartment lease renewal' }, 30)).toBe('unknown');
+
+      // Through the remote part: unknown records "couldn't check yet"; a later pass with the adapter back finds the match.
+      let current = lanes({ adapters: {} });
+      const remote = createRemotePrivateParts({
+        probe: (request, timeoutMs) => probePrivateMatch({ lanes: (request) => current(request), request: request as never, timeoutMs }),
+        store: () => store,
+        probeTimeoutMs: 5_000,
+      });
+      await remote.forConnection('conn-a').start('source_answer', { question: 'apartment lease renewal' })!.settle(answerResult(POLICY_SKIP), ANSWERED);
+      expect(store.list().questions.map((question) => question.state)).toEqual(['unchecked']);
+      expect(await remote.retryUnchecked()).toEqual({ matched: 0, cleared: 0, still: 1 });
+      current = lanes();
+      expect(await remote.retryUnchecked()).toEqual({ matched: 1, cleared: 0, still: 0 });
+      expect(store.list().questions.map((question) => question.state)).toEqual(['waiting']);
+    });
+  });
+
+  test('selected items: resolved through the store and its current tier and scope, never counted from the caller\'s identities', async () => {
+    await withConnectorStore(async ({ connectorStore, sql, lanes, adapter }) => {
+      const select = (item: Record<string, string>) => ({ question: 'When does it end?', selected_items: [item] });
+      sql.length = 0;
+      expect(await probe(lanes(), select(LEASE_ITEM))).toBe('match');
+      expect(sql.filter((statement) => statement.includes('bounded_text'))).toEqual([]);
+      // Nonexistent, or another identity under the same local id.
+      expect(await probe(lanes(), select({ ...LEASE_ITEM, local_item_id: 'personal:nothing', provider_item_id: 'nothing' }))).toBe('no_match');
+      expect(await probe(lanes(), select({ ...LEASE_ITEM, account_scope: 'work' }))).toBe('no_match');
+      expect(await probe(lanes(), select({ ...LEASE_ITEM, provider_item_id: 'other' }))).toBe('no_match');
+      // Outside the adapter's account scope.
+      const workAdapter = createConnectorStoreCorpusAdapter({ store: connectorStore, retrievalMode: 'keyword', accountScope: 'work' });
+      expect(await probe(lanes({ adapters: { [CORPUS_ID]: workAdapter } }), select(LEASE_ITEM))).toBe('no_match');
+      // The tier visibility gate refuses it.
+      expect(await probe(lanes({ visibilityGate: () => [] }), select(LEASE_ITEM))).toBe('no_match');
+      // A corpus the request did not name, or one with no adapter.
+      expect(await probe(lanes(), { ...select(LEASE_ITEM), corpus_ids: ['secure_local.other.files'] })).toBe('no_match');
+      expect(await probe(lanes({ adapters: {} }), select(LEASE_ITEM))).toBe('unknown');
+      expect(await probe(lanes({ adapters: {}, excludedCorpusIds: new Set([CORPUS_ID]) }), select(LEASE_ITEM))).toBe('no_match');
+      const opaque = Object.assign((request: Parameters<typeof adapter>[0]) => adapter(request), {});
+      expect(await probe(lanes({ adapters: { [CORPUS_ID]: opaque } }), select(LEASE_ITEM))).toBe('unknown');
+      // Now Secret, then deleted.
+      const db = (connectorStore as unknown as { db: { run: (statement: string, ...params: unknown[]) => unknown } }).db;
+      db.run("UPDATE items SET trust_tier = 'S5' WHERE local_item_id = ?", 'personal:lease');
+      expect(await probe(lanes(), select(LEASE_ITEM))).toBe('no_match');
+      db.run("UPDATE items SET trust_tier = 'S4', tombstoned = 1 WHERE local_item_id = ?", 'personal:lease');
+      expect(await probe(lanes(), select(LEASE_ITEM))).toBe('no_match');
     });
   });
 });

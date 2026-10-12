@@ -77,8 +77,9 @@
  * behavior above.
  *
  * Pending polls by the claiming key are rate limited per job (429), never
- * destructive. Unknown, expired (ten minutes from creation) and
- * wrong-install jobs answer 410 `gone`: the endpoint is no oracle for which
+ * destructive. Unknown, expired (ten minutes from creation when unclaimed;
+ * a claim extends that to at least its own deadline plus a five-minute
+ * collect and acknowledgment window) and wrong-install jobs answer 410 `gone`: the endpoint is no oracle for which
  * ids existed.
  * Analyses run one at a time, and after a deadline the next one waits for
  * the model's reset (bounded). Claims of live jobs are rate limited; a claim
@@ -309,7 +310,12 @@ interface Analysis {
 interface Job {
   readonly id: string;
   readonly createdAt: number;
-  readonly expiresAt: number;
+  /**
+   * Unclaimed: creation plus the job TTL. A claim extends it to at least the
+   * claim's own bounded lifetime (claimLifetimeFor), so a claim made just
+   * before the TTL still synthesizes, is collected and is acknowledged.
+   */
+  expiresAt: number;
   readonly caller: string | undefined;
   readonly detail: PrivateAnswerDetail;
   question: string | undefined;
@@ -387,6 +393,12 @@ export const PRIVATE_ANSWER_DEDUPE_MS = 3 * 60_000;
 export const PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60_000;
 /** How long the claiming POST holds for a ready answer (refresh and seal) before it answers 202. */
 export const PRIVATE_ANSWER_CLAIM_HOLD_MS = 1_500;
+/**
+ * After a claim's deadline, how long its sealed answer stays collectable and
+ * acknowledgeable: the panel's last pending poll, the collect and the seen
+ * acknowledgment. A claimed job lives at least its deadline plus this.
+ */
+export const PRIVATE_ANSWER_CLAIM_COLLECT_MS = 5 * 60_000;
 
 const defaultAudit = (event: PrivateAnswerAuditEvent) => {
   console.warn(`[olympus] private answer audit: ${event === 'claimed_by_other_key'
@@ -584,6 +596,9 @@ export class PrivateAnswerJobs {
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
+      // Expiry of an unclaimed job does not end a claim: the claim gets its
+      // own bounded lifetime for synthesis, collection and acknowledgment.
+      job.expiresAt = Math.max(job.expiresAt, this.now() + this.claimLifetimeFor(job.detail));
       // Synthesis starts now, at the first claim, never for a job no panel claims.
       if (job.analysis === undefined && this.options.precompute !== false) {
         const before = new Set(this.shared.values());
@@ -1140,6 +1155,11 @@ export class PrivateAnswerJobs {
       settle({ kind: 'failed' }, 'error');
     });
     return done;
+  }
+
+  /** A claim's bounded lifetime: its deadline, then the collect and acknowledgment window. */
+  private claimLifetimeFor(detail: PrivateAnswerDetail): number {
+    return this.timeoutFor(detail) + PRIVATE_ANSWER_CLAIM_COLLECT_MS;
   }
 
   /** The hard deadline for an analysis (and a claim) of this detail. */

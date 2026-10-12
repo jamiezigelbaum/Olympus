@@ -538,7 +538,9 @@ percent when known; counts only, no job).
    so the id is valid only from the moment ChatGPT can see it (a handed-off
    answer creates it at `source_answer_result`, not at `source_answer`). It
    holds the question in memory only, for at most **10 minutes** from
-   creation.
+   creation while unclaimed. A claim extends that to at least its own
+   deadline plus five minutes to collect and acknowledge the answer, so a
+   claim just before the ten minutes still completes.
    - **Claim-time synthesis (2026-10-12, `background-agents.md` A).** The
      analysis below now starts when a panel first claims the job, from the
      same search-time evidence, so no Private synthesis runs for a job no

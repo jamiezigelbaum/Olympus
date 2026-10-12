@@ -17,6 +17,7 @@ import {
   remoteDeclaredParams,
   remoteErrorOutput,
   remoteOperationOutput,
+  withRemotePrivateNote,
   remoteSurfaceErrorOutput,
   remoteWithheldParam,
   remoteWithheldParamOutput,
@@ -93,17 +94,19 @@ async function handleRemoteCallTool(
   const declaredParams = remoteDeclaredParams(operation.name, Object.keys(operation.params));
   const manifests = createReleaseManifestSink();
   // Read before the handler runs: a revocation during the call refuses its record.
-  const privatePart = ctx.remotePrivatePart?.start(operation.name, args);
+  const privatePart = ctx.remotePrivatePart?.start(operation.name, args, {
+    ...(ctx.sourceAnswerJobs ? { jobs: ctx.sourceAnswerJobs } : {}),
+    ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
+  });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
-    const privateMayAnswer = privatePart ? await privatePart.settle(result) : false;
-    return {
-      content: text(remoteOperationOutput(operation.name, result, {
-        ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
-        releaseManifests: manifests.manifests,
-        ...(privateMayAnswer ? { privateMayAnswer } : {}),
-      })),
-    };
+    const output = remoteOperationOutput(operation.name, result, {
+      ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
+      releaseManifests: manifests.manifests,
+    });
+    // Settled against the release the agent actually gets (slice 2's recheck included).
+    const privateMayAnswer = privatePart ? await privatePart.settle(result, output) : false;
+    return { content: text(privateMayAnswer ? withRemotePrivateNote(output) : output) };
   } catch (error) {
     return { content: text(remoteErrorOutput(error, { declaredParams })), isError: true };
   }

@@ -31,7 +31,14 @@ import {
   toBase64Url,
   type SealedPrivateAnswer,
 } from '../src/workers/chatgpt/private-answer-crypto.ts';
-import { PrivateAnswerJobs, createPrivateAnswerHandler, isPrivateEligible } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import {
+  PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS,
+  PRIVATE_ANSWER_CLAIM_COLLECT_MS,
+  PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS,
+  PrivateAnswerJobs,
+  createPrivateAnswerHandler,
+  isPrivateEligible,
+} from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import {
@@ -313,6 +320,47 @@ describe('one-time jobs', () => {
     expect(await jobs.claim(unclaimed, panel.publicKey)).toMatchObject({ status: 410 });
     expect(await jobs.claim(claimed, panel.publicKey)).toMatchObject({ status: 410 });
     expect(jobs.size).toBe(0);
+  });
+
+  test('a claim just before the ten minutes synthesizes, is collected and acknowledged at either detail; its lifetime is bounded', async () => {
+    for (const [detail, deadline] of [['summary', PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS], ['full', PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS]] as const) {
+      const clock = { now: 1_000_000 };
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const acknowledged: unknown[] = [];
+      const model = readyModel({ answerPrivately: async () => { await gate; return { answer: `late ${detail}`, citations: [] }; } });
+      // Claim-time synthesis (the default): nothing starts until the claim.
+      const jobs = new PrivateAnswerJobs({
+        eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, now: () => clock.now, log: () => {}, claimHoldMs: 0,
+        acknowledge: (ref) => { acknowledged.push(ref); },
+      });
+      const begin = (question: string) => jobs.begin({
+        question, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE, detail,
+        waiting: { id: `w-${question}`, generation: 1, connectionId: 'conn-a' },
+      }).jobId!;
+      const late = begin('late');
+      const unclaimed = begin('unclaimed');
+      const panel = await generatePanelKeyPair();
+      clock.now += 10 * 60_000 - 1_000;
+      expect((await jobs.claim(late, panel.publicKey)).status).toBe(202);
+      // Past the unclaimed lifetime: the unclaimed job is gone, the claim keeps synthesizing.
+      clock.now += 2_000;
+      expect(await jobs.claim(unclaimed, panel.publicKey)).toMatchObject({ status: 410 });
+      expect((await jobs.claim(late, panel.publicKey)).status).toBe(202);
+      release();
+      await settled(jobs);
+      clock.now += deadline;
+      const ready = await jobs.claim(late, panel.publicKey);
+      expect(ready.status).toBe(200);
+      const opened = JSON.parse(await openPrivateAnswer(late, panel.privateKey, ready.body as unknown as SealedPrivateAnswer)) as { answer: string; ack: string };
+      expect(opened.answer).toBe(`late ${detail}`);
+      expect(await jobs.acknowledge(late, panel.publicKey, opened.ack)).toMatchObject({ status: 200 });
+      expect(acknowledged).toEqual([{ id: 'w-late', generation: 1, connectionId: 'conn-a' }]);
+      // Bounded: the claim's deadline plus the collect window, then gone.
+      clock.now += PRIVATE_ANSWER_CLAIM_COLLECT_MS;
+      expect(await jobs.claim(late, panel.publicKey)).toMatchObject({ status: 410 });
+      expect(jobs.size).toBe(0);
+    }
   });
 
   test('a job id for another install, or an unknown id, is gone', async () => {

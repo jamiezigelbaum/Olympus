@@ -34,6 +34,12 @@ export interface SourceIndexSearchContext {
   allowedTrustDomains: readonly SourceTrustDomain[];
   allowCloudQueries?: boolean;
   allowedCorpusIds?: readonly string[];
+  /**
+   * Metadata only: each corpus answers through its adapter's metadataMatches,
+   * which reads no item text; a corpus whose adapter has none is skipped as
+   * metadata_search_unsupported (never searched the ordinary way).
+   */
+  metadataOnly?: boolean;
 }
 
 export interface SourceIndexSearchRequest {
@@ -137,6 +143,22 @@ export interface SourceIndexCorpusSearchAdapter {
    * adapter has no semantic lane.
    */
   semanticNeighbours?: (request: SourceIndexCorpusSearchRequest) => Promise<SourceIndexCorpusSearchResponse>;
+  /**
+   * The corpus's items that match the query (the same lexical matches and
+   * vetted semantic matches the search counts), as identity-only hits,
+   * without reading any item text: no chunk is loaded, located or offset, and
+   * no recency candidate or pin is added (they are not matches). Used when
+   * the request context is metadataOnly. Absent when the adapter cannot
+   * match without reading text.
+   */
+  metadataMatches?: (request: SourceIndexCorpusSearchRequest) => Promise<SourceIndexCorpusSearchResponse>;
+  /**
+   * Whether an item a caller selected by identity is this corpus's item and
+   * would be served now under this adapter's scope (account, filters, current
+   * tier and read policy), from metadata only. Absent when the adapter cannot
+   * tell without reading text.
+   */
+  selectedItemServable?: (sourceItem: SourceItemIdentity) => boolean;
 }
 
 export function withSourceIndexHybridAvailability(
@@ -169,6 +191,9 @@ export type SourceIndexSkippedCorpusReason =
   | 'cloud_query_not_allowed'
   | 'no_adapter'
   | 'lane_timeout'
+  // A metadataOnly request reached a corpus whose adapter cannot match
+  // without reading text: the corpus was not checked.
+  | 'metadata_search_unsupported'
   // The next three are never produced by routeSourceIndexSearch. The answer
   // handler rewrites a secure_local corpus's trust_domain_not_allowed skip to
   // one of them when the caller did not decide include_secure_local:
@@ -339,6 +364,10 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       });
       continue;
     }
+    if (request.context.metadataOnly === true && !adapter.metadataMatches) {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: 'metadata_search_unsupported' });
+      continue;
+    }
 
     searchableCorpora.push(corpus);
   }
@@ -360,8 +389,9 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       ...(cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}),
     };
     const retrievalState = retrievalStateForAdapter(adapter, corpusRequest);
+    const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneWithDeadline(
-      () => adapter(corpusRequest),
+      () => (metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest)),
       laneTimeoutMs,
       corpus.corpusId,
     );

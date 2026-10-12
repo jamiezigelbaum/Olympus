@@ -48,12 +48,6 @@ export interface RemoteOutputOptions {
   releaseCheck?: ReleaseCheck;
   /** The release manifests the call collected (its own answer's, or its job's). */
   releaseManifests?: readonly ReleaseManifest[];
-  /**
-   * The answer left Private out and the local probe found matching Private
-   * items (core/remote-private-part.ts): an answered source answer carries
-   * REMOTE_PRIVATE_NOTE, a fixed sentence, and nothing else about them.
-   */
-  privateMayAnswer?: boolean;
 }
 
 const MAX_ANSWER = 64 * 1024;
@@ -320,8 +314,19 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
     status: 'answered',
     answer: answer.text ?? '',
     citations,
-    ...(options.privateMayAnswer === true ? { private_note: REMOTE_PRIVATE_NOTE } : {}),
   };
+}
+
+/**
+ * A remote output with REMOTE_PRIVATE_NOTE added, when it is an answered
+ * source answer: the answer left Private out and the local probe found
+ * matching Private items (core/remote-private-part.ts). The fixed sentence
+ * and nothing else about them. Any other output is returned unchanged.
+ */
+export function withRemotePrivateNote(output: Record<string, unknown>): Record<string, unknown> {
+  return output.kind === 'source_answer' && output.status === 'answered'
+    ? { ...output, private_note: REMOTE_PRIVATE_NOTE }
+    : output;
 }
 
 function withheldAnswer(message: string): Record<string, unknown> {

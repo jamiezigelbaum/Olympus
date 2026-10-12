@@ -21,7 +21,12 @@
  * connection's revocation generation in one transaction. A recording carries
  * the generation it read when its request began (`ticket`) and is refused,
  * inside its own write transaction, when the generation has moved, so an
- * insert in flight across a revocation never lands.
+ * insert in flight across a revocation never lands. The revoking process's
+ * cleanup can fail (a lock held past its short busy timeout) without failing
+ * the revocation, so the store also takes `isActive` from the connection
+ * store: a recording for a connection it does not vouch for (revoked,
+ * unknown, or unreadable) is refused and that connection's records are
+ * removed, and the worker reconciles again on every re-check pass.
  *
  * Acknowledgment: a sealed panel answer carries a capability bound to a
  * record's id, generation and connection (private-answer-jobs.ts); the record
@@ -31,7 +36,13 @@
  *
  * Storage: one SQLite file beside the remote-connections database, in the
  * same owner-only (0700) data directory, the file itself 0600, with
- * secure_delete on, like the other private stores. It is never indexed (no
+ * secure_delete on. The rollback journal (journal_mode DELETE), not WAL: a
+ * deleted question's bytes are zeroed in the database file at commit, and
+ * the journal holding the pre-delete page is removed at that same commit, so
+ * no sidecar keeps the text while a connection stays open (a WAL file would
+ * keep it in earlier frames until a checkpoint). A crash mid-transaction
+ * leaves a hot journal that SQLite rolls back on the next open: the delete
+ * then never happened, and the row is still there to be deleted. It is never indexed (no
  * connector reads Olympus's own data directory), carries no telemetry (no log
  * line here holds a question), is left out of data exports (named as skipped,
  * data-lifecycle.ts) and is deleted with the connections on `delete --all`.
@@ -66,6 +77,8 @@ export const WAITING_QUESTION_LIMITS = Object.freeze({
 /** The fixed per-record allowance in the byte total (ids, times, enums). */
 const RECORD_OVERHEAD_BYTES = 160;
 const STORE_BUSY_TIMEOUT_MS = 5_000;
+/** The revoking process's cleanup waits at most this long for the lock; the worker retries it. */
+const REVOKE_BUSY_TIMEOUT_MS = 1_000;
 const OLDER_REMOVED_KEY = 'older_removed_at';
 
 /** `waiting`: Private items matched. `unchecked`: the local probe could not tell yet. */
@@ -255,18 +268,38 @@ function utf8Length(text: string): number {
   return Buffer.byteLength(text, 'utf8');
 }
 
+export interface WaitingQuestionStoreOptions {
+  now?: () => number;
+  busyTimeoutMs?: number;
+  /**
+   * Whether a connection is active now (the connection store's word). A
+   * recording for a connection it does not vouch for, or when it throws, is
+   * refused, and that connection's records are removed.
+   */
+  isActive?: (connectionId: string) => boolean;
+}
+
 export function openWaitingPrivateQuestionStore(
   dbPath: string,
-  options: { now?: () => number } = {},
+  options: WaitingQuestionStoreOptions = {},
 ): WaitingQuestionStore {
   const now = options.now ?? Date.now;
   hardenPrivatePath(dbPath);
   const db = new Database(dbPath, { create: true });
   try {
     chmodSync(dbPath, 0o600);
-    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
-    assertSqliteSchemaCanOpen(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION);
-    runSqliteMigrations(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, migrations());
+    const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA secure_delete = ON;`);
+    // A file left in WAL mode (by a build before 2026-10-12) leaves it here,
+    // which needs the only connection; until then the store stays unopened.
+    const mode = (db.query('PRAGMA journal_mode = DELETE').get() as { journal_mode?: string } | null)?.journal_mode;
+    if (mode !== 'delete') throw new Error('The waiting private questions store could not use its rollback journal yet.');
+    // Under one write lock: two processes opening a new file at once (the
+    // worker and the CLI) cannot both see version 0 and both migrate.
+    db.transaction(() => {
+      assertSqliteSchemaCanOpen(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION);
+      runSqliteMigrations(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, migrations());
+    }).immediate();
   } catch (error) {
     closeSqliteStore(db);
     throw error;
@@ -340,6 +373,18 @@ export function openWaitingPrivateQuestionStore(
         .update(JSON.stringify([ticket.connectionId, selectors, normalizeWaitingQuestion(question)]))
         .digest('hex');
       const at = now();
+      // The connection store's word now: a revocation whose own cleanup here
+      // failed still refuses the recording, and the cleanup is done instead.
+      let active = false;
+      try {
+        active = options.isActive ? options.isActive(ticket.connectionId) === true : true;
+      } catch {
+        return undefined;
+      }
+      if (!active) {
+        db.transaction(() => revokeInTransaction(ticket.connectionId)).immediate();
+        return undefined;
+      }
       return db.transaction((): WaitingQuestionRef | undefined => {
         // A revocation since the request began: refused, inside the same
         // write lock the revocation takes, so it cannot interleave.
@@ -459,11 +504,19 @@ export function openWaitingPrivateQuestionStore(
  * generation, opening the store beside the connections database. Called by
  * the connection store's revoke, in whichever process revokes (the worker's
  * Agents page or the CLI). Best effort for the caller: a failure here never
- * undoes or fails the revocation itself; the worker also reconciles the
- * store against the live connection list before it serves it.
+ * undoes or fails the revocation itself, and the lock wait is short
+ * (REVOKE_BUSY_TIMEOUT_MS): the store refuses recordings for connections the
+ * connection store no longer vouches for, and the worker reconciles against
+ * the live connection list on open and on every re-check pass.
  */
-export function revokeWaitingPrivateQuestions(remoteConnectionsDbPath: string, connectionId: string): void {
-  const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(remoteConnectionsDbPath));
+export function revokeWaitingPrivateQuestions(
+  remoteConnectionsDbPath: string,
+  connectionId: string,
+  options: { busyTimeoutMs?: number } = {},
+): void {
+  const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(remoteConnectionsDbPath), {
+    busyTimeoutMs: options.busyTimeoutMs ?? REVOKE_BUSY_TIMEOUT_MS,
+  });
   try {
     store.revokeConnection(connectionId);
   } finally {

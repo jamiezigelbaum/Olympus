@@ -3345,18 +3345,28 @@ export async function main(): Promise<void> {
             }
             return requestEmbeddings.get(store.corpusId);
           };
+          // Stores left without an adapter on purpose (the owner's read scope
+          // is off, or this request's scope excludes them), as distinct from a
+          // registered corpus nothing could search.
+          const excludedCorpusIds = new Set<string>();
           const connectorStoreAdapter = (
             store: LocalConnectorStore,
           ): SourceIndexCorpusSearchAdapter | undefined => {
             const mandatoryScope = connectorStoreReadScope(store);
-            if (!mandatoryScope.allowed) return undefined;
+            if (!mandatoryScope.allowed) {
+              excludedCorpusIds.add(store.corpusId);
+              return undefined;
+            }
             const principal = connectorStorePrincipals.get(store.corpusId);
             const scope = connectorStoreAnswerScope({
               store,
               request,
               ...(principal ? { principal } : {}),
             });
-            if (scope.kind === 'skip') return undefined;
+            if (scope.kind === 'skip') {
+              excludedCorpusIds.add(store.corpusId);
+              return undefined;
+            }
             const connectorStoreEmbedding = requestEmbedding(store);
             const connectorStoreAccount = scope.accountScope
               ?? mandatoryScope.accountScope
@@ -3412,6 +3422,7 @@ export async function main(): Promise<void> {
                   }),
               ),
             },
+            excludedCorpusIds,
             contentProviders: {
               ...Object.fromEntries(
                 readConnectorStores
@@ -4585,23 +4596,36 @@ export async function main(): Promise<void> {
   );
   dashboardAgentStore = remoteConnections;
   // Questions waiting on a Private answer (core/waiting-private-questions.ts):
-  // beside the connection store, owner-only, opened on first use. Records of
-  // a connection revoked while this worker was down are dropped on open.
+  // beside the connection store, owner-only, opened on first use (retried a
+  // minute after a failed open). The connection store is the authority on
+  // which connections are active: a recording for any other is refused, and
+  // records of a connection revoked while this worker was down, or whose
+  // revoking process could not clean up, are dropped on open and on every
+  // re-check pass.
   const { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath } = await import('../../core/waiting-private-questions.ts');
+  const connectionActive = (connectionId: string): boolean => {
+    const connections = remoteConnections();
+    if (!connections) throw new Error('remote connection store unavailable');
+    return connections.list().some((connection) => connection.id === connectionId && connection.revokedAt === null);
+  };
   let waitingStore: import('../../core/waiting-private-questions.ts').WaitingQuestionStore | undefined;
-  let waitingStoreFailed = false;
+  let waitingStoreRetryAt = 0;
+  let waitingStoreClosed = false;
   const waitingQuestionStore = () => {
-    if (waitingStore || waitingStoreFailed) return waitingStore;
+    if (waitingStore || waitingStoreClosed || Date.now() < waitingStoreRetryAt) return waitingStore;
     try {
-      const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(process.env)));
-      const connections = remoteConnections()?.list();
-      if (connections) {
-        const active = new Set(connections.filter((connection) => connection.revokedAt === null).map((connection) => connection.id));
-        store.reconcileConnections((id) => active.has(id));
+      const store = openWaitingPrivateQuestionStore(
+        waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(process.env)),
+        { isActive: connectionActive },
+      );
+      try {
+        store.reconcileConnections(connectionActive);
+      } catch {
+        // Retried on the next re-check pass.
       }
       waitingStore = store;
     } catch {
-      waitingStoreFailed = true;
+      waitingStoreRetryAt = Date.now() + 60_000;
       console.warn('[olympus] waiting private questions store unavailable');
     }
     return waitingStore;
@@ -4898,6 +4922,7 @@ export async function main(): Promise<void> {
       ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs })
       : Promise.resolve('unknown' as const)),
     store: waitingQuestionStore,
+    isActive: connectionActive,
   });
   const uncheckedRetry = setInterval(() => {
     void remotePrivateParts.retryUnchecked().catch(() => undefined);
@@ -5291,6 +5316,12 @@ export async function main(): Promise<void> {
     // The built-in transcriber's server, if this process started one.
     stopBuiltInModelOnShutdown(runningBuiltInTranscriber());
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
+    // The re-check timer, any pass or settle in flight, then the store.
+    clearInterval(uncheckedRetry);
+    remotePrivateParts.close();
+    waitingStoreClosed = true;
+    waitingStore?.close();
+    waitingStore = undefined;
     worker.close();
     sourceScheduler?.stop();
     void server.stop();

@@ -1586,6 +1586,11 @@ export interface ConnectorStoreSearchRow {
   rank: number;
   /** Offset-level match locator. Absent when no lane could pin one down. */
   chunk?: ConnectorStoreChunkMatch;
+  /**
+   * Set by a metadata-only search in place of `chunk`: the row matched in its
+   * text, and no chunk was read to say where.
+   */
+  contentMatched?: true;
 }
 
 export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
@@ -9210,6 +9215,9 @@ export class LocalConnectorStore {
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
     deadlineAtMs?: number,
+    // locate: false is the metadata-only mode: no chunk text is read to place
+    // the match, and the row says only that its text matched.
+    laneOptions: { locate?: boolean } = {},
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
     const vectorFilters = connectorStoreVectorScopeFilters(filters);
@@ -9249,6 +9257,7 @@ export class LocalConnectorStore {
       ...(accountScope !== undefined ? { accountScope } : {}),
       ...(vectorFilters ? { filters: vectorFilters } : {}),
       ...(deadlineAtMs !== undefined ? { deadlineAtMs } : {}),
+      locate: laneOptions.locate !== false,
     });
   }
 
@@ -9265,6 +9274,7 @@ export class LocalConnectorStore {
     accountScope?: string;
     filters?: ConnectorStoreSearchFilters;
     deadlineAtMs?: number;
+    locate: boolean;
   }): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     const { provider, queryVector, maxResults, accountScope, filters, deadlineAtMs } = input;
     if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
@@ -9370,6 +9380,7 @@ export class LocalConnectorStore {
     ).flatMap((row) => {
       const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
       if (winner === undefined) return [];
+      if (!input.locate) return [{ ...row, contentMatched: true as const, bestCosine: winner.bestCosine }];
       const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, 'semantic');
       return [{ ...row, ...(chunk ? { chunk } : {}), bestCosine: winner.bestCosine }];
     });
@@ -9570,7 +9581,9 @@ export class LocalConnectorStore {
     maxResults: number,
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
-    ftsOptions: { prefix?: boolean; contentOnly?: boolean } = {},
+    // locate: false is the metadata-only mode: a text match is reported as
+    // such, and no chunk text is read to place it.
+    ftsOptions: { prefix?: boolean; contentOnly?: boolean; locate?: boolean } = {},
   ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
@@ -9675,6 +9688,9 @@ export class LocalConnectorStore {
     return {
       rows: kept.map((row) => {
         const base = searchRowFromItemRow(row);
+        if (ftsOptions.locate === false) {
+          return row.chunk_pk === null || row.chunk_pk === undefined ? base : { ...base, contentMatched: true as const };
+        }
         const chunk = row.chunk_pk === null || row.chunk_pk === undefined
           ? undefined
           : this.chunkMatchForChunkPk(row.chunk_pk, 'keyword', spanTerms);
@@ -9849,6 +9865,37 @@ export class LocalConnectorStore {
       })),
       ...(resume < top ? { next: resume } : {}),
     };
+  }
+
+  /**
+   * Whether an item a caller selected by identity is this store's item and
+   * served now under the given scope: its full identity (provider, account,
+   * provider item id and conversation) names a live row here, the row matches
+   * the account scope and filters, and its content is served now
+   * (contentServedNow below). Item, chunk-existence and tier-ledger reads
+   * only; no chunk text is loaded. Fails closed.
+   */
+  selectedItemServable(
+    identity: Pick<SourceItemIdentity, 'localItemId' | 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    accountScope: string | undefined,
+    filters: ConnectorStoreSearchFilters | undefined,
+  ): boolean {
+    try {
+      const localItemId = typeof identity.localItemId === 'string' ? identity.localItemId.trim() : '';
+      if (!localItemId) return false;
+      const row = this.activeLocalItemRow(localItemId);
+      if (!row) return false;
+      if (
+        row.identity.provider !== identity.provider
+        || row.identity.accountScope !== identity.accountScope
+        || row.identity.providerItemId !== identity.providerItemId
+        || normalizeConversationId(row.identity.providerConversationId) !== normalizeConversationId(identity.providerConversationId)
+      ) return false;
+      if (!this.itemMatchesSearchFilters(localItemId, normalizeOptionalAccountScope(accountScope), filters)) return false;
+      return this.contentServedNow(localItemId);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -10693,10 +10740,66 @@ export function createConnectorStoreCorpusAdapter(
       rawExposed: false,
     };
   };
+  // Metadata-only matching (router.ts metadataMatches): the items that match
+  // the query, lexically or above the semantic relevance bar, as identity-only
+  // hits. No chunk text is read (both lanes run with locate: false), no
+  // recency lane or pin (they are not matches), and no result projection.
+  const metadataMatches = async (request: SourceIndexCorpusSearchRequest): Promise<SourceIndexCorpusSearchResponse> => {
+    const startedAt = Date.now();
+    const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
+    const hybrid = embeddingProvider !== undefined
+      && (options.retrievalMode ?? 'hybrid') === 'hybrid'
+      && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
+      && store.hasEmbeddings(embeddingProvider.modelId);
+    const keywordLane = connectorStoreKeywordLaneRows(
+      store,
+      request.query,
+      maxResults,
+      options.accountScope,
+      filters,
+      hybrid ? { prefix: false, locate: false } : { locate: false },
+    );
+    const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows];
+    let semanticOnly = 0;
+    if (hybrid) {
+      const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
+      if (bar !== undefined) {
+        const lane = await store.vectorSearchLane(
+          request.query,
+          embeddingProvider,
+          maxResults,
+          options.accountScope,
+          filters,
+          request.deadlineAtMs,
+          { locate: false },
+        );
+        for (const row of lane.rows) {
+          if (row.bestCosine < bar || keywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
+          rows.push(row);
+          semanticOnly += 1;
+        }
+      }
+    }
+    return {
+      hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
+      latencyMs: Date.now() - startedAt,
+      matchCount: {
+        ...keywordLane.matchCount,
+        matchedItems: keywordLane.matchCount.matchedItems + semanticOnly,
+        contentMatchedItems: keywordLane.matchCount.contentMatchedItems + semanticOnly,
+      },
+      rawExposed: false,
+    };
+  };
   const expanded: SourceIndexCorpusSearchAdapter = (request) => {
     assertConnectorStoreCorpusRequest(store, request);
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request), store);
   };
+  expanded.metadataMatches = (request) => {
+    assertConnectorStoreCorpusRequest(store, request);
+    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
+  };
+  expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
@@ -11009,7 +11112,7 @@ function connectorStoreKeywordLaneRows(
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
-  ftsOptions: { prefix?: boolean } = {},
+  ftsOptions: { prefix?: boolean; locate?: boolean } = {},
 ): {
   rows: ConnectorStoreSearchRow[];
   matchCount: SourceIndexCorpusMatchCount;
@@ -11073,7 +11176,7 @@ function connectorStoreKeywordLaneRows(
 // (or its scope is metadata-only), so a chunk-less keyword row is a title-only
 // or metadata-only item.
 function connectorStoreRowHasContent(row: ConnectorStoreSearchRow): boolean {
-  return row.chunk !== undefined;
+  return row.chunk !== undefined || row.contentMatched === true;
 }
 
 // A row's own tier, which is the tier its content is served at; the store's
