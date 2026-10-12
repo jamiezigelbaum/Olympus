@@ -102,6 +102,14 @@ export interface SourceIndexCorpusSearchResponse {
    * Counts only; an adapter that cannot count omits it.
    */
   matchCount?: SourceIndexCorpusMatchCount;
+  /**
+   * A lane the adapter should have run did not complete (a semantic lane
+   * whose query embedding, vectors or deadline failed): the hits are what
+   * the lanes that did run found, and an empty result is not a "no".
+   * Set by metadataMatches; ordinary searches report the same loss in their
+   * lane audits.
+   */
+  incomplete?: boolean;
   rawExposed: false;
 }
 
@@ -216,6 +224,9 @@ export interface SourceIndexRoutedSearchResponse {
   corpusTimings: readonly SourceIndexRoutedCorpusTiming[];
   // Per-corpus match breadth, for every searched corpus whose adapter counts.
   matchCounts?: readonly SourceIndexRoutedMatchCount[];
+  // Searched corpora whose adapter reported an incomplete response (see
+  // SourceIndexCorpusSearchResponse.incomplete).
+  incompleteCorpora?: readonly string[];
   // Content-free, decided before the visibility gate, the per-corpus budget
   // or any trim: true when a searched corpus contributed anything secure by
   // isSecureSensitivity. A corpus contributes when it returned a hit or a
@@ -339,6 +350,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const corpusTimings: SourceIndexRoutedCorpusTiming[] = [];
   const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[] }> = [];
   const matchCounts: SourceIndexRoutedMatchCount[] = [];
+  const incompleteCorpora: string[] = [];
   let encounteredSecureLocal = false;
   const secureLaneAudits: RetrievalLaneAudit[] = [];
   const startedAt = Date.now();
@@ -424,6 +436,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       outcome: 'success',
     });
     searchedCorpora.push(corpus.corpusId);
+    if (response.incomplete === true) incompleteCorpora.push(corpus.corpusId);
     const corpusLaneAuditsStart = laneAudits.length;
     laneAudits.push(...(response.laneAudits ?? []));
     const contributedSecure = corpusContributedSecure(corpus, response);
@@ -506,6 +519,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
     corpusTimings,
     ...(matchCounts.length > 0 ? { matchCounts } : {}),
+    ...(incompleteCorpora.length > 0 ? { incompleteCorpora } : {}),
     encounteredSecureLocal,
     secureLaneAudits,
     latencyMs: Date.now() - startedAt,

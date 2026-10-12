@@ -10761,6 +10761,10 @@ export function createConnectorStoreCorpusAdapter(
     );
     const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows];
     let semanticOnly = 0;
+    // A semantic lane that should have run and did not (query embedding
+    // outage, vectors unreadable or of the wrong width, the deadline): what
+    // it would have matched is unknown, and the response says so.
+    let incomplete = false;
     if (hybrid) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
       if (bar !== undefined) {
@@ -10773,6 +10777,7 @@ export function createConnectorStoreCorpusAdapter(
           request.deadlineAtMs,
           { locate: false },
         );
+        if (lane.skippedReason !== undefined) incomplete = true;
         for (const row of lane.rows) {
           if (row.bestCosine < bar || keywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
           rows.push(row);
@@ -10788,6 +10793,7 @@ export function createConnectorStoreCorpusAdapter(
         matchedItems: keywordLane.matchCount.matchedItems + semanticOnly,
         contentMatchedItems: keywordLane.matchCount.contentMatchedItems + semanticOnly,
       },
+      ...(incomplete ? { incomplete: true } : {}),
       rawExposed: false,
     };
   };

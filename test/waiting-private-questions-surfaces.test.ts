@@ -18,7 +18,8 @@ import { defaultConfig } from '../src/core/config.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { createRemotePrivateParts, remotePrivateOutcome, type PrivateMatchVerdict } from '../src/core/remote-private-part.ts';
-import { REMOTE_OUTPUT_SCHEMAS, REMOTE_PRIVATE_NOTE, remoteOperationOutput, withRemotePrivateNote } from '../src/core/remote-result.ts';
+import { recordReleaseManifest, type ReleaseCheck } from '../src/core/release-manifest.ts';
+import { REMOTE_ANSWER_CHANGED, REMOTE_OUTPUT_SCHEMAS, REMOTE_PRIVATE_NOTE, remoteOperationOutput, withRemotePrivateNote } from '../src/core/remote-result.ts';
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
@@ -36,6 +37,8 @@ import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/
 import { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } from '../src/workers/remote-openapi.ts';
 import { probePrivateMatch, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
+import { ARCTIC_EMBED_M_V1_5 } from '../src/workers/source-index/built-in-embedding/manifest.ts';
+import { TransientSourceEmbeddingError, type SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const INSTALL = 'a'.repeat(32);
 const PANEL_ORIGIN = 'https://olympus.web-sandbox.oaiusercontent.com';
@@ -280,11 +283,12 @@ describe('remote: probe states and records', () => {
     const calls: Array<Record<string, unknown>> = [];
     const call = parts('match', calls).forConnection('conn-a').start('source_answer', ARGS)!;
     expect(await call.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(true);
-    // The probe searched with the request's own selectors and question only.
-    expect(calls).toEqual([{ question: 'When does the lease end?', corpus_ids: ['secure_local.fixture.files'], account: 'personal' }]);
+    // The probe searched with the request's own selectors and question only,
+    // in the answer's effective retrieval mode (hybrid when the request named none).
+    expect(calls).toEqual([{ question: 'When does the lease end?', corpus_ids: ['secure_local.fixture.files'], account: 'personal', retrieval_mode: 'hybrid' }]);
     expect(store.list().questions).toEqual([expect.objectContaining({
       connectionId: 'conn-a', surface: 'remote', state: 'waiting', question: 'When does the lease end?',
-      selectors: { corpus_ids: ['secure_local.fixture.files'], account: 'personal' },
+      selectors: { corpus_ids: ['secure_local.fixture.files'], account: 'personal', retrieval_mode: 'hybrid' },
     })]);
 
     expect(await parts('no_match').forConnection('conn-b').start('source_answer', ARGS)!.settle(answerResult(UNAVAILABLE_SKIP), ANSWERED)).toBe(false);
@@ -312,6 +316,7 @@ describe('remote: probe states and records', () => {
     const calls: Array<Record<string, unknown>> = [];
     const hook = parts('match', calls).forConnection('conn-a');
     expect(await hook.start('source_answer', { ...ARGS, account: 42 })!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(false);
+    expect(await hook.start('source_answer', { ...ARGS, retrieval_mode: 'semantic' })!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(false);
     expect(await hook.start('source_answer', { ...ARGS, selected_items: [{ corpus_id: 'x', local_item_id: 'y'.repeat(5_000) }] })!.settle(answerResult(POLICY_SKIP), ANSWERED)).toBe(false);
     // The over-bound selectors were probed but the store refused them: nothing recorded, and no sentence.
     expect(store.list().questions).toEqual([]);
@@ -490,30 +495,52 @@ describe('remote: over /mcp and the REST surface', () => {
   let audit: Record<string, unknown>;
   let probes: number;
   let answerDelayMs: number;
+  // Set by a test that checks the release: the answer records a manifest of
+  // one Personal input, and this is its tier now.
+  let inputTier: 'public_or_personal' | 'secret' | undefined;
+  // While set, the probe waits on it (a slow local probe).
+  let probeHeld: Promise<void> | undefined;
 
   beforeEach(() => {
     connections = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
     audit = POLICY_SKIP;
     probes = 0;
     answerDelayMs = 0;
+    inputTier = undefined;
+    probeHeld = undefined;
     const worker = createEmailSourceWorker({
       sourceAnswer: {
         answer: async () => {
           if (answerDelayMs > 0) await Bun.sleep(answerDelayMs);
+          if (inputTier) {
+            recordReleaseManifest({
+              inputs: [{ corpusId: 'personal.fixture.files', provider: 'fixture_files', accountScope: 'personal', providerItemId: 'notes', privateAtAnswer: false }],
+              constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false },
+            });
+          }
           return answerResult(audit);
         },
       },
     });
     const sourceAnswerJobs = new SourceAnswerJobRegistry({ limits: { handoffMs: 250, resultWaitMs: 0 } });
     const remotePrivateParts = createRemotePrivateParts({
-      probe: async () => { probes += 1; return 'match'; },
+      probe: async () => {
+        probes += 1;
+        if (probeHeld) await probeHeld;
+        return 'match';
+      },
       store: () => store,
     });
+    const releaseCheck: ReleaseCheck = {
+      inputs: (inputs) => inputs.map(() => ({ tier: inputTier ?? 'legacy', gone: false })),
+      secureDerivativeDefault: () => 'allow',
+    };
     const remote = {
       connections: () => connections,
       makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
         ...createInProcessOperationContext({ config: CONFIG, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal, sourceAnswerJobs }),
         ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
+        ...(inputTier ? { releaseCheck } : {}),
       }),
     };
     const mcp = createRemoteMcpHandler(remote);
@@ -562,6 +589,57 @@ describe('remote: over /mcp and the REST surface', () => {
     expect(deliveredBody).not.toHaveProperty('private_note');
     expect(probes).toBe(2);
     expect(store.list().questions).toHaveLength(2);
+  });
+
+  test('an input reclassified to Secret while the probe runs: the answer is withheld at the final check, with no sentence', async () => {
+    const { token } = connections.create('Claude');
+    inputTier = 'public_or_personal';
+    const ask = async (send: () => Promise<Record<string, unknown>>) => {
+      inputTier = 'public_or_personal';
+      let release!: () => void;
+      probeHeld = new Promise<void>((resolve) => { release = resolve; });
+      const before = probes;
+      const pending = send();
+      for (let tries = 0; tries < 200 && probes === before; tries += 1) await Bun.sleep(5);
+      expect(probes).toBe(before + 1);
+      // Approved before the probe; Secret by the time it finishes.
+      inputTier = 'secret';
+      release();
+      return pending;
+    };
+    const client = new Client({ name: 'waiting-remote-test', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    }) as unknown as Parameters<Client['connect']>[0]);
+    try {
+      const mcp = await ask(async () => {
+        const result = await client.callTool({ name: 'source_answer', arguments: { question: 'When does the lease end?' } }) as { content: Array<{ text: string }> };
+        return JSON.parse(result.content[0]!.text) as Record<string, unknown>;
+      });
+      expect(mcp).toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_CHANGED, citations: [] });
+    } finally {
+      await client.close();
+    }
+    const rest = await ask(async () => {
+      const response = await fetch(`${base}/api/v1/tools/source_answer`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'Who signed the lease?' }),
+      });
+      expect(response.status).toBe(200);
+      return await response.json() as Record<string, unknown>;
+    });
+    expect(rest).toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_CHANGED, citations: [] });
+
+    // The same answer with the input still Personal leaves answered, with the sentence.
+    inputTier = 'public_or_personal';
+    probeHeld = undefined;
+    const kept = await fetch(`${base}/api/v1/tools/source_answer`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Where is the lease?' }),
+    });
+    expect(await kept.json()).toMatchObject({ kind: 'source_answer', status: 'answered', private_note: REMOTE_PRIVATE_NOTE });
   });
 
   test('a handed-off answer nobody collects still waits on the computer', async () => {
@@ -676,6 +754,63 @@ describe('probePrivateMatch: metadata only, the request\'s own selectors', () =>
       expect(await remote.retryUnchecked()).toEqual({ matched: 0, cleared: 0, still: 1 });
       current = lanes();
       expect(await remote.retryUnchecked()).toEqual({ matched: 1, cleared: 0, still: 0 });
+      expect(store.list().questions.map((question) => question.state)).toEqual(['waiting']);
+    });
+  });
+
+  test('hybrid unless pinned: a meaning-only match counts, is recorded and re-probed as hybrid; a semantic lane that did not run is not a "no"', async () => {
+    await withConnectorStore(async ({ connectorStore }) => {
+      let queryOutage = false;
+      const at = (cosine: number) => [cosine, Math.sqrt(1 - cosine * cosine)];
+      // Built-in-like (calibrated bar 0.40): only a question about the tenancy is near the lease.
+      const provider: SourceEmbeddingProvider = {
+        provider: 'built-in',
+        modelId: ARCTIC_EMBED_M_V1_5.modelId,
+        dimension: 2,
+        configHash: 'waiting-probe-fixture',
+        epochId: `local:built-in:${ARCTIC_EMBED_M_V1_5.modelId}:2`,
+        backend: 'local',
+        async embed(inputs, options) {
+          if (options.taskType !== 'RETRIEVAL_QUERY') return inputs.map(() => [1, 0]);
+          if (queryOutage) throw new TransientSourceEmbeddingError('built-in', 'timeout', 1);
+          return inputs.map((input) => at(input.text.includes('tenancy') ? 0.9 : 0.1));
+        },
+      };
+      await connectorStore.embedChunks({ provider });
+      const registry = buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' })]);
+      const modes: string[] = [];
+      // As the worker builds its lanes: the request's mode, keyword when absent.
+      const lanes = (request: unknown) => {
+        const mode = (request as { retrieval_mode?: 'keyword' | 'hybrid' }).retrieval_mode ?? 'keyword';
+        modes.push(mode);
+        return {
+          registry,
+          adapters: { [CORPUS_ID]: createConnectorStoreCorpusAdapter({ store: connectorStore, retrievalMode: mode, embeddingProvider: provider }) },
+        } as unknown as AnalystAnswerLanes;
+      };
+      // No word of it is in the item; only its meaning is.
+      const question = 'When does my tenancy expire?';
+      expect(await probe(lanes, { question })).toBe('match');
+      expect(await probe(lanes, { question, retrieval_mode: 'keyword' })).toBe('no_match');
+      expect(modes).toEqual(['hybrid', 'keyword']);
+
+      // The query embedding is down: the semantic lane did not run, so nothing matched is unknown.
+      queryOutage = true;
+      expect(await probe(lanes, { question })).toBe('unknown');
+      const remote = createRemotePrivateParts({
+        probe: (request, timeoutMs) => probePrivateMatch({ lanes, request: request as never, timeoutMs }),
+        store: () => store,
+        probeTimeoutMs: 5_000,
+      });
+      await remote.forConnection('conn-a').start('source_answer', { question })!.settle(answerResult(POLICY_SKIP), ANSWERED);
+      expect(store.list().questions).toEqual([expect.objectContaining({ state: 'unchecked', selectors: { retrieval_mode: 'hybrid' } })]);
+      // Still down: kept, never cleared as a "no".
+      expect(await remote.retryUnchecked()).toEqual({ matched: 0, cleared: 0, still: 1 });
+      // Back: re-probed as hybrid, and it waits.
+      queryOutage = false;
+      modes.length = 0;
+      expect(await remote.retryUnchecked()).toEqual({ matched: 1, cleared: 0, still: 0 });
+      expect(modes).toEqual(['hybrid']);
       expect(store.list().questions.map((question) => question.state)).toEqual(['waiting']);
     });
   });

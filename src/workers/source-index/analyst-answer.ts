@@ -2810,11 +2810,14 @@ async function privateNeighbours(
  *   (the item is that corpus's live item, in scope, with its content served
  *   at its current tier), then the same gate; a caller-supplied identity
  *   alone never matches.
+ * The retrieval mode is the request's effective one, as the answer handler
+ * resolves it: hybrid unless the request pinned keyword.
  * No content provider is used, nothing reaches a model and no query leaves
  * this computer. `unknown` when a Private corpus in scope was not checked
  * (no adapter that the lanes did not exclude on purpose, an adapter that
- * cannot match without reading text, a lane timeout) and nothing matched
- * elsewhere, and on a timeout or any failure. A caller must never treat
+ * cannot match without reading text, a lane timeout, or a semantic lane that
+ * should have run and did not) and nothing matched elsewhere, and on a
+ * timeout or any failure. A caller must never treat
  * `unknown` as a match. The verdict goes only to the local waiting record.
  */
 export async function probePrivateMatch(input: {
@@ -2829,6 +2832,8 @@ export async function probePrivateMatch(input: {
     const request: SourceIndexAnswerRequest = {
       ...input.request,
       question,
+      // The answer's own effective mode: hybrid unless the request pinned one.
+      retrieval_mode: input.request.retrieval_mode ?? 'hybrid',
       include_internal: false,
       include_secure_local: true,
       include_secure_local_content: false,
@@ -2884,12 +2889,14 @@ export async function probePrivateMatch(input: {
       laneTimeoutMs: input.timeoutMs,
     });
     if (routed.hits.some((hit) => hit.trustDomain === 'secure_local')) return 'match';
-    // A Private corpus in scope that was not searched is not a "no".
-    const unchecked = routed.skippedCorpora.some((skip) => skip.trustDomain === 'secure_local' && (
-      skip.reason === 'lane_timeout'
-      || skip.reason === 'metadata_search_unsupported'
-      || (skip.reason === 'no_adapter' && !excluded.has(skip.corpusId))
-    ));
+    // A Private corpus in scope that was not searched, or searched with a lane
+    // that should have run and did not, is not a "no".
+    const unchecked = (routed.incompleteCorpora?.length ?? 0) > 0
+      || routed.skippedCorpora.some((skip) => skip.trustDomain === 'secure_local' && (
+        skip.reason === 'lane_timeout'
+        || skip.reason === 'metadata_search_unsupported'
+        || (skip.reason === 'no_adapter' && !excluded.has(skip.corpusId))
+      ));
     return unchecked ? 'unknown' : 'no_match';
   };
   try {

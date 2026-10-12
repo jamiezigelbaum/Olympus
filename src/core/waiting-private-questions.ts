@@ -104,6 +104,12 @@ export interface WaitingQuestionSelectors {
   authored_after?: string;
   authored_before?: string;
   selected_items?: Array<Record<string, string>>;
+  /**
+   * The effective retrieval mode: the request's own, or hybrid (the answer
+   * handler's default) when it named none. Always set on a normalized record,
+   * so the probe, the dedupe key and every retry search the same way.
+   */
+  retrieval_mode?: 'keyword' | 'hybrid';
 }
 
 const SELECTOR_TEXT_FIELDS = [
@@ -210,8 +216,10 @@ export function normalizeWaitingQuestion(question: string): string {
 /**
  * The retrieval selectors of a source_answer request, field by field: every
  * other field (the question, analyst choice, tier flags, limits, timeouts) is
- * dropped. Undefined when a selector is malformed (a non-string where a
- * string belongs), so the caller records nothing rather than a wider search.
+ * dropped. The retrieval mode is kept as the answer resolves it (hybrid when
+ * absent). Undefined when a selector is malformed (a non-string where a
+ * string belongs, an unknown retrieval mode), so the caller records nothing
+ * rather than a different search.
  */
 export function normalizeWaitingSelectors(raw: Readonly<Record<string, unknown>>): WaitingQuestionSelectors | undefined {
   const out: WaitingQuestionSelectors = {};
@@ -248,6 +256,9 @@ export function normalizeWaitingSelectors(raw: Readonly<Record<string, unknown>>
     }
     if (items.length > 0) out.selected_items = items;
   }
+  const mode = raw.retrieval_mode ?? 'hybrid';
+  if (mode !== 'keyword' && mode !== 'hybrid') return undefined;
+  out.retrieval_mode = mode;
   return out;
 }
 

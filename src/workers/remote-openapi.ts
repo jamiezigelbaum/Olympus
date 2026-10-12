@@ -184,12 +184,17 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
   });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
-    const output = remoteOperationOutput(operation.name, result, {
+    const release = () => remoteOperationOutput(operation.name, result, {
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
       releaseManifests: manifests.manifests,
     });
-    // Settled against the release the agent actually gets (slice 2's recheck included).
-    const privateMayAnswer = privatePart ? await privatePart.settle(result, output) : false;
+    const approved = release();
+    // Settled against the release the agent would get (slice 2's recheck included).
+    const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
+    // The settle can wait on the local probe: an item reclassified meanwhile
+    // (to Secret, say) is caught by checking the release again right before
+    // it leaves. The note follows the output that actually leaves.
+    const output = privatePart ? release() : approved;
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output) : output);
   } catch (error) {
     return operationErrorResponse(error, declaredParams);

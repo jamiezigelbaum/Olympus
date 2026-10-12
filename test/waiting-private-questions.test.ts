@@ -93,7 +93,12 @@ describe('waiting private questions: what is stored', () => {
       authored_after: '2026-06-01',
       corpus_ids: ['a.one', 'b.two'],
       selected_items: [{ corpus_id: 'a.one', provider: 'dropbox', local_item_id: 'x' }],
+      retrieval_mode: 'hybrid',
     });
+    // The effective retrieval mode: the request's own, else the answer's hybrid default.
+    expect(normalizeWaitingSelectors({ query: 'q', retrieval_mode: 'keyword' })).toEqual({ query: 'q', retrieval_mode: 'keyword' });
+    expect(normalizeWaitingSelectors({})).toEqual({ retrieval_mode: 'hybrid' });
+    expect(normalizeWaitingSelectors({ retrieval_mode: 'semantic' })).toBeUndefined();
     expect(normalizeWaitingSelectors({ query: 4 })).toBeUndefined();
     expect(normalizeWaitingSelectors({ corpus_ids: 'a.one' })).toBeUndefined();
     expect(normalizeWaitingSelectors({ selected_items: [{ provider: 7 }] })).toBeUndefined();
