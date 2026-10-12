@@ -1,4 +1,4 @@
-/** Browser-safe static styles for the computer's own dashboard pages (pages/local.ts, pages/outside-help.ts). */
+/** Browser-safe static styles for the computer's own dashboard pages (pages/local.ts, pages/private-answers.ts). */
 
 /** The row list and the page title and notes, after the ChatGPT panel's rows. */
 export const LOCAL_PAGE_CSS = `

@@ -161,6 +161,7 @@ import {
   DASHBOARD_TOOLS_CALL_PATH,
   dashboardHtmlRoutePage,
   dashboardLegacyRedirect,
+  dashboardOutsideHelpRedirect,
   dashboardReadToken,
   renderComputerHostPage,
   renderDashboardLocalPage,
@@ -171,6 +172,7 @@ import type { DashboardPanelCallContext, DashboardPanelTools } from './dashboard
 import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine } from '../dashboard/vocabulary.ts';
 import { sourceFailureKind, type SourceFailureKind } from '../dashboard/source-failure.ts';
 import type { DashboardConsultBackend } from './dashboard-consult.ts';
+import type { LocalPrivateAnswers } from './local-private-answers.ts';
 
 import type {
   OlympusFolderScopeBrowseResult,
@@ -185,6 +187,7 @@ import {
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+  DASHBOARD_PRIVATE_ANSWERS_PATH,
 } from '../http.ts';
 import {
   readEmbeddingRuntime,
@@ -520,6 +523,14 @@ export interface EmailSourceWorkerOptions {
      * and the locked read. Absent: the route answers 501.
      */
     panelTools?: DashboardPanelTools;
+    /**
+     * Private answers on this computer (local-private-answers.ts): Ask
+     * privately, and the waiting questions with Answer and Dismiss. Its route
+     * and the page's list are served only inside a local control session
+     * (workers/http.ts). Absent: the page says it is unavailable and the route
+     * answers 501.
+     */
+    privateAnswers?: LocalPrivateAnswers;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
@@ -1225,6 +1236,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (page === 'legacy') {
             return new Response(null, { status: 302, headers: { Location: dashboardLegacyRedirect(url), 'Cache-Control': 'no-store' } });
           }
+          if (page === 'outside_help_moved') {
+            return new Response(null, { status: 302, headers: { Location: dashboardOutsideHelpRedirect(url), 'Cache-Control': 'no-store' } });
+          }
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
           if (page === 'host') {
             return new Response(renderComputerHostPage({
@@ -1260,19 +1274,26 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               },
             }));
           }
-          if (page === 'outside_help') {
-            // The card's facts (a daemon version call and two port probes) only
-            // with the control session; whether it was minted locally, the
-            // only grade the consult routes take.
+          if (page === 'private_answers') {
+            // Waiting questions and the outside help card's facts (a daemon
+            // version call and two port probes) only with the control
+            // session; the questions only when it was minted locally, the
+            // only grade the Private answers and consult routes take.
+            const localSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local';
             const outsideHelp = sourceDashboard?.consult && controlSessionCsrfToken !== undefined
               ? await sourceDashboard.consult.status().catch(() => undefined)
               : undefined;
-            const outsideHelpLocalSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local';
-            return html(renderDashboardLocalPage('outside_help', {
+            const waiting = controlSessionCsrfToken !== undefined && localSession ? sourceDashboard?.privateAnswers?.waiting() : undefined;
+            return html(renderDashboardLocalPage('private_answers', {
               url,
               options: {
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
-                ...(outsideHelp ? { outsideHelp, outsideHelpLocalSession } : {}),
+                ...(outsideHelp ? { outsideHelp } : {}),
+                outsideHelpLocalSession: localSession,
+                privateAnswers: {
+                  available: sourceDashboard?.privateAnswers !== undefined,
+                  ...(waiting ? { waiting } : {}),
+                },
               },
             }));
           }
@@ -1831,6 +1852,27 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // Return promptly; the authoritative Models card receives their result.
           void sourceDashboard.checkModelSetup().catch(() => undefined);
           return json({ ok: true, status_message: 'Readiness check requested. See the Models cards above for the result.' });
+        }
+
+        // Private answers (local-private-answers.ts): Ask privately, and
+        // Answer, seen, Dismiss and open on a waiting question. Like the
+        // consult routes below, it needs the control-session context header
+        // of a locally minted session, which only the HTTP boundary sets.
+        if (request.method === 'POST' && url.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {
+          const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+          if (!csrf || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Private answers open only in the dashboard on this computer, in an unlocked browser.' } }, 403);
+          }
+          if (!sourceDashboard?.privateAnswers) {
+            throw new EmailSourceWorkerError(501, 'private_answers_not_supported', 'Private answers are not available in this worker.');
+          }
+          const record = await parseObjectBody(request);
+          const outcome = await sourceDashboard.privateAnswers.handle(record, dashboardPanelOpener(request));
+          // Private text: never kept by a cache.
+          return new Response(JSON.stringify(outcome.body), {
+            status: outcome.status,
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+          });
         }
 
         // Outside help (consults), the Mac dashboard card's five routes. Every

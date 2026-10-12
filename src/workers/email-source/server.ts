@@ -55,6 +55,7 @@ import {
   type SovereigntyAnalystRoutePlan,
   type SovereigntyAnalystRouteStep,
 } from '../source-index/analyst-answer.ts';
+import { builtInEmbeddingOnly } from '../source-index/local-answer.ts';
 import { SecureAnalystPoolState, parseSecureAnalystPoolLastLegTimeoutMs } from '../source-index/analyst-pool.ts';
 import {
   createFileSourceAnswerLatencyLog,
@@ -3178,7 +3179,18 @@ export async function main(): Promise<void> {
   const secureDerivativeDefault = parseSecureDerivativeDefault(
     process.env.OLYMPUS_SECURE_DERIVATIVE_DEFAULT,
   );
-  let sourceAnswerLanes: ((request: SourceIndexAnswerRequest) => AnalystAnswerLanes) | undefined;
+  // The built-in embedding model, only once its files are on this computer:
+  // reading a "ready" or "loading" model never downloads anything.
+  const builtInEmbeddingInstalled = (provider: SourceEmbeddingProvider): boolean => {
+    if (!(provider instanceof BuiltInSourceEmbeddingProvider)) return false;
+    const state = provider.status().state;
+    return state === 'ready' || state === 'loading';
+  };
+  // `embedding: 'built_in_only'` builds the same lanes for answers on this
+  // computer alone (source-index/local-answer.ts): the vector lanes and
+  // passage ranking keep only the built-in embedding model, already installed
+  // here, and fall back to keyword search otherwise. No model or epoch changes.
+  let sourceAnswerLanes: ((request: SourceIndexAnswerRequest, embedding?: 'built_in_only') => AnalystAnswerLanes) | undefined;
   const analystSourceAnswer = sourceIndexAnswerEnabled
     ? await (async () => {
       const analystLane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
@@ -3326,7 +3338,7 @@ export async function main(): Promise<void> {
         // real bounded content. A registered corpus without a mounted adapter
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
-        lanes: sourceAnswerLanes = (request) => {
+        lanes: sourceAnswerLanes = (request: SourceIndexAnswerRequest, embedding?: 'built_in_only') => {
           // The scope each corpus is searched under in THIS request, so the
           // Secret locations released beside the answer are confined to it.
           const searchScopes = new Map<string, { accountScope?: string; filters?: ConnectorStoreSearchFilters }>();
@@ -3335,7 +3347,10 @@ export async function main(): Promise<void> {
           const requestEmbeddings = new Map<string, SourceEmbeddingProvider | undefined>();
           const requestEmbedding = (store: LocalConnectorStore): SourceEmbeddingProvider | undefined => {
             if (!requestEmbeddings.has(store.corpusId)) {
-              const provider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
+              const configured = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
+              const provider = embedding === 'built_in_only'
+                ? builtInEmbeddingOnly(configured, builtInEmbeddingInstalled)
+                : configured;
               requestEmbeddings.set(
                 store.corpusId,
                 provider && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(provider))
@@ -4410,6 +4425,9 @@ export async function main(): Promise<void> {
   // Built further down, once the ChatGPT surface exists; the worker only
   // calls it per request.
   let dashboardPanelTools: DashboardPanelTools | undefined;
+  // Private answers on this computer (local-private-answers.ts); built below,
+  // beside the waiting-question store and the built-in model.
+  let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
@@ -4487,6 +4505,18 @@ export async function main(): Promise<void> {
                 return dashboardPanelTools.call(name, args, context);
               },
             },
+            // Private answers on this computer; bound late like the panel's tools.
+            ...(sourceAnswerLanes
+              ? {
+                  privateAnswers: {
+                    waiting: () => localPrivateAnswers?.waiting(),
+                    waitingCount: () => localPrivateAnswers?.waitingCount() ?? 0,
+                    handle: (body, session) => (localPrivateAnswers
+                      ? localPrivateAnswers.handle(body, session)
+                      : Promise.resolve({ status: 503, body: { ok: false, error: { code: 'unavailable', message: 'Olympus is still starting. Try again in a moment.' } } })),
+                  },
+                }
+              : {}),
             // Outside help (consults): the Mac dashboard card's backend, the
             // one caller of the settings writer; bound late like the panel's tools.
             consult: {
@@ -4709,6 +4739,20 @@ export async function main(): Promise<void> {
   const privateEvidenceEligible = async (items: readonly Readonly<Record<string, unknown>>[]) => (sourceAnswerLanes
     ? checkPrivateEvidenceItems({ lanes: sourceAnswerLanes, items })
     : items.map(() => false));
+  // "Open on this Mac" for a cited file: macOS `open`, on a path this engine
+  // resolved for a cited source (never a path from the request), checked
+  // again now: no symlink, still inside a Dropbox folder, and only a
+  // document type opens; anything else is revealed in Finder.
+  const openCitedFile = process.platform === 'darwin'
+    ? (path: string) => new Promise<void>((resolve, reject) => {
+        const args = localOpenArguments(path, localDropboxRoots());
+        if (!args) {
+          reject(new Error('open refused'));
+          return;
+        }
+        execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+      })
+    : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: workerBuiltInModel?.model,
     eligible: privateEvidenceEligible,
@@ -4750,23 +4794,55 @@ export async function main(): Promise<void> {
     acknowledge: (ref) => {
       waitingQuestionStore()?.acknowledge(ref);
     },
-    // The panel's "open on this Mac": macOS `open`, on a path this engine
-    // resolved for a cited source (never a path from the request), checked
-    // again now: no symlink, still inside a Dropbox folder, and only a
-    // document type opens; anything else is revealed in Finder.
-    ...(process.platform === 'darwin'
-      ? {
-          openFile: (path: string) => new Promise<void>((resolve, reject) => {
-            const args = localOpenArguments(path, localDropboxRoots());
-            if (!args) {
-              reject(new Error('open refused'));
-              return;
-            }
-            execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
-          }),
-        }
-      : {}),
+    ...(openCitedFile ? { openFile: openCitedFile } : {}),
   });
+  // Private answers on this computer (design background-agents.md, section
+  // B): Ask privately, and Answer on a question waiting here. Planning none,
+  // retrieval through the same scoped adapters with only the built-in
+  // embedding model, synthesis by the built-in model; no connector query, no
+  // cloud route, and never zkAPI.
+  if (sourceAnswerLanes) {
+    const { answerOnThisComputer, checkLocalEvidenceItems, readLocalEvidenceItem } = await import('../source-index/local-answer.ts');
+    const { createLocalPrivateAnswers } = await import('./local-private-answers.ts');
+    const { DASHBOARD_SUPPORTED_SOURCES } = await import('../source-dashboard.ts');
+    const allLanes = sourceAnswerLanes;
+    const localLanes = (request: SourceIndexAnswerRequest) => allLanes(request, 'built_in_only');
+    const localEligible = (items: readonly Readonly<Record<string, unknown>>[]) => checkLocalEvidenceItems({ lanes: localLanes, items });
+    const localModel = createBuiltInPrivateAnswerModel({
+      model: workerBuiltInModel?.model,
+      eligible: localEligible,
+      available: () => workerBuiltInModel?.available() ?? false,
+      answer: answerPrivately,
+      relevance: embeddingPanelRelevance(() => builtInEmbeddingOnly(sourceIndexEmbeddingProvider, builtInEmbeddingInstalled)),
+      readItem: (item, request) => readLocalEvidenceItem({ lanes: localLanes, item, ...request }),
+      sourceLinks: (item) => {
+        const provenance = item.provenance as { sourceItem?: { provider?: unknown }; citation?: { uri?: unknown } } | undefined;
+        const provider = provenance?.sourceItem?.provider;
+        const locator = provenance?.citation?.uri;
+        if (typeof provider !== 'string' || typeof locator !== 'string') return undefined;
+        return Object.hasOwn(sourceOpenTargets, provider) ? sourceOpenTargets[provider]!(locator) : undefined;
+      },
+    });
+    // "Left out: Gmail": a corpus named by the dashboard card it belongs to.
+    const sourceName = (corpusId: string): string | undefined => {
+      const sourceId = sourceCorpusRegistry.list().find((corpus) => corpus.corpusId === corpusId)?.sourceId;
+      if (!sourceId) return undefined;
+      return DASHBOARD_SUPPORTED_SOURCES.find((source) => source.corpus_source_ids.includes(sourceId))?.label;
+    };
+    localPrivateAnswers = createLocalPrivateAnswers({
+      // The built-in model serves one question at once: an answer preempts the sniffer.
+      answer: (input) => answerActivity.run(() => answerOnThisComputer(input, {
+        lanes: localLanes,
+        model: localModel,
+        eligible: localEligible,
+        sourceName,
+      })),
+      store: waitingQuestionStore,
+      connectionName: (connectionId) => remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
+      eligible: localEligible,
+      ...(openCitedFile ? { openFile: openCitedFile } : {}),
+    });
+  }
   // The private question panel's jobs (chatgpt/private-question-jobs.ts):
   // the sealed question runs the same ask lane as the ask_anonymously tool,
   // with the caller placed as OpenAI-hosted, since ChatGPT opened the panel.
@@ -5196,6 +5272,7 @@ export async function main(): Promise<void> {
       return runtime.state === 'unknown' ? undefined : runtime.overrideOn;
     },
     unreadableFiles: () => unreadableFiles,
+    waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
   });
 
   const server = Bun.serve({

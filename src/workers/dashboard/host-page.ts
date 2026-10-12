@@ -53,7 +53,7 @@ export const DASHBOARD_PANEL_READ_QUERY_PARAM = 'panel-read';
 export const DASHBOARD_LOCAL_PAGES = {
   keys: 'keys',
   agents: 'agents',
-  outsideHelp: 'outside-help',
+  privateAnswers: 'private-answers',
   connector: 'connector',
 } as const;
 
