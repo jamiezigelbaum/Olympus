@@ -21367,6 +21367,7 @@ var GENERIC_MIME_TYPES = new Set([
 init_command_runner();
 var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js";
 var APPLE_VISION_OSASCRIPT = "/usr/bin/osascript";
+var OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync14) {
   let directory = dirname20(fileURLToPath7(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
@@ -21382,6 +21383,15 @@ function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = exist
 }
 function appleVisionOcrSelected(preference, platform2 = process.platform) {
   return preference === "auto" && platform2 === "darwin";
+}
+function parseOcrEnginePreference(value) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized)
+    return;
+  if (OCR_ENGINE_PREFERENCES.includes(normalized)) {
+    return normalized;
+  }
+  throw new Error(`OCR engine must be one of ${OCR_ENGINE_PREFERENCES.join(", ")}; got ${value}.`);
 }
 
 // src/workers/file-extraction/extractors/ocr-capability.ts
@@ -21705,10 +21715,12 @@ function ocrInstallRemedy(input) {
     return "sudo dnf install tesseract poppler-utils";
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
-function visionReady(platform2) {
-  return appleVisionOcrSelected("auto", platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync15(APPLE_VISION_OSASCRIPT);
+function visionReady(platform2, preference) {
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync15(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
+  if (input.preference === "tesseract")
+    return describePinnedReadiness(input);
   if (input.vision) {
     return {
       state: "ready",
@@ -21744,16 +21756,41 @@ function describeOcrReadiness(input) {
     remedy
   };
 }
+var PINNED_SETTING = "OLYMPUS_FILE_EXTRACTION_OCR_ENGINE";
+function describePinnedReadiness(input) {
+  const remedy = `Set ${PINNED_SETTING}=auto (or remove it) for the worker.`;
+  if (input.snapshot?.ocrmypdf === "ok") {
+    return {
+      state: "partial",
+      pdfEngine: "ocrmypdf",
+      detail: `${PINNED_SETTING} is set to tesseract: scanned PDFs are read with ocrmypdf, but pictures of text are not read.`,
+      remedy: `Set ${PINNED_SETTING}=auto (or remove it) for the worker to read pictures too.`
+    };
+  }
+  return {
+    state: "missing",
+    detail: `${PINNED_SETTING} is set to tesseract, which needs a working ocrmypdf, and ocrmypdf ${input.snapshot === undefined ? "could not be checked" : input.snapshot.ocrmypdf === "missing" ? "is not installed" : "does not work here"}. Scans and pictures of text are not read.`,
+    remedy
+  };
+}
+function effectivePreference(env) {
+  try {
+    return parseOcrEnginePreference(env[PINNED_SETTING]) ?? "auto";
+  } catch {
+    return "auto";
+  }
+}
 async function checkOcrReadiness(options = {}) {
   const platform2 = options.platform ?? process.platform;
   const family = platform2 === "linux" ? linuxFamilyFromOsRelease(options.osRelease ?? readOsRelease()) : "other";
-  const vision = options.vision ?? visionReady(platform2);
+  const preference = options.preference ?? effectivePreference(options.env ?? process.env);
+  const vision = options.vision ?? visionReady(platform2, preference);
   if (vision)
-    return describeOcrReadiness({ platform: platform2, family, snapshot: undefined, vision: true });
+    return describeOcrReadiness({ platform: platform2, family, snapshot: undefined, vision: true, preference });
   const snapshot = await (options.probe ?? (() => probeOcrCapability()))().catch(() => {
     return;
   });
-  return describeOcrReadiness({ platform: platform2, family, snapshot });
+  return describeOcrReadiness({ platform: platform2, family, snapshot, preference });
 }
 
 // src/core/operations.ts

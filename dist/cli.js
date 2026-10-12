@@ -70060,6 +70060,7 @@ function createOcrCapabilityProbe(options = {}) {
   }));
   let cached2;
   let inFlight;
+  let generation = 0;
   const fresh = () => {
     if (!cached2)
       return false;
@@ -70067,7 +70068,10 @@ function createOcrCapabilityProbe(options = {}) {
     return now() - cached2.checkedAt < ttl;
   };
   const refresh = () => {
-    inFlight ??= run().catch(() => ({
+    if (inFlight)
+      return inFlight;
+    const startedIn = generation;
+    const probing = run().catch(() => ({
       tesseract: "failed",
       pdftoppm: "failed",
       ocrmypdf: "failed",
@@ -70075,11 +70079,14 @@ function createOcrCapabilityProbe(options = {}) {
       imageEngine: undefined,
       checkedAt: now()
     })).then((snapshot) => {
-      cached2 = snapshot;
-      inFlight = undefined;
+      if (startedIn === generation)
+        cached2 = snapshot;
+      if (inFlight === probing)
+        inFlight = undefined;
       return snapshot;
     });
-    return inFlight;
+    inFlight = probing;
+    return probing;
   };
   return {
     async snapshot() {
@@ -70088,6 +70095,12 @@ function createOcrCapabilityProbe(options = {}) {
       return refresh();
     },
     peek: () => cached2,
+    peekFresh: () => cached2 && fresh() ? cached2 : undefined,
+    invalidate() {
+      generation += 1;
+      cached2 = undefined;
+      inFlight = undefined;
+    },
     warm() {
       if (!fresh())
         refresh();
@@ -70159,10 +70172,12 @@ function ocrInstallRemedy(input) {
     return "sudo dnf install tesseract poppler-utils";
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
-function visionReady(platform2) {
-  return appleVisionOcrSelected("auto", platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync41(APPLE_VISION_OSASCRIPT);
+function visionReady(platform2, preference) {
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync41(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
+  if (input.preference === "tesseract")
+    return describePinnedReadiness(input);
   if (input.vision) {
     return {
       state: "ready",
@@ -70198,18 +70213,42 @@ function describeOcrReadiness(input) {
     remedy
   };
 }
+function describePinnedReadiness(input) {
+  const remedy = `Set ${PINNED_SETTING}=auto (or remove it) for the worker.`;
+  if (input.snapshot?.ocrmypdf === "ok") {
+    return {
+      state: "partial",
+      pdfEngine: "ocrmypdf",
+      detail: `${PINNED_SETTING} is set to tesseract: scanned PDFs are read with ocrmypdf, but pictures of text are not read.`,
+      remedy: `Set ${PINNED_SETTING}=auto (or remove it) for the worker to read pictures too.`
+    };
+  }
+  return {
+    state: "missing",
+    detail: `${PINNED_SETTING} is set to tesseract, which needs a working ocrmypdf, and ocrmypdf ${input.snapshot === undefined ? "could not be checked" : input.snapshot.ocrmypdf === "missing" ? "is not installed" : "does not work here"}. Scans and pictures of text are not read.`,
+    remedy
+  };
+}
+function effectivePreference(env) {
+  try {
+    return parseOcrEnginePreference(env[PINNED_SETTING]) ?? "auto";
+  } catch {
+    return "auto";
+  }
+}
 async function checkOcrReadiness(options = {}) {
   const platform2 = options.platform ?? process.platform;
   const family = platform2 === "linux" ? linuxFamilyFromOsRelease(options.osRelease ?? readOsRelease()) : "other";
-  const vision = options.vision ?? visionReady(platform2);
+  const preference = options.preference ?? effectivePreference(options.env ?? process.env);
+  const vision = options.vision ?? visionReady(platform2, preference);
   if (vision)
-    return describeOcrReadiness({ platform: platform2, family, snapshot: undefined, vision: true });
+    return describeOcrReadiness({ platform: platform2, family, snapshot: undefined, vision: true, preference });
   const snapshot = await (options.probe ?? (() => probeOcrCapability()))().catch(() => {
     return;
   });
-  return describeOcrReadiness({ platform: platform2, family, snapshot });
+  return describeOcrReadiness({ platform: platform2, family, snapshot, preference });
 }
-var ARCH_IDS, DEBIAN_IDS, FEDORA_IDS;
+var ARCH_IDS, DEBIAN_IDS, FEDORA_IDS, PINNED_SETTING = "OLYMPUS_FILE_EXTRACTION_OCR_ENGINE";
 var init_ocr_readiness = __esm(() => {
   init_apple_vision_ocr();
   init_ocr_capability();
@@ -96713,17 +96752,14 @@ function createTextExtractor(options = {}) {
   const pdfOcr = options.pdfOcr;
   const imageOcr = options.imageOcr;
   const imagePreparation = options.imagePreparation;
-  const imageOcrVersionSuffix = options.imageOcrVersionSuffix;
   return {
     kind,
     version: version2,
     needsBytes: true,
-    ...imagePreparation || imageOcrVersionSuffix ? {
+    ...imagePreparation ? {
       versionFor(mimeType) {
         const normalized = normalizeMimeType2(mimeType);
-        if (!normalized || !IMAGE_MIME_TYPES.has(normalized))
-          return version2;
-        return `${version2}${imagePreparation ? IMAGE_MEDIA_VERSION_SUFFIX : ""}${imageOcrVersionSuffix?.() ?? ""}`;
+        return normalized && IMAGE_MIME_TYPES.has(normalized) ? `${version2}${IMAGE_MEDIA_VERSION_SUFFIX}` : version2;
       }
     } : {},
     ...options.ocrReread ? { reread: options.ocrReread } : {},
@@ -96784,7 +96820,8 @@ function createTextExtractor(options = {}) {
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context2.sizeBytes });
         if (ocrOutput)
           return ocrOutput;
-        if (!imageMediaDescriptor) {
+        const waitingForOcr = imageOcr !== undefined;
+        if (!imageMediaDescriptor && !waitingForOcr) {
           return { status: "metadata_only" };
         }
         return mediaDescriptorOutput({
@@ -96793,7 +96830,7 @@ function createTextExtractor(options = {}) {
           maxBoundedTextChars,
           kind: "image",
           label: "image file",
-          warnings: ["ocr_required", "image_only"]
+          warnings: ["ocr_required", "image_only", ...waitingForOcr ? [OCR_UNAVAILABLE_WARNING] : []]
         });
       }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
@@ -97072,7 +97109,12 @@ async function pdfTextExtractionResult(input) {
         maxBoundedTextChars: input.context.maxBoundedTextChars,
         kind: "media",
         label: "scanned or image-only pdf",
-        warnings: ["ocr_required", "pdf_image_only", "no_selectable_text_layer"]
+        warnings: [
+          "ocr_required",
+          "pdf_image_only",
+          "no_selectable_text_layer",
+          ...input.ocr ? [OCR_UNAVAILABLE_WARNING] : []
+        ]
       });
     }
     return { status: "empty_output" };
@@ -97264,7 +97306,7 @@ function extractDelimitedText(input) {
     ...bounded.warnings.length > 0 ? { warnings: appendBoundedTextWarnings(undefined, bounded) } : {}
   };
 }
-var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07";
+var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", OCR_UNAVAILABLE_WARNING = "ocr_unavailable";
 var init_text = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -97276,35 +97318,49 @@ var init_text = __esm(() => {
 import { mkdtemp as mkdtemp4, readdir as readdir3, rm as rm5 } from "node:fs/promises";
 import { tmpdir as tmpdir8 } from "node:os";
 import { join as join77 } from "node:path";
-function parsePageSizePoints(stdout) {
-  for (const line of stdout.split(`
-`)) {
-    if (!line.startsWith("Page size:"))
-      continue;
-    const [first, second] = line.slice("Page size:".length).split("x");
-    const width = Number.parseFloat(first ?? "");
-    const height = Number.parseFloat(second ?? "");
-    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
-      return Math.max(width, height);
-    }
+function parseSizePoints(text) {
+  const [first, second] = text.split("x");
+  const width = Number.parseFloat(first ?? "");
+  const height = Number.parseFloat(second ?? "");
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    return Math.max(width, height);
   }
   return;
+}
+function parsePageSizes(stdout) {
+  const sizes = new Map;
+  for (const line of stdout.split(`
+`)) {
+    if (line.startsWith("Page size:")) {
+      const edge2 = parseSizePoints(line.slice("Page size:".length));
+      if (edge2 !== undefined && !sizes.has(1))
+        sizes.set(1, edge2);
+      continue;
+    }
+    const words2 = line.trim().split(" ").filter((word) => word.length > 0);
+    if (words2[0] !== "Page" || words2[2] !== "size:")
+      continue;
+    const page = Number(words2[1]);
+    const edge = parseSizePoints(words2.slice(3).join(" "));
+    if (Number.isInteger(page) && page > 0 && edge !== undefined)
+      sizes.set(page, edge);
+  }
+  return sizes;
 }
 async function readPdfInfo(input) {
   try {
     const { stdout } = await input.options.commandRunner({
       command: PDFINFO_COMMAND,
-      args: [input.inputPath],
+      args: ["-f", "1", "-l", String(input.maxPages), input.inputPath],
       timeoutMs: input.options.timeoutMs
     });
     const totalPages = parsePdfInfoPageCount(stdout);
-    const longEdgePoints = parsePageSizePoints(stdout);
     return {
       ...totalPages !== undefined ? { totalPages } : {},
-      ...longEdgePoints !== undefined ? { longEdgePoints } : {}
+      pageLongEdges: parsePageSizes(stdout)
     };
   } catch {
-    return {};
+    return { pageLongEdges: new Map };
   }
 }
 function rasterDpiFor(longEdgePoints, maxPixelEdge) {
@@ -97312,6 +97368,12 @@ function rasterDpiFor(longEdgePoints, maxPixelEdge) {
     return DEFAULT_RASTER_OCR_DPI;
   const fitting = Math.floor(maxPixelEdge * 72 / longEdgePoints);
   return Math.max(MIN_RASTER_OCR_DPI, Math.min(DEFAULT_RASTER_OCR_DPI, fitting));
+}
+function renderSpecFor(longEdgePoints, maxPixelEdge) {
+  if (longEdgePoints === undefined) {
+    return ["-scale-to", String(Math.max(1, Math.min(maxPixelEdge, UNKNOWN_SIZE_RASTER_EDGE)))];
+  }
+  return ["-r", String(rasterDpiFor(longEdgePoints, maxPixelEdge))];
 }
 function classifyRasterPdfRejection(error2) {
   if (!(error2 instanceof ExtractionCommandError) || error2.command !== PDFTOPPM_COMMAND)
@@ -97337,8 +97399,7 @@ async function rasterPdfOcr(input, options) {
   const maxPixelEdge = options.pdfMaxPixelEdge ?? DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE;
   const now = options.now ?? Date.now;
   const deadline = now() + (options.fileDeadlineMs ?? DEFAULT_APPLE_VISION_FILE_DEADLINE_MS);
-  const info = await readPdfInfo({ inputPath: input.inputPath, options });
-  const dpi = rasterDpiFor(info.longEdgePoints, maxPixelEdge);
+  const info = await readPdfInfo({ inputPath: input.inputPath, maxPages, options });
   const tempDir = await mkdtemp4(join77(tmpdir8(), RASTER_TEMP_PREFIX));
   const pages = [];
   let attempted = 0;
@@ -97357,22 +97418,29 @@ async function rasterPdfOcr(input, options) {
           break;
         }
         try {
-          await options.commandRunner({
-            command: PDFTOPPM_COMMAND,
-            args: [
-              "-f",
-              String(firstPage),
-              "-l",
-              String(lastPage),
-              "-r",
-              String(dpi),
-              "-gray",
-              "-png",
-              input.inputPath,
-              join77(tempDir, RASTER_PAGE_PREFIX)
-            ],
-            timeoutMs: Math.min(options.timeoutMs, remainingMs)
-          });
+          let groupStart = firstPage;
+          while (groupStart <= lastPage) {
+            const spec = renderSpecFor(info.pageLongEdges.get(groupStart), maxPixelEdge);
+            let groupEnd = groupStart;
+            while (groupEnd < lastPage && renderSpecFor(info.pageLongEdges.get(groupEnd + 1), maxPixelEdge).join(" ") === spec.join(" "))
+              groupEnd += 1;
+            await options.commandRunner({
+              command: PDFTOPPM_COMMAND,
+              args: [
+                "-f",
+                String(groupStart),
+                "-l",
+                String(groupEnd),
+                ...spec,
+                "-gray",
+                "-png",
+                input.inputPath,
+                join77(tempDir, RASTER_PAGE_PREFIX)
+              ],
+              timeoutMs: Math.min(options.timeoutMs, remainingMs)
+            });
+            groupStart = groupEnd + 1;
+          }
         } catch (error2) {
           const rejection = classifyRasterPdfRejection(error2);
           if (rejection)
@@ -97437,9 +97505,16 @@ async function rasterPdfOcr(input, options) {
   } finally {
     await rm5(tempDir, { recursive: true, force: true });
   }
-  if (attempted > 0 && failed === attempted)
-    throw lastFailure;
   const read = pages.filter((page) => normalizeExtractedText(page.text).length > 0);
+  if (read.length === 0 && failed > 0)
+    throw lastFailure;
+  if (pages.length === 0)
+    throw new Error("Local PDF rendering ran out of time before any page was read.");
+  const incompleteWarnings = () => [
+    ...stopReason === "pages" ? ["ocr_pdf_pages_capped"] : [],
+    ...stopReason === "time" ? ["ocr_pdf_time_capped"] : [],
+    ...pages.some((page) => page.unreadable) ? ["ocr_pdf_page_unreadable"] : []
+  ];
   if (read.length === 0) {
     return mediaDescriptorOutput({
       mimeType: input.mimeType,
@@ -97447,7 +97522,7 @@ async function rasterPdfOcr(input, options) {
       maxBoundedTextChars: options.maxBoundedTextChars,
       kind: "media",
       label: "scanned or image-only pdf",
-      warnings: ["ocr_empty", "pdf_image_only", RASTER_OCR_ENGINE_WARNING]
+      warnings: ["ocr_empty", "pdf_image_only", RASTER_OCR_ENGINE_WARNING, ...incompleteWarnings()]
     });
   }
   const joined = read.map((page) => `--- Page ${page.page} ---
@@ -97495,7 +97570,7 @@ ${normalizeExtractedText(page.text)}`).join(`
     } : {}
   };
 }
-var RASTER_OCR_ENGINE_WARNING = "ocr_engine_tesseract", DEFAULT_RASTER_OCR_DPI = 200, MIN_RASTER_OCR_DPI = 72, RASTER_PAGE_PREFIX = "page", RASTER_TEMP_PREFIX = "olympus-extraction-raster-ocr-";
+var RASTER_OCR_ENGINE_WARNING = "ocr_engine_tesseract", DEFAULT_RASTER_OCR_DPI = 200, MIN_RASTER_OCR_DPI = 1, UNKNOWN_SIZE_RASTER_EDGE = 2400, RASTER_PAGE_PREFIX = "page", RASTER_TEMP_PREFIX = "olympus-extraction-raster-ocr-";
 var init_pdf_raster_ocr = __esm(() => {
   init_bounded_text();
   init_apple_vision_ocr();
@@ -97562,24 +97637,16 @@ function createOcrRereadPolicy(options) {
   return {
     unreadWarnings: ["ocr_required"],
     unreadTerminalErrorKinds: [],
+    notReadyWarnings: [OCR_UNAVAILABLE_WARNING],
     prepare() {
-      const seen = options.capability.peek();
-      options.capability.warm();
-      if (!seen)
+      const seen = options.capability.peekFresh();
+      if (!seen) {
+        options.capability.warm();
         return "pending";
+      }
       const ready = pinned ? seen.ocrmypdf === "ok" : seen.pdfEngine !== undefined;
       return ready ? "ready" : "unavailable";
     }
-  };
-}
-function createImageOcrVersionSuffix(options) {
-  const preference = options.preference ?? "auto";
-  const visionSelected = appleVisionOcrSelected(preference, options.platform ?? process.platform);
-  return () => {
-    if (preference === "tesseract" || visionSelected)
-      return;
-    options.capability.warm();
-    return options.capability.peek()?.imageEngine ? IMAGE_OCR_VERSION_SUFFIX : undefined;
   };
 }
 function createOcrExtractor(options = {}) {
@@ -97640,7 +97707,15 @@ function createPdfOcr(options = {}) {
     maxBoundedTextChars
   });
   return async ({ bytes, mimeType, sizeBytes }) => {
-    const laneInput = commandLaneInput({ bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs });
+    const laneInput = commandLaneInput({
+      bytes,
+      mimeType,
+      sizeBytes,
+      maxBoundedTextChars,
+      commandRunner,
+      timeoutMs,
+      capability: engine.capability
+    });
     try {
       return await runOcrLane(async () => await withVision(engine, (vision) => visionPdf(laneInput, vision)) ?? await commandPdfOcr(engine, laneInput));
     } catch (error2) {
@@ -97664,7 +97739,15 @@ function createImageOcr(options = {}) {
   return async ({ bytes, mimeType, sizeBytes }) => {
     if (!engine.vision && engine.pinned)
       return;
-    const laneInput = commandLaneInput({ bytes, mimeType, sizeBytes, maxBoundedTextChars, commandRunner, timeoutMs });
+    const laneInput = commandLaneInput({
+      bytes,
+      mimeType,
+      sizeBytes,
+      maxBoundedTextChars,
+      commandRunner,
+      timeoutMs,
+      capability: engine.capability
+    });
     try {
       return await runOcrLane(async () => await withVision(engine, (vision) => visionImage(laneInput, vision)) ?? await commandImageOcr(engine, laneInput));
     } catch (error2) {
@@ -97675,14 +97758,17 @@ function createImageOcr(options = {}) {
   };
 }
 function commandLaneInput(input) {
+  const { capability, ...laneInput } = input;
   return {
-    ...input,
+    ...laneInput,
     commandRunner: async (request) => {
       try {
         return await input.commandRunner(request);
       } catch (error2) {
-        if (isCommandMissing(error2))
+        if (isCommandMissing(error2)) {
+          capability.invalidate();
           throw new OcrUnavailableError;
+        }
         throw error2;
       }
     }
@@ -97878,7 +97964,7 @@ function imageExtensionForMimeType(mimeType) {
     return ".heif";
   return ".img";
 }
-var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND, OCR_IMAGE_COMMAND, TEMP_DIR_PREFIX3 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OcrUnavailableError;
+var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND, OCR_IMAGE_COMMAND, TEMP_DIR_PREFIX3 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -100212,15 +100298,10 @@ function createDefaultExtractorRegistry(config2 = {}) {
       ...config2.text?.pdfTextTimeoutMs !== undefined ? { pdfTextTimeoutMs: config2.text.pdfTextTimeoutMs } : {},
       ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {},
       pdfOcr: createPdfOcr(ocrShared),
-      imageOcr: createImageOcr(ocrShared),
+      ...config2.ocr?.engine === "tesseract" ? {} : { imageOcr: createImageOcr(ocrShared) },
       ocrReread: createOcrRereadPolicy({
         capability: ocrCapability,
         ...config2.ocr?.engine !== undefined ? { preference: config2.ocr.engine } : {}
-      }),
-      imageOcrVersionSuffix: createImageOcrVersionSuffix({
-        capability: ocrCapability,
-        ...config2.ocr?.engine !== undefined ? { preference: config2.ocr.engine } : {},
-        ...config2.ocr?.platform !== undefined ? { platform: config2.ocr.platform } : {}
       }),
       ...config2.media?.cacheDir && (config2.media.platform !== undefined ? config2.media.platform === "darwin" : stillImagePreparationAvailable()) ? {
         imagePreparation: createImagePreparation({
