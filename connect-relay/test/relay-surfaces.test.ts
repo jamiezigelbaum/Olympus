@@ -153,6 +153,8 @@ describe('the two offline lists differ', () => {
   test('the generated lists are distinct, and the remote list has no ChatGPT-only tool', () => {
     expect(remoteNames.length).toBeGreaterThan(0);
     expect(remoteNames).not.toContain('olympus_dashboard');
+    // The remote evidence search is listed offline exactly as online.
+    expect(remoteNames[0]).toBe('olympus_search');
     expect(chatgptNames).toContain('olympus_dashboard');
   });
 });

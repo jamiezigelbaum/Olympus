@@ -139,6 +139,8 @@ describe('Ask anonymously', () => {
     // The dashboard switch off, or no settings file yet: refused before anything is prepared, and no Strict/Standard choice is asked.
     const off = deps(settings({ enabled: false }));
     expect(await askAnonymously(q('x'), off.value)).toEqual({ ok: false, code: 'anonymous_answers_off', message: CONSULT_ASK_MESSAGES.off });
+    // It names the exact page that turns them on, so the agent never guesses one (2026-10-12: it sent the user to Models).
+    expect(CONSULT_ASK_MESSAGES.off).toContain('https://olympusplugin.ai/open/private/');
     expect(off.calls.prepare).toHaveLength(0);
     expect(off.calls.send).toHaveLength(0);
     const absent = deps({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });

@@ -23,6 +23,7 @@ import { DASHBOARD_RESOURCE } from '../src/workers/chatgpt/dashboard-resource.ts
 import { CHATGPT_RESOURCES, CHATGPT_TOOLS, readChatGptResource } from '../src/workers/chatgpt/mcp-surface.ts';
 import { PRIVATE_ANSWER_RESOURCE } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { PRIVATE_QUESTION_RESOURCE } from '../src/workers/chatgpt/private-question-resource.ts';
+import { remoteSearchExtension } from '../src/workers/remote-search.ts';
 
 const ROOT = join(import.meta.dir, '..');
 export const GENERATED_DIR = 'connect-relay/server/generated';
@@ -43,7 +44,12 @@ export function chatgptRelayAssets(): Record<string, string> {
  * lists them: what the relay shows a remote agent while its Mac is offline.
  */
 export function relayRemoteTools(): ReturnType<typeof listMcpTools> {
-  return listMcpTools(defaultConfig(), 'remote');
+  // As the worker's /mcp lists them with its evidence search on and an
+  // answer model set up (workers/remote-search.ts): the search tool first.
+  // The relay cannot know whether an install has an answer model; offline,
+  // every call gets the same fixed result anyway.
+  const extension = remoteSearchExtension({ evidenceSearch: async () => ({ evidence: [] }) }, () => 'unavailable');
+  return extension.tools(listMcpTools(defaultConfig(), 'remote'));
 }
 
 /** Paths whose committed content differs from what the source generates. */

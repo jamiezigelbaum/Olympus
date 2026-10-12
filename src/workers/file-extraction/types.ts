@@ -32,6 +32,9 @@
  */
 
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
+import type { StillImageReadiness } from '../../core/still-image-readiness.ts';
+import type { ExtractionCommandRunner } from './extractors/command-runner.ts';
+import type { StillImagePreparer } from './extractors/image-preparers.ts';
 import type { OcrCapabilityProbe } from './extractors/ocr-capability.ts';
 
 // --- Seam 1: the source ----------------------------------------------------
@@ -372,11 +375,18 @@ export interface Extractor {
    * becomes available. Absent means the lane never leaves items unread.
    */
   readonly reread?: ExtractorRereadPolicy;
+  /**
+   * More policies of the same kind for other readers of the same lane (the
+   * text lane waits on an OCR engine and, separately, on image decoders). Each
+   * is asked on its own, so one reader being ready never requeues the items
+   * waiting for another.
+   */
+  readonly extraReread?: readonly ExtractorRereadPolicy[];
 }
 
 /**
  * Items a lane settled unread because its reader was missing (not because
- * of the file): `metadata_only` jobs whose derivation carries one of
+ * of the file): `metadata_only` or partly `indexed` jobs whose derivation carries one of
  * `unreadWarnings`, and `failed_terminal` jobs whose last error kind is one
  * of `unreadTerminalErrorKinds`. The runner asks `prepare()` only when such
  * jobs exist; `ready` requeues each of them once.
@@ -519,7 +529,8 @@ export interface ExtractorRegistryConfig {
   };
   /**
    * Image preparation for media search (docs/design/photo-embeddings.md).
-   * Without a cache directory, or off macOS, images keep today's behaviour.
+   * Without a cache directory, or for a format this machine cannot prepare,
+   * images keep today's behaviour.
    */
   media?: {
     /**
@@ -527,9 +538,18 @@ export interface ExtractorRegistryConfig {
      */
     cacheDir?: string;
     /**
-     * Overrides `process.platform`, for tests.
+     * Which formats this machine can prepare, and with which tool. Defaults
+     * to the machine's own probe (`stillImageReadiness()`); tests inject one.
      */
-    platform?: NodeJS.Platform;
+    readiness?: StillImageReadiness;
+    /**
+     * Overrides the tool the readiness names, for tests.
+     */
+    preparer?: StillImagePreparer;
+    /**
+     * Overrides how the tool is run, for tests.
+     */
+    commandRunner?: ExtractionCommandRunner;
     timeoutMs?: number;
     maxInputBytes?: number;
   };
