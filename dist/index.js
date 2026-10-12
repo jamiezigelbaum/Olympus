@@ -11009,6 +11009,7 @@ var init_analyst_answer = __esm(() => {
   init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
+  init_router();
   init_source_model_policy();
   init_sovereignty();
   init_types();

@@ -13000,9 +13000,15 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
   const db = new Database(dbPath, { create: true });
   try {
     chmodSync4(dbPath, 384);
-    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
-    assertSqliteSchemaCanOpen(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION);
-    runSqliteMigrations(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, migrations());
+    const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA secure_delete = ON;`);
+    const mode = db.query("PRAGMA journal_mode = DELETE").get()?.journal_mode;
+    if (mode !== "delete")
+      throw new Error("The waiting private questions store could not use its rollback journal yet.");
+    db.transaction(() => {
+      assertSqliteSchemaCanOpen(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION);
+      runSqliteMigrations(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, migrations());
+    }).immediate();
   } catch (error) {
     closeSqliteStore(db);
     throw error;
@@ -13070,6 +13076,16 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       const detail = input.detail === "full" ? "full" : "summary";
       const dedupeKey = createHash8("sha256").update(JSON.stringify([ticket.connectionId, selectors, normalizeWaitingQuestion(question)])).digest("hex");
       const at = now();
+      let active = false;
+      try {
+        active = options.isActive ? options.isActive(ticket.connectionId) === true : true;
+      } catch {
+        return;
+      }
+      if (!active) {
+        db.transaction(() => revokeInTransaction(ticket.connectionId)).immediate();
+        return;
+      }
       return db.transaction(() => {
         if (revocationOf(ticket.connectionId) !== ticket.revocation)
           return;
@@ -13161,8 +13177,10 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     }
   };
 }
-function revokeWaitingPrivateQuestions(remoteConnectionsDbPath, connectionId) {
-  const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(remoteConnectionsDbPath));
+function revokeWaitingPrivateQuestions(remoteConnectionsDbPath, connectionId, options = {}) {
+  const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(remoteConnectionsDbPath), {
+    busyTimeoutMs: options.busyTimeoutMs ?? REVOKE_BUSY_TIMEOUT_MS
+  });
   try {
     store.revokeConnection(connectionId);
   } finally {
@@ -13243,7 +13261,7 @@ function hardenPrivatePath(dbPath) {
     }
   }
 }
-var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 1, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS;
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 1, WAITING_PRIVATE_QUESTIONS_FILE_NAME = "waiting-private-questions.sqlite", WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS;
 var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
   WAITING_QUESTION_LIMITS = Object.freeze({
@@ -22263,10 +22281,45 @@ function createConnectorStoreCorpusAdapter(options) {
       rawExposed: false
     };
   };
+  const metadataMatches = async (request) => {
+    const startedAt = Date.now();
+    const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
+    const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.hasEmbeddings(embeddingProvider.modelId);
+    const keywordLane = connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, hybrid ? { prefix: false, locate: false } : { locate: false });
+    const rows = [...keywordLane.rows];
+    let semanticOnly = 0;
+    if (hybrid) {
+      const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
+      if (bar !== undefined) {
+        const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false });
+        for (const row of lane.rows) {
+          if (row.bestCosine < bar || keywordLane.matchedItemIds.has(row.sourceItem.localItemId))
+            continue;
+          rows.push(row);
+          semanticOnly += 1;
+        }
+      }
+    }
+    return {
+      hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
+      latencyMs: Date.now() - startedAt,
+      matchCount: {
+        ...keywordLane.matchCount,
+        matchedItems: keywordLane.matchCount.matchedItems + semanticOnly,
+        contentMatchedItems: keywordLane.matchCount.contentMatchedItems + semanticOnly
+      },
+      rawExposed: false
+    };
+  };
   const expanded = (request) => {
     assertConnectorStoreCorpusRequest(store, request);
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request), store);
   };
+  expanded.metadataMatches = (request) => {
+    assertConnectorStoreCorpusRequest(store, request);
+    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
+  };
+  expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => {
     await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store);
   };
@@ -22493,7 +22546,7 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
   };
 }
 function connectorStoreRowHasContent(row) {
-  return row.chunk !== undefined;
+  return row.chunk !== undefined || row.contentMatched === true;
 }
 function connectorStoreRowIsSecureTier(row) {
   return isSecureTrustTier(row.trustTier);
@@ -28769,7 +28822,7 @@ var init_local_index = __esm(() => {
       const lane = await this.vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs);
       return lane.rows;
     }
-    async vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
+    async vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs, laneOptions = {}) {
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
       const vectorFilters = connectorStoreVectorScopeFilters(filters);
       const trimmed = query.trim();
@@ -28799,7 +28852,8 @@ var init_local_index = __esm(() => {
         maxResults,
         ...accountScope !== undefined ? { accountScope } : {},
         ...vectorFilters ? { filters: vectorFilters } : {},
-        ...deadlineAtMs !== undefined ? { deadlineAtMs } : {}
+        ...deadlineAtMs !== undefined ? { deadlineAtMs } : {},
+        locate: laneOptions.locate !== false
       });
     }
     async scoreVectorLaneSnapshot(input) {
@@ -28874,6 +28928,8 @@ var init_local_index = __esm(() => {
         const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
         if (winner === undefined)
           return [];
+        if (!input.locate)
+          return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
         const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, "semantic");
         return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
       });
@@ -29055,6 +29111,9 @@ var init_local_index = __esm(() => {
       return {
         rows: kept.map((row) => {
           const base = searchRowFromItemRow(row);
+          if (ftsOptions.locate === false) {
+            return row.chunk_pk === null || row.chunk_pk === undefined ? base : { ...base, contentMatched: true };
+          }
           const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : this.chunkMatchForChunkPk(row.chunk_pk, "keyword", spanTerms);
           return chunk ? { ...base, chunk } : base;
         }),
@@ -29148,6 +29207,23 @@ var init_local_index = __esm(() => {
         })),
         ...resume < top ? { next: resume } : {}
       };
+    }
+    selectedItemServable(identity, accountScope, filters) {
+      try {
+        const localItemId = typeof identity.localItemId === "string" ? identity.localItemId.trim() : "";
+        if (!localItemId)
+          return false;
+        const row = this.activeLocalItemRow(localItemId);
+        if (!row)
+          return false;
+        if (row.identity.provider !== identity.provider || row.identity.accountScope !== identity.accountScope || row.identity.providerItemId !== identity.providerItemId || normalizeConversationId(row.identity.providerConversationId) !== normalizeConversationId(identity.providerConversationId))
+          return false;
+        if (!this.itemMatchesSearchFilters(localItemId, normalizeOptionalAccountScope(accountScope), filters))
+          return false;
+        return this.contentServedNow(localItemId);
+      } catch {
+        return false;
+      }
     }
     contentServedNow(localItemId) {
       const row = this.db.query(`
@@ -36592,6 +36668,10 @@ async function routePreparedSourceIndexSearch(options) {
       });
       continue;
     }
+    if (request.context.metadataOnly === true && !adapter.metadataMatches) {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "metadata_search_unsupported" });
+      continue;
+    }
     searchableCorpora.push(corpus);
   }
   await Promise.all(searchableCorpora.map(async (corpus) => {
@@ -36611,7 +36691,8 @@ async function routePreparedSourceIndexSearch(options) {
       ...cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}
     };
     const retrievalState = retrievalStateForAdapter(adapter, corpusRequest);
-    const outcome = await runCorpusLaneWithDeadline(() => adapter(corpusRequest), laneTimeoutMs, corpus.corpusId);
+    const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
+    const outcome = await runCorpusLaneWithDeadline(() => metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest), laneTimeoutMs, corpus.corpusId);
     return { corpus, outcome, retrievalState };
   }));
   for (const { corpus, outcome, retrievalState } of laneOutcomes) {
@@ -39196,26 +39277,63 @@ async function probePrivateMatch(input) {
     };
     const lanes = input.lanes(request);
     const corpusIds = sourceAnswerCorpusIds(request);
-    const detail = await buildEvidencePackDetailed({
-      question,
-      ...request.query?.trim() ? { searchQuery: request.query.trim() } : {},
-      ...request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {},
-      maxResults: PRIVATE_EVIDENCE_MAX_RESULTS,
-      ...corpusIds ? { corpusIds } : {},
-      searchContext: {
-        allowedTrustDomains: ["secure_local"],
-        allowCloudQueries: false,
-        ...corpusIds ? { allowedCorpusIds: corpusIds } : {}
-      },
+    const excluded = lanes.excludedCorpusIds ?? new Set;
+    const gate = (hits) => lanes.visibilityGate ? lanes.visibilityGate(hits) : hits;
+    if (request.selected_items?.length) {
+      let unchecked2 = false;
+      const hits = [];
+      for (const selected of selectedEvidenceItemsFromRequest(request)) {
+        const corpus = lanes.registry.get(selected.corpusId);
+        if (!corpus || corpus.trustDomain !== "secure_local")
+          continue;
+        if (corpusIds && !corpusIds.includes(corpus.corpusId))
+          continue;
+        const adapter = lanes.adapters[corpus.corpusId];
+        if (!adapter) {
+          if (!excluded.has(corpus.corpusId))
+            unchecked2 = true;
+          continue;
+        }
+        if (!adapter.selectedItemServable) {
+          unchecked2 = true;
+          continue;
+        }
+        if (!adapter.selectedItemServable(selected.sourceItem))
+          continue;
+        hits.push({
+          corpusId: corpus.corpusId,
+          trustDomain: corpus.trustDomain,
+          sourceItem: selected.sourceItem,
+          provenance: { sourceItem: selected.sourceItem },
+          score: 1,
+          rawExposed: false
+        });
+      }
+      if (hits.length > 0 && gate(hits).length > 0)
+        return "match";
+      return unchecked2 ? "unknown" : "no_match";
+    }
+    const routed = await routeSourceIndexSearch({
       registry: lanes.registry,
       adapters: lanes.adapters,
-      contentProviders: {},
-      laneTimeoutMs: input.timeoutMs,
-      ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}
+      request: {
+        query: request.query?.trim() || question,
+        maxResults: PRIVATE_EVIDENCE_MAX_RESULTS,
+        context: {
+          allowedTrustDomains: ["secure_local"],
+          allowCloudQueries: false,
+          metadataOnly: true,
+          ...corpusIds ? { allowedCorpusIds: corpusIds } : {}
+        },
+        ...corpusIds ? { corpusIds } : {}
+      },
+      ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {},
+      laneTimeoutMs: input.timeoutMs
     });
-    if (detail.pack.candidates.some((candidate) => candidate.trustDomain === "secure_local"))
+    if (routed.hits.some((hit) => hit.trustDomain === "secure_local"))
       return "match";
-    return detail.skippedCorpora.some((skip) => skip.reason === "lane_timeout") ? "unknown" : "no_match";
+    const unchecked = routed.skippedCorpora.some((skip) => skip.trustDomain === "secure_local" && (skip.reason === "lane_timeout" || skip.reason === "metadata_search_unsupported" || skip.reason === "no_adapter" && !excluded.has(skip.corpusId)));
+    return unchecked ? "unknown" : "no_match";
   };
   try {
     return await Promise.race([
@@ -39310,6 +39428,7 @@ var init_analyst_answer = __esm(() => {
   init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
+  init_router();
   init_source_model_policy();
   init_sovereignty();
   init_types();
@@ -91048,9 +91167,11 @@ function sourceAnswerOutput(raw, options) {
     kind: "source_answer",
     status: "answered",
     answer: answer.text ?? "",
-    citations,
-    ...options.privateMayAnswer === true ? { private_note: REMOTE_PRIVATE_NOTE } : {}
+    citations
   };
+}
+function withRemotePrivateNote(output) {
+  return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: REMOTE_PRIVATE_NOTE } : output;
 }
 function withheldAnswer(message) {
   return { kind: "source_answer", status: "withheld", answer: message, citations: [] };
@@ -91786,6 +91907,15 @@ class SourceAnswerJobRegistry {
     }
     throw job.outcome.error;
   }
+  whenFinished(owner, jobId) {
+    const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
+    if (!job || !sameOwner(job.owner, owner))
+      return;
+    return job.done.then(() => {
+      const outcome = job.outcome;
+      return outcome?.ok ? { ok: true, value: outcome.value, releaseManifests: [...job.releaseManifests?.manifests ?? []] } : { ok: false };
+    });
+  }
   dropOwner(owner) {
     for (const [id, job] of this.jobs) {
       if (!sameOwner(job.owner, owner))
@@ -92003,17 +92133,18 @@ async function handleRemoteCallTool(request, makeOperationContext) {
     return { content: text(remoteWithheldParamOutput(withheld)), isError: true };
   const declaredParams = remoteDeclaredParams(operation.name, Object.keys(operation.params));
   const manifests = createReleaseManifestSink();
-  const privatePart = ctx.remotePrivatePart?.start(operation.name, args);
+  const privatePart = ctx.remotePrivatePart?.start(operation.name, args, {
+    ...ctx.sourceAnswerJobs ? { jobs: ctx.sourceAnswerJobs } : {},
+    ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}
+  });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
-    const privateMayAnswer = privatePart ? await privatePart.settle(result) : false;
-    return {
-      content: text(remoteOperationOutput(operation.name, result, {
-        ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
-        releaseManifests: manifests.manifests,
-        ...privateMayAnswer ? { privateMayAnswer } : {}
-      }))
-    };
+    const output = remoteOperationOutput(operation.name, result, {
+      ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
+      releaseManifests: manifests.manifests
+    });
+    const privateMayAnswer = privatePart ? await privatePart.settle(result, output) : false;
+    return { content: text(privateMayAnswer ? withRemotePrivateNote(output) : output) };
   } catch (error2) {
     return { content: text(remoteErrorOutput(error2, { declaredParams })), isError: true };
   }
@@ -129827,6 +129958,7 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS,
   PRIVATE_ANSWER_DEDUPE_MS: () => PRIVATE_ANSWER_DEDUPE_MS,
   PRIVATE_ANSWER_CLAIM_HOLD_MS: () => PRIVATE_ANSWER_CLAIM_HOLD_MS,
+  PRIVATE_ANSWER_CLAIM_COLLECT_MS: () => PRIVATE_ANSWER_CLAIM_COLLECT_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
 import { randomBytes as randomBytes21, timingSafeEqual as timingSafeEqual9 } from "node:crypto";
@@ -130024,6 +130156,7 @@ class PrivateAnswerJobs {
     }
     if (job.claimKey === undefined) {
       job.claimKey = panel.raw;
+      job.expiresAt = Math.max(job.expiresAt, this.now() + this.claimLifetimeFor(job.detail));
       if (job.analysis === undefined && this.options.precompute !== false) {
         const before = new Set(this.shared.values());
         this.precompute(job);
@@ -130532,6 +130665,9 @@ class PrivateAnswerJobs {
     });
     return done;
   }
+  claimLifetimeFor(detail) {
+    return this.timeoutFor(detail) + PRIVATE_ANSWER_CLAIM_COLLECT_MS;
+  }
   timeoutFor(detail) {
     return detail === "full" ? Math.max(this.analysisTimeoutMs, this.fullAnalysisTimeoutMs) : this.analysisTimeoutMs;
   }
@@ -130788,7 +130924,7 @@ async function boundedText(request, max) {
 }
 var AnalysisStop, defaultLog = (line) => {
   console.log(line);
-}, MAX_QUESTION_CHARS = 4000, OPEN_TOKEN_PATTERN, ACK_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, defaultAudit = (event) => {
+}, MAX_QUESTION_CHARS = 4000, OPEN_TOKEN_PATTERN, ACK_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, PRIVATE_ANSWER_CLAIM_COLLECT_MS, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 }, IDENTITY_FIELDS, SOURCE_ITEM_FIELDS;
 var init_private_answer_jobs = __esm(() => {
@@ -130807,6 +130943,7 @@ var init_private_answer_jobs = __esm(() => {
   ACK_TOKEN_PATTERN = OPEN_TOKEN_PATTERN;
   PRIVATE_ANSWER_DEDUPE_MS = 3 * 60000;
   PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60000;
+  PRIVATE_ANSWER_CLAIM_COLLECT_MS = 5 * 60000;
   IDENTITY_FIELDS = [
     "corpusId",
     "trustDomain",
@@ -131696,21 +131833,27 @@ __export(exports_remote_private_part, {
 function asRecord19(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-function remotePrivateOutcome(raw) {
+function remotePrivateOutcome(raw, released) {
   const record4 = asRecord19(raw);
   if (!record4 || typeof record4.answer !== "string")
     return "none";
   const audit = asRecord19(record4.audit);
   if (!audit)
     return "none";
-  const synthesis = asRecord19(audit.answer_synthesis);
-  const consulted = synthesis?.secure_local_items_consulted;
-  if (synthesis?.private_context_used === true || typeof consulted === "number" && consulted > 0)
-    return "delivered";
+  const decision = asRecord19(asRecord19(record4.opsec)?.release_decision)?.decision;
   const reasons = Array.isArray(audit.skipped_corpora) ? audit.skipped_corpora.map((skip) => asRecord19(skip)?.reason).filter((reason) => typeof reason === "string") : [];
+  if (decision === "needs_approval" || reasons.includes(BULK_REASON))
+    return "approval_required";
+  if (decision === "deny")
+    return "withheld";
+  if (released !== undefined && released.status !== "answered")
+    return "withheld";
+  const consulted = asRecord19(audit.answer_synthesis)?.secure_local_items_consulted;
+  if ((decision === "allow" || decision === "redact") && released?.status === "answered" && typeof consulted === "number" && consulted > 0)
+    return "delivered";
   if (reasons.includes(UNAVAILABLE_REASON))
     return "route_unavailable";
-  if (reasons.some((reason) => POLICY_REASONS.has(reason)))
+  if (reasons.includes(POLICY_REASON))
     return "excluded_by_policy";
   return "none";
 }
@@ -131719,6 +131862,8 @@ function createRemotePrivateParts(options) {
   const probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
   const handoffTtlMs = options.handoffTtlMs ?? DEFAULT_HANDOFF_TTL_MS;
   const handoffs = new Map;
+  let closed = false;
+  let pass;
   const sweep = () => {
     const at = now();
     for (const [key2, entry] of handoffs)
@@ -131739,6 +131884,15 @@ function createRemotePrivateParts(options) {
       return;
     }
   };
+  const activeNow = (connectionId) => {
+    if (!options.isActive)
+      return true;
+    try {
+      return options.isActive(connectionId) === true;
+    } catch {
+      return false;
+    }
+  };
   const probe = async (request) => {
     let timer;
     try {
@@ -131756,17 +131910,20 @@ function createRemotePrivateParts(options) {
         clearTimeout(timer);
     }
   };
-  const settleAnswer = async (raw, args, ticket) => {
+  const settleAnswer = async (raw, released, args, ticket) => {
     try {
-      const outcome = remotePrivateOutcome(raw);
-      if (outcome !== "excluded_by_policy" && outcome !== "route_unavailable")
+      if (closed || !ticket)
+        return false;
+      if (!PROBED.has(remotePrivateOutcome(raw, released)))
         return false;
       const question = typeof args.question === "string" ? args.question.trim() : "";
       const selectors = normalizeWaitingSelectors(args);
       if (!question || !selectors)
         return false;
+      if (!activeNow(ticket.connectionId))
+        return false;
       const verdict = await probe({ ...selectors, question });
-      if (verdict === "no_match" || !ticket)
+      if (verdict === "no_match" || closed)
         return false;
       let recorded = false;
       try {
@@ -131784,22 +131941,112 @@ function createRemotePrivateParts(options) {
       return false;
     }
   };
+  const settleWhenFinished = (jobs, jobId, args, ticket, releaseCheck) => {
+    let finished;
+    try {
+      finished = jobs?.registry.whenFinished(jobs.owner, jobId);
+    } catch {
+      finished = undefined;
+    }
+    if (!finished)
+      return;
+    return finished.then(async (outcome) => {
+      if (!outcome.ok || closed)
+        return false;
+      let released;
+      try {
+        released = remoteOperationOutput("source_answer", outcome.value, {
+          ...releaseCheck ? { releaseCheck } : {},
+          releaseManifests: outcome.releaseManifests
+        });
+      } catch {
+        released = { status: "error" };
+      }
+      return settleAnswer(outcome.value, released, args, ticket);
+    }).catch(() => false);
+  };
+  const runPass = async () => {
+    const counts = { matched: 0, cleared: 0, still: 0 };
+    let store;
+    try {
+      store = options.store();
+    } catch {
+      return counts;
+    }
+    if (!store || closed)
+      return counts;
+    if (options.isActive) {
+      try {
+        store.reconcileConnections(options.isActive);
+      } catch {}
+    }
+    let records;
+    try {
+      records = store.unchecked();
+    } catch {
+      return counts;
+    }
+    for (const record4 of records) {
+      if (closed)
+        break;
+      if (options.isActive) {
+        let active;
+        try {
+          active = options.isActive(record4.connectionId) === true;
+        } catch {
+          counts.still += 1;
+          continue;
+        }
+        if (!active) {
+          try {
+            store.revokeConnection(record4.connectionId);
+            counts.cleared += 1;
+          } catch {
+            counts.still += 1;
+          }
+          continue;
+        }
+      }
+      const verdict = await probe({ ...record4.selectors, question: record4.question });
+      if (closed)
+        break;
+      if (verdict === "unknown") {
+        counts.still += 1;
+        continue;
+      }
+      const ref = { id: record4.id, generation: record4.generation, connectionId: record4.connectionId };
+      try {
+        if (store.settleUnchecked(ref, verdict)) {
+          if (verdict === "match")
+            counts.matched += 1;
+          else
+            counts.cleared += 1;
+        }
+      } catch {
+        counts.still += 1;
+      }
+    }
+    return counts;
+  };
   return {
     forConnection(connectionId) {
       return {
-        start(operation, args) {
+        start(operation, args, context2) {
           if (operation === "source_answer") {
             const ticket = ticketFor(connectionId);
             return {
-              async settle(raw) {
+              async settle(raw, released) {
                 const pending = asRecord19(raw);
                 if (pending?.status === "working" && typeof pending.job_id === "string") {
-                  sweep();
-                  handoffs.set(`${connectionId}\x00${pending.job_id}`, { args, ticket, expiresAt: now() + handoffTtlMs });
-                  sweep();
+                  const settled = settleWhenFinished(context2?.jobs, pending.job_id, args, ticket, context2?.releaseCheck);
+                  if (settled) {
+                    sweep();
+                    handoffs.set(`${connectionId}\x00${pending.job_id}`, { settled, expiresAt: now() + handoffTtlMs });
+                    sweep();
+                  }
                   return false;
                 }
-                return settleAnswer(raw, args, ticket);
+                return settleAnswer(raw, released, args, ticket);
               }
             };
           }
@@ -131810,11 +132057,9 @@ function createRemotePrivateParts(options) {
             return {
               async settle(raw) {
                 sweep();
-                const key2 = `${connectionId}\x00${jobId}`;
-                const entry = handoffs.get(key2);
+                const entry = handoffs.get(`${connectionId}\x00${jobId}`);
                 if (!entry || asRecord19(raw)?.status === "working")
                   return false;
-                entry.settled ??= settleAnswer(raw, entry.args, entry.ticket);
                 return entry.settled;
               }
             };
@@ -131823,42 +132068,30 @@ function createRemotePrivateParts(options) {
         }
       };
     },
-    async retryUnchecked() {
-      const counts = { matched: 0, cleared: 0, still: 0 };
-      let store;
-      let records;
-      try {
-        store = options.store();
-        records = store?.unchecked() ?? [];
-      } catch {
-        return counts;
-      }
-      for (const record4 of records) {
-        const verdict = await probe({ ...record4.selectors, question: record4.question });
-        if (verdict === "unknown") {
-          counts.still += 1;
-          continue;
-        }
-        const ref = { id: record4.id, generation: record4.generation, connectionId: record4.connectionId };
-        try {
-          if (store?.settleUnchecked(ref, verdict)) {
-            if (verdict === "match")
-              counts.matched += 1;
-            else
-              counts.cleared += 1;
-          }
-        } catch {
-          counts.still += 1;
-        }
-      }
-      return counts;
+    retryUnchecked() {
+      if (closed)
+        return Promise.resolve({ matched: 0, cleared: 0, still: 0 });
+      pass ??= runPass().finally(() => {
+        pass = undefined;
+      });
+      return pass;
+    },
+    close() {
+      closed = true;
+      handoffs.clear();
     }
   };
 }
-var POLICY_REASONS, UNAVAILABLE_REASON = "private_analyst_unavailable", DEFAULT_PROBE_TIMEOUT_MS = 2000, DEFAULT_HANDOFF_TTL_MS, MAX_HANDOFFS = 200;
+var POLICY_REASON = "no_private_analyst_route", BULK_REASON = "bulk_secure_local_release_requires_approval", UNAVAILABLE_REASON = "private_analyst_unavailable", PROBED, DEFAULT_PROBE_TIMEOUT_MS = 2000, DEFAULT_HANDOFF_TTL_MS, MAX_HANDOFFS = 200;
 var init_remote_private_part = __esm(() => {
+  init_remote_result();
   init_waiting_private_questions();
-  POLICY_REASONS = new Set(["no_private_analyst_route", "bulk_secure_local_release_requires_approval"]);
+  PROBED = new Set([
+    "approval_required",
+    "withheld",
+    "excluded_by_policy",
+    "route_unavailable"
+  ]);
   DEFAULT_HANDOFF_TTL_MS = 35 * 60000;
 });
 
@@ -131953,15 +132186,18 @@ async function callTool(request, name, options) {
     return failure2(400, remoteSurfaceErrorOutput("invalid_request"));
   }
   const manifests = createReleaseManifestSink();
-  const privatePart = ctx.remotePrivatePart?.start(operation.name, params.value);
+  const privatePart = ctx.remotePrivatePart?.start(operation.name, params.value, {
+    ...ctx.sourceAnswerJobs ? { jobs: ctx.sourceAnswerJobs } : {},
+    ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}
+  });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
-    const privateMayAnswer = privatePart ? await privatePart.settle(result) : false;
-    return jsonResponse(200, remoteOperationOutput(operation.name, result, {
+    const output = remoteOperationOutput(operation.name, result, {
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
-      releaseManifests: manifests.manifests,
-      ...privateMayAnswer ? { privateMayAnswer } : {}
-    }));
+      releaseManifests: manifests.manifests
+    });
+    const privateMayAnswer = privatePart ? await privatePart.settle(result, output) : false;
+    return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output) : output);
   } catch (error2) {
     return operationErrorResponse(error2, declaredParams);
   }
@@ -135300,18 +135536,23 @@ async function main() {
           }
           return requestEmbeddings.get(store.corpusId);
         };
+        const excludedCorpusIds = new Set;
         const connectorStoreAdapter = (store) => {
           const mandatoryScope = connectorStoreReadScope(store);
-          if (!mandatoryScope.allowed)
+          if (!mandatoryScope.allowed) {
+            excludedCorpusIds.add(store.corpusId);
             return;
+          }
           const principal = connectorStorePrincipals.get(store.corpusId);
           const scope = connectorStoreAnswerScope({
             store,
             request,
             ...principal ? { principal } : {}
           });
-          if (scope.kind === "skip")
+          if (scope.kind === "skip") {
+            excludedCorpusIds.add(store.corpusId);
             return;
+          }
           const connectorStoreEmbedding = requestEmbedding(store);
           const connectorStoreAccount = scope.accountScope ?? mandatoryScope.accountScope ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
           searchScopes.set(store.corpusId, {
@@ -135351,6 +135592,7 @@ async function main() {
               return adapter ? [[store.corpusId, adapter]] : [];
             }))
           },
+          excludedCorpusIds,
           contentProviders: {
             ...Object.fromEntries(readConnectorStores.flatMap((store) => {
               const mandatoryScope = connectorStoreReadScope(store);
@@ -136164,21 +136406,26 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const remoteConnections = lazyRemoteConnectionStore2(() => resolveRemoteConnectionsDbPath2(process.env), openRemoteConnectionStore2);
   dashboardAgentStore = remoteConnections;
   const { openWaitingPrivateQuestionStore: openWaitingPrivateQuestionStore2, waitingPrivateQuestionsDbPath: waitingPrivateQuestionsDbPath2 } = await Promise.resolve().then(() => (init_waiting_private_questions(), exports_waiting_private_questions));
+  const connectionActive = (connectionId) => {
+    const connections = remoteConnections();
+    if (!connections)
+      throw new Error("remote connection store unavailable");
+    return connections.list().some((connection) => connection.id === connectionId && connection.revokedAt === null);
+  };
   let waitingStore;
-  let waitingStoreFailed = false;
+  let waitingStoreRetryAt = 0;
+  let waitingStoreClosed = false;
   const waitingQuestionStore = () => {
-    if (waitingStore || waitingStoreFailed)
+    if (waitingStore || waitingStoreClosed || Date.now() < waitingStoreRetryAt)
       return waitingStore;
     try {
-      const store = openWaitingPrivateQuestionStore2(waitingPrivateQuestionsDbPath2(resolveRemoteConnectionsDbPath2(process.env)));
-      const connections = remoteConnections()?.list();
-      if (connections) {
-        const active = new Set(connections.filter((connection) => connection.revokedAt === null).map((connection) => connection.id));
-        store.reconcileConnections((id) => active.has(id));
-      }
+      const store = openWaitingPrivateQuestionStore2(waitingPrivateQuestionsDbPath2(resolveRemoteConnectionsDbPath2(process.env)), { isActive: connectionActive });
+      try {
+        store.reconcileConnections(connectionActive);
+      } catch {}
       waitingStore = store;
     } catch {
-      waitingStoreFailed = true;
+      waitingStoreRetryAt = Date.now() + 60000;
       console.warn("[olympus] waiting private questions store unavailable");
     }
     return waitingStore;
@@ -136383,7 +136630,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const { createRemotePrivateParts: createRemotePrivateParts2 } = await Promise.resolve().then(() => (init_remote_private_part(), exports_remote_private_part));
   const remotePrivateParts = createRemotePrivateParts2({
     probe: (request, timeoutMs) => sourceAnswerLanes ? probePrivateMatch({ lanes: sourceAnswerLanes, request, timeoutMs }) : Promise.resolve("unknown"),
-    store: waitingQuestionStore
+    store: waitingQuestionStore,
+    isActive: connectionActive
   });
   const uncheckedRetry = setInterval(() => {
     remotePrivateParts.retryUnchecked().catch(() => {
@@ -136679,6 +136927,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     stopBuiltInModelOnShutdown(workerBuiltInModel?.model);
     stopBuiltInModelOnShutdown(runningBuiltInTranscriber());
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
+    clearInterval(uncheckedRetry);
+    remotePrivateParts.close();
+    waitingStoreClosed = true;
+    waitingStore?.close();
+    waitingStore = undefined;
     worker.close();
     sourceScheduler?.stop();
     server.stop();
