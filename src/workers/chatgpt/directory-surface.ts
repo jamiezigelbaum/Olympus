@@ -19,7 +19,11 @@
  * surface's unknown-tool result.
  *
  * Calls run the current code. A result that names a UI resource names the
- * submitted one, so the page that renders it is the submitted page.
+ * submitted one, so the page that renders it is the submitted page. The
+ * submitted private answer panel predates acknowledgments, so a Private
+ * answer it collects counts as seen when it is handed over
+ * (`privateAnswerSeenOnDelivery`); otherwise every answer shown there would
+ * also wait on the computer.
  * test/chatgpt-directory-approved.test.ts holds the current handlers to the
  * submitted input schemas and annotations, and runs the submitted pages
  * against current results.
@@ -92,6 +96,7 @@ export function createChatGptDirectoryMcpServer(
   /** The directory allowlist (always isDirectoryTool in the worker; a test may narrow it). */
   allowed: (name: string) => boolean = isDirectoryTool,
 ): Server {
+  options = { ...options, privateAnswerSeenOnDelivery: true };
   const served = (name: string) => allowed(name) && APPROVED_TOOL_BY_NAME.has(name);
   const server = createChatGptMcpServer(makeOperationContext, options, makeDetachedContext);
   // Replaces the surface's tool and resource handlers: its decisions, the submitted listing.

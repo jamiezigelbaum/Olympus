@@ -43,11 +43,13 @@ import { versionedResourceUri } from '../src/workers/chatgpt/dashboard-resource.
 import { createChatGptDirectoryMcpServer, withApprovedPages } from '../src/workers/chatgpt/directory-surface.ts';
 import { CHATGPT_TOOLS, createChatGptMcpServer, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
 import { PRIVATE_ANSWER_META_KEY, PRIVATE_ANSWER_RESOURCE_URI, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
-import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { PrivateAnswerJobs, createPrivateAnswerHandler, type PrivateAnswerWaitingRef } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { generatePanelKeyPair } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { createBuiltInPrivateAnswerModel } from '../src/workers/chatgpt/private-answer-model.ts';
 import { PRIVATE_QUESTION_META_KEY, PRIVATE_QUESTION_RESOURCE_URI } from '../src/workers/chatgpt/private-question-contract.ts';
 import { PrivateQuestionJobs, type PrivateQuestionAskInput } from '../src/workers/chatgpt/private-question-jobs.ts';
 import { ChatGptSurfaceError } from '../src/workers/chatgpt/response-builder.ts';
+import { NO_SECRET_LOCATIONS } from '../src/workers/chatgpt/scope-privacy.ts';
 import type { ChatGptSetupBackend } from '../src/workers/chatgpt/setup-tools.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
@@ -80,6 +82,9 @@ let jobs: PrivateAnswerJobs;
 let questions: PrivateQuestionJobs;
 let asked: PrivateQuestionAskInput[];
 let setup: ChatGptSetupBackend;
+/** Waiting questions recorded at a Private match, and those a panel's answer acknowledged. */
+let waitingRecorded: PrivateAnswerWaitingRef[];
+let acknowledged: PrivateAnswerWaitingRef[];
 
 function stubPanelModel() {
   const model: BuiltInAnalystModel = {
@@ -116,6 +121,14 @@ function surface(): ChatGptSurfaceOptions {
       coverage: { searched_corpora: 1, unreadable_items: 0, partially_read_items: 0, unclassified_items: 0 },
     }),
     setup,
+    waitingQuestions: () => ({
+      ticket: (connectionId) => ({ connectionId, revocation: 0 }),
+      record: (ticket) => {
+        const ref = { id: `w-${waitingRecorded.length + 1}`, generation: 1, connectionId: ticket.connectionId };
+        waitingRecorded.push(ref);
+        return ref;
+      },
+    }),
   };
 }
 
@@ -124,7 +137,15 @@ beforeEach(() => {
   readOnly = false;
   dashboardView = sampleView();
   const panelModel = stubPanelModel();
-  jobs = new PrivateAnswerJobs({ eligible: async (items) => items.map(() => true), model: () => panelModel, installId: () => INSTALL_ID, claimHoldMs: 0 });
+  waitingRecorded = [];
+  acknowledged = [];
+  jobs = new PrivateAnswerJobs({
+    eligible: async (items) => items.map(() => true),
+    model: () => panelModel,
+    installId: () => INSTALL_ID,
+    claimHoldMs: 0,
+    acknowledge: (ref) => { acknowledged.push(ref); },
+  });
   asked = [];
   setup = unreachableBackend;
   questions = new PrivateQuestionJobs({
@@ -302,7 +323,7 @@ interface JsonSchema {
   enum?: readonly unknown[];
   properties?: Record<string, JsonSchema>;
   required?: readonly string[];
-  additionalProperties?: boolean;
+  additionalProperties?: boolean | JsonSchema;
   items?: JsonSchema;
   minimum?: number;
   maximum?: number;
@@ -331,36 +352,210 @@ function narrowings(submitted: JsonSchema, current: JsonSchema, path = '$'): str
     if (current[high] !== undefined && !(submitted[high] !== undefined && submitted[high]! <= current[high]!)) issues.push(`${path}: ${high} lowered to ${current[high]}`);
   }
   for (const name of current.required ?? []) if (!(submitted.required ?? []).includes(name)) issues.push(`${path}.${name}: now required`);
-  if (current.additionalProperties === false && submitted.additionalProperties !== false) issues.push(`${path}: extra properties now refused`);
+  // What each schema accepts for a key it does not name: anything (absent or true), nothing (false), or a schema.
+  const extra = (schema: JsonSchema): JsonSchema | boolean => schema.additionalProperties ?? true;
+  const submittedExtra = extra(submitted);
+  const currentExtra = extra(current);
+  /** Where `now` refuses a value `before` accepted for one key. */
+  const keyNarrowings = (before: JsonSchema | boolean, now: JsonSchema | boolean, at: string): string[] => {
+    if (before === false || now === true) return [];
+    if (now === false) return [`${at}: no longer accepted`];
+    if (before === true) return [`${at}: now constrained`];
+    return narrowings(before, now, at);
+  };
   for (const [name, property] of Object.entries(submitted.properties ?? {})) {
-    const now = current.properties?.[name];
-    if (now) issues.push(...narrowings(property, now, `${path}.${name}`));
-    else if (current.additionalProperties === false) issues.push(`${path}.${name}: no longer accepted`);
+    issues.push(...keyNarrowings(property, current.properties?.[name] ?? currentExtra, `${path}.${name}`));
   }
+  for (const [name, property] of Object.entries(current.properties ?? {})) {
+    if (!submitted.properties?.[name]) issues.push(...keyNarrowings(submittedExtra, property, `${path}.${name}`));
+  }
+  issues.push(...keyNarrowings(submittedExtra, currentExtra, `${path}.*`).map((issue) => issue.replace(/\.\*: no longer accepted$/, ': extra properties now refused')));
   if (submitted.items && current.items) issues.push(...narrowings(submitted.items, current.items, `${path}[]`));
   else if (current.items) issues.push(`${path}[]: items now constrained`);
   return issues;
 }
 
-/** Argument sets the submitted schema allows: the required ones alone, then each enumerated value of each top-level property. */
-function submittedArgumentSets(schema: JsonSchema): Array<Record<string, unknown>> {
-  const sample = (property: JsonSchema): unknown => {
-    if (property.enum) return property.enum[0];
-    switch (property.type) {
-      case 'string': return 'x';
-      case 'integer': case 'number': return property.minimum ?? 1;
-      case 'boolean': return true;
-      case 'array': return [];
-      default: return {};
+const PRIVACY_REVISION = 'rev-1';
+
+/**
+ * A value of `schema` a real caller would send. Strings the handlers read for
+ * meaning (addresses, picker cursors) get realistic values by property name;
+ * everything else is a plain value of its type, with every property filled.
+ */
+function sampleValue(schema: JsonSchema, name: string, siblings: Record<string, unknown> = {}): unknown {
+  if (schema.enum) return schema.enum[0];
+  switch (schema.type) {
+    case 'string':
+      if (/senders$/.test(name)) return 'friend@example.com';
+      // A picker cursor is the one olympus_scope_list issued for the same parent.
+      if (name === 'cursor') return `olysort1.${Buffer.from(JSON.stringify({ p: siblings.parent_key ?? '', n: 'A', k: 'id-a' })).toString('base64url')}`;
+      if (name === 'revision') return PRIVACY_REVISION;
+      return 'x';
+    case 'integer': case 'number': return schema.minimum ?? 1;
+    case 'boolean': return true;
+    case 'array': return [sampleValue(schema.items ?? {}, name)];
+    case 'object': {
+      const value: Record<string, unknown> = {};
+      for (const [key, property] of Object.entries(schema.properties ?? {})) value[key] = sampleValue(property, key, value);
+      return value;
     }
-  };
-  const required = Object.fromEntries((schema.required ?? []).map((name) => [name, sample(schema.properties![name]!)]));
-  const sets: Array<Record<string, unknown>> = [required];
-  for (const [name, property] of Object.entries(schema.properties ?? {})) {
-    for (const value of property.enum ?? [sample(property)]) sets.push({ ...required, [name]: value });
-    if (property.type === 'integer' && property.maximum !== undefined) sets.push({ ...required, [name]: property.maximum });
+    default: return undefined;
   }
-  return sets;
+}
+
+/**
+ * Values of `schema` that together send every value it enumerates, at any
+ * depth, and both ends of every integer range: each varies one place of the
+ * full sample.
+ */
+function variants(schema: JsonSchema, name: string, fixed: Record<string, unknown> = {}, siblings: Record<string, unknown> = {}): unknown[] {
+  if (schema.enum) return [...schema.enum];
+  if (schema.type === 'integer' && schema.maximum !== undefined) return [schema.minimum ?? 1, schema.maximum];
+  if (schema.type === 'array') return variants(schema.items ?? {}, name).map((item) => [item]);
+  if (schema.type !== 'object') return [sampleValue(schema, name, siblings)];
+  const base = { ...(sampleValue(schema, name) as Record<string, unknown>), ...fixed };
+  const out: unknown[] = [base];
+  for (const [key, property] of Object.entries(schema.properties ?? {})) {
+    if (key in fixed) continue;
+    for (const value of variants(property, key, {}, base)) out.push({ ...base, [key]: value });
+  }
+  return out;
+}
+
+/** Every enumerated value in a schema, at any depth. */
+function enumerated(schema: JsonSchema): unknown[] {
+  return [
+    ...(schema.enum ?? []),
+    ...Object.values(schema.properties ?? {}).flatMap(enumerated),
+    ...(schema.items ? enumerated(schema.items) : []),
+  ];
+}
+
+/**
+ * Arguments whose meaning ties fields together, sent whole instead of varied
+ * field by field: one privacy rule of each kind on each source it applies to.
+ * Each must cover every value its submitted schema enumerates.
+ */
+const FIXED_ARGUMENTS: Record<string, Record<string, unknown>> = {
+  olympus_privacy_set: {
+    rules: [
+      { kind: 'folder', source_id: 'dropbox.files', key: '/Medical', display: 'Medical' },
+      { kind: 'folder', source_id: 'google_drive.docs', key: 'folder-id-1', display: 'Taxes' },
+      { kind: 'label', source_id: 'gmail.email', key: 'Label_7', value: 'Lawyer' },
+      { kind: 'sender', source_id: 'gmail.email', value: 'doctor@example.com' },
+    ],
+  },
+};
+
+/**
+ * The scope tools route on source_id: Gmail reads the mail fields, the folder
+ * sources the folder fields, and each ignores the other's (the submitted
+ * dashboard never sends both). They are swept once per source with only that
+ * branch's fields; Gmail's scope_set needs its mail draft.
+ */
+const SOURCE_ROUTED = new Set(['olympus_scope_list', 'olympus_scope_set']);
+const MAIL_FIELDS = ['draft', 'mail'];
+const FOLDER_FIELDS = ['parent_key', 'ancestor_keys', 'cursor', 'selections', 'whole_account_selected', 'confirm_whole_account'];
+
+function routed(tool: Tool, args: Record<string, unknown>): Record<string, unknown> {
+  if (!SOURCE_ROUTED.has(tool.name)) return args;
+  const mail = args.source_id === 'gmail.email';
+  const out = Object.fromEntries(Object.entries(args).filter(([key]) => !(mail ? FOLDER_FIELDS : MAIL_FIELDS).includes(key)));
+  if (mail && tool.name === 'olympus_scope_set' && out.mail === undefined) out.mail = sampleValue(tool.inputSchema.properties!.mail!, 'mail');
+  return out;
+}
+
+/** The backend operation each setup tool ends in once its arguments are parsed. */
+const SETUP_OPERATION: Record<string, RegExp> = {
+  olympus_connect_source: /^startOAuth$/,
+  olympus_scope_list: /^browse(Mail|Folders)$/,
+  olympus_scope_set: /^approve(Mail|Folders)$/,
+  olympus_disconnect_source: /^disconnect$/,
+  olympus_model_set: /^setModels$/,
+  olympus_model_retry: /^retryModel$/,
+  olympus_privacy_set: /^savePrivacy$/,
+  olympus_sync_source: /^syncSource$/,
+};
+
+interface Recorded { method: string; args: unknown[] }
+
+/**
+ * A setup backend for an install with nothing saved: its reads answer (no
+ * Secrets locations, no privacy settings at PRIVACY_REVISION, no saved
+ * choices); every operation is recorded and then answers "unavailable".
+ */
+function recordingBackend(recorded: Recorded[]): ChatGptSetupBackend {
+  const reads: Record<string, unknown> = {
+    secretLocations: () => NO_SECRET_LOCATIONS,
+    privacySettings: () => ({ configured: false, description: '', rules: [], pendingCount: 0, revision: PRIVACY_REVISION }),
+    savedFolderSelections: () => [],
+    savedMailDraft: () => undefined,
+  };
+  return new Proxy({}, {
+    get: (_target, key) => {
+      if (typeof key !== 'string' || key === 'then' || key === 'directSignIn' || key === 'privacyConfirmationScope') return undefined;
+      if (key in reads) return reads[key];
+      return (...args: unknown[]) => {
+        recorded.push({ method: key, args });
+        throw new ChatGptSurfaceError('unavailable');
+      };
+    },
+  }) as ChatGptSetupBackend;
+}
+
+/**
+ * Sends every argument set `tools`' schemas allow to the directory endpoint:
+ * the required arguments alone, then the variants. A setup tool passes only
+ * when its backend operation ran and received every enumerated value sent; any
+ * other tool only when it was not refused. Returns what failed.
+ */
+async function sweep(tools: readonly Tool[]): Promise<{ failures: string[]; sent: number }> {
+  const recorded: Recorded[] = [];
+  setup = recordingBackend(recorded);
+  const directory = connect('directory');
+  const failures: string[] = [];
+  let sent = 0;
+  for (const tool of tools) {
+    const schema = tool.inputSchema;
+    const fixed = FIXED_ARGUMENTS[tool.name] ?? {};
+    for (const [key, value] of Object.entries(fixed)) {
+      const missing = enumerated(schema.properties![key]!).filter((option) => !JSON.stringify(value).includes(JSON.stringify(option)));
+      if (missing.length) failures.push(`${tool.name}.${key}: fixture never sends ${missing.join(', ')}`);
+    }
+    const runs = SOURCE_ROUTED.has(tool.name)
+      ? (schema.properties!.source_id!.enum as string[]).map((sourceId) => ({ ...fixed, source_id: sourceId }))
+      : [fixed];
+    const sets = runs.flatMap((run) => {
+      const all = variants(schema, tool.name, run) as Array<Record<string, unknown>>;
+      const required = Object.fromEntries(Object.entries(all[0]!).filter(([key]) => (schema.required ?? []).includes(key)));
+      return [required, ...all].map((args) => routed(tool, args));
+    });
+    for (const args of sets) {
+      // A save that lowers protection carries the panel's confirmation, issued by olympus_privacy_get.
+      if ('confirmation' in args) args.confirmation = (await call(directory, 'olympus_privacy_get'))._meta?.['olympus/privacy']?.confirmation;
+      recorded.length = 0;
+      const result = await call(directory, tool.name, args);
+      sent += 1;
+      const label = `${tool.name} ${JSON.stringify(args)}`;
+      const error = result.structuredContent?.error;
+      const operation = SETUP_OPERATION[tool.name];
+      if (!operation) {
+        if (error === 'invalid_params' || error === 'unknown_tool') failures.push(`${label}: ${error}`);
+        continue;
+      }
+      const ran = recorded.find((entry) => operation.test(entry.method));
+      if (!ran) {
+        failures.push(`${label}: ${error ?? 'answered'} before ${operation.source}`);
+        continue;
+      }
+      const received = JSON.stringify(ran.args);
+      // Gmail's own operations take no source id: the route is the value.
+      const lost = enumerated(schema).filter((option) => JSON.stringify(args).includes(JSON.stringify(option)) && !received.includes(JSON.stringify(option)))
+        .filter((option) => !(option === args.source_id && /Mail$/.test(ran.method)));
+      if (lost.length) failures.push(`${label}: ${ran.method} never received ${lost.join(', ')}`);
+    }
+  }
+  return { failures, sent };
 }
 
 describe('the current handlers honour the submitted contract', () => {
@@ -384,26 +579,36 @@ describe('the current handlers honour the submitted contract', () => {
     expect(narrowings(submitted, { ...submitted, properties: { ...submitted.properties, n: { type: 'integer', minimum: 1, maximum: 24 } } })).toEqual(['$.n: maximum lowered to 24']);
     expect(narrowings(submitted, { ...submitted, properties: { n: submitted.properties!.n! } })).toEqual(['$.a: no longer accepted']);
     expect(narrowings(submitted, { ...submitted, properties: { ...submitted.properties, a: { type: 'string', pattern: '^x$' } as JsonSchema } })).toEqual(['$.a: unchecked keyword pattern']);
+    // Extra keys: a key the submitted schema left open may not gain a type, and open extras may not close or narrow.
+    const open: JsonSchema = { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] };
+    expect(narrowings(open, { ...open, properties: { ...open.properties, tag: { type: 'string' } } })).toEqual(['$.tag: now constrained']);
+    expect(narrowings(open, { ...open, additionalProperties: false })).toEqual(['$: extra properties now refused']);
+    expect(narrowings(open, { ...open, additionalProperties: { type: 'string' } })).toEqual(['$.*: now constrained']);
+    const typedExtras: JsonSchema = { ...open, additionalProperties: { type: 'string', maxLength: 10 } };
+    expect(narrowings(typedExtras, { ...open, additionalProperties: { type: 'string', maxLength: 5 } })).toEqual(['$.*: maxLength lowered to 5']);
+    expect(narrowings(typedExtras, { ...open, properties: { ...open.properties, tag: { type: 'string', maxLength: 5 } } })).toEqual(['$.tag: maxLength lowered to 5']);
+    // A closed submitted schema: new optional properties are fine (no submitted caller sends them).
+    expect(narrowings(submitted, { ...submitted, properties: { ...submitted.properties, extra: { type: 'string' } } })).toEqual([]);
   });
 
-  test('every argument set the submitted schemas allow reaches the handler', async () => {
-    const client = connect('directory');
+  test('every argument set the submitted schemas allow is parsed and reaches the backend with its values', async () => {
     // These run an engine operation end to end; their arguments are held by the schema check above.
     const operations = new Set(['source_answer', 'source_answer_result', 'ask_anonymously']);
-    const refused: string[] = [];
-    let reached = 0;
-    for (const tool of APPROVED_TOOLS as unknown as Tool[]) {
-      if (operations.has(tool.name)) continue;
-      for (const args of submittedArgumentSets(tool.inputSchema)) {
-        const result = await call(client, tool.name, args);
-        if (result.structuredContent?.error === 'invalid_params' || result.structuredContent?.error === 'unknown_tool') {
-          refused.push(`${tool.name} ${JSON.stringify(args)}: ${result.structuredContent.error}`);
-        }
-        reached += 1;
-      }
-    }
-    expect(refused).toEqual([]);
-    expect(reached).toBeGreaterThan(30);
+    const { failures, sent } = await sweep((APPROVED_TOOLS as unknown as Tool[]).filter((tool) => !operations.has(tool.name)));
+    expect(failures).toEqual([]);
+    expect(sent).toBeGreaterThan(80);
+  });
+
+  test('the sweep fails when a handler refuses a value the submitted schema allows, at any depth', async () => {
+    const tool = (name: string) => structuredClone((APPROVED_TOOLS as unknown as Tool[]).find((entry) => entry.name === name)!);
+    const connectSource = tool('olympus_connect_source');
+    (connectSource.inputSchema.properties!.source as { enum: string[] }).enum.push('icloud');
+    const scopeSet = tool('olympus_scope_set');
+    (scopeSet.inputSchema.properties!.mail!.properties!.window as { enum: string[] }).enum.push('10y');
+    const { failures } = await sweep([connectSource, scopeSet]);
+    expect(failures.some((failure) => failure.includes('"icloud"') && failure.includes('invalid_params'))).toBe(true);
+    expect(failures.some((failure) => failure.includes('"10y"') && failure.includes('invalid_params'))).toBe(true);
+    expect(failures).toHaveLength(2);
   });
 });
 
@@ -600,7 +805,38 @@ describe('the submitted pages render current results', () => {
     expect(requests.every((path) => path.startsWith('/private/'))).toBe(true);
     // Nothing of the answer reached the host.
     expect(JSON.stringify(page.sent)).not.toContain('31 May 2027');
+    // The submitted panel cannot acknowledge; the delivered answer did, so the question no longer waits on the computer.
+    expect(waitingRecorded).toHaveLength(1);
+    expect(acknowledged).toEqual(waitingRecorded);
   }, 30_000);
+
+  test('a delivered answer counts as seen only on the directory; /mcp still waits for the panel\'s acknowledgment', async () => {
+    const collect = async (endpoint: 'directory' | 'mcp') => {
+      const result = await call(connect(endpoint), 'olympus_search', { question: 'When does the lease end?' });
+      const { jobId } = result._meta![PRIVATE_ANSWER_META_KEY] as { jobId: string };
+      const panel = await generatePanelKeyPair();
+      const routes = engineRoutes();
+      const claim = () => routes(new Request(`https://mcp.olympusplugin.ai/private/${jobId}`, {
+        method: 'POST',
+        headers: { origin: PANEL_ORIGIN, 'content-type': 'application/json' },
+        body: JSON.stringify({ v: 1, publicKey: panel.publicKey }),
+      }));
+      let response = await claim();
+      for (let i = 0; i < 200 && response.status === 202; i += 1) {
+        await sleep(10);
+        response = await claim();
+      }
+      expect(((await response.json()) as { status: string }).status).toBe('ready');
+      // Collecting again (a re-mount) acknowledges nothing more.
+      expect((await claim()).status).toBe(200);
+    };
+    await collect('mcp');
+    expect(waitingRecorded).toHaveLength(1);
+    expect(acknowledged).toEqual([]);
+    await collect('directory');
+    expect(waitingRecorded).toHaveLength(2);
+    expect(acknowledged).toEqual([waitingRecorded[1]!]);
+  }, 15_000);
 
   test('the private question panel asks through the current job handler and shows the answer', async () => {
     const client = connect('directory');
