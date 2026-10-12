@@ -60,23 +60,18 @@
     },
     {
       "id": "setup_agents",
-      "rendered_html_sha256": "053b0b6e802ae5f78030771b5dc80f465066884b68f1757b9d8d49d1d18201a2",
+      "rendered_html_sha256": "c0929533c4e4da58b8b1d64627111d9027eb5d861060c04d1f68fe227de82ea3",
       "approved_by": "jamie",
       "approved_on": "2026-10-12",
-      "approval": "In chat: I approve that page (Agents page: relay-only ChatGPT steps, tunnel notes for the others, local prompt for both installs). The preview viewed then still listed Muse, which Jamie had just asked to remove; the approved render is without it.",
-      "screenshot_commit": "3824b59ab7ff6d4eb65283bcf33c02874201880c",
-      "rendered_from_commit": "3824b59ab7ff6d4eb65283bcf33c02874201880c",
-      "pending_review": {
-        "requested_on": "2026-10-12",
-        "reason": "Claude and Grok now connect through the relay (Olympus#289): their steps are one click on this computer like ChatGPT's, no tunnel note; the label is Grok (grok.com), Grok Bot deferred. The new render awaits Jamie's re-approval.",
-        "candidate_rendered_html_sha256": "c0929533c4e4da58b8b1d64627111d9027eb5d861060c04d1f68fe227de82ea3"
-      },
+      "approval": "In chat: yes approved, merge it (Agents page through the relay: Claude and Grok one click on this computer like ChatGPT, Claude works on the phone after, label Grok (grok.com); screenshot sent in chat, rendered by scripts/dashboard-preview.ts at rendered_from_commit).",
+      "screenshot_commit": "72230e74afe9298f9be87bc4c014960e187d98a5",
+      "rendered_from_commit": "72230e74afe9298f9be87bc4c014960e187d98a5",
       "prior_approval": {
-        "rendered_html_sha256": "7453298473da4e153c9cb13936f535b728133b363619d2edf2725b40373f5e4d",
-        "approved_on": "2026-10-03",
-        "approval": "In chat: Approved (Agents section after the gap and outlined-button fixes)",
-        "screenshot_commit": "ff46632da9fcd227270824fe4d45cbd5e2d4c6a1",
-        "rendered_from_commit": "ff46632da9fcd227270824fe4d45cbd5e2d4c6a1"
+        "rendered_html_sha256": "053b0b6e802ae5f78030771b5dc80f465066884b68f1757b9d8d49d1d18201a2",
+        "approved_on": "2026-10-12",
+        "approval": "In chat: I approve that page (Agents page: relay-only ChatGPT steps, tunnel notes for the others, local prompt for both installs). The preview viewed then still listed Muse, which Jamie had just asked to remove; the approved render is without it.",
+        "screenshot_commit": "3824b59ab7ff6d4eb65283bcf33c02874201880c",
+        "rendered_from_commit": "3824b59ab7ff6d4eb65283bcf33c02874201880c"
       }
     }
   ],
