@@ -1,7 +1,7 @@
 # Olympus for background agents (dots, Grok Bot, Muse)
 
-Status: approved design, revision 3 (2026-10-12), after two Codex
-(gpt-6-astra) review rounds and the owner's decisions below. Builds on
+Status: approved design, revision 4 (2026-10-12), after three Codex
+(gpt-6-astra) review rounds (final verdict: approve with changes, made) and the owner's decisions below. Builds on
 [hosted-agent-compatibility.md](hosted-agent-compatibility.md) (2026-09-24),
 which put Grok and Muse out of scope for 1.0, and on
 [chatgpt-plugin.md](chatgpt-plugin.md) and [private-answers.md](private-answers.md).
@@ -89,19 +89,27 @@ panel job:
   **delivered** (the summary included Private evidence: nothing recorded),
   **excluded by policy** or **private route unavailable** (the answer fell
   back to Public and Personal, `analyst-answer.ts:537-556,729-741`). For the
-  last two, a bounded local match probe (metadata only, as the ChatGPT
-  surface uses) decides whether anything Private matches; if so a waiting
-  question is recorded and the agent is told one sentence: "Private items may
-  answer this; the person can see that answer in Olympus on their computer."
-  Policy is never bypassed: the probe result goes nowhere but the local
-  record.
+  last two, a new local match probe decides whether anything Private
+  matches. It returns `match`, `no_match` or `unknown` (timeout or error) and
+  reads metadata only; it is not today's ChatGPT probe, which loads passages
+  (`email-source/server.ts:5013-5021`) and turns a timeout into "no match"
+  (`mcp-surface.ts:565-596`). `match` records a waiting question; `unknown`
+  records it too, marked "couldn't check yet" and retried locally, never
+  reported to the agent as a match. The agent is told one sentence only on
+  `match`: "Private items may answer this; the person can see that answer in
+  Olympus on their computer." Policy is never bypassed: the probe result goes
+  nowhere but the local record.
 
 **What is stored.** Question (at most 2 KB), stable connection id, time,
-detail level, and the corpus scope the original request named. Not stored:
+detail level, and the request's retrieval selectors: corpus, explicit query,
+selected items, account and filters (`analyst-answer.ts:394-402`,
+`email-source/server.ts:3353-3367`), bounded in size. A request whose
+selectors can't be stored within the bound is not recorded (the agent's own
+answer stands); replay never silently widens the search. Not stored:
 evidence, answers, match counts, job ids, citation tokens. Total store at
 most 256 KB.
 
-**Bounds.** Deduplicated by connection, scope and normalized question; a
+**Bounds.** Deduplicated by connection, selectors and normalized question; a
 duplicate refreshes the time and keeps the fuller detail level. 20 per
 connection, 50 in all, oldest dropped, with a visible "older questions were
 removed" line. 7 days. Dismiss and Dismiss all; a dismissed question asked
@@ -118,12 +126,23 @@ again comes back.
   eligibility again before showing the answer and before opening any cited
   item (as panels already do, `private-answer-jobs.ts:568,589`).
 
-**Seen.** A record leaves the list only after an authenticated
-acknowledgment that the answer was decrypted and rendered: the panel sends
-it after rendering, the local page after showing. The acknowledgment names
-the record's generation, so a newer duplicate is not cleared by an older
-answer. A lost acknowledgment leaves the question waiting; a duplicate is
-better than a loss.
+**Seen.** A record leaves the list only after an acknowledgment that the
+answer was decrypted and rendered. Today's claim proves neither (it accepts
+a job id and a public key, `private-answer-jobs.ts:529-546`), so:
+
+- the sealed answer carries a random, single-use **acknowledgment
+  capability**, bound on the computer to the job, the record's generation
+  and the connection;
+- the panel posts it back only after rendering; the local page acknowledges
+  through its control session;
+- the computer deletes the record only if the generation still matches
+  (atomic compare), so a newer duplicate is not cleared by an older answer.
+
+This proves decryption plus the panel's own claim that it rendered, not
+that a person read it; the accepted trust in the OpenAI-served panel and
+the relay (`chatgpt-plugin.md`, "Who can read the answer") is unchanged. A
+lost acknowledgment leaves the question waiting; a duplicate is better than
+a loss.
 
 **Protection.** In the worker's private state with the same file
 permissions as Private stores; excluded from indexing, telemetry and
@@ -154,8 +173,11 @@ The local path:
 
 - query planning by the built-in model, or none;
 - embeddings by the built-in embedding model only;
-- retrieval over Private stores and the Personal items indexed on this
-  computer; no remote connector query and no cloud fallback;
+- retrieval over Private stores and the Personal stores mounted on this
+  computer (their scoped adapters, `email-source/server.ts:3405-3435`), with
+  local lexical search where vectors are incompatible
+  (`connector-store/local-index.ts:10535-10544`); no remote connector query
+  and no cloud fallback;
 - synthesis by the built-in model.
 
 If a Personal source can't be searched locally, the answer says which
@@ -163,14 +185,21 @@ sources were left out (every problem findable). Anonymous outside help
 (zkAPI) stays a separate, clearly labeled action, never mixed into this
 answer, and waiting questions never feed `ask_anonymously`. Proof: a test
 that denies all outbound requests and still answers, for B and for A's
-Answer.
+Answer, covering planning, embedding, retrieval, passage ranking and
+synthesis.
 
 ### C. Remote result hardening (summary rule)
 
 Keeping summaries for non-ChatGPT agents makes the summary path's output the
-boundary. Every remote connection, manual tunnels included, gets typed
-output schemas instead of the serialized operation result
-(`src/mcp/server.ts:44-49`):
+boundary. Every remote connection, manual tunnels included, gets
+**discriminated, per-operation output schemas** instead of the serialized
+operation result (`src/mcp/server.ts:44-49`). `source_answer_result`
+returns two families (answers and anonymous answers,
+`src/core/operations.ts:336-343`), and each keeps its own schema.
+`ask_anonymously` keeps every consent and delivery state it needs today
+(`needs_choice` and options, reply, network identity, whether the question
+was sent; `consult-ask.ts:117-151`) as fixed enums plus scanned text;
+`source_index_status` gets its own. For source answers:
 
 - **Answer:** the released answer text. The Secret coverage note ("N
   Secret(s) matched by location only", `analyst-answer.ts:2082-2092`) is
@@ -206,10 +235,14 @@ same-provider exclusion can't be applied.
 
 - **Computer offline.** The relay knows the endpoint (`/openai/mcp` or
   `/mcp`), not the host (`connect-relay/shared/directory-tools.ts:23-24`),
-  and `/mcp` serves both ChatGPT developer connections and other agents. So:
-  `/openai/mcp` keeps the ChatGPT directory list; on `/mcp`, the engine tells
-  the relay, while online, which surface each credential family gets, and
-  the relay serves that list offline (default: the remote list). Tool
+  and `/mcp` serves both ChatGPT developer connections and other agents.
+  Tokens carry only kind, install and secret (`connect-relay/shared/tokens.ts`),
+  so the surface can't be read from a token. So: `/openai/mcp` keeps the
+  ChatGPT directory list; on `/mcp`, the engine confirms, while online, a
+  surface mapping keyed by install, endpoint and token fingerprint, with the
+  token's expiry; rotation adds the new fingerprint, and revocation or
+  expiry removes it. Offline, the relay serves the mapped list, or the
+  remote list for an unknown token. Never inferred from token prefixes. Tool
   results say "Olympus is off; last seen …; try again later" with a
   Retry-After, so an always-on agent backs off and retries.
 - **Priority** lives at the shared model execution boundary, covering native
@@ -298,6 +331,12 @@ the applicable pipeline evals (`docs/ENGINEERING_PROCESS.md`).
   revoke-race rules; offline lists by credential family; priority at the
   shared execution boundary; the pinned-versus-ChatGPT split ordered before
   any xAI pin; fuller acceptance proofs.
+- **Round 3, revision 3: approve with changes**, all made in this
+  revision: a sealed single-use acknowledgment capability; per-operation
+  remote schemas (anonymous answers keep their consent and delivery
+  states); full retrieval selectors stored, never widened; a new
+  three-state metadata probe (`unknown` kept locally, never a remote match);
+  offline surface mapping by install, endpoint and token fingerprint.
 
 ## Sources (checked 2026-10-12)
 
