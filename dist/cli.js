@@ -1526,6 +1526,244 @@ var init_still_image_formats = __esm(() => {
   IMAGE_MAX_DECLARED_PIXELS = 16384 * 16384;
 });
 
+// src/core/http-timeout.ts
+function untilAborted(work, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      work.catch(() => {
+        return;
+      });
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fetchImpl(url, init);
+  }
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  try {
+    return await fetchImpl(url, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+  }
+}
+async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    return fetchImpl(url, init);
+  const controller = new AbortController;
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  let timer;
+  const settle = () => {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    timer = undefined;
+    removeUpstreamAbortListener?.();
+    removeUpstreamAbortListener = undefined;
+  };
+  const deadline = new AbortController;
+  timer = setTimeout(() => {
+    timer = undefined;
+    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+    error.name = "AbortError";
+    controller.abort(error);
+    deadline.abort(error);
+  }, timeoutMs);
+  timer.unref?.();
+  let response;
+  try {
+    response = await untilAborted(fetchImpl(url, { ...init, signal: controller.signal }), deadline.signal);
+  } catch (error) {
+    settle();
+    throw error;
+  }
+  if (!response.body || NULL_BODY_STATUSES.has(response.status)) {
+    settle();
+    return response;
+  }
+  const reader = response.body.getReader();
+  const body = new ReadableStream({
+    async pull(stream) {
+      try {
+        const { done, value } = await untilAborted(reader.read(), deadline.signal);
+        if (done) {
+          settle();
+          stream.close();
+          return;
+        }
+        if (value)
+          stream.enqueue(value);
+      } catch (error) {
+        settle();
+        stream.error(error);
+        reader.cancel().catch(() => {
+          return;
+        });
+      }
+    },
+    cancel(reason) {
+      settle();
+      controller.abort();
+      reader.cancel(reason).catch(() => {
+        return;
+      });
+    }
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  });
+}
+function isAbortError(error) {
+  return error instanceof Error && error.name === "AbortError";
+}
+function isBoundedResponseTooLargeError(error) {
+  return error instanceof BoundedResponseTooLargeError;
+}
+async function fetchBoundedText(fetchImpl, url, init, options = {}) {
+  const limitBytes = options.limitBytes ?? DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES;
+  const timeoutMs = options.timeoutMs;
+  const deadlineWanted = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
+  if (!deadlineWanted) {
+    const response = await fetchImpl(url, init);
+    return { response, text: await readBoundedText(response, limitBytes) };
+  }
+  const controller = new AbortController;
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  let timer;
+  const deadline = new AbortController;
+  timer = setTimeout(() => {
+    controller.abort();
+    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+    error.name = "AbortError";
+    deadline.abort(error);
+  }, timeoutMs);
+  let activeReader;
+  try {
+    const response = await untilAborted(fetchImpl(url, { ...init, signal: controller.signal }), deadline.signal);
+    const read = readBoundedText(response, limitBytes, controller, (reader) => {
+      activeReader = reader;
+    });
+    read.catch(() => {
+      return;
+    });
+    const text2 = await untilAborted(read, deadline.signal);
+    return { response, text: text2 };
+  } finally {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+    if (activeReader) {
+      await Promise.race([
+        releaseBodyReader(activeReader),
+        new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        })
+      ]);
+    }
+  }
+}
+async function releaseBodyReader(reader) {
+  try {
+    await reader.cancel();
+  } catch {}
+  try {
+    reader.releaseLock();
+  } catch {}
+}
+async function readBoundedText(response, limitBytes, controller, onReader) {
+  const body = response.body;
+  if (!body) {
+    const text2 = await response.text();
+    if (new TextEncoder().encode(text2).byteLength > limitBytes) {
+      throw new BoundedResponseTooLargeError(limitBytes);
+    }
+    return text2;
+  }
+  const reader = body.getReader();
+  onReader?.(reader);
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;; ) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (!value)
+        continue;
+      total += value.byteLength;
+      if (total > limitBytes) {
+        controller?.abort();
+        throw new BoundedResponseTooLargeError(limitBytes);
+      }
+      chunks.push(value);
+    }
+    const joined = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(joined);
+  } finally {
+    await releaseBodyReader(reader);
+  }
+}
+var NULL_BODY_STATUSES, DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
+var init_http_timeout = __esm(() => {
+  NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+  DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
+    limitBytes;
+    constructor(limitBytes) {
+      super(`Response body exceeded the ${limitBytes}-byte cap.`);
+      this.name = "BoundedResponseTooLargeError";
+      this.limitBytes = limitBytes;
+    }
+  };
+});
+
 // src/workers/source-index/pinned-download.ts
 import { createHash } from "node:crypto";
 import { closeSync, createReadStream, existsSync as existsSync2, openSync, renameSync, rmSync, statSync as statSync2, writeSync } from "node:fs";
@@ -1696,25 +1934,12 @@ async function hashPartial(path, hash, timeoutMs) {
     stream.destroy();
   }
 }
-function untilAborted(work, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      work.catch(() => {
-        return;
-      });
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-  });
-}
 function message(cause) {
   return cause instanceof Error ? cause.message : String(cause);
 }
 var REQUEST_BYTES, READ_RETRIES = 3, RETRY_DELAY_MS = 250, InterruptedRead;
 var init_pinned_download = __esm(() => {
+  init_http_timeout();
   REQUEST_BYTES = 256 * 1024 ** 2;
   InterruptedRead = class InterruptedRead extends Error {
   };
@@ -7253,19 +7478,13 @@ async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BOD
   const chunks = [];
   let total = 0;
   let timer;
-  const deadline = options.deadlineMs === undefined ? undefined : new Promise((resolve5) => {
-    timer = setTimeout(() => resolve5("timeout"), options.deadlineMs);
-  });
+  const deadline = new AbortController;
+  const timeout = new Error("request body timeout");
+  if (options.deadlineMs !== undefined)
+    timer = setTimeout(() => deadline.abort(timeout), options.deadlineMs);
   try {
     for (;; ) {
-      const next = deadline ? await Promise.race([reader.read(), deadline]) : await reader.read();
-      if (next === "timeout") {
-        await reader.cancel().catch(() => {
-          return;
-        });
-        return { ok: false, reason: "timeout" };
-      }
-      const { done, value } = next;
+      const { done, value } = options.deadlineMs === undefined ? await reader.read() : await untilAborted(reader.read(), deadline.signal);
       if (done)
         break;
       total += value.byteLength;
@@ -7277,11 +7496,11 @@ async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BOD
       }
       chunks.push(value);
     }
-  } catch {
+  } catch (error) {
     await reader.cancel().catch(() => {
       return;
     });
-    return { ok: false, reason: "unreadable" };
+    return { ok: false, reason: error === timeout ? "timeout" : "unreadable" };
   } finally {
     clearTimeout(timer);
   }
@@ -7304,6 +7523,7 @@ function isJsonContentType(header) {
 }
 var REMOTE_REQUEST_MAX_BODY_BYTES;
 var init_remote_request_body = __esm(() => {
+  init_http_timeout();
   REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
 });
 
@@ -9100,238 +9320,6 @@ var init_worker_service = __esm(() => {
   init_worker_auth();
   WORKER_LOG_TAIL_BYTES = 64 * 1024;
   MANAGED_WORKER_ENV_SECRET_KEYS = ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY", "OLYMPUS_SERVER_MODE", "OLYMPUS_SERVER_SSH_TARGET", "OLYMPUS_SERVER_AGENT_ROUTE"];
-});
-
-// src/core/http-timeout.ts
-async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return fetchImpl(url, init);
-  }
-  const controller = new AbortController;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  try {
-    return await fetchImpl(url, {
-      ...init,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timer);
-    removeUpstreamAbortListener?.();
-  }
-}
-async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-    return fetchImpl(url, init);
-  const controller = new AbortController;
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  let timer;
-  const settle = () => {
-    if (timer !== undefined)
-      clearTimeout(timer);
-    timer = undefined;
-    removeUpstreamAbortListener?.();
-    removeUpstreamAbortListener = undefined;
-  };
-  const deadline = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => {
-      timer = undefined;
-      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
-      error.name = "AbortError";
-      controller.abort(error);
-      reject(error);
-    }, timeoutMs);
-    timer.unref?.();
-  });
-  deadline.catch(() => {
-    return;
-  });
-  let response;
-  try {
-    response = await Promise.race([fetchImpl(url, { ...init, signal: controller.signal }), deadline]);
-  } catch (error) {
-    settle();
-    throw error;
-  }
-  if (!response.body || NULL_BODY_STATUSES.has(response.status)) {
-    settle();
-    return response;
-  }
-  const reader = response.body.getReader();
-  const body = new ReadableStream({
-    async pull(stream) {
-      try {
-        const { done, value } = await Promise.race([reader.read(), deadline]);
-        if (done) {
-          settle();
-          stream.close();
-          return;
-        }
-        if (value)
-          stream.enqueue(value);
-      } catch (error) {
-        settle();
-        stream.error(error);
-        reader.cancel().catch(() => {
-          return;
-        });
-      }
-    },
-    cancel(reason) {
-      settle();
-      controller.abort();
-      reader.cancel(reason).catch(() => {
-        return;
-      });
-    }
-  });
-  return new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers
-  });
-}
-function isAbortError(error) {
-  return error instanceof Error && error.name === "AbortError";
-}
-function isBoundedResponseTooLargeError(error) {
-  return error instanceof BoundedResponseTooLargeError;
-}
-async function fetchBoundedText(fetchImpl, url, init, options = {}) {
-  const limitBytes = options.limitBytes ?? DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES;
-  const timeoutMs = options.timeoutMs;
-  const deadlineWanted = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
-  if (!deadlineWanted) {
-    const response = await fetchImpl(url, init);
-    return { response, text: await readBoundedText(response, limitBytes) };
-  }
-  const controller = new AbortController;
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  let timer;
-  const deadline = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
-      error.name = "AbortError";
-      reject(error);
-    }, timeoutMs);
-  });
-  let activeReader;
-  try {
-    const response = await Promise.race([
-      fetchImpl(url, { ...init, signal: controller.signal }),
-      deadline
-    ]);
-    const read = readBoundedText(response, limitBytes, controller, (reader) => {
-      activeReader = reader;
-    });
-    read.catch(() => {
-      return;
-    });
-    const text2 = await Promise.race([read, deadline]);
-    return { response, text: text2 };
-  } finally {
-    if (timer !== undefined)
-      clearTimeout(timer);
-    removeUpstreamAbortListener?.();
-    if (activeReader) {
-      await Promise.race([
-        releaseBodyReader(activeReader),
-        new Promise((resolve5) => {
-          setTimeout(resolve5, 0);
-        })
-      ]);
-    }
-  }
-}
-async function releaseBodyReader(reader) {
-  try {
-    await reader.cancel();
-  } catch {}
-  try {
-    reader.releaseLock();
-  } catch {}
-}
-async function readBoundedText(response, limitBytes, controller, onReader) {
-  const body = response.body;
-  if (!body) {
-    const text2 = await response.text();
-    if (new TextEncoder().encode(text2).byteLength > limitBytes) {
-      throw new BoundedResponseTooLargeError(limitBytes);
-    }
-    return text2;
-  }
-  const reader = body.getReader();
-  onReader?.(reader);
-  const chunks = [];
-  let total = 0;
-  try {
-    for (;; ) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      if (!value)
-        continue;
-      total += value.byteLength;
-      if (total > limitBytes) {
-        controller?.abort();
-        throw new BoundedResponseTooLargeError(limitBytes);
-      }
-      chunks.push(value);
-    }
-    const joined = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      joined.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return new TextDecoder().decode(joined);
-  } finally {
-    await releaseBodyReader(reader);
-  }
-}
-var NULL_BODY_STATUSES, DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
-var init_http_timeout = __esm(() => {
-  NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
-  DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
-    limitBytes;
-    constructor(limitBytes) {
-      super(`Response body exceeded the ${limitBytes}-byte cap.`);
-      this.name = "BoundedResponseTooLargeError";
-      this.limitBytes = limitBytes;
-    }
-  };
 });
 
 // src/core/oauth-relay.ts

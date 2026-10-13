@@ -1,3 +1,24 @@
+/**
+ * Settles with `work`, or rejects once `signal` aborts: fetch implementations
+ * and synthetic streams do not all honour the signal. Each call has its own
+ * listener, removed when `work` settles. Racing every read against one
+ * long-lived abort promise kept each chunk reachable until that promise
+ * settled; on Bun a 1.5 GB download then peaked at 6.2 GB of memory
+ * (Omarchy laptop, 2026-10-13).
+ */
+export function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) {
+      work.catch(() => undefined);
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 export type TimeoutFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export async function fetchWithTimeout(
@@ -78,22 +99,22 @@ export async function fetchWithBodyDeadline(
     removeUpstreamAbortListener?.();
     removeUpstreamAbortListener = undefined;
   };
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      timer = undefined;
-      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
-      error.name = 'AbortError';
-      controller.abort(error);
-      reject(error);
-    }, timeoutMs);
-    (timer as { unref?: () => void }).unref?.();
-  });
-  // Rejects only into the races below or into nothing: never unhandled.
-  deadline.catch(() => undefined);
+  // Keep the deadline separate from upstream cancellation: the transport
+  // receives the caller's reason, while an uncooperative peer still gets the
+  // same deadline error as before.
+  const deadline = new AbortController();
+  timer = setTimeout(() => {
+    timer = undefined;
+    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+    error.name = 'AbortError';
+    controller.abort(error);
+    deadline.abort(error);
+  }, timeoutMs);
+  (timer as { unref?: () => void }).unref?.();
 
   let response: Response;
   try {
-    response = await Promise.race([fetchImpl(url, { ...init, signal: controller.signal }), deadline]);
+    response = await untilAborted(fetchImpl(url, { ...init, signal: controller.signal }), deadline.signal);
   } catch (error) {
     settle();
     throw error;
@@ -106,7 +127,7 @@ export async function fetchWithBodyDeadline(
   const body = new ReadableStream<Uint8Array>({
     async pull(stream) {
       try {
-        const { done, value } = await Promise.race([reader.read(), deadline]);
+        const { done, value } = await untilAborted(reader.read(), deadline.signal);
         if (done) {
           settle();
           stream.close();
@@ -211,17 +232,13 @@ export async function fetchBoundedText(
   }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
-  // Rejects only when it wins a race below, so it is always handled and never
-  // becomes an unhandled rejection; the `finally` clears the timer on every
-  // other path before it can fire.
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
-      error.name = 'AbortError';
-      reject(error);
-    }, timeoutMs);
-  });
+  const deadline = new AbortController();
+  timer = setTimeout(() => {
+    controller.abort();
+    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+    error.name = 'AbortError';
+    deadline.abort(error);
+  }, timeoutMs);
 
   // When the deadline wins the race below, the read is still in flight and
   // still holds the stream's lock. An abort only ends it if the peer honours
@@ -230,17 +247,16 @@ export async function fetchBoundedText(
   // read against a permanently locked body (Codex round 2 on 98d4a946).
   let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
-    const response = await Promise.race([
-      fetchImpl(url, { ...init, signal: controller.signal }),
-      deadline,
-    ]);
+    const response = await untilAborted(
+      fetchImpl(url, { ...init, signal: controller.signal }), deadline.signal,
+    );
     const read = readBoundedText(response, limitBytes, controller, (reader) => {
       activeReader = reader;
     });
     // The race may abandon this promise. Attaching a handler now means an
     // abandoned rejection is never an unhandled one.
     read.catch(() => undefined);
-    const text = await Promise.race([read, deadline]);
+    const text = await untilAborted(read, deadline.signal);
     return { response, text };
   } finally {
     if (timer !== undefined) clearTimeout(timer);

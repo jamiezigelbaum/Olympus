@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { untilAborted } from './http-timeout.ts';
 import {
   OLYMPUS_DASHBOARD_PANEL_PATH,
   OLYMPUS_DASHBOARD_TOOL_METHOD,
@@ -684,14 +685,9 @@ async function readBoundedResponseText(
   const decoder = new TextDecoder();
   let total = 0;
   let text = '';
-  let rejectAbort!: (error: DashboardGatewayUnavailableError) => void;
-  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
-  const onAbort = () => rejectAbort(new DashboardGatewayUnavailableError('Olympus dashboard worker is unavailable.'));
-  if (signal.aborted) onAbort();
-  else signal.addEventListener('abort', onAbort, { once: true });
   try {
     while (true) {
-      const { done, value } = await Promise.race([reader.read(), aborted]);
+      const { done, value } = await untilAborted(reader.read(), signal);
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
@@ -701,8 +697,12 @@ async function readBoundedResponseText(
       text += decoder.decode(value, { stream: true });
     }
     return text + decoder.decode();
+  } catch (error) {
+    if (signal.aborted && error === signal.reason) {
+      throw new DashboardGatewayUnavailableError('Olympus dashboard worker is unavailable.');
+    }
+    throw error;
   } finally {
-    signal.removeEventListener('abort', onAbort);
     if (signal.aborted) void reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }

@@ -1,3 +1,5 @@
+import { untilAborted } from '../core/http-timeout.ts';
+
 /**
  * Bounded request-body reading for the remote agent endpoints (`/mcp` and the
  * OpenAPI tool paths). `request.text()` and `request.json()` buffer the whole
@@ -30,17 +32,13 @@ export async function readBoundedRequestText(
   const chunks: Uint8Array[] = [];
   let total = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = options.deadlineMs === undefined
-    ? undefined
-    : new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), options.deadlineMs); });
+  const deadline = new AbortController();
+  const timeout = new Error('request body timeout');
+  if (options.deadlineMs !== undefined) timer = setTimeout(() => deadline.abort(timeout), options.deadlineMs);
   try {
     for (;;) {
-      const next = deadline ? await Promise.race([reader.read(), deadline]) : await reader.read();
-      if (next === 'timeout') {
-        await reader.cancel().catch(() => undefined);
-        return { ok: false, reason: 'timeout' };
-      }
-      const { done, value } = next;
+      const { done, value } = options.deadlineMs === undefined
+        ? await reader.read() : await untilAborted(reader.read(), deadline.signal);
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
@@ -49,9 +47,9 @@ export async function readBoundedRequestText(
       }
       chunks.push(value);
     }
-  } catch {
+  } catch (error) {
     await reader.cancel().catch(() => undefined);
-    return { ok: false, reason: 'unreadable' };
+    return { ok: false, reason: error === timeout ? 'timeout' : 'unreadable' };
   } finally {
     clearTimeout(timer);
   }
