@@ -876,7 +876,7 @@ describe('Privacy saves through the panel tools', () => {
 // ---- a session that expires while the page is open ---------------------------
 
 describe('the host page when its session expires', () => {
-  function hostPage(readToken?: string) {
+  function hostPage(readToken?: string, pageOrigin = ORIGIN) {
     const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN, csrfToken: 'csrf-123', ...(readToken ? { readToken } : {}) });
     const start = html.indexOf('<script>') + '<script>'.length;
     const script = html.slice(start, html.indexOf('</script>', start));
@@ -888,6 +888,7 @@ describe('the host page when its session expires', () => {
     const child = { postMessage: (message: Record<string, any>) => received.push(message) };
     Object.defineProperty(frame, 'contentWindow', { configurable: true, get: () => child });
     const assigned: string[] = [];
+    const opened: string[] = [];
     const fetched: string[] = [];
     let status = 200;
     const fakeFetch = async (url: string) => {
@@ -895,14 +896,26 @@ describe('the host page when its session expires', () => {
       return new Response(JSON.stringify({ structuredContent: { ok: true } }), { status });
     };
     const fakeWindow = {
-      location: { hash: '', pathname: '/dashboard', search: '', assign: (url: string) => assigned.push(url), reload: () => assigned.push('reload') },
+      location: { hash: '', pathname: '/dashboard', search: '', href: `${pageOrigin}/dashboard`, origin: pageOrigin, assign: (url: string) => assigned.push(url), reload: () => assigned.push('reload') },
       history: { replaceState: () => undefined },
-      open: () => null,
+      open: (url: string) => { opened.push(url); return null; },
     };
     new Function('window', 'document', 'fetch', 'navigator', script)(fakeWindow, win.document, fakeFetch, win.navigator);
     const send = (message: Record<string, unknown>) => win.dispatchEvent(new win.MessageEvent('message', { data: { jsonrpc: '2.0', ...message }, source: child as any }));
-    return { win, received, assigned, fetched, send, expire: () => { status = 401; } };
+    return { win, received, assigned, opened, fetched, send, expire: () => { status = 401; } };
   }
+
+  test('the dashboard\'s own pages open in place, even behind the Linux bridge\'s other address; pages elsewhere open in the browser', async () => {
+    for (const pageOrigin of [ORIGIN, 'http://owner-1a2b.localhost:8010']) {
+      const page = hostPage(undefined, pageOrigin);
+      page.send({ id: 1, method: 'ui/open-link', params: { url: `${ORIGIN}/dashboard?private-answers` } });
+      page.send({ id: 2, method: 'ui/open-link', params: { url: 'https://olympusplugin.ai/open/private/' } });
+      page.send({ id: 3, method: 'ui/open-link', params: { url: 'https://console.example.test/keys' } });
+      await settle();
+      expect(page.assigned).toEqual(['/dashboard?private-answers', '/dashboard?private-answers']);
+      expect(page.opened).toEqual(['https://console.example.test/keys']);
+    }
+  });
 
   test('without a reader\'s token it locks in place: the banner shows, the panel is told, reads keep the last answer, never a raw 401', async () => {
     const page = hostPage();

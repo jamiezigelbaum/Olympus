@@ -6,7 +6,7 @@
 - **Olympus on Linux.** A standalone engine that runs as your user (Omarchy
   first): an installer and uninstaller, an Omarchy launcher and status
   widget, keys in the desktop keyring, and the same dashboard as on a Mac.
-  On Omarchy the dashboard opens in its own app window.
+  On Omarchy the dashboard opens in its own app window, and the app launcher shows the Olympus mountain icon.
   Anonymous answers (zkAPI) are not available on Linux yet.
 - **Better sorting for new items.** An item with nothing that marks it as
   your own record goes to Personal at once, and the local model checks it in
