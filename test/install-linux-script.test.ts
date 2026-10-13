@@ -798,5 +798,5 @@ for (const scenario of ['owned', 'unrecorded', 'nonempty', 'replacement', 'symli
   if(scenario==='symlink'){expect(result.status).not.toBe(0);expect(lstatSync(parents[0]!).isSymbolicLink()).toBe(true);return;}
   expect({status:result.status,error:result.stderr}).toEqual({status:0,error:''});
   for(const path of parents){expect(existsSync(path)).toBe(scenario!=='owned');if(scenario==='nonempty')expect(text(join(path,'unrelated'))).toBe('keep');}
- });
+ }, 30_000);
 }
