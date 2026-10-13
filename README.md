@@ -59,8 +59,8 @@ Everything is stored and searched on your computer: the search index is built
 there, by a model small enough for a computer with 8 GB of memory. There is no
 hosted copy of your things, no account and no subscription. Olympus's
 publisher runs only a relay that passes your AI app's requests to your
-computer without storing them, and the sign-in service for Olympus's shared
-Google app. For hard private
+computer without storing them. Google sign-in happens on your computer,
+directly with Google. For hard private
 questions you can reach stronger models: [Venice](https://venice.ai) runs
 private models that, under Venice's own terms, keep nothing you send, and
 zkAPI, from OpenAnonymity and the Ethereum Foundation, hides who is asking
@@ -117,9 +117,11 @@ uninstall: <https://olympusplugin.ai/install/>.
 [Codex](https://olympusplugin.ai/install/codex/) ·
 [OpenClaw](https://olympusplugin.ai/install/openclaw/) ·
 [Hermes](https://olympusplugin.ai/install/hermes/) ·
-[any MCP app](https://olympusplugin.ai/install/other/). ChatGPT, Claude, Grok
-and Grok Bot are approved with one click on a page Olympus opens on your own
-computer: there is no code to copy and no account to create. Apps on your
+[any MCP app](https://olympusplugin.ai/install/other/). In ChatGPT, Claude
+and Grok you add Olympus's address as a connector (in ChatGPT, in Developer
+mode until Olympus is listed in its directory), then approve it with one
+click on a page Olympus opens on your own computer: there is no pairing code
+and no account to create. Grok Bot then uses the Grok connection. Apps on your
 computer, such as Claude Code, Codex and Hermes, connect with one command.
 
 **3. Connect your sources and ask.** Open the dashboard (in ChatGPT, ask
@@ -135,13 +137,15 @@ connection that you approve on that computer.
 
 ### 1. Add Olympus in ChatGPT
 
-Install Olympus on your computer first ([Get started](#get-started)). Then,
-in the ChatGPT desktop app, add **Olympus** from the plugin directory and ask
-*"Connect Olympus"*. ChatGPT's setup skill shows the install command if
-Olympus is not on your computer yet; it never runs commands itself. ChatGPT's
-setup steps and its plugin listing still say Mac only until the plugin's next
-directory update: on Omarchy, install Olympus with the Linux command first, then
-connect.
+Install Olympus on your computer first ([Get started](#get-started)).
+Olympus is on its way to ChatGPT's app directory. Until it is listed, add it
+in Developer mode: in ChatGPT, open **Settings**, then **Apps**, and turn on
+**Developer mode** under **Advanced settings**. Then create a connector, name
+it Olympus, choose OAuth, and paste `https://mcp.olympusplugin.ai/mcp` as the
+URL. OpenAI decides which accounts have Developer mode; in a work or school
+workspace, an admin may need to allow it. Step by step:
+<https://olympusplugin.ai/install/chatgpt/>. On Omarchy,
+ChatGPT may still say Olympus needs a Mac; it works on Omarchy too.
 
 ### 2. Approve ChatGPT on your computer
 
@@ -156,7 +160,8 @@ computer is how Olympus knows the computer is yours: there is no code to copy an
 Open the **Olympus** dashboard in ChatGPT's sidebar (or ask *"Show my
 Olympus dashboard"*). Choose **Connect** next to Dropbox and sign in with
 your own Dropbox account; the sign-in link works once, for 10 minutes, from
-any device. Gmail and Google Drive connect the same way.
+any device. Gmail and Google Drive connect the same way, except that you open their
+sign-in link on the computer where Olympus runs, not on a phone.
 
 Then pick folders. For each folder choose:
 
@@ -253,8 +258,9 @@ it handles them in transit. Full details: the
 
 ## Claude, Grok and other apps
 
-Claude (web, desktop and phone), Grok and Grok Bot connect through the same
-Olympus relay as ChatGPT, with one click to approve on your computer; apps
+Claude (web, desktop and phone) and Grok connect through the same Olympus
+relay as ChatGPT, with one click to approve on your computer, and Grok Bot
+uses the Grok connection; apps
 on your computer, such as Claude Code, Codex and Hermes, connect there
 directly. Guides: <https://olympusplugin.ai/install/>.
 
@@ -346,7 +352,7 @@ flowchart LR
 ```
 
 Olympus uses **Personal** (ordinary personal and work content), **Private**
-(sensitive material), and **Secrets** (never model input). There is no
+(sensitive material), and **Secrets** (once recognized, never model input). There is no
 Public tier on any new install, ChatGPT or OpenClaw, whichever posture you
 choose: anything that would have been Public is Personal. Installs made
 before 1.0 keep a **Public** tier. See the
@@ -373,11 +379,11 @@ questions use OpenClaw's own configured default model.
 
 One question searches every tier. When it finds Private evidence, the private
 lane your posture approved answers it and your agent receives only the checked,
-cited answer. Secrets are never searched by content: Olympus can tell you where
+cited answer. Secrets Olympus recognizes are never searched by content: it can tell you where
 one lives, never what it says.
 
 Some rules are not configurable, by design: secure content never routes to
-ordinary cloud models, secrets are denied to every lane, and an
+ordinary cloud models, recognized secrets are denied to every lane, and an
 exhausted policy chain refuses rather than silently downgrading.
 
 ## Get started with OpenClaw
@@ -506,10 +512,13 @@ OpenClaw runtime config.
 Olympus is built on the assumption that the boundary *is* the product:
 
 - **Local-first ingestion.** Raw source content lands in local SQLite
-  indexes before any model sees anything. Classification happens at home.
-- **Sanitized handoffs.** Agents receive answer text, citations, and audit
-  counts — typed wire shapes with `raw_source_exposed: false`, re-validated
-  client-side. Raw documents, embeddings, cursors, and tokens never cross.
+  indexes before any model sees anything. Classification happens on your
+  computer unless you choose Venice for it.
+- **Sanitized handoffs.** Agents receive answer text, excerpts of Personal
+  items, citations, and audit counts — typed wire shapes with
+  `raw_source_exposed: false`, re-validated client-side. Embeddings, cursors,
+  and tokens never cross. Private items reach an agent only as answers
+  written from them, which can repeat what they say; ChatGPT's model gets none.
 - **A hard membrane.** Any evidence pack containing sensitive material is
   barred from standard cloud lanes by two independent checks — policy
   validation at config load, and a runtime re-check on every request.
@@ -583,17 +592,16 @@ computer**, choose **Open** next to **Agents**, then press **Connect an
 agent**. Pick the agent you use and follow its steps; every address and
 snippet has a copy button.
 
-- **ChatGPT**: add the Olympus plugin in ChatGPT (see
-  [Olympus for ChatGPT](#olympus-for-chatgpt)), then click **Connect** on the
+- **ChatGPT**: add Olympus in ChatGPT (Developer mode until it is listed;
+  see [Olympus for ChatGPT](#olympus-for-chatgpt)), then click **Connect** on the
   page that opens in this computer's browser.
 - **Claude Code** and **Codex** on this computer: copy the prompt (or the
   `olympus serve` command) into the agent. This works without remote access.
 - **Claude** (web, desktop and phone) and **Grok** (grok.com): add Olympus
   as a connector with the address the panel shows, then click **Connect** on
   the page that opens in this computer's browser.
-- **Grok Bot**: add Olympus as a custom server in Grok Bot and click
-  **Connect** on the same page. Grok Bot signs in as Cursor's cloud agents
-  do, so the page names it **Grok Bot or Cursor**.
+- **Grok Bot**: nothing to add. Once Olympus is connected on grok.com,
+  Grok Bot uses that connection, with the same xAI account.
 - The **Grok API** and other agents in the cloud need a tunnel you run
   yourself (below); the panel says so until remote access runs through one.
 
@@ -643,7 +651,8 @@ supported Hermes configuration narrows that server to exactly `source_answer`,
 per-server tool allowlist.
 
 `ask_anonymously` sends one typed question to a frontier model through zkAPI
-(paid per question from the user's own balance; nothing identifies them). The
+(paid per question, anonymously, from the user's own balance; what the
+question says can still identify them). The
 first call with no `level` returns `needs_choice`: the agent asks the user once
 for Strict (their own model rewrites the question into general questions before
 it leaves) or Standard (their words, prepared as written, lightly cleaned up or
@@ -758,7 +767,7 @@ remain at input boundaries do not select another runtime or store.
 
 Olympus is TypeScript on Bun: one plugin package, stable versioned architecture
 contracts (`SourceConnector` / `EvidencePack` / `Analyst` — only the
-connector is per-source), and 1,400+ tests including an architecture guard
+connector is per-source), and 3,400+ tests including an architecture guard
 that keeps per-source answer logic out of the shared spine.
 
 ```bash
