@@ -16,8 +16,11 @@
   connections made with a release candidate need Reconnect Google.
 - **An item that becomes Secret keeps only a record of where it is** in
   Olympus's index (its location, a screened title and the kinds of secret
-  found), so you can still find it.
-
+  found), so you can still find it. If you mark it not Secret, what
+  Olympus hid comes back.
+- **Model downloads use bounded memory.** The private and search models
+  download in pieces and retry a dropped connection; the private model
+  resumes where it stopped.
 - **No Public tier on any new install.** Every privacy posture now sets up
   Personal, Private and Secret only, on OpenClaw as on ChatGPT: anything
   that would have been Public is Personal. Installs made before 1.0 keep
