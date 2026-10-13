@@ -10121,6 +10121,9 @@ function tierRank(tier) {
 function maxTier(a, b) {
   return TIER_RANK[a] >= TIER_RANK[b] ? a : b;
 }
+function contentDigestReason(text2) {
+  return `content:sha256:${createHash5("sha256").update(text2.trim()).digest("hex")}`;
+}
 function snifferContentMaterial(names, excerpt) {
   const trimmed = names.trim();
   return trimmed ? `Names: ${trimmed}
@@ -10152,6 +10155,8 @@ function withPublicRetired(decision) {
 }
 function classifyItemTiers(input, options = {}) {
   const decision = classifyItemTiersWithPublic(input, options);
+  if (input.text !== undefined && decision.contentTier !== "secrets")
+    decision.reasons.push(contentDigestReason(input.text));
   return options.retirePublic ? withPublicRetired(decision) : decision;
 }
 function classifyItemTiersWithPublic(input, options) {
@@ -10239,7 +10244,7 @@ function classifyContentTier(input, options = {}) {
       ...base,
       contentTier: tier,
       decidedBy: "override",
-      reasons: [`override:item:${options.override.tier}`, ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : []],
+      reasons: [`override:item:${options.override.tier}`, ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [], contentDigestReason(input.text)],
       contentPending: false
     };
   }
@@ -10283,7 +10288,11 @@ function classifyContentTier(input, options = {}) {
     ...base,
     contentTier: lifted ? "private" : content.tier,
     decidedBy: content.decidedBy,
-    reasons: lifted ? [...content.reasons, PUBLIC_RETIRED_REASON] : content.reasons,
+    reasons: [
+      ...content.reasons,
+      ...lifted ? [PUBLIC_RETIRED_REASON] : [],
+      ...content.tier !== "secrets" ? [contentDigestReason(input.text)] : []
+    ],
     contentPending: content.pending || text2 === undefined
   };
 }
@@ -23307,6 +23316,20 @@ async function moveTieredItem(options) {
     }
     return exports.get(copy.corpusId);
   };
+  const contentSource = copyServingLayer(sources, "content");
+  const contentDestination = copyServingLayer(placement.copies, "content");
+  if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
+    const exported = exportFrom(contentSource);
+    const evidence = decision ?? record;
+    const digest = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
+    const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
+    if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
+      if (!raise && record.state === "moving") {
+        ledger.abandonMove(identity, { expectedGeneration: record.generation });
+      }
+      throw new TierMoveContentChangedError("Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.");
+    }
+  }
   const kept = ledger.copies(identity);
   const replacedSuperseded = {};
   for (const planned of placement.copies) {
@@ -23492,9 +23515,10 @@ function fullIdentity(identity) {
     ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
   };
 }
-var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError;
+var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError;
 var init_tier_move = __esm(() => {
   init_engine();
+  init_tier_classifier();
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_placement();
@@ -23503,6 +23527,8 @@ var init_tier_move = __esm(() => {
       super(message);
       this.name = "TierMoveRefusedError";
     }
+  };
+  TierMoveContentChangedError = class TierMoveContentChangedError extends TierMoveRefusedError {
   };
 });
 
@@ -23565,8 +23591,7 @@ function rejudgeStoredContent(set, record, options) {
   const serving = copyServingLayer(current2, "content");
   const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
   const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-  const text2 = exported?.chunks.map((chunk) => chunk.boundedText).join(`
-`) ?? "";
+  const text2 = exported?.chunks.map((chunk) => chunk.boundedText).join("") ?? "";
   if (!exported || !text2.trim()) {
     if (key2)
       ledger.markRejudged(identity, key2);
@@ -23622,8 +23647,12 @@ function rejudgeStoredContent(set, record, options) {
     return;
   }
   if (content.contentPending && record.state === "pending") {
+    ledger.recordRoutedPlacement(identity, decision, {
+      copies: current2,
+      embedHold: current2.some((copy) => copy.embedHold)
+    }, { guard: { generation: record.generation, override: undefined } });
     if (key2)
-      ledger.markHeldRejudged(record, key2);
+      ledger.markHeldRejudged(ledger.getCurrent(identity), key2);
     report.asked += 1;
     return;
   }
@@ -23958,7 +23987,15 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
       report.secrets += 1;
     return;
   }
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard });
+  const placement = set.placementFor(decision);
+  const source = copyServingLayer(ledger.copies(identity).filter((copy) => copy.state === "current"), "content");
+  const destination = copyServingLayer(placement.copies, "content");
+  if (source && destination && trustDomainRank(destination.trustDomain) < trustDomainRank(source.trustDomain)) {
+    const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
+    if (exported)
+      decision.reasons.push(contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join("")));
+  }
+  const recorded = ledger.recordRoutedPlacement(identity, decision, placement, { guard });
   switch (recorded.outcome) {
     case "queued_move":
       if (recorded.raise)
@@ -37924,8 +37961,25 @@ class TierSnifferService {
           });
           report.moved += 1;
           this.moveFailures.delete(failureKey);
-        } catch {
+        } catch (error) {
           report.failed += 1;
+          if (error instanceof TierMoveContentChangedError) {
+            const current2 = set.ledger.getCurrent(identity);
+            if (current2 && current2.state !== "moving") {
+              try {
+                const classification = set.classification();
+                if (!classification?.unavailableReason) {
+                  rejudgeStoredContent(set, current2, {
+                    ...classification,
+                    report: emptyTierRejudgeReport(),
+                    autoMoves: true
+                  });
+                }
+              } catch {}
+            }
+            this.moveFailures.delete(failureKey);
+            continue;
+          }
           try {
             set.ledger.recordMoveFailure(identity, { expectedGeneration: record.generation });
           } catch {}

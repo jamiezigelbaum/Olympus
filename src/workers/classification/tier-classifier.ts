@@ -185,6 +185,15 @@ export const CONTENT_READ_SNIFFER_FLAG = 'content:read';
 /** An open model question that does not hold the content (owner-approved). */
 export const PERSONAL_FIRST_REASON = 'content:personal_first';
 
+/** Persisted with the decision's content reasons, including while its question
+ * waits. The store chunks trimmed text into contiguous slices; concatenating
+ * those slices recovers precisely these bytes. No provider hash is trusted.
+ * Keeping this receipt in the existing content reasons makes it travel through
+ * queued moves, rejudges and late metadata updates without a schema migration. */
+export function contentDigestReason(text: string): string {
+  return `content:sha256:${createHash('sha256').update(text.trim()).digest('hex')}`;
+}
+
 /**
  * What the sniffer reads in pass 2: the item's names (title, folder path,
  * sender), when known, then the excerpt. The names are a signal of their own
@@ -361,6 +370,7 @@ export function classifyItemTiers(
   options: TierClassificationOptions = {},
 ): TierDecision {
   const decision = classifyItemTiersWithPublic(input, options);
+  if (input.text !== undefined && decision.contentTier !== 'secrets') decision.reasons.push(contentDigestReason(input.text));
   return options.retirePublic ? withPublicRetired(decision) : decision;
 }
 
@@ -511,7 +521,7 @@ export function classifyContentTier(
       ...base,
       contentTier: tier,
       decidedBy: 'override',
-      reasons: [`override:item:${options.override.tier}`, ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [])],
+      reasons: [`override:item:${options.override.tier}`, ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : []), contentDigestReason(input.text)],
       contentPending: false,
     };
   }
@@ -555,7 +565,8 @@ export function classifyContentTier(
     ...base,
     contentTier: lifted ? 'private' : content.tier,
     decidedBy: content.decidedBy,
-    reasons: lifted ? [...content.reasons, PUBLIC_RETIRED_REASON] : content.reasons,
+    reasons: [...content.reasons, ...(lifted ? [PUBLIC_RETIRED_REASON] : []),
+      ...(content.tier !== 'secrets' ? [contentDigestReason(input.text)] : [])],
     contentPending: content.pending || text === undefined,
   };
 }

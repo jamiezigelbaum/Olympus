@@ -167,7 +167,7 @@ export function rejudgeStoredContent(
   const serving = copyServingLayer(current, 'content');
   const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
   const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-  const text = exported?.chunks.map((chunk) => chunk.boundedText).join('\n') ?? '';
+  const text = exported?.chunks.map((chunk) => chunk.boundedText).join('') ?? '';
   if (!exported || !text.trim()) {
     // Nothing to read back: the decision stands, and the row is not re-read
     // until the classifier or the sniffer changes again.
@@ -231,7 +231,12 @@ export function rejudgeStoredContent(
   if (content.contentPending && record.state === 'pending') {
     // Already held for this question: the content pass just queued it again
     // (`subject` above); the sniffer's answer settles the row.
-    if (key) ledger.markHeldRejudged(record, key);
+    // Refresh the content receipt too: an old held row may predate receipts,
+    // or a refused move may have been judged against another stored body.
+    ledger.recordRoutedPlacement(identity, decision, {
+      copies: current, embedHold: current.some(copy => copy.embedHold),
+    }, { guard: { generation: record.generation, override: undefined } });
+    if (key) ledger.markHeldRejudged(ledger.getCurrent(identity)!, key);
     report.asked += 1;
     return;
   }

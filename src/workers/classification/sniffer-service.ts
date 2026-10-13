@@ -13,7 +13,7 @@ import {
   isClassifierApproved,
   readClassificationLedger,
 } from '../classification-ledger.ts';
-import { moveTieredItem, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
+import { moveTieredItem, TierMoveContentChangedError, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
 import type { ConnectorStoreItemCopy } from '../connector-store/local-index.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
@@ -37,6 +37,7 @@ import {
   DEFAULT_TIER_REJUDGE_PER_PASS,
   emptyTierRejudgeReport,
   rejudgeRoutedItems,
+  rejudgeStoredContent,
   settleRoutedSecrets,
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
@@ -873,10 +874,29 @@ export class TierSnifferService {
           });
           report.moved += 1;
           this.moveFailures.delete(failureKey);
-        } catch {
+        } catch (error) {
           // The move stays queued (held, never shown twice); the next pass or
           // the owner-approved migration picks it up.
           report.failed += 1;
+          if (error instanceof TierMoveContentChangedError) {
+            // A stale lowering was refused before import and taken out of
+            // moving. Re-read the actual stored body, even when this model
+            // already judged the discarded edit. Its old verdict cannot
+            // authorize the stored copy; a cache miss opens a new question.
+            const current = set.ledger.getCurrent(identity);
+            if (current && current.state !== 'moving') {
+              try {
+                const classification = set.classification();
+                if (!classification?.unavailableReason) {
+                  rejudgeStoredContent(set, current, {
+                    ...classification, report: emptyTierRejudgeReport(), autoMoves: true,
+                  });
+                }
+              } catch { /* A later sync can re-fetch; nothing was released. */ }
+            }
+            this.moveFailures.delete(failureKey);
+            continue;
+          }
           // To the back of the queue: a move that keeps failing never holds
           // the head of a page while moves behind it could land.
           try {

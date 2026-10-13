@@ -98,6 +98,12 @@ ledger verdict application and hide-before-move transaction handles a later
 Private verdict. Own-record requests use numeric `HELD_RECORD_PRIORITY = 10`; other requests
 use `0`. The queue honors this priority and reserves progress for aged work. Structured identifiers,
 Secrets, owner rules, source floors and image restrictions retain precedence.
+Downward content moves carry a SHA-256 receipt for the full judged text. The
+mover checks the actual stored chunks before any lower-tier import; a missing,
+different or still-pending receipt refuses the move and requires a re-fetch or
+fresh judgment. Edited content is retained in its existing more private store
+until that judgment settles. This also applies to background Personal verdicts
+and owner overrides. Upward moves still hide first without this check.
 Gmail and Drive use the shared placement planner: cleared names stay Personal
 when only the body is held. Names with unsafe metadata are still withheld;
 metadata copies contain no body chunks. Credential-bearing metadata URLs and

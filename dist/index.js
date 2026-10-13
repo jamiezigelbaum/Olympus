@@ -11079,6 +11079,7 @@ var init_embedding_ledger = __esm(() => {
 // src/workers/connector-store/tier-move.ts
 var init_tier_move = __esm(() => {
   init_engine();
+  init_tier_classifier();
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_placement();

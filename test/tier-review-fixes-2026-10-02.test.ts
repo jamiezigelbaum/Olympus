@@ -860,10 +860,10 @@ describe('12c. owner overrides under interleaving, round 2 (review of PR #255)',
     closers.push(cleanup);
     const fx = openTierFixture(dir, { embed: false });
     closers.push(() => fx.close());
-    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]), { fetchContent: true });
     const d1 = fixtureIdentityOf('d1');
     const judged = (metadataTier: 'private' | 'secure', contentTier: 'private' | 'secure'): TierDecision => ({
-      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'x' }),
+      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'Plain notes about the spring beds.' }),
       metadataTier, contentTier, decidedBy: 'sniffer', state: 'current',
       contentRead: true, contentPending: false, metadataPending: false,
     });
@@ -926,10 +926,10 @@ describe('12c. owner overrides under interleaving, round 2 (review of PR #255)',
     closers.push(cleanup);
     const fx = openTierFixture(dir, { embed: false });
     closers.push(() => fx.close());
-    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]), { fetchContent: true });
     const d1 = fixtureIdentityOf('d1');
     const split: TierDecision = {
-      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'x' }),
+      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'Plain notes about the spring beds.' }),
       metadataTier: 'public', contentTier: 'secure', decidedBy: 'sniffer', state: 'current',
       contentRead: true, contentPending: false, metadataPending: false,
     };

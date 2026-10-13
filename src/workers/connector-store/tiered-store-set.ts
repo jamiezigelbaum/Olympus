@@ -64,6 +64,8 @@ import {
   type TierKey,
 } from '../classification/tier-classifier.ts';
 import {
+  copyServingLayer,
+  placementIsRaise,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   trustDomainRank,
@@ -1207,7 +1209,18 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       decision = withRecordedContent(decision, ledger.getCurrent(identity));
     }
 
-    const placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
+    let placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
+    const currentCopies = ledger.copies(identity).filter(copy => copy.state === 'current');
+    const fromContent = copyServingLayer(currentCopies, 'content');
+    const toContent = copyServingLayer(placement.copies, 'content');
+    // Personal-first is for new content, not permission to declassify an
+    // existing Private copy before its background verdict. Keep the new body
+    // in its current, more private store while that question is answered.
+    if (contentRead && decision.contentPending && fromContent && toContent
+      && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain)
+      && !placementIsRaise(currentCopies, placement.copies)) {
+      placement = { copies: currentCopies, embedHold: true };
+    }
     const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity),
       ...(deferred ? { stagedLandingAllowed: true } : {}),
@@ -1222,6 +1235,14 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         this.copyRemovals.set(identityKey(identity), identity);
         return { kind: 'delete', corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: 'secrets' };
       case 'queued_move':
+        this.counts.movesQueued += 1;
+        if (contentRead && !recorded.raise) {
+          // Retain the body that produced this lowering verdict in the
+          // existing stores. Until this write lands the move's digest check
+          // refuses the old body; a crash therefore cannot release it.
+          return this.storedPlan(currentCopies);
+        }
+        return { kind: 'hold', reason: 'move_queued' };
       case 'held_moving':
         this.counts.movesQueued += 1;
         return { kind: 'hold', reason: 'move_queued' };
@@ -1244,6 +1265,16 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         return { kind: 'routed', copies, sensitivity };
       }
     }
+  }
+
+  private storedPlan(copies: readonly TierCopyPlan[]): Plan {
+    return {
+      kind: 'routed',
+      copies: new Map(copies.map(copy => [copy.corpusId, copy.layers])),
+      sensitivity: new Map(copies.map(copy => [copy.corpusId, buildSourceSensitivity({
+        trustTier: this.set.restingTierFor(copy.trustDomain), trustDomain: copy.trustDomain,
+      })])),
+    };
   }
 
   /**

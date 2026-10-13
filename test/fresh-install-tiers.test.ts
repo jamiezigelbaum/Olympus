@@ -51,6 +51,7 @@ import {
   LocalConnectorStore,
 } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import {
@@ -343,6 +344,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     lane?: typeof BUILT_IN_SNIFFER_LANE;
     now?: () => Date;
     staleAfterMs?: number;
+    rejudgePerPass?: number;
   } = {}) {
     const service = new TierSnifferService({
       installed: install.installed,
@@ -354,6 +356,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
       ownerContext: options.ownerWords ?? (() => undefined),
       autoApproveBuiltIn: options.autoApproveBuiltIn ?? true,
       ...(options.now ? { now: options.now } : {}),
+      ...(options.rejudgePerPass !== undefined ? { rejudgePerPass: options.rejudgePerPass } : {}),
       autoMoves: {
         localEmbeddingsOnly: () => options.localEmbeddingsOnly ?? true,
         embeddingLedgerPath: join(root, 'embedding-ledger.jsonl'),
@@ -465,6 +468,25 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     expect(ledger.some((entry) => entry.approved_by === 'system-automatic')).toBe(true);
   });
 
+  for (const missingReceipt of [false, true]) test(`automatic moves re-judge stored content after a ${missingReceipt ? 'missing' : 'mismatched'} receipt`, async () => {
+    const before = await freshInstall();
+    const garden = { ...identity('id:garden'), family: 'file' as const, localItemId: 'personal:id:garden' };
+    await moveTieredItem({ set: before.lane.set, identity: garden, target: { metadataTier: 'private', contentTier: 'secure' } });
+    // A verdict for an edit whose body never landed (or a pre-receipt move).
+    const decision = classifyItemTiers({ signals: { title: 'Notes' }, text: 'New reminder about oranges.' });
+    if (missingReceipt) decision.reasons = decision.reasons.filter(reason => !reason.startsWith('content:sha256:'));
+    expect(before.lane.ledger.recordRoutedPlacement(garden, decision, before.lane.set.placementFor(decision)).outcome).toBe('queued_move');
+    const { builtIn, runtime, prompts } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = addPrivateModel(before, runtime.source === 'built_in' ? runtime.lane : BUILT_IN_SNIFFER_LANE);
+    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true, rejudgePerPass: 0 });
+    expect(await service.runOnce()).toMatchObject({ autoMoves: { moved: 0, failed: 1 } });
+    expect(install.lane.internal.current()!.localContent('personal:id:garden')?.chunks ?? []).toEqual([]);
+    expect(install.lane.ledger.rejudgeQuestion(garden)).toBeDefined();
+    expect(await service.runOnce()).toMatchObject({ autoMoves: { moved: 1, failed: 0 } });
+    expect(prompts.some(prompt => prompt.prompt.includes(FILES[0].text))).toBe(true);
+    expect(install.lane.internal.current()!.localContent('personal:id:garden')?.chunks.join('')).toBe(FILES[0].text);
+  });
+
   test('an item held for a text question that left the queue is asked again, not held forever', async () => {
     // Live 2026-10-03: a move landed an item held (text question open) with
     // no question queued, so nothing ever asked about it again. Re-judging
@@ -511,7 +533,8 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     const before = await freshInstall();
     // Read, no detector fired, Personal at once (no private model yet).
     expect(before.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({
-      state: 'current', contentTier: 'private', decidedBy: 'default', reasons: ['metadata:default:personal', 'content:no_raise'],
+      state: 'current', contentTier: 'private', decidedBy: 'default',
+      reasons: ['metadata:default:personal', 'content:no_raise', expect.stringMatching(/^content:sha256:[a-f0-9]{64}$/)],
     });
     expect(JSON.stringify((await olympusSearch(before, 'orchard')).result)).toContain('pruning plan');
 
