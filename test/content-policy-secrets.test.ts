@@ -136,6 +136,20 @@ const POSITIVES: Array<[string, string]> = [
   ['block scalar with a comment', 'password: | # keep out\n  Tr0ub4dor&3'],
   ['block scalar, nested key', 'database:\n  db_password: |-\n    Tr0ub4dor&3\n  host: db'],
   ['block scalar passphrase with words', 'passphrase: |-\n  the horse rides at midnight'],
+  ['block scalar, # glued to text is data', 'password: |-\n  #Sunrise42!'],
+  ['block scalar, # data with a comment line before it', 'password: |\n  # keep out\n  #Sunrise42!'],
+  ['block scalar, comment line before the data', 'password: |\n  # keep out\n  Tr0ub4dor&3'],
+  ['folded block scalar over two lines', 'password: >-\n  blue\n  cat'],
+  ['literal block scalar over two lines', 'password: |\n  blue\n  cat'],
+  ['folded block scalar over three lines', 'db:\n  passphrase: >\n    red\n    fox\n    jumps\n  host: db'],
+  ['folded block scalar, CRLF', 'password: >-\r\n  blue\r\n  cat\r\n'],
+  ['folded block scalar, blank line between', 'password: >-\n  blue\n\n  cat'],
+  ['folded block scalar, secret key', 'client_secret: >-\n  tiger\n  lily'],
+  ['short labelled passphrase', 'Password: blue cat'],
+  ['short labelled passphrase, bold', '**Password:** red fox'],
+  ['short labelled passphrase, bulleted', '- Wi-Fi password: tiger lily'],
+  ['short labelled passphrase, Passphrase', 'Passphrase: blue cat'],
+  ['short labelled single-word passphrase', 'Passphrase: tiger9'],
   ['block scalar after a blank line', 'client_secret: |\n\n  4f9a2c7e1b8d3a6f5e0c9b7a'],
   ['block scalar, CRLF', 'password: |-\r\n  s3cr3t-value-9\r\n'],
   // Azure.
@@ -240,6 +254,24 @@ const NEGATIVES: Array<[string, string]> = [
   ['block scalar comment', 'password: |\n  # set this in the vault'],
   ['block scalar empty', 'password: |-\n'],
   ['block scalar mask', 'password: >-\n  ********'],
+  ['block scalar, only comment lines', 'password: |\n  #\n  # nothing here'],
+  ['block scalar, placeholder on a later line', 'password: >-\n  blue\n  ${DB_PASSWORD}'],
+  ['block scalar, the next key is not part of it', 'db:\n  password: >-\n      blue\n  cat: dog'],
+  ['block scalar, a short first line alone', 'password: |\n  blue'],
+  ['block scalar, instruction text', 'password: >-\n  Please set this in the vault\n  before you deploy'],
+  // Short labelled values that are prose, not passphrases.
+  ['label: reset', 'Password: reset'],
+  ['label: forgotten?', 'Password: forgotten?'],
+  ['label: Forgotten?', 'Password: Forgotten?'],
+  ['label: Reset!', 'Password: Reset!'],
+  ['label: try again', 'Password: try again'],
+  ['label: not set', 'Password: not set'],
+  ['label: reset link', 'Password: reset link'],
+  ['label: not required', 'Password: not required'],
+  ['label: sign in', 'Password: sign in'],
+  ['label: enter it', 'Password: enter it'],
+  ['label: single word, short', 'Password: blue'],
+  ['env: forgotten?', 'DB_PASSWORD=forgotten?'],
   // Azure shapes without a key.
   ['Azure AccountKey placeholder', 'AccountName=mystorage;AccountKey=<your account key>'],
   ['Azure AccountKey short', 'AccountKey=abc123'],
@@ -488,8 +520,7 @@ describe('Secrets floor: placeholders stay out under every key shape', () => {
 });
 
 describe('Secrets floor: linear-time on adversarial input', () => {
-  const N = 200_000;
-  const cases: Array<[string, string]> = [
+  const casesAt = (N: number): Array<[string, string]> => [
     ['closing-bracket run after a value', `password=a${')'.repeat(N)}z`],
     ['dot run after a value', `password=a${'.'.repeat(N)}z`],
     ['mixed trailing punctuation', `password=a${';,)]}.'.repeat(N / 6)}z`],
@@ -519,6 +550,14 @@ describe('Secrets floor: linear-time on adversarial input', () => {
     ['line of dashes and spaces', `${'- '.repeat(N / 2)}password: x`],
     ['block scalar header, many blank lines', `password: |\n${' \n'.repeat(N / 2)}`],
     ['block scalar header repeated', 'password: |\n'.repeat(N / 12)],
+    ['folded block scalar over very many lines', `password: >-\n${'  blue\n'.repeat(N / 7)}`],
+    ['folded block scalar repeated', 'password: >-\n  blue\n  cat\n'.repeat(N / 29)],
+    ['block scalar followed by one very long line', `password: |\n  a\n  ${'b '.repeat(N / 2)}`],
+    ['block scalar of comment lines', `password: |\n${'  # note\n'.repeat(N / 9)}`],
+    ['short labels, many lines', 'Password: blue cat\n'.repeat(N / 19)],
+    ['short label then very many words', `Password: ${'a '.repeat(N / 2)}`],
+    ['short label after a long run of spaces', `Password:${' '.repeat(N)}abcdef`],
+    ['short label with a long prefix', `${'- '.repeat(N / 2)}Password: blue cat`],
     ['block scalar with a long first line', `password: |\n  ${'a'.repeat(N)}`],
     ['AccountKey repeated', 'AccountKey='.repeat(N / 11)],
     ['AccountKey then a long base64 run', `AccountKey=${'A'.repeat(N)}`],
@@ -533,13 +572,25 @@ describe('Secrets floor: linear-time on adversarial input', () => {
     ['many short pairs', 'a=b '.repeat(N / 4)],
     ['many short credential pairs', 'DB_PASSWORD=x '.repeat(N / 14)],
   ];
-  for (const [name, text] of cases) {
+  const small = casesAt(100_000);
+  const large = casesAt(200_000);
+  const time = (text: string): number => {
+    const started = performance.now();
+    scanDropboxContentPolicyText({ text });
+    secretLabelsInText(text);
+    return performance.now() - started;
+  };
+  for (const [index, [name]] of large.entries()) {
     test(name, () => {
-      const started = performance.now();
-      scanDropboxContentPolicyText({ text });
-      secretLabelsInText(text);
-      const elapsed = performance.now() - started;
-      expect([name, elapsed < 1000]).toEqual([name, true]);
+      // Linear, not a wall-clock budget: doubling the input must not much more
+      // than double the time (a quadratic pattern quadruples it). The fixed
+      // slack absorbs timer noise on small inputs, and the absolute cap still
+      // catches a linear but pathologically slow pattern. Shared CI runners
+      // are several times slower than a workstation, so a 1 s budget flaked.
+      const smallMs = time(small[index]![1]);
+      const largeMs = time(large[index]![1]);
+      expect([name, largeMs < 3 * smallMs + 150]).toEqual([name, true]);
+      expect([name, largeMs < 5000]).toEqual([name, true]);
     });
   }
 });

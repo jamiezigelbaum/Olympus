@@ -189,7 +189,7 @@ describe('Dropbox extraction source: identity is data', () => {
 });
 
 describe('Dropbox extraction source: candidate enumeration', () => {
-  test('reads zero-chunk candidates and derives the approved scope key from the path', async () => {
+  test('reads zero-chunk and stale-chunk candidates and derives the approved scope key from the path', async () => {
     const seen: ExtractionCandidateReaderOptions[] = [];
     const source = makeSource({
       candidates: candidateReader({ candidates: [row()], nextCursor: 'c2', done: false }, seen),
@@ -197,6 +197,9 @@ describe('Dropbox extraction source: candidate enumeration', () => {
     const page = await source.listCandidates({ limit: 25, mimeTypes: ['application/pdf'] });
 
     expect(seen[0]?.withoutChunksOnly).toBe(true);
+    // A file edited after it was read is a candidate again; the store decides
+    // which stored text is stale, the source only has to ask.
+    expect(seen[0]?.includeStaleChunks).toBe(true);
     expect(seen[0]?.limit).toBe(25);
     expect(seen[0]?.mimeTypes).toEqual(['application/pdf']);
     expect(seen[0]?.accountScope).toBe(ACCOUNT);
