@@ -1396,11 +1396,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // the request's OAuth origin (beta.5, 2026-09-24).
               publisherOAuthSources: dashboardPublisherOAuthSources(dashboardClientIdSets.own),
               // Olympus's own Google app is out of room (Google caps an
-              // unverified app at 100 users): the Gmail and Drive cards lead
-              // into the owner's-own-app steps instead. Asked only when a
-              // Google source would actually connect through that app.
+              // unverified app at 100 users): a Gmail or Drive card with no
+              // connection of its own leads into the owner's-own-app steps
+              // instead. The card decides per source (a source that already
+              // has a connection says Reauthenticate and is never held back).
+              // Asked only when a Google source would actually connect through
+              // that app.
               googlePublisherFull: dashboardPublisherOAuthSources(dashboardClientIdSets.own).some(dashboardGoogleOAuthSource)
-                && await dashboardGooglePublisherFull(sourceDashboard, registry),
+                && await dashboardGooglePublisherFull(sourceDashboard),
               apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
               pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
               contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -1717,9 +1720,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // The wall: Google stops the 101st user on its own page and Olympus
           // never hears back, so the person is told here, before the consent
           // screen, and pointed at their own Google app. Publisher flows only;
-          // a submitted client id (their own app), Dropbox, X and an install
-          // that already has a Google connection never reach this.
-          if (publisher && dashboardGoogleOAuthSource(source) && await dashboardGooglePublisherFull(sourceDashboard, registry)) {
+          // a submitted client id (their own app), Dropbox, X and a source that
+          // already has its own Google connection (a reauthorization) never
+          // reach this. Another Google source's connection does not count:
+          // Google's consent lets the person choose any account, so adding
+          // Drive beside Gmail may be a new user.
+          if (publisher && dashboardGoogleOAuthSource(source) && await dashboardGooglePublisherFull(sourceDashboard, registry, source)) {
             throw new EmailSourceWorkerError(409, GOOGLE_SIGNIN_FULL_CODE, GOOGLE_SIGNIN_FULL_SENTENCE);
           }
           if (handback && (submittedClientId || publisher?.relay !== true)) {
@@ -6253,19 +6259,37 @@ function dashboardPublisherOAuthFlow(
  * Whether a NEW Google connection through Olympus's own app should be held back
  * because that app has reached Google's user limit.
  *
- * An install that already holds a Google connection is never held back: the
- * person behind it is already one of Google's counted users, so reconnecting,
- * or adding Drive beside Gmail, cannot be the 101st. Everything else is the
- * capacity check's own answer, which fails open on any doubt.
+ * Without `source` this is the capacity answer alone, for the view model: each
+ * card then decides for itself, and only a card that would say Connect (no
+ * connection of its own) is held back.
+ *
+ * With `source` (the start route), a source that already holds its own
+ * connection is never held back: reauthorizing it re-signs an account that is
+ * already one of Google's counted users. A connection of a DIFFERENT Google
+ * source does not excuse it: Google's consent lets the person pick any
+ * account, so adding Drive when only Gmail exists can bring in a new user and
+ * is held back like a first connection. Everything else is the capacity
+ * check's own answer, which fails open on any doubt.
  */
 async function dashboardGooglePublisherFull(
   sourceDashboard: { googleCapacityFetch?: typeof fetch },
-  registry: ConnectedHandleRegistry,
+  registry?: ConnectedHandleRegistry,
+  source?: DashboardOAuthSource | 'google',
 ): Promise<boolean> {
-  const hasGoogleConnection = registry.handles.some((handle) =>
-    (handle.provider === 'gmail' || handle.provider === 'google_drive') && !isRetiredGoogleHandle(handle));
-  if (hasGoogleConnection) return false;
+  if (registry && source) {
+    const providers: readonly string[] = dashboardGoogleProvidersForSource(source);
+    const hasOwnConnection = registry.handles.some((handle) =>
+      providers.includes(handle.provider) && !isRetiredGoogleHandle(handle));
+    if (hasOwnConnection) return false;
+  }
   return googlePublisherSignInFull(sourceDashboard.googleCapacityFetch ? { fetch: sourceDashboard.googleCapacityFetch } : {});
+}
+
+/** The handle providers behind one Google source card. */
+function dashboardGoogleProvidersForSource(source: DashboardOAuthSource | 'google'): readonly ('gmail' | 'google_drive')[] {
+  if (source === 'gmail') return ['gmail'];
+  if (source === 'google-drive') return ['google_drive'];
+  return ['gmail', 'google_drive'];
 }
 
 /** The sources whose card offers one-click Connect through a publisher app. */

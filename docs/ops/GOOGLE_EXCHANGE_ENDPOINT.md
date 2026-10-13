@@ -334,9 +334,13 @@ it. For now, you can still connect Google by using your own Google app.") with
 a **Set up** button into the bring-your-own steps. Everything else fails
 **open**: a network error, a timeout, a non-200, a redirect, or any body that is
 not exactly `{"google":"open"|"full"}` reads as open. Own-app flows, Dropbox, X,
-token refresh, and any install that already holds a Gmail or Drive connection
-(reconnecting, or adding Drive beside Gmail, cannot be a new Google user) never
-see the full state.
+token refresh, and a source that already holds its own connection (Reauthenticate
+re-signs an account already counted) never see the full state. A Google source
+with no connection of its own is held back even when the other Google source is
+connected: Google's consent lets the person pick any account, so adding Drive
+beside Gmail can be a new user. Olympus stores only opaque account labels, never
+the address, so it cannot preselect the account with `login_hint`; a
+Reauthenticate with a different account can still consume a slot.
 
 ### Owner and anchor deploy steps
 
