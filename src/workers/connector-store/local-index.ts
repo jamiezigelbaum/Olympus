@@ -471,6 +471,51 @@ function createConnectorStoreMediaJudgments(db: Database): void {
 }
 
 /**
+ * The source version an item's stored chunks were written for, kept only while
+ * the item row has moved past it.
+ *
+ * A metadata sync of an edited file advances `items.source_version` (and the
+ * content hash) and leaves the chunks it did not touch in place, so without
+ * this the store cannot tell text read from the current bytes from text read
+ * from bytes the file no longer has. The item's own `content_hash` cannot say:
+ * an extraction stores the hash of the TEXT there, and the next listing of the
+ * same unchanged file writes the provider's digest back over it.
+ *
+ * The record is written by a trigger the moment a version change leaves chunks
+ * behind (only when none stands yet, so the OLDEST version still standing is
+ * kept when an item is edited twice before it is read again; the trigger
+ * cannot say OR IGNORE, because the upsert that fires it overrides that). The
+ * chunk funnel (`indexItemText`) deletes it whenever text for the item's
+ * current version is written or confirmed. No row means the chunks are
+ * current: an item never edited has none, and neither does a store from before
+ * this table, which is why nothing is backfilled (the live Dropbox store is
+ * multi-gigabyte).
+ *
+ * Like the other tables added since v14, it is created idempotently at open
+ * without a schema-version bump, so a build that predates it can still open
+ * the file; its trigger only writes this table, which that build ignores.
+ */
+function createConnectorStoreItemTextVersions(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_text_versions (
+      item_pk INTEGER PRIMARY KEY,
+      source_version TEXT,
+      recorded_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_text_version_capture
+    AFTER UPDATE OF source_version ON items
+    WHEN OLD.source_version IS NOT NEW.source_version
+    BEGIN
+      INSERT INTO item_text_versions (item_pk, source_version, recorded_at)
+      SELECT OLD.item_pk, OLD.source_version, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE EXISTS (SELECT 1 FROM chunks WHERE item_pk = OLD.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions WHERE item_pk = OLD.item_pk);
+    END;
+  `);
+}
+
+/**
  * Media a deleted chunk referenced, queued by a trigger so every path that
  * deletes chunks (a replace, a tombstone, a purge) is covered without each
  * one remembering to. The store drains it after its writes and lets the media
@@ -1901,6 +1946,14 @@ export interface ConnectorStoreExtractionCandidateOptions {
   mimeTypes?: readonly string[];
   accountScope?: string;
   withoutChunksOnly?: boolean;
+  /**
+   * With `withoutChunksOnly`: also admit an item whose stored chunks were
+   * written for an older source version than the one the item row holds now,
+   * so a document edited after it was read is read again and its new text
+   * replaces the old (see `createConnectorStoreItemTextVersions`). An item
+   * that was never edited, or whose current version was read, stays out.
+   */
+  includeStaleChunks?: boolean;
   /** Trusted current-account/scope boundary, applied before pagination. */
   filters?: ConnectorStoreSearchFilters;
 }
@@ -2409,6 +2462,8 @@ export class LocalConnectorStore {
   private chunkMediaColumnsPresent = false;
   /** Whether the v13 `image_media_reads` table is here (a read-only open of an older store has none). */
   private imageMediaReadsPresent = false;
+  /** Whether the `item_text_versions` table is here (a read-only open of an older store has none). */
+  private itemTextVersionsPresent = false;
   /** Whether the v14 `media_judgments` table is here (a read-only open of an older store has none). */
   private mediaJudgmentsPresent = false;
   /** This store's name in the media cache's reference markers. */
@@ -2492,12 +2547,16 @@ export class LocalConnectorStore {
         runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
         createConnectorStoreChunkMediaReleases(this.db);
         createConnectorStoreMediaJudgments(this.db);
+        createConnectorStoreItemTextVersions(this.db);
         validateConnectorStoreSchema(this.db);
       }
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
       this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
       this.imageMediaReadsPresent = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'",
+      ).get() !== null;
+      this.itemTextVersionsPresent = this.db.query(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'",
       ).get() !== null;
       // A read-only open of a store from an earlier build of v14 (without
       // every column) reads no judgments: its pictures are unjudged, so Private.
@@ -4428,6 +4487,15 @@ export class LocalConnectorStore {
     // exactly `limit` rows is enough. With a filter the scan has to be able to
     // run past non-matching rows, hence a wider window.
     const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
+    // An item read before it was edited: its chunks are for a version the row
+    // has moved past. Only meaningful beside `withoutChunksOnly`, which would
+    // otherwise drop every item that has any text.
+    const staleChunksSql = options.includeStaleChunks === true && this.itemTextVersionsPresent
+      ? `OR EXISTS (
+            SELECT 1 FROM item_text_versions v
+            WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version
+          )`
+      : '';
     const query = this.db.query(`
       SELECT
         i.item_pk, i.family, i.provider, i.account_scope, i.provider_item_id,
@@ -4441,6 +4509,7 @@ export class LocalConnectorStore {
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${staleChunksSql}
           ${imagesWithoutPicture ? `OR (
             ${imageMimeSql}
             AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
@@ -4504,6 +4573,27 @@ export class LocalConnectorStore {
       ...(skippedByDisposition > 0 ? { skippedByDisposition } : {}),
       ...(exhausted ? {} : { nextCursor: String(lastExaminedPk) }),
     };
+  }
+
+  /**
+   * Whether this item holds text that was written for an older source version
+   * than its row holds now: it was edited after it was read and has not been
+   * read again. False for an item with no text, one never edited, and a store
+   * from before the record existed.
+   */
+  itemTextIsStale(localItemId: string): boolean {
+    if (!this.itemTextVersionsPresent) return false;
+    const row = this.db.query(`
+      SELECT 1 AS stale
+      FROM items i
+      JOIN item_text_versions v ON v.item_pk = i.item_pk
+      WHERE i.local_item_id = ?
+        AND i.tombstoned = 0
+        AND v.source_version IS NOT i.source_version
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+      LIMIT 1
+    `).get(localItemId) as { stale: number } | null;
+    return row !== null;
   }
 
   /**
@@ -5038,6 +5128,8 @@ export class LocalConnectorStore {
             this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
               .run(existing.item_pk, this.now().toISOString());
           }
+          // Complete means the stored chunks already are this version's.
+          this.clearItemTextVersion(existing.item_pk);
           itemsUnchanged += 1;
           continue;
         }
@@ -7751,6 +7843,7 @@ export class LocalConnectorStore {
       // failures return above and deliberately preserve prior chunks.
       this.db.transaction(() => {
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(itemPk);
+        this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
       })();
       return { chunksIndexed: 0, ftsContentChanged: true };
@@ -7821,6 +7914,9 @@ export class LocalConnectorStore {
         for (const chunk of desired) {
           update.run(chunk.embeddingHash, itemPk, chunk.index, chunk.embeddingHash);
         }
+        // The text for the item's current version was read and is what is
+        // stored, so an edit that left the words alone is settled too.
+        this.clearItemTextVersion(itemPk);
       })();
       return { chunksIndexed: 0, ftsContentChanged: false };
     }
@@ -7854,9 +7950,20 @@ export class LocalConnectorStore {
           insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
         }
       }
+      this.clearItemTextVersion(itemPk);
       this.refreshFtsForItem(itemPk);
     })();
     return { chunksIndexed: chunks.length, ftsContentChanged: true };
+  }
+
+  /**
+   * The item's chunks now match the source version its row holds, so any
+   * record of an older version is forgotten (`item_text_versions`). Called from
+   * the places that write or confirm text; a no-op when nothing is recorded.
+   */
+  private clearItemTextVersion(itemPk: number): void {
+    if (!this.itemTextVersionsPresent) return;
+    this.db.query('DELETE FROM item_text_versions WHERE item_pk = ?').run(itemPk);
   }
 
   /**
@@ -13565,6 +13672,8 @@ const CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
   'image_media_reads',
   'media_judgments',
   'idx_connector_store_media_judgments_unapplied',
+  'item_text_versions',
+  'connector_store_item_text_version_capture',
 ] as const;
 
 const CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
@@ -13693,6 +13802,8 @@ function validateConnectorStoreSchema(db: Database): void {
   assertTriggerExists(db, 'connector_store_chunk_media_release', 'v13');
   assertExactTableColumns(db, 'media_judgments', [...CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS], false, 'v14');
   assertIndexColumns(db, 'idx_connector_store_media_judgments_unapplied', ['media_sha256'], 'v14');
+  assertExactTableColumns(db, 'item_text_versions', ['item_pk', 'source_version', 'recorded_at'], false, 'v14');
+  assertTriggerExists(db, 'connector_store_item_text_version_capture', 'v14');
 }
 
 const CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS = [
