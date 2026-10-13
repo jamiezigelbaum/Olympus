@@ -1,4 +1,4 @@
-import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches } from './linux-desktop-entry.ts';
+import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
 import { spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
@@ -466,7 +466,7 @@ function assertDesktopTransactionTargets(layout:LinuxEngineLayout,transaction:Li
  assertLinuxDesktopEntryOwnership(layout,[old,transaction.desktopIconSha256].filter((hash):hash is string=>typeof hash==='string'));
 }
 function writeTransactionDesktop(layout:LinuxEngineLayout,program:EngineProgram,transaction:LinuxInstallTransaction,exec:EngineExec):void{
- transaction.desktopIconSha256=hashFile(join(program.workingDirectory,'assets/icon.png'));
+ transaction.desktopIconSha256=hashFile(join(program.workingDirectory,LINUX_APP_ICON));
  writeInstallTransaction(layout,transaction);
  writeLinuxDesktopEntry(layout,program.workingDirectory,exec);
 }

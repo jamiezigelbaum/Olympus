@@ -27,7 +27,7 @@ for(const checkpoint of checkpoints)test.skipIf(process.platform!=='linux')(`ins
   const generations=readdirSync(join(layout.packageDir,'generations'));expect({checkpoint,generations:generations.length}).toEqual({checkpoint,generations:1});
   const generation=join(layout.packageDir,'generations',generations[0]!);expect(readFileSync(layout.unitPath,'utf8')).toContain(generation);expect(readFileSync(layout.launcherPath,'utf8')).toContain(generation);
   expect(readFileSync(join(layout.dataHome,'applications/ai.olympusplugin.Olympus.desktop'),'utf8')).toContain(`Exec="${layout.launcherPath}" dashboard`);
-  expect(readFileSync(join(layout.dataHome,'icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png'))).toEqual(readFileSync(join(root,'source-1.0.0/assets/icon.png')));
+  expect(readFileSync(join(layout.dataHome,'icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png'))).toEqual(readFileSync(join(root,'source-1.0.0/assets/app-icon.png')));
   expect(readdirSync(layout.stateDir).filter(name=>name.startsWith('.install-backup-')||name.startsWith('.prepare-'))).toEqual([]);
 },20_000);
 
@@ -41,7 +41,7 @@ for(const checkpoint of rollbackCheckpoints)test.skipIf(process.platform!=='linu
   const layout=resolveLinuxEngineLayout(env),current=JSON.parse(readFileSync(join(layout.stateDir,'service-current.json'),'utf8')),unit=readFileSync(layout.unitPath,'utf8'),launcher=readFileSync(layout.launcherPath,'utf8');
   const committed=['qualified_published','backup_removed','journal_removed'].includes(checkpoint),expected=committed?'1.0.0+':'2.0.0+';
   expect(readFileSync(join(layout.dataHome,'applications/ai.olympusplugin.Olympus.desktop'),'utf8')).toContain(`Exec="${layout.launcherPath}" dashboard`);
-  expect(readFileSync(join(layout.dataHome,'icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png'))).toEqual(readFileSync(join(root,`source-${committed?'1.0.0':'2.0.0'}/assets/icon.png`)));
+  expect(readFileSync(join(layout.dataHome,'icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png'))).toEqual(readFileSync(join(root,`source-${committed?'1.0.0':'2.0.0'}/assets/app-icon.png`)));
   expect({checkpoint,build:current.program.build.startsWith(expected),unit:unit.includes(current.program.workingDirectory),launcher:launcher.includes(current.program.workingDirectory),journal:existsSync(join(layout.stateDir,'install-transaction.json'))}).toEqual({checkpoint,build:true,unit:true,launcher:true,journal:false});
 },30_000);
 
