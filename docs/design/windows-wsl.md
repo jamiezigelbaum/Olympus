@@ -45,8 +45,13 @@ claim (see W-4).
 
 ## What is different on WSL (and the work for each)
 
-Detect WSL by `WSL_DISTRO_NAME` plus `/proc/sys/fs/binfmt_misc/WSLInterop`,
-and report the host as "Windows (through WSL)" in doctor, the dashboard and
+Detect WSL with a probe that works inside the systemd user service, where
+`WSL_DISTRO_NAME` can be absent (microsoft/WSL#9719): the kernel release
+names Microsoft and `/proc/sys/fs/binfmt_misc/WSLInterop` exists. The
+installer also records the distro name in the engine's install receipt,
+since the keep-alive task and link handler call `wsl.exe -d <distro>`.
+Test detection under the real user service, not only in a shell. Report
+the host as "Windows (through WSL)" in doctor, the dashboard and
 copy. Every item below gates on a capability probe, as linux-parity does.
 
 ### W-1. One-command Windows install (medium)
@@ -135,7 +140,8 @@ Linux plan does for Sparta.
 Acceptance: on a Windows 11 machine without WSL, the install script
 completes (including the restart), ChatGPT connects, one Personal and one
 Private answer, a source opens in the Windows browser from an answer, a
-photo in `Pictures` is found by content, and the W-2 survival checks pass;
+photo in a connected Dropbox folder is found by content (a photo in the
+Windows `Pictures` folder only once a local-folder source exists, W-5), and the W-2 survival checks pass;
 uninstall leaves Windows and the distro as they were apart from the
 removed Olympus pieces.
 
