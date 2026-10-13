@@ -1923,6 +1923,26 @@ describe('Google sign-in capacity: the full state before the wall', () => {
     });
   });
 
+  test('with every Google card already connected, the dashboard never asks the capacity route', async () => {
+    await withoutPilotClient(async () => {
+      const instance = await withGmailConnected();
+      const started = await authorizationUrl(await startRaw(instance, { source: 'google-drive' }));
+      const callback = await instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/google-drive?code=drive-code&state=${encodeURIComponent(started.searchParams.get('state')!)}`,
+      ));
+      expect(callback.status).toBe(303);
+      resetGooglePublisherCapacityCache();
+      // Neither card can say Connect, so no answer could change the page: a
+      // down capacity route must not cost each refresh its timeout.
+      const fake = full();
+      const view = await dashboardJson(fixtureWithRegistry(instance.registryPath, instance.secretStore, fake.fetch));
+      expect(fake.calls).toEqual([]);
+      for (const sourceId of ['gmail.email', 'google_drive.docs'] as const) {
+        expect(googleCard(view, sourceId).connection.action.kind).toBe('none');
+      }
+    });
+  });
+
   test('full: the computer\'s Sources page leads Gmail with the owner\'s sentence, offers Set up with a Client ID field, and drops the shared-app warning', async () => {
     await withoutPilotClient(async () => {
       const view = await dashboardJson(fixture({}, { googleCapacityFetch: full().fetch })) as SourceDashboardViewModel;
@@ -2054,6 +2074,31 @@ describe('Google bring-your-own client secret on an https dashboard', () => {
         `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=byo-code&state=${encodeURIComponent(started.searchParams.get('state')!)}`,
       ));
       expect(instance.exchanges[0]!.get('client_secret')).toBe(OWN_WEB_CLIENT_SECRET);
+    });
+  });
+
+  test('a secret stored for Gmail\'s own Web client is not on file for Drive on a different client: Drive\'s field stays required', async () => {
+    await withoutPilotClient(async () => {
+      const DRIVE_WEB_CLIENT_ID = 'owner-drive-web-app.apps.googleusercontent.com';
+      const instance = fixture({
+        'gmail.personal.oauth.client_id': OWN_WEB_CLIENT_ID,
+        'gmail.personal.oauth.client_secret': OWN_WEB_CLIENT_SECRET,
+        'gmail.personal.oauth.client_id_source': 'byo',
+        'google-drive.personal.oauth.client_id': DRIVE_WEB_CLIENT_ID,
+        'google-drive.personal.oauth.client_id_source': 'byo',
+      });
+      const view = await dashboardJson(instance) as SourceDashboardViewModel;
+      expect(gmailCardAction(view)).toMatchObject({ kind: 'oauth', known_client_id: OWN_WEB_CLIENT_ID, client_secret_on_file: true });
+      const driveAction = view.sources.find((source) => source.source_id === 'google_drive.docs')!.connection.action;
+      expect(driveAction).toMatchObject({ kind: 'oauth', known_client_id: DRIVE_WEB_CLIENT_ID });
+      if (driveAction.kind !== 'oauth') throw new Error('expected a Drive OAuth action');
+      expect(driveAction.client_secret_on_file).toBeUndefined();
+      // The rendered sheet asks for Drive's own secret rather than offering
+      // Gmail's as a saved value.
+      const html = renderDashboardLocalPage('keys', { url: new URL(`${DASHBOARD_ORIGIN}/dashboard?keys`), view, options: {} });
+      const driveSheet = html.slice(html.indexOf('id="connect-google_drive-docs"')).split('<div class="sheet"')[0]!;
+      expect(driveSheet).toMatch(/name="client_secret" required/);
+      expect(driveSheet).not.toContain(DASHBOARD_SAVED_SECRET_FIELD_VALUE);
     });
   });
 
