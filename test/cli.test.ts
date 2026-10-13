@@ -324,6 +324,22 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('dashboard sends the worker token to the port worker.env gives the engine', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-cli-dashboard-port-'));
+    try {
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, '.config', 'olympus', 'worker.env'), 'OLYMPUS_EMAIL_SOURCE_PORT=1\nOLYMPUS_WORKER_AUTH_TOKEN=port-test-token\n', { mode: 0o600 });
+      const result = await runBinExit(['dashboard', '--no-open'], { HOME: home, OLYMPUS_CONFIG: join(home, 'missing-config.json') });
+      expect(result.code).toBe(1);
+      const output = `${result.stdout}${result.stderr}`;
+      expect(output).toContain('127.0.0.1:1');
+      expect(output).not.toContain('127.0.0.1:8010');
+      expect(output).not.toContain('port-test-token');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('every declared public leaf command has non-executing help', async () => {
     for (const command of V0_4_PUBLIC_CLI_COMMANDS) {
       const result = await runBinExit([...command.split(' '), '--help']);
@@ -985,6 +1001,48 @@ describe('CLI tool surface', () => {
         env.restore();
       }
     } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('the opening link is minted at the worker.env port, and never off this computer', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-dashboard-worker-env-origin-'));
+    const sent: Array<{ url: string; init: RequestInit }> = [];
+    const workerEnv = writeWorkerEnv(home, 'worker-env-port-token');
+    const env = withTemporaryEnv({
+      HOME: home,
+      OLYMPUS_CONFIG: join(home, 'missing-config.json'),
+      OLYMPUS_EMAIL_BASE_URL: undefined,
+      OLYMPUS_WORKER_AUTH_TOKEN: undefined,
+    });
+    try {
+      for (const [lines, origin] of [
+        ['OLYMPUS_EMAIL_SOURCE_PORT=8123\n', 'http://127.0.0.1:8123'],
+        ['OLYMPUS_EMAIL_SOURCE_HOST=0.0.0.0\nOLYMPUS_EMAIL_SOURCE_PORT=8124\n', 'http://127.0.0.1:8124'],
+      ] as const) {
+        sent.length = 0;
+        writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\n${lines}`);
+        const result = await runDashboardCommand({
+          fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+          noOpen: true,
+        });
+        expect(sent.map((request) => request.url)).toEqual([`${origin}/dashboard/control/launch`]);
+        expect(new Headers(sent[0]?.init.headers).get('Authorization')).toBe('Bearer worker-env-port-token');
+        expect(new URL(result.url).origin).toBe(origin);
+      }
+
+      sent.length = 0;
+      writeFileSync(workerEnv, 'OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\nOLYMPUS_EMAIL_SOURCE_HOST=192.0.2.10\nOLYMPUS_EMAIL_SOURCE_PORT=8123\n');
+      const error = await runDashboardCommand({
+        fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+        noOpen: true,
+      }).catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(OperationError);
+      expect((error as OperationError).code).toBe('config_error');
+      expect((error as Error).message).toContain('not a local address');
+      expect(sent).toHaveLength(0);
+    } finally {
+      env.restore();
       rmSync(home, { recursive: true, force: true });
     }
   }, 30_000);
