@@ -117,9 +117,10 @@ uninstall: <https://olympusplugin.ai/install/>.
 [Codex](https://olympusplugin.ai/install/codex/) ·
 [OpenClaw](https://olympusplugin.ai/install/openclaw/) ·
 [Hermes](https://olympusplugin.ai/install/hermes/) ·
-[any MCP app](https://olympusplugin.ai/install/other/). ChatGPT, Claude, Grok
-and Grok Bot are approved with one click on a page Olympus opens on your own
-computer: there is no code to copy and no account to create. Apps on your
+[any MCP app](https://olympusplugin.ai/install/other/). ChatGPT, Claude and
+Grok are approved with one click on a page Olympus opens on your own
+computer: there is no code to copy and no account to create. Grok Bot then
+uses the Grok connection. Apps on your
 computer, such as Claude Code, Codex and Hermes, connect with one command.
 
 **3. Connect your sources and ask.** Open the dashboard (in ChatGPT, ask
@@ -254,8 +255,9 @@ it handles them in transit. Full details: the
 
 ## Claude, Grok and other apps
 
-Claude (web, desktop and phone), Grok and Grok Bot connect through the same
-Olympus relay as ChatGPT, with one click to approve on your computer; apps
+Claude (web, desktop and phone) and Grok connect through the same Olympus
+relay as ChatGPT, with one click to approve on your computer, and Grok Bot
+uses the Grok connection; apps
 on your computer, such as Claude Code, Codex and Hermes, connect there
 directly. Guides: <https://olympusplugin.ai/install/>.
 
@@ -595,9 +597,8 @@ snippet has a copy button.
 - **Claude** (web, desktop and phone) and **Grok** (grok.com): add Olympus
   as a connector with the address the panel shows, then click **Connect** on
   the page that opens in this computer's browser.
-- **Grok Bot**: add Olympus as a custom server in Grok Bot and click
-  **Connect** on the same page. Grok Bot signs in as Cursor's cloud agents
-  do, so the page names it **Grok Bot or Cursor**.
+- **Grok Bot**: nothing to add. Once Olympus is connected on grok.com,
+  Grok Bot uses that connection, with the same xAI account.
 - The **Grok API** and other agents in the cloud need a tunnel you run
   yourself (below); the panel says so until remote access runs through one.
 
