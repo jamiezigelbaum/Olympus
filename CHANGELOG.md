@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **No Public tier on any new install.** Every privacy posture now sets up
+  Personal, Private and Secret only, on OpenClaw as on ChatGPT: anything
+  that would have been Public is Personal. Installs made before 1.0 keep
+  their Public tier unchanged; Olympus does not rewrite an existing privacy
+  policy, and the operator drift check no longer counts that kept tier as
+  drift.
+
 ## 1.0.0-rc.6 - 2026-10-12
 
 - **Claude and Grok connect through the Olympus relay.** Claude custom

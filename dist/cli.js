@@ -21237,6 +21237,34 @@ function validateSovereigntyConfig(rawConfig) {
 function isPublicTierRetired(config) {
   return config.routes.public_safe === undefined && config.retrieval.trustDomains.public_safe === undefined;
 }
+function presetKeepingPublicTier(preset, path) {
+  if (!isPublicTierRetired(preset) || !existsSync19(path))
+    return preset;
+  let existing;
+  try {
+    existing = JSON.parse(readFileSync20(path, "utf8"));
+  } catch {
+    throw new OperationError("config_error", `The sovereignty policy at ${path} cannot be read, so setup cannot tell whether it keeps a Public tier.`, "Fix the file's permissions or contents, or move it aside to start from the preset alone.");
+  }
+  const hasRoute = existing.routes?.public_safe !== undefined;
+  const hasRetrieval = existing.retrieval?.trustDomains?.public_safe !== undefined;
+  if (!hasRoute && !hasRetrieval)
+    return preset;
+  if (hasRoute !== hasRetrieval) {
+    throw new OperationError("config_error", `The sovereignty policy at ${path} defines only half of a Public tier (sovereignty.${hasRoute ? "retrieval.trustDomains" : "routes"}.public_safe is missing).`, "Restore the missing half, or move the file aside to start from the preset alone.");
+  }
+  return withPublicTierLikePersonal(preset);
+}
+function withPublicTierLikePersonal(config) {
+  const internalRoute = config.routes.internal;
+  const internalRetrieval = config.retrieval.trustDomains.internal;
+  if (!internalRoute || !internalRetrieval)
+    return config;
+  const next = structuredClone(config);
+  next.routes.public_safe = structuredClone(internalRoute);
+  next.retrieval.trustDomains.public_safe = structuredClone(internalRetrieval);
+  return next;
+}
 function buildEnvBridgeSovereigntyConfig(env = process.env) {
   const localProfile = {
     provider: "local-openai-compatible",
@@ -154610,14 +154638,14 @@ async function runSetupWizard(options) {
   assertSetupDependenciesOk(requiredCheck);
   const dependencyCheck2 = options.ocrReadiness ? { ...requiredCheck, checks: [...requiredCheck.checks, ocrDependencyFinding(await options.ocrReadiness())] } : requiredCheck;
   const cloudLane = options.cloudLane ?? "subscription";
-  const presetConfig = applyCloudLane(loadSovereigntyPreset(options.preset), cloudLane);
+  const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
+  const presetConfig = presetKeepingPublicTier(applyCloudLane(loadSovereigntyPreset(options.preset), cloudLane), sovereigntyPath);
   const unmetPrerequisites = await setupPreflight({
     config: presetConfig,
     ...options.env ? { env: options.env } : {},
     ...options.secretStore ? { secretStore: options.secretStore } : {},
     workerEnvPath: options.envPath ?? workerSetupEnvPath({ homeDir: options.homeDir ?? homedir48() })
   });
-  const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
   let wroteSovereignty = false;
   let managedWorker;
@@ -156882,9 +156910,10 @@ function runSovereigntyInit(args) {
   if (!preset) {
     throw new OperationError("invalid_params", "--preset is required.", `Use one of: ${SOVEREIGNTY_PRESETS.join(", ")}.`);
   }
+  const configPath = path ?? defaultSovereigntyConfigPath();
   const targetPath = writeSovereigntyConfigFile({
-    config: loadSovereigntyPreset(preset),
-    path: path ?? defaultSovereigntyConfigPath(),
+    config: presetKeepingPublicTier(loadSovereigntyPreset(preset), configPath),
+    path: configPath,
     force
   });
   return {
