@@ -147,7 +147,7 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     const lane = installed.forLedger(fx.ledger.dbPath).sniffer!;
     // A pass in flight: it read both items (neither Secret) and is about to ask.
     const staleRead = fx.ledger.classificationRead(identityOf('mortgage-letter'));
-    expect(staleRead).toEqual({ override: undefined, secret: false });
+    expect(staleRead).toMatchObject({ override: undefined, secret: false });
     const stale = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), staleRead);
     const other = secretFencedSniffer(lane, fx.ledger, identityOf('therapy-notes'), fx.ledger.classificationRead(identityOf('therapy-notes')));
 
@@ -190,6 +190,26 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     expect(store.questionFor(identityOf('mortgage-letter'), 'metadata')).toBeUndefined();
     ask();
     expect(JSON.stringify(store.listQuestions())).not.toContain('mortgage letter');
+  });
+
+  test('read as Secret, then cleared again by a detector with the override unchanged: queues nothing', async () => {
+    const dir = workspace('olympus-secret-side-sniffer-');
+    const installed = installSniffer(dir);
+    const fx = fixture(dir);
+    await fx.set.sync(fixtureConnector(() => [{ id: 'ops-note', name: 'ops note', version: 'v1', text: `The deploy key is ${FAKE_AWS_KEY} until Friday.` }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.ledger.getCurrent(identityOf('ops-note'))?.contentTier).toBe('secrets');
+    const store = installed.snifferStoreForLedger(fx.ledger.dbPath);
+    const lane = installed.forLedger(fx.ledger.dbPath).sniffer!;
+    // A listing reads it (Secrets, no override) and finds it changed: it would ask.
+    const read = fx.ledger.classificationRead(identityOf('ops-note'));
+    expect(read).toMatchObject({ secret: true, override: undefined });
+    const listing = secretFencedSniffer(lane, fx.ledger, identityOf('ops-note'), read);
+    // Meanwhile another pass detects the secret again and clears the side stores.
+    await fx.set.sync(fixtureConnector(() => [{ id: 'ops-note', name: 'ops note', version: 'v2', text: `Rotated: ${FAKE_AWS_KEY} is retired.` }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.ledger.classificationRead(identityOf('ops-note')).scrubRevision).toBeGreaterThan(read.scrubRevision);
+
+    listing.judge({ pass: 'metadata', flags: ['names:finance'], material: 'ops note', subject: identityOf('ops-note') });
+    expect(store.questionFor(identityOf('ops-note'), 'metadata')).toBeUndefined();
   });
 });
 

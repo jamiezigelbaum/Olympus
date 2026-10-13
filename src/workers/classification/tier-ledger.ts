@@ -1069,8 +1069,29 @@ export class TierLedger {
    * snapshot: the owner's override, and whether the item is Secrets already
    * (the sniffer fence, connector-store/tier-placement.ts, keys off it).
    */
-  classificationRead(identity: TierLedgerIdentity): { override: ItemTierOverride | undefined; secret: boolean } {
-    return this.db.transaction(() => ({ override: this.getOverride(identity), secret: this.itemIsSecret(identity) }))();
+  classificationRead(identity: TierLedgerIdentity): { override: ItemTierOverride | undefined; secret: boolean; scrubRevision: number } {
+    return this.db.transaction(() => ({
+      override: this.getOverride(identity),
+      secret: this.itemIsSecret(identity),
+      scrubRevision: this.secretScrubRevision(identity),
+    }))();
+  }
+
+  /** Note that a Secret's side stores are about to be cleared (see `classificationRead`). */
+  noteSecretScrub(identity: TierLedgerIdentity): void {
+    this.db.query(`
+      INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision)
+      VALUES (?, ?, ?, ?, 1)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET revision = revision + 1
+    `).run(...idParams(identity));
+  }
+
+  private secretScrubRevision(identity: TierLedgerIdentity): number {
+    const row = this.db.query(`
+      SELECT revision FROM secret_side_store_scrubs
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) as { revision: number } | null;
+    return row?.revision ?? 0;
   }
 
   /** Whether the item is Secrets here: decided, moving there, or set so by the owner. */
@@ -3542,6 +3563,16 @@ function tierLedgerMigrations(): SqliteMigration[] {
             local_item_id TEXT NOT NULL DEFAULT '',
             job_ledger_paths_json TEXT NOT NULL DEFAULT '[]',
             recorded_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          -- Bumped before every side-store clearing of a Secret, so a
+          -- classification pass can tell one happened since it read the item.
+          CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);

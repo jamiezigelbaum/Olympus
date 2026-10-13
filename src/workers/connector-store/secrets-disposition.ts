@@ -120,6 +120,13 @@ export function forgetSecretInSideStores(options: {
   const result: ForgottenSecretSideStores = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
   const owedJobLedgers: string[] = [];
+  // Committed before the queue is cleared: a listing that read the item
+  // before this point is fenced from queuing it again (tier-placement.ts).
+  try {
+    ledger.noteSecretScrub(identity);
+  } catch {
+    result.failed += 1;
+  }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ':memory:' && existsSync(snifferPath)) {
     try {
