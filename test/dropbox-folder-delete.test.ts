@@ -51,6 +51,41 @@ const TREE: DropboxMetadataEntry[] = [
 const UNDER_DOCS = ['id:docs', 'id:a', 'id:sub', 'id:b', 'id:deep', 'id:c'];
 const BESIDE_DOCS = ['id:docsold', 'id:sibling', 'id:docs2', 'id:dotted', 'id:keep'];
 
+describe('a folder moved outside approved scope', () => {
+  const gone = deleted('Docs', '/Approved/Docs');
+  const moved = [folder('id:docs', '/Excluded/Docs'), file('id:a', '/Excluded/Docs/a.txt')];
+  for (const [label, script] of [
+    ['delete first', { initial: TREE, deltas: { 'cursor-1': [gone, ...moved] } }],
+    ['delete last', { initial: TREE, deltas: { 'cursor-1': [...moved, gone] } }],
+    ['later page', { initial: TREE, deltaPages: {
+      'cursor-1': { entries: [gone], cursor: 'cursor-2', hasMore: true },
+      'cursor-2': { entries: moved, cursor: 'cursor-3', hasMore: false },
+    } }],
+  ] satisfies Array<[string, Script]>) {
+    test(`removes its old searchable contents and locator (${label})`, async () => {
+      const store = laneStore(join(workspace(), 'store.sqlite'));
+      const sync = createDropboxProviderStoreSyncHandler({
+        store, account: 'personal', broker: broker(), metadataClient: client(script),
+        scope: fakeScope((path) => path === '/approved' || path.startsWith('/approved/')),
+      });
+      await sync.pull({ approved_scope_key: SCOPE });
+      expect((await landText(store, 'id:a', 'The pelican nests here.')).accepted).toBe(true);
+      expect(store.searchItems('pelican', 10)).toHaveLength(1);
+
+      await sync.pull({ approved_scope_key: SCOPE });
+
+      expect(store.searchItems('pelican', 10)).toEqual([]);
+      expectInactive(store, UNDER_DOCS);
+      expectActive(store, BESIDE_DOCS);
+      for (const locatorUri of ['/Approved/Docs/a.txt', '/Excluded/Docs/a.txt']) {
+        expect(store.activeIdentityForLocatorIfIndexed({
+          provider: 'dropbox', accountScope: 'personal', locatorUri,
+        })).toBeUndefined();
+      }
+    });
+  }
+});
+
 describe('a deleted Dropbox folder takes its indexed descendants with it', () => {
   test('tombstones the folder and both nested levels below it, and nothing that only shares a name prefix', async () => {
     const { store, sync } = singleStoreLane({

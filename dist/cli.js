@@ -17029,13 +17029,16 @@ function createDropboxSourceConnector(options) {
   let cachedMetadataClient = options.metadataClient;
   let cachedDownloadClient = options.downloadClient;
   const contentAllowedByLocalItemId = new Map;
+  const metadataAllowed = (path) => {
+    if (!options.scope)
+      return true;
+    options.scope.assertCurrent();
+    return Boolean(path && options.scope.allowsMetadata(path));
+  };
   const scopedItems = (entries, fetchedAt) => entries.flatMap((entry) => {
     const path = entry.pathLower ?? entry.pathDisplay;
-    if (options.scope) {
-      options.scope.assertCurrent();
-      if (!path || !options.scope.allowsMetadata(path))
-        return [];
-    }
+    if (!metadataAllowed(path))
+      return [];
     const item = rawItemFromDropboxEntry(entry, account, fetchedAt, options.deletedItemIdentityResolver);
     contentAllowedByLocalItemId.set(item.identity.localItemId, entry.tag === "file" && (!options.scope || options.scope.allowsContent(path)));
     return [item];
@@ -17140,7 +17143,7 @@ function createDropboxSourceConnector(options) {
               if (seen + ahead.entries.length > lookaheadEntries)
                 return "capped";
               for (const entry of ahead.entries) {
-                if (entry.tag !== "deleted")
+                if (entry.tag !== "deleted" && metadataAllowed(entry.pathLower ?? entry.pathDisplay))
                   liveItemIds.add(entry.id);
               }
               if (!ahead.hasMore)
@@ -17187,7 +17190,7 @@ function createDropboxSourceConnector(options) {
           }
           const available = page2.entries.slice(offset);
           for (const entry of page2.entries) {
-            if (entry.tag !== "deleted")
+            if (entry.tag !== "deleted" && metadataAllowed(entry.pathLower ?? entry.pathDisplay))
               liveItemIds.add(entry.id);
           }
           const fetchedAt = nowIso();
