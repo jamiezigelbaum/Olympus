@@ -2632,9 +2632,9 @@ export class LocalConnectorStore {
       if (inputs?.unavailableReason) return false;
       const ledger = this.tierLedger();
       if (!ledger) return false;
+      const read = ledger.classificationRead(item.identity);
       const existing = ledger.getCurrent(item.identity);
       if (!existing) return false;
-      const read = ledger.classificationRead(item.identity);
       const override = read.override;
       // The item's names travel with the text, as they do in the tiered
       // sink: the detectors' origin hint and the sniffer read them too.
@@ -2660,7 +2660,7 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity) } : {}),
+          ...(inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read) } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },

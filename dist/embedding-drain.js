@@ -14981,8 +14981,8 @@ function isTextualMimeType(mimeType) {
 function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
-  const fresh = text2 !== undefined && extra.contentFetchFailed !== true;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, fresh ? read : undefined) : options?.sniffer;
+  const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
+  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
@@ -14997,12 +14997,14 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
 }
-function secretFencedSniffer(sniffer, ledger, identity, read) {
+function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
   const stillAsk = () => {
     const now = ledger.classificationRead(identity);
+    if (now.scrubRevision !== read.scrubRevision)
+      return false;
     if (!now.secret)
       return true;
-    return read?.secret === true && read.scrubRevision === now.scrubRevision && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
+    return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
   return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
 }
@@ -18175,10 +18177,10 @@ var init_local_index = __esm(() => {
         const ledger = this.tierLedger();
         if (!ledger)
           return false;
+        const read = ledger.classificationRead(item.identity);
         const existing = ledger.getCurrent(item.identity);
         if (!existing)
           return false;
-        const read = ledger.classificationRead(item.identity);
         const override = read.override;
         const metadataString = (keys) => {
           for (const key2 of keys) {
@@ -18201,7 +18203,7 @@ var init_local_index = __esm(() => {
           mimeType: item.mimeType,
           subject: item.identity
         }, {
-          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity) } : {},
+          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read) } : {},
           ...override ? { override } : {},
           ...inputs?.retirePublic ? { retirePublic: true } : {}
         });
@@ -24982,7 +24984,7 @@ function rejudgeStoredContent(set, record, options) {
     ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
     subject: identity
   }, {
-    ...options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity) } : {},
+    ...options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity, read) } : {},
     ...options.retirePublic ? { retirePublic: true } : {}
   });
   const decision = {

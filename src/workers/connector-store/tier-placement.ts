@@ -178,9 +178,10 @@ export function decideItemTiers(
   const override = read?.override;
   // Only a listing that read the item's text is fresh enough to ask about an
   // item recorded Secrets (an unread one keeps the recorded content tier).
-  const fresh = text !== undefined && extra.contentFetchFailed !== true;
+  // Blank text counts as unread, exactly as the classifier treats it.
+  const fresh = text?.trim() ? extra.contentFetchFailed !== true : false;
   const sniffer = options?.sniffer && ledger && read
-    ? secretFencedSniffer(options.sniffer, ledger, item.identity, fresh ? read : undefined)
+    ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh })
     : options?.sniffer;
   return classifyItemTiers(
     {
@@ -210,20 +211,24 @@ export function decideItemTiers(
  * secret gone, and may still ask, but only while the owner's override is the
  * one it read and no Secrets clearing ran since (the item's scrub revision):
  * a Secrets marking since then, by the owner or a detector, fences it. A
- * pass over a stored item (extraction, re-judge, migration) passes no `read`:
- * it may ask only while the item is not Secrets.
+ * pass over a stored item (extraction, re-judge, migration) may ask only while
+ * the item is not Secrets. Every pass passes the snapshot it took before
+ * reading the item, and any Secrets clearing since then fences it.
  */
 export function secretFencedSniffer(
   sniffer: TierSniffer,
   ledger: TierLedger,
   identity: TierLedgerIdentity,
-  read?: ReturnType<TierLedger['classificationRead']>,
+  read: ReturnType<TierLedger['classificationRead']>,
+  options: { mayAskSecret?: boolean } = {},
 ): TierSniffer {
   const stillAsk = (): boolean => {
     const now = ledger.classificationRead(identity);
+    // Any clearing since the read fences the pass, whether or not a Secrets
+    // decision was recorded (an extraction sink's untracked tombstone).
+    if (now.scrubRevision !== read.scrubRevision) return false;
     if (!now.secret) return true;
-    return read?.secret === true
-      && read.scrubRevision === now.scrubRevision
+    return options.mayAskSecret === true && read.secret
       && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
   return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };

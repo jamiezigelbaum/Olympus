@@ -161,8 +161,8 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     // A pass in flight: it read both items (neither Secret) and is about to ask.
     const staleRead = fx.ledger.classificationRead(identityOf('mortgage-letter'));
     expect(staleRead).toMatchObject({ override: undefined, secret: false });
-    const stale = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), staleRead);
-    const other = secretFencedSniffer(lane, fx.ledger, identityOf('therapy-notes'), fx.ledger.classificationRead(identityOf('therapy-notes')));
+    const stale = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), staleRead, { mayAskSecret: true });
+    const other = secretFencedSniffer(lane, fx.ledger, identityOf('therapy-notes'), fx.ledger.classificationRead(identityOf('therapy-notes')), { mayAskSecret: true });
 
     expect(runTierSet(['mortgage-letter', 'secrets'], { storePaths: storePaths(fx) }))
       .toMatchObject({ results: [{ override: 'Secrets', outcome: 'hidden_now' }] });
@@ -191,7 +191,7 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     const lane = installed.forLedger(fx.ledger.dbPath).sniffer!;
     const read = fx.ledger.classificationRead(identityOf('mortgage-letter'));
     expect(read).toMatchObject({ secret: true, override: { kind: 'not_secret' } });
-    const listing = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), read);
+    const listing = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), read, { mayAskSecret: true });
     const ask = () => listing.judge({ pass: 'metadata', flags: ['names:finance'], material: 'mortgage letter', subject: identityOf('mortgage-letter') });
 
     // Nothing changed since the read: the listing is the fresh truth and asks.
@@ -205,6 +205,20 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     expect(JSON.stringify(store.listQuestions())).not.toContain('mortgage letter');
   });
 
+  for (const body of ['', '   ']) {
+    test(`a Secret listed again with a blank body (${JSON.stringify(body)}) queues none of its names`, async () => {
+      const dir = workspace('olympus-secret-side-sniffer-');
+      const installed = installSniffer(dir);
+      const fx = fixture(dir);
+      await fx.set.sync(fixtureConnector(() => [{ id: 'ops-note', name: 'ops note', version: 'v1', text: `The deploy key is ${FAKE_AWS_KEY} until Friday.` }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      expect(fx.ledger.getCurrent(identityOf('ops-note'))?.contentTier).toBe('secrets');
+      // Renamed to something the names pass would ask about, its body unread.
+      await fx.set.sync(fixtureConnector(() => [{ id: 'ops-note', name: 'therapy notes', version: 'v2', text: body }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      expect(fx.ledger.getCurrent(identityOf('ops-note'))?.contentTier).toBe('secrets');
+      expect(JSON.stringify(installed.snifferStoreForLedger(fx.ledger.dbPath).listQuestions())).not.toContain('therapy notes');
+    });
+  }
+
   test('read as Secret, then cleared again by a detector with the override unchanged: queues nothing', async () => {
     const dir = workspace('olympus-secret-side-sniffer-');
     const installed = installSniffer(dir);
@@ -216,7 +230,7 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     // A listing reads it (Secrets, no override) and finds it changed: it would ask.
     const read = fx.ledger.classificationRead(identityOf('ops-note'));
     expect(read).toMatchObject({ secret: true, override: undefined });
-    const listing = secretFencedSniffer(lane, fx.ledger, identityOf('ops-note'), read);
+    const listing = secretFencedSniffer(lane, fx.ledger, identityOf('ops-note'), read, { mayAskSecret: true });
     // Meanwhile another pass detects the secret again and clears the side stores.
     await fx.set.sync(fixtureConnector(() => [{ id: 'ops-note', name: 'ops note', version: 'v2', text: `Rotated: ${FAKE_AWS_KEY} is retired.` }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     expect(fx.ledger.classificationRead(identityOf('ops-note')).scrubRevision).toBeGreaterThan(read.scrubRevision);
@@ -766,8 +780,12 @@ describe('a legacy item (never routed by a set) judged Secret', () => {
       extractorVersion: 'v1',
     }).jobRefs.map((entry) => entry.jobId);
 
+    // A pass over the stored item read it before the Secrets floor ran.
+    const installed = installSniffer(dir);
+    const stalePass = secretFencedSniffer(installed.forLedger(ledger.dbPath).sniffer!, ledger, subject, ledger.classificationRead(subject));
     // The sink's Secrets floor tombstones the copy; recording the decision is a separate best-effort write, not made here.
     expect(settleUntrackedSecretsCopy({ store, identity: subject, connectorId: 'fixture_lane', metadata: { title: 'ops note' } })).toBe('tombstoned');
+    stalePass.judge({ pass: 'content', flags: ['content:read'], material: 'ops note: weekly notes', subject });
     expect(ledger.getCurrent(subject)?.contentTier).not.toBe('secrets');
     expect(sniffer.questionFor(subject, 'content')).toBeUndefined();
     expect(jobs.get(jobId!)?.ref.name).toBeUndefined();

@@ -23854,8 +23854,8 @@ function isTextualMimeType(mimeType) {
 function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
-  const fresh = text2 !== undefined && extra.contentFetchFailed !== true;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, fresh ? read : undefined) : options?.sniffer;
+  const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
+  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
@@ -23870,12 +23870,14 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
 }
-function secretFencedSniffer(sniffer, ledger, identity, read) {
+function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
   const stillAsk = () => {
     const now = ledger.classificationRead(identity);
+    if (now.scrubRevision !== read.scrubRevision)
+      return false;
     if (!now.secret)
       return true;
-    return read?.secret === true && read.scrubRevision === now.scrubRevision && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
+    return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
   return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
 }
@@ -24383,20 +24385,22 @@ function settleUntrackedSecretsCopy(options) {
   return settled;
 }
 function forgetSecretJobNames(identity) {
-  let failed = 0;
+  let unsettled = 0;
   for (const jobsPath of extractionJobsDbPaths()) {
     try {
-      clearExtractionJobNames(jobsPath, {
+      const cleared = clearExtractionJobNames(jobsPath, {
         provider: identity.provider,
         accountScope: identity.accountScope,
         providerItemId: identity.providerItemId
       });
+      if (!cleared.durable)
+        unsettled += 1;
     } catch {
-      failed += 1;
+      unsettled += 1;
     }
   }
-  if (failed > 0)
-    console.warn(`[tier] secrets: ${failed} extraction job ledger(s) could not forget an item's name.`);
+  if (unsettled > 0)
+    console.warn(`[tier] secrets: ${unsettled} extraction job ledger(s) could not durably forget an item's name, and its store has no tier ledger to retry from.`);
 }
 var SECRETS_DISPOSITION = "tombstone_now";
 var init_secrets_disposition = __esm(() => {
@@ -28019,10 +28023,10 @@ var init_local_index = __esm(() => {
         const ledger = this.tierLedger();
         if (!ledger)
           return false;
+        const read = ledger.classificationRead(item.identity);
         const existing = ledger.getCurrent(item.identity);
         if (!existing)
           return false;
-        const read = ledger.classificationRead(item.identity);
         const override = read.override;
         const metadataString = (keys) => {
           for (const key2 of keys) {
@@ -28045,7 +28049,7 @@ var init_local_index = __esm(() => {
           mimeType: item.mimeType,
           subject: item.identity
         }, {
-          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity) } : {},
+          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read) } : {},
           ...override ? { override } : {},
           ...inputs?.retirePublic ? { retirePublic: true } : {}
         });
@@ -35248,7 +35252,7 @@ function rejudgeStoredContent(set, record, options) {
     ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
     subject: identity
   }, {
-    ...options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity) } : {},
+    ...options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity, read) } : {},
     ...options.retirePublic ? { retirePublic: true } : {}
   });
   const decision = {
@@ -76021,8 +76025,12 @@ async function planTierMigration(options) {
             continue;
           }
           const read = ledger.classificationRead(item.identity);
+          if (!store.itemPresence(item.identity).active) {
+            totals.notRead += 1;
+            continue;
+          }
           const override = read.override;
-          const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity) : undefined;
+          const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity, read) : undefined;
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
           const decision = classifyItemTiers({
             signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
@@ -106132,6 +106140,7 @@ function createTieredStoreExtractionSink(options) {
         }
         return result2;
       }
+      const read = ledger.classificationRead(identity);
       const record3 = ledger.getCurrent(identity);
       if (!record3 || record3.state === "moving")
         return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
@@ -106145,7 +106154,6 @@ function createTieredStoreExtractionSink(options) {
       if ("skippedReason" in plan)
         return skipped(plan.skippedReason);
       const tierClassification = classificationNow();
-      const read = ledger.classificationRead(identity);
       const override = read.override;
       const itemTitle2 = stringMetadata2(plan.item, ["title", "name", "subject"]);
       const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
@@ -106162,7 +106170,7 @@ function createTieredStoreExtractionSink(options) {
         ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
         subject: identity
       }, {
-        ...tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity) } : {},
+        ...tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity, read) } : {},
         ...override ? { override } : {},
         ...tierClassification?.retirePublic ? { retirePublic: true } : {}
       });

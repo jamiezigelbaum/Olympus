@@ -193,7 +193,7 @@ export function rejudgeStoredContent(
       subject: identity,
     },
     {
-      ...(options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity) } : {}),
+      ...(options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity, read) } : {}),
       ...(options.retirePublic ? { retirePublic: true } : {}),
     },
   );

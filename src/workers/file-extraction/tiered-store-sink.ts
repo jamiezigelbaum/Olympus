@@ -157,6 +157,8 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         return result;
       }
 
+      // Before anything else is read: the sniffer fence keys off this.
+      const read = ledger.classificationRead(identity);
       const record = ledger.getCurrent(identity);
       if (!record || record.state === 'moving') return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
       const current = ledger.copies(identity).filter((copy) => copy.state === 'current');
@@ -168,7 +170,6 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if ('skippedReason' in plan) return skipped(plan.skippedReason);
 
       const tierClassification = classificationNow();
-      const read = ledger.classificationRead(identity);
       const override = read.override;
       const itemTitle = stringMetadata(plan.item, ['title', 'name', 'subject']);
       const itemPath = stringMetadata(plan.item, ['locatorUri', 'pathDisplay']);
@@ -189,7 +190,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           subject: identity,
         },
         {
-          ...(tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity) } : {}),
+          ...(tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity, read) } : {}),
           ...(override ? { override } : {}),
           ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },
