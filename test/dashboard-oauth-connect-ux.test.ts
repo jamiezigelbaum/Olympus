@@ -206,7 +206,10 @@ describe('the card walks the owner through registering the callback itself', () 
     expect(sheet).toContain('enable the Gmail API');
     expect(sheet).toContain('<b>Authorized redirect URIs</b>');
     expect(sheet).toContain('Add it with + Add URI');
-    expect(sheet).toContain('copy the Client ID from the confirmation dialog');
+    // A Web application client cannot sign in without its secret: the steps
+    // say to copy it, and the form carries a masked field for it.
+    expect(sheet).toContain('copy the Client ID and the Client secret from the confirmation dialog');
+    expect(sheet).toContain('name="client_secret"');
     expect(sheet).toContain(`${TAILNET}/oauth/callback/gmail`);
     expect(setupSheet('google_drive.docs')).toContain('enable the Google Drive API');
   });
@@ -216,6 +219,8 @@ describe('the card walks the owner through registering the callback itself', () 
 
     expect(sheet).toContain('No registration needed on this machine');
     expect(sheet).not.toContain('<ol class="steps">');
+    // The Desktop app client uses PKCE alone: no secret field.
+    expect(sheet).not.toContain('name="client_secret"');
     // The URI is still shown; it is what a reader debugging a failed callback
     // needs, and it costs them no step.
     expect(sheet).toContain('http://127.0.0.1:8010/oauth/callback/gmail');

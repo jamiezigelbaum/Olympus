@@ -845,6 +845,7 @@ function optionalString(value: unknown): string | undefined {
 const BACKEND_CODES: Record<string, ChatGptErrorCode> = {
   model_setup_required: 'models_not_ready',
   oauth_handback_unavailable: 'connect_unavailable',
+  google_signin_full: 'google_signin_full',
   oauth_client_id_missing: 'connect_unavailable',
   oauth_client_secret_missing: 'connect_unavailable',
   oauth_start_invalid: 'sign_in_failed',

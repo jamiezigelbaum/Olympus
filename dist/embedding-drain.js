@@ -10643,13 +10643,19 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
   }
   ensureSchemaVersionTable(db);
   const applied = [];
-  db.transaction(() => {
-    for (const migration of ordered.filter((entry) => entry.version > currentVersion)) {
-      migration.up(db);
-      writeSqliteSchemaVersion(db, storeId, migration.version);
-      applied.push({ version: migration.version, name: migration.name });
-    }
-  })();
+  if (pending.length > 0) {
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion) {
+        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+      }
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        writeSqliteSchemaVersion(db, storeId, migration.version);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+  }
   return {
     storeId,
     currentVersion,
@@ -26024,6 +26030,12 @@ var init_unreadable_files = __esm(() => {
   CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
 });
 
+// src/core/google-signin-full-copy.ts
+var GOOGLE_SIGNIN_FULL_SENTENCE = "Google sign-in is full for the moment. We're working on it. For now, you can still connect Google by using your own Google app.", GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE;
+var init_google_signin_full_copy = __esm(() => {
+  GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE = `${GOOGLE_SIGNIN_FULL_SENTENCE} Open Olympus on your computer to set it up.`;
+});
+
 // src/workers/remote-oauth/consent-page.ts
 var init_consent_page = () => {};
 
@@ -27462,6 +27474,9 @@ var init_vocabulary = __esm(() => {
     linkExpired: "link expired",
     howOnComputer: "Do this on your computer",
     howOnComputerFix: "Fix this on your computer",
+    moreOnComputer: "More controls on your computer: Private answers, anonymous answers, keys and agents",
+    moreOnComputerOpen: "Open",
+    moreOnComputerOpenLabel: "Open Olympus on your computer",
     remote: {
       title: "Olympus runs on a server, so this opens on your computer through a secure tunnel.",
       askLine: "Ask your assistant:",
@@ -27507,7 +27522,8 @@ var init_vocabulary = __esm(() => {
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
-    changeModels: "Change"
+    changeModels: "Change",
+    useOwnGoogleApp: "Use your own Google app"
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
     back: "Back to Olympus",
@@ -27993,6 +28009,7 @@ var init_public_source_capabilities = __esm(() => {
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_google_handle_compatibility();
+  init_google_signin_full_copy();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -29490,7 +29507,24 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     add(page, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data2.progress, true));
     add(page, modelsSection(data2.models));
     add(page, computerSection());
+    add(page, moreOnComputer());
     return page;
+  }
+  function moreOnComputer() {
+    if (onComputer() || GLOBAL_STATES.indexOf(connectionState()) >= 0)
+      return null;
+    const href = helpHref(state.data.computerControls && state.data.computerControls.href);
+    if (!href)
+      return null;
+    const key2 = "more-on-computer";
+    const line = add(el("div", "section more-on-computer"), el("p", "muted", P.moreOnComputer));
+    const remote = remoteMode();
+    const open4 = button(P.moreOnComputerOpen, key2, remote ? () => toggleRemote(key2) : () => openLink(href), "plain");
+    open4.className = "btn link";
+    open4.setAttribute("aria-label", P.moreOnComputerOpenLabel);
+    if (remote)
+      open4.setAttribute("aria-expanded", state.open["remote:" + key2] ? "true" : "false");
+    return add(line, open4, remote ? remoteBox(key2, href) : null);
   }
   function computerSection() {
     if (!onComputer())
@@ -32379,6 +32413,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
 .remote-box{flex-basis:100%;margin-top:0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.375rem;font-size:0.875rem}
 .remote-box p{margin:0}
+.more-on-computer{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .remote-line{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 .remote-line code{flex:1 1 16rem;min-width:0;padding:0.25rem 0.5rem;border:1px solid var(--line);border-radius:0.375rem;background:var(--bg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;overflow-wrap:anywhere;user-select:all}
 .strong{font-weight:600}
@@ -34321,6 +34356,14 @@ init_apple_vision_ocr();
 
 // src/workers/email-source/index.ts
 init_google_handle_compatibility();
+
+// src/core/google-publisher-capacity.ts
+init_oauth_relay();
+init_google_signin_full_copy();
+var cache = new Map;
+var inFlight = new Map;
+
+// src/workers/email-source/index.ts
 init_source_account_binding();
 init_consent_page();
 init_analyst();
@@ -34803,10 +34846,18 @@ var COMPUTER_HOST_PAGE_CSP = [
 ].join("; ");
 
 // src/workers/dashboard/pages/local.ts
+init_google_signin_full_copy();
 init_source_dashboard();
 
 // src/workers/agent-connections.ts
 init_operation_caller();
+var AGENT_CHOICE_PROVIDERS = Object.freeze({
+  chatgpt: "openai",
+  claude: "anthropic",
+  grok: "xai",
+  "grok-api": "xai",
+  other: "other"
+});
 var WORKER_ENV_ADDRESS_MESSAGE = "This address is set by OLYMPUS_PUBLIC_BASE_URL in worker.env, a tunnel you run yourself, " + "so the dashboard cannot turn it off. To turn remote access off, delete that line from ~/.config/olympus/worker.env, " + "then restart OpenClaw (openclaw gateway restart), and stop your tunnel.";
 
 // src/core/agent-instructions.ts

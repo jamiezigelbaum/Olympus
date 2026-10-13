@@ -1348,7 +1348,7 @@ describe('connection database migration', () => {
     try {
       expect(upgraded.verifyToken(token)).toMatchObject({ ok: true, connection: { displayName: 'Muse', kind: 'bearer' } });
       const check = new Database(legacyPath);
-      expect((check.query("SELECT version FROM schema_version WHERE store_id = 'remote-connections'").get() as { version: number }).version).toBe(2);
+      expect((check.query("SELECT version FROM schema_version WHERE store_id = 'remote-connections'").get() as { version: number }).version).toBe(3);
       check.close();
       // Something approved after the upgrade, which the rollback will not keep.
       upgraded.create('Later');

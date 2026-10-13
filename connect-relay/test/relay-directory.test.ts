@@ -18,9 +18,10 @@ import { mintCredential } from '../shared/tokens.ts';
 import { MemoryInstallRegistry } from '../server/registry.ts';
 import { NOT_CONNECTED_MESSAGE, relayMcpResponse } from '../server/relay-mcp.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
-import generatedDashboard from '../server/generated/chatgpt-dashboard.json';
-import generatedPrivateAnswer from '../server/generated/chatgpt-private-answer.json';
 import generatedSurface from '../server/generated/chatgpt-tools.json';
+import approvedDashboard from '../server/directory/approved/dashboard.json';
+import approvedPrivateAnswer from '../server/directory/approved/private-answer.json';
+import approvedSurface from '../server/directory/approved/tools.json';
 
 setDefaultTimeout(15_000);
 
@@ -103,14 +104,15 @@ describe('the relay\'s own answers on /openai/mcp', () => {
     const future = [...generatedSurface.tools, { ...generatedSurface.tools[1]!, name: 'olympus_future_tool' }];
     expect(toolsForSurface(future, 'default').map((tool) => tool.name)).toContain('olympus_future_tool');
     expect(toolsForSurface(future, 'directory').map((tool) => tool.name)).toEqual([...DIRECTORY_TOOL_NAMES]);
-    // The relay narrows the generated manifest the same way; today it is the whole list.
+    // The relay's /mcp lists the generated manifest; /openai/mcp lists the
+    // submitted one (server/directory/approved.ts), narrowed the same way.
     const listed = (surface: 'default' | 'directory') => relayMcpResponse({
       method: 'POST', body: rpc('tools/list'), now: 0, surface,
       state: 'not_connected', installUrl: 'https://example.test/install', protectedResourceMetadataUrl: DIRECTORY_METADATA,
     }).json() as Promise<{ result: { tools: Array<{ name: string }> } }>;
     return Promise.all([listed('default'), listed('directory')]).then(([all, directory]) => {
       expect(all.result.tools).toEqual(generatedSurface.tools);
-      expect(directory.result.tools).toEqual(toolsForSurface(generatedSurface.tools, 'directory'));
+      expect(directory.result.tools).toEqual(toolsForSurface(approvedSurface.tools, 'directory'));
       expect(directory.result.tools.map((tool) => tool.name)).toEqual([...DIRECTORY_TOOL_NAMES]);
     });
   });
@@ -118,16 +120,16 @@ describe('the relay\'s own answers on /openai/mcp', () => {
   test('without a token: the narrowed list, widgets, and a noauth dashboard whose challenge names the directory resource', async () => {
     const relay = await makeRelay();
     const list = await (await post(relay, DIRECTORY_MCP_PATH, rpc('tools/list'))).json();
-    expect(list.result.tools).toEqual(toolsForSurface(generatedSurface.tools, 'directory'));
+    expect(list.result.tools).toEqual(toolsForSurface(approvedSurface.tools, 'directory'));
     const dashboardTool = list.result.tools.find((tool: { name: string }) => tool.name === 'olympus_dashboard');
     expect(dashboardTool.securitySchemes).toEqual([{ type: 'noauth' }, { type: 'oauth2', scopes: [] }]);
 
     const resources = await (await post(relay, DIRECTORY_MCP_PATH, rpc('resources/list'))).json();
-    expect(resources.result.resources).toEqual(generatedSurface.resources);
+    expect(resources.result.resources).toEqual(approvedSurface.resources);
     const panel = await (await post(relay, DIRECTORY_MCP_PATH, rpc('resources/read', { uri: 'ui://olympus/private-answer' }))).json();
-    expect(panel.result.contents).toEqual(generatedPrivateAnswer.contents);
+    expect(panel.result.contents).toEqual(approvedPrivateAnswer.contents);
     const page = await (await post(relay, DIRECTORY_MCP_PATH, rpc('resources/read', { uri: 'ui://olympus/dashboard' }))).json();
-    expect(page.result.contents).toEqual(generatedDashboard.contents);
+    expect(page.result.contents).toEqual(approvedDashboard.contents);
 
     const dashboard = await (await post(relay, DIRECTORY_MCP_PATH, rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }))).json();
     expect(dashboard.result.isError).toBeUndefined();
@@ -205,7 +207,7 @@ describe('routing /openai/mcp to the install', () => {
     }
     const token = mintCredential('access', identity.installId);
     const list = await (await post(relay, DIRECTORY_MCP_PATH, rpc('tools/list'), token)).json();
-    expect(list.result.tools).toEqual(toolsForSurface(generatedSurface.tools, 'directory'));
+    expect(list.result.tools).toEqual(toolsForSurface(approvedSurface.tools, 'directory'));
     const dashboard = await (await post(relay, DIRECTORY_MCP_PATH, rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }), token)).json();
     expect(dashboard.result.structuredContent).toMatchObject({ connection: { state: 'mac_offline' } });
     expect(worker.paths).toEqual([]);

@@ -29,11 +29,18 @@ import {
   type SqliteMigration,
 } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
-import { createRemoteOAuthStore, remoteOAuthSchemaMigration, type RemoteOAuthStore } from './remote-oauth-store.ts';
+import {
+  createRemoteOAuthStore,
+  isRemoteConnectionProvider,
+  remoteConnectionProvider,
+  remoteOAuthSchemaMigration,
+  type RemoteConnectionProvider,
+  type RemoteOAuthStore,
+} from './remote-oauth-store.ts';
 import { revokeWaitingPrivateQuestions } from './waiting-private-questions.ts';
 
 export const REMOTE_CONNECTIONS_STORE_ID = 'remote-connections';
-export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 2;
+export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 3;
 export const REMOTE_CONNECTION_TOKEN_PREFIX = 'olympus_conn_';
 /** How stale `last_used_at` may get before a successful call rewrites it. */
 export const REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60_000;
@@ -54,6 +61,8 @@ export interface RemoteConnectionRecord {
   kind: RemoteConnectionKind;
   /** The OAuth client the grant was issued to (oauth connections only). */
   clientId: string | null;
+  /** Who hosts the agent (remoteConnectionProvider). */
+  provider: RemoteConnectionProvider;
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
@@ -71,7 +80,11 @@ export type RemoteConnectionVerification =
 
 export interface RemoteConnectionStore {
   readonly dbPath: string;
-  create(displayName: string): CreatedRemoteConnection;
+  /**
+   * A bearer connection. `provider`: the agent the owner chose it for (the
+   * Agents page); absent, the host its name names, else `other`.
+   */
+  create(displayName: string, options?: { provider?: RemoteConnectionProvider }): CreatedRemoteConnection;
   list(): RemoteConnectionRecord[];
   revoke(id: string): RemoteConnectionRecord;
   verifyToken(token: string): RemoteConnectionVerification;
@@ -89,6 +102,8 @@ interface ConnectionRow {
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
+  /** NULL only on a row an older build wrote after a rollback; read as remoteConnectionProvider derives it. */
+  provider: string | null;
 }
 
 export const REMOTE_CONNECTIONS_DB_PATH_ENV = 'OLYMPUS_REMOTE_CONNECTIONS_DB_PATH';
@@ -226,16 +241,20 @@ export function openRemoteConnectionStore(
 
     oauth,
 
-    create(displayName: string): CreatedRemoteConnection {
+    create(displayName: string, options: { provider?: RemoteConnectionProvider } = {}): CreatedRemoteConnection {
       const name = requireDisplayName(displayName);
+      if (options.provider !== undefined && !isRemoteConnectionProvider(options.provider)) {
+        throw new OperationError('invalid_params', 'A connection\'s host must be openai, xai, meta, anthropic or other.');
+      }
+      const provider = remoteConnectionProvider({ displayName: name, chosen: options.provider ?? null });
       const id = randomBytes(CONNECTION_ID_BYTES).toString('hex');
       const secret = randomBytes(CONNECTION_SECRET_BYTES).toString('base64url');
       const token = `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret}`;
       const createdAt = now().toISOString();
       db.query(`
-        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at)
-        VALUES (?, ?, 'bearer', ?, ?)
-      `).run(id, name, hashRemoteConnectionToken(token), createdAt);
+        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider)
+        VALUES (?, ?, 'bearer', ?, ?, ?)
+      `).run(id, name, hashRemoteConnectionToken(token), createdAt, provider);
       const row = readRow(id);
       if (!row) throw new Error('Remote connection could not be read after creation.');
       return { connection: toRecord(row), token };
@@ -309,6 +328,11 @@ function toRecord(row: ConnectionRow): RemoteConnectionRecord {
     displayName: row.display_name,
     kind: row.kind === 'oauth' ? 'oauth' : 'bearer',
     clientId: row.client_id ?? null,
+    provider: remoteConnectionProvider({
+      clientId: row.client_id,
+      displayName: row.display_name,
+      chosen: isRemoteConnectionProvider(row.provider) ? row.provider : null,
+    }),
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at,
@@ -340,7 +364,44 @@ function remoteConnectionMigrations(): SqliteMigration[] {
         );
       `);
     },
-  }, remoteOAuthSchemaMigration(2)];
+  }, remoteOAuthSchemaMigration(2), connectionProviderMigration(3)];
+}
+
+/**
+ * Schema v3: each connection records who hosts its agent (design
+ * docs/design/background-agents.md section D). Existing connections take
+ * their pin's host, else the host their name names, else `other`.
+ *
+ * Idempotent, so a second process that opened the file before this one
+ * migrated it, or a re-upgrade after a rollback, changes nothing it should
+ * not: the column is added only when missing, and only rows with no
+ * provider are filled. Rolling back needs no copy: an older build reads
+ * this table unchanged once the store's version is set back to 2 (rows it
+ * adds get their provider on the next upgrade):
+ *
+ *   sqlite3 remote-connections.sqlite \
+ *     "UPDATE schema_version SET version = 2 WHERE store_id = 'remote-connections'"
+ */
+export function connectionProviderMigration(version: number): SqliteMigration {
+  return {
+    version,
+    name: 'add_connection_provider',
+    up(db) {
+      const columns = db.query('PRAGMA table_info(remote_connections)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'provider')) {
+        db.exec(`
+          ALTER TABLE remote_connections ADD COLUMN provider TEXT
+            CHECK(provider IS NULL OR provider IN ('openai', 'xai', 'meta', 'anthropic', 'other'));
+        `);
+      }
+      const unset = db.query('SELECT id, display_name, client_id FROM remote_connections WHERE provider IS NULL')
+        .all() as Array<{ id: string; display_name: string; client_id: string | null }>;
+      const fill = db.query('UPDATE remote_connections SET provider = ? WHERE id = ? AND provider IS NULL');
+      for (const row of unset) {
+        fill.run(remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name }), row.id);
+      }
+    },
+  };
 }
 
 /**

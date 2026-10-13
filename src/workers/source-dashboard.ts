@@ -1,4 +1,5 @@
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
+import { GOOGLE_SIGNIN_FULL_SENTENCE } from '../core/google-signin-full-copy.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
@@ -1129,6 +1130,14 @@ export type DashboardSourceAction =
     redirect_uri_guidance?: string;
     callback_registration?: DashboardCallbackRegistration;
     instructions: DashboardSetupInstructions;
+    /**
+     * True when this Google source would connect through Olympus's own app but
+     * that app has reached Google's user limit (exchange Worker's capacity
+     * route). The card leads with GOOGLE_SIGNIN_FULL_SENTENCE and the sheet is
+     * the bring-your-own walkthrough, so the owner can still connect with a
+     * Google app of their own. Names nothing but the fact.
+     */
+    publisher_full?: true;
     // The verb, not the deficit: this row is an option the owner may take, and
     // the app-key reality it involves lives in the blurb rather than in the
     // button. Owner ruling, 2026-08-18 review.
@@ -1271,6 +1280,7 @@ export interface SourceDashboardBuildOptions {
   unreadableRecheck?: (corpusId: string) => { unreadable: number; blocked: number } | undefined;
   credentialHealth?: CredentialHealthReport;
   oauthClientIds?: Partial<Record<DashboardOAuthSource | 'google', string>>;
+  /** Per card; a Google entry is true only for a secret paired with that card's client id. */
   oauthClientSecretAvailability?: Partial<Record<DashboardOAuthSource | 'google', boolean>>;
   googleCloudProjectId?: string;
   googlePilotClientConfigured?: boolean;
@@ -1281,6 +1291,13 @@ export interface SourceDashboardBuildOptions {
    * read-only surface with everything else here.
    */
   publisherOAuthSources?: readonly DashboardOAuthSource[];
+  /**
+   * True when Olympus's own Google app is full (Google allows 100 users while
+   * the app is unverified) and this install has no Google connection yet. A
+   * publisher Google source that would say Connect says so instead and leads
+   * into the bring-your-own walkthrough. Absent or false: nothing changes.
+   */
+  googlePublisherFull?: boolean;
   oauthRedirectBaseUrl?: string;
   apiKeyAvailability?: Partial<Record<DashboardApiKeySource, boolean>>;
   pendingConnects?: DashboardPendingConnect[];
@@ -2102,6 +2119,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.googleCloudProjectId,
       options.googlePilotClientConfigured === true,
       options.publisherOAuthSources ?? [],
+      options.googlePublisherFull === true,
       options.oauthRedirectBaseUrl,
       options.apiKeyAvailability ?? {},
       options.pendingConnects ?? [],
@@ -2261,7 +2279,7 @@ function answerLaneFromDefinition(
       || result.status === 'missing'
       || result.status === 'degraded');
   const connected = !probeUnavailable && (apiKeyAvailability.venice === true || activeHandles.length > 0);
-  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, [], undefined);
+  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, [], false, undefined);
   return {
     lane_id: 'venice-secure-answers',
     source_id: definition.source_id,
@@ -2346,6 +2364,7 @@ function sourceCardFromDefinition(
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
   publisherOAuthSources: readonly DashboardOAuthSource[],
+  googlePublisherFull: boolean,
   oauthRedirectBaseUrl: string | undefined,
   apiKeyAvailability: Partial<Record<DashboardApiKeySource, boolean>>,
   pendingConnects: DashboardPendingConnect[],
@@ -2416,6 +2435,7 @@ function sourceCardFromDefinition(
     googleCloudProjectId,
     googlePilotClientConfigured,
     publisherOAuthSources,
+    googlePublisherFull,
     oauthRedirectBaseUrl,
     apiKeyAvailability,
     pendingConnects,
@@ -3294,6 +3314,7 @@ function connectionFromDefinition(
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
   publisherOAuthSources: readonly DashboardOAuthSource[],
+  googlePublisherFull: boolean,
   oauthRedirectBaseUrl: string | undefined,
   apiKeyAvailability: Partial<Record<DashboardApiKeySource, boolean>>,
   pendingConnects: DashboardPendingConnect[],
@@ -3316,6 +3337,7 @@ function connectionFromDefinition(
     googleCloudProjectId,
     googlePilotClientConfigured,
     publisherOAuthSources,
+    googlePublisherFull,
     oauthRedirectBaseUrl,
     apiKeyAvailability,
     pending,
@@ -3359,6 +3381,7 @@ function connectionStateFromDefinition(
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
   publisherOAuthSources: readonly DashboardOAuthSource[],
+  googlePublisherFull: boolean,
   oauthRedirectBaseUrl: string | undefined,
   apiKeyAvailability: Partial<Record<DashboardApiKeySource, boolean>>,
   pending: DashboardPendingConnect | undefined,
@@ -3429,11 +3452,11 @@ function connectionStateFromDefinition(
     return {
       state: 'not_connected',
       label,
-      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, 'none', pending),
+      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, 'none', pending),
       handles: handleIds,
     };
   }
-  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, sessionEvidence, pending);
+  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, googlePublisherFull, oauthRedirectBaseUrl, sessionEvidence, pending);
   // A refused attempt is no longer a handshake in flight. Leaving it in
   // awaiting_consent kept the row reading "connecting" for the rest of the
   // ten-minute record over a flow the provider had already rejected (owner,
@@ -3554,6 +3577,7 @@ function sourceAction(
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
   publisherOAuthSources: readonly DashboardOAuthSource[],
+  googlePublisherFull: boolean,
   oauthRedirectBaseUrl: string | undefined,
   sessionEvidence?: DashboardSessionEvidence,
   pending?: DashboardPendingConnect,
@@ -3569,7 +3593,12 @@ function sourceAction(
     // offered without a stored secret would start a flow whose exchange is
     // doomed, so a missing secret routes to Set up instead.
     const clientSecretRequired = definition.connect_action.source === 'x';
-    const clientSecretOnFile = clientSecretRequired
+    // A Google Web application client (the https-origin bring-your-own path)
+    // is confidential too: its sheet asks for the secret, and one already
+    // stored makes that field optional on a reauthorization.
+    const googleWebClient = isGoogleOAuthSource(definition.connect_action.source)
+      && googleOAuthClientType(oauthRedirectBaseUrl) === 'web';
+    const clientSecretOnFile = (clientSecretRequired || googleWebClient)
       && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
     const hasClientSecret = !clientSecretRequired || clientSecretOnFile;
     const redirectUriToRegister = oauthRedirectUriToRegister(definition.connect_action.source, oauthRedirectBaseUrl);
@@ -3591,6 +3620,31 @@ function sourceAction(
     // bring-your-own path is not removed — it moves into the sheet's own
     // disclosure, carrying the identical walkthrough these fields feed.
     if (publisherOAuthSources.includes(definition.connect_action.source)) {
+      // The publisher app is out of room: Google would stop this person on its
+      // own page and Olympus would never hear back. Say so here, and make the
+      // bring-your-own walkthrough the whole card. Only a first connect is
+      // held back (label 'Connect'); an install that already has a Google
+      // connection is a reconnect and never reaches this.
+      if (googlePublisherFull && label === 'Connect' && isGoogleOAuthSource(definition.connect_action.source)) {
+        const ownApp = oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl);
+        const web = googleOAuthClientType(oauthRedirectBaseUrl) === 'web';
+        return {
+          kind: 'needs_setup',
+          source: definition.connect_action.source,
+          label: 'Set up',
+          // A Web application client cannot finish sign-in without its secret,
+          // so the sheet asks for it; a Desktop app client uses PKCE alone.
+          client_secret_required: web,
+          publisher_full: true,
+          instructions: {
+            ...ownApp,
+            plain_intro: web
+              ? `${GOOGLE_SIGNIN_FULL_SENTENCE} Olympus needs a Google Web application Client ID and Client secret that you create in your own Google account (about 5 minutes; the steps are below). Register the redirect URI shown on this card on that client, then paste the Client ID and the Client secret into the fields on this card.`
+              : `${GOOGLE_SIGNIN_FULL_SENTENCE} Olympus needs a Google Desktop app Client ID that you create in your own Google account (about 5 minutes; the steps are below).`,
+          },
+          ...redirectFields,
+        };
+      }
       return {
         kind: 'oauth',
         source: definition.connect_action.source,
@@ -3739,8 +3793,12 @@ function oauthSetupInstructions(
       // Factual only. "You stay in control" was reassurance and is gone; the
       // Google sentence stays because it states a checkable fact about the
       // consent screen. Owner ruling, 2026-08-18.
-      plain_intro: `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google ${clientTypeName} Client ID you create in your own Google account.${web ? ' Register the redirect URI shown on this card on that client.' : ''} PKCE protects the exchange, so there is no client secret to paste. Google shows you exactly what Olympus can see.`,
-      agent_prompt: `Help me connect ${sourceLabel} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel} API, and ${redirectClause}. Then give me the Client ID so I can paste it into the Client ID field on that card and press Connect. PKCE protects the exchange, so no client secret is needed. Do not ask me to edit files, configuration, or code.`,
+      plain_intro: web
+        ? `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Web application Client ID and Client secret you create in your own Google account. Register the redirect URI shown on this card on that client, then copy the Client ID and the Client secret into the fields on this card. Google Web clients need the secret to finish sign-in. Google shows you exactly what Olympus can see.`
+        : `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Desktop app Client ID you create in your own Google account. PKCE protects the exchange, so there is no client secret to paste. Google shows you exactly what Olympus can see.`,
+      agent_prompt: web
+        ? `Help me connect ${sourceLabel} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel} API, and ${redirectClause}. Then tell me where to find the Client ID and the Client secret so I can paste each into its own field on that card and press Connect. Google Web clients need the secret to finish sign-in; do not ask me to type it into this chat, only into the Client secret field on the card. Do not ask me to edit files, configuration, or code.`
+        : `Help me connect ${sourceLabel} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel} API, and ${redirectClause}. Then give me the Client ID so I can paste it into the Client ID field on that card and press Connect. PKCE protects the exchange, so no client secret is needed. Do not ask me to edit files, configuration, or code.`,
       provider_console_url: googleConsoleUrl('https://console.cloud.google.com/auth/clients', googleCloudProjectId),
       ...(googleCloudProjectId ? { google_cloud_project_id: googleCloudProjectId } : {}),
       diy_summary: 'Or set it up yourself (about 5 minutes)',
@@ -3753,10 +3811,12 @@ function oauthSetupInstructions(
           : { text: 'Create an OAuth client ID and choose Desktop app. Google accepts this dashboard\'s loopback callback with nothing to register.' },
         { text: 'Enable the Gmail API for this project. Sync returns 403 errors until the Gmail and Drive APIs are enabled.', link: { label: 'Open Gmail API', url: googleConsoleUrl('https://console.cloud.google.com/apis/library/gmail.googleapis.com', googleCloudProjectId) } },
         { text: 'Enable the Google Drive API for the same project.', link: { label: 'Open Google Drive API', url: googleConsoleUrl('https://console.cloud.google.com/apis/library/drive.googleapis.com', googleCloudProjectId) } },
-        { text: 'Copy the Client ID shown in the popup. Olympus uses PKCE and does not need the client secret.' },
+        web
+          ? { text: 'Copy the Client ID and the Client secret shown in the popup into the fields below. A Google Web application client needs its secret to finish sign-in. Paste the secret only into the Client secret field on this card; Olympus keeps it on this computer.' }
+          : { text: 'Copy the Client ID shown in the popup. Olympus uses PKCE and does not need the client secret.' },
       ],
       secret_shown_once: false,
-      fields: [clientIdField],
+      fields: web ? [clientIdField, clientSecretField] : [clientIdField],
     };
   }
   if (source === 'dropbox') {
@@ -3872,15 +3932,18 @@ function oauthClientIdForSource(
     ?? oauthClientIds['google-drive'];
 }
 
+/**
+ * Read per card, never borrowed across Google sources: the caller reports a
+ * Google secret only when it is paired with the client id that card starts
+ * with. Gmail's secret belongs to Gmail's client; showing it as on file for a
+ * Drive card on a different client made the field optional for an exchange
+ * that then went out without Drive's secret (Codex on #315).
+ */
 function oauthClientSecretAvailableForSource(
   source: DashboardOAuthSource,
   availability: Partial<Record<DashboardOAuthSource | 'google', boolean>>,
 ): boolean {
-  if (!isGoogleOAuthSource(source)) return availability[source] === true;
-  return availability[source] === true
-    || availability.google === true
-    || availability.gmail === true
-    || availability['google-drive'] === true;
+  return availability[source] === true;
 }
 
 /**
@@ -3989,7 +4052,7 @@ function oauthCallbackRegistration(
       redirect_uri: redirectUri,
       finish: desktop
         ? 'Copy the Client ID back into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste.'
-        : 'Add it with + Add URI, press Create, then copy the Client ID from the confirmation dialog into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste.',
+        : 'Add it with + Add URI, press Create, then copy the Client ID and the Client secret from the confirmation dialog into the fields below and press Connect. A Web application client needs its secret to finish sign-in; paste it only into the Client secret field.',
     };
   }
   if (source === 'dropbox') {

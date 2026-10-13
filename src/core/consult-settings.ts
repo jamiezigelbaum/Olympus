@@ -200,14 +200,27 @@ export function consultClaudeFrontierModel(settings: ConsultSettings): string {
 }
 
 /**
- * The provider hosting the agent that asks: OpenAI, Anthropic or xAI (by a
- * pinned OAuth client id, or a client's MCP name). Unknown callers
- * (OpenClaw, the CLI) have none.
+ * The provider hosting the agent that asks: OpenAI, xAI, Meta or Anthropic
+ * (by a pinned OAuth client id, the host a remote connection was approved
+ * for, or a client's MCP name). `other`: a remote connection whose host is
+ * not known, so the same-provider rule cannot be applied. Callers on this
+ * computer with no known host (OpenClaw, the CLI) have none.
  */
-export type ConsultCallerProvider = 'openai' | 'anthropic' | 'xai';
-export const CONSULT_CALLER_PROVIDERS: readonly ConsultCallerProvider[] = ['openai', 'anthropic', 'xai'];
-/** zkAPI model id prefixes by provider; xAI's models are listed as `x-ai/…`. */
-const CONSULT_MODEL_PREFIXES: Readonly<Record<string, ConsultCallerProvider>> = { openai: 'openai', anthropic: 'anthropic', 'x-ai': 'xai', xai: 'xai' };
+export type ConsultCallerProvider = 'openai' | 'xai' | 'meta' | 'anthropic' | 'other';
+export const CONSULT_CALLER_PROVIDERS: readonly ConsultCallerProvider[] = ['openai', 'xai', 'meta', 'anthropic', 'other'];
+/**
+ * zkAPI model id prefixes by provider; xAI's models are listed as `x-ai/…`,
+ * Meta's as `meta-llama/…`. Open-weight models count as their maker's, so
+ * the rule errs towards keeping a question from the conversation's host.
+ */
+const CONSULT_MODEL_PREFIXES: Readonly<Record<string, Exclude<ConsultCallerProvider, 'other'>>> = {
+  openai: 'openai',
+  anthropic: 'anthropic',
+  'x-ai': 'xai',
+  xai: 'xai',
+  'meta-llama': 'meta',
+  meta: 'meta',
+};
 
 /**
  * The zkAPI model for an agent's question by who hosts the agent: an
@@ -220,14 +233,29 @@ export function consultFrontierModelFor(settings: ConsultSettings, provider: Con
   return provider === 'anthropic' ? consultClaudeFrontierModel(settings) : consultChatgptFrontierModel(settings);
 }
 
+/* Bare model names (no provider prefix) that still name a hosting provider's
+   own family, so an alias like `gpt-5.5` or `claude-sonnet-5` cannot slip past
+   the cross-provider rule. */
+const CONSULT_BARE_MODEL_FAMILIES: ReadonlyArray<readonly [RegExp, Exclude<ConsultCallerProvider, 'other'>]> = [
+  [/^(?:gpt|chatgpt|o\d)(?:[-.]|$)/, 'openai'],
+  [/^claude(?:[-.]|$)/, 'anthropic'],
+  [/^grok(?:[-.]|$)/, 'xai'],
+  [/^(?:llama|meta-llama)(?:[-.\d]|$)/, 'meta'],
+];
+
 /**
  * The provider a zkAPI model id names (`openai/gpt-5.5` → `openai`,
- * `x-ai/grok-5` → `xai`), for the cross-provider rule; undefined when the id
- * names none of the hosting providers.
+ * `x-ai/grok-5` → `xai`, a bare `gpt-5.5` → `openai`), for the cross-provider
+ * rule; undefined when the id names none of the hosting providers.
  */
-export function consultModelProvider(model: string): ConsultCallerProvider | undefined {
+export function consultModelProvider(model: string): Exclude<ConsultCallerProvider, 'other'> | undefined {
   const prefix = model.slice(0, model.indexOf('/')).toLowerCase();
-  return Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix) ? CONSULT_MODEL_PREFIXES[prefix] : undefined;
+  if (Object.hasOwn(CONSULT_MODEL_PREFIXES, prefix)) return CONSULT_MODEL_PREFIXES[prefix];
+  const name = model.slice(model.lastIndexOf('/') + 1).trim().toLowerCase();
+  for (const [family, provider] of CONSULT_BARE_MODEL_FAMILIES) {
+    if (family.test(name)) return provider;
+  }
+  return undefined;
 }
 
 /**

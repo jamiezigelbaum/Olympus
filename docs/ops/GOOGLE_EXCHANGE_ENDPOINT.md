@@ -14,9 +14,9 @@ to redeploy** (`bunx wrangler deploy`), because this repository cannot publish
 to the owner's Cloudflare account. **`exchange/` has changed since that
 deployment** — the bounded upstream body read and its reader cleanup — so the
 Worker currently serving is one revision behind this repository until the owner
-redeploys. Nothing about the deployed Worker's API or the worker-side
-integration changes with it; what is pending is a hardening fix, not a
-contract change.
+redeploys. The hardening fix changes no contract. The newer revision does add
+two read routes and a user counter ("User cap counter" below); the engine fails
+open until they exist, so deploying them is what turns the full state on.
 
 Owner-approved direction (2026-09-03): Google requires `client_secret` at the
 token endpoint for a Web-application OAuth client, even with PKCE. A secret
@@ -88,7 +88,7 @@ about closing a gap that PKCE leaves open:
 | Strict JSON schema | Exact allowed field set (an unknown field refuses the whole request), bounded lengths, and a character-class check on every field (RFC 7636 shape for `code_verifier`, printable ASCII for `code`/`state`/`refresh_token`) | `exchange/src/schema.ts` |
 | `redirect_uri` allowlist | Exact match against the configured relay URL(s), or a loopback form (defense in depth — see below) | `exchange/src/redirect-allowlist.ts` |
 | No logging of codes/tokens | The only thing ever logged is `{path, status, duration_ms}` — never a request or response body, never a header value | `exchange/src/index.ts` (`logRequest`) |
-| No CORS | No `Access-Control-Allow-*` header is ever returned, and any request carrying an `Origin` header is refused outright — this is a server-to-server endpoint, never called from a browser | `exchange/src/index.ts` (`hasBrowserOrigin`) |
+| No CORS on the token routes | No `Access-Control-Allow-*` header is ever returned by the token routes or the stats route, and any request carrying an `Origin` header is refused outright — these are server-to-server (or address-bar) routes, never called from a page. The one exception is the public, count-free `GET /exchange/capacity` | `exchange/src/index.ts` (`hasBrowserOrigin`), `exchange/src/capacity.ts` |
 | Timeouts | 10s deadline on every call to Google, covering the response BODY as well as the headers (`AbortController` plus a raced deadline, so a peer that answers and then dribbles cannot outlive it) | `exchange/src/google.ts` |
 | Upstream body cap | 64 KiB on Google's response, enforced on the bytes actually read; an oversized answer is refused rather than truncated, and none of it is echoed | `exchange/src/google.ts` (`readBoundedText`) |
 | Structured error passthrough | Google's error responses are forwarded with their exact status and body (Google's OAuth error bodies are a small fixed vocabulary and never echo the secret); this endpoint's own errors are a fixed `{error, error_description}` shape that never includes exception text, a stack trace, or anything read from `env` | `exchange/src/index.ts` (`respondFromGoogle`, `errorResponse`) |
@@ -160,8 +160,10 @@ that has already been done by someone who actually can do it.
 
 Refresh tokens are stored **only on the user's own machine**, in that
 install's secret store, exactly as they are today for every other source.
-This endpoint is completely stateless: it holds no database, no per-user
-record, and no token of any kind at rest. A call to
+The token exchange is stateless: it holds no database, no per-user token, and
+no credential of any kind at rest. (The one thing it does keep is the distinct-
+user tally in "User cap counter" below: a keyed hash per Google account in the
+same KV namespace the rate limiter uses, never an id, an address or a token.) A call to
 `POST /exchange/google/refresh` is a pure function of its input — hand it a
 refresh token and Google's client secret, get back whatever Google returns —
 and nothing here would even notice if the *same* refresh token were sent by
@@ -169,13 +171,15 @@ two different installs (which should never happen, since a refresh token is
 never shared between installs by anything Olympus does). Losing this Worker
 entirely, or an attacker fully compromising it, discloses `GOOGLE_CLIENT_SECRET`
 and nothing else — no user data, no user tokens, no user identifiers ever
-pass through its logs (see "No logging" above) or its (absent) storage.
+pass through its logs (see "No logging" above), and its storage holds only the
+hashed tally.
 
 ## API
 
 Base: `https://auth.olympusplugin.ai/exchange` (see "Hostname and routing"
-below for why this hostname). Both routes are `POST` only and reject every
-other method with `405`.
+below for why this hostname). The two token routes are `POST` only and reject
+every other method with `405`. Two read-only `GET` routes sit beside them, for
+the user cap ("User cap counter" below).
 
 ### `POST /exchange/google`
 
@@ -224,6 +228,133 @@ Same response shapes and error table as above (the `redirect_uri_not_allowed`
 row does not apply to this route — a refresh has no `redirect_uri`). Rate
 limiting shares the same per-IP key namespace as `/exchange/google`, so a
 caller hammering either route exhausts one shared budget rather than two.
+
+## User cap counter and the full state
+
+**Why.** Olympus's publisher Google app is unverified and asks for restricted
+scopes (`gmail.readonly`, `drive.readonly`), so Google allows at most **100
+distinct users over the app's entire lifetime**. User 101 is stopped on
+Google's own page and never returns to Olympus, so nothing downstream can catch
+it after the fact. This Worker is the one component that sees every finished
+consent, so it keeps the count and tells the engine when the wall is near. The
+count is also the owner's evidence for deciding whether to pay for Google's
+verification.
+
+**How it counts.** The publisher Gmail and Drive flows request `openid`
+(`src/core/connect.ts`), so Google's `authorization_code` token response carries
+an `id_token`. After a successful exchange (never a refresh, never a refused
+one), the Worker decodes that token's payload, takes `sub`, and records
+`HMAC-SHA256(sub)` under `google-users:u:<hex>` in the `RATE_LIMIT_KV`
+namespace, with no TTL. The key is the whole record: the Google id and the
+address are never stored, one account is one key, so Gmail and Drive for the
+same account, and every reconnect, count once. `google-users:count` holds the
+running total so the public route costs one KV read; each new account
+recomputes it as the larger of "stored total + 1" and a fresh `list` of the
+keys (the list can lag a write by up to a minute, and two simultaneous new
+users can race the stored total, so each errs low and the next new account
+corrects it). The token's signature is not checked: it came from Google's token
+endpoint over TLS inside this same request, and the count is a tally, not an
+authentication decision.
+
+Counting is bookkeeping and **cannot break, change or delay an exchange**: it
+runs under `ctx.waitUntil` after the response is built from the untouched
+upstream text, every KV call is wrapped, and any failure only loses one tally.
+A sign-in whose response had no usable `id_token` (for example a person who
+declined the `openid` scope) cannot be attributed; those are tallied in
+`google-users:exchanges-without-id-token` and shown on the stats route, so a
+broken assumption is visible rather than silent.
+
+**The number is a lower bound of Google's.** Google also counts consents whose
+exchange never completed and the owner's own test accounts. `GOOGLE_USER_COUNT_OFFSET`
+(default `2`) is added to the reported number to cover the test accounts; the
+gap between `GOOGLE_FULL_AT` (default `90`) and `GOOGLE_USER_CAP` (default
+`100`) is the margin for everything else.
+
+**Vars** (`exchange/wrangler.toml`, public, change with a redeploy):
+
+| Var | Default | Meaning |
+|---|---|---|
+| `GOOGLE_USER_COUNT_OFFSET` | `2` | Added to the counted number |
+| `GOOGLE_USER_CAP` | `100` | Google's limit; shown on the stats page |
+| `GOOGLE_FULL_AT` | `90` | The state turns `full` when counted + offset reaches this |
+| `GOOGLE_SIGNIN_FULL` | `0` | `1` forces `full` whatever the count says (and `0` returns to the count) |
+
+**Secrets** (`wrangler secret put`, never committed):
+
+| Secret | Required | Meaning |
+|---|---|---|
+| `STATS_TOKEN` | For the stats route | At least 16 characters. Without it `/exchange/stats` answers `404` |
+| `USER_COUNT_HMAC_KEY` | No | Keys the hash of each account id. Without it the hash is plain SHA-256 under a fixed label. Set it **before** the first real sign-in and never rotate it: a new key makes every returning account look new and double-counts it |
+
+### `GET /exchange/capacity`
+
+Public, no token, readable from any origin, cacheable for about a minute
+(`Cache-Control: public, max-age=60`). Answers exactly
+`{ "google": "open" }` or `{ "google": "full" }` and never a count. `full` when
+`GOOGLE_SIGNIN_FULL` is `1`, or when counted + offset >= `GOOGLE_FULL_AT`.
+An unreadable counter answers `open` (the route fails open; the manual
+override still works with no KV at all).
+
+### `GET /exchange/stats`
+
+The owner's tracker. Bookmark this, with the token the owner chose for
+`STATS_TOKEN`:
+
+```text
+https://auth.olympusplugin.ai/exchange/stats?token=<STATS_TOKEN>
+```
+
+A browser gets a small page ("43 of 100", a bar, whether sign-in is open or
+full, the last new account's time). The same URL with `Accept: application/json`,
+`?format=json`, or `curl -H 'Authorization: Bearer <STATS_TOKEN>'` returns JSON:
+`users` (counted + offset, the number out of the cap), `counted`, `offset`,
+`cap`, `full_at`, `state`, `forced_full`, `last_new_user_at`,
+`exchanges_without_id_token`, `generated_at`. A missing or wrong token is `401`
+and reveals no number; the check compares digests, and attempts are rate
+limited per IP like the exchange. `503` means the counter could not be read.
+
+**Residual risk of the bookmarkable URL.** A token in a query string lands in
+the browser's history and bookmarks, and Cloudflare's own request logs (the
+Worker never logs it: only the path is logged). The token guards a read-only
+number, not a credential or a user record, so the damage from a leak is that
+someone learns the count; the Worker sends `Referrer-Policy: no-referrer` and
+`Cache-Control: no-store`, and a leaked token is replaced with
+`wrangler secret put STATS_TOKEN`. Use the `Authorization: Bearer` form from a
+script.
+
+### The engine's side
+
+Before the dashboard opens Google consent through Olympus's own app (a
+first-time Gmail or Drive connect with no Google app of the owner's own on
+file), `src/core/google-publisher-capacity.ts` asks `/exchange/capacity` with a
+1.5 second timeout, caching the answer for a minute. On `full` the dashboard's
+start route answers `409 google_signin_full` and the Gmail and Drive cards show
+the owner's sentence ("Google sign-in is full for the moment. We're working on
+it. For now, you can still connect Google by using your own Google app.") with
+a **Set up** button into the bring-your-own steps. Everything else fails
+**open**: a network error, a timeout, a non-200, a redirect, or any body that is
+not exactly `{"google":"open"|"full"}` reads as open. Own-app flows, Dropbox, X,
+token refresh, and a source that already holds its own connection (Reauthenticate
+re-signs an account already counted) never see the full state. A Google source
+with no connection of its own is held back even when the other Google source is
+connected: Google's consent lets the person pick any account, so adding Drive
+beside Gmail can be a new user. Olympus stores only opaque account labels, never
+the address, so it cannot preselect the account with `login_hint`; a
+Reauthenticate with a different account can still consume a slot.
+
+### Owner and anchor deploy steps
+
+1. `cd exchange && bunx wrangler secret put STATS_TOKEN` (a long random string).
+2. Optional, before the first real sign-in:
+   `bunx wrangler secret put USER_COUNT_HMAC_KEY` (another random string, then
+   never change it).
+3. `bunx wrangler deploy` (the new vars ship in `wrangler.toml`).
+4. Check: `curl -s https://auth.olympusplugin.ai/exchange/capacity` answers
+   `{"google":"open"}`; `curl -s https://auth.olympusplugin.ai/exchange/stats`
+   answers `401`; the stats URL with the token shows the page; and the relay
+   headers check in the runbook (step 7) still passes.
+5. To switch the full state on by hand: set `GOOGLE_SIGNIN_FULL = "1"` and
+   redeploy. To lower the threshold, change `GOOGLE_FULL_AT`.
 
 ## Hostname and routing
 
@@ -393,6 +524,16 @@ would be a check that expires on the next rotation. Two defences instead:
   Google account everywhere downstream of the token response.
 
 ## Testing
+
+`exchange/test/user-count.test.ts` covers the user counter and its two routes:
+distinct counting (the same account twice, Gmail plus Drive for one account,
+different accounts, the offset, no raw id or address in storage, refresh and
+refused exchanges never counting), counting never breaking or changing an
+exchange (throwing KV, a hanging counter under `waitUntil`, malformed tokens),
+`/exchange/capacity` at and around the threshold and under the manual override
+(and failing open), and `/exchange/stats` refusing every request without the
+token. The engine's side is in `test/google-publisher-capacity.test.ts` and the
+"Google sign-in capacity" block of `test/dashboard-oauth-publisher-relay.test.ts`.
 
 `exchange/test/google-exchange.test.ts` covers schema refusals (missing
 fields, wrong shapes, unknown fields), the `redirect_uri` allowlist (exact

@@ -36,8 +36,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import type { OlympusConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../core/email.ts';
-import { callerProviderFromLabel, markInProcessRemoteRequest, type OperationCaller } from '../core/operation-caller.ts';
-import { pinnedGrantProvider } from './remote-oauth/pinned-clients.ts';
+import { markInProcessRemoteRequest, type OperationCaller } from '../core/operation-caller.ts';
 import type { OperationContext } from '../core/operations.ts';
 import {
   isWellFormedRemoteConnectionToken,
@@ -45,7 +44,7 @@ import {
   type RemoteConnectionStore,
 } from '../core/remote-connections.ts';
 import { isRelayedRequest } from '../core/remote-access.ts';
-import { isWellFormedOAuthAccessToken } from '../core/remote-oauth-store.ts';
+import { isWellFormedOAuthAccessToken, remoteConnectionProvider } from '../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, remoteMcpResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
 import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/source-answer-jobs.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
@@ -54,7 +53,7 @@ import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts'
 import { remoteSearchExtension, type RemoteSearchOptions } from './remote-search.ts';
 import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
-import { remoteErrorOutput, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
+import { remoteErrorOutput, remoteRetryAfterSeconds, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
@@ -101,8 +100,11 @@ export interface RemoteMcpHandlerOptions {
   directoryServer?: typeof createChatGptDirectoryMcpServer;
 }
 
-/** The verified connection behind a remote request; `clientId` for OAuth grants. */
-export type RemoteMcpConnection = Pick<RemoteConnectionRecord, 'id' | 'displayName'> & { clientId?: string | null };
+/** The verified connection behind a remote request; `clientId` for OAuth grants, `provider` as stored. */
+export type RemoteMcpConnection = Pick<RemoteConnectionRecord, 'id' | 'displayName'> & {
+  clientId?: string | null;
+  provider?: RemoteConnectionRecord['provider'];
+};
 
 export function isRemoteMcpRequest(request: Request): boolean {
   return remoteMcpSurface(request) !== undefined;
@@ -189,14 +191,39 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
-      return await transport.handleRequest(request, {
+      const response = await transport.handleRequest(request, {
         authInfo: { token: '', clientId: verification.connection.id, scopes: [] },
         ...(parsedBody !== undefined ? { parsedBody } : {}),
       });
+      return chatgpt ? response : await withToolRetryAfter(response);
     } finally {
       await server.close().catch(() => undefined);
     }
   }
+}
+
+/**
+ * A remote tool result that asks the agent to wait (a busy refusal, core/
+ * remote-result.ts retry_after_seconds) also says so as HTTP Retry-After, as
+ * the OpenAPI surface does. Any other response passes through untouched.
+ */
+async function withToolRetryAfter(response: Response): Promise<Response> {
+  if (response.status !== 200 || !(response.headers.get('Content-Type') ?? '').includes('application/json')) return response;
+  const text = await response.text();
+  const rebuilt = (headers: Headers) => new Response(text, { status: response.status, statusText: response.statusText, headers });
+  if (!text.includes('retry_after_seconds')) return rebuilt(response.headers);
+  let retryAfter: number | undefined;
+  try {
+    const message = JSON.parse(text) as { result?: { isError?: unknown; content?: Array<{ type?: unknown; text?: unknown }> } };
+    const first = message.result?.isError === true ? message.result.content?.[0] : undefined;
+    if (first?.type === 'text' && typeof first.text === 'string') retryAfter = remoteRetryAfterSeconds(JSON.parse(first.text));
+  } catch {
+    // Not a single tool error: no header.
+  }
+  if (retryAfter === undefined) return rebuilt(response.headers);
+  const headers = new Headers(response.headers);
+  headers.set('Retry-After', String(retryAfter));
+  return rebuilt(headers);
 }
 
 /**
@@ -319,13 +346,16 @@ export function lazyRemoteConnectionStore(
 }
 
 /**
- * The remote caller: a pinned client's grant is placed by its client id
- * (ChatGPT → OpenAI, Claude → Anthropic, Grok → xAI); any other connection
- * by the name it was approved under.
+ * The remote caller, with the host its connection records
+ * (core/remote-oauth-store.ts remoteConnectionProvider): a pinned client's
+ * grant by its client id (ChatGPT → OpenAI, Claude → Anthropic, Grok and
+ * Grok Bot or Cursor → xAI), any other connection by the agent it was
+ * created for or the name it was approved under, else `other`. Every remote
+ * caller has one, so a host Olympus does not know is said, not silent.
  */
 export function remoteOperationCaller(connection: RemoteMcpConnection): OperationCaller {
-  const provider = pinnedGrantProvider(connection) ?? callerProviderFromLabel(connection.displayName);
-  return { surface: 'remote', connectionId: connection.id, displayName: connection.displayName, ...(provider ? { provider } : {}) };
+  const provider = remoteConnectionProvider({ clientId: connection.clientId ?? null, displayName: connection.displayName, chosen: connection.provider ?? null });
+  return { surface: 'remote', connectionId: connection.id, displayName: connection.displayName, provider };
 }
 
 /**

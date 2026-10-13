@@ -474,7 +474,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function agentParams(form: HTMLFormElement): OlympusDashboardControlParams | undefined {
     const kind = form.dataset.agentKind;
     if (kind === 'pair') return { action: 'mint_agent_pairing_code' };
-    if (kind === 'key') return { action: 'create_agent_key', name: formRecord(form).name || '' };
+    if (kind === 'key') {
+      // The agent chosen on Connect an agent sets who hosts the connection.
+      const agent = form.closest<HTMLElement>('[data-agent]')?.dataset.agent;
+      return { action: 'create_agent_key', name: formRecord(form).name || '', ...(agent ? { agent } : {}) };
+    }
     if (kind === 'revoke') return { action: 'revoke_agent_connection', connection_id: formRecord(form).connection_id || '' };
     if (kind === 'remote-on') return { action: 'set_remote_access', enabled: true };
     if (kind === 'remote-off') return { action: 'set_remote_access', enabled: false };

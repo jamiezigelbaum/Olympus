@@ -638,6 +638,29 @@ describe('R1: every refusal and timed-out upload ends its transport', () => {
     expect(small.status()).toMatchObject({ uploading: 0, inFlight: 0 });
   });
 
+  test('a timed-out upload gets its 408 before the connection idle limit ends it, whenever it starts', async () => {
+    // Bun sweeps the connection idle limit on a 4 s tick: uploads started
+    // every 100 ms across more than one tick put some just before a sweep,
+    // which used to close them before their own 300 ms deadline answered.
+    const relay = await makeRelay({
+      connectionIdleTimeoutSeconds: 1,
+      uploadTimeoutMs: 300,
+      uploadIdleTimeoutMs: 250,
+      maxConcurrentUploads: 100,
+      uploadsPerIp: 100,
+      publicRequestsPerIp: { capacity: 1000, refillPerSecond: 0 },
+    });
+    const uploads: Array<ReturnType<typeof heldUpload>> = [];
+    for (let i = 0; i < 42; i += 1) {
+      uploads.push(heldUpload(relay.port, '/openai/mcp', {}, 8_000, 10));
+      await Bun.sleep(100);
+    }
+    await until(() => uploads.every((u) => u.state.closed), 9_000);
+    expect(uploads.map((u) => u.status())).toEqual(uploads.map(() => 408));
+    for (const u of uploads) expect(u.state.closedAfterMs).toBeLessThan(6_500);
+    expect(relay.status()).toMatchObject({ uploading: 0, inFlight: 0 });
+  });
+
   test('long quiet answers, quiet SSE streams and install sessions outlive the connection idle limit', async () => {
     const relay = await makeRelay({ connectionIdleTimeoutSeconds: 1, publicRequestsPerIp: { capacity: 1000, refillPerSecond: 0 } });
     const server = Bun.serve({

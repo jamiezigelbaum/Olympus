@@ -75,6 +75,12 @@ export const REMOTE_PRIVATE_NOTE = 'Private items may answer this; the person ca
 export const REMOTE_ANSWER_WITHHELD = 'Olympus withheld this answer under the owner\'s privacy rules.';
 export const REMOTE_REPLY_WITHHELD = 'Olympus withheld the reply because it looked like it contained a password, key or token.';
 const REMOTE_REFUSAL_FALLBACK = 'Olympus could not ask anonymously.';
+/**
+ * Said with an anonymous answer when the asking connection's host is not
+ * known, so the question could not be kept from that host's models (the
+ * sentence core/consult-ask.ts CONSULT_ASK_MESSAGES.providerUnknown says).
+ */
+export const REMOTE_PROVIDER_UNKNOWN_NOTE = 'Olympus does not know which company runs this agent, so it could not make sure the answer came from another company\'s model.';
 /** What needs_choice tells the agent (the sentence core/consult-ask.ts CONSULT_ASK_MESSAGES.needsChoice says). */
 export const REMOTE_NEEDS_CHOICE_MESSAGE = 'Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.';
 
@@ -430,6 +436,8 @@ function anonymousAnswerOutput(raw: unknown): Record<string, unknown> {
       ...(route ? { route } : {}),
       ...(sent ? { sent } : {}),
       ...(note ? { note } : {}),
+      // A fixed sentence, never the worker's text.
+      ...(typeof record.providerNote === 'string' ? { provider_note: REMOTE_PROVIDER_UNKNOWN_NOTE } : {}),
     };
   }
   if (record.code === 'needs_choice') {
@@ -524,7 +532,9 @@ export type RemoteErrorCode =
   | RemoteTransportErrorCode
   | 'internal_error'
   | 'unknown_operation'
-  | 'operation_unavailable';
+  | 'operation_unavailable'
+  /** Only the relay says it, for any tool call while the install is offline (connect-relay/shared/offline-result.ts). */
+  | 'olympus_offline';
 
 const REMOTE_ERROR_TEXT: Readonly<Record<RemoteErrorCode, string>> = {
   invalid_params: 'The request was not valid. Check the arguments against the tool\'s schema and try again.',
@@ -554,6 +564,16 @@ const REMOTE_ERROR_TEXT: Readonly<Record<RemoteErrorCode, string>> = {
   method_not_allowed: 'That HTTP method is not allowed here.',
   unsupported_media_type: 'The request body must be JSON (Content-Type: application/json).',
   payload_too_large: 'The request body is too large.',
+  // The relay's sentence names a coarse "last seen" when it has one (connect-relay/shared/offline-result.ts).
+  olympus_offline: 'Olympus is off; try again later.',
+};
+
+/** How long a busy refusal asks an agent to wait (the body's retry_after_seconds and the HTTP Retry-After). */
+export const SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30;
+
+/** Codes that always ask the agent to come back after a while. */
+const RETRY_AFTER_SECONDS: Readonly<Partial<Record<RemoteErrorCode, number>>> = {
+  source_answer_busy: SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS,
 };
 
 export const REMOTE_ERROR_CODES: readonly RemoteErrorCode[] = Object.freeze(Object.keys(REMOTE_ERROR_TEXT) as RemoteErrorCode[]);
@@ -578,6 +598,15 @@ export interface RemoteErrorBody {
   ref?: string;
   /** The argument at fault: only ever one the operation declares on the remote surface. */
   param?: string;
+  /** Seconds to wait before trying again (busy, or offline at the relay); also sent as HTTP Retry-After. */
+  retry_after_seconds?: number;
+}
+
+/** A body's retry_after_seconds, when it is a well-formed one (for the HTTP Retry-After header). */
+export function remoteRetryAfterSeconds(body: unknown): number | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const value = (body as { retry_after_seconds?: unknown }).retry_after_seconds;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 86_400 ? value : undefined;
 }
 
 export interface RemoteErrorOptions {
@@ -597,6 +626,8 @@ export function remoteErrorOutput(error: unknown, options: RemoteErrorOptions = 
     const param = namedParam(error.message, options.declaredParams);
     if (param) return { error: code, message: invalidParamMessage(param), param };
   }
+  const retryAfter = RETRY_AFTER_SECONDS[code];
+  if (retryAfter !== undefined) return { error: code, message: REMOTE_ERROR_TEXT[code], retry_after_seconds: retryAfter };
   if (!REFERENCED_ERROR_CODES.has(code)) return { error: code, message: REMOTE_ERROR_TEXT[code] };
   const ref = mintErrorRef();
   const errorClass = error instanceof Error ? error.name : typeof error;
@@ -685,7 +716,7 @@ const SOURCE_ANSWER_SCHEMA = {
 
 const ANONYMOUS_ANSWERED_SCHEMA = {
   type: 'object',
-  description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent".',
+  description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
   additionalProperties: false,
   required: ['kind', 'status', 'reply', 'level', 'rewritten', 'remembered', 'network_identity'],
   properties: {
@@ -701,6 +732,7 @@ const ANONYMOUS_ANSWERED_SCHEMA = {
     route: { type: 'string', maxLength: MAX_ROUTE },
     sent: { type: 'string', maxLength: MAX_SENT },
     note: { type: 'string', maxLength: MAX_MESSAGE },
+    provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE },
   },
 } as const;
 
@@ -806,6 +838,12 @@ export const REMOTE_ERROR_SCHEMA = {
     message: { type: 'string', description: 'A fixed sentence for this code.' },
     ref: { type: 'string', pattern: '^[0-9a-f]{16}$', description: 'Where the owner finds this failure in Olympus\'s log on the computer.' },
     param: { type: 'string', pattern: PARAM_NAME.source, description: 'The argument at fault, when it is one the operation declares.' },
+    retry_after_seconds: {
+      type: 'integer',
+      minimum: 1,
+      maximum: 86400,
+      description: 'Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header.',
+    },
   },
 } as const;
 

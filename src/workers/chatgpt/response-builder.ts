@@ -25,6 +25,7 @@
 import { isValidPort, isValidSshTarget } from '../../core/remote-open.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
+import { GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE } from '../../core/google-signin-full-copy.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import type {
@@ -232,6 +233,8 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
       agent: remote.agent === true,
     };
   }
+  const controlsHref = safeHref(view.computerControls?.href);
+  if (controlsHref) out.computerControls = { href: controlsHref };
   const progress = view.progress;
   if (progress) {
     out.progress = {
@@ -1228,6 +1231,7 @@ type SurfaceOnlyErrorCode =
   | 'internal'
   | 'models_not_ready'
   | 'connect_unavailable'
+  | 'google_signin_full'
   | 'already_connected'
   | 'not_connected'
   | 'not_linked'
@@ -1263,6 +1267,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   unavailable: 'The Olympus dashboard is not available on the computer right now. Try again shortly.',
   models_not_ready: 'Search isn\'t ready on your computer yet. Finish setting up models in Olympus on your computer, then try again.',
   connect_unavailable: 'This source can\'t be connected from ChatGPT on this computer. Connect it in Olympus on your computer.',
+  google_signin_full: GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE,
   already_connected: 'This source already has a connected account. Disconnect it first to connect another.',
   not_connected: 'Connect this source before choosing what Olympus may read.',
   not_linked: 'Your computer isn\'t linked to ChatGPT yet. Open Olympus on your computer, then try again.',

@@ -235,6 +235,20 @@ Reviewer demo
   changed until OpenAI's review ends. No engine or plugin updates, config or
   data edits, reinstalls or restarts, and releases skip it. Ask the owner
   before touching it; update it only after the review result.
+- The relay keeps shipping while the demo engine is frozen. The directory
+  endpoint serves the submitted listing, not the current engine's
+  (`connect-relay/server/directory/approved.ts`); CI holds the relay's
+  reviewer-path answers to the submitted relay's and connects the submitted
+  engine's relay client to it (`connect-relay/test/reviewer-path.test.ts`);
+  `connect-relay/deploy/deploy.sh` walks the reviewer path live before and
+  after each deploy and rolls back on a failure
+  (`connect-relay/deploy/reviewer-check.ts`). Engines serve the same pinned
+  listing on `/openai/mcp` once connected (tool calls run the current code;
+  `src/workers/chatgpt/directory-surface.ts`), and CI holds the current
+  handlers to the submitted schemas and runs the submitted pages against
+  current results (`test/chatgpt-directory-approved.test.ts`). A new
+  submission replaces the pinned listing from the submitted commit, together
+  with its digests and the golden recording.
 - [ ] Demo engine has anonymous questions on, with a funded zkAPI account
       (owner funds it) so the zkAPI case never runs dry.
 - [ ] Demo engine holds only `demo-data/`, carries the demo marker, and has
