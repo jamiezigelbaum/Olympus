@@ -167,8 +167,13 @@ export class TierSnifferStore {
     stillAsk?: () => boolean;
   }): boolean {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
+    const priority = Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority!))) : 0;
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk()) return false;
+      const before = this.db.query(`
+        SELECT priority FROM sniffer_questions
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+      `).get(...subjectParams(question.subject), question.pass) as { priority: number } | null;
       this.db.query(`
       INSERT INTO sniffer_questions (
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
@@ -190,8 +195,17 @@ export class TierSnifferStore {
       question.material,
       JSON.stringify([...question.flags]),
       this.now().toISOString(),
-      Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority!))) : 0,
+      priority,
     );
+      // Recent order is priority, then queue time, which an update keeps.
+      if (priority > 0 && (!before || priority > before.priority)) {
+        // A blocked scan may have moved below this new/promoted question.
+        // Revisit the recent window next tick, atomically with enqueue; keep
+        // the oldest cursors so priority arrivals cannot erase aging progress.
+        // An unchanged re-enqueue (every sync) must not rewind the scan.
+        this.db.query('DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)')
+          .run('all:recent', `${question.pass}:recent`);
+      }
       return true;
     }).immediate();
   }
