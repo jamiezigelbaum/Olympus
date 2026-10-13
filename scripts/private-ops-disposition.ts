@@ -71,6 +71,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/private-answers.md',
   'docs/design/private-model-benchmark.md',
   'docs/design/relay.md',
+  'docs/design/windows-wsl.md',
   'docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md',
   'docs/ops/HARNESS_PROTOCOL.md',
   'docs/ops/OAUTH_RELAY.md',
