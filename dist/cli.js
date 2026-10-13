@@ -19574,11 +19574,25 @@ class TierLedger {
       jobLedgerPaths: JSON.parse(row.job_ledger_paths_json)
     }));
   }
-  clearSecretSideStoreDebt(identity) {
-    this.db.query(`
-      DELETE FROM secret_side_store_debt
+  secretSideStoreDebtJobLedgerPaths(identity) {
+    const row = this.db.query(`
+      SELECT job_ledger_paths_json FROM secret_side_store_debt
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(...idParams(identity));
+    `).get(...idParams(identity));
+    return row ? JSON.parse(row.job_ledger_paths_json) : [];
+  }
+  clearSecretSideStoreDebt(identity, clearedJobLedgerPaths) {
+    this.db.transaction(() => {
+      if (clearedJobLedgerPaths) {
+        const cleared = new Set(clearedJobLedgerPaths);
+        if (this.secretSideStoreDebtJobLedgerPaths(identity).some((path) => !cleared.has(path)))
+          return;
+      }
+      this.db.query(`
+        DELETE FROM secret_side_store_debt
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity));
+    }).immediate();
   }
   removeCopies(identity) {
     let removed = [];
@@ -24032,7 +24046,12 @@ function forgetSecretInSideStores(options) {
       result.failed += 1;
     }
   }
-  for (const jobsPath of new Set([...extractionJobsDbPaths(), ...options.jobLedgerPaths ?? []])) {
+  let owedBefore = [];
+  try {
+    owedBefore = ledger.secretSideStoreDebtJobLedgerPaths(identity);
+  } catch {}
+  const jobLedgers = [...new Set([...extractionJobsDbPaths(), ...owedBefore, ...options.jobLedgerPaths ?? []])];
+  for (const jobsPath of jobLedgers) {
     try {
       const cleared = clearExtractionJobNames(jobsPath, {
         provider: identity.provider,
@@ -24054,7 +24073,7 @@ function forgetSecretInSideStores(options) {
     if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker)
       ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
     else
-      ledger.clearSecretSideStoreDebt(identity);
+      ledger.clearSecretSideStoreDebt(identity, jobLedgers);
   } catch {}
   if (result.failed > 0)
     console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
