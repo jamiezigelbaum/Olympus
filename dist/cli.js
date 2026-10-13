@@ -17047,19 +17047,31 @@ function createDropboxSourceConnector(options) {
     const resolver = options.deletedItemIdentityResolver;
     if (!resolver?.activeItemsUnderLocatorIfIndexed || room <= 0)
       return [];
-    const limit = room + live.size + deleted.size;
+    const baseLimit = room + live.size + deleted.size;
     const found = new Map;
     for (const folder of deletedFolderPaths(entry)) {
-      for (const descendant of resolver.activeItemsUnderLocatorIfIndexed({
-        provider: CONNECTOR_ID,
-        accountScope: account,
-        locatorUri: folder,
-        limit
-      })) {
-        const id = descendant.identity.providerItemId;
-        if (live.has(id) || deleted.has(id) || found.has(id))
-          continue;
-        found.set(id, descendant);
+      let limit = baseLimit;
+      for (;; ) {
+        const descendants = resolver.activeItemsUnderLocatorIfIndexed({
+          provider: CONNECTOR_ID,
+          accountScope: account,
+          locatorUri: folder,
+          limit
+        });
+        let excluded = 0;
+        for (const descendant of descendants) {
+          if (!metadataAllowed(descendant.locatorUri.toLowerCase())) {
+            excluded += 1;
+            continue;
+          }
+          const id = descendant.identity.providerItemId;
+          if (live.has(id) || deleted.has(id) || found.has(id))
+            continue;
+          found.set(id, descendant);
+        }
+        if (found.size >= room || descendants.length < limit || excluded === 0)
+          break;
+        limit += excluded;
       }
     }
     return [...found.values()].slice(0, room).map((descendant) => rawItemFromDeletedDescendant(descendant, account, fetchedAt));
@@ -17206,9 +17218,9 @@ function createDropboxSourceConnector(options) {
               continue;
             }
             const deletion = scopedItems([entry], fetchedAt);
-            if (deletion.length > 0 && options.deletedItemIdentityResolver?.lookupsReady?.() === false)
+            if (options.deletedItemIdentityResolver?.lookupsReady?.() === false)
               break;
-            let descendants = deletion.length === 0 || lookaheadCapped ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            let descendants = lookaheadCapped ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
             if (descendants.length > 0 && hasMore && !lookaheadComplete) {
               const proof = await lookAhead(nextCursor);
               if (proof === "failed") {
