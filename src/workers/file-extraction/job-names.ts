@@ -117,7 +117,10 @@ export function clearExtractionJobNames(
   dbPath: string,
   item: ExtractionJobItemKey,
   options: {
-    /** The tier ledger that holds the item Secrets: recorded as a claim on the redaction. */
+    /**
+     * The tier ledger that holds the item Secrets: recorded as a claim on
+     * the redaction.
+     */
     claimant?: string;
     /**
      * Asked inside this ledger's write lock; nothing is written when it says
