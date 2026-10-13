@@ -265,8 +265,18 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
       warn.mockRestore();
     }
     expect(fx.ledger.secretSideStoreDebts()).toEqual([expect.objectContaining({ providerItemId: 'garden', jobLedgerPaths: [runtimePath] })]);
-    // The runtime stops (its path forgotten in this process); its ledger comes back holding the name.
+    // The runtime stops (its path forgotten in this process), its ledger still
+    // unreachable; the Secret is listed again meanwhile: still owed there.
     unregister();
+    const warnAgain = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await fx.set.sync(fixtureConnector(() => [{ ...GARDEN, version: 'v2' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      expect(warnAgain).toHaveBeenCalled();
+    } finally {
+      warnAgain.mockRestore();
+    }
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([expect.objectContaining({ providerItemId: 'garden', jobLedgerPaths: [runtimePath] })]);
+    // Its ledger comes back holding the name.
     rmSync(runtimePath);
     const restored = new LocalFileExtractionJobStore(runtimePath);
     const [gardenJob] = restored.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);

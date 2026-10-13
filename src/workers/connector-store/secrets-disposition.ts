@@ -138,8 +138,16 @@ export function forgetSecretInSideStores(options: {
     }
   }
   // The default ledger, any other this process opened (a runtime given its
-  // own path), and any an earlier attempt still owes.
-  for (const jobsPath of new Set([...extractionJobsDbPaths(), ...(options.jobLedgerPaths ?? [])])) {
+  // own path), and any an earlier attempt still owes (whoever calls: a
+  // listing must not settle a debt it never tried).
+  let owedBefore: string[] = [];
+  try {
+    owedBefore = ledger.secretSideStoreDebtJobLedgerPaths(identity);
+  } catch {
+    // Read again at the next tick.
+  }
+  const jobLedgers = [...new Set([...extractionJobsDbPaths(), ...owedBefore, ...(options.jobLedgerPaths ?? [])])];
+  for (const jobsPath of jobLedgers) {
     try {
       const cleared = clearExtractionJobNames(jobsPath, {
         provider: identity.provider,
@@ -159,7 +167,7 @@ export function forgetSecretInSideStores(options: {
   }
   try {
     if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
-    else ledger.clearSecretSideStoreDebt(identity);
+    else ledger.clearSecretSideStoreDebt(identity, jobLedgers);
   } catch {
     // The ledger itself unreachable: the copies' own settlement fails loudly elsewhere.
   }

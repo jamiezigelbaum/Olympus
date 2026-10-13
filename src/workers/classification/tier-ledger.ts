@@ -2401,11 +2401,30 @@ export class TierLedger {
     }));
   }
 
-  clearSecretSideStoreDebt(identity: TierLedgerIdentity): void {
-    this.db.query(`
-      DELETE FROM secret_side_store_debt
+  /** The extraction job ledgers a Secret is still owed in (empty when it owes none). */
+  secretSideStoreDebtJobLedgerPaths(identity: TierLedgerIdentity): string[] {
+    const row = this.db.query(`
+      SELECT job_ledger_paths_json FROM secret_side_store_debt
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(...idParams(identity));
+    `).get(...idParams(identity)) as { job_ledger_paths_json: string } | null;
+    return row ? JSON.parse(row.job_ledger_paths_json) as string[] : [];
+  }
+
+  /**
+   * Settle a Secret's side-store debt, unless it owes a job ledger outside
+   * `clearedJobLedgerPaths` (one another process recorded meanwhile).
+   */
+  clearSecretSideStoreDebt(identity: TierLedgerIdentity, clearedJobLedgerPaths?: readonly string[]): void {
+    this.db.transaction(() => {
+      if (clearedJobLedgerPaths) {
+        const cleared = new Set(clearedJobLedgerPaths);
+        if (this.secretSideStoreDebtJobLedgerPaths(identity).some((path) => !cleared.has(path))) return;
+      }
+      this.db.query(`
+        DELETE FROM secret_side_store_debt
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity));
+    }).immediate();
   }
 
   removeCopies(identity: TierLedgerIdentity): TierCopy[] {
