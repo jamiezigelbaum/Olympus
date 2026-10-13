@@ -94,6 +94,22 @@ const PROSE_WORDS = new Set([
   'strength', 'symbols', 'unchanged', 'use', 'used', 'using', 'via',
 ]);
 
+/** Decode a bounded number of nested URL/HTML escapes, including fragment parameters. */
+export function normalizeCredentialUrlPart(value: string, percent = true): string {
+  for (let depth = 0; depth < 4; depth++) {
+    let next = value.replace(/&(?:amp|#0*38|#x0*26);/gi, '&');
+    if (percent) {
+      // Decode runs independently so an unrelated malformed '%' cannot hide a key.
+      next = next.replace(/(?:%[0-9a-f]{2})+/gi, encoded => {
+        try { return decodeURIComponent(encoded); } catch { return encoded; }
+      });
+    }
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
 /** A mask or elision standing in for the real value: `****`, `xxxxx`, `abc...xyz`. */
 const MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
 const PLACEHOLDER_WORDS = new RegExp(
@@ -602,7 +618,7 @@ export const SHARED_SECRET_PATTERNS: readonly SharedSecretPattern[] = [
     pattern: URL_USERINFO,
     confidence: 0.9,
     accept: (match) => {
-      const password = match.groups?.pw ?? '';
+      const password = normalizeCredentialUrlPart(match.groups?.pw ?? '');
       return !isPlaceholderValue(password) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(password);
     },
   },

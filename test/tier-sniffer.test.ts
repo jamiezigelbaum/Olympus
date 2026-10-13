@@ -1029,3 +1029,90 @@ test('aging skips blocked moves on both sides of the oldest eligible question', 
     expect(store.questionFor(subject(8), 'metadata')).toBeDefined();
   } finally { store.close(); ledger.close(); }
 });
+
+
+test('a large moving backlog has bounded examination and still serves aged eligible work', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sniffer-scan-'));
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const dbPath = join(dir, 'queue.sqlite');
+  let clock = new Date('2026-01-01T00:00:00Z');
+  let store = new TierSnifferStore({ dbPath, now: () => clock });
+  try {
+    for (let n = 1; n <= 1200; n++) {
+      recordFlagged(ledger, store, n, `bank backlog ${n}`);
+      if (n !== 600 && n !== 601) ledger.beginMove(subject(n), { metadataTier: 'secure', contentTier: 'secure' }, ledger.getCurrent(subject(n))!.generation);
+      clock = new Date(clock.getTime() + 1000);
+    }
+    clock = new Date('2026-01-02T00:00:00Z');
+    for (let n = 0; n < 4; n++) store.recordDispatch();
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    for (let tick = 0; tick < 25 && model.requests.length < 2; tick++) {
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, pendingPageSize: 1, maxCallsPerPass: 1 });
+      expect(report.pendingSeen).toBeLessThanOrEqual(128);
+      // A tick may reopen the store; progress must survive that boundary.
+      store.close(); store = new TierSnifferStore({ dbPath, now: () => clock });
+    }
+    expect(model.requests).toHaveLength(2);
+    expect(model.requests[0]!.prompt).toContain('bank backlog 600');
+    expect(model.requests[1]!.prompt).toContain('bank backlog 601');
+  } finally { store.close(); ledger.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const path of [
+  '?%70ass%77ord=%26', '#%61ccess%5F%74oken=', '?%2561ccess%255F%2574oken=',
+  '?view=1&amp;%61ccess%5F%74oken=', '#/route?%61ccess%5F%74oken=',
+]) test(`normalized credential URL ${path} never queues or dispatches`, async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  const material = `Open https://example.test/${path}${['a7B9c2D4', 'e6F8g1H3'].join('')}`;
+  try {
+    expect(classifyItemTiers({ signals: { title: 'Notes' }, text: material }).contentTier).toBe('secrets');
+    const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+    expect(sniffer.judge({ pass: 'content', subject: subject(1), material, flags: [], mapRevision: 'none' }))
+      .toMatchObject({ verdict: 'decided', tier: 'secrets' });
+    recordFlagged(ledger, store, 2, 'bank letter');
+    store.enqueue({ subject: subject(2), pass: 'metadata', material, flags: [], mapRevision: 'none' });
+    const model = spyModel(() => { throw new Error('must not dispatch'); });
+    const report = await runSnifferPass({ targets: [{ ledger, sniffer: store, settleSecrets(question, decision) {
+      ledger.recordDecision(question, decision); return true;
+    } }], lane: LOCAL_LANE, model });
+    expect(report.secretRefused).toBe(1);
+    expect(model.requests).toEqual([]);
+    expect(store.counts().questions).toBe(0);
+  } finally { store.close(); ledger.close(); }
+});
+
+for (const url of ['https://user:password@example.test/report', 'https://example.test/?password=xxxx',
+  'https://example.test/#%61ccess_token=xxxx', 'https://user:%70assword@example.test/report']) {
+  test(`example credential stays available for ordinary judgment: ${url}`, () => {
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      const material = `Documentation: ${url}`;
+      expect(classifyItemTiers({ signals: { title: 'Documentation' }, text: material }).contentTier).toBe('private');
+      expect(new CachedTierSniffer(store, LOCAL_LANE).judge({ pass: 'content', subject: subject(1), material, flags: [], mapRevision: 'none' }))
+        .toMatchObject({ verdict: 'undecided' });
+      expect(store.counts().questions).toBe(1);
+    } finally { store.close(); }
+  });
+}
+
+
+test('a discovered oldest question survives until its reserved aging dispatch', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  let clock = new Date('2026-01-01T00:00:00Z');
+  const store = new TierSnifferStore({ dbPath: ':memory:', now: () => clock });
+  try {
+    for (let n = 1; n <= 257; n++) {
+      recordFlagged(ledger, store, n, `bank pinned oldest ${n}`);
+      if (n <= 256) ledger.beginMove(subject(n), { metadataTier: 'secure', contentTier: 'secure' }, ledger.getCurrent(subject(n))!.generation);
+    }
+    store.recordDispatch();
+    clock = new Date('2026-01-02T00:00:00Z');
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    for (let tick = 0; tick < 20; tick++) {
+      recordFlagged(ledger, store, 258 + tick, `bank fresh ${tick}`);
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, pendingPageSize: 1, maxCallsPerPass: 1 });
+    }
+    expect(model.requests.some(request => request.prompt.includes('bank pinned oldest 257'))).toBe(true);
+  } finally { store.close(); ledger.close(); }
+});

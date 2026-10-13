@@ -10312,6 +10312,24 @@ var init_media_cache = __esm(() => {
 });
 
 // src/core/secret-patterns.ts
+function normalizeCredentialUrlPart(value, percent = true) {
+  for (let depth = 0;depth < 4; depth++) {
+    let next = value.replace(/&(?:amp|#0*38|#x0*26);/gi, "&");
+    if (percent) {
+      next = next.replace(/(?:%[0-9a-f]{2})+/gi, (encoded) => {
+        try {
+          return decodeURIComponent(encoded);
+        } catch {
+          return encoded;
+        }
+      });
+    }
+    if (next === value)
+      break;
+    value = next;
+  }
+  return value;
+}
 function trimValueEnd(value) {
   let end = value.length;
   while (end > 0 && ";,)]}".includes(value[end - 1]))
@@ -10830,7 +10848,7 @@ var init_secret_patterns = __esm(() => {
       pattern: URL_USERINFO,
       confidence: 0.9,
       accept: (match) => {
-        const password = match.groups?.pw ?? "";
+        const password = normalizeCredentialUrlPart(match.groups?.pw ?? "");
         return !isPlaceholderValue(password) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(password);
       }
     },
@@ -10887,6 +10905,7 @@ var init_engine = __esm(() => {
 // src/workers/classification/tier-classifier.ts
 var UNDECIDED_TIER_SNIFFER;
 var init_tier_classifier = __esm(() => {
+  init_secret_patterns();
   init_engine();
   init_sender_rules();
   UNDECIDED_TIER_SNIFFER = Object.freeze({

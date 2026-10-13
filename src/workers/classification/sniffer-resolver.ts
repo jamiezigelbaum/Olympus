@@ -295,6 +295,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   const stillOpen = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     const row = target.ledger.getCurrent(question);
     if (row === undefined || row.decidedBy === 'override') return false;
+    // The queued secret is the durable retry marker if copy cleanup failed
+    // after the ledger hid the item. Do not discard it as a stale verdict.
+    if (row.contentTier === 'secrets' && row.reasons.includes('metadata:secret:sniffer_refused')
+      && snifferMaterialCarriesSecret(question.material)) return true;
     let expectedMap = row.mapRevision;
     let open = row.state === 'pending' && openPasses(row).includes(question.pass);
     if (row.state === 'current') {

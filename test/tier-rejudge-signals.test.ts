@@ -175,3 +175,41 @@ test('legacy Secrets settlement resumes after tombstoning but before the ledger 
   expect(settle()).toBe(true);
   expect(f.ledger.getCurrent(identity)).toMatchObject({ contentTier: 'secrets', contentPending: false });
 });
+
+
+for (const afterTombstone of [false, true]) test(`routed secret cleanup retries after a tombstone failure (after=${afterTombstone}) and service restart`, async () => {
+  const f = await storedPrivate();
+  const decision = { ...classifyItemTiers({ signals: { title: 'Notes' }, text }),
+    metadataTier: 'secure' as const, contentTier: 'secure' as const, state: 'pending' as const,
+    metadataPending: false, contentPending: true };
+  f.ledger.recordRoutedPlacement(identity, decision, f.set.placementFor(decision));
+  let installed = new InstalledTierClassification({ env: {} });
+  const queue = () => installed.snifferStoreForLedger(f.ledger.dbPath);
+  queue().enqueue({ subject: identity, pass: 'content', material: ['AKIA', 'ABCDEFGHIJKLMNOP'].join(''), flags: [], mapRevision: 'none' });
+  let calls = 0;
+  const makeService = () => new TierSnifferService({ installed, lane: BUILT_IN_SNIFFER_LANE,
+    model: { async complete() { calls++; throw new Error('must not dispatch'); } },
+    stores: () => [f.stores.secure_local!], classificationLedgerPath: join(f.dir, 'classification.jsonl'), autoApproveBuiltIn: true });
+  let service = makeService();
+  const store = f.stores.secure_local!;
+  const original = store.tombstoneCopy.bind(store);
+  store.tombstoneCopy = (...args) => {
+    if (afterTombstone) original(...args);
+    throw new Error('transient tombstone failure');
+  };
+  try {
+    expect(await service.runOnce()).toMatchObject({ state: 'failed' });
+    expect(f.ledger.getCurrent(identity)?.contentTier).toBe('secrets');
+    expect(f.ledger.copies(identity).length).toBeGreaterThan(0);
+    expect(store.itemStoredContent(identity)?.chunkCount ?? 0).toBe(afterTombstone ? 0 : 1);
+    expect(queue().counts().questions).toBe(1);
+    service.stop(); installed.close();
+    store.tombstoneCopy = original;
+    installed = new InstalledTierClassification({ env: {} }); service = makeService();
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { secretRefused: 1 } });
+    expect(f.ledger.copies(identity)).toEqual([]);
+    expect(store.itemStoredContent(identity)?.chunkCount ?? 0).toBe(0);
+    expect(queue().counts().questions).toBe(0);
+    expect(calls).toBe(0);
+  } finally { store.tombstoneCopy = original; service.stop(); installed.close(); }
+});

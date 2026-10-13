@@ -23,6 +23,7 @@
 //   steps put it and marks the item pending until the background pass
 //   (sniffer-resolver.ts) asks the privacy-safe model.
 
+import { isPlaceholderValue, normalizeCredentialUrlPart } from '../../core/secret-patterns.ts';
 import { createHash } from 'node:crypto';
 import type {
   SourceClassificationSignals,
@@ -872,17 +873,27 @@ function contentPass(args: {
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
 }
 
-/** Shared with placement so a credential URL is not retained as a Secret location. */
+/** Shared by classification, sniffer dispatch and location storage. */
 export function hasCredentialUrl(material: string): boolean {
-  // Try a whole locator first: valid URL userinfo may contain spaces or
-  // apostrophes. In prose, retain quotes rather than truncating a password.
-  const candidates = [material.trim(), ...Array.from(material.matchAll(/https?:\/\/[^\s<>]+/gi), match => match[0])];
+  const normalized = normalizeCredentialUrlPart(material, false);
+  // Try a whole locator first; userinfo can contain spaces or apostrophes.
+  const candidates = [normalized.trim(), ...Array.from(normalized.matchAll(/https?:\/\/[^\s<>]+/gi), match => match[0])];
+  const credential = (value: string): boolean => !isPlaceholderValue(normalizeCredentialUrlPart(value));
   for (const candidate of candidates) {
     try {
       const url = new URL(candidate);
-      if (url.username || url.password) return true;
-      for (const [key, value] of url.searchParams) {
-        if (value && /^(?:access_token|refresh_token|api_key|client_secret|password)$/i.test(key)) return true;
+      const userinfo = normalizeCredentialUrlPart(url.password || url.username);
+      if (userinfo && credential(userinfo) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(userinfo)) return true;
+      for (const part of [url.search.slice(1), url.hash.slice(1).replace(/^[^?]*\?/, '')]) {
+        // Parse first so encoded '&' or '=' inside a value stays a value.
+        // Also inspect nested whole-parameter encodings without discarding
+        // the original parse and its intact credential.
+        for (const variant of new Set([part, normalizeCredentialUrlPart(part)])) {
+          for (const [key, value] of new URLSearchParams(variant)) {
+            if (/^(?:access_token|refresh_token|api_key|client_secret|password)$/i.test(normalizeCredentialUrlPart(key))
+              && credential(value)) return true;
+          }
+        }
       }
     } catch { /* Not a URL; the regular credential detector still applies. */ }
   }

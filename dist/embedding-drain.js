@@ -9411,6 +9411,24 @@ var init_embeddings = __esm(() => {
 });
 
 // src/core/secret-patterns.ts
+function normalizeCredentialUrlPart(value, percent = true) {
+  for (let depth = 0;depth < 4; depth++) {
+    let next = value.replace(/&(?:amp|#0*38|#x0*26);/gi, "&");
+    if (percent) {
+      next = next.replace(/(?:%[0-9a-f]{2})+/gi, (encoded) => {
+        try {
+          return decodeURIComponent(encoded);
+        } catch {
+          return encoded;
+        }
+      });
+    }
+    if (next === value)
+      break;
+    value = next;
+  }
+  return value;
+}
 function trimValueEnd(value) {
   let end = value.length;
   while (end > 0 && ";,)]}".includes(value[end - 1]))
@@ -9929,7 +9947,7 @@ var init_secret_patterns = __esm(() => {
       pattern: URL_USERINFO,
       confidence: 0.9,
       accept: (match) => {
-        const password = match.groups?.pw ?? "";
+        const password = normalizeCredentialUrlPart(match.groups?.pw ?? "");
         return !isPlaceholderValue(password) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(password);
       }
     },
@@ -11008,15 +11026,22 @@ function contentPass(args) {
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
 }
 function hasCredentialUrl(material) {
-  const candidates = [material.trim(), ...Array.from(material.matchAll(/https?:\/\/[^\s<>]+/gi), (match) => match[0])];
+  const normalized = normalizeCredentialUrlPart(material, false);
+  const candidates = [normalized.trim(), ...Array.from(normalized.matchAll(/https?:\/\/[^\s<>]+/gi), (match) => match[0])];
+  const credential = (value) => !isPlaceholderValue(normalizeCredentialUrlPart(value));
   for (const candidate of candidates) {
     try {
       const url = new URL(candidate);
-      if (url.username || url.password)
+      const userinfo = normalizeCredentialUrlPart(url.password || url.username);
+      if (userinfo && credential(userinfo) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(userinfo))
         return true;
-      for (const [key, value] of url.searchParams) {
-        if (value && /^(?:access_token|refresh_token|api_key|client_secret|password)$/i.test(key))
-          return true;
+      for (const part of [url.search.slice(1), url.hash.slice(1).replace(/^[^?]*\?/, "")]) {
+        for (const variant of new Set([part, normalizeCredentialUrlPart(part)])) {
+          for (const [key, value] of new URLSearchParams(variant)) {
+            if (/^(?:access_token|refresh_token|api_key|client_secret|password)$/i.test(normalizeCredentialUrlPart(key)) && credential(value))
+              return true;
+          }
+        }
       }
     } catch {}
   }
@@ -11168,6 +11193,7 @@ function slug(value) {
 }
 var TIER_CLASSIFIER_VERSION = "2026-10-13.p6", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
+  init_secret_patterns();
   init_engine();
   init_sender_rules();
   TIER_KEYS = ["public", "private", "secure", "secrets"];
@@ -37461,6 +37487,7 @@ class TierSnifferStore {
   }
   listQuestions(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
+    const scanLimit = Math.max(64, limit);
     const accepted = new Map;
     const eligible = (question) => {
       if (!accepted.has(question.sequence))
@@ -37468,35 +37495,53 @@ class TierSnifferStore {
       return accepted.get(question.sequence);
     };
     const read = (oldest2, count) => {
-      const found = [];
-      let cursor;
-      do {
-        const filters = [];
-        const params = [];
-        if (options.pass) {
-          filters.push("pass = ?");
-          params.push(options.pass);
-        }
-        if (cursor) {
-          filters.push(oldest2 ? "(queued_at, question_pk) > (?, ?)" : "(priority, queued_at, question_pk) < (?, ?, ?)");
-          if (!oldest2)
-            params.push(cursor.priority);
-          params.push(cursor.queued_at, cursor.question_pk);
-        }
-        const rows = this.db.query(`SELECT * FROM sniffer_questions
-          ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
-          ORDER BY ${oldest2 ? "queued_at, question_pk" : "priority DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, limit);
-        for (const row of rows) {
-          const question = questionFromRow(row);
+      const key2 = `${options.pass ?? "all"}:${oldest2 ? "oldest" : "recent"}`;
+      let cursor = options.eligible && !this.readOnly ? this.db.query("SELECT priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?").get(key2) : null;
+      if (oldest2 && cursor?.candidate_pk != null) {
+        const pinned = this.db.query("SELECT * FROM sniffer_questions WHERE question_pk = ?").get(cursor.candidate_pk);
+        if (pinned) {
+          const question = questionFromRow(pinned);
           if (eligible(question))
-            found.push(question);
-          if (found.length === count)
-            return found;
+            return [question];
         }
-        if (rows.length < limit)
+        cursor = null;
+        this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key2);
+      }
+      const filters = [];
+      const params = [];
+      if (options.pass) {
+        filters.push("pass = ?");
+        params.push(options.pass);
+      }
+      if (cursor) {
+        filters.push(oldest2 ? "(queued_at, question_pk) > (?, ?)" : "(priority, queued_at, question_pk) < (?, ?, ?)");
+        if (!oldest2)
+          params.push(cursor.priority);
+        params.push(cursor.queued_at, cursor.question_pk);
+      }
+      const rows = this.db.query(`SELECT * FROM sniffer_questions
+        ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
+        ORDER BY ${oldest2 ? "queued_at, question_pk" : "priority DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, scanLimit);
+      const found = [];
+      for (const row of rows) {
+        const question = questionFromRow(row);
+        if (eligible(question))
+          found.push(question);
+        if (found.length === count)
           break;
-        cursor = rows.at(-1);
-      } while (cursor);
+      }
+      if (options.eligible && !this.readOnly) {
+        const last = rows.at(-1);
+        if (oldest2 && found[0]) {
+          const candidate = found[0];
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?)`).run(key2, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+        } else if (found.length === 0 && rows.length === scanLimit && last) {
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, priority, queued_at, question_pk) VALUES (?, ?, ?, ?)`).run(key2, last.priority, last.queued_at, last.question_pk);
+        } else
+          this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key2);
+      }
       return found;
     };
     const questions = read(false, limit);
@@ -37623,6 +37668,19 @@ function snifferMigrations() {
           CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
           INSERT INTO sniffer_schedule VALUES (1, 0);`);
       }
+    },
+    {
+      version: 3,
+      name: "bounded_queue_scans",
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_oldest ON sniffer_questions(queued_at, question_pk);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_oldest ON sniffer_questions(pass, queued_at, question_pk);
+          CREATE TABLE sniffer_scan (
+            scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
+            queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
+          );`);
+      }
     }
   ];
 }
@@ -37667,7 +37725,7 @@ var INJECTION_RULES = [
   ["role_boundary", /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
   ["instruction_override", /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
   ["forged_verdict", /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-  ["tier_steering", /\b(?:reply|respond|answer|output|return)\b[^.!?;]{0,50}\b(?:personal|private|public)\s+(?:tier|verdict)\b|\b(?:classify|label|mark|treat|tag|rate)\s+(?:(?:this|the|that|every|each|all)\s+(?:items?|files?|documents?|messages?|entries|list|batch)|(?:it|this|these|them))\s+(?:as\s+)?(?:personal|private|public|not private)\b|\b(?:classifier|sniffer)\b[^.!?;]{0,35}\b(?:classify|label|mark|treat|tag|rate)\b[^.!?;]{0,30}\b(?:personal|private|public)\b|\b(?:your verdict|verdict for this (?:file|item|document))\b[^.!?;]{0,40}\b(?:personal|private|public)\b|\b(?:classify|label|mark)\s+as\s+(?:personal|private|public)\b|\b(?:reply|answer|respond|return|output)\s*(?::|with)?\s*(?:only\s+)?(?:personal|private|public)\b/],
+  ["tier_steering", /\b(?:reply|respond|answer|output|return)\b[^.!?;]{0,50}\b(?:personal|private|public)\s+(?:tier|verdict)\b|\b(?:classify|label|mark|treat|tag|rate)\s+(?:(?:this|the|that|every|each|all)\s+(?:items?|files?|documents?|messages?|entries|list|batch)|(?:it|this|these|them))\s+(?:as\s+)?(?:personal|private|public|not private)\b|\b(?:classifier|sniffer)\b[^.!?;]{0,35}\b(?:classify|label|mark|treat|tag|rate)\b[^.!?;]{0,30}\b(?:personal|private|public)\b|\b(?:your verdict|verdict for this (?:file|item|document))\b[^.!?;]{0,40}\b(?:personal|private|public)\b|\b(?:classify|label|mark)\s+as\s+(?:personal|private|public)\b|\b(?:reply|answer|respond|return|output)\s*(?::\s*|(?:only\s+)?with\s+(?:only\s+)?|only\s+)?["']?(?:personal|private|public)["']?(?=\s*(?:[.,;:!?]|$|(?:tier|verdict|regardless)\b|\/[a-z_]+\/(?:0(?:\.\d+)?|1(?:\.0+)?)\b|with\s+(?:confidence|ownrecord|privatekind)\b|and\s+(?:set|return|output)\s+["']?(?:ownrecord|privatekind|confidence)\b))/],
   ["cross_item_steering", /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/]
 ];
 var CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı";
@@ -38227,6 +38285,8 @@ async function runSnifferPass(options) {
     const row = target.ledger.getCurrent(question);
     if (row === undefined || row.decidedBy === "override")
       return false;
+    if (row.contentTier === "secrets" && row.reasons.includes("metadata:secret:sniffer_refused") && snifferMaterialCarriesSecret(question.material))
+      return true;
     let expectedMap = row.mapRevision;
     let open5 = row.state === "pending" && openPasses(row).includes(question.pass);
     if (row.state === "current") {
@@ -38823,6 +38883,31 @@ class TierSnifferService {
           }
           if (!set)
             return false;
+          const row = ledger2.getCurrent(question);
+          if (row.contentTier === "secrets" && row.reasons.includes("metadata:secret:sniffer_refused")) {
+            if (!set.secrets()?.get(question)?.findingKinds.includes("sniffer_secret_refusal"))
+              return false;
+            const copies = ledger2.copies(question);
+            const stores = new Map(copies.map((copy) => {
+              const domain2 = set.domainForCorpus(copy.corpusId);
+              return [copy.corpusId, domain2 ? set.store(domain2) : undefined];
+            }));
+            if ([...stores.values()].some((store) => !store))
+              return false;
+            const remaining = [...stores.values()].map((store) => store.exportItemCopy(question)).find(Boolean);
+            if (remaining) {
+              settleSecretsCopies({
+                ledger: ledger2,
+                identity: remaining.identity,
+                copies,
+                storeFor: (corpusId) => stores.get(corpusId),
+                connectorId: "tier-sniffer"
+              });
+            } else {
+              ledger2.removeCopies(question);
+            }
+            return true;
+          }
           const current2 = set.ledger.copies(question).filter((copy) => copy.state === "current");
           const serving = copyServingLayer(current2, question.pass);
           const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;

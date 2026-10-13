@@ -14,6 +14,7 @@ import {
   isClassifierApproved,
   readClassificationLedger,
 } from '../classification-ledger.ts';
+import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
 import { moveTieredItem, TierMoveContentChangedError, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
 import type { ConnectorStoreItemCopy, LocalConnectorStore } from '../connector-store/local-index.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
@@ -652,6 +653,29 @@ export class TierSnifferService {
             finally { if (!shared) locations.close(); }
           }
           if (!set) return false;
+          const row = ledger.getCurrent(question)!;
+          if (row.contentTier === 'secrets' && row.reasons.includes('metadata:secret:sniffer_refused')) {
+            // Settlement may have hidden every copy before a tombstone threw.
+            // The location was recorded before deletion; no current/exportable
+            // copy is required to retry even after the last tombstone succeeded.
+            if (!set.secrets()?.get(question)?.findingKinds.includes('sniffer_secret_refusal')) return false;
+            const copies = ledger.copies(question);
+            const stores = new Map(copies.map(copy => {
+              const domain = set.domainForCorpus(copy.corpusId);
+              return [copy.corpusId, domain ? set.store(domain) : undefined] as const;
+            }));
+            if ([...stores.values()].some(store => !store)) return false;
+            const remaining = [...stores.values()].map(store => store!.exportItemCopy(question)).find(Boolean);
+            if (remaining) {
+              settleSecretsCopies({ ledger, identity: remaining.identity, copies,
+                storeFor: corpusId => stores.get(corpusId), connectorId: 'tier-sniffer' });
+            } else {
+              // All tombstones landed before the interruption. Every store
+              // was opened and checked above, so only the copy rows remain.
+              ledger.removeCopies(question);
+            }
+            return true;
+          }
           const current = set.ledger.copies(question).filter(copy => copy.state === 'current');
           const serving = copyServingLayer(current, question.pass);
           const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;

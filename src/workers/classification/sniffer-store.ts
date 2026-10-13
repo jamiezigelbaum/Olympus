@@ -20,7 +20,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import type { TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
-export const TIER_SNIFFER_SCHEMA_VERSION = 2;
+export const TIER_SNIFFER_SCHEMA_VERSION = 3;
 
 export type SnifferPass = 'metadata' | 'content';
 export type SnifferTier = 'personal' | 'private';
@@ -196,39 +196,69 @@ export class TierSnifferStore {
     return row ? questionFromRow(row) : undefined;
   }
 
-  /** Recent/high priority eligible work, plus the oldest eligible question. */
+  /** Recent/high priority work plus the oldest eligible question. Blocked
+   * backlogs are scanned in bounded, durable slices rather than every tick. */
   listQuestions(options: { pass?: SnifferPass; limit?: number; eligible?: (question: SnifferQuestion) => boolean } = {}): SnifferQuestion[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
+    const scanLimit = Math.max(64, limit);
     const accepted = new Map<number, boolean>();
     const eligible = (question: SnifferQuestion): boolean => {
       if (!accepted.has(question.sequence)) accepted.set(question.sequence, options.eligible?.(question) ?? true);
       return accepted.get(question.sequence)!;
     };
     const read = (oldest: boolean, count: number): SnifferQuestion[] => {
+      const key = `${options.pass ?? 'all'}:${oldest ? 'oldest' : 'recent'}`;
+      let cursor = options.eligible && !this.readOnly ? this.db.query(
+        'SELECT priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?',
+      ).get(key) as QuestionCursor | null : null;
+      if (oldest && cursor?.candidate_pk != null) {
+        const pinned = this.db.query('SELECT * FROM sniffer_questions WHERE question_pk = ?')
+          .get(cursor.candidate_pk) as QuestionRow | null;
+        if (pinned) {
+          const question = questionFromRow(pinned);
+          if (eligible(question)) return [question];
+        }
+        // Consumed, stale, or blocked: restart to find the next oldest eligible.
+        cursor = null;
+        this.db.query('DELETE FROM sniffer_scan WHERE scan_key = ?').run(key);
+      }
+      const filters: string[] = [];
+      const params: Array<string | number> = [];
+      if (options.pass) { filters.push('pass = ?'); params.push(options.pass); }
+      if (cursor) {
+        filters.push(oldest ? '(queued_at, question_pk) > (?, ?)'
+          : '(priority, queued_at, question_pk) < (?, ?, ?)');
+        if (!oldest) params.push(cursor.priority);
+        params.push(cursor.queued_at, cursor.question_pk);
+      }
+      const rows = this.db.query(`SELECT * FROM sniffer_questions
+        ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+        ORDER BY ${oldest ? 'queued_at, question_pk' : 'priority DESC, queued_at DESC, question_pk DESC'} LIMIT ?`)
+        .all(...params, scanLimit) as QuestionRow[];
       const found: SnifferQuestion[] = [];
-      let cursor: QuestionRow | undefined;
-      do {
-        const filters: string[] = [];
-        const params: Array<string | number> = [];
-        if (options.pass) { filters.push('pass = ?'); params.push(options.pass); }
-        if (cursor) {
-          filters.push(oldest ? '(queued_at, question_pk) > (?, ?)'
-            : '(priority, queued_at, question_pk) < (?, ?, ?)');
-          if (!oldest) params.push(cursor.priority);
-          params.push(cursor.queued_at, cursor.question_pk);
-        }
-        const rows = this.db.query(`SELECT * FROM sniffer_questions
-          ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
-          ORDER BY ${oldest ? 'queued_at, question_pk' : 'priority DESC, queued_at DESC, question_pk DESC'} LIMIT ?`)
-          .all(...params, limit) as QuestionRow[];
-        for (const row of rows) {
-          const question = questionFromRow(row);
-          if (eligible(question)) found.push(question);
-          if (found.length === count) return found;
-        }
-        if (rows.length < limit) break;
-        cursor = rows.at(-1);
-      } while (cursor);
+      for (const row of rows) {
+        const question = questionFromRow(row);
+        if (eligible(question)) found.push(question);
+        if (found.length === count) break;
+      }
+      if (options.eligible && !this.readOnly) {
+        // Until eligible work is found, advance past blocked rows even when
+        // the store is reopened each tick. Reset on a hit/end so new arrivals
+        // keep recent priority and newly unblocked old work is revisited.
+        const last = rows.at(-1);
+        if (oldest && found[0]) {
+          // Discovery may precede the reserved fifth dispatch. Keep this
+          // candidate across passes/restarts until it is consumed or blocked.
+          const candidate = found[0];
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?)`)
+            .run(key, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+        } else if (found.length === 0 && rows.length === scanLimit && last) {
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, priority, queued_at, question_pk) VALUES (?, ?, ?, ?)`)
+            .run(key, last.priority, last.queued_at, last.question_pk);
+        } else this.db.query('DELETE FROM sniffer_scan WHERE scan_key = ?').run(key);
+      }
       return found;
     };
     const questions = read(false, limit);
@@ -294,6 +324,8 @@ export class TierSnifferStore {
     return { questions, items, byPass, verdicts };
   }
 }
+
+type QuestionCursor = Pick<QuestionRow, 'priority' | 'queued_at' | 'question_pk'> & { candidate_pk: number | null };
 
 interface QuestionRow {
   question_pk: number;
@@ -385,6 +417,19 @@ function snifferMigrations(): SqliteMigration[] {
           CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
           CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
           INSERT INTO sniffer_schedule VALUES (1, 0);`);
+      },
+    },
+    {
+      version: 3,
+      name: 'bounded_queue_scans',
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_oldest ON sniffer_questions(queued_at, question_pk);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_oldest ON sniffer_questions(pass, queued_at, question_pk);
+          CREATE TABLE sniffer_scan (
+            scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
+            queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
+          );`);
       },
     },
   ];
