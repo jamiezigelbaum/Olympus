@@ -17746,7 +17746,7 @@ function workerOrigin(config, env) {
   if (!config.worker.service.enabled) {
     const port = env.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
     if (port && /^\d{1,5}$/.test(port)) {
-      const host = env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+      const host = env.OLYMPUS_WORKER_BIND_HOST?.trim() || env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
       return loopbackWorkerOrigin(`http://${host === "::1" ? "[::1]" : host}:${port}`);
     }
   }

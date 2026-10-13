@@ -471,7 +471,8 @@ function localWorkerOrigin(input: {
   if (reported) return reported;
   const port = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
   if (port && /^\d{1,5}$/.test(port)) {
-    const host = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || '127.0.0.1';
+    // The worker's own bind precedence (workers/http.ts resolveWorkerBindHost).
+    const host = input.layeredEnv.OLYMPUS_WORKER_BIND_HOST?.trim() || input.layeredEnv.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || '127.0.0.1';
     const origin = originOf(`http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port}`);
     if (origin) return origin;
   }

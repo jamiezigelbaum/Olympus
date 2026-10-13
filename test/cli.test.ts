@@ -1019,6 +1019,8 @@ describe('CLI tool surface', () => {
       for (const [lines, origin] of [
         ['OLYMPUS_EMAIL_SOURCE_PORT=8123\n', 'http://127.0.0.1:8123'],
         ['OLYMPUS_EMAIL_SOURCE_HOST=0.0.0.0\nOLYMPUS_EMAIL_SOURCE_PORT=8124\n', 'http://127.0.0.1:8124'],
+        // The worker's canonical bind host outranks the legacy one, as the worker itself reads them.
+        ['OLYMPUS_WORKER_BIND_HOST=::1\nOLYMPUS_EMAIL_SOURCE_HOST=127.0.0.1\nOLYMPUS_EMAIL_SOURCE_PORT=8125\n', 'http://[::1]:8125'],
       ] as const) {
         sent.length = 0;
         writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\n${lines}`);
@@ -1031,16 +1033,21 @@ describe('CLI tool surface', () => {
         expect(new URL(result.url).origin).toBe(origin);
       }
 
-      sent.length = 0;
-      writeFileSync(workerEnv, 'OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\nOLYMPUS_EMAIL_SOURCE_HOST=192.0.2.10\nOLYMPUS_EMAIL_SOURCE_PORT=8123\n');
-      const error = await runDashboardCommand({
-        fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
-        noOpen: true,
-      }).catch((failure: unknown) => failure);
-      expect(error).toBeInstanceOf(OperationError);
-      expect((error as OperationError).code).toBe('config_error');
-      expect((error as Error).message).toContain('not a local address');
-      expect(sent).toHaveLength(0);
+      for (const hosts of [
+        'OLYMPUS_EMAIL_SOURCE_HOST=192.0.2.10\n',
+        'OLYMPUS_WORKER_BIND_HOST=192.0.2.10\nOLYMPUS_EMAIL_SOURCE_HOST=127.0.0.1\n',
+      ]) {
+        sent.length = 0;
+        writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\n${hosts}OLYMPUS_EMAIL_SOURCE_PORT=8123\n`);
+        const error = await runDashboardCommand({
+          fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+          noOpen: true,
+        }).catch((failure: unknown) => failure);
+        expect(error).toBeInstanceOf(OperationError);
+        expect((error as OperationError).code).toBe('config_error');
+        expect((error as Error).message).toContain('not a local address');
+        expect(sent).toHaveLength(0);
+      }
     } finally {
       env.restore();
       rmSync(home, { recursive: true, force: true });
