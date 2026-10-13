@@ -1018,6 +1018,10 @@ function readLinuxEngineReceipt(path, uid = process.getuid()) {
   const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome }, l.dataDir);
   if (!linuxEngineLayoutsEqual(l, expected) || l.receiptPath !== path)
     throw new Error(`${path} has an inconsistent install layout.`);
+  const parentPaths = new Set([dirname4(l.stateDir), dirname4(l.cacheDir)]);
+  if (receipt.ownedEmptyParents !== undefined && (!Array.isArray(receipt.ownedEmptyParents) || new Set(receipt.ownedEmptyParents.map((entry) => entry?.path)).size !== receipt.ownedEmptyParents.length || receipt.ownedEmptyParents.some((entry) => !entry || !parentPaths.has(entry.path) || !Number.isSafeInteger(entry.device) || entry.device < 0 || !Number.isSafeInteger(entry.inode) || entry.inode <= 0))) {
+    throw new Error(`${path} has invalid empty-directory ownership.`);
+  }
   const allowedLinkParents = new Set([join2(l.configHome, "systemd/user"), join2(l.home, ".config/systemd/user")]);
   if (!Array.isArray(receipt.ownedUnitLinks) || receipt.ownedUnitLinks.some((p) => typeof p !== "string" || !isAbsolute3(p) || p === l.unitPath || !allowedLinkParents.has(dirname4(p)) || !p.endsWith("/olympus-engine.service")))
     throw new Error(`${path} has invalid unit links.`);

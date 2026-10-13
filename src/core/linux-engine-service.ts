@@ -612,6 +612,16 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   if(observedLinger===undefined)throw new Error('Olympus requires systemd-logind and a working user session. Linger could not be inspected; nothing was installed or upgraded.');
   if(!existingReceipt){publishLinuxEngineReceipt(l,{installationState:'recovery_pending',lingerPredated:observedLinger,ownedUnitLinks:[],machineArtifacts:[],openHandlerPending:false});lifecycleCheckpoint(options,'linger_receipt_published');}
   ensureEngineLinger(exec,options.uid,options.userName,options.notice);lifecycleCheckpoint(options,'linger_enabled');
+  // Ownership is earned only by creation, never by finding a same-user directory.
+  for (const parent of new Set([dirname(l.stateDir), dirname(l.cacheDir)])) {
+   if (existsSync(parent)) continue;
+   createLinuxPrivateDirectory(dirname(parent));
+   mkdirSync(parent, { mode: 0o700 });
+   syncDirectorySync(dirname(parent));
+   const info = lstatSync(parent);
+   const owned = readLinuxEngineReceipt(l.receiptPath)?.ownedEmptyParents ?? [];
+   publishLinuxEngineReceipt(l, { ownedEmptyParents: [...owned.filter(entry => entry.path !== parent), { path: parent, device: info.dev, inode: info.ino }] });
+  }
   const receiptBeforeInstall=readLinuxEngineReceipt(l.receiptPath)!;
   const originalReceipt=optionalText(l.receiptPath);
   const lingerPredated=receiptBeforeInstall.lingerPredated??observedLinger;

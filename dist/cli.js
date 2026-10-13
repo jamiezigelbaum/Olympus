@@ -6388,6 +6388,10 @@ function readLinuxEngineReceipt(path, uid = process.getuid()) {
   const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome }, l.dataDir);
   if (!linuxEngineLayoutsEqual(l, expected) || l.receiptPath !== path)
     throw new Error(`${path} has an inconsistent install layout.`);
+  const parentPaths = new Set([dirname7(l.stateDir), dirname7(l.cacheDir)]);
+  if (receipt.ownedEmptyParents !== undefined && (!Array.isArray(receipt.ownedEmptyParents) || new Set(receipt.ownedEmptyParents.map((entry) => entry?.path)).size !== receipt.ownedEmptyParents.length || receipt.ownedEmptyParents.some((entry) => !entry || !parentPaths.has(entry.path) || !Number.isSafeInteger(entry.device) || entry.device < 0 || !Number.isSafeInteger(entry.inode) || entry.inode <= 0))) {
+    throw new Error(`${path} has invalid empty-directory ownership.`);
+  }
   const allowedLinkParents = new Set([join10(l.configHome, "systemd/user"), join10(l.home, ".config/systemd/user")]);
   if (!Array.isArray(receipt.ownedUnitLinks) || receipt.ownedUnitLinks.some((p) => typeof p !== "string" || !isAbsolute5(p) || p === l.unitPath || !allowedLinkParents.has(dirname7(p)) || !p.endsWith("/olympus-engine.service")))
     throw new Error(`${path} has invalid unit links.`);
@@ -66632,6 +66636,16 @@ function installLinuxEngine(options) {
     }
     ensureEngineLinger(exec, options.uid, options.userName, options.notice);
     lifecycleCheckpoint(options, "linger_enabled");
+    for (const parent of new Set([dirname45(l.stateDir), dirname45(l.cacheDir)])) {
+      if (existsSync42(parent))
+        continue;
+      createLinuxPrivateDirectory(dirname45(parent));
+      mkdirSync30(parent, { mode: 448 });
+      syncDirectorySync(dirname45(parent));
+      const info = lstatSync24(parent);
+      const owned = readLinuxEngineReceipt(l.receiptPath)?.ownedEmptyParents ?? [];
+      publishLinuxEngineReceipt(l, { ownedEmptyParents: [...owned.filter((entry) => entry.path !== parent), { path: parent, device: info.dev, inode: info.ino }] });
+    }
     const receiptBeforeInstall = readLinuxEngineReceipt(l.receiptPath);
     const originalReceipt = optionalText(l.receiptPath);
     const lingerPredated = receiptBeforeInstall.lingerPredated ?? observedLinger;

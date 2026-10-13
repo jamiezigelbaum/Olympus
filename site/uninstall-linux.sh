@@ -225,6 +225,17 @@ expected = {
     "workerSocketPath": os.path.join(layout["runtimeHome"], "olympus", "worker.sock"),
 }
 if any(layout[key] != value for key, value in expected.items()): fail("the receipt contains an inconsistent Linux layout.")
+owned_empty_parents = receipt.get("ownedEmptyParents", [])
+allowed_empty_parents = {os.path.dirname(layout["stateDir"]), os.path.dirname(layout["cacheDir"])}
+if not isinstance(owned_empty_parents, list): fail("invalid empty-directory ownership; nothing was removed.")
+seen_parents = set()
+for entry in owned_empty_parents:
+    if (not isinstance(entry, dict) or entry.get("path") not in allowed_empty_parents
+        or entry["path"] in seen_parents or type(entry.get("device")) is not int or entry["device"] < 0
+        or type(entry.get("inode")) is not int or entry["inode"] <= 0):
+        fail("invalid empty-directory ownership; nothing was removed.")
+    seen_parents.add(entry["path"])
+
 def beneath(path, root):
     try: return os.path.commonpath([path, root]) == root and path != root
     except ValueError: return False
@@ -533,6 +544,17 @@ if purge:
         absolute(root, "purge root")
         if not beneath(root, purge_boundaries[root]) or os.path.basename(root) not in {"olympus","engine","olympus-engine"}: fail(f"purge root is outside the Olympus boundary: {root}")
         purge_root(root)
+    # Never infer creation from the name, permissions or user ownership alone.
+    for entry in owned_empty_parents:
+        parent = entry["path"]
+        info = lstat(parent)
+        if info is None: continue
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid
+            or stat.S_IMODE(info.st_mode) != 0o700 or (info.st_dev, info.st_ino) != (entry["device"], entry["inode"])): continue
+        check_ancestry(parent, leaf_owner=True)
+        try: os.rmdir(parent); fsync_dir(os.path.dirname(parent))
+        except OSError as error:
+            if error.errno not in {errno.ENOTEMPTY, errno.EEXIST, errno.ENOENT}: fail(f"empty parent cleanup failed: {parent}: {error}")
     # Keep the receipt reachable until every other requested deletion finishes.
     for name in os.listdir(layout["configDir"]):
         target = os.path.join(layout["configDir"], name)

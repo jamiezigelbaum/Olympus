@@ -159,6 +159,8 @@ test('install copies scratch inputs into a durable generation, receipts the laun
  expect(readFileSync(desktop,'utf8')).toContain(`Exec="${l.launcherPath}" dashboard`);expect(readFileSync(icon)).toEqual(readFileSync(join(checkout,'assets/icon.png')));
  expect(installedResult.program.workingDirectory).toStartWith(join(l.packageDir,'generations/'));expect(installedResult.program.workingDirectory).not.toBe(checkout);
  expect(readFileSync(l.launcherPath,'utf8')).toContain(`export XDG_CONFIG_HOME='${l.configHome}'`);
+ const parentReceipt=JSON.parse(readFileSync(l.receiptPath,'utf8'));
+ for(const path of [dirname(l.stateDir),dirname(l.cacheDir)])expect(parentReceipt.ownedEmptyParents).toContainEqual({path,device:statSync(path).dev,inode:statSync(path).ino});
  const journalPath=join(l.stateDir,'install-transaction.json'),journal=readFileSync(journalPath,'utf8'),transaction=JSON.parse(journal);expect(journal).not.toContain('OLYMPUS_WORKER_AUTH_TOKEN');expect(transaction.backupDir).toContain('.install-backup-');expect(Object.values(transaction.before.files).every((snapshot:any)=>snapshot.present===false&&!('backupPath' in snapshot))).toBe(true);
  await settleLinuxEngineInstall(options,{ok:true,expected_build:installedResult.program.build??null,running_build:installedResult.program.build??null,pid:42,worker:'ok',waited_ms:0});
  mkdirSync(join(l.home,'.openclaw'),{mode:0o700});
@@ -184,6 +186,7 @@ test('install copies scratch inputs into a durable generation, receipts the laun
  const upgraded=installEngine({...options,fromCheckout:packageAt(l.home,'v2')}),interrupted=JSON.parse(readFileSync(journalPath,'utf8'));expect(interrupted.generationCreated).toBe(true);
  rmSync(interrupted.generationPath,{recursive:true});writeFileSync(journalPath,JSON.stringify({...interrupted,phase:'rollback_required',before:{...interrupted.before,active:false}}),{mode:0o600});
  expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(true);expect(upgraded.program.build).not.toBe(installedResult.program.build);
+ expect(JSON.parse(readFileSync(l.receiptPath,'utf8')).ownedEmptyParents).toEqual(parentReceipt.ownedEmptyParents);
  expect(readFileSync(desktop,'utf8')).toContain(`Exec="${l.launcherPath}" dashboard`);expect(readFileSync(icon)).toEqual(readFileSync(join(checkout,'assets/icon.png')));
 },20_000); // Copies and hashes the real Bun binary twice, including on emulated runners.
 for (const enablement of ['enabled', 'enabled-runtime'] as const) {
