@@ -124,7 +124,9 @@ function metaFor(engine: Engine, extra: Record<string, unknown> = {}) {
 }
 
 function mount(options: MountOptions): Host {
-  const html = privateQuestionPageHtml({ relayOrigin: RELAY, secondMs: 1, pollCapMs: options.pollCapMs ?? 5_000, keyStore: { timeoutMs: 30 }, heightResendMs: 10, initFallbackMs: 20 });
+  // The key store keeps its shipped timeout: the fake answers through timer hops, and a short one let a loaded CI
+  // runner give up on it (falling back to memory), so a re-mount found no kept key and showed a fresh form.
+  const html = privateQuestionPageHtml({ relayOrigin: RELAY, secondMs: 1, pollCapMs: options.pollCapMs ?? 5_000, heightResendMs: 10, initFallbackMs: 20 });
   const start = html.indexOf('<script>') + '<script>'.length;
   const script = html.slice(start, html.indexOf('</script>', start));
   const win = new Window({ url: 'https://web-sandbox.oaiusercontent.com/' });
