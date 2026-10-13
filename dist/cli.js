@@ -75869,6 +75869,10 @@ async function planTierMigration(options) {
             continue;
           }
           const read = ledger.classificationRead(item.identity);
+          if (!store.itemPresence(item.identity).active) {
+            totals.notRead += 1;
+            continue;
+          }
           const override = read.override;
           const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity, read) : undefined;
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
