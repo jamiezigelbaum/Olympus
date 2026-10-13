@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { afterEach, expect, test } from 'bun:test';
-import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, copyFileSync, lstatSync, readlinkSync, symlinkSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
@@ -231,3 +231,52 @@ test('conflict warnings include the legacy Linux user worker', () => {
  expect(engineConflictWarnings(l.home,'linux',linuxEngineEnvironment(l)).join(' ')).toContain(unit);
  expect(engineConflictWarnings(l.home,'linux',linuxEngineEnvironment(l)).join(' ')).toContain('olympus worker uninstall');
 });
+
+for (const failure of ['none', 'link', 'start', 'health', 'parent', 'replacement'] as const) {
+ test(`custom XDG unit link with spaced HOME: ${failure}`, async () => {
+  const home=mkdtempSync(join(tmpdir(),'svc home '));roots.push(home);
+  const run=join(home,'run');mkdirSync(run,{mode:0o700});
+  const l=resolveLinuxEngineLayout({HOME:home,XDG_CONFIG_HOME:join(home,'custom config'),XDG_RUNTIME_DIR:run});
+  const link=join(home,'.config/systemd/user/olympus-engine.service');
+  let active=false,enabled=false,linkCalls=0;
+  const exec:EngineExec=(command,args)=>{
+   if(command==='loginctl')return good('yes');
+   if(command==='systemd-analyze')return good();
+   if(args.includes('--version'))return good('systemd 256');
+   if(args.includes('--property=Version'))return good('256');
+   if(args.includes('olympus-worker.service'))return good('LoadState=not-found');
+   if(args.includes('show'))return existsSync(l.unitPath)?good(`LoadState=loaded\nActiveState=${active?'active':'inactive'}\nUnitFileState=${enabled?'enabled':'disabled'}\nMainPID=${active?42:0}\nControlGroup=\nResult=success\nExecMainStatus=0\nFragmentPath=${l.unitPath}\n`):good('LoadState=not-found');
+   if(args.includes('link')){
+    linkCalls++;mkdirSync(dirname(link),{recursive:true,mode:0o700});if(!lstatSync(link,{throwIfNoEntry:false}))symlinkSync(l.unitPath,link);
+    return {status:failure==='link'?1:0,stdout:'',stderr:`Created symlink ${link} → ${l.unitPath}.\n`};
+   }
+   if(args.includes('enable'))enabled=true;
+   if(args.includes('disable')){if(!existsSync(link))return {status:1,stdout:'',stderr:'Unit file does not exist'};enabled=false;active=false;rmSync(link);} // systemd disable removes registration links too.
+   if(args.includes('stop'))active=false;
+   if(args.includes('start')){if(failure==='replacement'){rmSync(link);symlinkSync(join(home,'user-unit'),link);return {status:1,stdout:'',stderr:'changed target'};}if(failure==='start')return {status:1,stdout:'',stderr:'start fixture failed'};active=true;}
+   return good();
+  };
+  if(failure==='parent'){const outside=join(home,'outside');mkdirSync(outside,{mode:0o700});symlinkSync(outside,join(home,'.config'));}
+  const options={platform:'linux',homeDir:home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(home,'v1'),bunBin:runtimeAt(home),consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true};
+  if(failure==='parent'){expect(()=>installEngine(options)).toThrow();expect(linkCalls).toBe(0);return;}
+  if(failure==='replacement'){expect(()=>installEngine(options)).toThrow('recovery failed');expect(readlinkSync(link)).toBe(join(home,'user-unit'));return;}
+  if(failure==='link'||failure==='start'){
+   expect(()=>installEngine(options)).toThrow();
+   expect(()=>lstatSync(link)).toThrow();
+   expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(true);
+   for(const path of [dirname(l.stateDir),dirname(l.cacheDir)])expect(JSON.parse(readFileSync(l.receiptPath,'utf8')).ownedEmptyParents).toContainEqual({path,device:statSync(path).dev,inode:statSync(path).ino});
+  }else{
+   const result=installEngine(options);
+   expect(readlinkSync(link)).toBe(l.unitPath);
+   expect(JSON.parse(readFileSync(l.receiptPath,'utf8')).ownedUnitLinks).toEqual([link]);
+   await settleLinuxEngineInstall(options,{ok:failure!=='health',expected_build:result.program.build??null,running_build:result.program.build??null,pid:42,worker:'ok',waited_ms:0});
+   if(failure==='health')expect(()=>lstatSync(link)).toThrow();
+   else {
+    expect(readlinkSync(link)).toBe(l.unitPath);
+    active=false;enabled=false; // Existing linked-but-disabled installation.
+    expect(()=>installEngine({...options,lifecycleCheckpoint:(name)=>{if(name==='current_published')throw new Error('repair fixture failed');}})).toThrow('repair fixture failed');
+    expect(readlinkSync(link)).toBe(l.unitPath);
+   }
+  }
+ },20_000);
+}

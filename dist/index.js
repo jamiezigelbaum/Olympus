@@ -18801,7 +18801,7 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/linux-engine-service.ts
 init_linux_desktop_entry();
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { chmodSync as chmodSync5, closeSync as closeSync4, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync8, mkdirSync as mkdirSync12, openSync as openSync4, readFileSync as readFileSync20, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync6, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync15 } from "node:fs";
+import { chmodSync as chmodSync5, closeSync as closeSync4, constants as constants4, copyFileSync, existsSync as existsSync11, fstatSync, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync8, mkdirSync as mkdirSync12, openSync as openSync4, readFileSync as readFileSync20, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync6, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync15, symlinkSync as symlinkSync2 } from "node:fs";
 import { createRequire as createRequire2 } from "node:module";
 import { basename as basename5, dirname as dirname19, join as join26, relative as relative4, resolve as resolve5, sep as sep5 } from "node:path";
 init_linux_engine_layout();

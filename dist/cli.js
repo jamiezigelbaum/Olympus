@@ -65810,7 +65810,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { chmodSync as chmodSync19, closeSync as closeSync14, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync24, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync39, readlinkSync as readlinkSync2, readdirSync as readdirSync10, realpathSync as realpathSync10, renameSync as renameSync13, rmSync as rmSync16, statSync as statSync22 } from "node:fs";
+import { chmodSync as chmodSync19, closeSync as closeSync14, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync24, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync39, readlinkSync as readlinkSync2, readdirSync as readdirSync10, realpathSync as realpathSync10, renameSync as renameSync13, rmSync as rmSync16, statSync as statSync22, symlinkSync as symlinkSync2 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename8, dirname as dirname45, join as join63, relative as relative8, resolve as resolve11, sep as sep9 } from "node:path";
 import { userInfo } from "node:os";
@@ -66256,6 +66256,34 @@ function durableProgram(layout, source, transaction, options) {
   requireLinuxApprovalTransport(installed);
   return installed;
 }
+function unitLinkCandidates(layout) {
+  return [join63(layout.home, ".config/systemd/user", SYSTEMD_ENGINE_UNIT)].filter((path) => path !== layout.unitPath);
+}
+function ownedUnitLink(layout, path) {
+  const info = lstatSync24(path, { throwIfNoEntry: false });
+  if (!info)
+    return false;
+  assertLinuxManagedPath(dirname45(path), process.getuid(), "directory");
+  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve11(dirname45(path), readlinkSync2(path)) !== layout.unitPath) {
+    throw new Error(`The systemd unit link changed at ${path}; it was retained.`);
+  }
+  return true;
+}
+function restorePriorUnitLinks(layout, transaction) {
+  for (const { path, target } of transaction.priorUnitLinks ?? []) {
+    if (ownedUnitLink(layout, path))
+      continue;
+    assertLinuxManagedPath(dirname45(path), process.getuid(), "directory");
+    symlinkSync2(target, path);
+    syncDirectorySync(dirname45(path));
+  }
+}
+function removeNewUnitLinks(layout, transaction) {
+  for (const path of transaction.newUnitLinks ?? []) {
+    if (ownedUnitLink(layout, path))
+      removeFileDurablySync(path);
+  }
+}
 function transactionPath(layout) {
   return join63(layout.stateDir, "install-transaction.json");
 }
@@ -66296,8 +66324,10 @@ function createInstallTransaction(input) {
     files[path] = writeSnapshot(backupDir, index++, text2, mode);
   }
   const receipt = writeSnapshot(backupDir, index, input.receiptText);
+  const priorUnitLinks = unitLinkCandidates(input.layout).filter((path) => ownedUnitLink(input.layout, path)).map((path) => ({ path, target: readlinkSync2(path) }));
   return {
     schema: "olympus.engine.install-transaction.v1",
+    priorUnitLinks,
     action: input.action,
     phase: input.phase,
     stagingPath: join63(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID18()}`),
@@ -66332,7 +66362,7 @@ function readInstallTransaction(layout) {
   const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname45(resolve11(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename8(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
   const createdAllowed = new Set(transactionCreatedFiles(layout));
   const absent = value2?.before?.absentCreatedFiles;
-  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname45(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join63(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join63(backupDir, `file-${allowedFiles.length}.backup`) || dirname45(resolve11(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname45(resolve11(value2.generationPath)) !== join63(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join63(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
+  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve11(dirname45(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname45(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join63(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join63(backupDir, `file-${allowedFiles.length}.backup`) || dirname45(resolve11(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname45(resolve11(value2.generationPath)) !== join63(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join63(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value2.phase === "qualified" || value2.phase === "recovered") {
@@ -66427,6 +66457,8 @@ function restoreInstallTransaction(layout, exec, options) {
   assertDesktopTransactionTargets(layout, transaction);
   if (transaction.phase === "qualified" || transaction.phase === "recovered" || transaction.phase === "rollback_required")
     return transaction;
+  for (const path of [...transaction.newUnitLinks ?? [], ...(transaction.priorUnitLinks ?? []).map((entry) => entry.path)])
+    ownedUnitLink(layout, path);
   const currentFacts = inspectSystemdEngine(layout, exec);
   assertKnown(currentFacts);
   if (currentFacts.state !== "not_loaded" || currentFacts.enabled !== false)
@@ -66434,6 +66466,7 @@ function restoreInstallTransaction(layout, exec, options) {
   const stoppedFacts = inspectSystemdEngine(layout, exec);
   assertKnown(stoppedFacts);
   removeReleasedWorkerSocket2(layout, currentFacts, stoppedFacts, options);
+  removeNewUnitLinks(layout, transaction);
   for (const [path, snapshot] of Object.entries(transaction.before.files))
     restoreOptionalFile(path, snapshot);
   if (Object.hasOwn(transaction.before.files, linuxDesktopEntryPaths(layout).desktop))
@@ -66448,8 +66481,9 @@ function restoreInstallTransaction(layout, exec, options) {
   systemdMust(exec, ["daemon-reload"]);
   if (transaction.before.enabled)
     systemdMust(exec, ["enable", ...transaction.before.enabledRuntime ? ["--runtime"] : [], layout.unitPath]);
-  else if (transaction.before.files[layout.unitPath].present)
-    systemdMust(exec, ["disable", "--now", SYSTEMD_ENGINE_UNIT]);
+  restorePriorUnitLinks(layout, transaction);
+  if (transaction.priorUnitLinks?.length)
+    systemdMust(exec, ["daemon-reload"]);
   if (transaction.before.active)
     systemdMust(exec, ["restart", SYSTEMD_ENGINE_UNIT]);
   else if (transaction.before.files[layout.unitPath].present)
@@ -66620,6 +66654,8 @@ function installLinuxEngine(options) {
   return locked(l, () => {
     preflightSystemdEngine(l, exec, options.uid);
     preflightLinuxDesktopEntry(l);
+    for (const path of unitLinkCandidates(l))
+      assertLinuxManagedPath(dirname45(path), process.getuid(), "directory");
     assertNoInterruptedInstall(l);
     const before = inspectSystemdEngine(l, exec);
     assertKnown(before);
@@ -66704,8 +66740,10 @@ OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
         writePrivateFileAtomicSync(l.unitPath, unit);
       lifecycleCheckpoint(options, "unit_published");
       systemdMust(exec, ["daemon-reload"]);
-      const linkOutput = systemdMust(exec, ["link", l.unitPath]);
-      const links = [...linkOutput.matchAll(/Created symlink (\S+) →/g)].map((m) => m[1].replace(/\.$/, ""));
+      transaction.newUnitLinks = unitLinkCandidates(l).filter((path) => !lstatSync24(path, { throwIfNoEntry: false }));
+      writeInstallTransaction(l, transaction);
+      systemdMust(exec, ["link", l.unitPath]);
+      const links = transaction.newUnitLinks.filter((path) => ownedUnitLink(l, path));
       if (links.length)
         publishLinuxEngineReceipt(l, { ownedUnitLinks: [...new Set([...readLinuxEngineReceipt(l.receiptPath)?.ownedUnitLinks ?? [], ...links])] });
       systemdMust(exec, ["daemon-reload"]);

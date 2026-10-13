@@ -1605,3 +1605,18 @@ apart from one never created. Removing the refusal would seed missing settings;
 the recovery journal also does not accept that prior receipt state. Retain the
 refusal until a completeness contract and migration/recovery proof exist. This
 is the builder brief's P0 skip-and-flag disposition, not an adoption implementation.
+
+Systemd registration uses the known default user unit-link location, not the
+localized `systemctl link` diagnostic. The install journal records which link
+paths were absent before the command. Failed activation removes only those
+new links whose owner and target still match, including when the command
+creates a link then fails; previous links are journaled and restored after disable, followed by a manager
+reload. A changed target
+refuses recovery and retains the journal. This also covers HOME paths with
+spaces and a custom XDG_CONFIG_HOME.
+
+Validation boundary: directory identity checking and `rmdir` are not one atomic
+operation against another process running as the same UID. A concurrent swap
+can lose an empty replacement directory, but `rmdir` cannot remove its contents
+or follow a final-component symlink. No rename/quarantine step is used, avoiding
+new data-orphaning risk. This metadata-only residual is disclosed for anchor review.
