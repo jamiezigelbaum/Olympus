@@ -319,6 +319,23 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: true, decision: 'approved' });
   });
 
+  test('classifier CLI approval and decline use the worker prompt with owner privacy words', async () => {
+    const { dir, env } = setup();
+    const { writePrivacyProfile, privacyOwnerContext } = await import('../src/workers/classification/privacy-profile.ts');
+    const { snifferPromptVersions } = await import('../src/workers/classification/sniffer.ts');
+    const { loadSovereigntyPreset } = await import('../src/core/sovereignty.ts');
+    const withPolicy = { ...env, OLYMPUS_PRIVACY_PROFILE_PATH: join(dir, 'privacy.json'), OLYMPUS_SOVEREIGNTY_CONFIG_PATH: join(dir, 'policy.json') };
+    writeFileSync(withPolicy.OLYMPUS_SOVEREIGNTY_CONFIG_PATH, JSON.stringify(loadSovereigntyPreset('local-first')));
+    writePrivacyProfile({ description: 'Keep my health records private; routine notices are shareable.', rules: [] }, { env: withPolicy });
+    const expected = snifferPromptVersions(privacyOwnerContext({ env: withPolicy })).approval;
+    let time = 0;
+    const context = { env: withPolicy, now: () => new Date(1_800_000_000_000 + ++time * 1000) };
+    expect(await runTierCommand(['classifier', 'approve', '--why', 'Use my settings.'], context)).toMatchObject({ recorded: { prompt_version: expected } });
+    expect(await runTierCommand(['classifier', 'status'], context)).toMatchObject({ promptVersion: expected, decision: 'approved' });
+    expect(await runTierCommand(['classifier', 'decline'], context)).toMatchObject({ recorded: { prompt_version: expected } });
+    expect(await runTierCommand(['classifier', 'status'], context)).toMatchObject({ promptVersion: expected, decision: 'declined' });
+  });
+
   test('tier classifier decline is recorded, so status tells declined from never asked', async () => {
     const { dir, env } = setup();
     const sovereigntyPath = join(dir, 'sovereignty.json');
