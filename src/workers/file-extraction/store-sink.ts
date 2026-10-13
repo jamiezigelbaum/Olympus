@@ -27,7 +27,9 @@
 
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { RawItem } from '../../core/contracts.ts';
-import { isImageMediaType } from '../classification/tier-classifier.ts';
+import { detectSecretFindingKinds } from '../classification/engine.ts';
+import { isImageMediaType, type ItemTierOverride } from '../classification/tier-classifier.ts';
+import { settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
@@ -84,8 +86,9 @@ export const EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = 'extraction_claim_supers
  */
 export const EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = 'store_item_tier_move_queued';
 /**
- * A tiered store set: the item's text carries a secret, so the item is
- * stored nowhere and only its location is kept.
+ * The item's text carries a secret, so the item is stored nowhere and only
+ * its location is kept (a tiered store set, or the plain sink's Secrets
+ * floor).
  */
 export const EXTRACTION_SINK_SKIPPED_SECRETS = 'store_item_secrets';
 /**
@@ -173,6 +176,15 @@ export interface ConnectorStoreExtractionSinkOptions {
    * never lets picture content into a store outside Private.
    */
   mediaJudgment?: (mediaSha256: string) => MediaJudgment | undefined;
+  /**
+   * Whether this sink applies the Secrets floor to the text before writing
+   * it. Default true. The store's own S5 refusal judges only the row's stored
+   * tier, decided at listing before the text existed, so without this floor
+   * text recognized as Secret would be chunked and indexed. A tiered store
+   * set's routed landing turns it off: it has already judged this text with
+   * the shared classifier and settles Secrets through its ledger.
+   */
+  secretsFloor?: boolean;
 }
 
 /**
@@ -366,6 +378,26 @@ export function createConnectorStoreExtractionSink(
         };
       }
 
+      // THE SECRETS FLOOR, before anything is written. A Secret is stored
+      // nowhere: the copy this store already holds (an earlier version's text)
+      // goes, and only the location is kept, per the one Secrets policy
+      // (connector-store/secrets-disposition.ts). An explicit per-item owner
+      // override outranks the detector, as it does in the shared classifier.
+      // After the lease probe above, so a superseded worker changes nothing.
+      if (options.secretsFloor !== false && plan.item.content.kind === 'text'
+        && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
+        if (options.recordContentTier !== false) {
+          store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
+        }
+        settleUntrackedSecretsCopy({ store, identity: plan.item.identity, connectorId: options.syncConnectorId });
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_SECRETS,
+        };
+      }
+
       let summary;
       try {
         summary = store.restoreItemRepresentations({
@@ -476,6 +508,24 @@ export function createConnectorStoreExtractionSink(
       };
     },
   };
+}
+
+/**
+ * Whether the item's text is Secrets: an owner's tier override decides
+ * outright, an owner's not-secret override clears the detector, and otherwise
+ * any secret finding in the text holds. An unreadable ledger reads as no
+ * override, so the detector still decides.
+ */
+function secretsFloorHolds(store: LocalConnectorStore, item: RawItem, text: string): boolean {
+  let override: ItemTierOverride | undefined;
+  try {
+    override = store.tierLedger()?.getOverride(item.identity);
+  } catch {
+    override = undefined;
+  }
+  if (override?.kind === 'tier') return override.tier === 'secrets';
+  if (override?.kind === 'not_secret') return false;
+  return detectSecretFindingKinds(text).length > 0;
 }
 
 /**

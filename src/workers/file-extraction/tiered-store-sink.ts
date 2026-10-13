@@ -102,6 +102,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       ...(options.claims ? { claims: options.claims } : {}),
       ...(tierClassification ? { tierClassification } : {}),
       ...(recordContentTier ? {} : { recordContentTier: false }),
+      // A routed landing has judged the text already (classifyContentTier)
+      // and settles Secrets through the ledger; a legacy one has not.
+      ...(contentRulesRan ? { secretsFloor: false } : {}),
       ...(contentRulesRan ? { mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256) } : {}),
     });
 

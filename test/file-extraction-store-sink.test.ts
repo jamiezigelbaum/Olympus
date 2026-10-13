@@ -9,6 +9,7 @@
 // rather than replacing it.
 
 import { describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,6 +40,7 @@ import {
   EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
   EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
+  EXTRACTION_SINK_SKIPPED_SECRETS,
   createConnectorStoreExtractionSink,
   planExtractionSinkWrite,
 } from '../src/workers/file-extraction/store-sink.ts';
@@ -509,6 +511,109 @@ describe('extraction factory store sink', () => {
       // nothing if no chunk was written in the first place.
       expect(counts.chunks).toBe(1);
       expect(counts.embeddedChunks).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+// Assembled at run time so no key-shaped literal sits in the repository (as
+// test/content-policy-secrets.test.ts does).
+const STRIPE_LIVE_KEY = ['sk', '_live_', 'k9Xp2LmQ7vRt4WzY8bNc3HdF'].join('');
+
+/** What the store holds for any text, read straight from its tables. */
+function storedRows(store: LocalConnectorStore, needle: string): {
+  chunks: number;
+  ftsRows: number;
+  chunksWithNeedle: number;
+  ftsWithNeedle: number;
+  item: { tombstoned: number; trust_tier: string; title: string | null } | null;
+} {
+  const db = new Database(store.dbPath, { readonly: true });
+  try {
+    const count = (sql: string, ...params: string[]): number =>
+      (db.query(sql).get(...params) as { count: number }).count;
+    return {
+      chunks: count('SELECT COUNT(*) AS count FROM chunks'),
+      ftsRows: count('SELECT COUNT(*) AS count FROM connector_store_fts'),
+      chunksWithNeedle: count('SELECT COUNT(*) AS count FROM chunks WHERE instr(bounded_text, ?) > 0', needle),
+      ftsWithNeedle: count('SELECT COUNT(*) AS count FROM connector_store_fts WHERE instr(bounded_text, ?) > 0', needle),
+      item: db.query('SELECT tombstoned, trust_tier, title FROM items WHERE provider_item_id = ?')
+        .get(ITEM_ID) as { tombstoned: number; trust_tier: string; title: string | null } | null,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+describe('extraction factory store sink: the Secrets floor', () => {
+  test('text holding an API key leaves no chunk or FTS row and keeps the location only', async () => {
+    const store = await seededStore();
+    try {
+      const text = `Deploy notes.\nSTRIPE_SECRET_KEY=${STRIPE_LIVE_KEY}\nRotate quarterly.`;
+      const result = await sinkFor(store).accept(requestFor(text));
+      expect(result.accepted).toBe(false);
+      expect(result.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
+      expect(result.chunksIndexed).toBe(0);
+
+      const rows = storedRows(store, STRIPE_LIVE_KEY);
+      expect(rows.chunks).toBe(0);
+      expect(rows.ftsRows).toBe(0);
+      expect(rows.chunksWithNeedle).toBe(0);
+      expect(rows.ftsWithNeedle).toBe(0);
+      // Tombstoned as the store's own sync tombstones an S5 item: the row
+      // stays (so nothing resurrects it), its title does not.
+      expect(rows.item).toEqual({ tombstoned: 1, trust_tier: 'S5', title: null });
+    } finally {
+      store.close();
+    }
+  });
+
+  test('an earlier version whose text landed is removed when the new text is Secret', async () => {
+    const store = await seededStore();
+    try {
+      const sink = sinkFor(store);
+      expect((await sink.accept(requestFor('An ordinary first draft.'))).accepted).toBe(true);
+      expect(storedRows(store, 'ordinary').chunksWithNeedle).toBe(1);
+
+      const secret = await sink.accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, {
+        ref: refFor({ sourceVersion: 'rev-8' }),
+      }));
+      expect(secret.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
+      const rows = storedRows(store, 'ordinary');
+      expect(rows.chunks).toBe(0);
+      expect(rows.ftsRows).toBe(0);
+      expect(storedRows(store, STRIPE_LIVE_KEY).chunksWithNeedle).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("the owner's not-secret override lets the text land", async () => {
+    const store = await seededStore();
+    try {
+      store.tierLedger()!.setOverride(
+        { provider: PROVIDER, accountScope: ACCOUNT, providerItemId: ITEM_ID },
+        { kind: 'not_secret' },
+      );
+      const result = await sinkFor(store).accept(requestFor(`Test fixture key ${STRIPE_LIVE_KEY}`));
+      expect(result.accepted).toBe(true);
+      expect(storedRows(store, STRIPE_LIVE_KEY).chunksWithNeedle).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("the owner's Secrets override holds even for text the detector finds clean", async () => {
+    const store = await seededStore();
+    try {
+      store.tierLedger()!.setOverride(
+        { provider: PROVIDER, accountScope: ACCOUNT, providerItemId: ITEM_ID },
+        { kind: 'tier', tier: 'secrets' },
+      );
+      const result = await sinkFor(store).accept(requestFor('Nothing a detector would flag.'));
+      expect(result.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
+      expect(storedRows(store, 'detector').chunks).toBe(0);
     } finally {
       store.close();
     }
