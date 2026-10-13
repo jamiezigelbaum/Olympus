@@ -28413,6 +28413,7 @@ var init_vocabulary = __esm(() => {
     connectReopen: "Open sign-in again",
     connectTimeout: "Olympus has not heard back from {source} yet. If you finished signing in, check again.",
     connectFailed: "Olympus could not start signing in to {source}. Try again.",
+    goToModels: "Go to Models",
     connected: "{source} is connected.",
     foldersTitle: "Choose folders",
     foldersIntro: "Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.",
@@ -30484,6 +30485,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
+    showModels: () => {
+      state.open.models = true;
+      closeScreen("", false, "summary:models");
+    },
     directSignIn: () => state.hostKind !== "",
     setDashboard: (value) => {
       if (!isDashboard(value))
@@ -31025,6 +31030,12 @@ function chatgptPickerProgram(kit) {
     session++;
     kit.close(notice, refresh, key2);
   }
+  function goToModels() {
+    stopTimer();
+    p = null;
+    session++;
+    kit.showModels();
+  }
   function start(fix, sourceId, sourceLabel, returnKey) {
     stopTimer();
     session++;
@@ -31071,7 +31082,8 @@ function chatgptPickerProgram(kit) {
       if (!href) {
         p.phase = "error";
         p.errorText = kit.errorText(result);
-        kit.render("picker:connect:retry");
+        p.errorCode = result && result.isError && result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
+        kit.render(p.errorCode === "models_not_ready" ? "picker:connect:models" : "picker:connect:retry");
         return;
       }
       p.href = href;
@@ -31085,6 +31097,7 @@ function chatgptPickerProgram(kit) {
         return;
       p.phase = "error";
       p.errorText = "";
+      p.errorCode = "";
       kit.render("picker:connect:retry");
     });
   }
@@ -31171,7 +31184,8 @@ function chatgptPickerProgram(kit) {
     } else {
       const line = el("p", "", p.errorText || fill2(Q.connectFailed, { source: p.label }));
       line.setAttribute("role", "alert");
-      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", reopen, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      const models = p.errorCode === "models_not_ready";
+      add(box, line, add(el("div", "actions"), models ? kit.button(Q.goToModels, "picker:connect:models", goToModels, "main") : null, kit.button(Q.tryAgain, "picker:connect:retry", reopen, models ? "plain" : "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     }
     add(page, box);
   }
@@ -33148,7 +33162,17 @@ var init_page = __esm(() => {
   init_shared_privacy_logic();
   init_picker();
   init_privacy();
-  CHATGPT_INLINE_ERROR_CODES = ["sign_in_failed", "source_not_connected", "source_busy", "sync_unavailable", "disconnect_incomplete"];
+  CHATGPT_INLINE_ERROR_CODES = [
+    "sign_in_failed",
+    "source_not_connected",
+    "source_busy",
+    "sync_unavailable",
+    "disconnect_incomplete",
+    "models_not_ready",
+    "connect_unavailable",
+    "google_signin_full",
+    "already_connected"
+  ];
   CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
   CHATGPT_DASHBOARD_REFRESH = {
     activeMs: 15000,
