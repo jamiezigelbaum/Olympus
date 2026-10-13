@@ -10341,7 +10341,7 @@ function metadataPass(args) {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
     const verdict = args.sniffer.judge({
       pass: "metadata",
-      priority: "high",
+      priority: HELD_RECORD_PRIORITY,
       flags,
       material: snifferNames(signals),
       mapRevision: args.mapRevision,
@@ -10436,7 +10436,7 @@ function contentPass(args) {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
     const verdict = args.sniffer.judge({
       pass: "content",
-      priority: recordFlags.length > 0 || metadata.pending ? "high" : "normal",
+      priority: recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
       flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text2, vocabularyTerms(detection.vocabulary))),
       mapRevision: args.mapRevision,
@@ -10623,7 +10623,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-13.p5", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-13.p5", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_engine();
   init_sender_rules();
@@ -36269,7 +36269,6 @@ import { Database as Database3 } from "bun:sqlite";
 import { createHash as createHash18 } from "node:crypto";
 import { chmodSync as chmodSync4, existsSync as existsSync13, mkdirSync as mkdirSync11 } from "node:fs";
 import { dirname as dirname16 } from "node:path";
-var TIER_SNIFFER_SCHEMA_VERSION = 1;
 function snifferMaterialHash(pass, material) {
   return createHash18("sha256").update(`${pass}
 ${material}`).digest("hex");
@@ -36347,8 +36346,8 @@ class TierSnifferStore {
     const materialHash = snifferMaterialHash(question.pass, question.material);
     this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
@@ -36356,8 +36355,9 @@ class TierSnifferStore {
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
+        priority = excluded.priority,
         flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString());
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority))) : 0);
   }
   questionFor(subject, pass) {
     const row = this.db.query(`
@@ -36368,8 +36368,25 @@ class TierSnifferStore {
   }
   listQuestions(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
-    const rows = options.pass ? this.db.query("SELECT * FROM sniffer_questions WHERE pass = ? ORDER BY question_pk LIMIT ?").all(options.pass, limit) : this.db.query("SELECT * FROM sniffer_questions ORDER BY question_pk LIMIT ?").all(limit);
+    const where = options.pass ? "WHERE pass = ?" : "";
+    const params = options.pass ? [options.pass] : [];
+    const rows = this.db.query(`SELECT * FROM sniffer_questions ${where}
+      ORDER BY priority DESC, queued_at DESC, question_pk DESC LIMIT ?`).all(...params, limit);
+    const oldest = this.db.query(`SELECT * FROM sniffer_questions ${where}
+      ORDER BY queued_at, question_pk LIMIT 1`).get(...params);
+    if (oldest && !rows.some((row) => row.question_pk === oldest.question_pk))
+      rows.push(oldest);
     return rows.map(questionFromRow);
+  }
+  dispatchCount() {
+    const used = this.db.query("SELECT dispatches FROM sniffer_schedule WHERE id = 1").get().dispatches;
+    return used;
+  }
+  recordDispatch() {
+    this.db.exec("UPDATE sniffer_schedule SET dispatches = dispatches + 1 WHERE id = 1");
+  }
+  clockMs() {
+    return this.now().getTime();
   }
   deleteQuestion(subject, pass) {
     return this.db.query(`
@@ -36418,7 +36435,9 @@ function questionFromRow(row) {
     material: row.material,
     flags: JSON.parse(row.flags_json),
     attempts: row.attempts,
-    queuedAt: row.queued_at
+    queuedAt: row.queued_at,
+    priority: row.priority ?? 0,
+    sequence: row.question_pk
   };
 }
 function subjectParams(subject) {
@@ -36433,7 +36452,7 @@ function restrictFiles(dbPath) {
 function snifferMigrations() {
   return [
     {
-      version: TIER_SNIFFER_SCHEMA_VERSION,
+      version: 1,
       name: "create_tier_sniffer",
       up(db) {
         db.exec(`
@@ -36465,6 +36484,16 @@ function snifferMigrations() {
             UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
           );
         `);
+      }
+    },
+    {
+      version: 2,
+      name: "priority_and_aging",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
+          CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
+          INSERT INTO sniffer_schedule VALUES (1, 0);`);
       }
     }
   ];
@@ -36674,8 +36703,10 @@ class CachedTierSniffer {
   }
   judge(request) {
     const material = request.material?.trim();
-    if (!material || snifferMaterialCarriesSecret(material))
+    if (!material)
       return { verdict: "undecided" };
+    if (snifferMaterialCarriesSecret(material))
+      return { verdict: "decided", tier: "secrets", code: "secret_refused" };
     const injectionRule = snifferInjectionRule(material);
     if (injectionRule) {
       return { verdict: "decided", tier: "secure", code: `injection:${injectionRule}:0.00` };
@@ -36697,7 +36728,8 @@ class CachedTierSniffer {
           pass: request.pass,
           material,
           mapRevision,
-          flags: request.flags
+          flags: request.flags,
+          ...request.priority !== undefined ? { priority: request.priority } : {}
         });
       }
     } catch {}
@@ -36782,6 +36814,9 @@ var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 
 // src/workers/email-source/server.ts
 init_privacy_profile();
+
+// src/workers/classification/sniffer-service.ts
+import { Database as Database4 } from "bun:sqlite";
 
 // src/workers/classification-ledger.ts
 import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
@@ -36911,12 +36946,8 @@ init_atomic_file();
 import { mkdirSync as mkdirSync12, readFileSync as readFileSync15 } from "node:fs";
 import { dirname as dirname19 } from "node:path";
 init_sniffer_lane();
-var DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10;
-var DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS = 30;
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
-function defaultSnifferMaxCallsPerPass(kind) {
-  return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
-}
+var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 var OUTPUT_CHARS_PER_ITEM = 110;
 
@@ -36972,8 +37003,12 @@ class SnifferCallBudget {
 async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   const id = snifferId(options.lane, promptVersion);
-  const maxCallsPerPass = Math.max(0, Math.floor(options.maxCallsPerPass ?? DEFAULT_SNIFFER_MAX_CALLS_PER_PASS));
+  const maxCallsPerPass = Math.max(0, Math.floor(options.maxCallsPerPass ?? Number.MAX_SAFE_INTEGER));
+  const monotonicNow = options.monotonicNow ?? (() => performance.now());
+  const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report = {
+    callMs: 0,
+    maxQueueWaitMs: 0,
     pendingSeen: 0,
     calls: 0,
     failedCalls: 0,
@@ -37070,8 +37105,26 @@ async function runSnifferPass(options) {
         continue;
       }
       if (snifferMaterialCarriesSecret(question.material)) {
-        target.sniffer.deleteQuestion(question, question.pass);
-        report.secretRefused += 1;
+        const row = target.ledger.getCurrent(question);
+        const decision = {
+          ...row,
+          snifferId: id,
+          metadataTier: "secrets",
+          contentTier: "secrets",
+          state: "current",
+          decidedBy: "secret_detector",
+          reasons: ["metadata:secret:sniffer_refused"],
+          metadataPending: false,
+          contentPending: false,
+          contentRead: true
+        };
+        const settled = row.routed ? target.settleSecrets?.(question, decision) === true : (target.ledger.recordDecision(question, decision), true);
+        if (settled) {
+          target.sniffer.deleteQuestion(question, "metadata");
+          target.sniffer.deleteQuestion(question, "content");
+          report.secretRefused += 1;
+        } else
+          report.awaitingPlacement += 1;
         continue;
       }
       if (snifferMaterialLooksLikeInjection(question.material)) {
@@ -37095,79 +37148,105 @@ async function runSnifferPass(options) {
     }
   }
   let consecutiveTransportFailures = 0;
-  for (const pass of ["metadata", "content"]) {
-    const open5 = work[pass].filter((item) => {
-      if (stillOpen(item.target, item.question))
-        return true;
-      if (midMove(item.target, item.question))
-        return false;
-      item.target.sniffer.deleteQuestion(item.question, pass);
-      report.staleDropped += 1;
-      return false;
-    });
-    const batches = groupByMaterial(open5).map((group) => [group]);
-    for (const batch of batches) {
-      const stop = stopReason(options, report, maxCallsPerPass);
-      if (stop) {
-        report.stoppedBy = stop;
+  const pending = [...work.metadata, ...work.content].sort(compareRecent);
+  let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
+  while (pending.length > 0) {
+    const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+    let next = aged[0] ?? pending[0];
+    if (next.question.pass === "content")
+      next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && item.question.provider === next.question.provider && item.question.accountScope === next.question.accountScope && item.question.providerConversationId === next.question.providerConversationId && item.question.providerItemId === next.question.providerItemId) ?? next;
+    pending.splice(pending.indexOf(next), 1);
+    const pass = next.question.pass;
+    if (!stillOpen(next.target, next.question)) {
+      if (!midMove(next.target, next.question)) {
+        next.target.sniffer.deleteQuestion(next.question, pass);
+        report.staleDropped += 1;
+      }
+      continue;
+    }
+    const group = [next];
+    for (let i = pending.length - 1;i >= 0; i--) {
+      const item = pending[i];
+      if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)) {
+        group.push(item);
+        pending.splice(i, 1);
+      }
+    }
+    const batch = [group];
+    const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+    if (stop) {
+      report.stoppedBy = stop;
+      return finish(report);
+    }
+    assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
+    const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: group2[0].question.material })), options.ownerContext);
+    next.target.sniffer.recordDispatch();
+    dispatches += 1;
+    for (const item of group)
+      report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs, item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
+    const callStarted = monotonicNow();
+    report.calls += 1;
+    report.itemsAsked += batch.length;
+    report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+    let text2;
+    try {
+      const completion = await options.model.complete({
+        system: SNIFFER_SYSTEM_PROMPT,
+        prompt,
+        localOnly: true,
+        maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
+        ...options.signal ? { signal: options.signal } : {}
+      });
+      text2 = completion.text;
+    } catch {
+      if (options.signal?.aborted) {
+        report.stoppedBy = "preempted";
         return finish(report);
       }
-      assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-      const prompt = buildSnifferBatchPrompt(pass, batch.map((group, index) => ({ i: index + 1, material: group[0].question.material })), options.ownerContext);
-      report.calls += 1;
-      report.itemsAsked += batch.length;
-      report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
-      let text2;
-      try {
-        const completion = await options.model.complete({
-          system: SNIFFER_SYSTEM_PROMPT,
-          prompt,
-          localOnly: true,
-          maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
-          ...options.signal ? { signal: options.signal } : {}
-        });
-        text2 = completion.text;
-      } catch {
-        if (options.signal?.aborted) {
-          report.stoppedBy = "preempted";
-          return finish(report);
-        }
-        report.failedCalls += 1;
-        consecutiveTransportFailures += 1;
-        if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
-          report.stoppedBy = "transport_failures";
-          return finish(report);
+      report.failedCalls += 1;
+      consecutiveTransportFailures += 1;
+      if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
+        report.stoppedBy = "transport_failures";
+        return finish(report);
+      }
+      continue;
+    } finally {
+      report.callMs += Math.max(0, monotonicNow() - callStarted);
+    }
+    if (options.signal?.aborted) {
+      report.stoppedBy = "preempted";
+      return finish(report);
+    }
+    consecutiveTransportFailures = 0;
+    report.responseChars += text2.length;
+    const verdicts = parseSnifferBatchResponse(text2, new Set(batch.map((_, index) => index + 1)));
+    for (const [index, group2] of batch.entries()) {
+      const verdict = verdicts.get(index + 1);
+      const key2 = keyOf(group2[0].question);
+      if (verdict) {
+        const stored = { ...verdict, failSafe: false };
+        group2[0].target.sniffer.putVerdict(key2, stored);
+        for (const item of group2) {
+          if (item.target !== group2[0].target)
+            item.target.sniffer.putVerdict(key2, stored);
+          apply(item, stored);
         }
         continue;
       }
-      consecutiveTransportFailures = 0;
-      report.responseChars += text2.length;
-      const verdicts = parseSnifferBatchResponse(text2, new Set(batch.map((_, index) => index + 1)));
-      for (const [index, group] of batch.entries()) {
-        const verdict = verdicts.get(index + 1);
-        const key2 = keyOf(group[0].question);
-        if (verdict) {
-          const stored = { ...verdict, failSafe: false };
-          group[0].target.sniffer.putVerdict(key2, stored);
-          for (const item of group) {
-            if (item.target !== group[0].target)
-              item.target.sniffer.putVerdict(key2, stored);
-            apply(item, stored);
-          }
-          continue;
-        }
-        const attempts = Math.max(...group.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
-        if (attempts >= SNIFFER_MAX_ATTEMPTS) {
-          const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
-          for (const item of group) {
-            item.target.sniffer.putVerdict(key2, failSafe);
-            apply(item, failSafe);
-          }
+      const attempts = Math.max(...group2.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
+      if (attempts >= SNIFFER_MAX_ATTEMPTS) {
+        const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
+        for (const item of group2) {
+          item.target.sniffer.putVerdict(key2, failSafe);
+          apply(item, failSafe);
         }
       }
     }
   }
   return finish(report);
+}
+function compareRecent(a, b) {
+  return b.question.priority - a.question.priority || b.question.queuedAt.localeCompare(a.question.queuedAt) || b.question.sequence - a.question.sequence;
 }
 function openPasses(row) {
   const passes = [];
@@ -37177,22 +37256,10 @@ function openPasses(row) {
     passes.push("content");
   return passes;
 }
-function groupByMaterial(items) {
-  const groups = new Map;
-  for (const item of items) {
-    const key2 = `${item.question.materialHash}\x00${item.question.mapRevision}`;
-    const group = groups.get(key2);
-    if (group)
-      group.push(item);
-    else
-      groups.set(key2, [item]);
-  }
-  return [...groups.values()];
-}
-function stopReason(options, report, maxCallsPerPass) {
+function stopReason(options, report, maxCallsPerPass, timeUp) {
   if (options.signal?.aborted)
     return "aborted";
-  if (report.calls >= maxCallsPerPass)
+  if (report.calls >= maxCallsPerPass || timeUp)
     return "pass_budget";
   if (options.shouldYield?.())
     return "yield";
@@ -37207,7 +37274,6 @@ function finish(report) {
 }
 
 // src/workers/classification/sniffer-service.ts
-import { existsSync as existsSync14 } from "node:fs";
 init_tier_rejudge();
 init_tier_names_only_settle();
 init_tier_rules_sweep();
@@ -37215,7 +37281,8 @@ init_tier_override_settle();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
+import { existsSync as existsSync14 } from "node:fs";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
 var DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
@@ -37226,12 +37293,16 @@ class TierSnifferService {
   options;
   budget;
   timer;
+  continuation;
+  moveAbort = new AbortController;
+  moving;
   running = false;
   runningSinceMs = 0;
   overrunReported = false;
   overrunAbortedAtMs = 0;
   passGeneration = 0;
   waitingReason;
+  lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   waiting;
   moveFailures = new Map;
   abort;
@@ -37251,12 +37322,27 @@ class TierSnifferService {
     if (this.timer)
       return;
     this.timer = setInterval(() => {
+      this.drainMoves();
       this.runOnce();
     }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
     this.timer.unref?.();
+    this.wake();
+  }
+  wake() {
+    if (this.stopped || this.continuation)
+      return;
+    this.continuation = setTimeout(() => {
+      this.continuation = undefined;
+      this.runOnce();
+    }, 0);
+    this.continuation.unref?.();
   }
   stop() {
     this.stopped = true;
+    this.moveAbort.abort();
+    if (this.continuation)
+      clearTimeout(this.continuation);
+    this.continuation = undefined;
     if (this.timer)
       clearInterval(this.timer);
     this.timer = undefined;
@@ -37270,24 +37356,48 @@ class TierSnifferService {
   backlog() {
     let checkingItems = 0;
     let remainingQuestions = 0;
+    let pendingItems = 0;
+    let pendingWithoutQuestion = 0;
+    let oldestPendingAgeMs = 0;
     for (const ledgerPath of this.ledgerPaths()) {
-      const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ":memory:" || !existsSync14(path))
-        continue;
-      let store;
+      let db;
       try {
-        store = new TierSnifferStore({ dbPath: path, readOnly: true });
-        const counts = store.counts();
-        checkingItems += counts.items;
-        remainingQuestions += counts.questions;
+        db = new Database4(ledgerPath, { readonly: true, create: false });
+        db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+        const path = tierSnifferPathForLedger(ledgerPath);
+        const hasQueue = existsSync14(path);
+        if (hasQueue)
+          db.query("ATTACH DATABASE ? AS queue").run(path);
+        const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
+          WHERE q.provider = t.provider AND q.account_scope = t.account_scope
+          AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : "0";
+        const pending = db.query(`SELECT COUNT(*) AS n,
+          SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing,
+          MIN(decided_at) AS oldest FROM tier_items t WHERE state = 'pending'`).get();
+        pendingItems += pending.n;
+        pendingWithoutQuestion += pending.missing ?? 0;
+        checkingItems += pending.n;
+        if (pending.oldest)
+          oldestPendingAgeMs = Math.max(oldestPendingAgeMs, this.clockMs() - Date.parse(pending.oldest));
+        if (hasQueue) {
+          remainingQuestions += db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
+          checkingItems += db.query(`SELECT COUNT(*) AS n FROM (
+            SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM queue.sniffer_questions q
+            WHERE NOT EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
+              AND t.provider = q.provider AND t.account_scope = q.account_scope
+              AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id))`).get().n;
+        }
       } catch {} finally {
-        store?.close();
+        db?.close();
       }
     }
     return {
       checkingItems,
       remainingQuestions,
-      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ""),
+      pendingItems,
+      pendingWithoutQuestion,
+      oldestPendingAgeMs,
+      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ""),
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
       ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
     };
@@ -37345,8 +37455,16 @@ class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
+    if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
+      this.lastBacklogLogMs = this.clockMs();
+      const backlog = this.backlog();
+      if (backlog.checkingItems > 0)
+        this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs}.`);
+    }
     if (this.stopped)
       this.closeLedgers();
+    else if (this.timer && tick.state === "ran" && !this.yieldNow() && tick.report.stoppedBy !== "daily_budget" && tick.report.stoppedBy !== "transport_failures" && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls || (tick.autoMoves?.moved ?? 0) > 0 || (tick.rejudged?.seen ?? 0) > 0 || tick.report.stoppedBy === "preempted"))
+      this.wake();
     return tick;
   }
   clockMs() {
@@ -37475,6 +37593,7 @@ class TierSnifferService {
       try {
         this.options.startModel?.();
       } catch {}
+      await this.drainMoves();
       return { state: "model_unavailable", modelId: lane.modelId };
     }
     const ownerContext = this.options.ownerContext?.();
@@ -37511,6 +37630,7 @@ class TierSnifferService {
         status: "pending",
         entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`
       });
+      await this.drainMoves();
       return { state: "awaiting_owner_approval", modelId: lane.modelId, promptVersion: versions.approval };
     }
     const rejudged = this.rejudge();
@@ -37521,7 +37641,14 @@ class TierSnifferService {
       targets.push({
         ledger: ledger2,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
-        ...planner ? { placementFor: planner } : {}
+        ...planner ? { placementFor: planner } : {},
+        settleSecrets: (question, decision) => {
+          const set = tierSetForLedger(ledgerPath);
+          if (!set)
+            return false;
+          const exported = set.ledger.copies(question).map((copy) => set.store(copy.trustDomain)?.exportItemCopy(question)).find(Boolean);
+          return exported ? settleRoutedSecrets(set, question, decision, exported, { findingKinds: ["sniffer_secret_refusal"] }) : false;
+        }
       });
     }
     const report = await runSnifferPass({
@@ -37531,17 +37658,32 @@ class TierSnifferService {
       promptVersion: versions.cache,
       ...ownerContext ? { ownerContext } : {},
       budget: this.budget,
-      maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
+      maxCallsPerPass: this.options.maxCallsPerPass,
+      passTimeMs: this.options.passTimeMs,
       shouldYield: () => this.yieldNow(),
       signal
     });
     if (report.calls > 0 || report.verdictsApplied > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}.`);
     }
-    const autoMoves = this.options.autoMoves && !signal.aborted && !this.answering() && this.options.autoMoves.localEmbeddingsOnly() ? await this.runAutoMoves(this.options.autoMoves, signal) : undefined;
+    const autoMoves = await this.drainMoves();
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
     return { state: "ran", report, ...rejudged.seen > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
+  }
+  async drainMoves() {
+    try {
+      if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly())
+        return;
+      if (!this.moving)
+        this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal).finally(() => {
+          this.moving = undefined;
+        });
+      return await this.moving;
+    } catch (error) {
+      this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : "unknown"}); queued moves will retry.`);
+      return;
+    }
   }
   answering() {
     try {
@@ -37657,7 +37799,7 @@ class TierSnifferService {
         continue;
       }
       for (const record of queued) {
-        if (budget === 0 || signal.aborted || this.answering())
+        if (budget === 0 || signal.aborted)
           break;
         budget -= 1;
         const identity = recordIdentity(record);
