@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 6;
+export const TIER_LEDGER_SCHEMA_VERSION = 7;
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
 
@@ -3551,7 +3551,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // Secrets whose side stores (sniffer questions, extraction job names)
       // could not be cleared when they became Secrets: retried every tier
       // tick until they are, whether or not the item is listed again.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 6,
       name: 'secret_side_store_debt',
       up(db) {
         db.exec(`
@@ -3565,8 +3565,16 @@ function tierLedgerMigrations(): SqliteMigration[] {
             recorded_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
-          -- Bumped before every side-store clearing of a Secret, so a
-          -- classification pass can tell one happened since it read the item.
+        `);
+      },
+    },
+    {
+      // Bumped before every side-store clearing of a Secret, so a
+      // classification pass can tell one happened since it read the item.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'secret_side_store_scrubs',
+      up(db) {
+        db.exec(`
           CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,

@@ -172,11 +172,16 @@ export function decideItemTiers(
   text: string | undefined,
   options: ConnectorStoreTierClassification | undefined,
   ledger: TierLedger | undefined,
-  extra: { namesOnly?: boolean } = {},
+  extra: { namesOnly?: boolean; contentFetchFailed?: boolean } = {},
 ): TierDecision {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read) : options?.sniffer;
+  // Only a listing that read the item's text is fresh enough to ask about an
+  // item recorded Secrets (an unread one keeps the recorded content tier).
+  const fresh = text !== undefined && extra.contentFetchFailed !== true;
+  const sniffer = options?.sniffer && ledger && read
+    ? secretFencedSniffer(options.sniffer, ledger, item.identity, fresh ? read : undefined)
+    : options?.sniffer;
   return classifyItemTiers(
     {
       signals: connector.classificationSignals(item),
