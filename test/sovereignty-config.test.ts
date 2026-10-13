@@ -887,15 +887,15 @@ describe('sovereignty config engine', () => {
     for (const preset of SOVEREIGNTY_PRESETS) {
       const config = loadSovereigntyPreset(preset);
       const engine = createSovereigntyEngine(config);
-      // A preset without a Public tier (the fresh-install preset) has no public_safe route.
-      const domains = isPublicTierRetired(config) ? ['internal'] as const : ['internal', 'public_safe'] as const;
-      for (const domain of domains) {
-        const route = engine.resolveAnalystRoute({ trustDomain: domain });
-        expect(route[0]).toMatchObject({
-          id: 'cloud-openclaw-infer',
-          profile: { provider: 'openclaw-infer', trust: 'standard_cloud' },
-        });
-      }
+      // No preset has a Public tier (owner ruling 2026-10-13): Personal is the only ordinary cloud route.
+      expect(isPublicTierRetired(config)).toBe(true);
+      expect(config.routes.public_safe).toBeUndefined();
+      expect(config.retrieval.trustDomains.public_safe).toBeUndefined();
+      const route = engine.resolveAnalystRoute({ trustDomain: 'internal' });
+      expect(route[0]).toMatchObject({
+        id: 'cloud-openclaw-infer',
+        profile: { provider: 'openclaw-infer', trust: 'standard_cloud' },
+      });
     }
   });
 
@@ -996,6 +996,7 @@ describe('sovereignty config engine', () => {
         kind: 'sovereignty_config_drift',
         config_source: 'file',
         drift: true,
+        keeps_public_tier: false,
         preset: 'local-first',
         profile_names: {
           present_only_in_live: ['host-extra-profile'],
@@ -1019,6 +1020,30 @@ describe('sovereignty config engine', () => {
       });
       expect(JSON.stringify(report)).not.toContain('secretRef');
       expect(readFileSync(path, 'utf8')).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a policy written before 1.0 keeps its Public tier without counting as drift', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-sovereignty-drift-public-'));
+    const path = join(dir, 'sovereignty.json');
+    try {
+      const config = structuredClone(loadSovereigntyPreset('local-first'));
+      config.routes.public_safe = { analyst: ['cloud-openclaw-infer', 'local-source-answer'] };
+      config.retrieval.trustDomains.public_safe = {
+        minimumExecutionTrust: 'standard_cloud',
+        allowedEmbeddingTrust: ['local', 'standard_cloud'],
+        embeddingProfile: 'built-in-embedding',
+        allowCloudQuery: true,
+        activationMode: 'hybrid_shadow',
+      };
+      writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+
+      const report = inspectSovereigntyConfigDrift(path);
+
+      expect(report).toMatchObject({ drift: false, keeps_public_tier: true, preset: 'local-first', distance: 0 });
+      expect(report.trust_domains.public_safe).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

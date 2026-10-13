@@ -357,8 +357,9 @@ export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): Soverei
  * Whether this policy has no Public tier: it defines neither a public_safe
  * route nor a public_safe retrieval policy. Fresh installs are written this
  * way (owner ruling 2026-10-01: Personal, Private and Secret only; anything
- * that would be Public is Personal). Every earlier policy defines both and
- * keeps its Public tier unchanged.
+ * that would be Public is Personal), and since 2026-10-13 so is every shipped
+ * preset. Every earlier policy defines both and keeps its Public tier
+ * unchanged.
  */
 export function isPublicTierRetired(config: Pick<SovereigntyConfig, 'routes' | 'retrieval'>): boolean {
   return config.routes.public_safe === undefined && config.retrieval.trustDomains.public_safe === undefined;

@@ -3,6 +3,7 @@ import {
   SOVEREIGNTY_PRESETS,
   defaultSovereigntyConfigPath,
   loadSovereigntyEngine,
+  isPublicTierRetired,
   loadSovereigntyPreset,
   type SovereigntyConfig,
   type SovereigntyPresetName,
@@ -46,6 +47,12 @@ export interface SovereigntyDriftReport extends PresetComparison {
   kind: 'sovereignty_config_drift';
   config_source: 'file';
   drift: boolean;
+  /**
+   * The live policy keeps the Public tier it was written with before 1.0.
+   * No shipped preset defines one any more (owner ruling 2026-10-13), and an
+   * existing policy keeps it by design, so it is reported, never counted as drift.
+   */
+  keeps_public_tier: boolean;
 }
 
 export function inspectSovereigntyConfigDrift(configPath: string): SovereigntyDriftReport {
@@ -65,6 +72,7 @@ export function inspectSovereigntyConfigDrift(configPath: string): SovereigntyDr
     kind: 'sovereignty_config_drift',
     config_source: 'file',
     drift: comparison.distance > 0,
+    keeps_public_tier: !isPublicTierRetired(engine.config),
     ...comparison,
   };
 }
@@ -80,7 +88,9 @@ function compareWithPreset(live: SovereigntyConfig, presetName: SovereigntyPrese
   const trustDomains: PresetComparison['trust_domains'] = {};
   let distance = presentOnlyInLive.length + absentFromLive.length;
 
+  const presetHasPublic = !isPublicTierRetired(preset);
   for (const domain of TRUST_DOMAINS) {
+    if (domain === 'public_safe' && !presetHasPublic) continue;
     const livePolicy = live.retrieval.trustDomains[domain];
     const presetPolicy = preset.retrieval.trustDomains[domain];
     const livePool = effectivePool(live, domain);
