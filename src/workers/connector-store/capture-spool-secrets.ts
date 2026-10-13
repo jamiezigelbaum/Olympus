@@ -21,6 +21,13 @@
  *     judges the item Secrets again instead of indexing a text-less copy.
  *   - A record that cannot be redacted within its own length becomes a blank
  *     line, which every reader already skips.
+ *   - A record already redacted for its content is redacted again, for its
+ *     names, when the names are judged Secrets later.
+ *
+ * Retried until done: where a lane's window clearing has reached is kept in
+ * the ledger and advanced only after a window succeeds, so a window that
+ * failed (a file that could not be written) is cleared again by the next
+ * pull even though ingestion has moved past it.
  *
  * Who judges is the tier ledger (the item's recorded tiers) and, for records
  * the ledger cannot speak for (an earlier version of an edited message, an
@@ -164,6 +171,60 @@ export function createSpoolSecretJudge(options: {
 }
 
 /**
+ * Clear a lane's spool: the window `[from, through)` the pull just read,
+ * judged by the ledger and by the Secrets floor on each record's text, then a
+ * whole-spool pass when the ledger's Secrets changed. `from` reaches back to
+ * wherever the last successful window ended, so a failed window is retried.
+ * `through` absent means the lane has read nothing yet, so nothing is judged.
+ * `redact` is the lane's own rewrite over a window with the judge it is given.
+ */
+export function clearCaptureSpoolSecrets(options: {
+  ledger: TierLedger;
+  stateKey: string;
+  from?: string;
+  through: string | undefined;
+  redact: (window: { from?: string; through: string }, judge: SpoolSecretJudge) => CaptureSpoolRedactionResult;
+}): CaptureSpoolRedactionResult {
+  const through = options.through;
+  if (!through) return addCaptureSpoolRedactions();
+  const clearedKey = `${options.stateKey}:cleared_through`;
+  const cleared = options.ledger.readMeta(clearedKey);
+  const from = options.from === undefined
+    ? undefined
+    : cleared === undefined ? options.from : earlierSpoolCursor(cleared, options.from);
+  const window = options.redact(
+    { ...(from === undefined ? {} : { from }), through },
+    createSpoolSecretJudge({ ledger: options.ledger, floor: true }),
+  );
+  options.ledger.writeMeta(clearedKey, through);
+  const sweep = sweepCaptureSpoolWhenSecretsChange({
+    ledger: options.ledger,
+    stateKey: options.stateKey,
+    sweep: (judge) => options.redact({ through }, judge),
+  });
+  return addCaptureSpoolRedactions(window, sweep);
+}
+
+/**
+ * The earlier of two `<file>:<lines>` positions. One that does not parse
+ * counts as the very start, which only ever widens what is judged.
+ */
+export function earlierSpoolCursor(left: string, right: string): string | undefined {
+  const a = parseSpoolCursor(left);
+  const b = parseSpoolCursor(right);
+  if (!a || !b) return undefined;
+  if (a.file !== b.file) return a.file < b.file ? left : right;
+  return a.line <= b.line ? left : right;
+}
+
+function parseSpoolCursor(cursor: string): CaptureSpoolPosition | undefined {
+  const separator = cursor.lastIndexOf(':');
+  const file = separator > 0 ? cursor.slice(0, separator) : '';
+  const line = separator > 0 ? cursor.slice(separator + 1) : '';
+  return file && /^\d+$/.test(line) ? { file, line: Number(line) } : undefined;
+}
+
+/**
  * Bumped when the sweep must run over the whole spool once more, judging
  * every record's text as well (the first run on a host clears what was
  * captured before redaction existed).
@@ -218,12 +279,15 @@ export function addCaptureSpoolRedactions(
 
 function secretsDigest(ledger: TierLedger): string {
   const hash = createHash('sha256');
-  for (const identity of ledger.secretsIdentities()) {
+  // The level is part of the digest: an item whose names are judged Secrets
+  // after its content was must be cleared again, of its names this time.
+  for (const { identity, names } of ledger.secretsIdentities()) {
     hash.update([
       identity.provider,
       identity.accountScope,
       identity.providerConversationId ?? '',
       identity.providerItemId,
+      names ? 'names' : 'content',
     ].join('\u001f'));
     hash.update('\u001e');
   }

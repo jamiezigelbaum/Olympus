@@ -21,9 +21,7 @@ import {
 } from '../connector-store/tiered-store-set.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
-  addCaptureSpoolRedactions,
-  createSpoolSecretJudge,
-  sweepCaptureSpoolWhenSecretsChange,
+  clearCaptureSpoolSecrets,
   type CaptureSpoolRedactionResult,
 } from '../connector-store/capture-spool-secrets.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
@@ -329,10 +327,8 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
 }
 
 /**
- * Clear the Secrets out of the spool lines the set has committed past: the
- * pull's own window, judged by the ledger and by the Secrets floor on each
- * line's text, then a whole-spool pass when the ledger's Secrets changed.
- * `through` absent means nothing has been committed yet, so nothing is judged.
+ * Clear the Secrets out of the spool lines the set has committed past
+ * (connector-store/capture-spool-secrets.ts), and the audio they saved.
  */
 export function clearWhatsAppSpoolSecrets(options: {
   spoolDir: string;
@@ -342,25 +338,19 @@ export function clearWhatsAppSpoolSecrets(options: {
   from?: string;
   through: string | undefined;
 }): CaptureSpoolRedactionResult {
-  const through = options.through;
-  if (!through) return addCaptureSpoolRedactions();
-  const lane = {
-    spoolDir: options.spoolDir,
-    account: options.account,
-    through,
-    ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
-  };
-  const window = redactWhatsAppLiveSpoolSecrets({
-    ...lane,
-    ...(options.from ? { from: options.from } : {}),
-    judge: createSpoolSecretJudge({ ledger: options.ledger, floor: true }),
-  });
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  return clearCaptureSpoolSecrets({
     ledger: options.ledger,
     stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
-    sweep: (judge) => redactWhatsAppLiveSpoolSecrets({ ...lane, judge }),
+    ...(options.from ? { from: options.from } : {}),
+    through: options.through,
+    redact: (window, judge) => redactWhatsAppLiveSpoolSecrets({
+      spoolDir: options.spoolDir,
+      account: options.account,
+      ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
+      ...window,
+      judge,
+    }),
   });
-  return addCaptureSpoolRedactions(window, sweep);
 }
 
 function whatsappSyncReceipt(

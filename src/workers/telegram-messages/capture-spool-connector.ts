@@ -345,7 +345,8 @@ export function readTelegramCaptureSpool(options: {
 /**
  * Rewrite, in place, every complete record in `[from, through)` whose item
  * the judge says is Secrets: its text and attachment names go (and its chat
- * title and sender name when the names themselves were judged Secrets), its
+ * title and sender name when the names themselves were judged Secrets, also
+ * from a record whose text went earlier), its
  * identity, version and capture id stay, and it is flagged so a replay
  * judges it Secrets again. Cursors are this spool's `<file>:<lines>`.
  */
@@ -378,11 +379,28 @@ function redactTelegramSpoolLine(line: string, judge: SpoolSecretJudge): string 
     return undefined;
   }
   const message = requireObject(raw.message, 'message');
-  if (message.secretRedacted === true) return undefined;
   const item = record.capturedItem.item;
-  const text = typeof item.metadata['searchText'] === 'string' ? item.metadata['searchText'] as string : undefined;
+  const alreadyRedacted = message.secretRedacted === true;
+  const text = alreadyRedacted || typeof item.metadata['searchText'] !== 'string'
+    ? undefined
+    : item.metadata['searchText'] as string;
   const redaction = judge(item.identity, text);
   if (!redaction) return undefined;
+  // A record already cleared of its text is rewritten again only when its
+  // names are now judged Secrets and still there.
+  if (alreadyRedacted && (redaction !== 'names' || (message.chatTitle === undefined && message.senderDisplayName === undefined))) {
+    return undefined;
+  }
+  const namesLeft = message.chatTitle !== undefined || message.senderDisplayName !== undefined;
+  const namedAttachment = Array.isArray(message.attachments) && message.attachments.some((attachment) => (
+    !!attachment && typeof attachment === 'object' && !Array.isArray(attachment) && 'name' in attachment
+  ));
+  // A record with nothing left to remove is not rewritten: the flag alone
+  // would not fit, and blanking it would lose the record for nothing.
+  if (
+    message.boundedText === undefined && message.attachmentNames === undefined && !namedAttachment
+    && (redaction !== 'names' || !namesLeft)
+  ) return undefined;
   const kept: Record<string, unknown> = { ...message };
   delete kept.boundedText;
   delete kept.attachmentNames;

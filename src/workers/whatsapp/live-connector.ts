@@ -43,13 +43,13 @@
 //   Each occurrence lists normally; downstream upserts collapse them, and
 //   fetchItem returns the LAST occurrence (the newest version).
 // - A line whose message was judged Secrets is rewritten in place without its
-//   text, preview, re-download keys or saved audio, and carries
+//   text, preview, mentions, re-download keys or saved audio, and carries
 //   "secret_redacted": true (connector-store/capture-spool-secrets.ts). It
 //   reads back as a metadata_only item with a Secrets floor, so a replay or a
 //   reaction re-emit judges it Secrets again.
 
 import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { join, relative, isAbsolute } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -696,12 +696,13 @@ function spoolMessageText(message: SpoolMessage): string {
 
 /**
  * Rewrite, in place, every message line in `[from, through)` whose item the
- * judge says is Secrets: its text, link preview and media re-download keys go
- * (and the chat and sender names and mentions when the names themselves were
- * judged Secrets), and the audio it saved under `mediaDir` is deleted. Its id,
- * chat, time and media type stay, and it is flagged so a replay judges it
- * Secrets again. Reaction lines name another message and are left alone.
- * Cursors are this spool's `<file>:<lines>`.
+ * judge says is Secrets: its text, link preview, mentions and media
+ * re-download keys go (and the chat and sender names when the names
+ * themselves were judged Secrets, also from a line whose text went earlier),
+ * and the audio it saved under `mediaDir` is deleted. Its id, chat, time and
+ * media type stay, and it is flagged so a replay judges it Secrets again.
+ * Reaction lines name another message and are left alone. Cursors are this
+ * spool's `<file>:<lines>`.
  */
 export function redactWhatsAppLiveSpoolSecrets(options: {
   spoolDir: string;
@@ -716,6 +717,17 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);
   const mediaRoot = options.mediaDir ? existingRealPath(options.mediaDir) : undefined;
+  let owners: Map<string, Set<string>> | undefined;
+  // Saved audio is deleted only when this message is the only one that names
+  // it: the bridge names a file by message id alone, and an id is unique only
+  // within its chat.
+  const deleteOwnedMedia = (message: SpoolMessage): void => {
+    if (!message.mediaPath || !mediaRoot) return;
+    owners ??= mediaPathOwners(options.spoolDir);
+    const named = owners.get(resolve(message.mediaPath));
+    if (named && named.size > 1) return;
+    deleteSavedMedia(message.mediaPath, mediaRoot);
+  };
   return redactCaptureSpoolLines({
     dir: options.spoolDir,
     files: listSpoolFiles(options.spoolDir),
@@ -731,29 +743,52 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
         providerItemId: message.id,
         providerConversationId: message.chatJid,
       };
-      // An already-redacted line is judged no further, but its audio is
-      // deleted again in case an earlier pass could not.
-      if (message.secretRedacted === true) {
-        deleteSavedMedia(message.mediaPath, mediaRoot);
-        return undefined;
-      }
-      const redaction = options.judge(identity, message.mediaType === undefined ? spoolMessageText(message) : undefined);
+      const alreadyRedacted = message.secretRedacted === true;
+      const text = alreadyRedacted || message.mediaType !== undefined ? undefined : spoolMessageText(message);
+      const redaction = options.judge(identity, text);
       if (!redaction) return undefined;
-      deleteSavedMedia(message.mediaPath, mediaRoot);
+      // Deleted again for an already-redacted line, in case an earlier pass
+      // could not.
+      deleteOwnedMedia(message);
+      const namesLeft = message.chatName !== '' || message.senderName !== '';
+      if (alreadyRedacted && (redaction !== 'names' || !namesLeft)) return undefined;
       const record = JSON.parse(line) as Record<string, unknown>;
+      // Mentions are display names copied into the text, so they go with it.
+      const removable = ['preview_title', 'preview_description', 'preview_url', 'mentions', 'media_key', 'media_direct_path']
+        .filter((key) => key in record);
+      // A line with nothing left to remove (a voice note whose audio was its
+      // only content) is not rewritten: the flag alone would not fit, and
+      // blanking it would lose the record for nothing.
+      if (message.text === '' && removable.length === 0 && (redaction !== 'names' || !namesLeft)) return undefined;
       record['text'] = '';
-      for (const key of ['preview_title', 'preview_description', 'preview_url', 'media_key', 'media_direct_path']) {
-        delete record[key];
-      }
+      for (const key of removable) delete record[key];
       if (redaction === 'names') {
         record['chat_name'] = '';
         record['sender_name'] = '';
-        delete record['mentions'];
       }
       record['secret_redacted'] = true;
       return JSON.stringify(record);
     },
   });
+}
+
+/**
+ * Every saved media path the spool names, and the messages (chat-scoped)
+ * that name it.
+ */
+function mediaPathOwners(spoolDir: string): Map<string, Set<string>> {
+  const owners = new Map<string, Set<string>>();
+  for (const file of listSpoolFiles(spoolDir)) {
+    for (const line of terminatedLines(join(spoolDir, file))) {
+      const message = parseSpoolLine(line);
+      if (message?.mediaPath === undefined) continue;
+      const path = resolve(message.mediaPath);
+      const named = owners.get(path) ?? new Set<string>();
+      named.add(chatScopedKey(message.chatJid, message.id));
+      owners.set(path, named);
+    }
+  }
+  return owners;
 }
 
 function existingRealPath(path: string): string | undefined {

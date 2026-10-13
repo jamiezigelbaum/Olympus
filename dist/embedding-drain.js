@@ -11967,15 +11967,18 @@ class TierLedger {
   }
   secretsIdentities() {
     const rows = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items
+      SELECT provider, account_scope, conversation_key, provider_item_id, metadata_tier FROM tier_items
       WHERE metadata_tier = 'secrets' OR content_tier = 'secrets'
       ORDER BY provider, account_scope, conversation_key, provider_item_id
     `).all();
     return rows.map((row) => ({
-      provider: row.provider,
-      accountScope: row.account_scope,
-      providerItemId: row.provider_item_id,
-      ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+      identity: {
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+      },
+      names: row.metadata_tier === "secrets"
     }));
   }
   isRouted(identity) {

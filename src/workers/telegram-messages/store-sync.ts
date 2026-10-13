@@ -12,9 +12,7 @@ import { createLaneTieredStoreSet, type TieredStoreSet } from '../connector-stor
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import {
-  addCaptureSpoolRedactions,
-  createSpoolSecretJudge,
-  sweepCaptureSpoolWhenSecretsChange,
+  clearCaptureSpoolSecrets,
   type CaptureSpoolRedactionResult,
 } from '../connector-store/capture-spool-secrets.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
@@ -346,11 +344,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
 }
 
 /**
- * Clear the Secrets out of the spool records both lanes have read: the pull's
- * own window, judged by the ledger and by the Secrets floor on each record's
- * text (an earlier version of an edited message is judged on its own text),
- * then a whole-spool pass when the ledger's Secrets changed. `through`
- * absent means a lane has read nothing yet, so nothing is judged.
+ * Clear the Secrets out of the spool records both lanes have read
+ * (connector-store/capture-spool-secrets.ts). An earlier version of an edited
+ * message is judged on its own text.
  */
 export function clearTelegramSpoolSecrets(options: {
   spoolDir: string;
@@ -358,20 +354,13 @@ export function clearTelegramSpoolSecrets(options: {
   from?: string;
   through: string | undefined;
 }): CaptureSpoolRedactionResult {
-  const through = options.through;
-  if (!through) return addCaptureSpoolRedactions();
-  const window = redactTelegramCaptureSpoolSecrets({
-    spoolDir: options.spoolDir,
-    ...(options.from ? { from: options.from } : {}),
-    through,
-    judge: createSpoolSecretJudge({ ledger: options.ledger, floor: true }),
-  });
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  return clearCaptureSpoolSecrets({
     ledger: options.ledger,
     stateKey: TELEGRAM_SPOOL_REDACTION_STATE_KEY,
-    sweep: (judge) => redactTelegramCaptureSpoolSecrets({ spoolDir: options.spoolDir, through, judge }),
+    ...(options.from ? { from: options.from } : {}),
+    through: options.through,
+    redact: (window, judge) => redactTelegramCaptureSpoolSecrets({ spoolDir: options.spoolDir, ...window, judge }),
   });
-  return addCaptureSpoolRedactions(window, sweep);
 }
 
 /**

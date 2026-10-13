@@ -12,6 +12,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { clearCaptureSpoolSecrets } from '../src/workers/connector-store/capture-spool-secrets.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -19,11 +21,13 @@ import {
   createTelegramConnectorStoreSyncHandler,
   readTelegramCaptureSpool,
 } from '../src/workers/telegram-messages/index.ts';
+import { redactTelegramCaptureSpoolSecrets } from '../src/workers/telegram-messages/capture-spool-connector.ts';
 import {
   WHATSAPP_LIVE_CORPUS_ID,
   createWhatsAppConnectorStoreSyncHandler,
   createWhatsAppTierLane,
 } from '../src/workers/whatsapp/store-sync.ts';
+import { redactWhatsAppLiveSpoolSecrets } from '../src/workers/whatsapp/live-connector.ts';
 
 // Key-shaped fixtures are assembled at run time so no literal key sits in
 // the repository.
@@ -218,6 +222,80 @@ describe('Telegram capture spool: Secrets leave the spool', () => {
   });
 });
 
+describe('Capture spool clearing: retries and later decisions', () => {
+  test('a window that failed is cleared again by the next pull, though ingestion moved past it', () => {
+    const root = workspace('olympus-spool-clear-retry-');
+    const ledger = new TierLedger({ dbPath: join(root, 'ledger.sqlite') });
+    closers.push(() => ledger.close());
+    const windows: Array<{ from?: string; through: string }> = [];
+    let fail = true;
+    const redact = (window: { from?: string; through: string }) => {
+      windows.push(window);
+      if (fail && window.from !== undefined) throw new Error('disk full');
+      return { recordsRedacted: 0, recordsBlanked: 0 };
+    };
+    // First pull: the first-run sweep is due, so pass it once cleanly.
+    clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:0', through: 'a.jsonl:5', redact: (w) => { fail = false; const r = redact(w); fail = true; return r; } });
+    expect(() => clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:5', through: 'a.jsonl:9', redact })).toThrow('disk full');
+    fail = false;
+    windows.length = 0;
+    // The next pull's own window starts at 9, but the failed one ended at 5.
+    clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:9', through: 'a.jsonl:12', redact });
+    expect(windows[0]).toEqual({ from: 'a.jsonl:5', through: 'a.jsonl:12' });
+    windows.length = 0;
+    clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:12', through: 'a.jsonl:14', redact });
+    expect(windows[0]).toEqual({ from: 'a.jsonl:12', through: 'a.jsonl:14' });
+  });
+
+  test('a Telegram record cleared of its text loses its names too once the names are judged Secrets', () => {
+    const root = workspace('olympus-telegram-spool-upgrade-');
+    const spoolDir = join(root, 'spool');
+    mkdirSync(spoolDir);
+    const file = join(spoolDir, TELEGRAM_FILE);
+    writeFileSync(file, `${telegramLine('4', `see ${GITHUB_TOKEN}`)}\n`);
+    redactTelegramCaptureSpoolSecrets({ spoolDir, judge: () => 'content' });
+    let message = JSON.parse(readFileSync(file, 'utf8').split('\n')[0]!).message;
+    expect(message).toMatchObject({ secretRedacted: true, chatTitle: 'Porto trip', senderDisplayName: 'Sam' });
+    expect(message).not.toHaveProperty('boundedText');
+    // A content-level judgment again changes nothing.
+    expect(redactTelegramCaptureSpoolSecrets({ spoolDir, judge: () => 'content' }).recordsRedacted).toBe(0);
+    expect(redactTelegramCaptureSpoolSecrets({ spoolDir, judge: () => 'names' }).recordsRedacted).toBe(1);
+    message = JSON.parse(readFileSync(file, 'utf8').split('\n')[0]!).message;
+    expect(message).not.toHaveProperty('chatTitle');
+    expect(message).not.toHaveProperty('senderDisplayName');
+    expect(message).toMatchObject({ id: '4', secretRedacted: true });
+  });
+
+  test('a later names-level Secrets decision changes the sweep state, so the sweep runs again', async () => {
+    const root = workspace('olympus-telegram-spool-names-later-');
+    const telegram = openTelegram(root);
+    writeFileSync(telegram.file, `${telegramLine('1', 'The door code for the flat is the year we met.')}\n`);
+    await telegram.sync.pull();
+    const identity = { provider: 'telegram', accountScope: TELEGRAM_ACCOUNT, providerItemId: '1', providerConversationId: 'porto' };
+    telegram.tierSet.ledger.recordContentDecision(identity, {
+      contentTier: 'secrets',
+      decidedBy: 'secret_detector',
+      reasons: ['content:secret_fixture'],
+      contentPending: false,
+      engineVersion: 'fixture',
+      mapRevision: 'fixture',
+      snifferId: 'fixture',
+    });
+    await telegram.sync.pull();
+    let message = JSON.parse(readFileSync(telegram.file, 'utf8').split('\n')[0]!).message;
+    expect(message).not.toHaveProperty('boundedText');
+    expect(message.chatTitle).toBe('Porto trip');
+
+    const current = telegram.tierSet.ledger.getCurrent(identity)!;
+    expect(current.metadataTier).not.toBe('secrets');
+    telegram.tierSet.ledger.flipToSecrets(identity, { expectedGeneration: current.generation });
+    await telegram.sync.pull();
+    message = JSON.parse(readFileSync(telegram.file, 'utf8').split('\n')[0]!).message;
+    expect(message).not.toHaveProperty('chatTitle');
+    expect(message).not.toHaveProperty('senderDisplayName');
+  });
+});
+
 // --- WhatsApp -----------------------------------------------------------------
 
 function whatsappLine(fields: Record<string, unknown>): string {
@@ -325,7 +403,8 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
       })).toBeDefined();
     }
     const receipt = await whatsapp.sync.pull();
-    expect(receipt.counts.spool_records_redacted).toBe(2);
+    // V1 loses its re-download keys; V2 had nothing in its line to remove.
+    expect(receipt.counts.spool_records_redacted).toBe(1);
 
     expect(existsSync(audioPath)).toBe(false);
     expect(readFileSync(outside, 'utf8')).toBe('keep me');
@@ -334,5 +413,34 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
     expect(record).toMatchObject({ id: 'V1', secret_redacted: true });
     expect(record).not.toHaveProperty('media_key');
     expect(record).not.toHaveProperty('media_direct_path');
+  });
+  test('mentions go with the text, and audio another chat\'s message also names is kept', () => {
+    const root = workspace('olympus-whatsapp-spool-mentions-');
+    const spoolDir = join(root, 'spool');
+    const mediaDir = join(root, 'media', 'audio');
+    mkdirSync(spoolDir, { recursive: true });
+    mkdirSync(mediaDir, { recursive: true });
+    const shared = join(mediaDir, 'SAME.ogg');
+    writeFileSync(shared, 'audio');
+    const file = join(spoolDir, WHATSAPP_FILE);
+    writeFileSync(file, `${[
+      whatsappLine({ id: 'M1', text: `hi @111 ${STRIPE_LIVE_KEY}`, mentions: { '111': `Ops ${STRIPE_LIVE_KEY}` } }),
+      whatsappLine({ id: 'SAME', text: '', media_type: 'audio', media_path: shared }),
+      whatsappLine({ id: 'SAME', chat_jid: '15550002222@s.whatsapp.net', text: '', media_type: 'audio', media_path: shared }),
+    ].join('\n')}\n`);
+    const secret = new Set(['M1', '15550001111@s.whatsapp.net SAME']);
+    const result = redactWhatsAppLiveSpoolSecrets({
+      spoolDir,
+      mediaDir,
+      judge: (identity) => secret.has(identity.providerItemId)
+        || secret.has(`${identity.providerConversationId} ${identity.providerItemId}`) ? 'content' : undefined,
+    });
+    // The voice note had no text to remove: only its audio is its content.
+    expect(result).toEqual({ recordsRedacted: 1, recordsBlanked: 0 });
+    const spool = readFileSync(file, 'utf8');
+    expect(spool).not.toContain(STRIPE_LIVE_KEY);
+    expect(JSON.parse(spool.split('\n')[0]!)).not.toHaveProperty('mentions');
+    // Both chats name the same file: it is not this message's alone to delete.
+    expect(existsSync(shared)).toBe(true);
   });
 });
