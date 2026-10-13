@@ -382,8 +382,16 @@ contract (`src/workers/chatgpt/dashboard-contract.ts`).
   the signed state's nonce, and the engine verifies signature, nonce, origin
   (fixed at start) and freshness. This works from a phone and from any
   desktop, not only on the Mac; the non-loopback interstitial on the bounce
-  page asks for one click. X (owner app) and the paired chats are set up on
-  the Mac.
+  page asks for one click. That is Dropbox's path. **Gmail and Google Drive
+  sign in on the computer** (owner decision 2026-10-13,
+  `docs/ops/OAUTH_RELAY.md`, "Google sign-in on the computer"): once
+  Olympus's Google Desktop client is configured, the start uses
+  `handback: 'computer'` and a loopback redirect to the engine, the link is of
+  kind `computer`, and its relayed visit goes to the relay's
+  `/connect/signin` page, which opens `http://127.0.0.1:<port>/go/<id>` on
+  the computer (that visit spends the link) or, when the engine does not
+  answer, says to open it on the computer. Google sign-in from a phone is not
+  offered. X (owner app) and the paired chats are set up on the Mac.
 - **Keys:** none through ChatGPT (owner decision). Venice and Readwise are
   configured on the Mac only; `olympus_model_set` switches between models
   already set up there and never takes a key. Models are status only in the
