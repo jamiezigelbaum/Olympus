@@ -43,13 +43,14 @@ function plain(status: number, text: string): Response {
 
 /**
  * The engine's loopback port, when the engine named one (it may not listen on
- * the relay's default). Digits only, an unprivileged port, never repeated.
+ * the relay's default). Any port the engine itself accepts (1-65535), digits
+ * only, never repeated.
  */
 function bridgePort(url: URL): number | undefined {
   const values = url.searchParams.getAll('port');
-  if (values.length !== 1 || !/^[1-9][0-9]{3,4}$/.test(values[0]!)) return undefined;
+  if (values.length !== 1 || !/^[1-9][0-9]{0,4}$/.test(values[0]!)) return undefined;
   const port = Number(values[0]);
-  return port >= 1024 && port <= 65535 ? port : undefined;
+  return port <= 65535 ? port : undefined;
 }
 
 export function signinBridge(url: URL, options: SigninBridgeOptions): Response {

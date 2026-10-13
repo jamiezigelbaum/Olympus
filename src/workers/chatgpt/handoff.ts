@@ -138,7 +138,8 @@ function loopbackRedirectPort(location: string): string | undefined {
   try {
     const redirect = new URL(new URL(location).searchParams.get('redirect_uri') ?? '');
     if (redirect.protocol !== 'http:' || redirect.hostname !== '127.0.0.1') return undefined;
-    return redirect.port || undefined;
+    // URL drops a scheme's default port: no port here means 80.
+    return redirect.port || '80';
   } catch {
     return undefined;
   }

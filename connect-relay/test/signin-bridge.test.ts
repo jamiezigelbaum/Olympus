@@ -61,7 +61,8 @@ describe('the sign-in bridge page', () => {
     const named = page(`?go=${go}&source=gmail&port=8123`);
     expect(await named.text()).toContain(`href="http://127.0.0.1:8123/go/${go}"`);
     expect(named.headers.get('content-security-policy')).toContain('connect-src http://127.0.0.1:8123');
-    for (const port of ['80', '99999', '8123abc', '0', '-1', '08123']) {
+    expect(await page(`?go=${go}&port=80`).text()).toContain(`href="http://127.0.0.1:80/go/${go}"`);
+    for (const port of ['99999', '65536', '8123abc', '0', '-1', '08123', '']) {
       expect(await page(`?go=${go}&port=${port}`).text(), port).toContain(`href="http://127.0.0.1:8010/go/${go}"`);
     }
     expect(await page(`?go=${go}&port=8123&port=8124`).text()).toContain(`href="http://127.0.0.1:8010/go/${go}"`);
@@ -138,6 +139,9 @@ describe('a computer sign-in link through a real relay', () => {
     const link = handoffs.mint(installId, { kind: 'computer', source: 'google-drive', location: googleAuthorize(8123) });
     const relayed = await fetch(`${relay.url}/go/${link.id}`, { redirect: 'manual' });
     expect(relayed.headers.get('location')).toBe(`${SIGNIN_BRIDGE_PATH}?go=${link.id}&source=google-drive&port=8123`);
+    const onEighty = handoffs.mint(installId, { kind: 'computer', source: 'gmail', location: googleAuthorize(80) });
+    const eighty = await fetch(`${relay.url}/go/${onEighty.id}`, { redirect: 'manual' });
+    expect(eighty.headers.get('location')).toBe(`${SIGNIN_BRIDGE_PATH}?go=${onEighty.id}&source=gmail&port=80`);
   });
 
   test('an ordinary redirect link still goes straight to the provider through the relay', async () => {

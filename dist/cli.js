@@ -145282,7 +145282,7 @@ function loopbackRedirectPort(location) {
     const redirect = new URL(new URL(location).searchParams.get("redirect_uri") ?? "");
     if (redirect.protocol !== "http:" || redirect.hostname !== "127.0.0.1")
       return;
-    return redirect.port || undefined;
+    return redirect.port || "80";
   } catch {
     return;
   }
