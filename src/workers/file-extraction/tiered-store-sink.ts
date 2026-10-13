@@ -30,7 +30,7 @@ import {
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { classifyContentTier, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
-import type { TierCopy, TierPlacementPlan } from '../classification/tier-ledger.ts';
+import { placementIsRaise, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
@@ -216,8 +216,25 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
 
       if (record.contentRead) {
         // Text already landed once: a re-judgment. Same stores: enrich the
-        // content copy in place. Different stores: queue the move, write nothing.
+        // content copy in place. Different stores: queue the move.
         if (!samePlacement(current, placement)) {
+          if (!placementIsRaise(current, placement.copies)) {
+            // A LOWERING move copies whatever the source store holds, and the
+            // verdict just reached judged THIS text. If the file was edited,
+            // the store still holds the older text, which the new verdict
+            // never judged (it may be Private and about to reach a store that
+            // may be shared). So the text in hand first replaces the old
+            // where the content already rests, which stays at least as
+            // private as the old; the queued move then carries the text the
+            // verdict is about. A raise needs no such step: it only moves
+            // content to a more private store.
+            const resting = current.find((copy) => copy.layers !== 'metadata');
+            const restingDomain = resting ? set.domainForCorpus(resting.corpusId) : undefined;
+            const restingStore = restingDomain ? set.store(restingDomain) : undefined;
+            if (!restingStore) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
+            const replaced = await sinkFor(restingStore, false, tierClassification, true).accept(request);
+            if (!replaced.accepted) return replaced;
+          }
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
