@@ -103891,6 +103891,16 @@ function createTieredStoreExtractionSink(options) {
         return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
       if (record3.contentRead) {
         if (!samePlacement2(current2, placement)) {
+          if (!placementIsRaise(current2, placement.copies)) {
+            const resting = current2.find((copy) => copy.layers !== "metadata");
+            const restingDomain = resting ? set2.domainForCorpus(resting.corpusId) : undefined;
+            const restingStore = restingDomain ? set2.store(restingDomain) : undefined;
+            if (!restingStore)
+              return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
+            const replaced = await sinkFor(restingStore, false, tierClassification, true).accept(request);
+            if (!replaced.accepted)
+              return replaced;
+          }
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
@@ -104012,6 +104022,7 @@ var init_tiered_store_sink = __esm(() => {
   init_types();
   init_engine();
   init_tier_classifier();
+  init_tier_ledger();
   init_tiered_store_set();
   init_store_sink();
 });

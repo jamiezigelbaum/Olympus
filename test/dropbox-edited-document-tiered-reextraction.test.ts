@@ -12,16 +12,21 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { tieredExtractionView } from '../src/workers/connector-store/tiered-extraction.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import {
   createTieredLaneSet,
   onDemandTierStore,
   tieredStoreSetLedgerPath,
   type TieredStoreSet,
 } from '../src/workers/connector-store/tiered-store-set.ts';
-import { EXTRACTION_SINK_SKIPPED_SECRETS } from '../src/workers/file-extraction/store-sink.ts';
+import {
+  EXTRACTION_SINK_SKIPPED_SECRETS,
+  EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
+} from '../src/workers/file-extraction/store-sink.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import type { ExtractionSink, ExtractionSinkRequest } from '../src/workers/file-extraction/types.ts';
 import {
@@ -37,6 +42,17 @@ import {
 } from './helpers/tier-fixtures.ts';
 
 const SECURE_PLACEMENT = { trustTier: 'S4' as const, trustDomain: 'secure_local' as const };
+
+// A body that reads like someone's own health record is Private; anything else
+// is Personal. The sniffer makes that call, so these tests do not depend on
+// which words the built-in rules raise by themselves.
+const HEALTH_RECORD = /glucose/i;
+const SNIFFER: TierSniffer = {
+  id: 'fixture-sniffer',
+  judge: (request) => HEALTH_RECORD.test(request.material ?? '')
+    ? { verdict: 'decided', tier: 'secure', code: 'private' }
+    : { verdict: 'decided', tier: 'private', code: 'ordinary' },
+};
 
 // Built at runtime: the repository refuses literal credential patterns.
 const FAKE_AWS_KEY = ['AKIA', 'LMNOPQRSTUVWXYZ2'].join('');
@@ -57,7 +73,7 @@ const REFERENCE: Doc = {
 const REPORT: Doc = {
   id: 'lab-report',
   name: 'scan-0413.pdf',
-  body: 'The lab results confirm the diagnosis; the patient starts treatment next week.',
+  body: 'Patient: Morgan Example\nGlucose 93 mg/dL. The lab results confirm the diagnosis; treatment starts next week.',
 };
 
 const cleanups: Array<() => void> = [];
@@ -117,6 +133,7 @@ function openLane(): Lane {
     syncConnectorId: 'extraction',
     ownerConnectorId: 'fixture-connector',
     ownershipKind: 'observed',
+    tierClassification: { sniffer: SNIFFER },
   });
   cleanups.push(() => {
     for (const store of Object.values(stores)) store?.close();
@@ -128,8 +145,12 @@ function openLane(): Lane {
 }
 
 /** The listing carries names and the file's revision, never text. */
-async function list(lane: Lane, docs: readonly Doc[], version: string): Promise<void> {
-  const specs: FixtureSpec[] = docs.map(({ id, name }) => ({ id, name, version }));
+async function list(lane: Lane, docs: readonly Doc[], version: string | Record<string, string>): Promise<void> {
+  const specs: FixtureSpec[] = docs.map(({ id, name }) => ({
+    id,
+    name,
+    version: typeof version === 'string' ? version : version[id]!,
+  }));
   await lane.set.sync(fixtureConnector(() => specs), { fetchContent: false, placement: SECURE_PLACEMENT });
 }
 
@@ -210,14 +231,14 @@ describe('an edited file on per-tier stores', () => {
     await list(lane, [REFERENCE, REPORT], 'rev-2');
 
     const revisedReference = 'Integral theory revised: quadrants, levels, lines and states of development.';
-    const revisedReport = 'The lab results were revised; the diagnosis stands and the patient continues treatment.';
+    const revisedReport = 'Patient: Morgan Example\nGlucose 95 mg/dL. The lab results were revised; the diagnosis stands.';
     expect((await lane.sink.accept(request(REFERENCE, revisedReference, 'rev-2'))).accepted).toBe(true);
     expect((await lane.sink.accept(request(REPORT, revisedReport, 'rev-2'))).accepted).toBe(true);
 
     expect(searchIds(lane.stores.internal, 'states')).toEqual([REFERENCE.id]);
     expect(searchIds(lane.stores.internal, 'maps')).toEqual([]);
     expect(searchIds(lane.stores.secure_local, 'revised')).toEqual([REPORT.id]);
-    expect(searchIds(lane.stores.secure_local, 'starts')).toEqual([]);
+    expect(searchIds(lane.stores.secure_local, 'treatment')).toEqual([]);
     // The tiers did not move: the text rests where it did.
     expect(lane.ledger.copies(identityOf(REPORT.id)).map((copy) => [copy.corpusId, copy.layers]))
       .toEqual([[CORPORA.internal, 'metadata'], [CORPORA.secure_local, 'content']]);
@@ -237,5 +258,74 @@ describe('an edited file on per-tier stores', () => {
     expect(searchIds(lane.stores.internal, 'quadrants')).toEqual([]);
     expect(searchIds(lane.stores.internal, 'deploy')).toEqual([]);
     expect(searchIds(lane.stores.secure_local, 'deploy')).toEqual([]);
+  });
+});
+
+/** Carries out the move the sink queued, as the automatic mover does. */
+async function runQueuedMove(lane: Lane, doc: Doc) {
+  const identity = identityOf(doc.id);
+  const record = lane.ledger.getCurrent(identity)!;
+  expect(record.state).toBe('moving');
+  return moveTieredItem({
+    set: lane.set,
+    identity,
+    target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
+    expectedGeneration: record.generation,
+  });
+}
+
+describe('an edit that changes which store the text belongs in', () => {
+  const REPORT_REVISED = 'Weekend grocery list: oranges, bananas and oat milk.';
+
+  test('a Private file edited into ordinary text never lets the old Private text into the Personal store', async () => {
+    const lane = openLane();
+    await landFirstReading(lane);
+    await list(lane, [REFERENCE, REPORT], { [REFERENCE.id]: 'rev-1', [REPORT.id]: 'rev-2' });
+    expect(candidateIds(lane, true)).toEqual([REPORT.id]);
+
+    // The new text is ordinary, so the file now belongs in the Personal store.
+    // The sink queues that move and writes nothing to Personal itself.
+    const result = await lane.sink.accept(request(REPORT, REPORT_REVISED, 'rev-2'));
+    expect(result.accepted).toBe(false);
+    expect(result.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
+    expect(searchIds(lane.stores.internal, 'diagnosis')).toEqual([]);
+    expect(searchIds(lane.stores.internal, 'oranges')).toEqual([]);
+
+    // The move that carries it down must bring the NEW text, never the old.
+    await runQueuedMove(lane, REPORT);
+    expect(searchIds(lane.stores.internal, 'diagnosis')).toEqual([]);
+    expect(searchIds(lane.stores.internal, 'patient')).toEqual([]);
+    expect(searchIds(lane.stores.internal, 'oranges')).toEqual([REPORT.id]);
+    // Nothing is served from the Private store any more.
+    expect(searchIds(lane.stores.secure_local, 'diagnosis')).toEqual([]);
+    expect(searchIds(lane.stores.secure_local, 'oranges')).toEqual([]);
+    expect(lane.ledger.copies(identityOf(REPORT.id)).filter((copy) => copy.state === 'current')
+      .map((copy) => [copy.corpusId, copy.layers])).toEqual([[CORPORA.internal, 'both']]);
+    // Settled: the file is no longer a candidate, and it reads as current.
+    expect(candidateIds(lane, true)).toEqual([]);
+    expect(lane.stores.internal!.itemTextIsStale(localId(REPORT.id))).toBe(false);
+  });
+
+  test('an ordinary file edited into Private text never puts the new text in the Personal store', async () => {
+    const lane = openLane();
+    await landFirstReading(lane);
+    await list(lane, [REFERENCE, REPORT], { [REFERENCE.id]: 'rev-2', [REPORT.id]: 'rev-1' });
+    expect(candidateIds(lane, true)).toEqual([REFERENCE.id]);
+
+    const sensitive = 'Patient: Morgan Example\nGlucose 99 mg/dL. The lab results confirm the diagnosis.';
+    const result = await lane.sink.accept(request(REFERENCE, sensitive, 'rev-2'));
+    expect(result.accepted).toBe(false);
+    expect(result.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
+    // Hidden at once; the sensitive words are in no Personal row.
+    expect(searchIds(lane.stores.internal, 'diagnosis')).toEqual([]);
+    expect(searchIds(lane.stores.internal, 'quadrants')).toEqual([]);
+
+    await runQueuedMove(lane, REFERENCE);
+    expect(searchIds(lane.stores.internal, 'diagnosis')).toEqual([]);
+    expect(searchIds(lane.stores.internal, 'quadrants')).toEqual([]);
+    // After the raise the Private store serves the text it had (the new text
+    // is stored nowhere until the file is read again).
+    expect(searchIds(lane.stores.secure_local, 'diagnosis')).toEqual([REPORT.id]);
+    expect(searchIds(lane.stores.secure_local, 'quadrants')).toEqual([REFERENCE.id]);
   });
 });

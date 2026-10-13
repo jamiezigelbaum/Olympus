@@ -34068,6 +34068,7 @@ var PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 init_types();
 init_engine();
 init_tier_classifier();
+init_tier_ledger();
 init_tiered_store_set();
 
 // src/workers/connector-store/tiered-extraction.ts
