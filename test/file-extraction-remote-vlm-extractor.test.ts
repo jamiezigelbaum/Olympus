@@ -1,12 +1,21 @@
 // B6 parity: the approved-remote vision lane.
 //
-// This is the only extractor whose egress is not local, so the two guards that
+// This is the only extractor whose egress is not local, so the guards that
 // decide whether bytes may leave the machine get their own tests, including
 // the negative cases. Nothing here touches the network.
+//
+// The pre-send Secrets check reads the payload with a local reader first. Here
+// that reader is a stand-in OCR that "reads" a fixture's bytes as the text
+// printed in it, so a fixture can carry an API-key-shaped string the way a
+// screenshot would. Key-shaped strings are assembled at run time, so this file
+// holds no literal a secret scanner would mistake for a real token.
 
 import { describe, expect, test } from 'bun:test';
 import { writeFile } from 'node:fs/promises';
 import type {
+  Extractor,
+  ExtractorInput,
+  ExtractorOutput,
   VlmClient,
   VlmDescribeRequest,
   VlmDescribeResult,
@@ -15,14 +24,21 @@ import type { ExtractionCommandRunner } from '../src/workers/file-extraction/ext
 import {
   APPROVED_REMOTE_EXTRACTION_HOST,
   DEFAULT_REMOTE_EXTRACTION_MODEL,
+  REMOTE_SECRET_CHECK_FAILED,
+  REMOTE_SECRET_CHECK_NOT_CONFIGURED,
   REMOTE_VLM_EXTRACTOR_KINDS,
   REMOTE_VLM_EXTRACTOR_VERSION,
+  REMOTE_WITHHELD_SECRET_WARNING,
   classifyRemoteVlmEndpointError,
   createRemoteVlmExtractor,
   extractJsonMessages,
   requireApprovedRemoteExtractionBaseUrl,
   requireLocalHttpBaseUrl,
+  type RemoteVlmExtractorOptions,
 } from '../src/workers/file-extraction/extractors/remote-vlm.ts';
+import { createDefaultExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
+import { createOcrCapabilityProbe } from '../src/workers/file-extraction/extractors/ocr-capability.ts';
+import { createOcrExtractor } from '../src/workers/file-extraction/extractors/ocr.ts';
 import {
   extractorInput,
   pdfImageOnly,
@@ -30,6 +46,50 @@ import {
 } from './fixtures/file-extraction-extractor-fixtures.ts';
 
 const PDF_MIME = 'application/pdf';
+
+const join = (...parts: string[]): string => parts.join('');
+// Provider-shaped API keys, assembled so no literal key sits in this file.
+const STRIPE_LIVE_KEY = join('sk', '_live_', 'k9Xp2LmQ7vRt4WzY8bNc3HdF');
+const GITHUB_TOKEN = join('gh', 'p_', 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8');
+
+/**
+ * A stand-in for the local OCR lane: it reads a fixture's bytes as the text
+ * printed in it (none, for an empty fixture) and records what it was shown.
+ */
+function fixtureOcr(): Pick<Extractor, 'extract'> & { reads: ExtractorInput[] } {
+  const reads: ExtractorInput[] = [];
+  return {
+    reads,
+    async extract(input): Promise<ExtractorOutput> {
+      reads.push(input);
+      const text = Buffer.from(input.bytes ?? new Uint8Array()).toString('utf8').trim();
+      if (!text) return { status: 'metadata_only', warnings: ['ocr_empty'] };
+      return {
+        status: 'indexed',
+        text,
+        derivations: [{
+          artifactKind: 'image_description',
+          structuralRef: { kind: 'image', label: 'image ocr text', artifact: 'image_ocr' },
+          confidence: 0.5,
+          warnings: ['ocr_text'],
+          chars: text.length,
+        }],
+      };
+    },
+  };
+}
+
+/**
+ * A payload with no readable text: the local reader finds nothing, so the
+ * pre-send check lets it through.
+ */
+function clearReader(): Pick<Extractor, 'extract'> {
+  return { extract: async () => ({ status: 'metadata_only', warnings: ['ocr_empty'] }) };
+}
+
+function remote(options: RemoteVlmExtractorOptions = {}) {
+  return createRemoteVlmExtractor({ localReader: clearReader(), ...options });
+}
 
 function recordingClient(
   describe_: (request: VlmDescribeRequest) => VlmDescribeResult,
@@ -86,7 +146,7 @@ describe('remote vlm extractor: registry surface', () => {
 
   test('a non-image, non-PDF item is skipped without a describe call', async () => {
     const client = recordingClient(() => ({ text: 'never reached' }));
-    const result = await createRemoteVlmExtractor({ client }).extract(extractorInput({
+    const result = await remote({ client }).extract(extractorInput({
       bytes: textBytes('plain'),
       mimeType: 'text/plain',
     }));
@@ -99,7 +159,7 @@ describe('remote vlm extractor: image path', () => {
   test('sends the image bytes untouched and indexes the description', async () => {
     const bytes = textBytes('pretend jpeg');
     const client = recordingClient(() => ({ text: 'A receipt with a total of 12.40.' }));
-    const result = await createRemoteVlmExtractor({ client }).extract(extractorInput({
+    const result = await remote({ client }).extract(extractorInput({
       bytes,
       mimeType: 'image/jpeg',
     }));
@@ -125,7 +185,7 @@ describe('remote vlm extractor: image path', () => {
       confidence: 0.42,
       warnings: ['provider_warning'],
     }));
-    const result = await createRemoteVlmExtractor({ client }).extract(extractorInput({
+    const result = await remote({ client }).extract(extractorInput({
       bytes: textBytes('pretend png'),
       mimeType: 'image/png',
     }));
@@ -140,7 +200,7 @@ describe('remote vlm extractor: PDF first-page render path', () => {
     const rendered = textBytes('rendered png bytes');
     const { runner, calls } = firstPageRenderRunner(rendered);
     const client = recordingClient(() => ({ text: 'Page one says hello.' }));
-    const result = await createRemoteVlmExtractor({
+    const result = await remote({
       client,
       pdfRenderCommandRunner: runner,
     }).extract(extractorInput({ bytes: pdfImageOnly(), mimeType: PDF_MIME }));
@@ -164,7 +224,7 @@ describe('remote vlm extractor: PDF first-page render path', () => {
 describe('remote vlm extractor: empty response fallback', () => {
   test('an empty description for an image falls back to a media descriptor', async () => {
     const client = recordingClient(() => ({ text: '   ' }));
-    const result = await createRemoteVlmExtractor({ client }).extract(extractorInput({
+    const result = await remote({ client }).extract(extractorInput({
       bytes: textBytes('pretend png'),
       mimeType: 'image/png',
       sizeBytes: 11,
@@ -184,7 +244,7 @@ describe('remote vlm extractor: empty response fallback', () => {
   test('an empty description for a rendered PDF names the render in its warnings', async () => {
     const { runner } = firstPageRenderRunner(textBytes('png'));
     const client = recordingClient(() => ({ text: '' }));
-    const result = await createRemoteVlmExtractor({
+    const result = await remote({
       client,
       pdfRenderCommandRunner: runner,
     }).extract(extractorInput({ bytes: pdfImageOnly(), mimeType: PDF_MIME }));
@@ -215,10 +275,202 @@ describe('remote vlm extractor: configuration failures', () => {
 
   test('missing bytes is a terminal invariant failure', async () => {
     const client = recordingClient(() => ({ text: 'unused' }));
-    const result = await createRemoteVlmExtractor({ client }).extract(extractorInput({
+    const result = await remote({ client }).extract(extractorInput({
       mimeType: 'image/png',
     }));
     expect(result.status).toBe('failed_terminal');
+    expect(client.requests).toHaveLength(0);
+  });
+});
+
+describe('remote vlm extractor: the pre-send Secrets check', () => {
+  test('an image whose local reading shows an API key is never passed to the client', async () => {
+    const screenshot = textBytes(`Settings > API keys\nSecret key: ${STRIPE_LIVE_KEY}\nCreated today`);
+    const ocr = fixtureOcr();
+    const client = recordingClient(() => ({ text: 'never reached' }));
+    const result = await remote({ client, localReader: ocr }).extract(extractorInput({
+      bytes: screenshot,
+      mimeType: 'image/png',
+    }));
+    expect(client.requests).toHaveLength(0);
+    // The local reading saw exactly the bytes that would have left.
+    expect(ocr.reads).toHaveLength(1);
+    expect(ocr.reads[0]?.bytes).toBe(screenshot);
+    expect(ocr.reads[0]?.mimeType).toBe('image/png');
+    // The item keeps the local text, so the sink judges it Secrets and keeps
+    // only where it is; nothing carries a remote destination.
+    expect(result.status).toBe('indexed');
+    if (result.status !== 'indexed') return;
+    expect(result.text).toContain(STRIPE_LIVE_KEY);
+    expect(result).not.toHaveProperty('egressDestination');
+    expect(result.warnings).toContain(REMOTE_WITHHELD_SECRET_WARNING);
+    expect(result.derivations?.[0]?.warnings).toContain(REMOTE_WITHHELD_SECRET_WARNING);
+  });
+
+  test("a PDF whose rendered first page shows an API key is never passed to the client", async () => {
+    const renderedPage = textBytes(`Deploy notes\nGITHUB_TOKEN=${GITHUB_TOKEN}`);
+    const { runner } = firstPageRenderRunner(renderedPage);
+    const ocr = fixtureOcr();
+    const client = recordingClient(() => ({ text: 'never reached' }));
+    const result = await remote({
+      client,
+      localReader: ocr,
+      pdfRenderCommandRunner: runner,
+    }).extract(extractorInput({ bytes: pdfImageOnly(), mimeType: PDF_MIME }));
+    expect(client.requests).toHaveLength(0);
+    // What was checked is the rendered page, which is all that would leave.
+    expect(ocr.reads[0]?.mimeType).toBe('image/png');
+    expect(Buffer.from(ocr.reads[0]!.bytes!).toString('utf8')).toBe(Buffer.from(renderedPage).toString('utf8'));
+    expect(result.status).toBe('indexed');
+    if (result.status !== 'indexed') return;
+    expect(result.warnings).toEqual(expect.arrayContaining([REMOTE_WITHHELD_SECRET_WARNING, 'pdf_rendered_first_page']));
+  });
+
+  test('a payload whose local reading holds no secret is sent', async () => {
+    const receipt = textBytes('Corner Cafe\nFlat white 3.40\nTotal 3.40');
+    const ocr = fixtureOcr();
+    const client = recordingClient(() => ({ text: 'A cafe receipt totalling 3.40.' }));
+    const result = await remote({ client, localReader: ocr }).extract(extractorInput({
+      bytes: receipt,
+      mimeType: 'image/jpeg',
+    }));
+    expect(ocr.reads).toHaveLength(1);
+    expect(client.requests).toHaveLength(1);
+    expect(client.requests[0]?.bytes).toBe(receipt);
+    if (result.status !== 'indexed') throw new Error('expected indexed');
+    expect(result.text).toBe('A cafe receipt totalling 3.40.');
+  });
+
+  test('a payload with no readable text at all (a photo) is sent', async () => {
+    const ocr = fixtureOcr();
+    const client = recordingClient(() => ({ text: 'A dog on a beach.' }));
+    await remote({ client, localReader: ocr }).extract(extractorInput({
+      bytes: textBytes('   '),
+      mimeType: 'image/jpeg',
+    }));
+    expect(client.requests).toHaveLength(1);
+  });
+
+  test('a payload the local reader cannot read is not sent (fails closed)', async () => {
+    const client = recordingClient(() => ({ text: 'never reached' }));
+    const failing: Pick<Extractor, 'extract'> = {
+      extract: async () => ({ status: 'failed_retryable', errorKind: 'ocr_command_failed' }),
+    };
+    const result = await remote({ client, localReader: failing }).extract(extractorInput({
+      bytes: textBytes(`key ${STRIPE_LIVE_KEY}`),
+      mimeType: 'image/png',
+    }));
+    expect(client.requests).toHaveLength(0);
+    expect(result).toEqual({ status: 'failed_retryable', errorKind: REMOTE_SECRET_CHECK_FAILED });
+
+    const terminal: Pick<Extractor, 'extract'> = {
+      extract: async () => ({ status: 'skipped_unsupported' }),
+    };
+    const settled = await remote({ client, localReader: terminal }).extract(extractorInput({
+      bytes: textBytes('heic'),
+      mimeType: 'image/heic',
+    }));
+    expect(client.requests).toHaveLength(0);
+    expect(settled).toEqual({ status: 'failed_terminal', errorKind: REMOTE_SECRET_CHECK_FAILED });
+
+    const throwing: Pick<Extractor, 'extract'> = {
+      extract: async () => { throw new Error('reader crashed'); },
+    };
+    const thrown = await remote({ client, localReader: throwing }).extract(extractorInput({
+      bytes: textBytes('png'),
+      mimeType: 'image/png',
+    }));
+    expect(client.requests).toHaveLength(0);
+    expect(thrown).toEqual({ status: 'failed_retryable', errorKind: REMOTE_SECRET_CHECK_FAILED });
+  });
+
+  test('through the real OCR lane: a key the engine reads off the image stops the send', async () => {
+    // The production reader (createOcrExtractor, Vision off as on Linux) with
+    // only the tesseract command stubbed: it is handed the payload file and
+    // prints what it "sees". Everything between the payload and the detector
+    // (temp file, arguments, bounding, settlement) is the shipped code.
+    const seen: string[][] = [];
+    const tesseract = (printed: string): ExtractionCommandRunner => async (request) => {
+      seen.push([request.command, ...request.args]);
+      return { stdout: printed, stderr: '' };
+    };
+    const client = recordingClient(() => ({ text: 'never reached' }));
+    const reader = createOcrExtractor({
+      commandRunner: tesseract(`API key\n${STRIPE_LIVE_KEY}\n`),
+      engine: { platform: 'linux', preference: 'tesseract' },
+    });
+    const withheld = await createRemoteVlmExtractor({ client, localReader: reader }).extract(extractorInput({
+      bytes: textBytes('png pixels'),
+      mimeType: 'image/png',
+    }));
+    expect(seen[0]?.[0]).toBe('tesseract');
+    expect(client.requests).toHaveLength(0);
+    expect(withheld.status).toBe('indexed');
+    expect(withheld.warnings).toContain(REMOTE_WITHHELD_SECRET_WARNING);
+
+    // The same lane reading only ordinary text lets the payload go.
+    const clean = createOcrExtractor({
+      commandRunner: tesseract('Corner Cafe\nTotal 3.40\n'),
+      engine: { platform: 'linux', preference: 'tesseract' },
+    });
+    await createRemoteVlmExtractor({ client, localReader: clean }).extract(extractorInput({
+      bytes: textBytes('png pixels'),
+      mimeType: 'image/png',
+    }));
+    expect(client.requests).toHaveLength(1);
+  });
+
+  test('a local reading cut short at the text bound is not trusted: a key past the cut is never sent', async () => {
+    const client = recordingClient(() => ({ text: 'never reached' }));
+    const reader = createOcrExtractor({
+      commandRunner: async () => ({ stdout: `${'ordinary words '.repeat(20)}\n${STRIPE_LIVE_KEY}\n`, stderr: '' }),
+      engine: { platform: 'linux', preference: 'tesseract' },
+      maxBoundedTextChars: 64,
+    });
+    const result = await createRemoteVlmExtractor({ client, localReader: reader }).extract(extractorInput({
+      bytes: textBytes('png pixels'),
+      mimeType: 'image/png',
+    }));
+    expect(client.requests).toHaveLength(0);
+    expect(result).toEqual({ status: 'failed_terminal', errorKind: REMOTE_SECRET_CHECK_FAILED });
+  });
+
+  test('without a local reader nothing is sent', async () => {
+    const client = recordingClient(() => ({ text: 'never reached' }));
+    const result = await createRemoteVlmExtractor({ client }).extract(extractorInput({
+      bytes: textBytes('png'),
+      mimeType: 'image/png',
+    }));
+    expect(client.requests).toHaveLength(0);
+    expect(result).toEqual({ status: 'failed_retryable', errorKind: REMOTE_SECRET_CHECK_NOT_CONFIGURED });
+  });
+
+  test('the registry wires the check into every remote kind: a payload no local engine can read never reaches the client', async () => {
+    // No Vision (not a Mac) and no tesseract that can read these bytes: the
+    // OCR lane cannot read the payload, so it must not leave.
+    const capability = createOcrCapabilityProbe({
+      probe: async () => ({
+        tesseract: 'missing',
+        pdftoppm: 'missing',
+        ocrmypdf: 'missing',
+        pdfEngine: undefined,
+        imageEngine: undefined,
+        checkedAt: 0,
+      }),
+    });
+    const client = recordingClient(() => ({ text: 'never reached' }));
+    const registry = createDefaultExtractorRegistry({
+      remote: { client },
+      ocr: { platform: 'linux', capability },
+    });
+    for (const kind of REMOTE_VLM_EXTRACTOR_KINDS) {
+      const result = await registry.get(kind)!.extract(extractorInput({
+        bytes: textBytes(`token ${GITHUB_TOKEN}`),
+        mimeType: 'image/png',
+      }));
+      expect(result.status === 'failed_retryable' || result.status === 'failed_terminal').toBe(true);
+      expect(result).toHaveProperty('errorKind', REMOTE_SECRET_CHECK_FAILED);
+    }
     expect(client.requests).toHaveLength(0);
   });
 });
