@@ -38,6 +38,7 @@ import {
   type SourceIndexRoutedSearchResponse,
   type SourceIndexRouterAdapterMap,
   type SourceIndexSearchContext,
+  type SourceIndexDocumentMatch,
   type SourceIndexSkippedCorpus,
   type SourceIndexVisibilityGate,
 } from './source-index/router.ts';
@@ -102,6 +103,14 @@ export interface LocalContentBlock {
 
 export interface LocalContentProvider {
   fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined>;
+  // Last synchronous no-text guard immediately before private model dispatch.
+  documentCurrent?(document: SourceIndexDocumentMatch, trustDomain: SourceTrustDomain): boolean;
+  /**
+   * Read one revision-bound document in source order. The cursor is local and
+   * opaque; providers must revalidate scope, tier visibility and revision
+   * before every window and return undefined when any of them changed.
+   */
+  fetchDocumentWindow?(request: LocalDocumentContentWindowRequest): Promise<LocalDocumentContentWindow | undefined>;
   // Corpus-level readability, counts only. An extraction gap can only be
   // reported for a document the router RETURNED, so the document whose one
   // unreadable page holds the answer contributes nothing: the term is not in
@@ -110,6 +119,19 @@ export interface LocalContentProvider {
   // matched or not. Optional: a provider that cannot answer it without walking
   // every document must omit it rather than pay that per query.
   corpusReadability?(): Promise<CorpusReadabilityCounts | undefined>;
+}
+
+export interface LocalDocumentContentWindowRequest {
+  document: SourceIndexDocumentMatch;
+  trustDomain: SourceTrustDomain;
+  maxChars: number;
+  cursor?: string;
+}
+
+export interface LocalDocumentContentWindow {
+  content: LocalContentBlock;
+  nextCursor?: string;
+  done: boolean;
 }
 
 // Counts only — no paths, no titles, no identifiers beyond the corpus id the

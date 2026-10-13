@@ -28,6 +28,9 @@
 //   audits — never raw chunks, packets, or pack internals.
 
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
+import { documentDigestAnalyst } from '../../core/document-digest.ts';
+import { runWithDocumentDispatch } from '../../core/document-dispatch.ts';
+import type { PreparedDocumentDigest } from './document-digest.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
@@ -137,6 +140,8 @@ export interface AnalystAnswerLanes {
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
+  // Local summarize-first for Venice. Absent keeps the established excerpt route.
+  documentDigest?: (request: SourceIndexAnswerRequest) => Promise<PreparedDocumentDigest | undefined>;
   // The local analyst (Argus on Delphi/local models).
   analyst: Analyst;
   // Optional frontier analyst (createAnalyst-wrapped cloud model).
@@ -467,6 +472,20 @@ export function createAnalystSourceIndexAnswerHandler(
       if (secureLocalChoice.exclusion) {
         detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
       }
+      let documentCurrent: (() => boolean) | undefined;
+      let usingDigest = false;
+      if (requestedAnalystProviderForGate === 'venice' && options.documentDigest) {
+        const prepared = await options.documentDigest({ ...request, include_secure_local: includeSecureLocal });
+        if (prepared) {
+          if (prepared.kind === 'refused') throw new OperationError('source_index_policy_violation', 'The local document digest could not be completed. Nothing was sent.');
+          documentCurrent = prepared.current;
+          if (!documentCurrent()) throw new OperationError('source_index_policy_violation', 'Document authorization changed. Nothing was sent.');
+          if (prepared.kind === 'digest') {
+            usingDigest = true;
+            detail = { ...detail, pack: prepared.pack, candidateCorpusIds: prepared.refs.map(ref => ref.corpusId), namesOnlyCandidateIndexes: [], contentPrivateCandidateIndexes: [] };
+          }
+        }
+      }
       let pack = detail.pack;
       const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
       // Leg fitting is keyed by the candidates of the pack actually analyzed,
@@ -478,8 +497,8 @@ export function createAnalystSourceIndexAnswerHandler(
           analysisDetail.candidateCorpusIds[index] ?? '',
         ] as const));
         return {
-          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus),
-          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
+          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(usingDigest ? documentDigestAnalyst(analyst) : analyst, localPromptBytes, candidateCorpus),
+          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(usingDigest ? documentDigestAnalyst(analyst) : analyst, usingDigest ? 256 * 1024 : CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -510,13 +529,13 @@ export function createAnalystSourceIndexAnswerHandler(
       // are the product posture, so no default-path cap cuts them short.
       const analyze = (analysisDetail: EvidencePackBuildDetail, analysisLocalOnly: boolean) => {
         const { localLeg, cloudLeg } = legFitting(analysisDetail);
-        return routeAnalysis({
+        return runWithDocumentDispatch(documentCurrent ?? (() => true), () => routeAnalysis({
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
           local: localLeg(options.analyst),
           ...(options.cloudAnalyst ? { cloud: cloudLeg(options.cloudAnalyst) } : {}),
-          ...(veniceAnalyst ? { venice: veniceAnalyst } : {}),
+          ...(veniceAnalyst ? { venice: usingDigest ? documentDigestAnalyst(veniceAnalyst) : veniceAnalyst } : {}),
           // Trusted/encrypted-cloud bound only. request.timeout_ms is the OpenClaw
           // tool watchdog budget (the skill passes ~600s) — a DIFFERENT quantity;
           // it must never inflate this bound, or a ~20s Venice attempt silently
@@ -535,7 +554,7 @@ export function createAnalystSourceIndexAnswerHandler(
             ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs }
             : {}),
           secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs,
-        });
+        }));
       };
       const analystStartedAt = Date.now();
       let routedAnalysis: RoutedAnalysis;
@@ -609,6 +628,7 @@ export function createAnalystSourceIndexAnswerHandler(
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
       // Every item the analysed pack held, cited or not.
+      if (documentCurrent && !documentCurrent()) throw new OperationError('source_index_policy_violation', 'Document authorization changed. The answer was withheld.');
       recordReleaseManifest({ inputs: releaseInputs(detail), constraints: releaseConstraints });
       return {
         answer,

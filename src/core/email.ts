@@ -49,6 +49,7 @@ export type SourceIndexSearchAttachmentType = 'image' | 'video' | 'audio' | 'fil
 
 export interface ConsultAskClientOptions {
   question: string;
+  use_documents?: boolean;
   level?: 'strict' | 'standard';
   cleanup?: 'as_written' | 'light_cleanup' | 'custom';
   remember?: boolean;
@@ -429,6 +430,7 @@ export class EmailClient {
       ...(options.signal ? { signal: options.signal } : {}),
       body: JSON.stringify({
         question: options.question,
+        ...(options.use_documents !== undefined ? { use_documents: options.use_documents } : {}),
         ...(options.level ? { level: options.level } : {}),
         ...(options.cleanup ? { cleanup: options.cleanup } : {}),
         ...(options.remember !== undefined ? { remember: options.remember } : {}),

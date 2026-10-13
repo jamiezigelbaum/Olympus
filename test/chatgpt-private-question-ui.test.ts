@@ -9,7 +9,11 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import { PRIVATE_QUESTION_META_KEY, type PrivateQuestionResultV1 } from '../src/workers/chatgpt/private-question-contract.ts';
+import {
+  PRIVATE_QUESTION_META_KEY,
+  type PrivateQuestionProgressV1,
+  type PrivateQuestionResultV1,
+} from '../src/workers/chatgpt/private-question-contract.ts';
 import {
   generateEngineKeyPair,
   importPanelPublicKey,
@@ -112,6 +116,7 @@ interface MountOptions {
   /** The relay's replies to a collection, in order; 'ready' seals `result`. */
   collectReplies?: Array<number | 'ready' | 'throw'>;
   result?: PrivateQuestionResultV1;
+  results?: Array<PrivateQuestionResultV1 | PrivateQuestionProgressV1>;
   pollCapMs?: number;
   /** The relay's reply to /another: 'opened' (a new job, JOB2, with the same engine key) or a status. */
   anotherReply?: number | 'opened';
@@ -179,7 +184,7 @@ function mount(options: MountOptions): Host {
       if (reply === 'throw') throw new TypeError('Failed to fetch');
       if (reply === 'ready') {
         const panel = await importPanelPublicKey(body.publicKey);
-        const sealed = await sealPrivateAnswer(jobOf(url), panel!.key, padPrivateAnswerPlaintext(JSON.stringify(options.result ?? ANSWERED)));
+        const sealed = await sealPrivateAnswer(jobOf(url), panel!.key, padPrivateAnswerPlaintext(JSON.stringify(options.results?.shift() ?? options.result ?? ANSWERED)));
         return json(200, { status: 'ready', v: 1, ...sealed });
       }
       return json(reply, reply === 202 ? { status: 'pending' } : { status: 'x' }, reply === 202 ? { 'Retry-After': '1' } : {});
@@ -245,6 +250,45 @@ describe('the resource', () => {
 });
 
 describe('asking', () => {
+  test('a supplied document question is prefilled, its choice stays inside the sealed ask, and encrypted progress is shown', async () => {
+    const engine = await generateEngineKeyPair();
+    const progress = { v: 1, state: 'reading', documentsRead: 2, documentsTotal: 5 } as const;
+    const answered = { ...ANSWERED, rewritten: false, sent: 'What did I decide about Acme?' };
+    const host = mount({
+      engine,
+      results: [progress, answered],
+      collectReplies: ['ready', ...Array.from({ length: 30 }, () => 202 as const), 'ready'],
+    });
+    host.push({
+      content: [],
+      _meta: metaFor(engine, { question: 'What did I decide about Acme?', useDocuments: true, provider: 'venice' }),
+    });
+    expect(host.field().value).toBe('What did I decide about Acme?');
+    const documents = host.win.document.querySelector('input[type="checkbox"]') as unknown as HTMLInputElement;
+    expect(documents.checked).toBe(true);
+    expect(host.text()).toContain('Use my documents');
+    expect(host.text()).toContain('Provider Venice');
+    expect(host.text()).not.toContain(W.strictHint);
+    expect(host.text()).not.toContain(W.standardHint);
+
+    host.button('Ask privately').click();
+    await host.until(() => host.text().includes('2 of 5 documents'), 'encrypted document progress');
+    expect(host.asks[0]!.opened).toEqual({
+      v: 1,
+      question: 'What did I decide about Acme?',
+      level: 'standard',
+      cleanup: 'as_written',
+      useDocuments: true,
+    });
+    await host.until(() => host.text().includes(SECRET_ANSWER), 'the document answer');
+    expect(host.text()).toContain('anthropic/claude-sonnet-5.5');
+    expect(host.text()).toContain('Venice Private');
+    expect(host.text()).not.toContain(W.howStrict);
+    host.button(W.showSent).click();
+    expect(host.text()).toContain('What did I decide about Acme?');
+    expectNothingLeaked(host);
+  });
+
   test('nothing shows without the tool result; then the form, sealed to the engine key, then the answer', async () => {
     const engine = await generateEngineKeyPair();
     const host = mount({ engine });

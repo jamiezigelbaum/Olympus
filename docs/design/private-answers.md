@@ -1,42 +1,99 @@
 # Private answers
 
 Status: structure approved by the owner on 2026-10-07 (approved mockup:
-<https://claude.ai/artifact/XViZZCr6zpWcZQhmzXhNNE>). Built and live by
-2026-10-10: the private answer panel, the private question panel and anonymous
-answers through zkAPI (#215, #225, #227 and follow-ups). Venice end-to-end
-encryption is not built. Where this page and the code differ, the code is
-current.
+<https://claude.ai/artifact/XViZZCr6zpWcZQhmzXhNNE>). The 2026-10-10 private
+answer panel, private question panel and question-only zkAPI path were built
+before this branch (#215, #225, #227 and follow-ups). The document-question
+extension below is built only on `claude/documents-lane`; it is not merged,
+released or live.
+Where this page and the code differ, the code is current.
+
+## Current branch status: document questions (2026-10-13)
+
+The branch adds a document mode to the existing private question/result
+surfaces:
+
+- Direct ChatGPT questions open the encrypted private panel with documents
+  selected, using zkAPI or an explicitly requested Venice analyst. ChatGPT's
+  model receives only the opened status; widget-only metadata carries the
+  prefilled question, and the model override stays in the engine job.
+- Other agents can start zkAPI document questions, but their tool result is a
+  fixed private notice. Progress, refusal, exact text sent, answering model and
+  answer appear on the computer's Private answers page.
+- A normal Venice `source_answer` uses the locally built digest when one is
+  available and the caller did not provide `selected_items` or `max_results`.
+  Explicit selection or limits retain the existing excerpt path. Successful
+  digests are always used; only a request with `fits: false` takes the excerpt
+  fallback. The reviewer path is unchanged.
+
+The provider reads the document facts Olympus sends. A local writer tries to
+omit identifiers and the Standard or Strict gate checks the outgoing text; this
+does not prove that a person cannot be identified. Tests use synthetic content
+and prove bounds, routing and revocation, not real-model writing quality.
+
+### Mechanical bounds and lifecycle
+
+- Traversal admits at most 512 documents globally, 64 references per page and
+  256,000 characters from one document, with 1 MiB of admitted document text
+  for one request.
+- Local-model reading uses windows of at most 3,000 characters, keeping whole
+  lines where possible. A complete serialized model message is at most 7,000
+  UTF-8 bytes. `maxOutputChars: 8,000` maps to 4,000 built-in reply tokens;
+  together these fit the 12,288-token context conservatively, including prompt
+  framing.
+- One step admits new work until it has processed four documents or 60 seconds
+  have elapsed. A model call already in flight may then run for up to another
+  60 seconds, so 60 seconds is an admission bound, not a wall-clock promise.
+  Work resumes in memory across steps and polls.
+- The digest admits at most 2,048 rows and 128 KiB. The owner's configured
+  writer may read that 128 KiB digest. The built-in Strict writer retains its
+  2,048-token input bound and refuses a larger prompt instead of clipping it.
+- The digest budget is exercised against a full-year fixture containing 1,200
+  invented transactions; it is real fixture input, not a claim about live data.
+- The actual zkAPI send is capped at 8 KiB.
+- Private jobs expire after 30 minutes. They are in-memory only: an engine
+  restart loses unfinished jobs and their resume state.
+- Document-derived results are checked against the exact source references and
+  revisions after awaited work, around sealing and again at collection. A
+  missing or revoked guard fails closed and replaces the result with a private
+  refusal.
+
+The first document send requires risk-acknowledgement version 8, which states
+plainly that the chosen provider reads the document facts Olympus sends.
 
 ## Outcome
 
-When the answer your Mac gives from your private material is missing
-something, you decide in one place what Olympus may do about it, and you can
-see exactly what left the Mac and who could read it.
+Ask a private question, optionally using documents, through the provider you
+choose. Document questions are read and summarized locally first. The private
+surface shows the exact request and answering model; it does not put the
+document-derived answer into ChatGPT's conversation.
 
 ## The section: "Private answers"
 
-A dashboard section on the Mac. Your Mac always answers first. One choice
-decides what happens when that answer is missing something:
+A dashboard section on the computer configures the available routes. A
+frontier request runs only when explicitly requested; an incomplete local
+answer does not send one automatically:
 
 - **Keep it on this Mac** (default). Nothing leaves.
 - **Sealed cloud · Venice.** The private material the question needs goes to
   Venice's TEE (sealed-hardware) models. Venice knows the account. True
   end-to-end-encrypted Venice stays gated in Olympus
   (`SecureAnalystPoolE2EEGateError`) until local key handling exists.
-- **Anonymous · zkAPI.** A short question goes to a top model, paid through
-  zkAPI over Tor with a fresh key per request. The provider reads the
-  question but cannot tell who asked.
+- **Anonymous · zkAPI.** A short question, or a bounded document request when
+  selected, goes to a top model, paid through zkAPI over Tor with a fresh key
+  per request. Payment and the verified network route do not name the owner;
+  facts in the request can still identify them.
 
 | | Keep it on this Mac | Sealed cloud · Venice | Anonymous · zkAPI |
 |---|---|---|---|
-| What leaves the Mac | Nothing | The question and the private material it needs, sealed | A short question, with names and identifying details removed |
+| What leaves the Mac | Nothing | The question and relevant digest, or bounded excerpts when wording is needed | The writer's prepared request; document facts may be included at Standard |
 | Who can read it | Only your Mac | Only the sealed model | The AI provider |
-| Who knows it was you | No one | Venice, through your account | No one: paid anonymously, sent over Tor |
+| Who can link the request to an account | No outside provider | Venice, through your account | Payment is separated and the network route uses Tor when verified; facts in the request can still identify you |
 | Main risk | The answer stays as good as the local model | Trust in Venice's sealed hardware and its account records | An unusual situation could still hint at who you are (re-identification) |
 | Speed and models | Seconds; the local model | Seconds; strong models | 1–2 minutes today; top models |
 
-Summary line on the page: "Venice hides what you ask; zkAPI hides who is
-asking."
+Summary line on the page: "Venice is account-linked; zkAPI separates payment
+and can hide the network route, but facts in a request can still identify you."
 
 ## zkAPI: what it may send
 
@@ -45,7 +102,8 @@ Two levels:
 - **Standard (recommended)** (`unnamed`, the default everywhere, including a
   settings file with no `level`). "Your question goes out as you choose:
   exactly as written, lightly cleaned, or by your own instruction. The
-  provider can read it but can't tell who sent it."
+  provider reads it; zkAPI separates payment and can hide the verified network
+  route, but the words can still identify you."
 - **Strict** (`general`). "Your model rewrites it into general questions
   first (Vitalik Buterin's approach)." The writer's general questions under
   Vitalik's rules, with the full gate for the built-in writer and the thin
@@ -198,11 +256,14 @@ Decisions:
    exactly as before. Two existing protections still apply: the zkAPI
    daemon's port is refused, and a model with Ollama's cloud tag is refused,
    because both would send private evidence off the machine.
-3. **Vitalik's way.** The chosen model reads bounded excerpts of the evidence
-   the answer used (at most 12 excerpts, 1,500 characters each, 12,000 in
-   all), the question, the first answer and its gaps. It decides whether a
-   frontier model would help and writes the request in its own words. The
-   built-in writer keeps its inputs (question, answer, gaps) and token bound.
+3. **Vitalik's way.** Question-only asks supply only the typed question.
+   Document mode supplies the bounded digest described above: an owner's
+   configured writer can read 128 KiB, while the built-in writer keeps its
+   2,048-token bound and refuses a larger prompt rather than clipping it.
+   When the local extractor says the question needs original wording, the
+   writer receives bounded excerpts instead (at most 12, 1,500 characters
+   each and 12,000 in all). For document questions it decides whether a
+   frontier model would help and writes the request in its own words.
    Both use the same rewritten rules (consult-writer-instructions.md): Strict
    keeps Vitalik's rules (the skill file in ethereum/zkapi PR #16), Standard
    is the user's own choice (above). Strict was measured with and without the
@@ -211,13 +272,11 @@ Decisions:
 4. **No automatic escalation** (retired 2026-10-10, design step 3). A
    private answer with gaps no longer sends anything on its own, and the
    private answer panel no longer shows an anonymous answer under it: a
-   question goes out only when the user asks through their agent. zkAPI
-   never sees the documents, so it cannot fix retrieval or find what the Mac
-   missed; it helps when a stronger model's reasoning or outside knowledge is
-   wanted. The evidence excerpts in item 3 return with the documents lane
-   (`use_documents`, design step 4); until then the writer reads only the
-   question. The card's first cost-and-risk statement says so (acknowledgement
-   version 7, 2026-10-10), and the card's Turn on/off is a real brake: while
+   question goes out only when the user asks through their agent. The document
+   lane is now built on this branch: `use_documents` retrieves locally and can
+   send bounded facts to zkAPI; explicit Venice analysis uses the same private
+   panel. The first document send uses acknowledgement version 8. The card's
+   Turn on/off remains a real brake: while
    anonymous answers are off, or were never set up, `ask_anonymously` and the
    private question panel refuse with `anonymous_answers_off` before anything
    is prepared or any Strict/Standard choice is asked.
@@ -291,9 +350,10 @@ https or a private network.
       adding and taking out money each have a network fee; unused money can
       be claimed by the operator after about 30 days (the card shows the
       estimated date when Olympus knows it); zkAPI is new, so add only what you are comfortable losing.
-3. **Everyday use.** The user asks their agent to use Olympus zkAPI; the
-   answer comes back in the agent's result with the model that answered and
-   the exact question that was sent, every time, for trust. (The private
+3. **Everyday use.** The user asks their agent to use Olympus zkAPI. A
+   question-only answer comes back in the agent's result with the answering
+   model and exact request. A document answer stays on its private surface,
+   with the same request and model receipt. (The private
    answer panel's "Anonymous answer · zkAPI" block went with the automatic
    escalation on 2026-10-10.)
 
@@ -302,8 +362,8 @@ card (a reminder before it is not built yet), and one-click off.
 
 ## A private question ChatGPT never sees (added 2026-10-10)
 
-The `ask_anonymously` tool keeps the question out of the provider's hands but
-not out of ChatGPT's: the user typed it into the conversation. For a question
+The `ask_anonymously` tool sends the prepared question to the answering
+provider. ChatGPT also knows a question typed into its conversation. For a question
 the user does not want ChatGPT to see either, `open_private_question` opens a
 panel in the ChatGPT reply where the question is typed, sealed to the user's
 own computer, asked through the same lane (writer, gate, zkAPI, the provider
@@ -311,7 +371,74 @@ rule) and answered in the panel. ChatGPT learns that a panel opened and
 nothing else. Protocol and proof: docs/design/chatgpt-plugin.md "Private
 question panel".
 
+On the document branch, the same panel can use locally retrieved documents
+with zkAPI or Venice. Progress and the final result remain encrypted to the
+panel; the host can still observe polling and rendered-size classes. The exact
+text sent and the answering model are shown on every document answer, even
+when the writer did not rewrite it.
+
+## Site, legal and frozen-listing follow-ups (owner decision required)
+
+Product statements changed in this branch:
+
+- `README.md`, `core/operations.ts` and the ChatGPT tool description no longer
+  describe every anonymous ask as question-only. They explain `use_documents`
+  and its private result destination.
+- The Anonymous answers dashboard privacy line and disclosures now say that
+  document facts can leave the computer; files staying local does not mean
+  their derived facts stay local.
+- The private question panel now describes both providers, and only text
+  added inside the panel is described as unseen by ChatGPT. An agent may
+  already know a prefilled question. Venice is labeled Private, not anonymous
+  or Strict; those preparation choices belong to zkAPI.
+- The local Private answers introduction describes the private display and
+  possible provider send, instead of claiming everything on the page stays
+  on the computer. Risk acknowledgement 8 explains provider access to facts.
+
+This branch intentionally does not edit the published site, privacy policy,
+terms, ChatGPT directory submission, or pinned `/openai/mcp` listing. Before
+document mode is published, the owner must review these current statements:
+
+- `site/privacy/index.html`, **The three labels**: Private processing lists
+  only the built-in model and Venice; document mode adds prepared zkAPI sends.
+- The same page, **What ChatGPT receives / Anonymous questions asked in the
+  conversation** and **Where you ask it**: a conversation-started document
+  answer now stays in the private panel, rather than returning in the chat.
+- The same page, **What leaves your Mac**: the statement that no source
+  documents are attached needs to distinguish file uploads from facts and
+  wording derived from those documents inside the request.
+- The same page, **The private question panel** and **Who receives it**:
+  disclose optional document retrieval, encrypted progress and document facts
+  reaching zkAPI's answering provider. The Venice recipient description
+  should mention digest preparation and the retained excerpt fallback.
+- `site/terms/index.html`, **Your content and accounts**: its reference to
+  services described in the privacy policy depends on those recipient
+  disclosures being updated. The relay description remains accurate.
+- `chatgpt-plugin/plugin.json` and `chatgpt-plugin/SUBMISSION.md`: the frozen
+  directory listing and reviewer wording. Changing the pinned listing is a new
+  submission and is outside this branch.
+
 ## Known gaps
+
+- **Document quality proof.** The branch has synthetic routing, privacy,
+  budget and UI tests. It has not run a live writer/provider quality eval or
+  used personal records. The held-out harness tests are not a real-model
+  quality receipt.
+- **Resume lifetime.** Document work resumes within the running job. Its
+  30-minute deadline cancels work even without polling; a restart loses it.
+
+## Open product questions for 1.0.1
+
+- Should document jobs survive an engine restart? This branch keeps their
+  evidence and resume state in memory; durable private checkpoints need a
+  retention and deletion decision.
+- Should the built-in writer receive a larger, separately measured context?
+  Its existing 2,048-token limit can refuse an annual digest that an owner's
+  larger local writer can handle.
+- Should explicit Venice selections and limits gain their own full-document
+  digest mode? They currently keep the established excerpt behavior and scope.
+
+## Other existing gaps
 
 - **Funding.** Olympus never runs `zkapi-clientd config` (a standing security
   rule), so "add money" needs one Terminal command that the dashboard watches.

@@ -63,10 +63,21 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   const JOB_ID = new RegExp(config.jobIdPattern);
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
-  type Meta = { jobId: string; askKey: string; level: string; cleanup: string; customInstruction: boolean; maxChars: number };
+  type Meta = {
+    jobId: string;
+    askKey: string;
+    level: string;
+    cleanup: string;
+    customInstruction: boolean;
+    maxChars: number;
+    question: string;
+    useDocuments: boolean;
+    provider: 'zkapi' | 'venice';
+  };
   type Result =
     | { state: 'answered'; answer: string; model: string; level: string; cleanup: string; rewritten: boolean; sent: string; route: string; network: string }
-    | { state: 'refused'; message: string; left: boolean; sent: string };
+    | { state: 'refused'; message: string; left: boolean; sent: string }
+    | { state: 'progress'; progress: 'reading' | 'summarizing' | 'writing' | 'answering'; documentsRead: number; documentsTotal: number };
   let info: Meta | null = null;
   // compose | sending | waiting | done | error | opening | gone
   let phase = 'compose';
@@ -76,6 +87,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   let draft = '';
   let level = '';
   let cleanup = '';
+  let useDocuments = false;
   let sentOpen = false;
   let pair: { jobId: string; privateKey: CryptoKey; publicKey: string } | null = null;
   /** Job ids this panel followed from (Ask another): the host re-delivers the original tool result on every event, which must not restart the view. */
@@ -140,13 +152,18 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   function readMeta(value: Any): Meta | null {
     if (!(value && typeof value === 'object' && value.v === 1 && typeof value.jobId === 'string' && JOB_ID.test(value.jobId)
       && typeof value.askKey === 'string' && /^[A-Za-z0-9_-]{87}$/.test(value.askKey))) return null;
+    const maxChars = typeof value.maxChars === 'number' && isFinite(value.maxChars) && value.maxChars > 0 ? Math.floor(value.maxChars) : 4000;
+    const question = typeof value.question === 'string' && value.question.length <= maxChars && !value.question.includes('\u0000') ? value.question : '';
     return {
       jobId: value.jobId,
       askKey: value.askKey,
       level: value.level === 'strict' ? 'strict' : 'standard',
       cleanup: value.cleanup === 'light_cleanup' || value.cleanup === 'custom' ? value.cleanup : 'as_written',
       customInstruction: value.customInstruction === true,
-      maxChars: typeof value.maxChars === 'number' && isFinite(value.maxChars) && value.maxChars > 0 ? Math.floor(value.maxChars) : 4000,
+      maxChars,
+      question,
+      useDocuments: value.useDocuments === true,
+      provider: value.provider === 'venice' ? 'venice' : 'zkapi',
     };
   }
   function accept(meta: Any, quiet?: boolean): void {
@@ -168,9 +185,10 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     result = null;
     errorText = '';
     canRetry = false;
-    draft = '';
-    level = next ? next.level : '';
-    cleanup = next ? next.cleanup : '';
+    draft = next ? next.question : '';
+    level = next ? next.provider === 'venice' ? 'standard' : next.level : '';
+    cleanup = next ? next.provider === 'venice' ? 'as_written' : next.cleanup : '';
+    useDocuments = next ? next.useDocuments : false;
     sentOpen = false;
     pair = null;
     if (draw) render();
@@ -419,6 +437,11 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   }
   function readResult(value: Any): Result | null {
     if (!value || typeof value !== 'object' || value.v !== 1) return null;
+    if (value.state === 'reading' || value.state === 'summarizing' || value.state === 'writing' || value.state === 'answering') {
+      if (!Number.isInteger(value.documentsRead) || value.documentsRead < 0) return null;
+      if (!Number.isInteger(value.documentsTotal) || value.documentsTotal < value.documentsRead) return null;
+      return { state: 'progress', progress: value.state, documentsRead: value.documentsRead, documentsTotal: value.documentsTotal };
+    }
     if (value.state === 'refused') {
       if (typeof value.message !== 'string') return null;
       // After a send was attempted, only `not_sent` means nothing left; `sent_failed` and `unknown` may have been charged.
@@ -453,7 +476,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     try {
       const keys = await keyPair(jobId);
       if (mine !== run) return;
-      const plaintext = JSON.stringify({ v: 1, question, level, ...(level === 'standard' && cleanup ? { cleanup } : {}) });
+      const plaintext = JSON.stringify({ v: 1, question, level, ...(level === 'standard' && cleanup ? { cleanup } : {}), ...(useDocuments ? { useDocuments: true } : {}) });
       const sealed = await seal(jobId, keys.privateKey, info.askKey, plaintext);
       if (mine !== run) return;
       const controller = typeof (window as Any).AbortController === 'function' ? new (window as Any).AbortController() as AbortController : null;
@@ -524,6 +547,13 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
           const opened = readResult(await open(jobId, keys.privateKey, body));
           if (mine !== run) return;
           if (!opened) return fail(T.generic, false);
+          if (opened.state === 'progress') {
+            result = opened;
+            phase = 'progress';
+            render();
+            await wait(config.secondMs);
+            continue;
+          }
           result = opened;
           phase = 'done';
           focusAfter = 'answer';
@@ -607,11 +637,24 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     });
     form.appendChild(field);
     form.appendChild(count);
-    const options = el('div', 'q-opts');
-    options.appendChild(radio('level', 'strict', T.strict, T.strictHint, level === 'strict', () => { level = 'strict'; render(); }));
-    options.appendChild(radio('level', 'standard', T.standard, T.standardHint, level === 'standard', () => { level = 'standard'; render(); }));
-    form.appendChild(options);
-    if (level === 'standard') {
+    const documents = el('label', 'q-docs');
+    const documentsInput = doc.createElement('input');
+    documentsInput.type = 'checkbox';
+    documentsInput.checked = useDocuments;
+    documentsInput.setAttribute('data-key', 'documents');
+    documentsInput.addEventListener('change', () => { useDocuments = documentsInput.checked; render(); });
+    documents.appendChild(documentsInput);
+    documents.appendChild(el('span', '', 'Use my documents'));
+    form.appendChild(documents);
+    if (current.provider === 'venice') form.appendChild(el('div', 'q-note', T.providerVenice));
+    else if (useDocuments) form.appendChild(el('div', 'q-note', T.providerZkapi));
+    if (current.provider !== 'venice') {
+      const options = el('div', 'q-opts');
+      options.appendChild(radio('level', 'strict', T.strict, T.strictHint, level === 'strict', () => { level = 'strict'; render(); }));
+      options.appendChild(radio('level', 'standard', T.standard, T.standardHint, level === 'standard', () => { level = 'standard'; render(); }));
+      form.appendChild(options);
+    }
+    if (current.provider !== 'venice' && level === 'standard') {
       const prep = el('div', 'q-prep');
       const prepLabel = el('label', 'q-label', T.prepLabel);
       prepLabel.setAttribute('for', 'q-prep');
@@ -635,7 +678,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       form.appendChild(prep);
     }
     const actions = el('div', 'q-actions');
-    const button = el('button', 'btn q-send', T.send) as HTMLButtonElement;
+    const button = el('button', 'btn q-send', current.provider === 'venice' ? T.sendVenice : T.send) as HTMLButtonElement;
     button.type = 'button';
     button.setAttribute('data-key', 'send');
     button.addEventListener('click', () => { void send(); });
@@ -670,8 +713,15 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     card.appendChild(line);
     return card;
   }
+  function progressText(shown: Extract<Result, { state: 'progress' }>): string {
+    const label = shown.progress === 'reading'
+      ? 'Reading documents'
+      : shown.progress === 'summarizing' ? 'Summarizing documents' : shown.progress === 'writing' ? 'Writing the answer' : 'Asking the model';
+    return label + '… ' + num(shown.documentsRead) + ' of ' + num(shown.documentsTotal) + ' documents';
+  }
   function doneView(shown: Result): HTMLElement {
     const card = el('div', 'card');
+    if (shown.state === 'progress') return workingView(progressText(shown));
     if (shown.state === 'refused') {
       card.appendChild(head(shown.left ? T.mayHaveLeft : T.notSent, true));
       const text = el('div', 'answer', shown.message);
@@ -703,14 +753,16 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       text.textContent = shown.answer;
     }
     card.appendChild(text);
-    const how = shown.level === 'strict'
-      ? T.howStrict
-      : shown.cleanup === 'as_written' ? T.howAsWritten : shown.cleanup === 'custom' ? T.howCustom : T.howLightCleanup;
+    const how = info?.provider === 'venice'
+      ? T.venicePrivate
+      : shown.level === 'strict'
+        ? T.howStrict
+        : shown.cleanup === 'as_written' ? T.howAsWritten : shown.cleanup === 'custom' ? T.howCustom : T.howLightCleanup;
     const foot = [shown.model ? fill(T.answeredBy, { model: shown.model }) : '', how].filter(Boolean).join(' · ');
     card.appendChild(el('p', 'q-foot', foot));
     if (shown.network === 'visible') card.appendChild(el('p', 'q-foot warn', T.networkVisible));
     else if (shown.network === 'not_verified') card.appendChild(el('p', 'q-foot', T.networkUnverified));
-    if (shown.rewritten && shown.sent) {
+    if (shown.sent) {
       const toggle = el('button', 'src-toggle', sentOpen ? T.hideSent : T.showSent) as HTMLButtonElement;
       toggle.type = 'button';
       toggle.setAttribute('aria-expanded', sentOpen ? 'true' : 'false');
@@ -748,6 +800,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       else if (phase === 'sending') root.appendChild(workingView(T.sending));
       else if (phase === 'opening') root.appendChild(workingView(T.opening));
       else if (phase === 'waiting') root.appendChild(workingView(T.waiting));
+      else if (phase === 'progress' && result && result.state === 'progress') root.appendChild(workingView(progressText(result)));
       else if (phase === 'done' && result) root.appendChild(doneView(result));
       else if (phase === 'gone') {
         const card = el('div', 'card');
@@ -843,6 +896,8 @@ export const CHATGPT_PRIVATE_QUESTION_CSS = `${CHATGPT_PRIVATE_ANSWER_CSS}
 .q-field:focus{outline:2px solid var(--focus);outline-offset:1px}
 .q-count{font-size:0.75rem;color:var(--muted);text-align:right;margin-top:-0.25rem}
 .q-count.over{color:var(--warning);font-weight:500}
+.q-docs{display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.875rem;line-height:1.4}
+.q-docs input{margin:0;flex:none}
 .q-opts{display:flex;flex-direction:column;gap:0.25rem}
 .q-radio{display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;font-size:0.875rem;line-height:1.4}
 .q-radio input{margin:0.2rem 0 0;flex:none}

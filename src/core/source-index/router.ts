@@ -64,6 +64,42 @@ export interface SourceIndexCorpusSearchRequest {
   deadlineAtMs?: number;
 }
 
+/**
+ * One item in a local exhaustive-match snapshot. `revision` is opaque outside
+ * the adapter and binds later full-document reads to the exact stored content
+ * that matched; it is never a provider cursor or source text.
+ */
+export interface SourceIndexDocumentMatch {
+  sourceItem: SourceItemIdentity;
+  provenance: SourceIndexProvenance;
+  revision: string;
+}
+
+export interface SourceIndexDocumentMatchRequest {
+  query: string;
+  corpus: SourceIndexCorpusDefinition;
+  context: SourceIndexSearchContext;
+  pageSize: number;
+  // Hard ceiling for the complete snapshot. Exceeding it is a refusal.
+  maxDocuments: number;
+  cursor?: string;
+  deadlineAtMs?: number;
+}
+
+export type SourceIndexDocumentMatchResponse =
+  | {
+      status: 'ok';
+      documents: readonly SourceIndexDocumentMatch[];
+      nextCursor?: string;
+      done: boolean;
+      rawExposed: false;
+    }
+  | {
+      status: 'unsupported' | 'invalidated';
+      reason: string;
+      rawExposed: false;
+    };
+
 export interface SourceIndexSearchHit {
   sourceItem: SourceItemIdentity;
   provenance?: SourceIndexProvenance;
@@ -160,6 +196,12 @@ export interface SourceIndexCorpusSearchAdapter {
    * match without reading text.
    */
   metadataMatches?: (request: SourceIndexCorpusSearchRequest) => Promise<SourceIndexCorpusSearchResponse>;
+  /**
+   * Complete local match-set traversal for summarize-first workflows. Unlike
+   * metadataMatches this is not a top-k surface: it either snapshots every
+   * lexical and vetted semantic match inside maxDocuments, or refuses.
+   */
+  documentMatches?: (request: SourceIndexDocumentMatchRequest) => Promise<SourceIndexDocumentMatchResponse>;
   /**
    * Whether an item a caller selected by identity is this corpus's item and
    * would be served now under this adapter's scope (account, filters, current

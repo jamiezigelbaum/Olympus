@@ -1698,7 +1698,7 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
   rows: {
     keys: { title: 'Keys', line: 'Venice, Readwise and X keys' },
     agents: { title: 'Agents', line: 'Remote access and connected agents' },
-    privateAnswers: { title: 'Private answers', line: 'Questions answered only on this computer' },
+    privateAnswers: { title: 'Private answers', line: 'Private questions and answers on your computer' },
     connector: { title: 'Build a connector', line: 'For a source Olympus does not have yet' },
   },
   /**
@@ -2090,22 +2090,22 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
 
 /**
  * The private question panel (src/workers/dashboard/chatgpt/private-question.ts):
- * a question typed in ChatGPT's panel that ChatGPT never sees, asked
- * anonymously through zkAPI from the user's own computer. `{model}` is
- * filled in by the panel. Nothing here names a source item.
+ * a question typed in ChatGPT's panel that ChatGPT never sees. Olympus may
+ * ask it through zkAPI or Venice, with optional locally retrieved document
+ * facts. `{model}` is filled in by the panel. Nothing here names a source item.
  */
 export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
   pageTitle: 'Olympus private question',
   title: 'Private question',
   /** The muted line under the title while composing and once answered. */
-  notSeen: 'ChatGPT does not see this question or its answer. It goes out anonymously through zkAPI from your computer.',
+  notSeen: 'Text you add in this panel, document facts and answers are not sent to ChatGPT. Olympus asks from your computer through the provider shown below.',
   /** The muted line when the ask was refused before anything left the computer. */
   notSent: 'Nothing was sent.',
   /** The send was attempted and failed afterwards: it may have reached the provider and used some of the balance. */
   mayHaveLeft: 'The question left your computer but no answer came back. It may have used some of your zkAPI balance; check before asking again.',
   questionLabel: 'Your question',
   strict: 'Strict',
-  strictHint: 'Your own model rewrites it into general questions first, so nothing identifying can leave.',
+  strictHint: 'Your own model rewrites it into general questions first, then Olympus checks the result for identifying details.',
   standard: 'Standard',
   standardHint: 'Your words, prepared the way you chose on the dashboard.',
   prepLabel: 'Prepared',
@@ -2113,8 +2113,11 @@ export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
   lightCleanup: 'lightly cleaned up',
   custom: 'by your saved instruction',
   send: 'Ask anonymously',
+  sendVenice: 'Ask privately',
+  providerVenice: 'Provider Venice',
+  providerZkapi: 'Provider zkAPI',
   /** The one side-effect line (owner decision 2026-10-10: no money words inside ChatGPT; zkapi-copy.ts). */
-  cost: 'Uses your zkAPI balance.',
+  cost: 'Uses the selected provider; zkAPI questions use your balance.',
   sending: 'Sealing your question for your computer…',
   waiting: 'Asking from your computer… this can take a few minutes.',
   empty: 'Type a question first.',
@@ -2130,6 +2133,7 @@ export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
   unreachable: 'Olympus couldn\'t reach your computer. Try again in a moment.',
   generic: 'Olympus couldn\'t ask this here.',
   answeredBy: 'Answered by {model}',
+  venicePrivate: 'Venice Private',
   howStrict: 'rewritten by your own model before it left',
   howAsWritten: 'sent as written',
   howLightCleanup: 'lightly cleaned up before it left',
@@ -2299,13 +2303,14 @@ export const DASHBOARD_LOCAL_COPY = {
 /**
  * The Private answers page (pages/private-answers.ts; design
  * background-agents.md sections A and B, "Dashboard changes" 1 and 2).
- * Questions are answered by the model built into Olympus, on this computer
- * only. Anonymous answers (zkAPI) sit beneath it, collapsed, as outside help.
+ * Local questions use the model built into Olympus. Agent-started document
+ * questions may use zkAPI; their progress and answers appear only on this
+ * computer. Anonymous answers setup sits beneath, collapsed, as outside help.
  */
 export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   crumb: 'Private answers',
   title: 'Private answers',
-  intro: 'Answered on this computer by the model built into Olympus. Nothing here leaves this computer.',
+  intro: 'Private answers on this page stay out of your agent conversation. Document questions may send selected facts to the provider you chose.',
   askLabel: 'Ask privately',
   askPlaceholder: 'Ask about your private things',
   ask: 'Ask',
@@ -2416,7 +2421,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     unnamed: {
       short: 'Standard',
       title: 'Standard (recommended)',
-      body: 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can\'t tell who sent it.',
+      body: 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider reads it; zkAPI separates payment and can hide the verified network route, but the words can still identify you.',
     },
     general: {
       short: 'Strict',
@@ -2440,7 +2445,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   },
   levelSave: 'Save',
   /** The public privacy line, in plain words (design §2, §A.10). */
-  privacy: 'Your files and private answer stay on this computer. The outside model sees only the short question, and that question could still hint at private things.',
+  privacy: 'For a normal question, the outside model sees only the prepared question. For a document question, it also sees bounded facts Olympus selects from the documents. The answer stays out of the agent conversation.',
   state: {
     off: 'Anonymous answers are off.',
     on: 'Anonymous answers are on.',
@@ -2481,7 +2486,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   disclosureTitle: 'Before you turn this on',
   /** Two short lines at first view; the fuller detail sits behind disclosureMore. */
   disclosureShort: [
-    'It asks only when you do: tell your agent to use Olympus zkAPI, and Olympus sends one short question.',
+    'It asks only when you do: tell your agent to use Olympus zkAPI. A normal ask sends one prepared question; document mode also sends bounded facts selected from your documents.',
     'The provider reads the question, prepared the way you choose; zkAPI hides who paid.',
   ],
   disclosureMore: 'Everything to know first',
@@ -2493,7 +2498,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
    * and the proof setup, and when the network route can be confirmed.
    */
   disclosure: [
-    'Olympus sends a question only when you ask your agent to use Olympus zkAPI. Nothing is sent on its own.',
+    'Olympus sends a request only when you ask your agent to use Olympus zkAPI. A normal request contains the prepared question; document mode also contains bounded document facts. Nothing is sent on its own.',
     'A question usually costs a few cents. While it runs, up to $6 of your zkAPI balance is held, and the rest comes back when it settles. Olympus counts each question at the amount held for its model (between $1 and $6) when checking the daily limits you set.',
     'There is no daily limit unless you set one under Balance and limits. Your balance is the most that can be spent.',
     'Adding money and taking it out are each an Ethereum transaction with its own network fee (about $7 each when Olympus last checked). There is no top-up: each deposit starts a new balance with its own fee and its own 30-day clock.',

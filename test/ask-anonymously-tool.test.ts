@@ -23,6 +23,13 @@ function lane(consultAsk?: (input: ConsultAskWireRequest, signal: AbortSignal) =
 }
 
 describe('ask_anonymously: operation → worker route → core', () => {
+  test('use_documents reaches the worker as a boolean and document outcomes stay private', async () => {
+    const seen: ConsultAskWireRequest[] = [];
+    const { ctx } = lane(async input => { seen.push(input); return { ok: false, code: 'private_documents_pending', privateDocuments: true, message: 'Read the private answer on your computer.' }; });
+    expect(await ask.handler(ctx, { question: 'Review the invented labs', use_documents: true })).toMatchObject({ privateDocuments: true });
+    expect(seen[0]).toMatchObject({ use_documents: true });
+    await expect(ask.handler(ctx, { question: 'Review', use_documents: 'not-a-boolean' })).rejects.toMatchObject({ code: 'invalid_params' });
+  });
   test('the question and the conversation\'s choices reach the core exactly; the outcome comes back as a result, refusals included', async () => {
     const seen: ConsultAskWireRequest[] = [];
     const { ctx } = lane(async (input) => {
@@ -145,7 +152,7 @@ describe('ask_anonymously: operation → worker route → core', () => {
     expect(ask.openWorld).toBe(true);
     expect(ask.nativeExposure).toBe('always');
     expect(ask.cliHints).toEqual({ name: 'ask', positional: ['question'], stdin: 'question' });
-    expect(Object.keys(ask.params)).toEqual(['question', 'level', 'cleanup', 'remember', 'model', 'timeoutMs']);
+    expect(Object.keys(ask.params)).toEqual(['question', 'use_documents', 'level', 'cleanup', 'remember', 'model', 'timeoutMs']);
     // The collector is exposed wherever the ask can hand off, source index on or off.
     expect(operations.find((operation) => operation.name === 'source_answer_result')?.nativeExposure).toBe('always');
   });

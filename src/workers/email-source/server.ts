@@ -1,4 +1,12 @@
 import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts';
+import { createPrivateDocumentRequests } from '../../core/private-document-requests.ts';
+import { documentDigestAnalyst } from '../../core/document-digest.ts';
+import { prepareDocumentDigest } from '../source-index/document-digest.ts';
+import { runDocumentConsult, type DocumentConsultInput } from '../source-index/document-consult.ts';
+import { currentAnalystAbortSignal } from '../../core/analyst.ts';
+import { sourceAnswerCorpusIds } from '../source-index/analyst-answer.ts';
+import { consultModelProvider } from '../../core/consult-settings.ts';
+import { FILE_SOURCE_SCOPE_IDS } from '../../core/source-scope-approval.ts';
 import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
 import { linuxGraphicalSessionReadinessAsync } from '../../core/linux-desktop-opener.ts';
 import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
@@ -3188,6 +3196,45 @@ export async function main(): Promise<void> {
   // `embedding: 'built_in_only'` builds the same lanes for answers on this
   // computer alone (source-index/local-answer.ts, source-answer-lanes.ts).
   let sourceAnswerLanes: ((request: SourceIndexAnswerRequest, embedding?: 'built_in_only') => AnalystAnswerLanes) | undefined;
+  const prepareDocumentsForRequest = async (
+    request: SourceIndexAnswerRequest,
+    signal?: AbortSignal,
+    onProgress?: import('../source-index/document-digest.ts').PrepareDocumentDigestOptions['onProgress'],
+  ) => {
+    if (!sourceAnswerLanes || !answerBuiltInModel || !workerBuiltInModel?.available()) {
+      return { kind: 'refused' as const, reason: 'local_model_unavailable', current: () => false };
+    }
+    const domains: import('../../core/source-index/types.ts').SourceTrustDomain[] = ['public_safe'];
+    if (request.include_internal !== false) domains.push('internal');
+    if (request.include_secure_local === true) domains.push('secure_local');
+    const corpusIds = sourceAnswerCorpusIds(request);
+    // Scope changes invalidate jobs immediately, before any resync rewrites
+    // rows. Token refreshes retain these account/grant identities.
+    const authorityIdentity = () => JSON.stringify([
+      FILE_SOURCE_SCOPE_IDS.map(id => fileSourceScopeAuthority?.policyRef(id) ?? null),
+      fileSourceScopeAuthority?.mailPolicyRef() ?? null,
+      readActiveConnectedHandles(process.env).map(handle => [handle.handle, handle.provider, handle.providerAccountId, handle.accountRole, handle.connectedAt, handle.allowedCapabilities, handle.scopes]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    ]);
+    const admittedAuthority = authorityIdentity();
+    return answerActivity.run(() => prepareDocumentDigest({
+      request: { question: request.question, ...(request.query ? { query: request.query } : {}), context: { allowedTrustDomains: domains, allowCloudQueries: false, ...(corpusIds ? { allowedCorpusIds: corpusIds } : {}) } },
+      model: answerBuiltInModel,
+      authorized: () => !signal?.aborted && authorityIdentity() === admittedAuthority,
+      ...(signal ? { signal } : {}),
+      ...(onProgress ? { onProgress } : {}),
+      lanesFactory: () => {
+        const lanes = sourceAnswerLanes!(request, 'built_in_only');
+        return lanes.registry.select({ trustDomains: domains, ...(corpusIds ? { corpusIds } : {}) })
+          .filter(corpus => !lanes.excludedCorpusIds?.has(corpus.corpusId))
+          .map(corpus => {
+            const adapter = lanes.adapters[corpus.corpusId];
+            const contentProvider = lanes.contentProviders[corpus.corpusId];
+            if (!adapter || !contentProvider) throw new Error('Document source is unavailable');
+            return { corpus, adapter, contentProvider };
+          });
+      },
+    }));
+  };
   const analystSourceAnswer = sourceIndexAnswerEnabled
     ? await (async () => {
       const analystLane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
@@ -3286,6 +3333,13 @@ export async function main(): Promise<void> {
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
       return createAnalystSourceIndexAnswerHandler({
         analyst: defaultLocalAnalyst,
+        documentDigest: async request => {
+          // Existing Venice-only installs and explicitly bounded selections
+          // retain their excerpt route. No provider substitutes for the local
+          // summarizer. Unbounded document questions can use the whole scan.
+          if (!workerBuiltInModel?.available() || request.selected_items?.length || request.max_results !== undefined) return undefined;
+          return prepareDocumentsForRequest(request, currentAnalystAbortSignal());
+        },
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
@@ -4326,6 +4380,8 @@ export async function main(): Promise<void> {
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
+  const documentRequests = createPrivateDocumentRequests();
+  let askDocumentsNow: ((input: DocumentConsultInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
   let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
   let desktopPollingClosed = false;
@@ -4342,9 +4398,18 @@ export async function main(): Promise<void> {
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
     // Bound late: the consult block below sets askAnonymouslyNow.
-    consultAsk: ({ caller, ...input }, signal) => (askAnonymouslyNow
-      ? askAnonymouslyNow({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal })
-      : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
+    consultAsk: ({ caller, use_documents, ...input }, signal) => {
+      if (use_documents) {
+        if (!askDocumentsNow || !localPrivateAnswers) return Promise.resolve({ ok: false, code: 'documents_unavailable', message: 'Set up sources and a local private model in Olympus first.' });
+        const active = () => !caller?.connection_id || remoteConnections()?.list().some(connection => connection.id === caller.connection_id && connection.revokedAt === null) === true;
+        return Promise.resolve(documentRequests.start(input.question, control => askDocumentsNow!({
+          ...input, ...control, ...(caller?.provider ? { callerProvider: caller.provider } : {}), stillAuthorized: active,
+        }), active));
+      }
+      return askAnonymouslyNow
+        ? askAnonymouslyNow({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal })
+        : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' });
+    },
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
     ...(unreadableFiles
@@ -4756,6 +4821,7 @@ export async function main(): Promise<void> {
       sourceName,
     });
     localPrivateAnswers = createLocalPrivateAnswers({
+      documents: documentRequests,
       // The built-in model serves one question at once: an answer preempts the sniffer.
       answer: (input) => answerActivity.run(() => local.answer(input)),
       store: waitingQuestionStore,
@@ -4769,11 +4835,17 @@ export async function main(): Promise<void> {
   // with the caller placed as OpenAI-hosted, since ChatGPT opened the panel.
   const privateQuestions = new PrivateQuestionJobs({
     installId: () => remotePublicUrls()?.installId,
-    ask: (input) => (askAnonymouslyNow
+    ask: (input) => input.useDocuments
+      ? askDocumentsNow?.({ ...input, callerProvider: 'openai' }) ?? Promise.resolve({ ok: false as const, code: 'documents_unavailable', message: 'Document questions are not available on this computer.' })
+      : input.provider === 'venice'
+        ? Promise.resolve({ ok: false as const, code: 'invalid_params', message: 'Select Use my documents for this Venice question.' })
+        : (askAnonymouslyNow
       ? askAnonymouslyNow({
         question: input.question,
         level: input.level,
         ...(input.cleanup !== undefined ? { cleanup: input.cleanup } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(input.remember !== undefined ? { remember: input.remember } : {}),
         callerProvider: 'openai',
         signal: input.signal,
         stillAuthorized: input.stillAuthorized,
@@ -4909,6 +4981,54 @@ export async function main(): Promise<void> {
           throw error;
         }
       };
+      const { consultFrontierModelFor } = await import('../../core/consult-settings.ts');
+      const { zkapiMoneyStatus } = await import('../../core/consult-transport-zkapi.ts');
+      askDocumentsNow = input => runDocumentConsult(input, {
+        preflight: request => {
+          if (request.provider === 'venice') return undefined;
+          const read = readConsultSettings();
+          if (read.state !== 'valid' || !read.settings.enabled) return { ok: false, code: 'anonymous_answers_off', message: 'Turn on Anonymous answers in Private answers on this computer first.' };
+          const route = transport(request.model ?? consultFrontierModelFor(read.settings, request.callerProvider));
+          if (!route) return { ok: false, code: 'route_not_configured', message: 'Set up the zkAPI route on this computer first.' };
+          if (!zkapiMoneyStatus(route.settings, new Date()).acknowledgements.complete) return { ok: false, code: 'acknowledgements_incomplete', message: 'Before using documents, accept the updated notice in Private answers on this computer: zkAPI hides who is asking, but the answering provider reads the document facts sent.' };
+          return undefined;
+        },
+        prepare: request => prepareDocumentsForRequest({ question: request.question, include_internal: true, include_secure_local: true, include_secure_local_content: true }, request.signal,
+          progress => request.onProgress?.({ state: 'summarizing', documentsRead: progress.documentsRead, documentsTotal: progress.documentsTotal })),
+        ask: request => askAnonymouslyNow!(request),
+        venice: async (pack, current, request, dispatched) => {
+          // Only a Venice member already approved for Private analysis; the
+          // live catalog independently enforces Private model eligibility.
+          const selected = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local', requestedProvider: 'venice' }).members.find(member => member.profile.provider === 'venice');
+          if (!selected) throw new Error('No approved Venice Private route');
+          const profile = selected.profile;
+          const model = (request.model ?? profile.model)?.trim();
+          if (!model) throw new Error('Venice model is not configured');
+          if (request.callerProvider && consultModelProvider(model) === request.callerProvider) throw new Error('Answering provider matches caller');
+          const apiKey = profile.secretRef ? resolveSecretRefValueSync(profile.secretRef, { env: environmentWithWorkerSetupEnv() }) : undefined;
+          if (!apiKey) throw new Error('Venice key unavailable');
+          let sent = '';
+          let answeringModel = model;
+          const backend = createVeniceAnalystModel({ apiKey, model, ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
+            fetchImpl: async (url, init) => {
+              if (!current()) throw new Error('Document authorization changed');
+              // This is the exact POST body, excluding the credential header.
+              // It stays in the private result, never tool output or logs.
+              sent = typeof init.body === 'string' ? init.body : '';
+              dispatched(sent);
+              return fetch(url, init);
+            },
+          });
+          const analyst = documentDigestAnalyst(createAnalyst({ complete: async modelRequest => {
+            const completion = await backend.complete(modelRequest);
+            answeringModel = completion.modelId;
+            return completion;
+          } }));
+          const answer = await analyst.analyze(pack, { localOnly: true });
+          if (!current()) throw new Error('Document authorization changed');
+          return { reply: [answer.answer, ...answer.unanswered].filter(Boolean).join('\n\n'), sent, model: answeringModel };
+        },
+      });
     }
   }
   // The same ledgers and the same derivative posture the answer handler

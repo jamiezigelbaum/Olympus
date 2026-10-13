@@ -31,6 +31,7 @@ import { lstatSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import type { WaitingQuestion, WaitingQuestionRef, WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
 import { answerPrivately, type BuiltInAnalystModel } from '../../core/analyst-built-in.ts';
+import type { ConsultAskResult } from '../../core/consult-ask.ts';
 import type { PrivateAnswerSourceCitation, PrivateEvidenceItem } from '../chatgpt/private-answer-contract.ts';
 import {
   createBuiltInPrivateAnswerModel,
@@ -84,6 +85,15 @@ export interface LocalPrivateAnswersOptions {
   eligible?: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
   /** Opens a local file (macOS `open`, checked by the caller). Absent: local files do not open. */
   openFile?: (path: string, eligible: () => Promise<boolean>) => Promise<void>;
+  /** Document questions opened by agents. Their content is returned only on this local-control route. */
+  documents?: {
+    list(): Promise<readonly {
+      id: string;
+      question: string;
+      progress: { state: string; documentsRead: number; documentsTotal: number };
+      result?: ConsultAskResult;
+    }[]>;
+  };
   now?: () => number;
 }
 
@@ -287,6 +297,14 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
 
     async handle(body, session) {
       const action = body.action;
+      if (action === 'documents') {
+        if (!options.documents) return { status: 200, body: { ok: true, documents: [] } };
+        try {
+          return { status: 200, body: { ok: true, documents: await options.documents.list() } };
+        } catch {
+          return refused(503, 'unavailable', 'Document questions cannot be read right now.');
+        }
+      }
       if (action === 'ask') {
         const question = typeof body.question === 'string' ? body.question.trim() : '';
         if (!question || question.length > MAX_QUESTION_CHARS) return refused(400, 'invalid_params', 'Type a question first.');

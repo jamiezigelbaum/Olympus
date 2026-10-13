@@ -35,6 +35,18 @@ export const PRIVATE_QUESTION_MAX_CHARS = CONSULT_ASK_MAX_CHARS;
 
 export type PrivateQuestionLevel = 'strict' | 'standard';
 export type PrivateQuestionCleanup = 'as_written' | 'light_cleanup' | 'custom';
+export type PrivateQuestionProvider = 'zkapi' | 'venice';
+
+/** Content-free document progress; it is sealed before it leaves the engine. */
+export interface PrivateQuestionProgress {
+  state: 'reading' | 'summarizing' | 'writing' | 'answering';
+  documentsRead: number;
+  documentsTotal: number;
+}
+
+export interface PrivateQuestionProgressV1 extends PrivateQuestionProgress {
+  v: 1;
+}
 
 /** Widget-only `_meta` of an `open_private_question` result. */
 export interface PrivateQuestionMetaV1 {
@@ -49,6 +61,12 @@ export interface PrivateQuestionMetaV1 {
   cleanup: PrivateQuestionCleanup;
   /** Whether a custom instruction is saved (so "custom" is a real choice). */
   customInstruction: boolean;
+  /** A widget-only prefill. It is not included in the tool's model-visible content. */
+  question?: string;
+  /** The panel's initial document choice. The user's final choice is sealed. */
+  useDocuments?: boolean;
+  /** The route fixed when the job is opened; never caller-controlled plaintext. */
+  provider?: PrivateQuestionProvider;
   maxChars: number;
 }
 
@@ -58,6 +76,7 @@ export interface PrivateQuestionPlaintextV1 {
   question: string;
   level: PrivateQuestionLevel;
   cleanup?: PrivateQuestionCleanup;
+  useDocuments?: boolean;
 }
 
 /** What the engine seals back: the ask lane's outcome, in the user's words. Rendered as text only. */

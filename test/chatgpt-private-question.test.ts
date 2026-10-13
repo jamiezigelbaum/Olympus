@@ -20,7 +20,13 @@ import {
 } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import type { PrivateAnswerModel } from '../src/workers/chatgpt/private-answer-contract.ts';
-import { PRIVATE_QUESTION_MAX_CHARS, type PrivateQuestionMetaV1, type PrivateQuestionResultV1 } from '../src/workers/chatgpt/private-question-contract.ts';
+import {
+  PRIVATE_QUESTION_MAX_CHARS,
+  type PrivateQuestionMetaV1,
+  type PrivateQuestionProgress,
+  type PrivateQuestionProgressV1,
+  type PrivateQuestionResultV1,
+} from '../src/workers/chatgpt/private-question-contract.ts';
 import { PrivateQuestionJobs, resultOf } from '../src/workers/chatgpt/private-question-jobs.ts';
 import {
   PRIVATE_ANSWER_MAX_REQUEST_BYTES,
@@ -41,12 +47,14 @@ const ANSWERED: ConsultAskResult = {
 interface Harness {
   jobs: PrivateQuestionJobs;
   clock: { now: number };
-  asked: Array<{ question: string; level: string; cleanup?: string }>;
+  asked: Array<{ question: string; level: string; cleanup?: string; useDocuments?: boolean; model?: string; provider?: string }>;
   /** Resolves the running ask with the given outcome. */
   answer: (outcome: ConsultAskResult | Error) => void;
   aborted: () => boolean;
   /** The last ask's final check, as the transport calls it just before dispatch. */
   stillAuthorized: () => boolean;
+  registerDocumentGuard: (guard: () => Promise<boolean>) => void;
+  progress: (progress: PrivateQuestionProgress) => void;
 }
 
 function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs>[0]> = {}, auto?: ConsultAskResult): Harness {
@@ -56,12 +64,23 @@ function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs
   let reject: ((error: Error) => void) | undefined;
   let signal: AbortSignal | undefined;
   let stillAuthorized: (() => boolean) | undefined;
+  let registerDocumentGuard: ((guard: () => Promise<boolean>) => void) | undefined;
+  let onProgress: ((progress: PrivateQuestionProgress) => void) | undefined;
   const jobs = new PrivateQuestionJobs({
     installId: () => INSTALL,
     ask: (input) => {
-      asked.push({ question: input.question, level: input.level, ...(input.cleanup ? { cleanup: input.cleanup } : {}) });
+      asked.push({
+        question: input.question,
+        level: input.level,
+        ...(input.cleanup ? { cleanup: input.cleanup } : {}),
+        ...(input.useDocuments !== undefined ? { useDocuments: input.useDocuments } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(input.provider !== 'zkapi' ? { provider: input.provider } : {}),
+      });
       signal = input.signal;
       stillAuthorized = input.stillAuthorized;
+      registerDocumentGuard = input.registerDocumentGuard;
+      onProgress = input.onProgress;
       if (auto) return Promise.resolve(auto);
       return new Promise<ConsultAskResult>((res, rej) => { resolve = res; reject = rej; });
     },
@@ -76,6 +95,8 @@ function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs
     answer: (outcome) => (outcome instanceof Error ? reject!(outcome) : resolve!(outcome)),
     aborted: () => signal?.aborted === true,
     stillAuthorized: () => stillAuthorized!(),
+    registerDocumentGuard: (guard) => registerDocumentGuard!(guard),
+    progress: (progress) => onProgress!(progress),
   };
 }
 
@@ -92,6 +113,15 @@ async function settle(): Promise<void> {
 }
 
 async function opened(jobs: PrivateQuestionJobs, jobId: string, panel: { privateKey: CryptoKey; publicKey: string }): Promise<PrivateQuestionResultV1> {
+  const response = await jobs.collect(jobId, panel.publicKey);
+  expect(response.status).toBe(200);
+  const body = response.body as Record<string, unknown>;
+  expect(body.status).toBe('ready');
+  const text = await openPrivateAnswer(jobId, panel.privateKey, body as never);
+  return JSON.parse(text.replace(/\s+$/, ''));
+}
+
+async function openedPayload(jobs: PrivateQuestionJobs, jobId: string, panel: { privateKey: CryptoKey; publicKey: string }): Promise<PrivateQuestionResultV1 | PrivateQuestionProgressV1> {
   const response = await jobs.collect(jobId, panel.publicKey);
   expect(response.status).toBe(200);
   const body = response.body as Record<string, unknown>;
@@ -118,6 +148,73 @@ describe('the crypto: a question sealed to the engine key, opened with the engin
 });
 
 describe('the jobs: begin → ask → collect', () => {
+  test('a document question binds panel defaults and model to the job, reports only sealed progress, and returns exact sent text', async () => {
+    const h = harness({ connectionActive: (id) => id === 'conn-docs' });
+    let eligible = true;
+    const meta = (await h.jobs.begin(
+      { connectionId: 'conn-docs' },
+      { question: 'What did I decide about Acme?', useDocuments: true, model: 'anthropic/claude-sonnet-5.5', provider: 'venice' },
+    )) as PrivateQuestionMetaV1;
+    expect(meta).toMatchObject({ question: 'What did I decide about Acme?', useDocuments: true, provider: 'venice' });
+    expect(meta).not.toHaveProperty('model');
+
+    const { panel, body } = await panelAsk(meta, {
+      v: 1,
+      question: meta.question,
+      level: 'strict',
+      useDocuments: true,
+    });
+    expect((await h.jobs.ask(meta.jobId, body)).status).toBe(202);
+    h.registerDocumentGuard(async () => eligible);
+    expect(h.asked).toEqual([{
+      question: 'What did I decide about Acme?',
+      level: 'strict',
+      useDocuments: true,
+      model: 'anthropic/claude-sonnet-5.5',
+      provider: 'venice',
+    }]);
+
+    h.progress({ state: 'reading', documentsRead: 2, documentsTotal: 5 });
+    await settle();
+    expect(await openedPayload(h.jobs, meta.jobId, panel)).toEqual({
+      v: 1,
+      state: 'reading',
+      documentsRead: 2,
+      documentsTotal: 5,
+    });
+
+    h.answer({ ...ANSWERED, rewritten: false, sent: 'What did I decide about Acme?' });
+    await settle();
+    expect(await opened(h.jobs, meta.jobId, panel)).toMatchObject({
+      state: 'answered',
+      model: 'anthropic/claude-sonnet-5.5',
+      rewritten: false,
+      sent: 'What did I decide about Acme?',
+    });
+
+    eligible = false;
+    expect(await opened(h.jobs, meta.jobId, panel)).toMatchObject({ state: 'refused', code: 'authorization_refused' });
+  });
+
+  test('document-derived results fail closed when the per-job source guard is absent or revoked after the ask', async () => {
+    const absent = harness();
+    const absentMeta = (await absent.jobs.begin({}, { useDocuments: true })) as PrivateQuestionMetaV1;
+    const absentAsk = await panelAsk(absentMeta, { v: 1, question: 'q', level: 'strict', useDocuments: true });
+    expect((await absent.jobs.ask(absentMeta.jobId, absentAsk.body)).status).toBe(202);
+    absent.answer(ANSWERED);
+    await settle();
+    expect(await opened(absent.jobs, absentMeta.jobId, absentAsk.panel)).toMatchObject({ state: 'refused', code: 'authorization_refused' });
+
+    const revoked = harness();
+    const revokedMeta = (await revoked.jobs.begin({}, { useDocuments: true })) as PrivateQuestionMetaV1;
+    const revokedAsk = await panelAsk(revokedMeta, { v: 1, question: 'q', level: 'strict', useDocuments: true });
+    expect((await revoked.jobs.ask(revokedMeta.jobId, revokedAsk.body)).status).toBe(202);
+    revoked.registerDocumentGuard(async () => false);
+    revoked.answer(ANSWERED);
+    await settle();
+    expect(await opened(revoked.jobs, revokedMeta.jobId, revokedAsk.panel)).toMatchObject({ state: 'refused', code: 'authorization_refused' });
+  });
+
   test('a sealed question runs the ask lane and the outcome comes back sealed to the asking key only', async () => {
     const h = harness();
     const meta = (await h.jobs.begin())!;

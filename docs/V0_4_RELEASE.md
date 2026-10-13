@@ -15,6 +15,18 @@ whose outcome still holds for existing OpenClaw installs. Design and
 protocol: [`design/chatgpt-plugin.md`](design/chatgpt-plugin.md). User-facing
 path: [README, "Olympus for ChatGPT"](../README.md#olympus-for-chatgpt).
 
+### 1.0.1 branch work: private document questions
+
+Status: built on `claude/documents-lane`, not merged, released or live. This is
+narrow 1.0.1 work, outside the 1.0.0 scope. Direct ChatGPT
+document questions open the encrypted private panel for zkAPI or Venice; other
+agents' zkAPI document answers are collected only on the computer's Private
+answers page. The document traversal, digest bounds, source reauthorization,
+encrypted progress and private-result routing are covered by synthetic tests.
+The tests establish mechanics and containment, not real local-writer quality
+or an absolute anonymity claim. Product copy, design receipts and owner review
+must be current before this branch can ship.
+
 **Outcome.** A person who has only ChatGPT and a Mac adds Olympus in ChatGPT,
 installs the engine on their Mac with ChatGPT's help, connects Dropbox, Gmail
 or Google Drive with accounts they already have, says what is private for

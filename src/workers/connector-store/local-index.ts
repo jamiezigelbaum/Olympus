@@ -29,6 +29,7 @@ import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../.
 //   via the gated answer.
 
 import { createHash, randomUUID } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -43,6 +44,8 @@ import type {
   LocalContentBlock,
   LocalContentProvider,
   LocalContentRequest,
+  LocalDocumentContentWindow,
+  LocalDocumentContentWindowRequest,
 } from '../../core/evidence-pack.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import {
@@ -149,6 +152,9 @@ import type {
   SourceIndexCorpusSearchRequest,
   SourceIndexCorpusMatchCount,
   SourceIndexCorpusSearchResponse,
+  SourceIndexDocumentMatch,
+  SourceIndexDocumentMatchRequest,
+  SourceIndexDocumentMatchResponse,
   SourceIndexSearchHit,
 } from '../../core/source-index/router.ts';
 import {
@@ -177,6 +183,9 @@ import type { ConnectorStoreResultProjector } from './filter-capabilities.ts';
 export const DEFAULT_MAX_CHUNK_CHARS = 4_000;
 const MAX_MAX_CHUNK_CHARS = 32_000;
 const MAX_SEARCH_RESULTS = 50;
+const MAX_DOCUMENT_MATCH_PAGE_SIZE = 100;
+const MAX_DOCUMENT_MATCH_SNAPSHOT = 2_048;
+const DOCUMENT_MATCH_SCAN_PAGE_SIZE = 256;
 // Titles are compact, user-assigned metadata. A small source-neutral boost
 // keeps an exact title match inside the bounded keyword lane when longer body
 // text also matches, without changing the query or candidate budget.
@@ -1651,6 +1660,10 @@ export interface ConnectorStoreSearchRow {
 
 export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
   bestCosine: number;
+}
+
+interface ConnectorStoreDocumentMatchRow extends ConnectorStoreSearchRow {
+  revision: string;
 }
 
 /**
@@ -9685,6 +9698,118 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Exact semantic match-set scan for document traversal. Any current chunk at
+   * or above the calibrated bar makes its item a match. It retains identities
+   * only, stops at the caller's explicit complete-snapshot ceiling, and uses
+   * the same authority-fenced SQLite snapshot as ordinary vector retrieval.
+   */
+  async documentVectorMatches(
+    query: string,
+    provider: SourceEmbeddingProvider,
+    relevanceBar: number,
+    maxDocuments: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+    deadlineAtMs?: number,
+  ): Promise<{ rows: ConnectorStoreDocumentMatchRow[]; overflow: boolean; skippedReason?: string }> {
+    assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+    const cap = normalizeDocumentMatchLimit(maxDocuments);
+    const vectorFilters = connectorStoreVectorScopeFilters(filters);
+    const trimmed = query.trim();
+    if (!trimmed) return { rows: [], overflow: false };
+    const before = this.embeddingReadAuthority(provider);
+    if (before.skippedReason) return { rows: [], overflow: false, skippedReason: before.skippedReason };
+    let queryVector: number[] | undefined;
+    try {
+      [queryVector] = await provider.embed([{ text: trimmed }], { taskType: 'RETRIEVAL_QUERY' });
+    } catch (error) {
+      if (error instanceof TransientSourceEmbeddingError) {
+        return { rows: [], overflow: false, skippedReason: `embedding_query_unavailable:${error.reason}` };
+      }
+      throw error;
+    }
+    if (!queryVector) return { rows: [], overflow: false, skippedReason: 'embedding_query_vector_missing' };
+    if (queryVector.length !== provider.dimension) {
+      return { rows: [], overflow: false, skippedReason: 'embedding_query_dimension_mismatch' };
+    }
+    if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
+      return { rows: [], overflow: false, skippedReason: 'vector_scan_deadline_exceeded' };
+    }
+
+    const selectedAccount = normalizeOptionalAccountScope(accountScope);
+    const scanDb = this.dbPath === ':memory:'
+      ? this.db
+      : new Database(this.dbPath, { readonly: true, create: false, strict: true });
+    const ownsScanDb = scanDb !== this.db;
+    const qualified = new Set<number>();
+    const matches: ConnectorStoreDocumentMatchRow[] = [];
+    let dimensionMismatches = 0;
+    let afterChunkPk = 0;
+    try {
+      if (ownsScanDb) scanDb.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;');
+      scanDb.exec('BEGIN DEFERRED TRANSACTION;');
+      const after = this.embeddingReadAuthority(provider, scanDb);
+      if (after.skippedReason) return { rows: [], overflow: false, skippedReason: after.skippedReason };
+      if (after.token !== before.token) {
+        return { rows: [], overflow: false, skippedReason: 'embedding_authority_changed_during_query' };
+      }
+      while (true) {
+        if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
+          return { rows: [], overflow: false, skippedReason: 'vector_scan_deadline_exceeded' };
+        }
+        const page = connectorStoreCurrentEmbeddingRowsPage(scanDb, {
+          modelId: provider.modelId,
+          ...(selectedAccount ? { accountScope: selectedAccount } : {}),
+          ...(vectorFilters ? { filters: vectorFilters } : {}),
+        }, afterChunkPk);
+        if (page.length === 0) break;
+        const newlyQualified: number[] = [];
+        for (const row of page) {
+          if (qualified.has(row.itemPk)) continue;
+          const vector = decodeEmbedding(row.embedding);
+          if (vector.length !== queryVector.length) {
+            dimensionMismatches += 1;
+            continue;
+          }
+          if (cosineSimilarity(queryVector, vector) >= relevanceBar) {
+            qualified.add(row.itemPk);
+            newlyQualified.push(row.itemPk);
+          }
+        }
+        if (newlyQualified.length > 0) {
+          const visible = this.tierVisibleRows(
+            this.searchRowsByItemPks(newlyQualified, selectedAccount, vectorFilters),
+            (row) => row.sourceItem,
+            () => 'content',
+          );
+          for (const row of visible) {
+            // Bind the reference to the same SQLite snapshot whose vector
+            // crossed the relevance bar. A later write then invalidates the
+            // reference instead of making changed text look like the old hit.
+            const revision = this.documentRevision(row.sourceItem.localItemId, scanDb);
+            if (!revision) continue;
+            matches.push({ ...row, contentMatched: true, revision });
+            if (matches.length > cap) return { rows: matches, overflow: true };
+          }
+        }
+        afterChunkPk = page.at(-1)!.chunkPk;
+        if (page.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
+        await yieldConnectorStoreVectorScan();
+      }
+    } finally {
+      try { scanDb.exec('ROLLBACK;'); } catch { /* original result remains primary */ }
+      if (ownsScanDb) closeSqliteStore(scanDb);
+    }
+    return {
+      rows: matches,
+      overflow: false,
+      ...(matches.length === 0 && dimensionMismatches > 0
+        ? { skippedReason: 'embedding_stored_dimension_mismatch' }
+        : {}),
+    };
+  }
+
+  /**
    * The snapshot half of the vector lane. A dedicated read connection keeps
    * one SQLite snapshot across cooperative page yields, so timers can run
    * without letting a concurrent embedding rebind mix vector spaces.
@@ -10129,6 +10254,247 @@ export class LocalConnectorStore {
           minimumSignal ? (matchedGroups.get(row.item_pk) ?? 0) : groups.length,
         ])),
       },
+    };
+  }
+
+  /**
+   * Every lexical match, ordered by the store's stable item key and bounded by
+   * an explicit complete-snapshot ceiling. This deliberately does not reuse
+   * searchItemsDetailed: that surface is relevance-ranked top-k and its 50-row
+   * probe cannot establish exhaustiveness.
+   */
+  documentKeywordMatches(
+    query: string,
+    maxDocuments: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+  ): { rows: ConnectorStoreDocumentMatchRow[]; overflow: boolean; invalidated?: boolean } {
+    const terms = toFtsQuery(query, { prefix: false });
+    if (!terms) return { rows: [], overflow: false };
+    const cap = normalizeDocumentMatchLimit(maxDocuments);
+    const selectedAccount = normalizeOptionalAccountScope(accountScope);
+    const selectedFilters = connectorStoreFilterSql(filters);
+    const selectedFtsScope = connectorStoreFtsScopeSql(filters);
+    const groups = sourceIndexFtsTermGroups(query);
+    const exact = queryInitialisms(query);
+    const minimumSignal = groups.length >= 2;
+    const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
+    const weights = minimumSignal ? this.conceptWeights(groups, exact) : undefined;
+    const matches: ConnectorStoreDocumentMatchRow[] = [];
+    let afterItemPk = 0;
+
+    while (matches.length <= cap) {
+      const rows = this.db.query(`
+        SELECT
+          i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
+          i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
+          i.source_version, i.content_hash, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
+          i.mime_type, i.authored_at, i.updated_at, i.trust_tier, i.sync_run_id,
+          connector_store_fts.chunk_pk AS chunk_pk,
+          MIN(connector_store_fts.rank) AS rank
+        FROM connector_store_fts
+        JOIN items i ON i.item_pk = connector_store_fts.item_pk
+        WHERE connector_store_fts MATCH ?
+          AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+          AND i.item_pk > ?
+          AND i.tombstoned = 0
+          AND i.trust_tier <> 'S5'
+          AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
+          ${selectedAccount ? 'AND i.account_scope = ?' : ''}
+          ${selectedFilters.sql}
+          ${selectedFtsScope.sql}
+        GROUP BY i.item_pk
+        ORDER BY i.item_pk
+        LIMIT ?
+      `).all(
+        terms,
+        afterItemPk,
+        ...(selectedAccount ? [selectedAccount] : []),
+        ...selectedFilters.params,
+        ...selectedFtsScope.params,
+        DOCUMENT_MATCH_SCAN_PAGE_SIZE,
+      ) as Array<ItemRow & { content_hash: string | null }>;
+      if (rows.length === 0) break;
+      afterItemPk = rows.at(-1)!.item_pk;
+
+      let selected = rows;
+      if (minimumSignal) {
+        const pks = rows.map((row) => row.item_pk);
+        const placeholders = pks.map(() => '?').join(', ');
+        const matchedGroupIndexes = new Map<number, number[]>();
+        for (const [groupIndex, group] of groups.entries()) {
+          const hits = this.db.query(`
+            SELECT DISTINCT connector_store_fts.item_pk
+            FROM connector_store_fts
+            JOIN items i ON i.item_pk = connector_store_fts.item_pk
+            WHERE connector_store_fts MATCH ?
+              AND connector_store_fts.item_pk IN (${placeholders})
+              ${selectedFtsScope.sql}
+          `).all(sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
+          for (const hit of hits) {
+            matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
+          }
+        }
+        selected = rows.filter((row) => {
+          const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+          if (indexes.length >= required) return true;
+          if (!weights) return false;
+          const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);
+          return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+        });
+      }
+      selected = this.tierVisibleRows(
+        selected,
+        (row) => ({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+        }),
+        (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
+      );
+      for (const row of selected) {
+        const base = searchRowFromItemRow(row);
+        const revision = this.documentRevision(base.sourceItem.localItemId, this.db, {
+          sourceVersion: row.source_version,
+          contentHash: row.content_hash,
+        });
+        if (!revision) return { rows: [], overflow: false, invalidated: true };
+        matches.push({
+          ...base,
+          ...(row.chunk_pk === null || row.chunk_pk === undefined ? {} : { contentMatched: true as const }),
+          revision,
+        });
+        if (matches.length > cap) return { rows: matches, overflow: true };
+      }
+      if (rows.length < DOCUMENT_MATCH_SCAN_PAGE_SIZE) break;
+    }
+    return { rows: matches, overflow: false };
+  }
+
+  /** Opaque metadata-and-content revision; computes from hashes, never text. */
+  documentRevision(
+    localItemId: string,
+    db: Database = this.db,
+    expected?: { sourceVersion: string | null; contentHash: string | null },
+  ): string | undefined {
+    const row = db.query(`
+      SELECT item_pk, provider, account_scope, provider_item_id, provider_conversation_id,
+        source_version, content_hash, title, mime_type, trust_tier, locator_uri
+      FROM items WHERE local_item_id = ? AND tombstoned = 0
+    `).get(localItemId) as {
+      item_pk: number;
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+      source_version: string | null;
+      content_hash: string | null;
+      title: string | null;
+      mime_type: string;
+      trust_tier: string;
+      locator_uri: string | null;
+    } | null;
+    if (!row) return undefined;
+    if (expected && (row.source_version !== expected.sourceVersion || row.content_hash !== expected.contentHash)) {
+      return undefined;
+    }
+    let tier: SourceTrustTier;
+    try { tier = trustTierFromRow(row.trust_tier); } catch { return undefined; }
+    if (tier === 'S5') return undefined;
+    const identity = {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    };
+    if (!this.copyServable(identity)) return undefined;
+    const chunks = db.query(
+      'SELECT chunk_index, content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
+    ).all(row.item_pk) as Array<{ chunk_index: number; content_hash: string }>;
+    return hashString(JSON.stringify({
+      v: 1,
+      identity,
+      sourceVersion: row.source_version,
+      contentHash: row.content_hash,
+      title: row.title,
+      mimeType: row.mime_type,
+      tier,
+      locatorUri: row.locator_uri,
+      chunks,
+    }));
+  }
+
+  /** Synchronous no-text revalidation for traversal pages and model dispatch. */
+  documentReferenceCurrent(
+    document: SourceIndexDocumentMatch,
+    accountScope: string | undefined,
+    filters: ConnectorStoreSearchFilters | undefined,
+    requireContent: boolean,
+  ): boolean {
+    try {
+      const localItemId = document.sourceItem.localItemId.trim();
+      if (!localItemId) return false;
+      const row = this.activeLocalItemRow(localItemId);
+      if (!row || row.trustTier === 'S5') return false;
+      if (
+        row.identity.provider !== document.sourceItem.provider
+        || row.identity.accountScope !== document.sourceItem.accountScope
+        || row.identity.providerItemId !== document.sourceItem.providerItemId
+        || normalizeConversationId(row.identity.providerConversationId)
+          !== normalizeConversationId(document.sourceItem.providerConversationId)
+      ) return false;
+      if (!this.itemMatchesSearchFilters(localItemId, normalizeOptionalAccountScope(accountScope), filters)) return false;
+      if (this.documentRevision(localItemId) !== document.revision) return false;
+      return !requireContent || this.contentServedNow(localItemId);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Ordered full-text window, after revision/tier checks and before any text leaves SQLite. */
+  documentContentWindow(
+    localItemId: string,
+    revision: string,
+    offset: number,
+    maxChars: number,
+  ): { text: string; nextOffset?: number; trustTier: SourceTrustTier; locatorUri?: string } | undefined {
+    if (!this.contentServedNow(localItemId)) return undefined;
+    if (this.documentRevision(localItemId) !== revision) return undefined;
+    const start = normalizeDocumentWindowOffset(offset);
+    const limit = normalizeDocumentWindowChars(maxChars);
+    const row = this.db.query(
+      'SELECT item_pk, trust_tier, locator_uri FROM items WHERE local_item_id = ? AND tombstoned = 0',
+    ).get(localItemId) as { item_pk: number; trust_tier: string; locator_uri: string | null } | null;
+    if (!row) return undefined;
+    const chunks = this.db.query(
+      'SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
+    ).all(row.item_pk) as Array<{ bounded_text: string }>;
+    let skipped = 0;
+    let remaining = limit;
+    let text = '';
+    let total = 0;
+    for (const chunk of chunks) total += chunk.bounded_text.length;
+    if (start > total) return undefined;
+    for (const chunk of chunks) {
+      const end = skipped + chunk.bounded_text.length;
+      if (end <= start) {
+        skipped = end;
+        continue;
+      }
+      const within = Math.max(0, start - skipped);
+      const take = chunk.bounded_text.slice(within, within + remaining);
+      text += take;
+      remaining -= take.length;
+      skipped = end;
+      if (remaining === 0) break;
+    }
+    const nextOffset = start + text.length;
+    return {
+      text,
+      ...(nextOffset < total ? { nextOffset } : {}),
+      trustTier: trustTierFromRow(row.trust_tier),
+      ...(row.locator_uri ? { locatorUri: row.locator_uri } : {}),
     };
   }
 
@@ -11220,6 +11586,117 @@ export function createConnectorStoreCorpusAdapter(
       rawExposed: false,
     };
   };
+  const documentMatches = async (
+    request: SourceIndexDocumentMatchRequest,
+  ): Promise<SourceIndexDocumentMatchResponse> => {
+    assertConnectorStoreCorpusRequest(store, request);
+    const pageSize = normalizeDocumentMatchPageSize(request.pageSize);
+    const maxDocuments = normalizeDocumentMatchLimit(request.maxDocuments);
+    if (request.maxDocuments > MAX_DOCUMENT_MATCH_SNAPSHOT) {
+      return { status: 'unsupported', reason: 'document_match_limit_too_large', rawExposed: false };
+    }
+    if (!request.context.allowedTrustDomains.includes(store.trustDomain)
+      || (request.context.allowedCorpusIds !== undefined
+        && !request.context.allowedCorpusIds.includes(store.corpusId))) {
+      return { status: 'unsupported', reason: 'document_match_scope_not_allowed', rawExposed: false };
+    }
+    const fingerprint = documentMatchRequestFingerprint({
+      request,
+      ...(options.accountScope !== undefined ? { accountScope: options.accountScope } : {}),
+      ...(filters !== undefined ? { filters } : {}),
+      retrievalMode: options.retrievalMode ?? (embeddingProvider ? 'hybrid' : 'keyword'),
+      ...(embeddingProvider !== undefined ? { embeddingProvider } : {}),
+      ...(semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {}),
+    });
+    let documents: SourceIndexDocumentMatch[];
+    let offset = 0;
+    if (request.cursor !== undefined) {
+      const cursor = parseDocumentMatchCursor(request.cursor);
+      if (!cursor || cursor.fingerprint !== fingerprint) {
+        return { status: 'invalidated', reason: 'cursor_request_mismatch', rawExposed: false };
+      }
+      documents = cursor.documents;
+      offset = cursor.offset;
+    } else {
+      const keyword = store.documentKeywordMatches(
+        request.query,
+        maxDocuments,
+        options.accountScope,
+        filters,
+      );
+      if (keyword.invalidated) {
+        return { status: 'invalidated', reason: 'document_snapshot_changed', rawExposed: false };
+      }
+      if (keyword.overflow) {
+        return { status: 'unsupported', reason: 'document_match_limit_exceeded', rawExposed: false };
+      }
+      const byId = new Map(keyword.rows.map((row) => [row.sourceItem.localItemId, row]));
+      const hybrid = embeddingProvider !== undefined
+        && (options.retrievalMode ?? 'hybrid') === 'hybrid'
+        && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
+        && store.hasEmbeddings(embeddingProvider.modelId);
+      const bar = embeddingProvider
+        ? semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar)
+        : undefined;
+      if (hybrid && embeddingProvider && bar !== undefined) {
+        const semantic = await store.documentVectorMatches(
+          request.query,
+          embeddingProvider,
+          bar,
+          maxDocuments,
+          options.accountScope,
+          filters,
+          request.deadlineAtMs,
+        );
+        if (semantic.skippedReason) {
+          return {
+            status: 'unsupported',
+            reason: `semantic_document_match_incomplete:${semantic.skippedReason}`,
+            rawExposed: false,
+          };
+        }
+        if (semantic.overflow) {
+          return { status: 'unsupported', reason: 'document_match_limit_exceeded', rawExposed: false };
+        }
+        for (const row of semantic.rows) byId.set(row.sourceItem.localItemId, row);
+      }
+      if (byId.size > maxDocuments) {
+        return { status: 'unsupported', reason: 'document_match_limit_exceeded', rawExposed: false };
+      }
+      documents = [...byId.values()]
+        .sort((left, right) => documentMatchOrderKey(left.sourceItem).localeCompare(documentMatchOrderKey(right.sourceItem)))
+        .map((row) => ({
+          sourceItem: row.sourceItem,
+          provenance: provenanceFromSearchRow(store.corpusId, row),
+          revision: row.revision,
+        }));
+    }
+    const page = documents.slice(offset, offset + pageSize);
+    if (page.some((document) => !store.documentReferenceCurrent(
+      document,
+      options.accountScope,
+      filters,
+      false,
+    ))) {
+      return { status: 'invalidated', reason: 'document_snapshot_changed', rawExposed: false };
+    }
+    const nextOffset = offset + page.length;
+    const done = nextOffset >= documents.length;
+    return {
+      status: 'ok',
+      documents: page,
+      ...(done ? {} : {
+        nextCursor: encodeDocumentMatchCursor({
+          v: 1,
+          fingerprint,
+          offset: nextOffset,
+          documents,
+        }),
+      }),
+      done,
+      rawExposed: false,
+    };
+  };
   const expanded: SourceIndexCorpusSearchAdapter = (request) => {
     assertConnectorStoreCorpusRequest(store, request);
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request), store);
@@ -11228,6 +11705,12 @@ export function createConnectorStoreCorpusAdapter(
     assertConnectorStoreCorpusRequest(store, request);
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
   };
+  expanded.documentMatches = (request) => withExpandedSourceIndexKeywords(
+    request.query,
+    () => store.keywordLanguages(),
+    () => documentMatches(request),
+    store,
+  );
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
   expanded.hybridAvailability = adapter.hybridAvailability;
@@ -11521,6 +12004,139 @@ function normalizeSemanticRelevanceBar(value: number | undefined): number | unde
   return value;
 }
 
+function normalizeDocumentMatchPageSize(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('Connector store document match page size must be a positive integer.');
+  }
+  return Math.min(value, MAX_DOCUMENT_MATCH_PAGE_SIZE);
+}
+
+function normalizeDocumentMatchLimit(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('Connector store document match limit must be a positive integer.');
+  }
+  return Math.min(value, MAX_DOCUMENT_MATCH_SNAPSHOT);
+}
+
+function normalizeDocumentWindowChars(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > 32_000) {
+    throw new Error('Connector store document window size must be an integer from 1 through 32000.');
+  }
+  return value;
+}
+
+function normalizeDocumentWindowOffset(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error('Connector store document window offset must be a non-negative integer.');
+  }
+  return value;
+}
+
+interface ConnectorStoreDocumentMatchCursor {
+  v: 1;
+  fingerprint: string;
+  offset: number;
+  documents: SourceIndexDocumentMatch[];
+}
+
+interface ConnectorStoreDocumentWindowCursor {
+  v: 1;
+  localItemId: string;
+  revision: string;
+  offset: number;
+}
+
+function documentMatchRequestFingerprint(input: {
+  request: SourceIndexDocumentMatchRequest;
+  accountScope?: string;
+  filters?: ConnectorStoreSearchFilters;
+  retrievalMode: 'keyword' | 'hybrid';
+  embeddingProvider?: SourceEmbeddingProvider;
+  semanticRelevanceBar?: number;
+}): string {
+  return hashString(JSON.stringify({
+    v: 1,
+    query: input.request.query.trim(),
+    corpusId: input.request.corpus.corpusId,
+    family: input.request.corpus.family,
+    trustDomain: input.request.corpus.trustDomain,
+    allowedTrustDomains: [...input.request.context.allowedTrustDomains].sort(),
+    allowedCorpusIds: [...(input.request.context.allowedCorpusIds ?? [])].sort(),
+    metadataOnly: input.request.context.metadataOnly === true,
+    maxDocuments: input.request.maxDocuments,
+    accountScope: input.accountScope ?? null,
+    filters: input.filters ?? null,
+    retrievalMode: input.retrievalMode,
+    embedding: input.embeddingProvider ? {
+      provider: input.embeddingProvider.provider,
+      backend: input.embeddingProvider.backend,
+      modelId: input.embeddingProvider.modelId,
+      dimension: input.embeddingProvider.dimension,
+      epochId: input.embeddingProvider.epochId,
+      configHash: input.embeddingProvider.configHash,
+    } : null,
+    semanticRelevanceBar: input.semanticRelevanceBar ?? null,
+  }));
+}
+
+function encodeDocumentMatchCursor(cursor: ConnectorStoreDocumentMatchCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function parseDocumentMatchCursor(value: string): ConnectorStoreDocumentMatchCursor | undefined {
+  try {
+    if (!value || value.length > 4_000_000) return undefined;
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<ConnectorStoreDocumentMatchCursor>;
+    if (parsed.v !== 1
+      || typeof parsed.fingerprint !== 'string'
+      || !Number.isSafeInteger(parsed.offset)
+      || parsed.offset! < 0
+      || !Array.isArray(parsed.documents)
+      || parsed.documents.length > MAX_DOCUMENT_MATCH_SNAPSHOT
+      || parsed.offset! > parsed.documents.length) return undefined;
+    for (const document of parsed.documents) {
+      if (!document || typeof document !== 'object'
+        || typeof document.revision !== 'string'
+        || !document.sourceItem || typeof document.sourceItem.localItemId !== 'string'
+        || !document.provenance || document.provenance.sourceItem?.localItemId !== document.sourceItem.localItemId) {
+        return undefined;
+      }
+    }
+    return parsed as ConnectorStoreDocumentMatchCursor;
+  } catch {
+    return undefined;
+  }
+}
+
+function encodeDocumentWindowCursor(cursor: ConnectorStoreDocumentWindowCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function parseDocumentWindowCursor(value: string): ConnectorStoreDocumentWindowCursor | undefined {
+  try {
+    if (!value || value.length > 8_192) return undefined;
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<ConnectorStoreDocumentWindowCursor>;
+    if (parsed.v !== 1
+      || typeof parsed.localItemId !== 'string'
+      || typeof parsed.revision !== 'string'
+      || !Number.isSafeInteger(parsed.offset)
+      || parsed.offset! < 0) return undefined;
+    return parsed as ConnectorStoreDocumentWindowCursor;
+  } catch {
+    return undefined;
+  }
+}
+
+function documentMatchOrderKey(item: SourceItemIdentity): string {
+  return [
+    item.provider,
+    item.accountScope,
+    item.providerConversationId ?? '',
+    item.providerItemId,
+    item.localItemId,
+  ].join('\u0000');
+}
+
 // Content-first keyword lane. A file corpus can hold hundreds of title-only
 // items (unextracted files whose names and paths are all the index knows) and
 // a handful of readable documents; bm25 over names routinely ranks the titles
@@ -11686,7 +12302,10 @@ function compareConnectorStoreSearchCandidates(
   return rightDate.localeCompare(leftDate);
 }
 
-function assertConnectorStoreCorpusRequest(store: LocalConnectorStore, request: SourceIndexCorpusSearchRequest): void {
+function assertConnectorStoreCorpusRequest(
+  store: LocalConnectorStore,
+  request: Pick<SourceIndexCorpusSearchRequest, 'corpus'>,
+): void {
   if (request.corpus.corpusId !== store.corpusId) {
     throw new Error(`Connector store adapter for ${store.corpusId} cannot serve corpus ${request.corpus.corpusId}.`);
   }
@@ -11799,6 +12418,8 @@ export const CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP =
  */
 export interface ConnectorStoreContentProvider extends LocalContentProvider {
   contentServable(request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain }): boolean;
+  documentCurrent(document: SourceIndexDocumentMatch, trustDomain: SourceTrustDomain): boolean;
+  fetchDocumentWindow(request: LocalDocumentContentWindowRequest): Promise<LocalDocumentContentWindow | undefined>;
 }
 
 export function createConnectorStoreContentProvider(
@@ -11824,6 +12445,16 @@ export function createConnectorStoreContentProvider(
       return undefined;
     }
   };
+  const documentCurrent = (document: SourceIndexDocumentMatch, trustDomain: SourceTrustDomain): boolean => {
+    if (trustDomain !== store.trustDomain || options.contentAllowed === false) return false;
+    if (document.provenance.sourceItem.localItemId !== document.sourceItem.localItemId) return false;
+    return store.documentReferenceCurrent(
+      document,
+      options.accountScope,
+      options.filters,
+      true,
+    );
+  };
   return {
     contentServable(request) {
       if (request.trustDomain !== store.trustDomain) return false;
@@ -11831,6 +12462,47 @@ export function createConnectorStoreContentProvider(
       if (!localItemId || options.contentAllowed === false) return false;
       if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return false;
       return store.contentServedNow(localItemId);
+    },
+    documentCurrent,
+    async fetchDocumentWindow(request): Promise<LocalDocumentContentWindow | undefined> {
+      if (request.trustDomain !== store.trustDomain) {
+        throw new Error(
+          `Connector store content provider for ${store.corpusId} (${store.trustDomain}) `
+          + `refused a ${request.trustDomain} document request.`,
+        );
+      }
+      if (!documentCurrent(request.document, request.trustDomain)) return undefined;
+      let offset = 0;
+      if (request.cursor !== undefined) {
+        const parsed = parseDocumentWindowCursor(request.cursor);
+        if (!parsed
+          || parsed.localItemId !== request.document.sourceItem.localItemId
+          || parsed.revision !== request.document.revision) return undefined;
+        offset = parsed.offset;
+      }
+      const window = store.documentContentWindow(
+        request.document.sourceItem.localItemId,
+        request.document.revision,
+        offset,
+        request.maxChars,
+      );
+      if (!window) return undefined;
+      const nextCursor = window.nextOffset === undefined ? undefined : encodeDocumentWindowCursor({
+        v: 1,
+        localItemId: request.document.sourceItem.localItemId,
+        revision: request.document.revision,
+        offset: window.nextOffset,
+      });
+      return {
+        content: {
+          sensitivity: buildSourceSensitivity({ trustTier: window.trustTier, trustDomain: store.trustDomain }),
+          chunks: window.text ? [window.text] : [],
+          ...(nextCursor ? { truncated: true } : {}),
+          ...(window.locatorUri ? { locatorUri: window.locatorUri } : {}),
+        },
+        ...(nextCursor ? { nextCursor } : {}),
+        done: nextCursor === undefined,
+      };
     },
     async fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined> {
       if (request.trustDomain !== store.trustDomain) {

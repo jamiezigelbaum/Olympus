@@ -25,6 +25,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { answerPrivately, type BuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
+import type { ConsultAskResult } from '../src/core/consult-ask.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
@@ -631,6 +632,45 @@ describe('Answer and Dismiss on a waiting question', () => {
     expect((await controller.handle({ action: 'ask', question: 'x'.repeat(2_001) }, 'session:owner')).status).toBe(400);
   });
 
+  test('document questions are listed only through the local documents action', async () => {
+    const result: ConsultAskResult = {
+      ok: true,
+      sent: 'What did I decide about Acme?',
+      reply: 'You chose the annual plan.',
+      route: 'venice',
+      networkIdentity: 'hidden',
+      level: 'strict',
+      rewritten: false,
+      remembered: false,
+      model: 'venice/llama-4',
+    };
+    const controller = createLocalPrivateAnswers({
+      answer: async () => ({ status: 'failed' }),
+      store: () => undefined,
+      documents: {
+        list: async () => [{
+          id: 'doc-1',
+          question: 'What did I decide about Acme?',
+          progress: { state: 'answering', documentsRead: 3, documentsTotal: 3 },
+          result,
+        }],
+      },
+    });
+    expect(await controller.handle({ action: 'documents' }, 'session:owner')).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        documents: [{
+          id: 'doc-1',
+          question: 'What did I decide about Acme?',
+          progress: { state: 'answering', documentsRead: 3, documentsTotal: 3 },
+          result,
+        }],
+      },
+    });
+    expect(await scripted().controller.handle({ action: 'documents' }, 'session:owner')).toEqual({ status: 200, body: { ok: true, documents: [] } });
+  });
+
   test('the list says who asked and when, without a connection id', () => {
     const store = waitingStore();
     store.record(store.ticket('conn-a'), { question: 'Where is the lease?', surface: 'remote', state: 'unchecked' });
@@ -964,7 +1004,7 @@ describe('the Private answers page', () => {
     const row = page.document.querySelector('[data-pa-question="wq_1"]')!;
     (row.querySelector('[data-pa-answer]') as unknown as { click(): void }).click();
     await page.settle();
-    expect(page.posts.map((post) => post.body)).toEqual([{ action: 'answer', id: 'wq_1' }, { action: 'seen', ack: 'A'.repeat(32) }]);
+    expect(page.posts.map((post) => post.body).filter((body) => body.action !== 'documents')).toEqual([{ action: 'answer', id: 'wq_1' }, { action: 'seen', ack: 'A'.repeat(32) }]);
     expect(page.posts.every((post) => post.url === DASHBOARD_PRIVATE_ANSWERS_PATH && post.headers['X-Olympus-CSRF'] === 'csrf-token')).toBe(true);
     const out = row.querySelector('[data-pa-out]')!;
     expect(out.textContent).toContain('It ends in May. <img src=x onerror=alert(1)>');
@@ -981,12 +1021,59 @@ describe('the Private answers page', () => {
     (row.querySelector('[data-pa-answer]') as unknown as { click(): void }).click();
     await gone.settle();
     expect(row.textContent).toContain('This question is no longer waiting.');
-    expect(gone.posts.map((post) => post.body.action)).toEqual(['answer']);
+    expect(gone.posts.map((post) => post.body.action).filter((action) => action !== 'documents')).toEqual(['answer']);
 
     const dismissed = renderAndRun(() => ({ status: 200, body: { ok: true, status: 'dismissed' } }));
     (dismissed.document.querySelector('[data-pa-dismiss]') as unknown as { click(): void }).click();
     await dismissed.settle();
     expect(dismissed.document.querySelector('[data-pa-question="wq_1"]')).toBeNull();
+  });
+
+  test('polls document questions and renders progress, replies, exact sent text, models, and refusals as text', async () => {
+    const page = renderAndRun((body) => body.action === 'documents'
+      ? {
+        status: 200,
+        body: {
+          ok: true,
+          documents: [
+            { id: 'doc-working', question: 'Search the project notes', progress: { state: 'reading', documentsRead: 2, documentsTotal: 5 } },
+            {
+              id: 'doc-answered',
+              question: 'What did I decide about Acme?',
+              progress: { state: 'answering', documentsRead: 3, documentsTotal: 3 },
+              result: {
+                ok: true,
+                sent: 'What did I decide about Acme?',
+                reply: 'You chose the annual plan. <img src=x onerror=alert(1)>',
+                route: 'venice',
+                networkIdentity: 'hidden',
+                level: 'strict',
+                rewritten: false,
+                remembered: false,
+                model: 'venice/llama-4',
+              },
+            },
+            {
+              id: 'doc-refused',
+              question: 'Summarize the contracts',
+              progress: { state: 'answering', documentsRead: 1, documentsTotal: 1 },
+              result: { ok: false, code: 'authorization_refused', message: 'Document access was revoked.', sent: 'Summarize the contracts', outcome: 'not_sent' },
+            },
+          ],
+        },
+      }
+      : { status: 500, body: {} });
+    await page.settle();
+    const documents = page.document.querySelector('[data-pa-documents]')!;
+    expect(documents.textContent).toContain('Search the project notes');
+    expect(documents.textContent).toContain('Reading · 2 of 5 documents');
+    expect(documents.textContent).toContain('You chose the annual plan. <img src=x onerror=alert(1)>');
+    expect(documents.querySelector('img')).toBeNull();
+    expect(documents.textContent).toContain('Answered by venice/llama-4');
+    expect(documents.textContent).toContain('What was sent: What did I decide about Acme?');
+    expect(documents.textContent).toContain('Document access was revoked.');
+    expect(documents.textContent).toContain('What was sent: Summarize the contracts');
+    expect(page.posts[0]!.body).toEqual({ action: 'documents' });
   });
 
   test('the old address\'s fragment opens Anonymous answers, labeled as outside help, collapsed otherwise', () => {

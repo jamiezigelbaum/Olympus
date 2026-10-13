@@ -34,6 +34,9 @@ import {
   type PrivateQuestionLevel,
   type PrivateQuestionMetaV1,
   type PrivateQuestionPlaintextV1,
+  type PrivateQuestionProgress,
+  type PrivateQuestionProgressV1,
+  type PrivateQuestionProvider,
   type PrivateQuestionResultV1,
 } from './private-question-contract.ts';
 
@@ -43,9 +46,28 @@ export interface PrivateQuestionAskInput {
   readonly question: string;
   readonly level: PrivateQuestionLevel;
   readonly cleanup?: PrivateQuestionCleanup;
+  readonly remember?: boolean;
+  readonly useDocuments?: boolean;
+  /** Bound when the job opens; never accepted from the panel plaintext. */
+  readonly model?: string;
+  readonly provider: PrivateQuestionProvider;
   readonly signal: AbortSignal;
   /** The transport's final check before it reserves and dispatches (ConsultAskInput.stillAuthorized): the opening connection is not revoked. */
   readonly stillAuthorized: () => boolean;
+  /** The documents integration binds this guard to the source refs/revisions actually used. */
+  readonly registerDocumentGuard?: (guard: () => Promise<boolean>) => void;
+  /** Counts and a closed state only; this module seals each update before collection. */
+  readonly onProgress: (progress: PrivateQuestionProgress) => void;
+}
+
+export interface PrivateQuestionBeginRequest {
+  readonly question?: string;
+  readonly useDocuments?: boolean;
+  readonly model?: string;
+  readonly provider?: PrivateQuestionProvider;
+  readonly level?: PrivateQuestionLevel;
+  readonly cleanup?: PrivateQuestionCleanup;
+  readonly remember?: boolean;
 }
 
 /**
@@ -109,6 +131,13 @@ interface Job {
   readonly enginePrivateKey: CryptoKey;
   readonly askKey: string;
   readonly origin: PrivateQuestionOrigin;
+  readonly model?: string;
+  readonly provider: PrivateQuestionProvider;
+  readonly remember?: boolean;
+  useDocuments: boolean;
+  documentGuard?: () => Promise<boolean>;
+  progressSealed?: SealedPrivateAnswer;
+  progressVersion: number;
   /** The panel key that asked (base64url raw); set by the first `ask`. */
   claimKey?: string;
   panelKey?: CryptoKey;
@@ -145,8 +174,8 @@ export class PrivateQuestionJobs {
    * daily limit is set and not reached.
    */
   begin(): Promise<PrivateQuestionMetaV1 | undefined>;
-  begin(origin: PrivateQuestionOrigin): Promise<PrivateQuestionMetaV1 | PrivateQuestionBeginRefusal | undefined>;
-  async begin(origin: PrivateQuestionOrigin = {}): Promise<PrivateQuestionMetaV1 | PrivateQuestionBeginRefusal | undefined> {
+  begin(origin: PrivateQuestionOrigin, request?: PrivateQuestionBeginRequest): Promise<PrivateQuestionMetaV1 | PrivateQuestionBeginRefusal | undefined>;
+  async begin(origin: PrivateQuestionOrigin = {}, request: PrivateQuestionBeginRequest = {}): Promise<PrivateQuestionMetaV1 | PrivateQuestionBeginRefusal | undefined> {
     const installId = this.options.installId();
     if (!installId) return undefined;
     if (origin.readOnly) {
@@ -164,6 +193,9 @@ export class PrivateQuestionJobs {
     }
     const engine = await generateEngineKeyPair();
     const at = this.now();
+    const question = validQuestion(request.question);
+    const model = validModel(request.model);
+    const provider: PrivateQuestionProvider = request.provider === 'venice' ? 'venice' : 'zkapi';
     const job: Job = {
       id: `oly2p.${installId}.${randomBytes(32).toString('base64url')}`,
       createdAt: at,
@@ -171,14 +203,30 @@ export class PrivateQuestionJobs {
       enginePrivateKey: engine.privateKey,
       askKey: engine.publicKey,
       origin: { ...(origin.connectionId !== undefined ? { connectionId: origin.connectionId } : {}), ...(origin.readOnly ? { readOnly: true } : {}) },
+      ...(model !== undefined ? { model } : {}),
+      provider,
+      ...(request.remember !== undefined ? { remember: request.remember } : {}),
+      useDocuments: request.useDocuments === true,
       state: 'open',
       abort: new AbortController(),
       pollTokens: POLL_CAPACITY,
       pollRefilledAt: at,
+      progressVersion: 0,
     };
     this.jobs.set(job.id, job);
     const choice = this.choice();
-    return { v: 1, jobId: job.id, askKey: job.askKey, ...choice, maxChars: PRIVATE_QUESTION_MAX_CHARS };
+    return {
+      v: 1,
+      jobId: job.id,
+      askKey: job.askKey,
+      ...choice,
+      ...(request.level !== undefined ? { level: request.level } : {}),
+      ...(request.cleanup !== undefined ? { cleanup: request.cleanup } : {}),
+      ...(question !== undefined ? { question } : {}),
+      ...(request.useDocuments !== undefined ? { useDocuments: request.useDocuments === true } : {}),
+      provider,
+      maxChars: PRIVATE_QUESTION_MAX_CHARS,
+    };
   }
 
   /** Whether `jobId` is one of these jobs (live or not): the handler routes its collection here. */
@@ -208,6 +256,7 @@ export class PrivateQuestionJobs {
     if (this.jobs.get(jobId) !== job || job.state !== 'open') return this.jobs.get(jobId) === job ? this.outcome(job) : gone();
     // A revoked connection's panel asks nothing (checked last, just before dispatch).
     if (!this.originActive(job)) return gone();
+    job.useDocuments = plaintext.useDocuments === true;
     job.claimKey = panel.raw;
     job.panelKey = panel.key;
     job.state = 'working';
@@ -224,6 +273,9 @@ export class PrivateQuestionJobs {
     if (!panel) return invalid();
     if (this.jobs.get(jobId) !== job) return gone();
     if (job.claimKey !== undefined && job.claimKey !== panel.raw) return { status: 409, body: { status: 'claimed' } };
+    if (job.useDocuments && job.state !== 'open' && !(await this.documentsStillAuthorized(job))) {
+      await this.invalidateDocumentResult(job);
+    }
     if (!this.takePoll(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     return this.outcome(job);
   }
@@ -250,7 +302,7 @@ export class PrivateQuestionJobs {
     if (!this.takePoll(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     // The successor carries this job's origin: a revoked connection mints none.
     if (!this.originActive(job)) return gone();
-    const meta = await this.begin(job.origin);
+    const meta = await this.begin(job.origin, { useDocuments: job.useDocuments, ...(job.model ? { model: job.model } : {}), provider: job.provider });
     if (!meta) return { status: 503, body: { status: 'mac_offline' }, retryAfterSeconds: 30 };
     // A read-only grant past its daily limit: no new job; the panel shows it as it shows a job gone.
     if ('refused' in meta) return gone();
@@ -263,6 +315,7 @@ export class PrivateQuestionJobs {
 
   private outcome(job: Job): ClaimResponse {
     if (job.state === 'open') return { status: 202, body: { status: 'pending' }, retryAfterSeconds: WAITING_RETRY_SECONDS };
+    if (job.state === 'working' && job.progressSealed) return { status: 200, body: { status: 'ready', v: 1, ...job.progressSealed } };
     if (job.state === 'working' || !job.sealed) return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     return { status: 200, body: { status: 'ready', v: 1, ...job.sealed } };
   }
@@ -279,23 +332,77 @@ export class PrivateQuestionJobs {
           question: plaintext.question,
           level: plaintext.level,
           ...(plaintext.cleanup !== undefined ? { cleanup: plaintext.cleanup } : {}),
+          ...(job.remember !== undefined ? { remember: job.remember } : {}),
+          ...(job.useDocuments ? { useDocuments: true } : {}),
+          ...(job.model !== undefined ? { model: job.model } : {}),
+          provider: job.provider,
           signal: job.abort.signal,
           // Revoked while the question was being prepared or the session started: nothing is sent.
           stillAuthorized: () => this.originActive(job),
+          ...(job.useDocuments ? { registerDocumentGuard: (guard: () => Promise<boolean>) => { job.documentGuard = guard; } } : {}),
+          onProgress: (progress) => { void this.storeProgress(job, progress); },
         });
-        result = resultOf(outcome);
+        if (this.jobs.get(job.id) !== job || job.state !== 'working') return;
+        result = job.useDocuments && !(await this.documentsStillAuthorized(job))
+          ? documentAuthorizationRefusal()
+          : resultOf(outcome, { useDocuments: job.useDocuments, ...(job.model !== undefined ? { model: job.model } : {}) });
       } catch {
         result = { v: 1, state: 'refused', code: 'internal_error', message: 'The question could not be asked from this computer.' };
       }
     }
-    if (this.jobs.get(job.id) !== job || !job.panelKey) return;
+    if (this.jobs.get(job.id) !== job || job.state !== 'working' || !job.panelKey) return;
     try {
-      job.sealed = await sealPrivateAnswer(job.id, job.panelKey, padPrivateAnswerPlaintext(JSON.stringify(result)));
+      if (job.useDocuments && !(await this.documentsStillAuthorized(job))) result = documentAuthorizationRefusal();
+      let sealed = await sealPrivateAnswer(job.id, job.panelKey, padPrivateAnswerPlaintext(JSON.stringify(result)));
+      if (job.useDocuments && !(await this.documentsStillAuthorized(job))) {
+        sealed = await sealPrivateAnswer(job.id, job.panelKey, padPrivateAnswerPlaintext(JSON.stringify(documentAuthorizationRefusal())));
+      }
+      if (this.jobs.get(job.id) !== job || job.state !== 'working') return;
+      job.sealed = sealed;
+      delete job.progressSealed;
     } catch {
       // Nothing sealed: the panel keeps seeing pending until the job expires. Never a plaintext outcome.
       return;
     }
     job.state = 'done';
+  }
+
+  private async storeProgress(job: Job, value: PrivateQuestionProgress): Promise<void> {
+    const progress = normalizeProgress(value);
+    if (!progress || !job.useDocuments || !job.panelKey || job.state !== 'working') return;
+    const version = ++job.progressVersion;
+    if (!(await this.documentsStillAuthorized(job))) return;
+    try {
+      const sealed = await sealPrivateAnswer(job.id, job.panelKey, padPrivateAnswerPlaintext(JSON.stringify({ v: 1, ...progress } satisfies PrivateQuestionProgressV1)));
+      if (this.jobs.get(job.id) !== job || job.state !== 'working' || version !== job.progressVersion) return;
+      if (!(await this.documentsStillAuthorized(job))) return;
+      job.progressSealed = sealed;
+    } catch {
+      // Progress is optional. The final result remains the only required payload.
+    }
+  }
+
+  private async documentsStillAuthorized(job: Job): Promise<boolean> {
+    if (!job.useDocuments) return true;
+    if (!this.originActive(job) || !job.documentGuard) return false;
+    try {
+      return (await job.documentGuard()) === true && this.originActive(job);
+    } catch {
+      return false;
+    }
+  }
+
+  private async invalidateDocumentResult(job: Job): Promise<void> {
+    if (!job.panelKey || job.state === 'open') return;
+    job.progressVersion++;
+    try {
+      job.sealed = await sealPrivateAnswer(job.id, job.panelKey, padPrivateAnswerPlaintext(JSON.stringify(documentAuthorizationRefusal())));
+      delete job.progressSealed;
+      job.state = 'done';
+      job.abort.abort();
+    } catch {
+      delete job.sealed;
+    }
   }
 
   private drop(id: string): void {
@@ -359,26 +466,57 @@ function parseQuestion(text: string): PrivateQuestionPlaintextV1 | undefined {
   if (!question || question.length > PRIVATE_QUESTION_MAX_CHARS || /\u0000/.test(question)) return undefined;
   if (typeof record.level !== 'string' || !(LEVELS as readonly string[]).includes(record.level)) return undefined;
   if (record.cleanup !== undefined && (typeof record.cleanup !== 'string' || !(CLEANUPS as readonly string[]).includes(record.cleanup))) return undefined;
+  if (record.useDocuments !== undefined && typeof record.useDocuments !== 'boolean') return undefined;
   return {
     v: 1,
     question,
     level: record.level as PrivateQuestionLevel,
     ...(record.cleanup !== undefined ? { cleanup: record.cleanup as PrivateQuestionCleanup } : {}),
+    ...(record.useDocuments !== undefined ? { useDocuments: record.useDocuments } : {}),
+  };
+}
+
+function validQuestion(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value || value.length > PRIVATE_QUESTION_MAX_CHARS || /\u0000/.test(value)) return undefined;
+  return value;
+}
+
+function validModel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const model = value.trim();
+  return model && model.length <= 256 && !/\u0000/.test(model) ? model : undefined;
+}
+
+function normalizeProgress(value: PrivateQuestionProgress): PrivateQuestionProgress | undefined {
+  const states: readonly PrivateQuestionProgress['state'][] = ['reading', 'summarizing', 'writing', 'answering'];
+  if (!value || !(states as readonly string[]).includes(value.state)) return undefined;
+  if (!Number.isInteger(value.documentsRead) || value.documentsRead < 0) return undefined;
+  if (!Number.isInteger(value.documentsTotal) || value.documentsTotal < 0 || value.documentsRead > value.documentsTotal) return undefined;
+  return { state: value.state, documentsRead: value.documentsRead, documentsTotal: value.documentsTotal };
+}
+
+function documentAuthorizationRefusal(): PrivateQuestionResultV1 {
+  return {
+    v: 1,
+    state: 'refused',
+    code: 'authorization_refused',
+    message: 'Access to the documents used for this answer was revoked, so the answer was not returned.',
+    outcome: 'not_sent',
   };
 }
 
 /** The ask lane's outcome as the panel reads it: an answer, or a refusal in the user's words. */
-export function resultOf(outcome: ConsultAskResult): PrivateQuestionResultV1 {
+export function resultOf(outcome: ConsultAskResult, options: { useDocuments?: boolean; model?: string } = {}): PrivateQuestionResultV1 {
   if (outcome.ok) {
     return {
       v: 1,
       state: 'answered',
       answer: outcome.reply,
-      ...(outcome.model !== undefined ? { model: outcome.model } : {}),
+      ...(outcome.model !== undefined || options.model !== undefined ? { model: outcome.model ?? options.model } : {}),
       level: outcome.level,
       ...(outcome.cleanup !== undefined ? { cleanup: outcome.cleanup } : {}),
       rewritten: outcome.rewritten,
-      ...(outcome.rewritten ? { sent: outcome.sent } : {}),
+      ...(outcome.rewritten || options.useDocuments ? { sent: outcome.sent } : {}),
       route: chatgptZkapiRouteLabel(outcome.route, outcome.networkIdentity),
       networkIdentity: outcome.networkIdentity,
     };

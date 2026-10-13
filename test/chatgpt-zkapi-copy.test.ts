@@ -75,12 +75,12 @@ describe('ChatGPT tool definitions', () => {
 describe('the private question panel', () => {
   test('every word the panel shows is clean, and the one side-effect line is neutral', () => {
     for (const [key, value] of Object.entries(DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY)) expectClean(value, `panel ${key}`);
-    expect(DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY.cost).toBe('Uses your zkAPI balance.');
+    expect(DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY.cost).toBe('Uses the selected provider; zkAPI questions use your balance.');
   });
 
   test('the generated panel resource carries no money words in its copy', () => {
     const resource = readFileSync(join(import.meta.dir, '..', 'connect-relay/server/generated/chatgpt-private-question.json'), 'utf8');
-    expect(resource).toContain('Uses your zkAPI balance.');
+    expect(resource).toContain('Uses the selected provider; zkAPI questions use your balance.');
     expect(resource).not.toContain('Paid from');
     expect(resource).not.toContain('payment was private');
   });

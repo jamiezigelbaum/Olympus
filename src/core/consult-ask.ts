@@ -7,8 +7,9 @@
 // checked by the gate (Standard: secrets only; Strict: the thin net under the
 // owner's own writer, the full gate under the built-in one), and sent through
 // the same zkAPI transport as every consult, with its caps and
-// acknowledgements. The reply and exactly what was sent come back. No private
-// evidence is involved: the writer sees only the typed question.
+// acknowledgements. Direct asks use the typed question alone. The internal
+// documents lane supplies a local digest or bounded fallback excerpts and
+// brands every outcome private, for the sealed panel or local page only.
 //
 // The level is asked once (design DESIGN-2026-10-10): with no level in the
 // call and none remembered in consult.json (`levelChosen`), nothing is sent and
@@ -53,6 +54,14 @@ export function consultAskLevelFromSettings(level: ConsultLevel): ConsultAskLeve
 
 export interface ConsultAskInput {
   readonly question: unknown;
+  /** Internal, local-only document lane. Never accepted from a tool's JSON. */
+  readonly documents?: {
+    readonly digest?: string;
+    readonly evidence?: readonly string[];
+    readonly context: ConsultWriterContext;
+    /** Synchronous revision/tier/account check immediately before dispatch. */
+    readonly current: () => boolean;
+  };
   /** This question's level; absent means the remembered one. */
   readonly level?: ConsultAskLevel;
   /** Standard's preparation for this question; absent means the remembered one. */
@@ -120,7 +129,7 @@ export interface ConsultAskChoiceOptions {
   readonly customInstruction: boolean;
 }
 
-export type ConsultAskResult =
+type ConsultAskOutcome =
   | {
     readonly ok: true;
     readonly sent: string;
@@ -158,6 +167,10 @@ export type ConsultAskResult =
     /** The zkAPI daemon's own error code, when it answered with one (`funding_required`: the balance has run out). */
     readonly daemonCode?: ZkapiDaemonErrorCode;
   };
+
+/** A document-derived result may be shown only on the private surface. */
+export type ConsultAskResult = ConsultAskOutcome & { readonly privateDocuments?: true };
+export const CONSULT_DOCUMENTS_PRIVATE_NOTICE = 'Your document answer is private. Read it in the private panel or in Private answers on your computer.';
 
 export const CONSULT_ASK_MESSAGES = Object.freeze({
   empty: 'Type a question first.',
@@ -245,6 +258,16 @@ function askBinding(read: ConsultSettingsRead): string {
 
 /** Prepares, checks and sends one typed question. Never throws. */
 export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDependencies): Promise<ConsultAskResult> {
+  const result = await askPreparedQuestion(input, deps);
+  return input.documents ? { ...result, privateDocuments: true } : result;
+}
+
+async function askPreparedQuestion(input: ConsultAskInput, deps: ConsultAskDependencies): Promise<ConsultAskOutcome> {
+  const documentsCurrent = (): boolean => {
+    try { return !input.documents || input.documents.current() === true; } catch { return false; }
+  };
+  const changed = (): ConsultAskOutcome => ({ ok: false, code: 'documents_changed', message: 'The documents or their privacy settings changed. Nothing further was sent; ask again.' });
+  if (!documentsCurrent()) return changed();
   const typed = typeof input.question === 'string' ? input.question.trim() : '';
   if (!typed) return { ok: false, code: 'question_empty', message: CONSULT_ASK_MESSAGES.empty };
   if (typed.length > CONSULT_ASK_MAX_CHARS) return { ok: false, code: 'question_too_long', message: CONSULT_ASK_MESSAGES.tooLong };
@@ -346,15 +369,20 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   const strict = level === 'strict';
   let questions: readonly string[];
   let rewritten: boolean;
-  if (!strict && cleanup === 'as_written') {
+  if (!strict && cleanup === 'as_written' && !input.documents) {
     questions = [typed];
     rewritten = false;
   } else {
-    const instruction = strict ? undefined : cleanup === 'custom' ? stored.instruction : CONSULT_LIGHT_CLEANUP_INSTRUCTION;
+    const instruction = strict ? undefined : cleanup === 'custom' ? stored.instruction : cleanup === 'as_written' && input.documents
+      ? 'Keep the owner\'s question as written and add only the facts it needs from the digest.' : CONSULT_LIGHT_CLEANUP_INSTRUCTION;
     let written: ConsultWriterOutcome;
     try {
       written = await deps.prepare(
-        { question: typed, answer: '', gaps: [], ...(instruction !== undefined ? { instruction } : { direct: true as const }) },
+        { question: typed, answer: '', gaps: [],
+          ...(input.documents ? { documents: true as const } : {}),
+          ...(input.documents?.digest !== undefined ? { digest: input.documents.digest } : {}),
+          ...(input.documents?.evidence !== undefined ? { evidence: input.documents.evidence } : {}),
+          ...(instruction !== undefined ? { instruction } : input.documents ? {} : { direct: true as const }) },
         writer,
         strict ? 'general' : 'unnamed',
         input.signal,
@@ -363,6 +391,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
       written = { kind: 'failed', reason: 'request_failed' };
     }
     if (input.signal?.aborted) return { ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled };
+    if (!documentsCurrent()) return changed();
     if (written.kind === 'declined') return { ok: false, code: 'writer_declined', message: CONSULT_ASK_MESSAGES.declined };
     if (written.kind !== 'questions') return { ok: false, code: 'writer_failed', message: CONSULT_ASK_MESSAGES.writerFailed };
     questions = written.questions;
@@ -374,7 +403,10 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   // carries it. Strict runs Vitalik's rules: the thin net under the owner's
   // own writer, the full gate under the built-in one, with the typed question
   // as the asked question so copying it is refused.
-  const context: ConsultWriterContext = { entries: [{ kind: 'text', text: typed, path: 'writerVisible[]', group: -2 }], overflow: false };
+  const context: ConsultWriterContext = {
+    ...(input.documents?.context ?? { overflow: false }),
+    entries: [...(input.documents?.context.entries ?? []), { kind: 'text', text: typed, path: 'writerVisible[]', group: -2 }],
+  };
   const gate = (draft: readonly string[]) => evaluateConsultRequest([...draft], context, {}, {}, strict
     ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: 'general', askedQuestionTexts: [typed], net: writer ? 'thin' : 'full' }
     : { net: 'secrets' });
@@ -383,7 +415,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   // wording from the typed question gets one more draft, with the finding as
   // feedback (live test 2026-10-10: "40%" survived the rewrite and the gate
   // refused it as snapshot_figure). Secrets and identifier shapes never retry.
-  const feedback = verdict.decision !== 'pass' && strict && rewritten && !writer ? consultGateRetryFeedback(verdict.reasons) : undefined;
+  const feedback = verdict.decision !== 'pass' && strict && rewritten && !writer && !input.documents ? consultGateRetryFeedback(verdict.reasons) : undefined;
   if (feedback !== undefined) {
     let again: ConsultWriterOutcome;
     try {
@@ -420,6 +452,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   const authorize = (modelInUse?: string): boolean => {
     // Cancelled before dispatch: refused with nothing reserved.
     if (input.signal?.aborted) return false;
+    if (!documentsCurrent()) return false;
     // Last, on the model the route resolved for this very send.
     sentModel = modelInUse || model;
     if (fromCallersProvider(sentModel)) {
@@ -453,6 +486,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     result = { ok: false, error: { code: 'internal_error', message: 'The zkAPI session failed inside Olympus.', outcome: 'unknown', networkIdentity: 'not_verified' } };
   }
   if (!result) return { ok: false, code: 'route_not_configured', message: CONSULT_ASK_MESSAGES.noRoute };
+  if (!documentsCurrent()) return changed();
   if (sameProvider) return sameProviderRefusal();
   if (stale) return { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale };
   if (input.signal?.aborted && !result.ok && result.error.outcome === 'not_sent') return { ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled };

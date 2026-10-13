@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=9ff184c12dd0"
+          "resourceUri": "ui://olympus/dashboard?v=4c8f6e969093"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=9ff184c12dd0",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=4c8f6e969093",
         "openai/ui": {
           "entrypoints": [
             {
@@ -125,6 +125,17 @@
               "full"
             ],
             "description": "How much of the matching items the private answer reads. Leave it out (summary) for ordinary questions: faster. Use \"full\" when the user asks for all the details, the full results, every value, the whole document or similar, including a follow-up asking for more about something already answered; it is slower."
+          },
+          "analyst_provider": {
+            "type": "string",
+            "enum": [
+              "venice"
+            ],
+            "description": "Use Venice to answer from documents in the private panel. The answer is never returned to ChatGPT."
+          },
+          "analyst_model": {
+            "type": "string",
+            "description": "Optional Venice model override for this private document answer. Requires analyst_provider: \"venice\"."
           }
         },
         "required": [
@@ -188,7 +199,7 @@
     {
       "name": "ask_anonymously",
       "title": "Ask anonymously",
-      "description": "Ask a frontier model one question anonymously through zkAPI; nothing identifies the user and the model provider cannot tie the question to them. Uses the user's own zkAPI account, set up outside ChatGPT in Olympus on their computer; each question uses a little of its balance. Use it only when the user has already written the question in this conversation and asks for it to go anonymously, privately or through Olympus zkAPI, or to a named model without being tracked. When they ask for a private or anonymous question without writing it, call open_private_question instead and never ask them to type the question here (you would see it). Only the question goes out: no documents, no history. The first time it returns {status: \"needs_choice\"}: ask the user once whether they want Strict (their own model rewrites the question into general questions before it leaves, so nothing identifying can be sent) or Standard (their words, prepared as written, lightly cleaned up, or by the instruction they saved); then call again with level, and remember: true to keep it. Returns {status: \"answered\", answer, level, rewritten, sent, model}: give the answer; when rewritten is true, say the question was rewritten first and offer to show what was sent. {status: \"refused\", message}: tell the user the message in those words. If it returns {status: \"working\", job_id}, the answer is still coming: call source_answer_result with that job_id (again while it says working) instead of asking again. Ask one question at a time.",
+      "description": "Ask a frontier model through zkAPI. The provider reads what is sent, and its contents may identify the user. Uses the user's own zkAPI account, set up outside ChatGPT in Olympus on their computer; each question uses a little of its balance. Use it only when the user has already written the question in this conversation and asks for it to go anonymously, privately or through Olympus zkAPI, or to a named model without being tracked. When they ask for a private or anonymous question without writing it, call open_private_question instead and never ask them to type the question here (you would see it). Without use_documents, only the question goes out: no documents, no history. With use_documents: true, open the private panel instead; document content and the answer stay out of this conversation. The first time it returns {status: \"needs_choice\"}: ask the user once whether they want Strict (their own model rewrites the question into general questions before it leaves, then Olympus checks it) or Standard (their words, prepared as written, lightly cleaned up, or by the instruction they saved); then call again with level, and remember: true to keep it. Returns {status: \"answered\", answer, level, rewritten, sent, model}: give the answer; when rewritten is true, say the question was rewritten first and offer to show what was sent. {status: \"refused\", message}: tell the user the message in those words. If it returns {status: \"working\", job_id}, the answer is still coming: call source_answer_result with that job_id (again while it says working) instead of asking again. Ask one question at a time.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -220,6 +231,10 @@
           "model": {
             "type": "string",
             "description": "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; an OpenAI model is refused here, since OpenAI hosts this conversation."
+          },
+          "use_documents": {
+            "type": "boolean",
+            "description": "Open the private panel prefilled with this question so Olympus can use the user's documents without returning their content or the answer to ChatGPT."
           }
         },
         "required": [
@@ -250,9 +265,9 @@
       },
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-question?v=6a9d8c18b516"
+          "resourceUri": "ui://olympus/private-question?v=250fd00e0626"
         },
-        "openai/outputTemplate": "ui://olympus/private-question?v=6a9d8c18b516"
+        "openai/outputTemplate": "ui://olympus/private-question?v=250fd00e0626"
       },
       "annotations": {
         "readOnlyHint": false,
@@ -895,7 +910,7 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=9ff184c12dd0",
+      "uri": "ui://olympus/dashboard?v=4c8f6e969093",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },
@@ -905,7 +920,7 @@
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-question?v=6a9d8c18b516",
+      "uri": "ui://olympus/private-question?v=250fd00e0626",
       "name": "Olympus private question",
       "mimeType": "text/html;profile=mcp-app"
     }

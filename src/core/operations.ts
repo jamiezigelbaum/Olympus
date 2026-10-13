@@ -191,10 +191,11 @@ const SOURCE_ANSWER_RESULT_PARAMS = {
 } satisfies Record<string, ParamDef>;
 
 const ASK_ANONYMOUSLY_PARAMS = {
-  question: { type: 'string', required: true, description: 'The question, in the user\'s words. Nothing else is sent: no documents, no history, no account.' },
+  question: { type: 'string', required: true, description: 'The question, in the user\'s words. History and account details are never attached.' },
+  use_documents: { type: 'boolean', description: 'Read matching documents locally and prepare the request from a structured digest. The answer and exact request stay in the private panel or Private answers on this computer.' },
   level: {
     type: 'string',
-    description: 'How the question is prepared before it leaves: "strict" (the user\'s own model rewrites it into general questions first; nothing identifying can be sent) or "standard" (their words, prepared as they chose). Omit to use the level the user chose before; the first call without one returns needs_choice.',
+    description: 'How the question is prepared before it leaves: "strict" (the user\'s own model rewrites it into general questions first, then Olympus checks the request) or "standard" (their words, prepared as they chose). Omit to use the level the user chose before; the first call without one returns needs_choice.',
   },
   cleanup: { type: 'string', description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
   remember: { type: 'boolean', description: 'Save this level (and cleanup) as the default for later questions, so the user is not asked again.' },
@@ -613,8 +614,8 @@ export const operations: Operation[] = [
   {
     name: 'ask_anonymously',
     description: [
-      'Ask a frontier model one question anonymously through zkAPI, paid per question from the user\'s own zkAPI balance; nothing identifies them and the provider cannot tie it to an account.',
-      'Use it only when the user asks to ask anonymously, privately or through Olympus zkAPI, or to use a named model without being tracked. Only the question goes out: no documents, no history.',
+      'Ask a frontier model through zkAPI, paid per question from the user\'s own zkAPI balance. zkAPI separates payment from the request; the provider reads what is sent, and its contents may identify the user.',
+      'Use it only when the user asks to ask anonymously, privately or through Olympus zkAPI, or to use a named model without being tracked. Set use_documents=true when the question needs their documents: a local model prepares a digest and the answer stays in the private panel or Private answers on their computer. Without it, only the typed question is prepared; history is never attached.',
       'Returns {ok: true, reply, sent, level, rewritten, model}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent". The model is one from another provider than the one hosting this conversation.',
       'Returns {ok: false, code: "needs_choice", message, options} the first time: ask the user once (Strict or Standard), then call again with level, and remember=true to keep it.',
       'Any other {ok: false, message} is a refusal to tell the user in those words (a secret in the question, no route set up, the daily spend limit).',
@@ -634,6 +635,7 @@ export const operations: Operation[] = [
       const level = optionalAskLevel(params.level);
       const cleanup = optionalAskCleanup(params.cleanup);
       const remember = optionalBoolean(params.remember, 'remember');
+      const useDocuments = optionalBoolean(params.use_documents, 'use_documents');
       const model = optionalString(params.model);
       const timeoutMs = optionalNumber(params.timeoutMs, 'timeoutMs');
       // Inside the OpenClaw Gateway the lane timer must stay at its ceiling
@@ -641,6 +643,7 @@ export const operations: Operation[] = [
       const insideGateway = ctx.caller?.surface === 'native';
       const ask = (signal?: AbortSignal) => ctx.email.askAnonymously({
         question,
+        ...(useDocuments !== undefined ? { use_documents: useDocuments } : {}),
         ...(level !== undefined ? { level } : {}),
         ...(cleanup !== undefined ? { cleanup } : {}),
         ...(remember !== undefined ? { remember } : {}),

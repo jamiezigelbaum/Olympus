@@ -75,7 +75,7 @@ export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
  * it (from the confirmed funding date; otherwise unknown or past). Olympus
  * sends no reminder of its own, so the statement does not promise one.
  */
-export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 7;
+export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 8;
 export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   {
     id: 'only_when_asked',
@@ -83,7 +83,7 @@ export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   },
   {
     id: 'provider_reads',
-    statement: 'The AI provider reads each question but cannot tell who sent it. At Standard, a question goes out the way you choose; at Strict, your model removes identifying details first. An unusual situation could still hint at who you are.',
+    statement: 'zkAPI hides who is asking, but the answering AI provider reads everything sent. When you ask to use documents, your local model prepares the request from relevant document facts; those facts can leave this computer. At Standard, the request follows your chosen preparation; at Strict, your model writes general questions first. Unusual details could still hint at who you are.',
   },
   {
     id: 'cost',

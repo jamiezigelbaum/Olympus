@@ -577,6 +577,10 @@ const ASK_PENDING_TEXT = 'Olympus is still waiting for the anonymous answer. Cal
  */
 export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
   const record = asRecord(raw);
+  if (record?.privateDocuments === true) return {
+    content: [{ type: 'text', text: 'Your document answer is private. Read it in the private panel or in Private answers on your computer.' }],
+    structuredContent: { status: 'private' },
+  };
   if (record?.status === 'working' && typeof record.job_id === 'string' && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record.job_id)) {
     return {
       content: [{ type: 'text', text: ASK_PENDING_TEXT }],

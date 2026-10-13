@@ -37,6 +37,12 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pafrom { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
 .pa .paout { grid-column: 1 / -1; }
 .pa .paout:empty { display: none; }
+.pa .padocuments[hidden] { display: none; }
+.pa .padocuments-list { display: grid; gap: 10px; }
+.pa .padoc { margin-top: 0; }
+.pa .padoc .paq { font-weight: 600; }
+.pa .padoc-progress { margin: 6px 0 0; color: var(--t3); font-size: var(--fs-body); }
+.pa .padoc-sent { margin: 8px 0 0; color: var(--t2); font-size: var(--fs-body); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pa .srow.answered .paq { font-weight: 600; }
 .pa .pacard { margin: 10px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .pa .paanswer p { margin: 0 0 10px; color: var(--t1); line-height: 1.55; max-width: 72ch; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -72,8 +78,8 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
     meta: '',
     body: renderPrivateAnswersBody(options),
     styles: [LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS],
-    // No shared controller and no poll: the page carries its own small
-    // script, and the answer appears in place.
+    // No shared controller: the page carries its own small script, including
+    // the local document-question poll, and answers appear in place.
   });
 }
 
@@ -105,11 +111,19 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
     parts.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
     parts.push(renderAsk());
+    parts.push(renderDocuments());
     parts.push(renderWaiting(options.privateAnswers.waiting, options.now ?? new Date()));
     script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
   parts.push(renderAnonymous(options, csrfToken));
   return `<div class="privacy pa" data-private-answers>${parts.join('')}</div>${script}`;
+}
+
+function renderDocuments(): string {
+  return `<section class="padocuments" data-pa-documents-section hidden>`
+    + `<div class="sect">Questions from agents</div>`
+    + `<p class="pnote">Document questions and their answers stay off the agent conversation.</p>`
+    + `<div class="padocuments-list" data-pa-documents aria-live="polite"></div></section>`;
 }
 
 function renderAsk(): string {
@@ -200,6 +214,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       unreachable: W.unreachable,
       dismissed: W.dismissed,
       dismissAllConfirm: W.dismissAllConfirm,
+      documentsUnavailable: 'Document questions cannot be read right now.',
     },
   };
   return `(function () {
@@ -328,6 +343,60 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     }
     if (leftOut.length > 0) out.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
   }
+  function documentProgress(progress) {
+    if (!progress || typeof progress !== 'object') return '';
+    var state = typeof progress.state === 'string' ? progress.state : '';
+    var words = state === 'reading' ? 'Reading' : state === 'summarizing' ? 'Summarizing' : state === 'writing' ? 'Writing' : state === 'answering' ? 'Answering' : state;
+    var read = Number.isInteger(progress.documentsRead) && progress.documentsRead >= 0 ? progress.documentsRead : 0;
+    var total = Number.isInteger(progress.documentsTotal) && progress.documentsTotal >= read ? progress.documentsTotal : read;
+    return (words || 'Working') + ' · ' + read + ' of ' + total + ' documents';
+  }
+  function renderDocuments(items) {
+    var section = root.querySelector('[data-pa-documents-section]');
+    var list = root.querySelector('[data-pa-documents]');
+    if (!section || !list) return;
+    list.textContent = '';
+    if (!Array.isArray(items) || items.length === 0) { section.hidden = true; return; }
+    section.hidden = false;
+    items.forEach(function (item) {
+      if (!item || typeof item !== 'object' || typeof item.question !== 'string') return;
+      var card = el('div', 'pacard padoc');
+      if (typeof item.id === 'string') card.setAttribute('data-pa-document', item.id);
+      card.appendChild(el('div', 'paq', item.question));
+      var result = item.result;
+      if (!result || typeof result !== 'object') {
+        card.appendChild(el('p', 'padoc-progress', documentProgress(item.progress)));
+        list.appendChild(card);
+        return;
+      }
+      if (result.ok === true) {
+        var answer = el('div', 'paanswer');
+        String(result.reply || '').split(/\\n{2,}/).forEach(function (paragraph) {
+          if (paragraph.trim() !== '') answer.appendChild(el('p', '', paragraph.trim()));
+        });
+        card.appendChild(answer);
+        if (typeof result.model === 'string' && result.model) card.appendChild(el('p', 'padoc-progress', 'Answered by ' + result.model));
+      } else {
+        var refusal = typeof result.message === 'string' && result.message ? result.message : config.copy.documentsUnavailable;
+        var line = el('p', 'pamsg', refusal);
+        line.setAttribute('data-state', 'error');
+        card.appendChild(line);
+      }
+      if (typeof result.sent === 'string' && result.sent) card.appendChild(el('p', 'padoc-sent', 'What was sent: ' + result.sent));
+      list.appendChild(card);
+    });
+    if (!list.firstChild) section.hidden = true;
+  }
+  var documentsPolling = false;
+  async function pollDocuments() {
+    if (documentsPolling) return;
+    documentsPolling = true;
+    var outcome = await send({ action: 'documents' });
+    documentsPolling = false;
+    if (outcome.ok) renderDocuments(outcome.result.documents);
+  }
+  void pollDocuments();
+  if (typeof window.setInterval === 'function') window.setInterval(function () { void pollDocuments(); }, 2000);
   var ask = root.querySelector('form[data-pa-ask]');
   if (ask) {
     ask.addEventListener('submit', async function (event) {

@@ -37,7 +37,7 @@ import { PRIVATE_ANSWER_RESOURCE_URI, type PrivateAnswerDetail, type PrivateEvid
 import type { PrivateAnswerJobs, PrivateAnswerWaitingRef, PrivateEvidenceRefresh } from './private-answer-jobs.ts';
 import type { WaitingQuestionStore, WaitingQuestionTicket } from '../../core/waiting-private-questions.ts';
 import { PRIVATE_ANSWER_RESOURCE, privateAnswerResourceHtml, privateAnswerResourceMeta } from './private-answer-resource.ts';
-import { PRIVATE_QUESTION_RESOURCE_URI } from './private-question-contract.ts';
+import { PRIVATE_QUESTION_MAX_CHARS, PRIVATE_QUESTION_RESOURCE_URI } from './private-question-contract.ts';
 import type { PrivateQuestionJobs } from './private-question-jobs.ts';
 import { PRIVATE_QUESTION_RESOURCE, privateQuestionResourceHtml, privateQuestionResourceMeta } from './private-question-resource.ts';
 import {
@@ -227,6 +227,15 @@ export const SOURCE_ANSWER_TOOL: ChatGptToolDefinition = {
     properties: {
       question: QUESTION_PROPERTY,
       detail: DETAIL_PROPERTY,
+      analyst_provider: {
+        type: 'string',
+        enum: ['venice'],
+        description: 'Use Venice to answer from documents in the private panel. The answer is never returned to ChatGPT.',
+      },
+      analyst_model: {
+        type: 'string',
+        description: 'Optional Venice model override for this private document answer. Requires analyst_provider: "venice".',
+      },
     },
     required: ['question'],
     additionalProperties: false,
@@ -304,13 +313,14 @@ export const ASK_ANONYMOUSLY_TOOL: ChatGptToolDefinition = {
   name: 'ask_anonymously',
   title: 'Ask anonymously',
   description: [
-    'Ask a frontier model one question anonymously through zkAPI; nothing identifies the user and the model provider cannot tie the',
-    `question to them. ${CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE} Use it only when the user has already written the question`,
+    'Ask a frontier model through zkAPI. The provider reads what is sent, and its contents may identify the user.',
+    `${CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE} Use it only when the user has already written the question`,
     'in this conversation and asks for it to go anonymously, privately or through Olympus zkAPI, or to a named model without being tracked.',
     'When they ask for a private or anonymous question without writing it, call open_private_question instead and never ask them to',
-    'type the question here (you would see it). Only the question goes out: no documents, no history.',
+    'type the question here (you would see it). Without use_documents, only the question goes out: no documents, no history.',
+    'With use_documents: true, open the private panel instead; document content and the answer stay out of this conversation.',
     'The first time it returns {status: "needs_choice"}: ask the user once whether they want Strict (their own model rewrites',
-    'the question into general questions before it leaves, so nothing identifying can be sent) or Standard (their words,',
+    'the question into general questions before it leaves, then Olympus checks it) or Standard (their words,',
     'prepared as written, lightly cleaned up, or by the instruction they saved); then call again with level, and remember: true to keep it.',
     'Returns {status: "answered", answer, level, rewritten, sent, model}: give the answer; when rewritten is true, say the question',
     'was rewritten first and offer to show what was sent. {status: "refused", message}: tell the user the message in those words.',
@@ -325,6 +335,7 @@ export const ASK_ANONYMOUSLY_TOOL: ChatGptToolDefinition = {
       cleanup: { type: 'string', enum: ['as_written', 'light_cleanup', 'custom'], description: 'Standard only: how the words are prepared. Omit to use the saved one.' },
       remember: { type: 'boolean', description: 'Save this level (and cleanup) as the default so the user is not asked again.' },
       model: { type: 'string', description: 'A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; an OpenAI model is refused here, since OpenAI hosts this conversation.' },
+      use_documents: { type: 'boolean', description: 'Open the private panel prefilled with this question so Olympus can use the user\'s documents without returning their content or the answer to ChatGPT.' },
     },
     required: ['question'],
     additionalProperties: false,
@@ -497,8 +508,21 @@ async function runChatGptTool(
       case SOURCE_ANSWER_TOOL.name: {
         if (!answerToolsListed(ctx, options)) throw new ChatGptSurfaceError('unknown_tool');
         const question = typeof args.question === 'string' ? args.question.trim() : '';
-        if (!question) throw new ChatGptSurfaceError('invalid_params');
+        if (!question || question.length > PRIVATE_QUESTION_MAX_CHARS) throw new ChatGptSurfaceError('invalid_params');
         const detail = detailArgument(args.detail);
+        const analystProvider = args.analyst_provider;
+        const analystModel = typeof args.analyst_model === 'string' ? args.analyst_model.trim() : '';
+        if (args.analyst_model !== undefined && (!analystModel || analystProvider !== 'venice')) throw new ChatGptSurfaceError('invalid_params');
+        if (analystProvider !== undefined) {
+          if (analystProvider !== 'venice') throw new ChatGptSurfaceError('invalid_params');
+          const origin = { ...(ctx.caller?.connectionId ? { connectionId: ctx.caller.connectionId } : {}), readOnly: options.readOnly === true };
+          return openPrivateQuestionToolResult(options.privateQuestions ? await options.privateQuestions.begin(origin, {
+            question,
+            useDocuments: true,
+            provider: 'venice',
+            ...(analystModel ? { model: analystModel } : {}),
+          }) : undefined);
+        }
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const ticket = waitingTicket(ctx, options);
         const [raw, probed] = await Promise.all([
@@ -546,7 +570,7 @@ async function runChatGptTool(
       case ASK_ANONYMOUSLY_TOOL.name: {
         if (!askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
         const question = typeof args.question === 'string' ? args.question.trim() : '';
-        if (!question) throw new ChatGptSurfaceError('invalid_params');
+        if (!question || question.length > PRIVATE_QUESTION_MAX_CHARS) throw new ChatGptSurfaceError('invalid_params');
         const params: Record<string, unknown> = { question };
         for (const key of ['level', 'cleanup', 'model'] as const) {
           if (args[key] === undefined) continue;
@@ -556,6 +580,20 @@ async function runChatGptTool(
         if (args.remember !== undefined) {
           if (typeof args.remember !== 'boolean') throw new ChatGptSurfaceError('invalid_params');
           params.remember = args.remember;
+        }
+        if (args.use_documents !== undefined && typeof args.use_documents !== 'boolean') throw new ChatGptSurfaceError('invalid_params');
+        if (args.use_documents === true) {
+          if (params.level !== undefined && params.level !== 'strict' && params.level !== 'standard') throw new ChatGptSurfaceError('invalid_params');
+          if (params.cleanup !== undefined && params.cleanup !== 'as_written' && params.cleanup !== 'light_cleanup' && params.cleanup !== 'custom') throw new ChatGptSurfaceError('invalid_params');
+          const origin = { ...(ctx.caller?.connectionId ? { connectionId: ctx.caller.connectionId } : {}), readOnly: options.readOnly === true };
+          return openPrivateQuestionToolResult(options.privateQuestions ? await options.privateQuestions.begin(origin, {
+            question,
+            useDocuments: true,
+            ...(typeof params.model === 'string' && params.model ? { model: params.model } : {}),
+            ...(params.level === 'strict' || params.level === 'standard' ? { level: params.level } : {}),
+            ...(params.cleanup === 'as_written' || params.cleanup === 'light_cleanup' || params.cleanup === 'custom' ? { cleanup: params.cleanup } : {}),
+            ...(typeof params.remember === 'boolean' ? { remember: params.remember } : {}),
+          }) : undefined);
         }
         return askAnonymouslyToolResult(await runOperation(ASK_ANONYMOUSLY_TOOL.name, ctx, params));
       }

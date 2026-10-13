@@ -3836,6 +3836,7 @@ function sleep(ms: number): Promise<void> {
 /** The `/consult/ask` body: the question and the conversation's choices, shapes only. */
 export interface ConsultAskWireRequest {
   question: string;
+  use_documents?: boolean;
   level?: 'strict' | 'standard';
   cleanup?: 'as_written' | 'light_cleanup' | 'custom';
   remember?: boolean;
@@ -3858,10 +3859,12 @@ async function parseConsultAskRequest(request: Request): Promise<ConsultAskWireR
     throw new EmailSourceWorkerError(400, 'invalid_request', 'cleanup must be "as_written", "light_cleanup" or "custom".');
   }
   const remember = asOptionalBoolean(record.remember);
+  const useDocuments = asOptionalBoolean(record.use_documents);
   const model = asOptionalString(record.model);
   const caller = parseRequestCaller(record, request);
   return {
     question: record.question,
+    ...(useDocuments !== undefined ? { use_documents: useDocuments } : {}),
     ...(level !== undefined ? { level } : {}),
     ...(cleanup !== undefined ? { cleanup } : {}),
     ...(remember !== undefined ? { remember } : {}),

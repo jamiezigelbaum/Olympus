@@ -14,6 +14,7 @@
 // failure class they use for any other transport failure.
 
 import { assertNotZkapiDaemonEndpointResolved } from './zkapi-consult-settings.ts';
+import { assertDocumentDispatchCurrent } from './document-dispatch.ts';
 
 export type ModelTransportFetch = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -63,6 +64,7 @@ export async function fetchModelEndpoint(
   await assertNotZkapiDaemonEndpointResolved(url, 'Model endpoint');
   let response: Response;
   try {
+    assertDocumentDispatchCurrent();
     response = await fetchImpl(url, { ...init, redirect: 'error' });
   } catch (error) {
     if (isFetchRedirectRefusal(error)) throw new ModelEndpointRedirectError();

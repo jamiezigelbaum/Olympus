@@ -141,6 +141,7 @@ export const REMOTE_REFUSAL_CODES: readonly string[] = Object.freeze([
   'anonymous_answers_off', 'cancelled', 'gate_refused', 'internal_error', 'invalid_params', 'model_same_provider',
   'question_empty', 'question_too_long', 'route_not_configured', 'secret_detected', 'settings_invalid',
   'settings_stale', 'writer_declined', 'writer_failed',
+  'private_documents_pending', 'documents_changed', 'documents_busy', 'documents_unavailable',
   // core/consult-transport-zkapi.ts ZkapiConsultErrorCode
   'invalid_question', 'busy', 'acknowledgements_incomplete', 'funding_date_missing', 'funding_date_invalid',
   'note_expired', 'daemon_api_key_missing', 'daemon_not_found', 'tor_not_found', 'unresolved_session',
@@ -414,6 +415,10 @@ function anonymousAnswerOutput(raw: unknown): Record<string, unknown> {
   if (!record || typeof record.ok !== 'boolean') {
     throw new OperationError('email_error', 'unexpected anonymous answer shape');
   }
+  if (record.privateDocuments === true) return {
+    kind: 'anonymous_answer', status: 'refused', code: 'private_documents_pending',
+    message: 'Your document answer is private. Read it in Private answers on your computer.',
+  };
   if (record.ok) {
     if (typeof record.reply !== 'string') throw new OperationError('email_error', 'unexpected anonymous answer shape');
     const reply = scannedText(record.reply, MAX_ANSWER, 'multiline');

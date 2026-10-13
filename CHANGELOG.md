@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Private questions can use documents without returning Private content to
+  the agent.** This is built on the current branch for a later release; it is
+  not live in 1.0.0. ChatGPT opens an encrypted private panel for direct zkAPI
+  or Venice document questions. Other agents receive a fixed notice while a
+  zkAPI document answer appears only on the computer's Private answers page.
+  Olympus sends bounded document facts to the chosen provider, shows the exact
+  text sent and the answering model on the private surface, and retracts a
+  result when its source authorization no longer holds.
+
 ## 1.0.0 - 2026-10-13
 
 - **Olympus 1.0.** The first full release, for Mac and for Omarchy Linux.

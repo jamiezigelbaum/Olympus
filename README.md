@@ -63,8 +63,9 @@ computer without storing them. Google sign-in happens on your computer,
 directly with Google. For hard private
 questions you can reach stronger models: [Venice](https://venice.ai) runs
 private models that, under Venice's own terms, keep nothing you send, and
-zkAPI, from OpenAnonymity and the Ethereum Foundation, hides who is asking
-(see [Stronger models, privately](#stronger-models-privately)).
+zkAPI, from OpenAnonymity and the Ethereum Foundation, separates payment and
+can hide the verified network route with Tor. Facts in a request can still
+identify you (see [Stronger models, privately](#stronger-models-privately)).
 
 ```text
 you › "What did I commit to this week, across email and Telegram?"
@@ -285,8 +286,9 @@ yourself away. Both are off until you turn them on.
 - **[Venice](https://venice.ai)** runs private models that, under Venice's own
   terms, keep nothing you send. Add your Venice key under **Keys**, on your
   computer.
-- **zkAPI**, from OpenAnonymity and the Ethereum Foundation, hides who is
-  asking. It pays anonymously and sends the question over Tor (on unless you
+- **zkAPI**, from OpenAnonymity and the Ethereum Foundation, separates payment
+  and can hide the verified network route. It pays anonymously and sends the
+  question over Tor (on unless you
   turn it off; without Tor, your network address shows): no account, no card,
   no name, just proof the question is paid for. In **Strict** mode your
   computer first rewrites the question into general questions; **Standard**,
@@ -295,6 +297,17 @@ yourself away. Both are off until you turn them on.
   you. Turn on **Anonymous answers** on the
   dashboard's [Private answers](https://olympusplugin.ai/open/private/) page.
   Anonymous answers are on a Mac only, for now.
+
+Document questions are built on the current development branch for a later
+release and are not live in 1.0.0. In that mode Olympus retrieves locally,
+builds a bounded digest, and sends the document facts needed for the question
+to the chosen zkAPI or Venice model. ChatGPT receives only an opened-panel
+status; the question, progress, exact text sent, model and answer stay on the
+encrypted panel. For other agents, zkAPI document answers appear on the
+computer's Private answers page rather than in the agent result. The provider
+can read the facts Olympus sends; local preparation tries to omit identifiers
+and the chosen Strict or Standard gate checks the outgoing text, but synthetic
+tests do not prove that a local model will always generalize safely.
 
 ## Uninstall
 
@@ -650,20 +663,22 @@ supported Hermes configuration narrows that server to exactly `source_answer`,
 `source_answer_result`, `source_index_status` and `ask_anonymously` through its
 per-server tool allowlist.
 
-`ask_anonymously` sends one typed question to a frontier model through zkAPI
+`ask_anonymously` normally sends one typed question to a frontier model through zkAPI
 (paid per question, anonymously, from the user's own balance; what the
 question says can still identify them). The
 first call with no `level` returns `needs_choice`: the agent asks the user once
 for Strict (their own model rewrites the question into general questions before
 it leaves) or Standard (their words, prepared as written, lightly cleaned up or
 by their saved instruction), then calls again with `level` and `remember: true`.
-Only the question goes out, never documents, and never to the provider that
-hosts the agent asking: a question from ChatGPT goes to Claude Sonnet by
-default, one from Claude Code or Claude Desktop to an OpenAI model, and a
-one-off `model` from the agent's own provider is refused. Setup (the zkAPI
-route, the writer model, the zkAPI models for questions from ChatGPT and from
-Claude, the spend limit) lives on the dashboard's Anonymous answers card, which
-is for setup only: questions are asked through an agent (or `olympus ask`); see
+In normal mode only the question goes out. The branch-only `use_documents`
+mode instead sends a bounded, locally prepared digest of relevant document
+facts and returns the result only through a private panel or the computer's
+Private answers page. The private result includes the exact text sent and the
+model that answered. Olympus refuses a model from the provider that hosts the
+asking agent when it can identify that provider. Setup (the zkAPI route, the
+writer model, the zkAPI models for questions from ChatGPT and Claude, the spend
+limit) lives on the dashboard's Anonymous answers card, which is for setup
+only: questions are asked through an agent (or `olympus ask`); see
 [`docs/design/private-answers.md`](docs/design/private-answers.md).
 
 MCP clients cap how long one tool call may run, and an answer can take several
