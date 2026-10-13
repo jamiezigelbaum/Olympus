@@ -211,7 +211,7 @@ describe('the pins', () => {
   test('every pinned download is https from the upstream release, with a 64-hex SHA-256 and a size', () => {
     for (const pin of Object.values(MANAGED_TOOL_PINS)) {
       for (const asset of Object.values(pin.assets)) {
-        expect(asset!.url.startsWith('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/') || asset!.url.startsWith('https://dist.torproject.org/torbrowser/15.0.24/')).toBe(true);
+        expect(asset!.url.startsWith('https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus2/') || asset!.url.startsWith('https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24/')).toBe(true);
         expect(asset!.sha256).toMatch(/^[0-9a-f]{64}$/);
         expect(asset!.bytes).toBeGreaterThan(1_000_000);
       }

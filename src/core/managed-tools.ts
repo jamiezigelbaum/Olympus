@@ -122,7 +122,8 @@ function zkapiAsset(url: string, sha256: string, bytes: number): ManagedToolAsse
   return { url, sha256, bytes, executable: 'bin/zkapi-clientd', required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
 }
 
-const TOR_RELEASE = 'https://dist.torproject.org/torbrowser/15.0.24';
+// Tor's permanent archive: dist.torproject.org drops a release once a newer one ships.
+const TOR_RELEASE = 'https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24';
 
 function torMacAsset(name: string, sha256: string, bytes: number, adhocSign?: readonly string[]): ManagedToolAsset {
   return { url: `${TOR_RELEASE}/${name}`, sha256, bytes, executable: 'tor/tor', required: ['tor/tor', 'tor/libevent-2.1.7.dylib'], ...(adhocSign ? { adhocSign } : {}) };

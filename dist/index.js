@@ -18971,7 +18971,7 @@ var ZKAPI_RENAME = { "zkapi-clientd": "bin/zkapi-clientd", "zkapi-walletd": "bin
 function zkapiAsset(url, sha256, bytes) {
   return { url, sha256, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
 }
-var TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24";
+var TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24";
 function torMacAsset(name, sha256, bytes, adhocSign) {
   return { url: `${TOR_RELEASE}/${name}`, sha256, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"], ...adhocSign ? { adhocSign } : {} };
 }
