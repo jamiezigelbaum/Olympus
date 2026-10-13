@@ -1,3 +1,4 @@
+import { linuxDesktopEntryPaths } from './linux-desktop-entry.ts';
 /** One Linux layout shared by installers, services and consumers. No OpenClaw dependency. */
 import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -98,7 +99,7 @@ export function readLinuxEngineReceipt(path: string, uid = process.getuid!()): L
   }
   if(receipt.mimeOwnership&&(receipt.mimeOwnership.path!==l.mimeappsPath||receipt.mimeOwnership.scheme!=='x-scheme-handler/olympus'||receipt.mimeOwnership.desktopId!=='ai.olympusplugin.open.desktop'))throw new Error(`${path} has invalid MIME ownership.`);
   if(receipt.openHandlerPending!==undefined&&typeof receipt.openHandlerPending!=='boolean')throw new Error(`${path} has invalid open-handler transaction state.`);
-  const fileArtifacts=new Set([l.unitPath,l.launcherPath,l.openHandlerPath,join(l.stateDir,'service-current.json'),join(l.stateDir,'service-previous.json'),join(l.stateDir,'install-transaction.json')]);
+  const fileArtifacts=new Set([...Object.values(linuxDesktopEntryPaths(l)),l.unitPath,l.launcherPath,l.openHandlerPath,join(l.stateDir,'service-current.json'),join(l.stateDir,'service-previous.json'),join(l.stateDir,'install-transaction.json')]);
   const unitLinks=new Set(receipt.ownedUnitLinks);
   const artifactPaths=new Set<string>();
   for(const artifact of receipt.machineArtifacts){

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, symlinkSync, mkdirSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
 import type { EngineLifecycleCheckpoint } from '../src/core/engine-service.ts';
@@ -26,6 +26,8 @@ for(const checkpoint of checkpoints)test.skipIf(process.platform!=='linux')(`ins
   expect({checkpoint,state:receipt.installationState,lingerPredated:receipt.lingerPredated,journal:existsSync(join(layout.stateDir,'install-transaction.json'))}).toEqual({checkpoint,state:'installed',lingerPredated:false,journal:false});
   const generations=readdirSync(join(layout.packageDir,'generations'));expect({checkpoint,generations:generations.length}).toEqual({checkpoint,generations:1});
   const generation=join(layout.packageDir,'generations',generations[0]!);expect(readFileSync(layout.unitPath,'utf8')).toContain(generation);expect(readFileSync(layout.launcherPath,'utf8')).toContain(generation);
+  expect(readFileSync(join(layout.dataHome,'applications/ai.olympusplugin.Olympus.desktop'),'utf8')).toContain(`Exec="${layout.launcherPath}" dashboard`);
+  expect(readFileSync(join(layout.dataHome,'icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png'))).toEqual(readFileSync(join(root,'source-1.0.0/assets/icon.png')));
   expect(readdirSync(layout.stateDir).filter(name=>name.startsWith('.install-backup-')||name.startsWith('.prepare-'))).toEqual([]);
 },20_000);
 
@@ -38,5 +40,37 @@ for(const checkpoint of rollbackCheckpoints)test.skipIf(process.platform!=='linu
   const env={HOME:join(root,'home'),XDG_CONFIG_HOME:join(root,'config'),XDG_DATA_HOME:join(root,'data'),XDG_STATE_HOME:join(root,'state'),XDG_CACHE_HOME:join(root,'cache'),XDG_RUNTIME_DIR:join(root,'run')};
   const layout=resolveLinuxEngineLayout(env),current=JSON.parse(readFileSync(join(layout.stateDir,'service-current.json'),'utf8')),unit=readFileSync(layout.unitPath,'utf8'),launcher=readFileSync(layout.launcherPath,'utf8');
   const committed=['qualified_published','backup_removed','journal_removed'].includes(checkpoint),expected=committed?'1.0.0+':'2.0.0+';
+  expect(readFileSync(join(layout.dataHome,'applications/ai.olympusplugin.Olympus.desktop'),'utf8')).toContain(`Exec="${layout.launcherPath}" dashboard`);
+  expect(readFileSync(join(layout.dataHome,'icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png'))).toEqual(readFileSync(join(root,`source-${committed?'1.0.0':'2.0.0'}/assets/icon.png`)));
   expect({checkpoint,build:current.program.build.startsWith(expected),unit:unit.includes(current.program.workingDirectory),launcher:launcher.includes(current.program.workingDirectory),journal:existsSync(join(layout.stateDir,'install-transaction.json'))}).toEqual({checkpoint,build:true,unit:true,launcher:true,journal:false});
 },30_000);
+
+for(const checkpoint of ['launcher_published','qualified_published'] as const) for(const replacement of ['desktop','icon','symlink'] as const)
+test.skipIf(process.platform!=='linux')(`desktop recovery retains user ${replacement} after ${checkpoint}`,()=>{
+ const root=mkdtempSync(join(tmpdir(),'linux-desktop-recovery-'));roots.push(root);
+ expect(run(root,'install',checkpoint).signal).toBe('SIGKILL');
+ const desktop=join(root,'data/applications/ai.olympusplugin.Olympus.desktop');
+ const icon=join(root,'data/icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png');
+ const target=replacement==='icon'?icon:desktop;
+ if(replacement==='symlink'){rmSync(target);const other=join(root,'personal');writeFileSync(other,'personal');symlinkSync(other,target);}
+ else writeFileSync(target,'personal');
+ const recovered=run(root,'recover');
+ expect(recovered.status).not.toBe(0);expect(readFileSync(target,'utf8')).toBe('personal');
+ expect(existsSync(join(root,'state/olympus/engine/install-transaction.json'))).toBe(true);
+});
+
+test.skipIf(process.platform!=='linux')('legacy recovery leaves unrelated desktop files alone',()=>{
+ const root=mkdtempSync(join(tmpdir(),'linux-legacy-desktop-'));roots.push(root);
+ expect(run(root,'install','journal_published').signal).toBe('SIGKILL');
+ const desktop=join(root,'data/applications/ai.olympusplugin.Olympus.desktop');
+ const icon=join(root,'data/icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png');
+ const journalPath=join(root,'state/olympus/engine/install-transaction.json');
+ const journal=JSON.parse(readFileSync(journalPath,'utf8'));
+ for(const path of [desktop,icon]){delete journal.before.files[path];mkdirSync(dirname(path),{recursive:true,mode:0o700});writeFileSync(path,'personal');}
+ const oldBackup=join(journal.backupDir,'file-5.backup');renameSync(journal.before.receipt.backupPath,oldBackup);journal.before.receipt.backupPath=oldBackup;
+ writeFileSync(journalPath,JSON.stringify(journal));
+ const recovered=run(root,'recover');expect({status:recovered.status,stderr:recovered.stderr}).toEqual({status:0,stderr:''});
+ for(const path of [desktop,icon])expect(readFileSync(path,'utf8')).toBe('personal');
+ const receipt=JSON.parse(readFileSync(join(root,'config/olympus/install-receipt.json'),'utf8'));
+ expect(receipt.machineArtifacts.some((item:any)=>[desktop,icon].includes(item.path))).toBe(false);
+});

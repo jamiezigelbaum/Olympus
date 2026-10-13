@@ -52,7 +52,7 @@ test('copytruncate retains inode and bounded private backups; open append descri
  expect(statSync(log).ino).toBe(inode); expect(readFileSync(log,'utf8')).toBe('after'); expect(readFileSync(log+'.1','utf8')).toBe('0123456789'); expect(statSync(log+'.1').mode & 0o777).toBe(0o600);
 });
 
-import { engineServicePaths, engineDataCustody, installEngine, waitForEngineHealthy, startEngine, stopEngine, restartEngine, uninstallEngine, rollbackEngine } from '../src/core/engine-service.ts';
+import { engineServicePaths, engineDataCustody, verifyEngine, installEngine, waitForEngineHealthy, startEngine, stopEngine, restartEngine, uninstallEngine, rollbackEngine } from '../src/core/engine-service.ts';
 import { publishLinuxEngineReceipt, linuxEngineEnvironment } from '../src/core/linux-engine-layout.ts';
 function installed() {
  const l=layout(); publishLinuxEngineReceipt(l); mkdirSync(l.stateDir,{recursive:true,mode:0o700}); mkdirSync(join(l.configHome,'systemd/user'),{recursive:true,mode:0o700}); writeFileSync(l.unitPath,'unit',{mode:0o600});
@@ -113,7 +113,7 @@ test.skipIf(process.platform!=='linux')('kernel lifecycle lock reuses only an in
  expect(closed.status).not.toBe(0);expect(closed.stdout).not.toContain('held');
  expect(withLinuxEngineLifecycleLock(l,()=>statSync(l.lifecycleLockPath).mode&0o777)).toBe(0o600);
 });
-function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1',linuxStateCompatibility:1}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);return dir;}
+function packageAt(root:string,name:string,capable=true){const dir=join(root,name);mkdirSync(join(dir,'dist'),{recursive:true,mode:0o700});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'olympus',version:name,olympus:capable?{linuxApprovalTransport:'owner-unix-socket-v1',linuxStateCompatibility:1}:{}}));writeFileSync(join(dir,'dist/cli.js'),`// ${name}`);mkdirSync(join(dir,'assets'));copyFileSync(join(import.meta.dir,'../assets/icon.png'),join(dir,'assets/icon.png'));return dir;}
 function runtimeAt(root:string){const dir=join(root,`fixture-runtime-${Math.random().toString(16).slice(2)}`),runtime=join(dir,'bun');mkdirSync(dir,{mode:0o700});copyFileSync(realpathSync(process.execPath),runtime);chmodSync(runtime,0o700);return runtime;}
 test('install refuses an unintegrated approval package before enabling linger or writing config',()=>{
  const l=layout(),checkout=packageAt(l.home,'v1',false);const calls:string[][]=[];
@@ -142,11 +142,14 @@ test('install copies scratch inputs into a durable generation, receipts the laun
  const runtime=runtimeAt(l.home);
  const options={platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:checkout,bunBin:runtime,consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true};
  const installedResult=installEngine(options);
+ const desktop=join(l.dataHome,'applications/ai.olympusplugin.Olympus.desktop'),icon=join(l.dataHome,'icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png');
+ expect(readFileSync(desktop,'utf8')).toContain(`Exec="${l.launcherPath}" dashboard`);expect(readFileSync(icon)).toEqual(readFileSync(join(checkout,'assets/icon.png')));
  expect(installedResult.program.workingDirectory).toStartWith(join(l.packageDir,'generations/'));expect(installedResult.program.workingDirectory).not.toBe(checkout);
  expect(readFileSync(l.launcherPath,'utf8')).toContain(`export XDG_CONFIG_HOME='${l.configHome}'`);
  const journalPath=join(l.stateDir,'install-transaction.json'),journal=readFileSync(journalPath,'utf8'),transaction=JSON.parse(journal);expect(journal).not.toContain('OLYMPUS_WORKER_AUTH_TOKEN');expect(transaction.backupDir).toContain('.install-backup-');expect(Object.values(transaction.before.files).every((snapshot:any)=>snapshot.present===false&&!('backupPath' in snapshot))).toBe(true);
  await settleLinuxEngineInstall(options,{ok:true,expected_build:installedResult.program.build??null,running_build:installedResult.program.build??null,pid:42,worker:'ok',waited_ms:0});
  expect(existsSync(join(l.stateDir,'install-transaction.json'))).toBe(false);
+ expect((await verifyEngine({...options,expectedBuild:'other'})).desktop_entry).toEqual({present:true,path:desktop});
  const receipt=JSON.parse(readFileSync(l.receiptPath,'utf8'));const generation=receipt.machineArtifacts.find((entry:any)=>entry.kind==='tree');
  expect(generation).toMatchObject({path:dirname(installedResult.program.workingDirectory),markerPath:join(dirname(installedResult.program.workingDirectory),'.olympus-generation.json')});
  expect(Number.isSafeInteger(generation.rootInode)).toBe(true);expect(receipt.machineArtifacts.some((entry:any)=>entry.path===l.launcherPath)).toBe(true);
@@ -158,6 +161,7 @@ test('install copies scratch inputs into a durable generation, receipts the laun
  const upgraded=installEngine({...options,fromCheckout:packageAt(l.home,'v2')}),interrupted=JSON.parse(readFileSync(journalPath,'utf8'));expect(interrupted.generationCreated).toBe(true);
  rmSync(interrupted.generationPath,{recursive:true});writeFileSync(journalPath,JSON.stringify({...interrupted,phase:'rollback_required',before:{...interrupted.before,active:false}}),{mode:0o600});
  expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(true);expect(upgraded.program.build).not.toBe(installedResult.program.build);
+ expect(readFileSync(desktop,'utf8')).toContain(`Exec="${l.launcherPath}" dashboard`);expect(readFileSync(icon)).toEqual(readFileSync(join(checkout,'assets/icon.png')));
 },20_000); // Copies and hashes the real Bun binary twice, including on emulated runners.
 test('rollback uses the recorded matching runtime and restores the old unit/config after failed health',async()=>{
  const {l,options,calls}=installed();

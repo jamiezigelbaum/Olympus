@@ -36,6 +36,39 @@ design-only work order is complete; the owner subsequently authorized the
 five-track integration and a local acceptance artifact. Publication and live
 installation remain separate work.
 
+## Desktop launcher (local branch, 2026-10-13)
+
+Install and upgrade register **Olympus** in the user's XDG applications
+folder. The entry runs the absolute `~/.local/bin/olympus` shim with
+`dashboard`; the shim preserves the installation's XDG layout. The icon is
+`assets/icon.png` (512×512), installed in the user hicolor theme. Both files
+are included in install recovery and receipt-based removal. No desktop or
+icon files are written to system directories. Optional desktop/icon cache
+refresh tools are best effort.
+
+Olympus replaces an existing desktop entry only when its Desktop Entry group
+has `X-Olympus-Managed=true`. Remove that key to take ownership; installation
+then refuses and leaves the file in place. A changed icon is also retained.
+The shell uninstaller retains changed artifacts and reports incomplete removal;
+move those files aside before retrying. Unchanged owned files are removed in
+both keep-data and purge modes. `engine verify` reports `desktop_entry.present`
+and its path separately from engine health.
+
+The dashboard still uses the default browser through the existing private
+owner-ticket opener. A Chromium `--app=file://…` launch could carry only the
+filename, but retaining the app window through the redirect to the per-session
+localhost origin has not been browser-qualified. No browser command selection,
+owner proof, origin check, or secret handling changes in this slice.
+
+Omarchy acceptance remains a real-laptop check: install, press Super+Space,
+find Olympus with its icon, and open it. Compare with `olympus dashboard`;
+confirm the owner dashboard loads and no secret appears in process arguments.
+Repeat after upgrade and rollback. Check `engine verify`, then confirm the
+entry/icon disappear after keep-data uninstall; use a disposable install for
+purge. A custom XDG data directory and an unmarked user-edited entry should
+also be checked. Container tests do not establish launcher discovery or browser
+behavior on Hyprland.
+
 ## Current contract, verified against code
 
 | Surface | Current behavior and evidence |

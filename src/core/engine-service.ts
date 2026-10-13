@@ -1,3 +1,4 @@
+import { linuxDesktopEntryStatus } from './linux-desktop-entry.ts';
 import { withEngineMaintenanceFence, withEngineMaintenanceFenceSync, type EngineMaintenanceFence } from './engine-maintenance.ts';
 import { installLinuxEngine, inspectSystemdEngine, linuxEngineCustody, linuxLayoutFor, linuxInstalledBuild, recoverInterruptedLinuxEngineInstall, settleLinuxEngineInstall, startLinuxEngine, stopLinuxEngine, restartLinuxEngine, uninstallLinuxEngine, rollbackLinuxEngine, systemdPidInCgroup, withLinuxEngineLifecycleLockAsync } from './linux-engine-service.ts';
 import { processInstanceIdentity } from './file-lease.ts';
@@ -788,26 +789,28 @@ export function installedEngineBuild(plistPath: string): string | null {
  */
 export async function verifyEngine(
   options: EngineServiceOptions & { health?: EngineHealthDeps; expectedBuild?: string; expectPackage?: string } = {},
-): Promise<{ ok: boolean; expected_build: string; installed_build: string | null; health?: EngineHealthProof; reason?: string }> {
+): Promise<{ ok: boolean; expected_build: string; installed_build: string | null; health?: EngineHealthProof; reason?: string; desktop_entry?: { present: boolean; path: string } }> {
   if (normalizedPlatform(options.platform) !== 'linux') assertDarwin(options.platform);
   const paths = engineServicePaths(options);
   if (!existsSync(paths.plistPath)) {
     throw new OperationError('config_error', 'The engine is not installed.', 'Run olympus engine install.');
   }
   const expectedBuild = expectedEngineBuild(options);
+  const desktop = paths.linux ? {desktop_entry: linuxDesktopEntryStatus(paths.linux)} : {};
   const installedBuild = paths.linux ? linuxInstalledBuild(options) : installedEngineBuild(paths.plistPath);
   if (installedBuild !== expectedBuild) {
     return {
       ok: false,
       expected_build: expectedBuild,
       installed_build: installedBuild,
+      ...desktop,
       reason: `The installed engine agent runs build ${installedBuild ?? 'unknown'}, not ${expectedBuild}: run olympus engine install --restart.`,
     };
   }
   const health = await waitForEngineHealthy({ paths, expectedBuild }, { ...options.health, exec: options.exec ?? options.health?.exec });
   return health.ok
-    ? { ok: true, expected_build: expectedBuild, installed_build: installedBuild, health }
-    : { ok: false, expected_build: expectedBuild, installed_build: installedBuild, health, reason: `The engine is not healthy: ${health.reason}.` };
+    ? { ok: true, expected_build: expectedBuild, installed_build: installedBuild, ...desktop, health }
+    : { ok: false, expected_build: expectedBuild, installed_build: installedBuild, ...desktop, health, reason: `The engine is not healthy: ${health.reason}.` };
 }
 
 function expectedEngineBuild(options: { expectedBuild?: string; expectPackage?: string }): string {

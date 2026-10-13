@@ -56,7 +56,7 @@ exec /bin/sh "$@"
   mkdirSync(zipStage, { recursive: true });
   executable(join(zipStage, 'bun'), bunProgram);
   const zip = join(root, 'bun.zip');
-  expect(spawnSync('zip', ['-qr', zip, 'bun-linux-x64-baseline'], { cwd: dirname(zipStage) }).status).toBe(0);
+  expect(spawnSync('python3', ['-m', 'zipfile', '-c', zip, 'bun-linux-x64-baseline'], { cwd: dirname(zipStage) }).status).toBe(0);
   const packageDir = join(root, 'release', 'package');
   mkdirSync(join(packageDir, 'dist'), { recursive: true });
   writeFileSync(join(packageDir, 'package.json'), JSON.stringify({ name: 'olympus', version: '1.0.0-rc.7' }));
@@ -700,7 +700,10 @@ test('killing the uninstall shell cannot release flock while Python mutation con
   }
 }, 30_000);
 
-test('Linux installers parse and pass ShellCheck', () => {
+test('Linux installers parse', () => {
+ for(const p of ['scripts/install-linux.sh','site/uninstall-linux.sh']) for(const shell of shells) expect(spawnSync(shell,['-n',join(REPO,p)]).status).toBe(0);
+});
+test.skipIf(spawnSync('shellcheck',['--version']).status !== 0)('Linux installers pass ShellCheck', () => {
   for (const p of ['scripts/install-linux.sh', 'site/uninstall-linux.sh']) {
     for (const shell of shells) expect(spawnSync(shell, ['-n', join(REPO, p)]).status).toBe(0);
     const sources = [text(join(REPO, p))];
@@ -710,4 +713,17 @@ test('Linux installers parse and pass ShellCheck', () => {
       expect({ status: r.status, output: r.stdout + r.stderr }).toEqual({ status: 0, output: '' });
     }
   }
+});
+
+for (const purge of [false, true]) test(`desktop launcher removal in ${purge ? 'purge' : 'keep-data'} mode`, () => {
+ const h=fixture(),r=h.receipt(),receipt=JSON.parse(text(r.path));
+ const desktop=join(receipt.layout.dataHome,'applications/ai.olympusplugin.Olympus.desktop');
+ const icon=join(receipt.layout.dataHome,'icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png');
+ for(const [path,contents] of [[desktop,'[Desktop Entry]\nX-Olympus-Managed=true\n'],[icon,'icon bytes']]){
+  mkdirSync(dirname(path!),{recursive:true,mode:0o700});writeFileSync(path!,contents!);receipt.machineArtifacts.push({path,kind:'file',sha256:sha(contents!)});
+ }
+ writeFileSync(r.path,JSON.stringify(receipt));
+ const result=h.uninstall({},purge?['--purge','--yes']:[]);
+ expect({status:result.status,stderr:result.stderr}).toEqual({status:0,stderr:''});
+ expect(existsSync(desktop)).toBe(false);expect(existsSync(icon)).toBe(false);
 });

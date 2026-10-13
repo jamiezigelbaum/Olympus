@@ -285,6 +285,8 @@ if purge:
         fail("file secrets exist without a durable backend selection; receipt retained.")
     if backend == "libsecret":
         fail("full purge cannot prove ownership or deletion of Secret Service items without the installed app. Inspect and delete Olympus items individually in Secret Service (never delete the whole keyring), then remove secret-backend.json and rerun --purge --yes; receipt retained.")
+desktop_entry = os.path.join(layout["dataHome"], "applications", "ai.olympusplugin.Olympus.desktop")
+desktop_icon = os.path.join(layout["dataHome"], "icons", "hicolor", "512x512", "apps", "ai.olympusplugin.Olympus.png")
 state_names = {"service-current.json", "service-previous.json", "install-transaction.json"}
 normalized, seen = [], set()
 for artifact in artifacts:
@@ -301,6 +303,7 @@ for artifact in artifacts:
     allowed = path == layout["unitPath"] or (kind == "tree" and path == layout["packageDir"])
     allowed = allowed or (path == layout["launcherPath"] and kind == "file")
     allowed = allowed or (path == layout["openHandlerPath"] and kind == "file")
+    allowed = allowed or (path in {desktop_entry, desktop_icon} and kind == "file")
     allowed = allowed or (os.path.dirname(path) == layout["stateDir"] and os.path.basename(path) in state_names and kind == "file")
     manager_dirs = [os.path.join(layout["configHome"], "systemd", "user"), os.path.join(layout["home"], ".config", "systemd", "user")]
     allowed = allowed or (kind == "symlink" and path in owned_links and os.path.basename(path) == "olympus-engine.service" and any(beneath(path, root) for root in manager_dirs))
@@ -324,6 +327,11 @@ for path, kind, expected, artifact in normalized:
     else:
         observed = artifact_digest(path, kind)
         if observed is not None and observed != expected: fail(f"replaced machinery was retained: {path}")
+        if path == desktop_entry and observed is not None:
+            with open(path, encoding="utf-8") as handle: desktop_text = handle.read()
+            groups = desktop_text.split("\n[")
+            entries = [group for group in groups if group.lstrip("[").startswith("Desktop Entry]")]
+            if len(entries) != 1 or [line for line in entries[0].splitlines() if line.startswith("X-Olympus-Managed=")] != ["X-Olympus-Managed=true"]: fail(f"your own launcher was retained: {path}")
 
 def run(args): return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=35)
 before = run(["systemctl","--user","show","olympus-engine.service","--property=LoadState","--property=ActiveState","--property=SubState","--property=UnitFileState","--property=MainPID","--property=ControlGroup","--property=FragmentPath"])
@@ -416,6 +424,12 @@ def remove_artifact(path, kind, expected, artifact):
         shutil.rmtree(tombstone) if kind == "tree" else os.unlink(tombstone); fsync_dir(parent)
     os.unlink(journal); fsync_dir(parent)
 for artifact in sorted(normalized, key=lambda item: item[0].count(os.sep), reverse=True): remove_artifact(*artifact)
+if any(path in {desktop_entry, desktop_icon} for path, _, _, _ in normalized):
+    for command, args in [("update-desktop-database", [os.path.dirname(desktop_entry)]), ("gtk-update-icon-cache", ["--force", "--ignore-theme-index", os.path.join(layout["dataHome"], "icons", "hicolor")])]:
+        executable = shutil.which(command)
+        if executable:
+            try: subprocess.run([executable, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            except (OSError, subprocess.TimeoutExpired): pass
 if mime_ownership is not None and os.path.lexists(layout["mimeappsPath"]):
     mime_path = layout["mimeappsPath"]
     check_ancestry(mime_path, leaf_owner=True)
