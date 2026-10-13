@@ -34,7 +34,7 @@ import {
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
-import { secretsDisposition } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -67,6 +67,9 @@ export function applyOwnerOverrides(options: {
   } catch {
     // An override does not depend on the owner's map or rules.
   }
+  // Secrets whose side stores could not be cleared before: every tick tries
+  // again, listed or not.
+  retrySecretSideStoreDebts(ledger);
   const overrides = ledger.listRoutedOverrides();
   options.afterRead?.();
   for (const { record, override } of overrides) {
@@ -121,8 +124,15 @@ function applyOne(
       if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] }, { guard })) report.secrets += 1;
       return;
     }
-    // No stored copy to read the location from: hidden all the same.
-    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === 'secrets') report.secrets += 1;
+    // No stored copy to read the location from: hidden all the same, and
+    // forgotten by the side stores.
+    if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === 'secrets') {
+      forgetSecretInSideStores({ ledger, identity });
+      // Nothing stored is left to tombstone (an earlier settlement got that
+      // far): under tombstone_now its copy rows go too.
+      if (secretsDisposition() === 'tombstone_now') ledger.removeCopies(identity);
+      report.secrets += 1;
+    }
     return;
   }
   const placement = set.placementFor(decision);

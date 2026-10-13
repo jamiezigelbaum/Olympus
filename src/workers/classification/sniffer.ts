@@ -461,7 +461,7 @@ export class CachedTierSniffer implements TierSniffer {
         return { verdict: 'decided', tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
       }
       if (request.subject) {
-        this.store.enqueue({
+        const queued = this.store.enqueue({
           subject: request.subject,
           pass: request.pass,
           material,
@@ -469,8 +469,10 @@ export class CachedTierSniffer implements TierSniffer {
           mapRevision,
           flags: request.flags,
           ...(request.priority !== undefined ? { priority: request.priority } : {}),
+          ...(request.stillAsk ? { stillAsk: request.stillAsk } : {}),
         });
-        return { verdict: 'undecided', queued: true };
+        // Refused by `stillAsk` (the item became Secrets meanwhile): not queued.
+        return queued ? { verdict: 'undecided', queued: true } : { verdict: 'undecided' };
       }
     } catch {
       // Fail safe: an unreadable cache or queue leaves the item pending.

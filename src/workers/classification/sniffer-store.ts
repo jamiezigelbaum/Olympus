@@ -150,7 +150,10 @@ export class TierSnifferStore {
   /**
    * Queue (or refresh) the question for one item and pass. A changed material
    * replaces the old one and resets the attempt count; an identical one keeps
-   * its place and attempts.
+   * its place and attempts. `stillAsk` is checked under this write's lock: the
+   * Secrets disposition deletes an item's questions only after the item is
+   * Secrets in the ledger, so a check that still finds it askable here runs
+   * before that deletion, and a later one finds it Secrets and queues nothing.
    */
   enqueue(question: {
     subject: TierSnifferSubject;
@@ -161,9 +164,12 @@ export class TierSnifferStore {
     mapRevision: string;
     flags: readonly string[];
     priority?: number;
-  }): void {
+    stillAsk?: () => boolean;
+  }): boolean {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
-    this.db.query(`
+    return this.db.transaction(() => {
+      if (question.stillAsk && !question.stillAsk()) return false;
+      this.db.query(`
       INSERT INTO sniffer_questions (
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
@@ -186,6 +192,8 @@ export class TierSnifferStore {
       this.now().toISOString(),
       Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority!))) : 0,
     );
+      return true;
+    }).immediate();
   }
 
   questionFor(subject: TierSnifferSubject, pass: SnifferPass): SnifferQuestion | undefined {
@@ -284,6 +292,18 @@ export class TierSnifferStore {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
         AND (? IS NULL OR material_hash = ?)
     `).run(...subjectParams(subject), pass, materialHash ?? null, materialHash ?? null).changes > 0;
+  }
+
+  /**
+   * Drop every queued question for one item, both passes, with the material
+   * they hold. An item that becomes Secrets is never asked about again, and
+   * its names or excerpt do not wait here for the resolver's next pass.
+   */
+  deleteItemQuestions(subject: TierSnifferSubject): number {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...subjectParams(subject)).changes;
   }
 
   /**

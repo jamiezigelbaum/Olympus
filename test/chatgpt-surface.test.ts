@@ -490,7 +490,7 @@ describe('dashboard view-model producer', () => {
   test('a failed built-in install says why in install words and retries with olympus_model_retry', () => {
     const cases = [
       ['disk_full', 'the disk is full. Free up some space, then Try again.'],
-      ['network', 'the download stopped before it finished.'],
+      ['network', 'the network dropped.'],
       ['checksum', 'the download was damaged.'],
     ] as const;
     for (const [reason, why] of cases) {

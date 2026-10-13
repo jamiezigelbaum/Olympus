@@ -1351,13 +1351,13 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
   modelInstallFailed: {
     embedding: {
       disk_full: 'Couldn\'t download the search model: the disk is full.',
-      network: 'Couldn\'t download the search model: the download stopped before it finished.',
+      network: 'Couldn\'t download the search model: the network dropped.',
       checksum: 'Couldn\'t download the search model: the download was damaged.',
       unknown: 'Couldn\'t download the search model.',
     },
     answers: {
       disk_full: 'Couldn\'t download the private model: the disk is full.',
-      network: 'Couldn\'t download the private model: the download stopped before it finished.',
+      network: 'Couldn\'t download the private model: the network dropped.',
       checksum: 'Couldn\'t download the private model: the download was damaged.',
       unknown: 'Couldn\'t download the private model.',
     },
