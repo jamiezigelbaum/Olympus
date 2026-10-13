@@ -85,12 +85,12 @@ export function hasSecretPatternHit(text: string, spec: SharedSecretPattern): bo
  * here: "the horse rides at midnight" is a perfectly good passphrase.
  */
 const PROSE_WORDS = new Set([
-  'above', 'below', 'cannot', 'change', 'changed', 'characters', 'choose', 'click', 'contact', 'enter',
+  'above', 'again', 'below', 'cannot', 'change', 'changed', 'characters', 'choose', 'click', 'contact', 'enter',
   'expired', 'expires', 'forgot', 'forgotten', 'guideline', 'guidelines', 'hidden', 'incorrect',
   'information', 'instruction', 'instructions', 'invalid', 'least', 'letters', 'link', 'manager',
   'maximum', 'min', 'minimum', 'must', 'need', 'needed', 'needs', 'number', 'numbers', 'optional',
   'please', 'policies', 'policy', 'protected', 'provide', 'provided', 'required', 'requirements',
-  'reset', 'see', 'send', 'sent', 'setting', 'settings', 'shared', 'should', 'shown', 'sign',
+  'reset', 'retry', 'see', 'send', 'sent', 'setting', 'settings', 'shared', 'should', 'shown', 'sign',
   'strength', 'symbols', 'unchanged', 'use', 'used', 'using', 'via',
 ]);
 
@@ -103,7 +103,7 @@ const PLACEHOLDER_WORDS = new RegExp(
     String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
     String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
     'placeholder', 'redacted', 'changeme', 'change[_-]me', 'replace[_-]?me', 'insert[_-]?(?:your|here|key|token)',
-    '[_-]here$', '^n/a$', 'not[_-]?set', '^unset$',
+    '[_-]here$', '^n/a$', 'not[_ -]?set', '^unset$',
   ].join('|'),
   'i',
 );
@@ -309,7 +309,9 @@ function assignmentAccepted(match: RegExpMatchArray): boolean {
 
   // Quoted values with spaces are the only spaced values this pattern sees.
   if (/\s/.test(value)) return isSecret && isPlausiblePassphrase(value, 6);
-  if (quoted && isSecret) return value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase());
+  // "Password: forgotten?", "Password: Reset!": an instruction word, not a password.
+  if (PROSE_WORDS.has(stripNonAlphanumeric(value))) return false;
+  if (quoted && isSecret) return value.length >= 6;
   if (isIdentifierHandOff(match, assigned)) return false;
 
   // Bare "secret" and "token" are ordinary words; a named key (`GITHUB_TOKEN`,
@@ -337,7 +339,6 @@ function assignmentAccepted(match: RegExpMatchArray): boolean {
   return isPassword
     && !groups.nl
     && value.length >= 6
-    && !PROSE_WORDS.has(value.toLowerCase())
     && endsTheLine(match);
 }
 
@@ -369,22 +370,60 @@ function envAssignmentAccepted(match: RegExpMatchArray): boolean {
   const rest = value.startsWith('<') || value.startsWith('(') ? restOfLine(match) : '';
   if (isPlaceholderValue(value, quoted ? '' : rest) || isNotLiteralCredential(value)) return false;
   if (/\s/.test(value) && !isPlausiblePassphrase(value, 6)) return false;
+  if (!/\s/.test(value) && PROSE_WORDS.has(stripNonAlphanumeric(value))) return false;
   return !isIdentifierHandOff(match, assigned);
 }
 
-/** The value on the line after `password: |` (a YAML block scalar), indented under the key. */
+/** Most following lines, and characters, a block scalar is read across. */
+const BLOCK_SCALAR_MAX_LINES = 16;
+const BLOCK_SCALAR_WINDOW = 600;
+/** A comment-looking line (`# note`, a bare `#`); `#Sunrise42!` is data. */
+const COMMENT_LINE = /^#(?:\s|$)/;
+
+/**
+ * The lines of a block scalar: the first one the pattern matched, then every
+ * following line indented deeper than the key (blank lines skipped), at most
+ * `BLOCK_SCALAR_MAX_LINES` of them inside a `BLOCK_SCALAR_WINDOW`-character
+ * window, so the read is bounded however long the document is. Comment-looking
+ * lines are dropped; a `#` glued to text is data.
+ */
+function blockScalarLines(match: RegExpMatchArray, keyIndent: number): string[] {
+  const lines = [(match.groups?.bv ?? '').trim()];
+  const input = match.input ?? '';
+  const end = (match.index ?? 0) + match[0].length;
+  const following = input.slice(end, end + BLOCK_SCALAR_WINDOW).split(/\r?\n/);
+  // The first piece is the rest of the matched line (empty: the match ran to its end).
+  for (let i = 1; i < following.length && lines.length < BLOCK_SCALAR_MAX_LINES; i += 1) {
+    const line = following[i]!;
+    const text = line.trim();
+    if (!text) continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= keyIndent) break;
+    lines.push(text);
+  }
+  return lines.filter((line) => line && !COMMENT_LINE.test(line));
+}
+
+/** The value of a YAML block scalar: `password: |` followed by lines indented under the key. */
 function blockScalarAccepted(match: RegExpMatchArray): boolean {
   const groups = match.groups ?? {};
   const keyword = (groups.kw ?? '').toLowerCase();
-  const value = (groups.bv ?? '').trim();
-  if (!value || value.startsWith('#')) return false;
   const keyLead = leadBefore(match.input ?? '', match.index ?? 0, 200);
   const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? '').length;
   if ((groups.ind ?? '').length <= keyIndent) return false;
-  if (isPlaceholderValue(value) || isNotLiteralCredential(value)) return false;
   const isSecret = keyword.startsWith('pass') || keyword.startsWith('secret');
-  if (/\s/.test(value)) return isSecret && isPlausiblePassphrase(value, 6);
-  return value.length >= (isSecret ? 6 : 8);
+  const judge = (value: string): boolean => {
+    if (!value || isPlaceholderValue(value) || isNotLiteralCredential(value)) return false;
+    if (/\s/.test(value)) return isSecret && isPlausiblePassphrase(value, 6);
+    if (PROSE_WORDS.has(stripNonAlphanumeric(value))) return false;
+    return value.length >= (isSecret ? 6 : 8);
+  };
+  const lines = blockScalarLines(match, keyIndent);
+  if (lines.length === 0) return false;
+  // The first line alone, then the whole scalar read as one folded value
+  // (`>-` over `blue` and `cat` is "blue cat").
+  if (judge(lines[0]!)) return true;
+  return lines.length > 1 && judge(lines.join(' '));
 }
 
 // --- Assignment shapes --------------------------------------------------------
@@ -432,7 +471,7 @@ const BLOCK_SCALAR = new RegExp(
  * at the start of a line so a sentence mentioning a password never matches.
  */
 const LABELLED_PASSPHRASE = new RegExp(
-  String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{11,159})$`,
+  String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`,
   'gim',
 );
 
@@ -555,7 +594,7 @@ export const SHARED_SECRET_PATTERNS: readonly SharedSecretPattern[] = [
     label: 'password',
     pattern: LABELLED_PASSPHRASE,
     confidence: 0.85,
-    accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? '', 12),
+    accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? '', 6),
   },
   {
     findingType: 'credential_assignment',

@@ -16590,8 +16590,10 @@ function assignmentAccepted(match) {
   const isSecret = isPassword || keyword.startsWith("secret");
   if (/\s/.test(value))
     return isSecret && isPlausiblePassphrase(value, 6);
+  if (PROSE_WORDS.has(stripNonAlphanumeric(value)))
+    return false;
   if (quoted && isSecret)
-    return value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase());
+    return value.length >= 6;
   if (isIdentifierHandOff(match, assigned))
     return false;
   let strong = true;
@@ -16614,7 +16616,7 @@ function assignmentAccepted(match) {
     return true;
   if (value.length >= 8 && hasCredentialShape(value))
     return true;
-  return isPassword && !groups.nl && value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase()) && endsTheLine(match);
+  return isPassword && !groups.nl && value.length >= 6 && endsTheLine(match);
 }
 function maskedProviderToken(token) {
   const body = token.replace(/^(?:github_pat_|[A-Za-z]+[_-])+/, "");
@@ -16636,29 +16638,56 @@ function envAssignmentAccepted(match) {
     return false;
   if (/\s/.test(value) && !isPlausiblePassphrase(value, 6))
     return false;
+  if (!/\s/.test(value) && PROSE_WORDS.has(stripNonAlphanumeric(value)))
+    return false;
   return !isIdentifierHandOff(match, assigned);
+}
+function blockScalarLines(match, keyIndent) {
+  const lines = [(match.groups?.bv ?? "").trim()];
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const following = input.slice(end, end + BLOCK_SCALAR_WINDOW).split(/\r?\n/);
+  for (let i = 1;i < following.length && lines.length < BLOCK_SCALAR_MAX_LINES; i += 1) {
+    const line = following[i];
+    const text2 = line.trim();
+    if (!text2)
+      continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= keyIndent)
+      break;
+    lines.push(text2);
+  }
+  return lines.filter((line) => line && !COMMENT_LINE.test(line));
 }
 function blockScalarAccepted(match) {
   const groups = match.groups ?? {};
   const keyword = (groups.kw ?? "").toLowerCase();
-  const value = (groups.bv ?? "").trim();
-  if (!value || value.startsWith("#"))
-    return false;
   const keyLead = leadBefore(match.input ?? "", match.index ?? 0, 200);
   const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? "").length;
   if ((groups.ind ?? "").length <= keyIndent)
     return false;
-  if (isPlaceholderValue(value) || isNotLiteralCredential(value))
-    return false;
   const isSecret = keyword.startsWith("pass") || keyword.startsWith("secret");
-  if (/\s/.test(value))
-    return isSecret && isPlausiblePassphrase(value, 6);
-  return value.length >= (isSecret ? 6 : 8);
+  const judge = (value) => {
+    if (!value || isPlaceholderValue(value) || isNotLiteralCredential(value))
+      return false;
+    if (/\s/.test(value))
+      return isSecret && isPlausiblePassphrase(value, 6);
+    if (PROSE_WORDS.has(stripNonAlphanumeric(value)))
+      return false;
+    return value.length >= (isSecret ? 6 : 8);
+  };
+  const lines = blockScalarLines(match, keyIndent);
+  if (lines.length === 0)
+    return false;
+  if (judge(lines[0]))
+    return true;
+  return lines.length > 1 && judge(lines.join(" "));
 }
-var PROSE_WORDS, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+var PROSE_WORDS, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
 var init_secret_patterns = __esm(() => {
   PROSE_WORDS = new Set([
     "above",
+    "again",
     "below",
     "cannot",
     "change",
@@ -16703,6 +16732,7 @@ var init_secret_patterns = __esm(() => {
     "required",
     "requirements",
     "reset",
+    "retry",
     "see",
     "send",
     "sent",
@@ -16733,7 +16763,7 @@ var init_secret_patterns = __esm(() => {
     "insert[_-]?(?:your|here|key|token)",
     "[_-]here$",
     "^n/a$",
-    "not[_-]?set",
+    "not[_ -]?set",
     "^unset$"
   ].join("|"), "i");
   BARE_LITERALS = new Set([
@@ -16835,13 +16865,14 @@ var init_secret_patterns = __esm(() => {
   ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
   NON_CREDENTIAL_KEY_TAIL = /[_.-](?:file|path|dir|url|uri|hash|hashed|salt|type|length|len|ttl|expiry|expires|expiration|policy|field|header|endpoint|name|label|count|size|min|max|regex|pattern|prefix|id)$/i;
   NON_CREDENTIAL_CAMEL_TAIL = /[a-z](?:File|Path|Dir|Url|Uri|Hash|Hashed|Salt|Type|Length|Ttl|Expiry|Expires|Name|Label|Count|Size|Min|Max|Regex|Pattern|Prefix|Id)$/;
+  COMMENT_LINE = /^#(?:\s|$)/;
   KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
   SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
   VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
   CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
   ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
   BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
-  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{11,159})$`, "gim");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
   URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
   AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
   AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
@@ -16939,7 +16970,7 @@ var init_secret_patterns = __esm(() => {
       label: "password",
       pattern: LABELLED_PASSPHRASE,
       confidence: 0.85,
-      accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? "", 12)
+      accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? "", 6)
     },
     {
       findingType: "credential_assignment",
