@@ -16839,6 +16839,7 @@ class TierSnifferStore {
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
+    const priority = Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority))) : 0;
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk())
         return false;
@@ -16855,7 +16856,10 @@ class TierSnifferStore {
         material = excluded.material,
         priority = excluded.priority,
         flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority))) : 0);
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority);
+      if (priority > 0) {
+        this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
+      }
       return true;
     }).immediate();
   }

@@ -167,6 +167,7 @@ export class TierSnifferStore {
     stillAsk?: () => boolean;
   }): boolean {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
+    const priority = Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority!))) : 0;
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk()) return false;
       this.db.query(`
@@ -190,8 +191,15 @@ export class TierSnifferStore {
       question.material,
       JSON.stringify([...question.flags]),
       this.now().toISOString(),
-      Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority!))) : 0,
+      priority,
     );
+      if (priority > 0) {
+        // A blocked scan may have moved below this new/promoted question.
+        // Revisit the recent window next tick, atomically with enqueue; keep
+        // the oldest cursors so priority arrivals cannot erase aging progress.
+        this.db.query('DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)')
+          .run('all:recent', `${question.pass}:recent`);
+      }
       return true;
     }).immediate();
   }

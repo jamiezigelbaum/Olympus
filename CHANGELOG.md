@@ -13,6 +13,7 @@
   the background, moving it up if it is Private. Your privacy settings
   decide the tiers. Secret detection is stricter about real credentials
   (including encoded links) and no longer flags ordinary example links.
+  New priority checks no longer wait behind a blocked sorting backlog.
 - **Google sign-in happens on your computer**, directly with Google. Google
   connections made with a release candidate need Reconnect Google.
 - **An item that becomes Secret keeps only a record of where it is** in
