@@ -365,6 +365,34 @@ export function isPublicTierRetired(config: Pick<SovereigntyConfig, 'routes' | '
   return config.routes.public_safe === undefined && config.retrieval.trustDomains.public_safe === undefined;
 }
 
+/**
+ * A preset about to replace the policy at `path` (setup or init with
+ * --force), keeping the Public tier that policy has. No shipped preset
+ * defines Public (owner ruling 2026-10-13), but an install made before 1.0
+ * keeps its Public tier through a forced re-setup, shaped as the presets then
+ * shipped it: Public routes and embeds like Personal. Without an existing
+ * Public tier (or a readable file) the preset is returned unchanged.
+ */
+export function presetKeepingPublicTier(preset: SovereigntyConfig, path: string): SovereigntyConfig {
+  if (!isPublicTierRetired(preset) || !existsSync(path)) return preset;
+  let existing: Partial<SovereigntyConfig>;
+  try {
+    existing = JSON.parse(readFileSync(path, 'utf8')) as Partial<SovereigntyConfig>;
+  } catch {
+    return preset;
+  }
+  if (existing.routes?.public_safe === undefined && existing.retrieval?.trustDomains?.public_safe === undefined) {
+    return preset;
+  }
+  const internalRoute = preset.routes.internal;
+  const internalRetrieval = preset.retrieval.trustDomains.internal;
+  if (!internalRoute || !internalRetrieval) return preset;
+  const next = structuredClone(preset);
+  next.routes.public_safe = structuredClone(internalRoute);
+  next.retrieval.trustDomains.public_safe = structuredClone(internalRetrieval);
+  return next;
+}
+
 export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | undefined> = process.env): SovereigntyConfig {
   const localProfile: SovereigntyModelProfile = {
     provider: 'local-openai-compatible',

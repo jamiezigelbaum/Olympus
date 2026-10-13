@@ -1361,6 +1361,44 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('sovereignty init --force keeps the Public tier of a policy written before 1.0', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-sovereignty-public-'));
+    const path = join(dir, 'sovereignty.json');
+    try {
+      const older = JSON.parse(readFileSync(join(process.cwd(), 'config/sovereignty/presets/local-first.json'), 'utf8'));
+      older.routes.public_safe = { analyst: ['cloud-openclaw-infer', 'local-source-answer'] };
+      older.retrieval.trustDomains.public_safe = {
+        minimumExecutionTrust: 'standard_cloud',
+        allowedEmbeddingTrust: ['local', 'standard_cloud'],
+        embeddingProfile: 'built-in-embedding',
+        allowCloudQuery: true,
+        activationMode: 'hybrid_shadow',
+      };
+      writeFileSync(path, JSON.stringify(older));
+      const proc = Bun.spawn([
+        process.execPath, 'src/cli.ts', 'sovereignty', 'init', '--preset', 'local-only', '--path', path, '--force',
+      ], {
+        cwd: process.cwd(),
+        env: { PATH: process.env.PATH ?? '' },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      if (code !== 0) throw new Error(stderr || stdout);
+
+      const written = JSON.parse(readFileSync(path, 'utf8'));
+      expect(written.routes.secure_local.pool.members).toEqual(['local-source-answer']);
+      expect(written.routes.public_safe).toEqual(written.routes.internal);
+      expect(written.retrieval.trustDomains.public_safe).toEqual(written.retrieval.trustDomains.internal);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('masked key input is explicit and incompatible input modes fail before reading', async () => {
     for (const args of [
       ['connect', 'gemini', '--api-key-prompt', '--api-key-stdin'],

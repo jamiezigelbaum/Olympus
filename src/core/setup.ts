@@ -15,6 +15,7 @@ import {
   SOVEREIGNTY_PRESETS,
   defaultSovereigntyConfigPath,
   loadSovereigntyPreset,
+  presetKeepingPublicTier,
   writeSovereigntyConfigFile,
   type SovereigntyConfig,
   type SovereigntyPresetName,
@@ -220,7 +221,8 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
     ? { ...requiredCheck, checks: [...requiredCheck.checks, ocrDependencyFinding(await options.ocrReadiness())] }
     : requiredCheck;
   const cloudLane = options.cloudLane ?? 'subscription';
-  const presetConfig = applyCloudLane(loadSovereigntyPreset(options.preset), cloudLane);
+  const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
+  const presetConfig = presetKeepingPublicTier(applyCloudLane(loadSovereigntyPreset(options.preset), cloudLane), sovereigntyPath);
   const unmetPrerequisites = await setupPreflight({
     config: presetConfig,
     ...(options.env ? { env: options.env } : {}),
@@ -229,7 +231,6 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
     // different home must preflight against that home's stored keys.
     workerEnvPath: options.envPath ?? workerSetupEnvPath({ homeDir: options.homeDir ?? homedir() }),
   });
-  const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
   let wroteSovereignty = false;
   let managedWorker: ManagedWorkerFilesResult;
