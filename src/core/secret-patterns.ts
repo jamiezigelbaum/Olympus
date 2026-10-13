@@ -126,7 +126,7 @@ export function canonicalizeScreeningText(value: string): string {
         }
       })
       .normalize('NFKC')
-      .replace(/[‘’‚‛`]/g, "'").replace(/[“”„‟]/g, '"');
+      .replace(/[\p{Quotation_Mark}`]/gu, quote => /['‘’‚‛`]/.test(quote) ? "'" : '"');
     if (next === value) break;
     value = next;
   }
@@ -138,7 +138,7 @@ export function secretScreeningVariants(text: string): readonly string[] {
   return canonical === text ? [text] : [text, canonical];
 }
 
-const URL_SCHEME = /[a-z][a-z0-9+.-]{1,15}:\/\//gi;
+const URL_SCHEME = /[a-z][a-z0-9+.-]{0,15}:\/\//gi;
 
 /**
  * One forward walk: external wrappers end a URL, paired punctuation inside
@@ -163,7 +163,7 @@ function credentialUrlMatches(text: string): RegExpMatchArray[] {
     let authority = true;
     for (; end < text.length; end++) {
       const char = text[end]!;
-      if (/\s|["'`‘’“”>]/.test(char)) break;
+      if (/[\s\p{Quotation_Mark}`>]/u.test(char)) break;
       if (char === '<') {
         const placeholder = text[end - 1] === '=' ? /^<[\w-]{1,64}>/.exec(text.slice(end, end + 66))?.[0] : undefined;
         if (!placeholder) break;

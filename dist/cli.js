@@ -16882,7 +16882,7 @@ function canonicalizeScreeningText(value) {
       } catch {
         return encoded.replace(/%([0-7][0-9a-f])/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
       }
-    }).normalize("NFKC").replace(/[‘’‚‛`]/g, "'").replace(/[“”„‟]/g, '"');
+    }).normalize("NFKC").replace(/[\p{Quotation_Mark}`]/gu, (quote) => /['‘’‚‛`]/.test(quote) ? "'" : '"');
     if (next === value)
       break;
     value = next;
@@ -16907,7 +16907,7 @@ function credentialUrlMatches(text2) {
     let authority = true;
     for (;end < text2.length; end++) {
       const char = text2[end];
-      if (/\s|["'`‘’“”>]/.test(char))
+      if (/[\s\p{Quotation_Mark}`>]/u.test(char))
         break;
       if (char === "<") {
         const placeholder = text2[end - 1] === "=" ? /^<[\w-]{1,64}>/.exec(text2.slice(end, end + 66))?.[0] : undefined;
@@ -17250,7 +17250,7 @@ var init_secret_patterns = __esm(() => {
     "using",
     "via"
   ]);
-  URL_SCHEME = /[a-z][a-z0-9+.-]{1,15}:\/\//gi;
+  URL_SCHEME = /[a-z][a-z0-9+.-]{0,15}:\/\//gi;
   CREDENTIAL_QUERY_KEY = /^(?:access_token|refresh_token|api_key|client_secret|password|token|secret|sig)$/i;
   MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
   PLACEHOLDER_WORDS = new RegExp([
