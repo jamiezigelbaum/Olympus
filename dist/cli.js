@@ -23186,6 +23186,34 @@ function validateSovereigntyConfig(rawConfig) {
 function isPublicTierRetired(config) {
   return config.routes.public_safe === undefined && config.retrieval.trustDomains.public_safe === undefined;
 }
+function presetKeepingPublicTier(preset, path) {
+  if (!isPublicTierRetired(preset) || !existsSync19(path))
+    return preset;
+  let existing;
+  try {
+    existing = JSON.parse(readFileSync20(path, "utf8"));
+  } catch {
+    throw new OperationError("config_error", `The sovereignty policy at ${path} cannot be read, so setup cannot tell whether it keeps a Public tier.`, "Fix the file's permissions or contents, or move it aside to start from the preset alone.");
+  }
+  const hasRoute = existing.routes?.public_safe !== undefined;
+  const hasRetrieval = existing.retrieval?.trustDomains?.public_safe !== undefined;
+  if (!hasRoute && !hasRetrieval)
+    return preset;
+  if (hasRoute !== hasRetrieval) {
+    throw new OperationError("config_error", `The sovereignty policy at ${path} defines only half of a Public tier (sovereignty.${hasRoute ? "retrieval.trustDomains" : "routes"}.public_safe is missing).`, "Restore the missing half, or move the file aside to start from the preset alone.");
+  }
+  return withPublicTierLikePersonal(preset);
+}
+function withPublicTierLikePersonal(config) {
+  const internalRoute = config.routes.internal;
+  const internalRetrieval = config.retrieval.trustDomains.internal;
+  if (!internalRoute || !internalRetrieval)
+    return config;
+  const next = structuredClone(config);
+  next.routes.public_safe = structuredClone(internalRoute);
+  next.retrieval.trustDomains.public_safe = structuredClone(internalRetrieval);
+  return next;
+}
 function buildEnvBridgeSovereigntyConfig(env = process.env) {
   const localProfile = {
     provider: "local-openai-compatible",
@@ -66065,6 +66093,7 @@ var init_vocabulary = __esm(() => {
     connectReopen: "Open sign-in again",
     connectTimeout: "Olympus has not heard back from {source} yet. If you finished signing in, check again.",
     connectFailed: "Olympus could not start signing in to {source}. Try again.",
+    goToModels: "Go to Models",
     connected: "{source} is connected.",
     foldersTitle: "Choose folders",
     foldersIntro: "Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.",
@@ -116932,6 +116961,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
+    showModels: () => {
+      state.open.models = true;
+      closeScreen("", false, "summary:models");
+    },
     directSignIn: () => state.hostKind !== "",
     setDashboard: (value2) => {
       if (!isDashboard(value2))
@@ -117473,6 +117506,12 @@ function chatgptPickerProgram(kit) {
     session++;
     kit.close(notice, refresh, key2);
   }
+  function goToModels() {
+    stopTimer();
+    p = null;
+    session++;
+    kit.showModels();
+  }
   function start(fix, sourceId, sourceLabel4, returnKey) {
     stopTimer();
     session++;
@@ -117519,7 +117558,8 @@ function chatgptPickerProgram(kit) {
       if (!href) {
         p.phase = "error";
         p.errorText = kit.errorText(result);
-        kit.render("picker:connect:retry");
+        p.errorCode = result && result.isError && result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
+        kit.render(p.errorCode === "models_not_ready" ? "picker:connect:models" : "picker:connect:retry");
         return;
       }
       p.href = href;
@@ -117533,6 +117573,7 @@ function chatgptPickerProgram(kit) {
         return;
       p.phase = "error";
       p.errorText = "";
+      p.errorCode = "";
       kit.render("picker:connect:retry");
     });
   }
@@ -117619,7 +117660,8 @@ function chatgptPickerProgram(kit) {
     } else {
       const line = el("p", "", p.errorText || fill2(Q.connectFailed, { source: p.label }));
       line.setAttribute("role", "alert");
-      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", reopen, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+      const models = p.errorCode === "models_not_ready";
+      add(box, line, add(el("div", "actions"), models ? kit.button(Q.goToModels, "picker:connect:models", goToModels, "main") : null, kit.button(Q.tryAgain, "picker:connect:retry", reopen, models ? "plain" : "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
     }
     add(page2, box);
   }
@@ -119596,7 +119638,17 @@ var init_page = __esm(() => {
   init_shared_privacy_logic();
   init_picker();
   init_privacy();
-  CHATGPT_INLINE_ERROR_CODES = ["sign_in_failed", "source_not_connected", "source_busy", "sync_unavailable", "disconnect_incomplete"];
+  CHATGPT_INLINE_ERROR_CODES = [
+    "sign_in_failed",
+    "source_not_connected",
+    "source_busy",
+    "sync_unavailable",
+    "disconnect_incomplete",
+    "models_not_ready",
+    "connect_unavailable",
+    "google_signin_full",
+    "already_connected"
+  ];
   CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
   CHATGPT_DASHBOARD_REFRESH = {
     activeMs: 15000,
@@ -158155,7 +158207,8 @@ async function runSetupWizard(options) {
   assertSetupDependenciesOk(requiredCheck);
   const dependencyCheck2 = options.ocrReadiness ? { ...requiredCheck, checks: [...requiredCheck.checks, ocrDependencyFinding(await options.ocrReadiness())] } : requiredCheck;
   const cloudLane = options.cloudLane ?? "subscription";
-  const presetConfig = applyCloudLane(loadSovereigntyPreset(options.preset), cloudLane);
+  const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
+  const presetConfig = presetKeepingPublicTier(applyCloudLane(loadSovereigntyPreset(options.preset), cloudLane), sovereigntyPath);
   const unmetPrerequisites = await setupPreflight({
     config: presetConfig,
     ...options.homeDir ? { homeDir: options.homeDir } : {},
@@ -158163,7 +158216,6 @@ async function runSetupWizard(options) {
     ...options.secretStore ? { secretStore: options.secretStore } : {},
     workerEnvPath: options.envPath ?? workerSetupEnvPath({ homeDir: options.homeDir ?? homedir50() })
   });
-  const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
   let wroteSovereignty = false;
   let managedWorker;
@@ -160488,9 +160540,10 @@ function runSovereigntyInit(args) {
   if (!preset) {
     throw new OperationError("invalid_params", "--preset is required.", `Use one of: ${SOVEREIGNTY_PRESETS.join(", ")}.`);
   }
+  const configPath = path ?? defaultSovereigntyConfigPath();
   const targetPath = writeSovereigntyConfigFile({
-    config: loadSovereigntyPreset(preset),
-    path: path ?? defaultSovereigntyConfigPath(),
+    config: presetKeepingPublicTier(loadSovereigntyPreset(preset), configPath),
+    path: configPath,
     force
   });
   return {

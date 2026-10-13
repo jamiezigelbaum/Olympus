@@ -72,6 +72,7 @@ import {
   SOVEREIGNTY_PRESETS,
   defaultSovereigntyConfigPath,
   loadSovereigntyPreset,
+  presetKeepingPublicTier,
   loadSovereigntyEngine,
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
@@ -2229,9 +2230,10 @@ function runSovereigntyInit(args: string[]): {
       `Use one of: ${SOVEREIGNTY_PRESETS.join(', ')}.`,
     );
   }
+  const configPath = path ?? defaultSovereigntyConfigPath();
   const targetPath = writeSovereigntyConfigFile({
-    config: loadSovereigntyPreset(preset),
-    path: path ?? defaultSovereigntyConfigPath(),
+    config: presetKeepingPublicTier(loadSovereigntyPreset(preset), configPath),
+    path: configPath,
     force,
   });
   return {

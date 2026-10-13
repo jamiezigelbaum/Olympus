@@ -484,6 +484,22 @@ export function baseConfig(): Record<string, any> {
   return JSON.parse(JSON.stringify(loadSovereigntyPreset('local-first')));
 }
 
+/**
+ * Adds the Public tier a policy written before 1.0 keeps (no shipped preset
+ * defines one since 2026-10-13), shaped as the presets then shipped it.
+ */
+export function withOlderPublicTier(config: Record<string, any>): Record<string, any> {
+  config.routes.public_safe = { pool: { members: ['cloud-openclaw-infer', 'local-source-answer'], order: ['cloud-openclaw-infer', 'local-source-answer'] } };
+  config.retrieval.trustDomains.public_safe = {
+    minimumExecutionTrust: 'standard_cloud',
+    allowedEmbeddingTrust: ['local', 'standard_cloud'],
+    embeddingProfile: 'built-in-embedding',
+    allowCloudQuery: true,
+    activationMode: 'hybrid_shadow',
+  };
+  return config;
+}
+
 export function zkapiProfile(overrides: Record<string, unknown> = {}): Record<string, any> {
   return {
     provider: 'zkapi',

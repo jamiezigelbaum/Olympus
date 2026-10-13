@@ -101,6 +101,7 @@ import {
   timedTransport,
   ledger,
   baseConfig,
+  withOlderPublicTier,
   zkapiProfile,
   configError,
   engineWith,
@@ -916,12 +917,15 @@ describe('sovereignty: zkapi provider', () => {
     }))).toContain('Consult-only profile "zk" cannot serve the secure_local analyst route');
     for (const domain of ['internal', 'public_safe']) {
       expect(configError(() => engineWith((config) => {
+        // public_safe exists only on a policy written before 1.0.
+        if (domain === 'public_safe') withOlderPublicTier(config);
         config.routes[domain].pool.members.push('zk');
         config.routes[domain].pool.order.push('zk');
       }))).toContain(`cannot serve the ${domain} analyst route`);
     }
     for (const domain of ['secure_local', 'internal', 'public_safe']) {
       expect(configError(() => engineWith((config) => {
+        if (domain === 'public_safe') withOlderPublicTier(config);
         config.retrieval.trustDomains[domain].embeddingProfile = 'zk';
         config.retrieval.trustDomains[domain].allowedEmbeddingTrust = ['local', 'standard_cloud'];
       }))).toMatch(/cannot serve the \w+ embedding policy|secure_local embeddings/);
@@ -947,7 +951,6 @@ describe('sovereignty: zkapi provider', () => {
     config.routes = {
       secure_local: { pool: { members: ['venice-private'] } },
       internal: { pool: { members: ['venice-private'] } },
-      public_safe: { pool: { members: ['venice-private'] } },
     };
     const parsed = createSovereigntyEngine(config as SovereigntyConfig).config;
     expect(configError(() => applyModelChoice(parsed, { answers: 'local' }, { local: true, venice: true })))
