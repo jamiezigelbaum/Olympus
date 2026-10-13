@@ -1130,7 +1130,7 @@ test('a queued secret settles a routed item through the existing Secrets disposi
 });
 
 for (const authority of ['model', 'model-private-body', 'model-waiting-body', 'owner-rule', 'override'] as const) {
-  test(`old Private metadata is rejudged only when decided by the model (${authority})`, async () => {
+  test(`old Private metadata is rejudged only for model decisions and stays sealed without all original signals (${authority})`, async () => {
     const { install } = await gardenSettledPersonal();
     const ledger = install.lane.ledger;
     const old: TierDecision = {
@@ -1152,11 +1152,10 @@ for (const authority of ['model', 'model-private-body', 'model-waiting-body', 'o
     for (let pass = 0; pass < 4; pass++) await service.runOnce();
     if (authority.startsWith('model')) {
       expect(model.prompts.some(p => p.prompt.includes('NAMES') && p.prompt.includes('orchard-plan'))).toBe(true);
-      expect(ledger.getCurrent(garden)).toMatchObject({ state: 'current',
-        metadataTier: authority === 'model-waiting-body' ? 'secure' : 'private',
-        contentTier: authority === 'model' ? 'private' : 'secure' });
-      if (authority === 'model') expect(await olympusSearch(install, 'orchard')).toContain('pruning plan');
-      else expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+      // Labels were not stored. A new Personal answer cannot prove that
+      // the original names are safe; a connector relist must reassess them.
+      expect(ledger.getCurrent(garden)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+      expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
     } else {
       expect(model.prompts.some(p => p.prompt.includes('orchard-plan'))).toBe(false);
       expect(ledger.getCurrent(garden)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });

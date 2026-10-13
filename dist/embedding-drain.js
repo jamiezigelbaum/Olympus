@@ -5893,13 +5893,7 @@ function readWorkerSetupEnv(options = {}) {
     const stat2 = statSync5(path, { bigint: true });
     if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
       return;
-    const key = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}:${stat2.mode}`;
-    const cached = setupEnvCache.get(path);
-    if (cached?.key === key)
-      return { ...cached.env };
-    const env = parseWorkerSetupEnv(readFileSync9(path, "utf8"));
-    setupEnvCache.set(path, { key, env });
-    return { ...env };
+    return parseWorkerSetupEnv(readFileSync9(path, "utf8"));
   } catch {
     return;
   }
@@ -5941,10 +5935,7 @@ function unquoteEnvValue(value) {
   }
   return trimmed;
 }
-var setupEnvCache;
-var init_worker_auth = __esm(() => {
-  setupEnvCache = new Map;
-});
+var init_worker_auth = () => {};
 // src/core/build-flavor.ts
 var PUBLIC_RUNTIME_BUILD = false;
 
@@ -10494,8 +10485,6 @@ function hasCredentialUrl(material) {
   for (const candidate of candidates) {
     try {
       const url = new URL(candidate);
-      if (url.protocol !== "https:" && url.protocol !== "http:")
-        continue;
       if (url.username || url.password)
         return true;
       for (const [key, value] of url.searchParams) {
@@ -23612,7 +23601,8 @@ function rejudgeStoredContent(set, record, options) {
   const path = columnString(exported.columns["locator_uri"]);
   const sender = columnString(exported.columns["sender_label"]);
   const mimeType = columnString(exported.columns["mime_type"]);
-  const metadata = rejudgeMetadata(record, options.sniffer, { title, path, sender }, identity);
+  const folderKeys = storedFolderKeys(exported.columns["source_scope_folder_keys_json"]);
+  const metadata = rejudgeMetadata(record, options.sniffer, { title, path, sender, folderKeys }, identity);
   const content = classifyContentTier({
     text: text2,
     metadataTier: metadata.metadataTier,
@@ -23694,14 +23684,15 @@ function rejudgeMetadata(record, sniffer, names, subject) {
   const signals = {
     ...names.title ? { title: names.title } : {},
     ...names.path ? { path: names.path } : {},
-    ...names.sender ? { sender: names.sender } : {}
+    ...names.sender ? { sender: names.sender } : {},
+    folderKeys: names.folderKeys
   };
   const fresh = classifyItemTiers({ signals, namesOnly: true });
   const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason));
-  const baseline = maxTier(fresh.metadataTier, providerReasons.length ? record.metadataTier : "private");
+  const baseline = maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
-  const material = [names.title, names.path, names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
+  const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({
     pass: "metadata",
     material,
@@ -23739,7 +23730,7 @@ function settleRoutedSecrets(set, identity, decision, exported, finding, placeme
   const scopeRevision = columnString(exported.columns["source_scope_revision"]);
   set.secrets()?.record({
     identity: exported.identity,
-    ...locator ? { locator } : {},
+    ...locator && !hasCredentialUrl(locator) ? { locator } : {},
     ...title && namesReleasable ? { title } : {},
     namesReleasable,
     ...folderKeys.length > 0 ? { folderKeys } : {},

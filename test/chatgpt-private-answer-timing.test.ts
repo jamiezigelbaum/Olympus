@@ -229,7 +229,7 @@ describe('2. the sniffer yields to a private answer', () => {
     cleanups.push(() => installed.close());
     const store = installed.snifferStoreForLedger(ledgerPath);
     for (let n = 0; n < 3; n += 1) {
-      ledger.recordDecision(subject(n), classifyItemTiers({ signals: { title: `bank ${n}` }, subject: subject(n) }, { sniffer: new CachedTierSniffer(store, LANE) }));
+      ledger.recordDecision(subject(n), classifyItemTiers({ signals: { title: `bank ${n}` }, text: `Account holder: Morgan Example\nStatement ${n}`, subject: subject(n) }, { sniffer: new CachedTierSniffer(store, LANE) }));
     }
     const classificationLedgerPath = join(dir, 'classification-ledger.jsonl');
     await appendClassificationLedgerEntry(classificationLedgerPath, {

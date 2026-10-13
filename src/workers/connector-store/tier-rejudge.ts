@@ -45,6 +45,7 @@ import {
   SNIFFER_NAMES_MAX_CHARS,
   tierSnifferInputHash,
   maxTier,
+  hasCredentialUrl,
   namesDecidedByOwner,
   TIER_CLASSIFIER_VERSION,
   type TierDecision,
@@ -180,7 +181,8 @@ export function rejudgeStoredContent(
   const path = columnString(exported.columns['locator_uri']);
   const sender = columnString(exported.columns['sender_label']);
   const mimeType = columnString(exported.columns['mime_type']);
-  const metadata = rejudgeMetadata(record, options.sniffer, { title, path, sender }, identity);
+  const folderKeys = storedFolderKeys(exported.columns['source_scope_folder_keys_json']);
+  const metadata = rejudgeMetadata(record, options.sniffer, { title, path, sender, folderKeys }, identity);
   const content = classifyContentTier(
     {
       text,
@@ -273,7 +275,7 @@ export function rejudgeStoredContent(
 function rejudgeMetadata(
   record: TierLedgerRecord,
   sniffer: TierSniffer | undefined,
-  names: { title: string | undefined; path: string | undefined; sender: string | undefined },
+  names: { title: string | undefined; path: string | undefined; sender: string | undefined; folderKeys: string[] },
   subject: TierLedgerIdentity,
 ): Pick<TierDecision, 'metadataTier' | 'metadataForced' | 'metadataFlagged' | 'metadataPending' | 'reasons'> {
   const previous = { ...record, reasons: record.reasons.filter(reason => !reason.startsWith('content:')) };
@@ -283,14 +285,17 @@ function rejudgeMetadata(
     ...(names.title ? { title: names.title } : {}),
     ...(names.path ? { path: names.path } : {}),
     ...(names.sender ? { sender: names.sender } : {}),
+    folderKeys: names.folderKeys,
   };
   const fresh = classifyItemTiers({ signals, namesOnly: true });
-  // A stored reason does not encode the provider's floor tier. Retain it
-  // conservatively when the provider facts cannot be reconstructed.
+  // The store retains scope folder keys but not labels (nor all provider
+  // facts). An old model verdict may have relied on those missing signals.
+  // Re-judging may raise it, but only a connector relist with complete signals
+  // can lower the names and therefore their content floor.
   const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason));
-  const baseline = maxTier(fresh.metadataTier, providerReasons.length ? record.metadataTier : 'private');
+  const baseline = maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
-  const material = [names.title, names.path, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
+  const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({ pass: 'metadata', material, flags: ['names:rejudge'], subject,
     materialHash: tierSnifferInputHash('metadata', signals),
     mapRevision: fresh.mapRevision, priority: HELD_RECORD_PRIORITY });
@@ -336,7 +341,7 @@ export function settleRoutedSecrets(
   const scopeRevision = columnString(exported.columns['source_scope_revision']);
   set.secrets()?.record({
     identity: exported.identity,
-    ...(locator ? { locator } : {}),
+    ...(locator && !hasCredentialUrl(locator) ? { locator } : {}),
     ...(title && namesReleasable ? { title } : {}),
     namesReleasable,
     ...(folderKeys.length > 0 ? { folderKeys } : {}),

@@ -72,13 +72,7 @@ function readWorkerSetupEnv(options = {}) {
     const stat = statSync2(path, { bigint: true });
     if (!stat.isFile() || (stat.mode & 0o077n) !== 0n)
       return;
-    const key = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.mode}`;
-    const cached = setupEnvCache.get(path);
-    if (cached?.key === key)
-      return { ...cached.env };
-    const env = parseWorkerSetupEnv(readFileSync(path, "utf8"));
-    setupEnvCache.set(path, { key, env });
-    return { ...env };
+    return parseWorkerSetupEnv(readFileSync(path, "utf8"));
   } catch {
     return;
   }
@@ -136,10 +130,7 @@ function unquoteEnvValue(value) {
   }
   return trimmed;
 }
-var setupEnvCache;
-var init_worker_auth = __esm(() => {
-  setupEnvCache = new Map;
-});
+var init_worker_auth = () => {};
 
 // src/core/source-index/types.ts
 function buildSourceSensitivity(input) {

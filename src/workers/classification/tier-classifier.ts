@@ -879,7 +879,6 @@ export function hasCredentialUrl(material: string): boolean {
   for (const candidate of candidates) {
     try {
       const url = new URL(candidate);
-      if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
       if (url.username || url.password) return true;
       for (const [key, value] of url.searchParams) {
         if (value && /^(?:access_token|refresh_token|api_key|client_secret|password)$/i.test(key)) return true;

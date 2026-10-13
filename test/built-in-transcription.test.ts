@@ -546,7 +546,7 @@ describe('install: pinned files and the shared runtime', () => {
       writeFileSync(join(target, 'llama-b0', 'llama-server'), '#!/bin/sh\n', { mode: 0o755 });
     };
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: tempDir(), OLYMPUS_BUILT_IN_TRANSCRIPTION_DIR: tempDir() };
-    const common = { env, runtime, platform: 'darwin-arm64', fetchImpl, extractArchive, log: () => undefined };
+    const common = { env, runtime, platform: 'darwin-arm64', fetchImpl, extractArchive, freeBytes: () => 10 * 1024 ** 3, log: () => undefined };
     const reasoning = await installBuiltInReasoning({
       ...common,
       model: { ...QWEN35_4B, modelId: 'test-reasoning', file: { name: 'r.gguf', url: 'https://models.test/reasoning.gguf', bytes: reasoningBytes.length, sha256: sha256(reasoningBytes) } },
