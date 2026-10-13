@@ -34,6 +34,7 @@ import {
   buildSnifferBatchPrompt,
   parseSnifferBatchResponse,
   snifferId,
+  snifferCacheModelId,
   snifferMaterialCarriesSecret,
   snifferMaterialLooksLikeInjection,
   cachedSnifferVerdictHolds,
@@ -229,7 +230,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   };
   const keyOf = (question: SnifferQuestion): SnifferVerdictKey => ({
     materialHash: question.materialHash,
-    modelId: options.lane.modelId,
+    modelId: snifferCacheModelId(options.lane),
     promptVersion,
     mapRevision: question.mapRevision,
   });
@@ -243,7 +244,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       pass: item.question.pass,
       tier,
       reason: `${item.question.pass}:sniffer:${id}:${snifferReasonCode(verdict)}`,
-      modelId: options.lane.modelId,
+      modelId: snifferCacheModelId(options.lane),
       mapRevision: item.question.mapRevision,
     }, {
       ...(item.target.placementFor ? { placementFor: item.target.placementFor } : {}),

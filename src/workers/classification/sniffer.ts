@@ -80,7 +80,10 @@ export type SnifferLaneKind = 'local' | 'venice';
 
 export interface SnifferLaneIdentity {
   kind: SnifferLaneKind;
+  /** Stable owner-approval identity. */
   modelId: string;
+  /** Actual weights/revision identity; never used to look up owner consent. */
+  cacheModelId?: string;
 }
 
 /** The parser folds record sensitivity into tier BEFORE the existing cache stores it.
@@ -165,8 +168,13 @@ export function snifferMaterialLooksLikeInjection(material: string): boolean {
   return snifferInjectionRule(material) !== undefined;
 }
 
-export function snifferId(lane: Pick<SnifferLaneIdentity, 'kind'>, promptVersion = SNIFFER_PROMPT_VERSION): string {
-  return `${lane.kind}:${promptVersion}`;
+export function snifferCacheModelId(lane: SnifferLaneIdentity): string {
+  return lane.cacheModelId ?? lane.modelId;
+}
+
+export function snifferId(lane: SnifferLaneIdentity, promptVersion = SNIFFER_PROMPT_VERSION): string {
+  const model = createHash('sha256').update(snifferCacheModelId(lane)).digest('hex').slice(0, 16);
+  return `${lane.kind}:${promptVersion}.m${model}`;
 }
 
 // --- Prompt ----------------------------------------------------------------------
@@ -399,7 +407,7 @@ export class CachedTierSniffer implements TierSniffer {
     try {
       const cached = this.store.getVerdict({
         materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
-        modelId: this.lane.modelId,
+        modelId: snifferCacheModelId(this.lane),
         promptVersion: this.promptVersion,
         mapRevision,
       });

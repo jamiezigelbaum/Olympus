@@ -32,6 +32,7 @@ import {
   type SnifferLane,
 } from '../src/workers/classification/sniffer-lane.ts';
 import { SnifferCallBudget, runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
+import { BUILT_IN_SNIFFER_LANE, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { classifyItemTiers, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
@@ -705,7 +706,7 @@ describe('bounds and the owner-approval gate', () => {
 
   test('the prompt version is derived from the prompt text, so an edit is a new version', () => {
     expect(SNIFFER_PROMPT_VERSION).toMatch(/^p-[0-9a-f]{12}$/);
-    expect(snifferId(LOCAL_LANE)).toBe(`local:${SNIFFER_PROMPT_VERSION}`);
+    expect(snifferId(LOCAL_LANE)).toStartWith(`local:${SNIFFER_PROMPT_VERSION}.m`);
   });
 });
 
@@ -907,3 +908,51 @@ for (const pass of ['metadata', 'content'] as const) {
     } finally { store.close(); ledger.close(); }
   });
 }
+
+test('a model revision changes cache and rejudge identity but preserves approval identity', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    const first = { ...LOCAL_LANE, modelId: 'built_in', cacheModelId: 'weights-sha256-a' };
+    const second = { ...first, cacheModelId: 'weights-sha256-b' };
+    const material = 'Ordinary reminder';
+    store.putVerdict({ materialHash: snifferMaterialHash('content', material), modelId: first.cacheModelId, promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+      { tier: 'personal', category: 'ordinary', confidence: 1, failSafe: false });
+    expect(new CachedTierSniffer(store, first).judge({ pass: 'content', material, flags: [] })).toMatchObject({ verdict: 'decided', tier: 'private' });
+    expect(new CachedTierSniffer(store, second).judge({ pass: 'content', material, flags: [] })).toEqual({ verdict: 'undecided' });
+    expect(new CachedTierSniffer(store, second).id).not.toBe(new CachedTierSniffer(store, first).id);
+    // The stable approval key remains unchanged across a weights update.
+    expect(approvalKey(second)).toEqual(approvalKey(first));
+    ledger.recordDecision(subject(1), { ...classifyItemTiers({ signals: {}, text: material }), contentPending: true, state: 'pending' });
+    store.enqueue({ subject: subject(1), pass: 'content', material, flags: [], mapRevision: 'none' });
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    const result = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: second, model });
+    expect(result).toMatchObject({ calls: 1, cacheHits: 0, resolvedPrivate: 1 });
+    expect(new CachedTierSniffer(store, second).judge({ pass: 'content', material, flags: [] })).toMatchObject({ verdict: 'decided', tier: 'secure' });
+  } finally { store.close(); ledger.close(); }
+});
+
+
+test('a built-in weights change cannot bypass an owner revocation', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sniffer-revision-'));
+  const installed = new InstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(dir, 'rules.json') } });
+  const model = spyModel(() => { throw new Error('revoked model must never run'); });
+  const ledgerPath = join(dir, 'approval.jsonl');
+  try {
+    await appendClassificationLedgerEntry(ledgerPath, {
+      recorded_at: new Date().toISOString(), kind: 'classifier_model_revoked', what: 'Owner declines local classification.',
+      model_id: 'built_in', lane: 'local', profile_id: 'built_in', prompt_version: 'older-prompt', approved_by: 'owner', status: 'complete',
+    });
+    for (const cacheModelId of ['model-a:revision-a:hash-a', 'model-b:revision-b:hash-b']) {
+      const runtime = resolveTierSnifferRuntime({ engine: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')),
+        builtIn: { model, available: () => true, cacheModelId } });
+      expect(runtime.source).toBe('built_in');
+      if (runtime.source !== 'built_in') throw new Error('missing built-in');
+      expect(runtime.lane).toMatchObject({ modelId: 'built_in', cacheModelId });
+      const service = new TierSnifferService({ installed, lane: runtime.lane, model, stores: () => [], classificationLedgerPath: ledgerPath, autoApproveBuiltIn: true });
+      try { expect(await service.runOnce()).toMatchObject({ state: 'awaiting_owner_approval', modelId: 'built_in' }); }
+      finally { service.stop(); }
+    }
+    expect(model.requests).toHaveLength(0);
+  } finally { installed.close(); rmSync(dir, { recursive: true, force: true }); }
+});
