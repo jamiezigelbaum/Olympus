@@ -2024,6 +2024,17 @@ export interface ConnectorStoreChunkMedia {
  * orders grants: within one authority, a write may not land on top of a newer
  * one for the same item and scope.
  */
+/** How a fenced Secrets tombstone of an extracted item went. */
+export type ConnectorStoreSecretsExtractionOutcome =
+  | 'tombstoned'
+  | 'missing'
+  | 'ambiguous'
+  | 'excluded'
+  | 'metadata_only'
+  | 'stale_version'
+  | 'owned_elsewhere'
+  | 'stale_claim';
+
 export interface ConnectorStoreItemWriteClaim {
   /** Which family of writes this grant orders. Data, chosen by the caller. */
   scope: string;
@@ -3042,6 +3053,102 @@ export class LocalConnectorStore {
     } finally {
       // The pictures its chunks carried (and their judgments) go when no
       // other chunk here carries them; inside a caller's transaction, after it.
+      if (!this.db.inTransaction) this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  /**
+   * Tombstone an untracked copy whose freshly extracted text is Secrets (the
+   * plain extraction sink), fenced exactly as the representation restore that
+   * would otherwise have written that text: the owner skip and the write-claim
+   * generation are judged inside the same transaction as the tombstone, so a
+   * superseded worker can never remove the current holder's content and an
+   * item another owner claims is left alone. The copy keeps its location only.
+   */
+  tombstoneSecretsExtraction(
+    identity: SourceItemIdentity,
+    options: {
+      connectorId: string;
+      /** The extracted item's metadata, judged by the same exclusion gate as a restore. */
+      metadata: Readonly<Record<string, unknown>>;
+      skipOwner?: { connectorId: string; ownershipKind: ConnectorStoreOwnershipKind };
+      writeClaim?: ConnectorStoreItemWriteClaim;
+    },
+  ): ConnectorStoreSecretsExtractionOutcome {
+    const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
+    try {
+      return this.db.transaction((): ConnectorStoreSecretsExtractionOutcome => {
+        // The restore's own refusals, in its order: an excluded or
+        // metadata-only item takes no text, so there is no text to settle and
+        // its names stay exactly as policy keeps them.
+        const disposition = this.exclusions.evaluateMetadata(options.metadata);
+        if (disposition.excluded) return 'excluded';
+        if (disposition.disposition === 'metadata_only') return 'metadata_only';
+        const existing = this.db.query(`
+          SELECT
+            COUNT(*) AS matching_provider_id_rows,
+            SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
+            MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
+          FROM items
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        `).get(
+          normalizeConversationId(identity.providerConversationId),
+          normalizeConversationId(identity.providerConversationId),
+          normalizeConversationId(identity.providerConversationId),
+          normalizeConversationId(identity.providerConversationId),
+          identity.provider,
+          identity.accountScope,
+          identity.providerItemId,
+        ) as {
+          matching_provider_id_rows: number;
+          exact_identity_rows: number;
+          item_pk: number | null;
+          tombstoned: number | null;
+          source_version: string | null;
+        };
+        if (existing.matching_provider_id_rows > 1) return 'ambiguous';
+        if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1) return 'missing';
+        // The text judged Secret is one revision's. When the row has since
+        // moved to another, that revision's verdict says nothing about the
+        // current one, whose own extraction decides it.
+        if (identity.sourceVersion && existing.source_version !== null
+          && existing.source_version !== identity.sourceVersion) return 'stale_version';
+        if (options.skipOwner) {
+          const owned = this.db.query(`
+            SELECT 1 AS present FROM item_owners
+            WHERE item_pk = ? AND connector_id = ? AND ownership_kind = ?
+            LIMIT 1
+          `).get(existing.item_pk, options.skipOwner.connectorId, options.skipOwner.ownershipKind) as { present: number } | null;
+          if (owned?.present === 1) return 'owned_elsewhere';
+        }
+        if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim)) return 'stale_claim';
+        const syncRunId = `connector-secrets-extraction-${randomUUID()}`;
+        const startedAt = nowIso();
+        this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+            items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, 1, 0, ?, ?)
+        `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
+        this.tombstoneItem(
+          {
+            identity,
+            mimeType: 'application/octet-stream',
+            content: { kind: 'metadata_only' },
+            metadata: {},
+            fetchedAt: startedAt,
+          },
+          options.connectorId,
+          'observed',
+          syncRunId,
+          'S5',
+          true,
+        );
+        return 'tombstoned';
+      })();
+    } finally {
       if (!this.db.inTransaction) this.releaseUnreferencedChunkMedia();
     }
   }
