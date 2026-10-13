@@ -164,7 +164,7 @@ export function pathCarriesOwnerIdentityToken(
  * each exception exact and confined to the files that need it; no private
  * identity, arbitrary GitHub URL, or surrounding text is exempt.
  */
-export const LICENSE_COPYRIGHT_LINE = 'Copyright (c) 2026 Jamie Zigelbaum';
+export const LICENSE_COPYRIGHT_LINE = 'Copyright (c) 2026 Open Coordination Unlimited, Inc.';
 
 const PUBLIC_INSTALL_URL_FILES = new Set([
   'README.md',
