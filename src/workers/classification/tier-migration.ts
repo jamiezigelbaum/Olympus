@@ -50,6 +50,7 @@ import type {
 } from '../connector-store/local-index.ts';
 import { moveTieredItem, sameText, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
 import { secretsDisposition, settleSecretsCopies, type SecretsDisposition } from '../connector-store/secrets-disposition.ts';
+import { secretFencedSniffer } from '../connector-store/tier-placement.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import {
   EMBEDDING_LEDGER_OWNER_APPROVAL,
@@ -704,8 +705,16 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
             totals.notRead += 1;
             continue;
           }
-          const override = ledger.getOverride(item.identity);
-          const sniffer = laneSniffer;
+          // The sniffer fence's snapshot, then the copy re-checked: this page
+          // was read before it, and a Secrets tombstone (which precedes its
+          // side-store clearing) since then leaves nothing to judge.
+          const read = ledger.classificationRead(item.identity);
+          if (!store.itemPresence(item.identity).active) {
+            totals.notRead += 1;
+            continue;
+          }
+          const override = read.override;
+          const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity, read) : undefined;
           // A photo's picture judgment, when the photo judge made one here.
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
           const decision = classifyItemTiers(
@@ -1634,7 +1643,15 @@ async function migrateOne(
 
   // Crash reconciliation: the flip already happened.
   if (record?.routed && record.state !== 'moving') {
-    const current = currentPlacement(ledger.copies(proposal.identity));
+    const copies = ledger.copies(proposal.identity);
+    const current = currentPlacement(copies);
+    if (secrets && record.contentTier === 'secrets' && current.length === 0 && copies.length > 0) {
+      // Flipped, then perhaps stopped before the location was recorded and
+      // the Secrets policy ran: the copies are hidden, and under
+      // `tombstone_now` still stored. Finish it (idempotent); never count the
+      // item as moved.
+      return resumeSecretsSettle(lane, proposal, record, copies, context.secretsDisposition);
+    }
     const done = secrets
       ? record.contentTier === 'secrets' && current.length === 0
       : record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier
@@ -1794,43 +1811,97 @@ function secretsMove(
   if (!record) return { kind: 'skipped', reason: 'changed_since_plan' };
   try {
     const flipped = ledger.flipToSecrets(proposal.identity, { expectedGeneration: record.generation, reasons: proposal.decision.reasons });
-    const row = sourceStore.activeLocalItemRow(identity.localItemId);
-    const kinds = detectSecretFindingKinds(text);
-    lane.set.secrets()?.record({
-      identity,
-      ...(row?.locatorUri ? { locator: row.locatorUri } : {}),
-      namesReleasable: proposal.decision.metadataTier === 'public' || proposal.decision.metadataTier === 'private',
-      folderKeys: row?.sourceScope?.folderKeys ?? [],
-      ...(row?.sourceScope
-        ? { scopeGeneration: row.sourceScope.accountGeneration, scopeRevision: row.sourceScope.scopeRevision }
-        : {}),
-      findingKinds: kinds.length > 0 ? kinds : ['owner_marked_secret'],
-      text,
-    });
-    const settled = settleSecretsCopies({
-      ledger,
-      identity,
-      copies: flipped.copies,
-      storeFor: (corpusId) => {
-        const domain = lane.set.domainForCorpus(corpusId);
-        return domain ? lane.set.store(domain) : undefined;
-      },
-      connectorId: 'olympus_tier_migration',
-      ...(disposition ? { disposition } : {}),
-    });
-    return {
-      kind: 'secrets',
-      generation: flipped.record.generation,
-      chunksPlaced: 0,
-      vectorsCopied: 0,
-      chunksToEmbed: {},
-      secretsChunks: settled.chunks,
-      secretsDisposition: settled.disposition,
-    };
+    recordMigrationSecretLocation(lane, proposal, identity, text, sourceStore);
+    return settleMigrationSecrets(lane, identity, flipped.record.generation, flipped.copies, disposition);
   } catch (error) {
     if (error instanceof TierLedgerGenerationConflictError) return { kind: 'skipped', reason: 'changed_since_plan' };
     throw error;
   }
+}
+
+/** Where a Secret found by the migration lives: the location only, from its stored row. */
+function recordMigrationSecretLocation(
+  lane: TierMigrationLane,
+  proposal: TierMigrationProposal,
+  identity: SourceItemIdentity,
+  text: string,
+  store: LocalConnectorStore,
+): void {
+  const row = store.activeLocalItemRow(identity.localItemId);
+  const kinds = detectSecretFindingKinds(text);
+  lane.set.secrets()?.record({
+    identity,
+    ...(row?.locatorUri ? { locator: row.locatorUri } : {}),
+    namesReleasable: proposal.decision.metadataTier === 'public' || proposal.decision.metadataTier === 'private',
+    folderKeys: row?.sourceScope?.folderKeys ?? [],
+    ...(row?.sourceScope
+      ? { scopeGeneration: row.sourceScope.accountGeneration, scopeRevision: row.sourceScope.scopeRevision }
+      : {}),
+    findingKinds: kinds.length > 0 ? kinds : ['owner_marked_secret'],
+    text,
+  });
+}
+
+/** Hand a flipped item's hidden copies to the one Secrets policy. */
+function settleMigrationSecrets(
+  lane: TierMigrationLane,
+  identity: SourceItemIdentity,
+  generation: number,
+  copies: readonly TierCopy[],
+  disposition: SecretsDisposition | undefined,
+): ItemOutcome {
+  const settled = settleSecretsCopies({
+    ledger: lane.set.ledger,
+    identity,
+    copies,
+    storeFor: (corpusId) => {
+      const domain = lane.set.domainForCorpus(corpusId);
+      return domain ? lane.set.store(domain) : undefined;
+    },
+    connectorId: 'olympus_tier_migration',
+    ...(disposition ? { disposition } : {}),
+  });
+  return {
+    kind: 'secrets',
+    generation,
+    chunksPlaced: 0,
+    vectorsCopied: 0,
+    chunksToEmbed: {},
+    secretsChunks: settled.chunks,
+    secretsDisposition: settled.disposition,
+  };
+}
+
+/**
+ * A migration that stopped between `flipToSecrets` and the Secrets policy
+ * (process killed, power lost): the ledger already says Secrets and hides
+ * every copy, but the location may be unrecorded, the side stores may still
+ * hold the item's names, and under `tombstone_now` the store rows are still
+ * there, untombstoned and unscreened. Finish it: record the location if a
+ * hidden copy still reads, then hand every copy the ledger lists to the
+ * Secrets policy (which keeps them hidden under `hide_until_purge`). Each
+ * step is idempotent, so a run that had finished them changes nothing.
+ */
+function resumeSecretsSettle(
+  lane: TierMigrationLane,
+  proposal: TierMigrationProposal,
+  record: TierLedgerRecord,
+  copies: readonly TierCopy[],
+  disposition: SecretsDisposition | undefined,
+): ItemOutcome {
+  let identity: SourceItemIdentity | undefined;
+  for (const copy of copies) {
+    const domain = lane.set.domainForCorpus(copy.corpusId);
+    const store = domain ? lane.set.store(domain) : undefined;
+    const exported = store?.exportItemCopy(proposal.identity);
+    if (!store || !exported) continue;
+    identity = fullIdentity(proposal, exported.identity.localItemId);
+    recordMigrationSecretLocation(lane, proposal, identity, exported.chunks.map((chunk) => chunk.boundedText).join(''), store);
+    break;
+  }
+  // Every copy already tombstoned (the stop came after them): the rows are
+  // matched by provider identity, so no local id is needed to settle.
+  return settleMigrationSecrets(lane, identity ?? fullIdentity(proposal, ''), record.generation, copies, disposition);
 }
 
 // ---- M5: rollback ------------------------------------------------------------------------

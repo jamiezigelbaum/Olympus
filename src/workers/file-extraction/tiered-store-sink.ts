@@ -32,7 +32,7 @@ import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { classifyContentTier, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
-import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
+import { secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { settleSecretsCopies, settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
 import {
@@ -157,6 +157,8 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         return result;
       }
 
+      // Before anything else is read: the sniffer fence keys off this.
+      const read = ledger.classificationRead(identity);
       const record = ledger.getCurrent(identity);
       if (!record || record.state === 'moving') return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
       const current = ledger.copies(identity).filter((copy) => copy.state === 'current');
@@ -168,7 +170,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if ('skippedReason' in plan) return skipped(plan.skippedReason);
 
       const tierClassification = classificationNow();
-      const override = ledger.getOverride(identity);
+      const override = read.override;
       const itemTitle = stringMetadata(plan.item, ['title', 'name', 'subject']);
       const itemPath = stringMetadata(plan.item, ['locatorUri', 'pathDisplay']);
       // The photo judge's verdict on this exact picture, wherever in the set
@@ -188,7 +190,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           subject: identity,
         },
         {
-          ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
+          ...(tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity, read) } : {}),
           ...(override ? { override } : {}),
           ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },
