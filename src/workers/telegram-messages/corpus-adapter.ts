@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import { LEGACY_TELEGRAM_MESSAGES_CORPUS_ID } from '../../core/source-corpus-registry.ts';
 import { defineSourceIndexCorpus, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
@@ -18,12 +19,9 @@ export type TelegramMessagesCorpusTrustDomain = Extract<SourceTrustDomain, 'inte
 export function defaultInternalTelegramConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
+  // The standalone Linux engine keeps every store under its own data root.
   return join(
-    env.HOME?.trim() || homedir(),
-    '.local',
-    'share',
-    'openclaw',
-    'olympus',
+    standaloneLinuxDataDir(env) ?? join(env.HOME?.trim() || homedir(), '.local', 'share', 'openclaw', 'olympus'),
     'telegram-internal-connector-store.sqlite',
   );
 }
@@ -31,12 +29,9 @@ export function defaultInternalTelegramConnectorStoreDbPath(
 export function defaultProtectedTelegramConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
+  // The standalone Linux engine keeps every store under its own data root.
   return join(
-    env.HOME?.trim() || homedir(),
-    '.local',
-    'share',
-    'openclaw',
-    'olympus',
+    standaloneLinuxDataDir(env) ?? join(env.HOME?.trim() || homedir(), '.local', 'share', 'openclaw', 'olympus'),
     'telegram-protected-connector-store.sqlite',
   );
 }

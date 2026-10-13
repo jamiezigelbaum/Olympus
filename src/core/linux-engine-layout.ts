@@ -165,6 +165,11 @@ export function preflightLinuxEngineLayout(layout: LinuxEngineLayout, options: {
       layout.openHandlerPath,
       join(layout.home, '.config/systemd/user/olympus-worker.service'), join(layout.configHome, 'systemd/user/olympus-worker.service')];
     const managed = new Set([layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir, layout.unitPath, layout.launcherPath, layout.openHandlerPath]);
+    // The engine writes its status under its own XDG data root (dataDir/engine).
+    // Once the receipt owns that root, the subdirectory is ours, not a legacy
+    // package directory, so a re-check during the install transaction must not
+    // refuse the engine it just started.
+    if (layout.dataDir === join(layout.dataHome, 'olympus')) managed.add(join(layout.dataDir, 'engine'));
     const recoverableEmptyDirectory = (p: string): boolean => {
       const info=stat(p);
       return managed.has(p)&&Boolean(info?.isDirectory()&&info.uid===uid&&(info.mode&0o077)===0&&readdirSync(p).length===0);

@@ -173,3 +173,26 @@ test('receipt discovery validates the recorded legacy layout before considering 
   writeFileSync(oldLayout.receiptPath!, JSON.stringify({ ...receipt, layout: oldLayout }), { mode: 0o600 });
   expect(resolveLinuxEngineLayout({ ...env, XDG_CONFIG_HOME: configHome }).dataDir).toBe(oldLayout.dataDir!);
 });
+test('an owned install re-checked after its engine wrote status is not refused as legacy data', () => {
+  // Default XDG data home: the engine's status directory is <data>/olympus/engine,
+  // which is also where a pre-XDG package directory used to live.
+  const { home, env } = fixture(); const xdg = { ...env, XDG_DATA_HOME: join(home, '.local/share') };
+  const layout = resolveLinuxEngineLayout(xdg);
+  const engineDir = join(layout.dataDir, 'engine');
+  mkdirSync(engineDir, { recursive: true, mode: 0o700 }); writeFileSync(join(engineDir, 'status.json'), '{}', { mode: 0o600 });
+  // Without a receipt the same directory is someone else's data: refuse.
+  expect(() => preflightLinuxEngineLayout(resolveLinuxEngineLayout(xdg))).toThrow(engineDir);
+  rmSync(engineDir, { recursive: true });
+  publishLinuxEngineReceipt(layout);
+  mkdirSync(engineDir, { recursive: true, mode: 0o700 }); writeFileSync(join(engineDir, 'status.json'), '{}', { mode: 0o600 });
+  expect(() => preflightLinuxEngineLayout(resolveLinuxEngineLayout(xdg))).not.toThrow();
+});
+test('the standalone engine keeps Telegram stores under its own data root, never the OpenClaw path', async () => {
+  const { home, env } = fixture(); const xdg = { ...env, XDG_DATA_HOME: join(home, '.local/share'), OLYMPUS_ENGINE_HOST: '1' };
+  const { defaultInternalTelegramConnectorStoreDbPath, defaultProtectedTelegramConnectorStoreDbPath } = await import('../src/workers/telegram-messages/corpus-adapter.ts');
+  const layout = resolveLinuxEngineLayout(xdg);
+  for (const path of [defaultInternalTelegramConnectorStoreDbPath(xdg), defaultProtectedTelegramConnectorStoreDbPath(xdg)]) {
+    expect(path.startsWith(`${layout.dataDir}/`)).toBe(true);
+    expect(path).not.toContain('openclaw');
+  }
+});
