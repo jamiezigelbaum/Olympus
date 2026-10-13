@@ -205,7 +205,8 @@ computer**, marked **Not sent to ChatGPT**.
   sized to its memory: 2B under 16 GB, 4B with more) and sends it to the panel sealed, so only the panel can open it. It goes
   around the ChatGPT conversation, not through it, and the Olympus relay
   cannot read it.
-- It usually arrives within a minute. Ask for *"all the details"* and
+- On an Apple silicon Mac it usually arrives within a minute; on Omarchy it
+  depends on the computer's processor and can take a few minutes. Ask for *"all the details"* and
   Olympus reads the whole documents instead; that can take a few minutes.
 - **Sources** (closed at first) lists the items the answer used. Click one to
   open it on your computer, or in Dropbox on the web if it is not on this computer
