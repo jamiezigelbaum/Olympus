@@ -162,6 +162,12 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-13 — Grok Bot is in 1.0.** Owner decision, superseding the
+  Grok Bot part of the 2026-10-12 Claude and Grok decision below. Grok Bot
+  needs no connector of its own: once Olympus is connected on grok.com, it
+  uses that connection, with the same xAI account. Grok Bot's own sign-in (as
+  Cursor's pinned client), Muse and the Grok API key path stay after 1.0.
+
 - **2026-10-12 — Linux parity, Omarchy first.** Owner decision: Olympus
   itself runs on Linux with the Mac's capabilities (scan and image text,
   photo content, transcription, built-in private model, confined zkAPI lane,
@@ -185,7 +191,8 @@ testers have exercised the normal product journey without custom engineering.
   the relay answers the standard 401 (how these clients start signing in);
   `/openai/mcp` keeps its tokenless ChatGPT answers. Grok counts as xAI for
   anonymous answers, so its questions never go to an xAI model. Muse, Grok
-  Bot and the Grok API key path stay after 1.0.
+  Bot and the Grok API key path stay after 1.0 (Grok Bot superseded by the
+  2026-10-13 decision above).
 
 - **2026-10-08 — Ordinary photos are Personal; only sensitive photos are
   Private.** Owner decision, replacing the 2026-10-07 interim rule below.
