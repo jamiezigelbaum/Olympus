@@ -256,6 +256,24 @@ function hostProgram(input: {
     frame,
     callTool,
     openUrl(url: string) {
+      // On the computer the dashboard is already the whole app: its own pages
+      // open in place (an Omarchy app window would otherwise hand them to a
+      // browser tab). Only pages elsewhere open in the browser (owner
+      // decision, 2026-10-13). The links name the worker's address; behind
+      // the Linux desktop bridge the page runs on another, so a page is
+      // matched by the list it came from and opened by its path.
+      const own = Object.keys(input.bridge.links).map((key) => input.bridge.links[key])
+        .concat(Object.keys(input.bridge.openTargets).map((key) => input.bridge.openTargets[key]));
+      let parsed: URL | undefined;
+      try {
+        parsed = new URL(url, window.location.href);
+      } catch {
+        parsed = undefined;
+      }
+      if (parsed && (own.indexOf(url) >= 0 || parsed.origin === window.location.origin)) {
+        window.location.assign(parsed.pathname + parsed.search + parsed.hash);
+        return;
+      }
       window.open(url, '_blank', 'noopener');
     },
   });
