@@ -161,98 +161,521 @@ export function officeTableSummary(input: {
 }
 
 // --- PDF text layer --------------------------------------------------------
+//
+// This is the reader a host without poppler uses, which is most Macs, so it
+// has to be safe on any PDF a user keeps in a synced folder: photo albums,
+// font-heavy brochures, scans. It runs synchronously inside the process that
+// also answers questions, so three rules keep it cheap:
+//
+//   - Only streams that can hold page text are decoded. A stream whose
+//     dictionary marks it as an image, an embedded font, an ICC profile, a
+//     cross-reference or object stream, and the like is never inflated.
+//   - Content streams are read by a single forward pass over their tokens, so
+//     the cost is linear in the stream size whatever bytes it holds.
+//   - One PDF gets a fixed budget of decoded bytes and decode time. When it
+//     runs out, the text found so far is returned and the result is flagged
+//     partial rather than the worker waiting for the rest.
 
-export function extractPdfTextStreams(bytes: Uint8Array): string[] {
-  const source = decodeLatin1(bytes);
-  const streamPattern = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+export const PDF_TEXT_PARTIAL_WARNING = 'pdf_text_partial';
+
+/**
+ * The largest a single stream may grow to when inflated. Page content streams
+ * are kilobytes; a stream past this is an image or a deliberate bomb.
+ */
+export const PDF_TEXT_MAX_STREAM_BYTES = 8_000_000;
+/**
+ * The most stream bytes (inflated or raw) one PDF may have decoded and
+ * scanned: room for a very long text document, not for an archive.
+ */
+export const PDF_TEXT_MAX_TOTAL_BYTES = 48_000_000;
+/**
+ * The longest one PDF may keep the worker busy decoding.
+ */
+export const PDF_TEXT_MAX_DECODE_MS = 1_500;
+
+const PDF_STREAM_DICTIONARY_MAX_BYTES = 65_536;
+
+export interface PdfTextLimits {
+  maxStreamBytes?: number;
+  maxTotalBytes?: number;
+  maxDecodeMs?: number;
+  /**
+   * A millisecond clock; tests pass a fake one so the time budget is exact.
+   */
+  now?: () => number;
+}
+
+export interface PdfTextLayer {
+  texts: string[];
+  /**
+   * True when the budget stopped the reader before the whole PDF was read, so
+   * the text is what was found up to that point.
+   */
+  partial: boolean;
+}
+
+interface PdfDecodeBudget {
+  maxStreamBytes: number;
+  maxTotalBytes: number;
+  deadline: number;
+  now: () => number;
+  usedBytes: number;
+  partial: boolean;
+}
+
+interface PdfStreamSpan {
+  keywordStart: number;
+  dataStart: number;
+  dataEnd: number;
+  next: number;
+}
+
+export function extractPdfTextStreams(bytes: Uint8Array, limits: PdfTextLimits = {}): string[] {
+  return extractPdfTextLayer(bytes, limits).texts;
+}
+
+export function extractPdfTextLayer(bytes: Uint8Array, limits: PdfTextLimits = {}): PdfTextLayer {
+  const now = limits.now ?? (() => performance.now());
+  const budget: PdfDecodeBudget = {
+    maxStreamBytes: limits.maxStreamBytes ?? PDF_TEXT_MAX_STREAM_BYTES,
+    maxTotalBytes: limits.maxTotalBytes ?? PDF_TEXT_MAX_TOTAL_BYTES,
+    deadline: now() + (limits.maxDecodeMs ?? PDF_TEXT_MAX_DECODE_MS),
+    now,
+    usedBytes: 0,
+    partial: false,
+  };
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const texts: string[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = streamPattern.exec(source)) !== null) {
-    const streamSource = match[1] ?? '';
-    const streamBytes = latin1Bytes(streamSource);
-    const dictionaryStart = source.lastIndexOf('<<', match.index);
-    const dictionaryEnd = source.lastIndexOf('>>', match.index);
-    const dictionary = dictionaryStart >= 0 && dictionaryEnd >= dictionaryStart
-      ? source.slice(dictionaryStart, dictionaryEnd + 2)
-      : '';
-    const decoded = decodePdfStream(streamBytes, dictionary);
-    const text = normalizeExtractedText(extractPdfTextOperators(decoded).join('\n'));
+  const streamRanges: Array<[number, number]> = [];
+  let cursor = 0;
+  for (;;) {
+    const stream = findPdfStream(buffer, cursor);
+    if (!stream) break;
+    cursor = stream.next;
+    streamRanges.push([stream.keywordStart, stream.next]);
+    if (pdfBudgetSpent(budget)) {
+      budget.partial = true;
+      break;
+    }
+    const dictionary = readPdfStreamDictionary(buffer, stream.keywordStart);
+    if (pdfStreamHoldsNoText(dictionary)) continue;
+    const content = readPdfStreamContent(buffer, stream, dictionary, budget);
+    if (content === undefined) continue;
+    const text = normalizeExtractedText(scanPdfTextShows(content).join('\n'));
     if (text) texts.push(text);
   }
 
-  if (texts.length > 0) return texts;
-  return [normalizeExtractedText(extractPdfTextOperators(source).join('\n'))].filter(Boolean);
-}
-
-function decodePdfStream(bytes: Uint8Array, dictionary: string): string {
-  if (!/\/FlateDecode\b/.test(dictionary)) return decodeLatin1(bytes);
-  try {
-    return decodeLatin1(inflateSync(bytes));
-  } catch {
-    try {
-      return decodeLatin1(inflateRawSync(bytes));
-    } catch {
-      return '';
-    }
-  }
-}
-
-function extractPdfTextOperators(content: string): string[] {
-  const texts: string[] = [];
-  const textObjectPattern = /BT([\s\S]*?)ET/g;
-  let match: RegExpExecArray | null;
-  while ((match = textObjectPattern.exec(content)) !== null) {
-    const block = match[1] ?? '';
-    texts.push(...extractPdfTextRuns(block));
-  }
-  return texts.length > 0 ? texts : extractPdfTextRuns(content);
-}
-
-function extractPdfTextRuns(content: string): string[] {
-  const texts: string[] = [];
-  const tokenPattern = /(\((?:\\.|[^\\()])*\)|<[\da-fA-F\s]+>)\s*(?:Tj|'|")|\[((?:[^\]\\]|\\.|\((?:\\.|[^\\()])*\)|<[\da-fA-F\s]+>)*)\]\s*TJ/g;
-  let match: RegExpExecArray | null;
-  while ((match = tokenPattern.exec(content)) !== null) {
-    const literal = match[1];
-    const arrayBody = match[2];
-    if (literal) {
-      texts.push(decodePdfTextToken(literal));
-    } else if (arrayBody) {
-      const parts: string[] = [];
-      const arrayTokenPattern = /\((?:\\.|[^\\()])*\)|<[\da-fA-F\s]+>/g;
-      let tokenMatch: RegExpExecArray | null;
-      while ((tokenMatch = arrayTokenPattern.exec(arrayBody)) !== null) {
-        parts.push(decodePdfTextToken(tokenMatch[0] ?? ''));
+  // A file whose streams gave no text may still carry an uncompressed content
+  // stream the stream reader did not recognize, so the bytes between the
+  // recognized streams are read as content too. The streams themselves are
+  // left out: they were already tried, or are known not to hold text.
+  if (texts.length === 0 && !budget.partial) {
+    let gapStart = 0;
+    const boundaries: Array<[number, number]> = [...streamRanges, [buffer.length, buffer.length]];
+    for (const [rangeStart, rangeEnd] of boundaries) {
+      if (rangeStart - gapStart >= 4) {
+        if (pdfBudgetSpent(budget)) {
+          budget.partial = true;
+          break;
+        }
+        const length = Math.min(rangeStart - gapStart, budget.maxStreamBytes);
+        if (length < rangeStart - gapStart) budget.partial = true;
+        const gap = buffer.subarray(gapStart, gapStart + length);
+        budget.usedBytes += length;
+        if (pdfHasTextObject(gap)) {
+          const text = normalizeExtractedText(scanPdfTextShows(gap.toString('latin1')).join('\n'));
+          if (text) texts.push(text);
+        }
       }
-      const joined = parts.join('');
-      if (joined) texts.push(joined);
+      gapStart = rangeEnd;
     }
   }
-  return texts.map(normalizeExtractedText).filter(Boolean);
+  return { texts, partial: budget.partial };
 }
 
-function decodePdfTextToken(token: string): string {
-  if (token.startsWith('<') && token.endsWith('>')) {
-    return decodePdfHexString(token.slice(1, -1));
+function pdfBudgetSpent(budget: PdfDecodeBudget): boolean {
+  return budget.usedBytes >= budget.maxTotalBytes || budget.now() > budget.deadline;
+}
+
+/**
+ * Find the next `stream ... endstream` span at or after `from`. The data runs
+ * from the line break after `stream` to the line break before `endstream`.
+ */
+function findPdfStream(buffer: Buffer, from: number): PdfStreamSpan | undefined {
+  let search = from;
+  for (;;) {
+    const keywordStart = buffer.indexOf('stream', search, 'latin1');
+    if (keywordStart < 0) return undefined;
+    search = keywordStart + 6;
+    // `endstream` ends in the same word, and `...stream` inside prose is not
+    // a stream keyword: it must follow whitespace or the closing `>>`.
+    const before = keywordStart > 0 ? buffer[keywordStart - 1]! : 0x0a;
+    if (!isPdfWhitespaceCode(before) && before !== 0x3e) continue;
+    let dataStart = keywordStart + 6;
+    if (buffer[dataStart] === 0x0d && buffer[dataStart + 1] === 0x0a) dataStart += 2;
+    else if (buffer[dataStart] === 0x0a) dataStart += 1;
+    else continue;
+    const close = buffer.indexOf('endstream', dataStart, 'latin1');
+    if (close < 0) return undefined;
+    let dataEnd = close;
+    if (dataEnd > dataStart && buffer[dataEnd - 1] === 0x0a) {
+      dataEnd -= 1;
+      if (dataEnd > dataStart && buffer[dataEnd - 1] === 0x0d) dataEnd -= 1;
+    } else if (dataEnd > dataStart && buffer[dataEnd - 1] === 0x0d) {
+      dataEnd -= 1;
+    }
+    return { keywordStart, dataStart, dataEnd, next: close + 9 };
   }
-  if (token.startsWith('(') && token.endsWith(')')) {
-    return decodePdfLiteralString(token.slice(1, -1));
+}
+
+/**
+ * The dictionary written just before a `stream` keyword, matching nested
+ * `<< >>` pairs so a /DecodeParms sub-dictionary does not hide /Filter.
+ * Empty when no dictionary precedes the keyword.
+ */
+function readPdfStreamDictionary(buffer: Buffer, keywordStart: number): string {
+  let end = keywordStart;
+  while (end > 0 && isPdfWhitespaceCode(buffer[end - 1]!)) end -= 1;
+  if (end < 2 || buffer[end - 1] !== 0x3e || buffer[end - 2] !== 0x3e) return '';
+  const floor = Math.max(0, end - PDF_STREAM_DICTIONARY_MAX_BYTES);
+  let depth = 0;
+  let index = end;
+  while (index - 2 >= floor) {
+    const first = buffer[index - 2];
+    const second = buffer[index - 1];
+    if (first === 0x3e && second === 0x3e) {
+      depth += 1;
+      index -= 2;
+    } else if (first === 0x3c && second === 0x3c) {
+      depth -= 1;
+      index -= 2;
+      if (depth === 0) return buffer.toString('latin1', index, end);
+    } else {
+      index -= 1;
+    }
   }
   return '';
 }
 
-function decodePdfHexString(hex: string): string {
-  const cleaned = hex.replace(/\s+/g, '');
-  const bytes: number[] = [];
-  for (let index = 0; index < cleaned.length; index += 2) {
-    const pair = cleaned.slice(index, index + 2).padEnd(2, '0');
-    const value = Number.parseInt(pair, 16);
-    if (!Number.isNaN(value)) bytes.push(value);
+/**
+ * Streams the dictionary marks as something other than page content: images,
+ * embedded font programs, ICC profiles, cross-reference and object streams,
+ * metadata, embedded files and function or shading tables. None can hold the
+ * page's text, and most are the large binary part of a PDF.
+ */
+function pdfStreamHoldsNoText(dictionary: string): boolean {
+  return /\/Subtype\s*\/(?:Image|Type1C|CIDFontType0C|OpenType)\b/.test(dictionary)
+    || /\/Length[123]\b/.test(dictionary)
+    || /\/Type\s*\/(?:XRef|ObjStm|Metadata|EmbeddedFile)\b/.test(dictionary)
+    || /\/(?:DCTDecode|JPXDecode|JBIG2Decode|CCITTFaxDecode)\b/.test(dictionary)
+    || /\/(?:FunctionType|ShadingType|Alternate)\b/.test(dictionary)
+    || /\/N\s+[134]\b/.test(dictionary);
+}
+
+function pdfStreamUsesFlate(dictionary: string): boolean {
+  return /\/FlateDecode\b/.test(dictionary);
+}
+
+function pdfStreamHasFilter(dictionary: string): boolean {
+  return /\/Filter\b/.test(dictionary);
+}
+
+/**
+ * The decoded content of a stream worth scanning, or undefined when it cannot
+ * or should not be: a filter this reader does not decode, a stream that does
+ * not inflate, one past the size cap, or one with no BT ... ET text object.
+ */
+function readPdfStreamContent(
+  buffer: Buffer,
+  stream: PdfStreamSpan,
+  dictionary: string,
+  budget: PdfDecodeBudget,
+): string | undefined {
+  const raw = buffer.subarray(stream.dataStart, stream.dataEnd);
+  let content: Buffer;
+  if (pdfStreamUsesFlate(dictionary)) {
+    const inflated = inflatePdfStream(raw, budget.maxStreamBytes);
+    if (inflated === 'too_large') {
+      budget.partial = true;
+      return undefined;
+    }
+    if (inflated === undefined) return undefined;
+    content = inflated;
+  } else if (pdfStreamHasFilter(dictionary)) {
+    return undefined;
+  } else {
+    if (raw.length > budget.maxStreamBytes) {
+      budget.partial = true;
+      return undefined;
+    }
+    content = raw;
   }
-  return decodePdfStringBytes(new Uint8Array(bytes));
+  budget.usedBytes += content.length;
+  if (!pdfHasTextObject(content)) return undefined;
+  return content.toString('latin1');
+}
+
+function inflatePdfStream(raw: Uint8Array, maxOutputLength: number): Buffer | 'too_large' | undefined {
+  try {
+    return inflateSync(raw, { maxOutputLength });
+  } catch (error) {
+    if (isInflateOutputLimitError(error)) return 'too_large';
+  }
+  try {
+    return inflateRawSync(raw, { maxOutputLength });
+  } catch (error) {
+    return isInflateOutputLimitError(error) ? 'too_large' : undefined;
+  }
+}
+
+/**
+ * Inflating past `maxOutputLength` is the one failure that means "too big"
+ * rather than "not Flate data".
+ */
+function isInflateOutputLimitError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === 'ERR_BUFFER_TOO_LARGE';
+}
+
+/**
+ * Whether the bytes hold a text object: a BT with an ET after it.
+ */
+function pdfHasTextObject(content: Buffer): boolean {
+  const begin = content.indexOf('BT', 0, 'latin1');
+  return begin >= 0 && content.indexOf('ET', begin + 2, 'latin1') >= 0;
+}
+
+function isPdfWhitespaceCode(code: number): boolean {
+  return code === 0x20 || code === 0x0a || code === 0x0d || code === 0x09 || code === 0x0c || code === 0x00;
+}
+
+function isPdfDelimiterCode(code: number): boolean {
+  return code === 0x28 || code === 0x29 || code === 0x3c || code === 0x3e
+    || code === 0x5b || code === 0x5d || code === 0x7b || code === 0x7d
+    || code === 0x2f || code === 0x25;
+}
+
+function pdfHexDigitValue(code: number): number {
+  if (code >= 0x30 && code <= 0x39) return code - 0x30;
+  if (code >= 0x41 && code <= 0x46) return code - 0x41 + 10;
+  if (code >= 0x61 && code <= 0x66) return code - 0x61 + 10;
+  return -1;
+}
+
+/**
+ * Index just past the `)` that closes the literal string opening at `start`,
+ * counting nested parentheses and skipping backslash escapes; -1 when it
+ * never closes.
+ */
+function skipPdfLiteralString(content: string, start: number): number {
+  let depth = 0;
+  for (let index = start; index < content.length; index += 1) {
+    const code = content.charCodeAt(index);
+    if (code === 0x5c) {
+      index += 1;
+    } else if (code === 0x28) {
+      depth += 1;
+    } else if (code === 0x29) {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Index just past the `>` that closes the hex string opening at `start`; -1
+ * when the bytes are not a hex string (anything but hex digits and
+ * whitespace before a `>`).
+ */
+function skipPdfHexString(content: string, start: number): number {
+  for (let index = start + 1; index < content.length; index += 1) {
+    const code = content.charCodeAt(index);
+    if (code === 0x3e) return index + 1;
+    if (pdfHexDigitValue(code) < 0 && !isPdfWhitespaceCode(code)) return -1;
+  }
+  return -1;
+}
+
+/**
+ * Read the strings of a TJ array opening just before `from`, up to its
+ * closing bracket; undefined when it never closes.
+ */
+function readPdfTextArray(content: string, from: number): { text: string; end: number } | undefined {
+  const parts: string[] = [];
+  let index = from;
+  while (index < content.length) {
+    const code = content.charCodeAt(index);
+    if (code === 0x5d) return { text: parts.join(''), end: index + 1 };
+    if (code === 0x28) {
+      const end = skipPdfLiteralString(content, index);
+      if (end < 0) return undefined;
+      parts.push(decodePdfLiteralString(content.slice(index + 1, end - 1)));
+      index = end;
+    } else if (code === 0x3c && content.charCodeAt(index + 1) !== 0x3c) {
+      const end = skipPdfHexString(content, index);
+      if (end < 0) {
+        index += 1;
+      } else {
+        parts.push(decodePdfHexString(content.slice(index + 1, end - 1)));
+        index = end;
+      }
+    } else {
+      index += 1;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Index just past the `EI` that ends the inline image whose data follows
+ * `from`; -1 when there is none.
+ */
+function skipPdfInlineImageData(content: string, from: number): number {
+  let search = from;
+  for (;;) {
+    const found = content.indexOf('EI', search);
+    if (found < 0) return -1;
+    const beforeIsSpace = found > from && isPdfWhitespaceCode(content.charCodeAt(found - 1));
+    const afterIsSpace = found + 2 >= content.length || isPdfWhitespaceCode(content.charCodeAt(found + 2));
+    if (beforeIsSpace && afterIsSpace) return found + 2;
+    search = found + 2;
+  }
+}
+
+function pushPdfTextRun(runs: string[], text: string): void {
+  const run = normalizeExtractedText(text);
+  if (run) runs.push(run);
+}
+
+/**
+ * The text a content stream shows, in order, one run per show operator: the
+ * string before each Tj, ' and ", and the strings of the array before each TJ.
+ *
+ * One forward pass over the tokens that never revisits a byte, so the cost is
+ * linear in the content size whatever the bytes are. As in any PDF lexer, a
+ * string or array that never closes swallows the rest of the content.
+ */
+function scanPdfTextShows(content: string): string[] {
+  const runs: string[] = [];
+  const length = content.length;
+  const noOperand = 0;
+  const stringOperand = 1;
+  const arrayOperand = 2;
+  let operandKind = noOperand;
+  let operandText = '';
+  let inlineImage = false;
+  let index = 0;
+  while (index < length) {
+    const code = content.charCodeAt(index);
+    if (isPdfWhitespaceCode(code)) {
+      index += 1;
+      continue;
+    }
+    if (code === 0x28) {
+      const end = skipPdfLiteralString(content, index);
+      if (end < 0) break;
+      operandKind = stringOperand;
+      operandText = decodePdfLiteralString(content.slice(index + 1, end - 1));
+      index = end;
+      continue;
+    }
+    if (code === 0x3c) {
+      if (content.charCodeAt(index + 1) === 0x3c) {
+        operandKind = noOperand;
+        index += 2;
+        continue;
+      }
+      const end = skipPdfHexString(content, index);
+      if (end < 0) {
+        operandKind = noOperand;
+        index += 1;
+      } else {
+        operandKind = stringOperand;
+        operandText = decodePdfHexString(content.slice(index + 1, end - 1));
+        index = end;
+      }
+      continue;
+    }
+    if (code === 0x5b) {
+      const array = readPdfTextArray(content, index + 1);
+      if (!array) break;
+      operandKind = arrayOperand;
+      operandText = array.text;
+      index = array.end;
+      continue;
+    }
+    if (code === 0x25) {
+      while (index < length && content.charCodeAt(index) !== 0x0a && content.charCodeAt(index) !== 0x0d) {
+        index += 1;
+      }
+      continue;
+    }
+
+    // Anything else ends the run of operands: a name, a number, an operator,
+    // or a stray bracket.
+    const shown = operandKind;
+    operandKind = noOperand;
+    let end = index + 1;
+    if (code !== 0x2f && isPdfDelimiterCode(code)) {
+      index = end;
+      continue;
+    }
+    while (end < length) {
+      const next = content.charCodeAt(end);
+      if (isPdfWhitespaceCode(next) || isPdfDelimiterCode(next)) break;
+      end += 1;
+    }
+    if (code !== 0x2f) {
+      const tokenLength = end - index;
+      const second = tokenLength === 2 ? content.charCodeAt(index + 1) : 0;
+      if (tokenLength === 1 && (code === 0x27 || code === 0x22)) {
+        if (shown === stringOperand) pushPdfTextRun(runs, operandText);
+      } else if (tokenLength === 2 && code === 0x54 && second === 0x6a) {
+        if (shown === stringOperand) pushPdfTextRun(runs, operandText);
+      } else if (tokenLength === 2 && code === 0x54 && second === 0x4a) {
+        if (shown === arrayOperand) pushPdfTextRun(runs, operandText);
+      } else if (tokenLength === 2 && code === 0x42 && second === 0x49) {
+        inlineImage = true;
+      } else if (tokenLength === 2 && code === 0x49 && second === 0x44 && inlineImage) {
+        inlineImage = false;
+        end = skipPdfInlineImageData(content, end);
+        if (end < 0) break;
+      }
+    }
+    index = end;
+  }
+  return runs;
+}
+
+function decodePdfHexString(hex: string): string {
+  const bytes = new Uint8Array((hex.length >> 1) + 1);
+  let count = 0;
+  let high = -1;
+  for (let index = 0; index < hex.length; index += 1) {
+    const digit = pdfHexDigitValue(hex.charCodeAt(index));
+    if (digit < 0) continue;
+    if (high < 0) {
+      high = digit;
+    } else {
+      bytes[count] = (high << 4) | digit;
+      count += 1;
+      high = -1;
+    }
+  }
+  // An odd final digit stands for the byte with a zero low nibble.
+  if (high >= 0) {
+    bytes[count] = high << 4;
+    count += 1;
+  }
+  return decodePdfStringBytes(bytes.subarray(0, count));
 }
 
 function decodePdfLiteralString(value: string): string {
+  // The common case: no escapes, and not a UTF-16 string. The content was
+  // decoded as Latin-1, so every character already is one byte.
+  if (value.indexOf('\\') < 0 && !(value.charCodeAt(0) === 0xfe && value.charCodeAt(1) === 0xff)) {
+    return value;
+  }
   const bytes: number[] = [];
   for (let index = 0; index < value.length; index += 1) {
     const char = value[index];
@@ -299,20 +722,7 @@ function decodePdfStringBytes(bytes: Uint8Array): string {
 }
 
 function decodeLatin1(bytes: Uint8Array): string {
-  const chunkSize = 8192;
-  let output = '';
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    output += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return output;
-}
-
-function latin1Bytes(value: string): Uint8Array {
-  const bytes = new Uint8Array(value.length);
-  for (let index = 0; index < value.length; index += 1) {
-    bytes[index] = value.charCodeAt(index) & 0xff;
-  }
-  return bytes;
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('latin1');
 }
 
 /**
@@ -388,7 +798,7 @@ export function readZipEntryText(
   const entry = entries.get(name);
   if (!entry) return undefined;
   if (entry.uncompressedSize > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) {
-    throw new OfficeDocumentUnreadableError('unsupported', 'Office document zip entry exceeds the local extraction cap.');
+    throw zipEntryExceedsCapError();
   }
   return decodeZipEntryText(bytes, entry);
 }
@@ -409,12 +819,18 @@ function decodeZipEntryText(
   const extraLength = readUint16Le(bytes, offset + 28);
   const dataOffset = offset + 30 + nameLength + extraLength;
   const compressed = bytes.subarray(dataOffset, dataOffset + entry.compressedSize);
-  if (entry.method === 0) return decodeUtf8(compressed);
+  // The sizes in a zip directory are whatever the file's author wrote, so the
+  // cap is enforced on the bytes themselves, not on the declared sizes.
+  if (entry.method === 0) {
+    if (compressed.length > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) throw zipEntryExceedsCapError();
+    return decodeUtf8(compressed);
+  }
   if (entry.method === 8) {
     let inflated: Buffer;
     try {
-      inflated = inflateRawSync(compressed);
-    } catch {
+      inflated = inflateRawSync(compressed, { maxOutputLength: MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES });
+    } catch (error) {
+      if (isInflateOutputLimitError(error)) throw zipEntryExceedsCapError();
       throw new OfficeDocumentUnreadableError('damaged', 'Office document zip entry does not decompress.');
     }
     return decodeUtf8(new Uint8Array(inflated));
@@ -423,6 +839,10 @@ function decodeZipEntryText(
     'unsupported',
     `Unsupported Office document zip compression method ${entry.method}.`,
   );
+}
+
+function zipEntryExceedsCapError(): OfficeDocumentUnreadableError {
+  return new OfficeDocumentUnreadableError('unsupported', 'Office document zip entry exceeds the local extraction cap.');
 }
 
 function findZipEndOfCentralDirectory(bytes: Uint8Array): number {

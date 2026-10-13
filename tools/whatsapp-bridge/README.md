@@ -104,6 +104,24 @@ If pairing times out before a scan, the daemon exits; just start it again.
 If the phone ever removes the linked device, the daemon exits with a
 "logged out" message — delete nothing, restart it, and pair again.
 
+## Command-line modes
+
+- No flags: the historic daemon. It pairs by QR when the session store is
+  empty, then captures every chat.
+- `--pair-only`: what `olympus connect whatsapp --pair` runs. It pairs (or
+  verifies the existing link), prints JSON events on stdout (`qr` with the
+  private PNG path, then `ready` with the authentication proof), records a
+  content-free result in `pairing-status.json`, and exits without capturing.
+  It ignores the native-capture switch and creates no spool. A failure exits
+  non-zero with `olympus-whatsapp-bridge: <code>` on stderr.
+  `OLYMPUS_WHATSAPP_PAIR_TTY_QR=false` keeps the QR out of the terminal.
+- `--capture-approved`: captures only the chats listed in
+  `OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS` (comma-separated chat JIDs, or `*` for
+  the whole linked account). A missing or malformed list exits before any state
+  is touched. Messages, reactions and voice notes from other chats are dropped
+  before any download or spool write. It combines with native capture.
+- `--pair-only --capture-approved` is refused (`incompatible_modes`).
+
 ## Native capture mode (managed service)
 
 `OLYMPUS_WHATSAPP_NATIVE_CAPTURE=true` turns the same binary into a managed

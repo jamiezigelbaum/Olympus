@@ -18427,8 +18427,8 @@ class TierLedger {
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
   }
   queueOwnerRaise(identity, decision, trustDomain, options = {}) {
-    if (decision.decidedBy !== "override")
-      throw new Error("Only an owner override is queued this way.");
+    if (decision.decidedBy !== "override" && decision.decidedBy !== "owner_rule")
+      throw new Error("Only an owner override or owner rule is queued this way.");
     if (!(trustDomain in TRUST_DOMAIN_RANK))
       throw new Error(`Unknown trust domain "${trustDomain}".`);
     let result = "none";
@@ -32018,7 +32018,7 @@ class BuiltInSourceEmbeddingProvider {
       return false;
     if (this.picturesHeld())
       return false;
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     const supported = model.kind === "litert" && model.embedder.vision;
     if (!supported && !this.imageSupportWarned) {
       this.imageSupportWarned = true;
@@ -32043,7 +32043,7 @@ class BuiltInSourceEmbeddingProvider {
         throw new BuiltInEmbeddingNotReadyError(this.status());
       }
     }
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     return this.embedLoaded(model, inputs, options.taskType);
   }
   loadedOnly() {
@@ -32063,6 +32063,15 @@ class BuiltInSourceEmbeddingProvider {
         return this.embedLoaded(model, inputs, options.taskType);
       }
     };
+  }
+  async ready() {
+    if (this.loaded)
+      return this.loaded;
+    try {
+      return await this.load();
+    } catch (error) {
+      throw new BuiltInEmbeddingNotReadyError(this.status(), error);
+    }
   }
   load() {
     if (this.loading)
@@ -32176,7 +32185,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedWithImageVectors(inputs) {
     if (inputs.length === 0)
       return { vectors: [], imageVectors: [] };
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert" || !this.spec.vision) {
       return { vectors: await this.embedLoaded(model, inputs, "RETRIEVAL_DOCUMENT"), imageVectors: inputs.map(() => {
         return;
@@ -32198,7 +32207,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedImageVectors(images) {
     if (images.length === 0)
       return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert" || !this.spec.vision) {
       throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
     }
@@ -32218,7 +32227,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedPromptTexts(texts) {
     if (texts.length === 0)
       return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert")
       throw new Error("The photo judge needs the LiteRT model.");
     const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, "RETRIEVAL_DOCUMENT", new Set);
@@ -32458,11 +32467,11 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
   BuiltInEmbeddingNotReadyError = class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
     status;
-    constructor(status) {
+    constructor(status, cause) {
       super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0);
       this.name = "BuiltInEmbeddingNotReadyError";
       this.status = status;
-      this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : `The built-in search model is still being prepared (${status.percent}%).`;
+      this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
       this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
     }
   };
@@ -33611,164 +33620,6 @@ var init_tier_rejudge = __esm(() => {
   init_tier_ledger();
 });
 
-// src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash18 } from "node:crypto";
-function sweepOwnerRuleRaises(options) {
-  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
-  const { set } = options;
-  const classification = set.classification();
-  if (!classification || classification.unavailableReason)
-    return report;
-  const ledger = set.ledger;
-  const raising = (classification.rules ?? []).filter(isRaisingRule);
-  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
-  const state = readState(ledger.readMeta(SWEEP_META_KEY));
-  const done = state.done.filter((key2) => keyed.has(key2));
-  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
-  if (pendingKeys.length === 0) {
-    if (done.length !== state.done.length || state.pending)
-      writeState(ledger, { done });
-    return report;
-  }
-  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
-  const resume = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending.after : undefined;
-  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
-  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
-  for (const record of rows) {
-    report.scanned += 1;
-    try {
-      raiseIfMatched(set, record, pendingRules, classification);
-    } catch {
-      continue;
-    }
-  }
-  if (rows.length < limit) {
-    writeState(ledger, { done: [...done, ...pendingKeys] });
-  } else {
-    report.complete = false;
-    writeState(ledger, { done, pending: { rules: pendingKeys, after: identityOf3(rows.at(-1)) } });
-  }
-  return report;
-  function raiseIfMatched(set2, record, rules, inputs) {
-    if (record.state === "moving" || record.contentTier === "secrets" || record.metadataTier === "secrets")
-      return;
-    const identity = identityOf3(record);
-    if (set2.ledger.getOverride(identity))
-      return;
-    const current2 = set2.ledger.copies(identity).filter((copy) => copy.state === "current");
-    const names = copyServingLayer(current2, "metadata");
-    const domain = names ? set2.domainForCorpus(names.corpusId) : undefined;
-    const exported = domain ? set2.store(domain)?.exportItemCopy(identity) : undefined;
-    if (!exported)
-      return;
-    const signals = storedSignals(exported);
-    const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
-    if (matched.length === 0)
-      return;
-    const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-    const metadataTier = maxTier(record.metadataTier, ruleTier);
-    if (tierRank(metadataTier) <= tierRank(record.metadataTier))
-      return;
-    const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
-      rules: [...inputs.rules ?? []],
-      ...inputs.retirePublic ? { retirePublic: true } : {}
-    });
-    const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
-    const contentTier = maxTier(record.contentTier, metadataTier);
-    const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
-    const decision = {
-      metadataTier,
-      contentTier,
-      decidedBy: "owner_rule",
-      reasons: [
-        ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
-        ...record.reasons.filter((reason) => reason.startsWith("content:"))
-      ],
-      state: contentPending ? "pending" : "current",
-      contentRead: record.contentRead,
-      metadataPending: false,
-      contentPending,
-      metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
-      metadataFlagged: record.metadataFlagged,
-      engineVersion: record.engineVersion,
-      mapRevision: record.mapRevision,
-      snifferId: classified.snifferId
-    };
-    if (metadataTier === "secrets") {
-      if (settleRoutedSecrets(set2, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }))
-        report.secrets += 1;
-      return;
-    }
-    set2.ledger.recordRoutedPlacement(identity, decision, set2.placementFor(decision));
-    report.raised += 1;
-  }
-}
-function isRaisingRule(rule) {
-  return tierRank(rule.tier) > tierRank("private");
-}
-function ruleKey(rule) {
-  return createHash18("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
-}
-function storedSignals(copy) {
-  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-  const title = text2(copy.columns["title"]);
-  const locator = text2(copy.columns["locator_uri"]);
-  const path = locator?.startsWith("/") ? locator : undefined;
-  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
-  let folderKeys = [];
-  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
-  if (keysJson) {
-    try {
-      const parsed = JSON.parse(keysJson);
-      if (Array.isArray(parsed))
-        folderKeys = parsed.filter((key2) => typeof key2 === "string");
-    } catch {
-      folderKeys = [];
-    }
-  }
-  if (copy.identity.providerConversationId)
-    folderKeys.push(copy.identity.providerConversationId);
-  return {
-    ...title ? { title } : {},
-    ...path ? { path } : {},
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...sender ? { sender } : {}
-  };
-}
-function readState(raw) {
-  if (!raw)
-    return { done: [] };
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
-      ...parsed.pending && Array.isArray(parsed.pending.rules) ? { pending: parsed.pending } : {}
-    };
-  } catch {
-    return { done: [] };
-  }
-}
-function writeState(ledger, state) {
-  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
-}
-function sameKeys(left, right) {
-  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
-}
-function identityOf3(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
-var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep";
-var init_tier_rules_sweep = __esm(() => {
-  init_tier_classifier();
-  init_tier_ledger();
-  init_tier_rejudge();
-});
-
 // src/workers/connector-store/tier-override-settle.ts
 function applyOwnerOverrides(options) {
   const report = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0 };
@@ -33792,7 +33643,7 @@ function applyOwnerOverrides(options) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity = identityOf4(record);
+  const identity = identityOf3(record);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
@@ -33866,7 +33717,7 @@ function storedCopy(set, identity) {
   }
   return;
 }
-function identityOf4(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -33878,6 +33729,386 @@ var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_tier_rejudge();
+});
+
+// src/workers/connector-store/tier-rules-sweep.ts
+import { createHash as createHash18 } from "node:crypto";
+function sweepOwnerRuleRaises(options) {
+  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
+  const { set } = options;
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason)
+    return report;
+  const ledger = set.ledger;
+  const raising = (classification.rules ?? []).filter((rule) => isRaisingRule(rule) && !isLabelRule(rule));
+  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
+  const state = readState(ledger.readMeta(SWEEP_META_KEY));
+  const done = state.done.filter((key2) => keyed.has(key2));
+  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
+  if (pendingKeys.length === 0) {
+    if (done.length !== state.done.length || state.pending)
+      writeState(ledger, { done });
+    return report;
+  }
+  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
+  const progress = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending : undefined;
+  const held = [...progress?.held ?? []];
+  let overflow = progress?.overflow === true;
+  const attempt = (record) => {
+    report.scanned += 1;
+    let raised;
+    try {
+      raised = raiseRoutedItem(set, record, pendingRules, classification);
+    } catch {
+      raised = "deferred";
+    }
+    if (raised === "raised")
+      report.raised += 1;
+    else if (raised === "secrets")
+      report.secrets += 1;
+    else if (raised === "deferred") {
+      if (held.length < MAX_HELD_ITEMS)
+        held.push(identityOf4(record));
+      else
+        overflow = true;
+    }
+  };
+  if (progress?.retry && !progress.overflow) {
+    const retrying = held.splice(0);
+    for (const identity of retrying) {
+      const record = ledger.getCurrent(identity);
+      if (record?.routed)
+        attempt(record);
+    }
+    if (held.length === 0) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+    return report;
+  }
+  const resume = progress?.after;
+  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
+  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
+  for (const record of rows)
+    attempt(record);
+  if (rows.length < limit) {
+    if (held.length === 0 && !overflow) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, overflow ? { done } : { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+  } else {
+    report.complete = false;
+    writeState(ledger, {
+      done,
+      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+    });
+  }
+  return report;
+}
+function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
+  if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+    return "unchanged";
+  const identity = identityOf4(record);
+  if (set.ledger.getOverride(identity))
+    return "unchanged";
+  const copies = set.ledger.copies(identity);
+  const exported = storedCopyOf(set, identity, copies);
+  const signals = { ...exported ? storedSignals(exported) : {}, ...extraSignals };
+  const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
+  if (!exported) {
+    if (copies.length === 0)
+      return "unchanged";
+    return matched.length > 0 || rules.some((rule) => !isLabelRule(rule)) ? "deferred" : "unchanged";
+  }
+  if (matched.length === 0)
+    return "unchanged";
+  const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
+  const metadataTier = maxTier(record.metadataTier, ruleTier);
+  const moving = record.state === "moving";
+  if (!moving && tierRank(metadataTier) <= tierRank(record.metadataTier))
+    return "unchanged";
+  const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
+    rules: [...inputs.rules ?? []],
+    ...inputs.retirePublic ? { retirePublic: true } : {}
+  });
+  const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
+  const contentTier = maxTier(record.contentTier, metadataTier);
+  const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
+  const decision = {
+    metadataTier,
+    contentTier,
+    decidedBy: "owner_rule",
+    reasons: [
+      ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
+      ...record.reasons.filter((reason) => reason.startsWith("content:"))
+    ],
+    state: contentPending ? "pending" : "current",
+    contentRead: record.contentRead,
+    metadataPending: false,
+    contentPending,
+    metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: classified.snifferId
+  };
+  if (metadataTier === "secrets") {
+    return settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }) ? "secrets" : "unchanged";
+  }
+  if (moving) {
+    return set.ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision)) === "none" ? "unchanged" : "raised";
+  }
+  set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  return "raised";
+}
+function storedCopyOf(set, identity, copies) {
+  const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
+  const ordered = [
+    ...names ? [names] : [],
+    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"))
+  ];
+  for (const copy of ordered) {
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (exported)
+      return exported;
+  }
+  return;
+}
+async function sweepLabelRuleRaises(options) {
+  const report = { rules: 0, scanned: 0, raised: 0, secrets: 0, pending: 0 };
+  const { set, provider, accountScope, source } = options;
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason)
+    return report;
+  const ledger = set.ledger;
+  const keyed = new Map;
+  for (const rule of classification.rules ?? []) {
+    if (!isRaisingRule(rule) || !isLabelRule(rule))
+      continue;
+    if (rule.source !== undefined && rule.source !== provider)
+      continue;
+    keyed.set(ruleKey(rule), rule);
+  }
+  const metaKey = `${LABEL_SWEEP_META_KEY}:${provider}:${accountScope}`;
+  let written = ledger.readMeta(metaKey);
+  const stored = readLabelState(written);
+  const done = new Set(stored.done.filter((key2) => keyed.has(key2)));
+  const walks = new Map(Object.entries(stored.walks ?? {}).filter(([key2]) => keyed.has(key2)));
+  const order = (stored.order ?? []).filter((key2, at, all) => keyed.has(key2) && all.indexOf(key2) === at);
+  const save = () => {
+    const state = {
+      done: [...done].sort(),
+      ...order.length > 0 ? { order: [...order] } : {},
+      ...walks.size > 0 ? { walks: Object.fromEntries([...walks].sort(([left], [right]) => left < right ? -1 : 1)) } : {}
+    };
+    const next = JSON.stringify(state);
+    if (next === written || written === undefined && done.size === 0 && walks.size === 0 && order.length === 0)
+      return;
+    ledger.writeMeta(metaKey, next);
+    written = next;
+  };
+  const queue = [...keyed.keys()].filter((key2) => options.recheck === true || !done.has(key2)).sort((left, right) => order.indexOf(left) - order.indexOf(right) || (left < right ? -1 : 1));
+  let pagesLeft = Math.max(1, options.maxPages ?? DEFAULT_LABEL_SWEEP_PAGES);
+  for (const key2 of queue) {
+    if (pagesLeft <= 0)
+      break;
+    const rule = keyed.get(key2);
+    const resumed = walks.get(key2);
+    let pageToken = resumed?.pageToken;
+    let deferred = resumed?.deferred === true;
+    report.rules += 1;
+    let finished = false;
+    try {
+      let firstPage = true;
+      while (pagesLeft > 0) {
+        pagesLeft -= 1;
+        let page;
+        try {
+          page = await source.listLabelled(rule.match.value, pageToken !== undefined ? { pageToken } : {});
+        } catch (error) {
+          if (error instanceof LabelPageRejectedError && firstPage && resumed)
+            walks.delete(key2);
+          throw error;
+        }
+        firstPage = false;
+        for (const id of page.ids) {
+          report.scanned += 1;
+          const outcome = raiseLabelled(set, { provider, accountScope, providerItemId: id }, rule, classification);
+          if (outcome === "raised")
+            report.raised += 1;
+          else if (outcome === "secrets")
+            report.secrets += 1;
+          else if (outcome === "deferred")
+            deferred = true;
+        }
+        pageToken = page.nextPageToken || undefined;
+        if (pageToken === undefined) {
+          finished = true;
+          break;
+        }
+        walks.set(key2, { pageToken, ...deferred ? { deferred: true } : {} });
+        save();
+      }
+    } catch {}
+    if (!finished) {
+      done.delete(key2);
+      save();
+      break;
+    }
+    if (deferred)
+      done.delete(key2);
+    else
+      done.add(key2);
+    walks.delete(key2);
+    order.splice(0, order.length, ...order.filter((entry) => entry !== key2), key2);
+    save();
+  }
+  save();
+  report.pending = [...keyed.keys()].filter((key2) => !done.has(key2)).length;
+  return report;
+}
+function raiseLabelled(set, identity, rule, classification) {
+  try {
+    const record = set.ledger.getCurrent(identity);
+    if (!record || !record.routed)
+      return "unchanged";
+    return raiseRoutedItem(set, record, [rule], classification, { labels: [rule.match.value] });
+  } catch {
+    return "deferred";
+  }
+}
+function readLabelState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const walks = {};
+    if (parsed.walks && typeof parsed.walks === "object" && !Array.isArray(parsed.walks)) {
+      for (const [key2, walk] of Object.entries(parsed.walks)) {
+        const entry = walk;
+        if (entry && typeof entry.pageToken === "string" && entry.pageToken) {
+          walks[key2] = { pageToken: entry.pageToken, ...entry.deferred === true ? { deferred: true } : {} };
+        }
+      }
+    }
+    const order = Array.isArray(parsed.order) ? parsed.order.filter((key2) => typeof key2 === "string") : [];
+    return {
+      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
+      ...Object.keys(walks).length > 0 ? { walks } : {},
+      ...order.length > 0 ? { order } : {}
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function isLabelRule(rule) {
+  return rule.match.kind === "label";
+}
+function isRaisingRule(rule) {
+  return tierRank(rule.tier) > tierRank("private");
+}
+function ruleKey(rule) {
+  return createHash18("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+}
+function storedSignals(copy) {
+  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const title = text2(copy.columns["title"]);
+  const locator = text2(copy.columns["locator_uri"]);
+  const path = locator?.startsWith("/") ? locator : undefined;
+  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
+  let folderKeys = [];
+  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
+  if (keysJson) {
+    try {
+      const parsed = JSON.parse(keysJson);
+      if (Array.isArray(parsed))
+        folderKeys = parsed.filter((key2) => typeof key2 === "string");
+    } catch {
+      folderKeys = [];
+    }
+  }
+  if (copy.identity.providerConversationId)
+    folderKeys.push(copy.identity.providerConversationId);
+  return {
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...sender ? { sender } : {}
+  };
+}
+function readState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const pending = parsePending(parsed.pending);
+    return {
+      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
+      ...pending ? { pending } : {}
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function parsePending(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const pending = value;
+  if (!Array.isArray(pending.rules) || !pending.rules.every((key2) => typeof key2 === "string"))
+    return;
+  if (pending.after !== undefined && !isIdentity(pending.after))
+    return;
+  if (pending.held !== undefined && (!Array.isArray(pending.held) || !pending.held.every(isIdentity)))
+    return;
+  if (pending.retry !== undefined && pending.retry !== true)
+    return;
+  if (pending.overflow !== undefined && pending.overflow !== true)
+    return;
+  if (pending.retry === true && (!Array.isArray(pending.held) || pending.held.length === 0))
+    return;
+  return {
+    rules: pending.rules,
+    ...pending.after ? { after: pending.after } : {},
+    ...pending.held ? { held: pending.held } : {},
+    ...pending.retry === true ? { retry: true } : {},
+    ...pending.overflow === true ? { overflow: true } : {}
+  };
+}
+function isIdentity(value) {
+  const record = value;
+  return typeof record === "object" && record !== null && typeof record.provider === "string" && typeof record.accountScope === "string" && typeof record.providerItemId === "string" && (record.providerConversationId === undefined || typeof record.providerConversationId === "string");
+}
+function writeState(ledger, state) {
+  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
+}
+function sameKeys(left, right) {
+  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
+}
+function identityOf4(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep", LABEL_SWEEP_META_KEY = "owner_rules_label_sweep", DEFAULT_LABEL_SWEEP_PAGES = 20, MAX_HELD_ITEMS = 200, LabelPageRejectedError;
+var init_tier_rules_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_override_settle();
+  init_tier_rejudge();
+  LabelPageRejectedError = class LabelPageRejectedError extends Error {
+    constructor() {
+      super("The provider no longer accepts the saved label page.");
+      this.name = "LabelPageRejectedError";
+    }
+  };
 });
 
 // src/workers/connector-store/tier-image-content-sweep.ts
@@ -42033,6 +42264,41 @@ class GoogleGmailSourceConnector {
     return parts.length > 0 ? parts.join(" ") : undefined;
   }
 }
+function gmailLabelledMessageSource(getClient) {
+  let known;
+  return {
+    async listLabelled(label, page) {
+      const client = await getClient();
+      let labelId = label.trim();
+      if (client.listLabels) {
+        known ??= await client.listLabels();
+        const wanted = labelId.toLowerCase();
+        const match = known.find((candidate) => candidate.id === labelId) ?? known.find((candidate) => candidate.id.trim().toLowerCase() === wanted);
+        if (!match)
+          return { ids: [] };
+        labelId = match.id;
+      }
+      let response;
+      try {
+        response = await client.listMessages({
+          maxResults: GMAIL_LABEL_PAGE_SIZE,
+          labelIds: [labelId],
+          includeSpamTrash: true,
+          ...page.pageToken ? { pageToken: page.pageToken } : {}
+        });
+      } catch (error) {
+        if (page.pageToken && error instanceof Error && /Gmail API request failed \((?:400|404)\)/.test(error.message)) {
+          throw new GmailPageTokenRejectedError;
+        }
+        throw error;
+      }
+      return {
+        ids: response.messages.map((message) => message.id).filter((id) => id),
+        ...response.nextPageToken ? { nextPageToken: response.nextPageToken } : {}
+      };
+    }
+  };
+}
 function gmailConnectorStoreClassification(ownerRules = []) {
   return {
     baselineTrustTier: "S3",
@@ -42214,12 +42480,14 @@ class RestGmailApiClient {
   async listMessages(request) {
     const params = new URLSearchParams({
       maxResults: String(request.maxResults),
-      includeSpamTrash: "false"
+      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
     });
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     if (request.query)
       params.set("q", request.query);
+    for (const labelId of request.labelIds ?? [])
+      params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
     const record = asRecord6(json, "Gmail messages list response");
     return {
@@ -42454,13 +42722,19 @@ function safeProviderDetail(value) {
 function hashString3(value) {
   return createHash23("sha256").update(value).digest("hex");
 }
-var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_mail_source_scope();
   init_sender_rules();
   init_credential_broker();
   init_ingest_filter();
   init_request_budget();
+  GmailPageTokenRejectedError = class GmailPageTokenRejectedError extends Error {
+    constructor() {
+      super("Gmail rejected the saved page token.");
+      this.name = "GmailPageTokenRejectedError";
+    }
+  };
   GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
 });
 
@@ -42540,6 +42814,32 @@ function createGmailConnectorStoreSyncHandler(options) {
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened(store) } : {}
   });
+  const sweepLabelRules = async (connector, recheck = false) => {
+    try {
+      const labelled = gmailLabelledMessageSource(() => connector.apiClientForTooling());
+      const report = await sweepLabelRuleRaises({
+        set: tierSet,
+        provider: GMAIL_PROVIDER,
+        accountScope: account,
+        ...recheck ? { recheck: true } : {},
+        source: {
+          async listLabelled(label, page) {
+            let answer;
+            try {
+              answer = await labelled.listLabelled(label, page);
+            } catch (error) {
+              throw error instanceof GmailPageTokenRejectedError ? new LabelPageRejectedError : error;
+            }
+            options.assertScopeCurrent?.();
+            return answer;
+          }
+        }
+      });
+      return report.pending > 0 ? [GMAIL_LABEL_RULES_PENDING_WARNING] : [];
+    } catch {
+      return [GMAIL_LABEL_RULES_PENDING_WARNING];
+    }
+  };
   const runBothStores = async (input) => {
     const traversal = scopedTraversal(input.connector, connectorId, options.assertScopeCurrent);
     const sync = {
@@ -42565,11 +42865,13 @@ function createGmailConnectorStoreSyncHandler(options) {
   return {
     async sync(request = {}) {
       const maxMessages = request.max_messages ?? options.maxMessages;
+      const connector = buildConnector({
+        ...maxMessages !== undefined ? { maxMessages } : {},
+        ...request.query ? { query: request.query } : {}
+      });
+      await sweepLabelRules(connector);
       const run = await runBothStores({
-        connector: buildConnector({
-          ...maxMessages !== undefined ? { maxMessages } : {},
-          ...request.query ? { query: request.query } : {}
-        }),
+        connector,
         ...maxMessages !== undefined ? { maxItems: maxMessages } : {}
       });
       return {
@@ -42589,6 +42891,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         warnings.push(GMAIL_RESUME_REJECTED_WARNING);
       const provenance = sourceInvocationProvenance(request.provenance);
       let connector = buildConnector({ maxMessages: maxItems, provenance });
+      warnings.push(...await sweepLabelRules(connector));
       let head;
       try {
         head = await runBothStores({
@@ -42623,6 +42926,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         maxMessages: MAX_RECONCILE_MESSAGES,
         provenance: sourceInvocationProvenance(request.provenance)
       });
+      const warnings = await sweepLabelRules(connector, true);
       const head = await runBothStores({ connector, reconcile: true });
       return taskOutcome({
         kind: GMAIL_STORE_RECONCILE_RECEIPT_KIND,
@@ -42631,7 +42935,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         usage: connector.requestBudgetStatus(),
         resumed: false,
         checkpoint: null,
-        warnings: []
+        warnings
       });
     },
     lastStoreRunCompletedAt: () => latestCompletedAt([
@@ -42802,9 +43106,10 @@ function boundedMaxItems(value, fallback) {
 function latestCompletedAt(values) {
   return values.filter((value) => Boolean(value)).sort().at(-1);
 }
-var GMAIL_STORE_PULL_RECEIPT_KIND = "gmail_connector_store_pull_receipt", GMAIL_STORE_RECONCILE_RECEIPT_KIND = "gmail_connector_store_reconcile_receipt", GMAIL_RESUME_REJECTED_WARNING = "gmail_store_resume_cursor_rejected", GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = "gmail_attachments_not_ingested", GMAIL_INGEST_FILTERED_WARNING = "gmail_ingest_filtered_items", CHECKPOINT_PREFIX = "gmp1:", MAX_CHECKPOINT_CHARS = 16384, MAX_RECONCILE_MESSAGES = 1000, GMAIL_SCOPED_CONNECTOR_PREFIX;
+var GMAIL_STORE_PULL_RECEIPT_KIND = "gmail_connector_store_pull_receipt", GMAIL_STORE_RECONCILE_RECEIPT_KIND = "gmail_connector_store_reconcile_receipt", GMAIL_RESUME_REJECTED_WARNING = "gmail_store_resume_cursor_rejected", GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = "gmail_attachments_not_ingested", GMAIL_INGEST_FILTERED_WARNING = "gmail_ingest_filtered_items", GMAIL_LABEL_RULES_PENDING_WARNING = "gmail_label_rules_pending", CHECKPOINT_PREFIX = "gmp1:", MAX_CHECKPOINT_CHARS = 16384, MAX_RECONCILE_MESSAGES = 1000, GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
+  init_tier_rules_sweep();
   init_embeddings();
   init_gmail();
   init_gmail_live_control();
@@ -61498,12 +61803,12 @@ var init_vocabulary = __esm(() => {
     stepsIntro: "Install the parts above with one click, then run the rest in Terminal, in this order. This is the order that worked live.",
     steps: [
       "Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). On macOS, the confined route requires the Olympus zkapi-clientd fork 0.1.6-olympus2; the upstream 0.1.5/0.1.6 build cannot confirm it.",
-      "Run: zkapi-clientd config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.",
+      "Run: {daemon} config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.",
       'Wait until the tool prints "Private inference balance activated".',
-      "Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050",
-      "Run: zkapi-clientd config --require-api-key",
-      "Run: zkapi-clientd config --api-key <key>. Store the same key where the route's key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.",
-      "Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on."
+      "Run: {daemon} config --relay-url socks5://127.0.0.1:19050",
+      "Run: {daemon} config --require-api-key",
+      "Run: {daemon} config --api-key <key>. Store the same key where the route's key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.",
+      "Run: {daemon} config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on."
     ],
     costTitle: "Cost and risk",
     costIntro: "Nothing is sent until you accept these. If the wording changes, you are asked again.",
@@ -64310,10 +64615,15 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
   const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "sync"));
   if (tasks.length === 0)
     return;
-  const signals = tasks.map((task) => task.last_result?.counts?.traversal_complete);
-  if (signals.some((value) => typeof value !== "number" || !Number.isFinite(value)))
-    return false;
-  return signals.every((value) => value === 1);
+  const walks = [];
+  for (const task of tasks) {
+    if (!task.last_result)
+      return false;
+    const signal = [task.last_result.counts?.traversal_complete, task.last_result.counts?.global_traversal_exhausted].find((value) => typeof value === "number" && Number.isFinite(value));
+    if (signal !== undefined)
+      walks.push(signal === 1);
+  }
+  return walks.length === 0 ? undefined : walks.every(Boolean);
 }
 function freshnessFrom(corpus, scheduler) {
   const hours = scheduler?.freshness_hours;
@@ -98335,6 +98645,7 @@ var init_job_store = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/document-formats.ts
+import { Buffer as Buffer5 } from "node:buffer";
 import { inflateRawSync as inflateRawSync2, inflateSync } from "node:zlib";
 function decodeUtf8(bytes) {
   const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
@@ -98435,95 +98746,389 @@ function officeTableSummary(input) {
   return normalizeExtractedText(lines.join(`
 `));
 }
-function extractPdfTextStreams(bytes) {
-  const source = decodeLatin1(bytes);
-  const streamPattern = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+function extractPdfTextLayer(bytes, limits = {}) {
+  const now = limits.now ?? (() => performance.now());
+  const budget = {
+    maxStreamBytes: limits.maxStreamBytes ?? PDF_TEXT_MAX_STREAM_BYTES,
+    maxTotalBytes: limits.maxTotalBytes ?? PDF_TEXT_MAX_TOTAL_BYTES,
+    deadline: now() + (limits.maxDecodeMs ?? PDF_TEXT_MAX_DECODE_MS),
+    now,
+    usedBytes: 0,
+    partial: false
+  };
+  const buffer = Buffer5.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const texts = [];
-  let match;
-  while ((match = streamPattern.exec(source)) !== null) {
-    const streamSource = match[1] ?? "";
-    const streamBytes = latin1Bytes(streamSource);
-    const dictionaryStart = source.lastIndexOf("<<", match.index);
-    const dictionaryEnd = source.lastIndexOf(">>", match.index);
-    const dictionary = dictionaryStart >= 0 && dictionaryEnd >= dictionaryStart ? source.slice(dictionaryStart, dictionaryEnd + 2) : "";
-    const decoded = decodePdfStream(streamBytes, dictionary);
-    const text2 = normalizeExtractedText(extractPdfTextOperators(decoded).join(`
+  const streamRanges = [];
+  let cursor = 0;
+  for (;; ) {
+    const stream = findPdfStream(buffer, cursor);
+    if (!stream)
+      break;
+    cursor = stream.next;
+    streamRanges.push([stream.keywordStart, stream.next]);
+    if (pdfBudgetSpent(budget)) {
+      budget.partial = true;
+      break;
+    }
+    const dictionary = readPdfStreamDictionary(buffer, stream.keywordStart);
+    if (pdfStreamHoldsNoText(dictionary))
+      continue;
+    const content = readPdfStreamContent(buffer, stream, dictionary, budget);
+    if (content === undefined)
+      continue;
+    const text2 = normalizeExtractedText(scanPdfTextShows(content).join(`
 `));
     if (text2)
       texts.push(text2);
   }
-  if (texts.length > 0)
-    return texts;
-  return [normalizeExtractedText(extractPdfTextOperators(source).join(`
-`))].filter(Boolean);
-}
-function decodePdfStream(bytes, dictionary) {
-  if (!/\/FlateDecode\b/.test(dictionary))
-    return decodeLatin1(bytes);
-  try {
-    return decodeLatin1(inflateSync(bytes));
-  } catch {
-    try {
-      return decodeLatin1(inflateRawSync2(bytes));
-    } catch {
-      return "";
-    }
-  }
-}
-function extractPdfTextOperators(content) {
-  const texts = [];
-  const textObjectPattern = /BT([\s\S]*?)ET/g;
-  let match;
-  while ((match = textObjectPattern.exec(content)) !== null) {
-    const block = match[1] ?? "";
-    texts.push(...extractPdfTextRuns(block));
-  }
-  return texts.length > 0 ? texts : extractPdfTextRuns(content);
-}
-function extractPdfTextRuns(content) {
-  const texts = [];
-  const tokenPattern = /(\((?:\\.|[^\\()])*\)|<[\da-fA-F\s]+>)\s*(?:Tj|'|")|\[((?:[^\]\\]|\\.|\((?:\\.|[^\\()])*\)|<[\da-fA-F\s]+>)*)\]\s*TJ/g;
-  let match;
-  while ((match = tokenPattern.exec(content)) !== null) {
-    const literal3 = match[1];
-    const arrayBody = match[2];
-    if (literal3) {
-      texts.push(decodePdfTextToken(literal3));
-    } else if (arrayBody) {
-      const parts = [];
-      const arrayTokenPattern = /\((?:\\.|[^\\()])*\)|<[\da-fA-F\s]+>/g;
-      let tokenMatch;
-      while ((tokenMatch = arrayTokenPattern.exec(arrayBody)) !== null) {
-        parts.push(decodePdfTextToken(tokenMatch[0] ?? ""));
+  if (texts.length === 0 && !budget.partial) {
+    let gapStart = 0;
+    const boundaries = [...streamRanges, [buffer.length, buffer.length]];
+    for (const [rangeStart, rangeEnd] of boundaries) {
+      if (rangeStart - gapStart >= 4) {
+        if (pdfBudgetSpent(budget)) {
+          budget.partial = true;
+          break;
+        }
+        const length = Math.min(rangeStart - gapStart, budget.maxStreamBytes);
+        if (length < rangeStart - gapStart)
+          budget.partial = true;
+        const gap = buffer.subarray(gapStart, gapStart + length);
+        budget.usedBytes += length;
+        if (pdfHasTextObject(gap)) {
+          const text2 = normalizeExtractedText(scanPdfTextShows(gap.toString("latin1")).join(`
+`));
+          if (text2)
+            texts.push(text2);
+        }
       }
-      const joined = parts.join("");
-      if (joined)
-        texts.push(joined);
+      gapStart = rangeEnd;
     }
   }
-  return texts.map(normalizeExtractedText).filter(Boolean);
+  return { texts, partial: budget.partial };
 }
-function decodePdfTextToken(token) {
-  if (token.startsWith("<") && token.endsWith(">")) {
-    return decodePdfHexString(token.slice(1, -1));
+function pdfBudgetSpent(budget) {
+  return budget.usedBytes >= budget.maxTotalBytes || budget.now() > budget.deadline;
+}
+function findPdfStream(buffer, from) {
+  let search = from;
+  for (;; ) {
+    const keywordStart = buffer.indexOf("stream", search, "latin1");
+    if (keywordStart < 0)
+      return;
+    search = keywordStart + 6;
+    const before = keywordStart > 0 ? buffer[keywordStart - 1] : 10;
+    if (!isPdfWhitespaceCode(before) && before !== 62)
+      continue;
+    let dataStart = keywordStart + 6;
+    if (buffer[dataStart] === 13 && buffer[dataStart + 1] === 10)
+      dataStart += 2;
+    else if (buffer[dataStart] === 10)
+      dataStart += 1;
+    else
+      continue;
+    const close = buffer.indexOf("endstream", dataStart, "latin1");
+    if (close < 0)
+      return;
+    let dataEnd = close;
+    if (dataEnd > dataStart && buffer[dataEnd - 1] === 10) {
+      dataEnd -= 1;
+      if (dataEnd > dataStart && buffer[dataEnd - 1] === 13)
+        dataEnd -= 1;
+    } else if (dataEnd > dataStart && buffer[dataEnd - 1] === 13) {
+      dataEnd -= 1;
+    }
+    return { keywordStart, dataStart, dataEnd, next: close + 9 };
   }
-  if (token.startsWith("(") && token.endsWith(")")) {
-    return decodePdfLiteralString(token.slice(1, -1));
+}
+function readPdfStreamDictionary(buffer, keywordStart) {
+  let end = keywordStart;
+  while (end > 0 && isPdfWhitespaceCode(buffer[end - 1]))
+    end -= 1;
+  if (end < 2 || buffer[end - 1] !== 62 || buffer[end - 2] !== 62)
+    return "";
+  const floor = Math.max(0, end - PDF_STREAM_DICTIONARY_MAX_BYTES);
+  let depth = 0;
+  let index = end;
+  while (index - 2 >= floor) {
+    const first = buffer[index - 2];
+    const second = buffer[index - 1];
+    if (first === 62 && second === 62) {
+      depth += 1;
+      index -= 2;
+    } else if (first === 60 && second === 60) {
+      depth -= 1;
+      index -= 2;
+      if (depth === 0)
+        return buffer.toString("latin1", index, end);
+    } else {
+      index -= 1;
+    }
   }
   return "";
 }
-function decodePdfHexString(hex) {
-  const cleaned = hex.replace(/\s+/g, "");
-  const bytes = [];
-  for (let index = 0;index < cleaned.length; index += 2) {
-    const pair = cleaned.slice(index, index + 2).padEnd(2, "0");
-    const value = Number.parseInt(pair, 16);
-    if (!Number.isNaN(value))
-      bytes.push(value);
+function pdfStreamHoldsNoText(dictionary) {
+  return /\/Subtype\s*\/(?:Image|Type1C|CIDFontType0C|OpenType)\b/.test(dictionary) || /\/Length[123]\b/.test(dictionary) || /\/Type\s*\/(?:XRef|ObjStm|Metadata|EmbeddedFile)\b/.test(dictionary) || /\/(?:DCTDecode|JPXDecode|JBIG2Decode|CCITTFaxDecode)\b/.test(dictionary) || /\/(?:FunctionType|ShadingType|Alternate)\b/.test(dictionary) || /\/N\s+[134]\b/.test(dictionary);
+}
+function pdfStreamUsesFlate(dictionary) {
+  return /\/FlateDecode\b/.test(dictionary);
+}
+function pdfStreamHasFilter(dictionary) {
+  return /\/Filter\b/.test(dictionary);
+}
+function readPdfStreamContent(buffer, stream, dictionary, budget) {
+  const raw = buffer.subarray(stream.dataStart, stream.dataEnd);
+  let content;
+  if (pdfStreamUsesFlate(dictionary)) {
+    const inflated = inflatePdfStream(raw, budget.maxStreamBytes);
+    if (inflated === "too_large") {
+      budget.partial = true;
+      return;
+    }
+    if (inflated === undefined)
+      return;
+    content = inflated;
+  } else if (pdfStreamHasFilter(dictionary)) {
+    return;
+  } else {
+    if (raw.length > budget.maxStreamBytes) {
+      budget.partial = true;
+      return;
+    }
+    content = raw;
   }
-  return decodePdfStringBytes(new Uint8Array(bytes));
+  budget.usedBytes += content.length;
+  if (!pdfHasTextObject(content))
+    return;
+  return content.toString("latin1");
+}
+function inflatePdfStream(raw, maxOutputLength) {
+  try {
+    return inflateSync(raw, { maxOutputLength });
+  } catch (error2) {
+    if (isInflateOutputLimitError(error2))
+      return "too_large";
+  }
+  try {
+    return inflateRawSync2(raw, { maxOutputLength });
+  } catch (error2) {
+    return isInflateOutputLimitError(error2) ? "too_large" : undefined;
+  }
+}
+function isInflateOutputLimitError(error2) {
+  return error2?.code === "ERR_BUFFER_TOO_LARGE";
+}
+function pdfHasTextObject(content) {
+  const begin = content.indexOf("BT", 0, "latin1");
+  return begin >= 0 && content.indexOf("ET", begin + 2, "latin1") >= 0;
+}
+function isPdfWhitespaceCode(code) {
+  return code === 32 || code === 10 || code === 13 || code === 9 || code === 12 || code === 0;
+}
+function isPdfDelimiterCode(code) {
+  return code === 40 || code === 41 || code === 60 || code === 62 || code === 91 || code === 93 || code === 123 || code === 125 || code === 47 || code === 37;
+}
+function pdfHexDigitValue(code) {
+  if (code >= 48 && code <= 57)
+    return code - 48;
+  if (code >= 65 && code <= 70)
+    return code - 65 + 10;
+  if (code >= 97 && code <= 102)
+    return code - 97 + 10;
+  return -1;
+}
+function skipPdfLiteralString(content, start) {
+  let depth = 0;
+  for (let index = start;index < content.length; index += 1) {
+    const code = content.charCodeAt(index);
+    if (code === 92) {
+      index += 1;
+    } else if (code === 40) {
+      depth += 1;
+    } else if (code === 41) {
+      depth -= 1;
+      if (depth === 0)
+        return index + 1;
+    }
+  }
+  return -1;
+}
+function skipPdfHexString(content, start) {
+  for (let index = start + 1;index < content.length; index += 1) {
+    const code = content.charCodeAt(index);
+    if (code === 62)
+      return index + 1;
+    if (pdfHexDigitValue(code) < 0 && !isPdfWhitespaceCode(code))
+      return -1;
+  }
+  return -1;
+}
+function readPdfTextArray(content, from) {
+  const parts = [];
+  let index = from;
+  while (index < content.length) {
+    const code = content.charCodeAt(index);
+    if (code === 93)
+      return { text: parts.join(""), end: index + 1 };
+    if (code === 40) {
+      const end = skipPdfLiteralString(content, index);
+      if (end < 0)
+        return;
+      parts.push(decodePdfLiteralString(content.slice(index + 1, end - 1)));
+      index = end;
+    } else if (code === 60 && content.charCodeAt(index + 1) !== 60) {
+      const end = skipPdfHexString(content, index);
+      if (end < 0) {
+        index += 1;
+      } else {
+        parts.push(decodePdfHexString(content.slice(index + 1, end - 1)));
+        index = end;
+      }
+    } else {
+      index += 1;
+    }
+  }
+  return;
+}
+function skipPdfInlineImageData(content, from) {
+  let search = from;
+  for (;; ) {
+    const found = content.indexOf("EI", search);
+    if (found < 0)
+      return -1;
+    const beforeIsSpace = found > from && isPdfWhitespaceCode(content.charCodeAt(found - 1));
+    const afterIsSpace = found + 2 >= content.length || isPdfWhitespaceCode(content.charCodeAt(found + 2));
+    if (beforeIsSpace && afterIsSpace)
+      return found + 2;
+    search = found + 2;
+  }
+}
+function pushPdfTextRun(runs, text2) {
+  const run = normalizeExtractedText(text2);
+  if (run)
+    runs.push(run);
+}
+function scanPdfTextShows(content) {
+  const runs = [];
+  const length = content.length;
+  const noOperand = 0;
+  const stringOperand = 1;
+  const arrayOperand = 2;
+  let operandKind = noOperand;
+  let operandText = "";
+  let inlineImage = false;
+  let index = 0;
+  while (index < length) {
+    const code = content.charCodeAt(index);
+    if (isPdfWhitespaceCode(code)) {
+      index += 1;
+      continue;
+    }
+    if (code === 40) {
+      const end2 = skipPdfLiteralString(content, index);
+      if (end2 < 0)
+        break;
+      operandKind = stringOperand;
+      operandText = decodePdfLiteralString(content.slice(index + 1, end2 - 1));
+      index = end2;
+      continue;
+    }
+    if (code === 60) {
+      if (content.charCodeAt(index + 1) === 60) {
+        operandKind = noOperand;
+        index += 2;
+        continue;
+      }
+      const end2 = skipPdfHexString(content, index);
+      if (end2 < 0) {
+        operandKind = noOperand;
+        index += 1;
+      } else {
+        operandKind = stringOperand;
+        operandText = decodePdfHexString(content.slice(index + 1, end2 - 1));
+        index = end2;
+      }
+      continue;
+    }
+    if (code === 91) {
+      const array3 = readPdfTextArray(content, index + 1);
+      if (!array3)
+        break;
+      operandKind = arrayOperand;
+      operandText = array3.text;
+      index = array3.end;
+      continue;
+    }
+    if (code === 37) {
+      while (index < length && content.charCodeAt(index) !== 10 && content.charCodeAt(index) !== 13) {
+        index += 1;
+      }
+      continue;
+    }
+    const shown = operandKind;
+    operandKind = noOperand;
+    let end = index + 1;
+    if (code !== 47 && isPdfDelimiterCode(code)) {
+      index = end;
+      continue;
+    }
+    while (end < length) {
+      const next = content.charCodeAt(end);
+      if (isPdfWhitespaceCode(next) || isPdfDelimiterCode(next))
+        break;
+      end += 1;
+    }
+    if (code !== 47) {
+      const tokenLength = end - index;
+      const second = tokenLength === 2 ? content.charCodeAt(index + 1) : 0;
+      if (tokenLength === 1 && (code === 39 || code === 34)) {
+        if (shown === stringOperand)
+          pushPdfTextRun(runs, operandText);
+      } else if (tokenLength === 2 && code === 84 && second === 106) {
+        if (shown === stringOperand)
+          pushPdfTextRun(runs, operandText);
+      } else if (tokenLength === 2 && code === 84 && second === 74) {
+        if (shown === arrayOperand)
+          pushPdfTextRun(runs, operandText);
+      } else if (tokenLength === 2 && code === 66 && second === 73) {
+        inlineImage = true;
+      } else if (tokenLength === 2 && code === 73 && second === 68 && inlineImage) {
+        inlineImage = false;
+        end = skipPdfInlineImageData(content, end);
+        if (end < 0)
+          break;
+      }
+    }
+    index = end;
+  }
+  return runs;
+}
+function decodePdfHexString(hex) {
+  const bytes = new Uint8Array((hex.length >> 1) + 1);
+  let count = 0;
+  let high = -1;
+  for (let index = 0;index < hex.length; index += 1) {
+    const digit = pdfHexDigitValue(hex.charCodeAt(index));
+    if (digit < 0)
+      continue;
+    if (high < 0) {
+      high = digit;
+    } else {
+      bytes[count] = high << 4 | digit;
+      count += 1;
+      high = -1;
+    }
+  }
+  if (high >= 0) {
+    bytes[count] = high << 4;
+    count += 1;
+  }
+  return decodePdfStringBytes(bytes.subarray(0, count));
 }
 function decodePdfLiteralString(value) {
+  if (value.indexOf("\\") < 0 && !(value.charCodeAt(0) === 254 && value.charCodeAt(1) === 255)) {
+    return value;
+  }
   const bytes = [];
   for (let index = 0;index < value.length; index += 1) {
     const char = value[index];
@@ -98577,19 +99182,7 @@ function decodePdfStringBytes(bytes) {
   return decodeLatin1(bytes);
 }
 function decodeLatin1(bytes) {
-  const chunkSize = 8192;
-  let output = "";
-  for (let offset = 0;offset < bytes.length; offset += chunkSize) {
-    output += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return output;
-}
-function latin1Bytes(value) {
-  const bytes = new Uint8Array(value.length);
-  for (let index = 0;index < value.length; index += 1) {
-    bytes[index] = value.charCodeAt(index) & 255;
-  }
-  return bytes;
+  return Buffer5.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("latin1");
 }
 function pdfAppearsImageOnly(bytes) {
   const source = decodeLatin1(bytes);
@@ -98643,7 +99236,7 @@ function readZipEntryText(bytes, entries, name) {
   if (!entry)
     return;
   if (entry.uncompressedSize > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) {
-    throw new OfficeDocumentUnreadableError("unsupported", "Office document zip entry exceeds the local extraction cap.");
+    throw zipEntryExceedsCapError();
   }
   return decodeZipEntryText(bytes, entry);
 }
@@ -98656,18 +99249,26 @@ function decodeZipEntryText(bytes, entry) {
   const extraLength = readUint16Le(bytes, offset + 28);
   const dataOffset = offset + 30 + nameLength + extraLength;
   const compressed = bytes.subarray(dataOffset, dataOffset + entry.compressedSize);
-  if (entry.method === 0)
+  if (entry.method === 0) {
+    if (compressed.length > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES)
+      throw zipEntryExceedsCapError();
     return decodeUtf8(compressed);
+  }
   if (entry.method === 8) {
     let inflated;
     try {
-      inflated = inflateRawSync2(compressed);
-    } catch {
+      inflated = inflateRawSync2(compressed, { maxOutputLength: MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES });
+    } catch (error2) {
+      if (isInflateOutputLimitError(error2))
+        throw zipEntryExceedsCapError();
       throw new OfficeDocumentUnreadableError("damaged", "Office document zip entry does not decompress.");
     }
     return decodeUtf8(new Uint8Array(inflated));
   }
   throw new OfficeDocumentUnreadableError("unsupported", `Unsupported Office document zip compression method ${entry.method}.`);
+}
+function zipEntryExceedsCapError() {
+  return new OfficeDocumentUnreadableError("unsupported", "Office document zip entry exceeds the local extraction cap.");
 }
 function findZipEndOfCentralDirectory(bytes) {
   const minimumOffset = Math.max(0, bytes.length - 65558);
@@ -98827,7 +99428,7 @@ function decodeXmlEntities(input) {
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-var MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 5000000, OfficeDocumentUnreadableError, XLSX_MAX_COLUMNS = 16384;
+var MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 5000000, OfficeDocumentUnreadableError, PDF_TEXT_PARTIAL_WARNING = "pdf_text_partial", PDF_TEXT_MAX_STREAM_BYTES = 8000000, PDF_TEXT_MAX_TOTAL_BYTES = 48000000, PDF_TEXT_MAX_DECODE_MS = 1500, PDF_STREAM_DICTIONARY_MAX_BYTES = 65536, XLSX_MAX_COLUMNS = 16384;
 var init_document_formats = __esm(() => {
   init_bounded_text();
   OfficeDocumentUnreadableError = class OfficeDocumentUnreadableError extends Error {
@@ -99283,13 +99884,14 @@ async function extractPdfText(input) {
     if (viaCommand)
       return viaCommand;
   }
-  const streamText = normalizeExtractedText(extractPdfTextStreams(input.context.bytes).join(`
+  const layer = extractPdfTextLayer(input.context.bytes);
+  const streamText = normalizeExtractedText(layer.texts.join(`
 `));
   const bounded = boundText(pdfTextLooksUndecoded(streamText) ? "" : streamText, input.context.maxBoundedTextChars);
   return pdfTextExtractionResult({
     context: input.context,
     bounded,
-    warnings: ["pdf_text_layer_only"],
+    warnings: layer.partial ? ["pdf_text_layer_only", PDF_TEXT_PARTIAL_WARNING] : ["pdf_text_layer_only"],
     ...input.ocr ? { ocr: input.ocr } : {}
   });
 }
@@ -102109,7 +102711,7 @@ var init_transcription = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/vlm.ts
-import { Buffer as Buffer5 } from "node:buffer";
+import { Buffer as Buffer6 } from "node:buffer";
 import { createHash as createHash56 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
   const itemToken = createHash56("sha256").update(input.localItemId).digest("hex");
@@ -102402,14 +103004,14 @@ function estimateVlmPdfPageDescribeRequestBytes(input) {
           {
             type: "image_url",
             image_url: {
-              url: `data:${input.page.mimeType};base64,${Buffer5.from(input.page.bytes).toString("base64")}`
+              url: `data:${input.page.mimeType};base64,${Buffer6.from(input.page.bytes).toString("base64")}`
             }
           }
         ]
       }
     ]
   };
-  return Buffer5.byteLength(JSON.stringify(body), "utf8");
+  return Buffer6.byteLength(JSON.stringify(body), "utf8");
 }
 var VLM_PDF_EXTRACTOR_KIND = "local_vlm_pdf", VLM_PDF_EXTRACTOR_VERSION = "2026-08-17-delphi-vision-deep-v1", VLM_LAYOUT_EXTRACTOR_KIND = "local_vlm_layout", VLM_LAYOUT_EXTRACTOR_VERSION = "vlm-v1", DEFAULT_VLM_PDF_MAX_PAGES = 40, DEFAULT_VLM_PDF_MAX_TOKENS = 2000, DEFAULT_VLM_PDF_MAX_REQUEST_BYTES = 1050000, DEFAULT_VLM_PDF_PAGE_RETRIES = 2, DEFAULT_VLM_PDF_PAGE_RETRY_DELAY_MS = 3000, DEFAULT_VLM_PDF_HEALTHCHECK_TIMEOUT_MS = 20000, DEFAULT_VLM_PDF_RECYCLE_EVERY_N_PAGES = 0, DEFAULT_VLM_PROMPT, DEFAULT_VLM_PDF_PROMPT, VLM_PDF_PROBE_IMAGE_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", VLM_PDF_PROBE_IMAGE_BASE64, VLM_ROUTER_PROFILE_UNKNOWN_ERROR_KIND = "vlm_router_profile_unknown", VLM_ROUTER_REQUEST_REJECTED_ERROR_KIND = "vlm_router_request_rejected", VLM_ROUTER_AUTH_FAILED_ERROR_KIND = "vlm_router_auth_failed", VLM_BACKEND_UNAVAILABLE_ERROR_KIND = "vlm_backend_unavailable", VlmRouterError;
 var init_vlm = __esm(() => {
@@ -105312,7 +105914,7 @@ var init_analyst_venice = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/venice-client.ts
-import { Buffer as Buffer6 } from "node:buffer";
+import { Buffer as Buffer7 } from "node:buffer";
 
 class VeniceVlmClient {
   approvedRemoteDestination;
@@ -105383,7 +105985,7 @@ class VeniceVlmClient {
                 {
                   type: "image_url",
                   image_url: {
-                    url: `data:${request.mimeType};base64,${Buffer6.from(request.bytes).toString("base64")}`
+                    url: `data:${request.mimeType};base64,${Buffer7.from(request.bytes).toString("base64")}`
                   }
                 }
               ]
@@ -105480,7 +106082,7 @@ var init_venice_client = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/openai-compatible-client.ts
-import { Buffer as Buffer7 } from "node:buffer";
+import { Buffer as Buffer8 } from "node:buffer";
 
 class OpenAICompatibleVlmClient {
   baseUrl;
@@ -105521,7 +106123,7 @@ class OpenAICompatibleVlmClient {
                 {
                   type: "image_url",
                   image_url: {
-                    url: `data:${request.mimeType};base64,${Buffer7.from(request.bytes).toString("base64")}`
+                    url: `data:${request.mimeType};base64,${Buffer8.from(request.bytes).toString("base64")}`
                   }
                 }
               ]
@@ -106944,6 +107546,7 @@ var init_source_watch_runtime = __esm(() => {
 
 // src/control-ui/browser-controller.ts
 function mountDashboardController(options) {
+  const landedHighlightMs = 4000;
   let canWrite = options.canWrite;
   let csrfToken = options.csrfToken || "";
   let signature = options.signature || "";
@@ -107758,7 +108361,7 @@ function mountDashboardController(options) {
     }
     const landed = focus;
     landed.classList.add("landed");
-    view3.setTimeout(() => landed.classList.remove("landed"), LANDED_HIGHLIGHT_MS);
+    view3.setTimeout(() => landed.classList.remove("landed"), landedHighlightMs);
     if (typeof focus.scrollIntoView === "function")
       focus.scrollIntoView({ block: "center" });
     focus.focus();
@@ -107811,7 +108414,6 @@ function mountDashboardController(options) {
     dispose
   };
 }
-var LANDED_HIGHLIGHT_MS = 4000;
 
 // src/workers/dashboard/theme.ts
 function dashboardThemeVariable(token) {
@@ -108557,6 +109159,14 @@ var init_components = __esm(() => {
 });
 
 // src/workers/dashboard/outside-help-tools.ts
+function shellWord(value) {
+  return /^[A-Za-z0-9_@%+:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+function outsideHelpDaemonCommand(tools) {
+  const entry = tools?.tools.find((item) => item.tool === "zkapi-clientd");
+  const program = entry?.source === "configured" ? entry.path : entry?.executable;
+  return program ? shellWord(program) : "zkapi-clientd";
+}
 function installable(entry) {
   return entry.source === "missing" || entry.source === "outdated";
 }
@@ -108807,7 +109417,7 @@ function renderOutsideHelpCard(status, input) {
     more.push(renderLimits(route, canEdit));
   if (route.state === "configured" && route.acknowledgements.complete)
     more.push(renderAccepted());
-  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit })));
+  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit }), outsideHelpDaemonCommand(status.tools)));
   more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
   const config2 = {
@@ -108983,13 +109593,14 @@ function renderStandard(standard, level, canEdit) {
   const summary = level === "general" ? fill(C2.unusedAtStrict, { mode: C2.modes[standard.mode].short }) : C2.modes[standard.mode].short;
   return renderSection({ id: "standard", title: C2.title, summary, body });
 }
-function renderSetupSteps(secretRef, tools = "") {
-  const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => fill(step, { secretRef }));
+function renderSetupSteps(secretRef, toolsHtml, daemon) {
+  const values = { secretRef, daemon };
+  const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => step.replace(/\{(secretRef|daemon)\}/g, (_match, key2) => values[key2]));
   return renderSection({
     id: "steps",
     title: DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle,
     summary: "",
-    body: `${tools}<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
+    body: `${toolsHtml}<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
   });
 }
 function renderLimits(route, canEdit) {
@@ -144396,6 +145007,7 @@ __export(exports_dashboard_consult, {
   DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
   DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
 });
+import { delimiter as delimiter9, dirname as dirname65 } from "node:path";
 function acknowledgementsCurrent(acknowledgements) {
   return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
 }
@@ -144432,12 +145044,14 @@ function createDashboardConsultAdapter(options) {
         return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
+      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname65(system)) ? system : undefined;
       return {
         tool: entry.tool,
         label: entry.label,
         source: entry.installed ? "olympus" : system ? "system" : entry.offered ? "missing" : "not_offered",
         version: entry.version,
-        offered: entry.offered
+        offered: entry.offered,
+        ...executable ? { executable } : {}
       };
     });
   });
@@ -145337,7 +145951,7 @@ __export(exports_server2, {
 });
 import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync59 } from "node:fs";
-import { dirname as dirname65, isAbsolute as isAbsolute22, join as join92 } from "node:path";
+import { dirname as dirname66, isAbsolute as isAbsolute22, join as join92 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -148544,7 +149158,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join92(dirname65(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join92(dirname66(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,

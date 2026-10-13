@@ -218,6 +218,10 @@ export interface GmailListMessagesRequest {
   maxResults: number;
   pageToken?: string;
   query?: string;
+  /** Only messages carrying every one of these label ids (exact Gmail ids). */
+  labelIds?: readonly string[];
+  /** Also list Spam and Trash, which Gmail's listing leaves out unless asked. */
+  includeSpamTrash?: boolean;
 }
 
 export interface GmailListMessagesResponse {
@@ -608,6 +612,65 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   }
 }
 
+/** Gmail no longer accepts a saved page token (it expired, or never was this query's). */
+export class GmailPageTokenRejectedError extends Error {
+  constructor() {
+    super('Gmail rejected the saved page token.');
+    this.name = 'GmailPageTokenRejectedError';
+  }
+}
+
+/** Gmail's largest list page. */
+const GMAIL_LABEL_PAGE_SIZE = 500;
+
+/**
+ * Which of the mailbox's messages carry a label, a page at a time, for the
+ * owner-rule sweep of mail already stored (see tier-rules-sweep.ts): Gmail
+ * never lists a held message again, so the labels of stored mail are asked of
+ * Gmail by label, not read back. The label is matched against Gmail's label
+ * ids without regard to case, exactly as the tier classifier compares them,
+ * and the listing includes Spam and Trash (stored mail may have been moved
+ * there). A label Gmail does not have carries no messages. Not narrowed by the
+ * mail scope: stored mail the scope no longer covers is still stored.
+ */
+export function gmailLabelledMessageSource(getClient: () => Promise<GmailApiClient>): {
+  listLabelled(label: string, page: { pageToken?: string }): Promise<{ ids: string[]; nextPageToken?: string }>;
+} {
+  let known: readonly GmailLabel[] | undefined;
+  return {
+    async listLabelled(label, page) {
+      const client = await getClient();
+      let labelId = label.trim();
+      if (client.listLabels) {
+        known ??= await client.listLabels();
+        const wanted = labelId.toLowerCase();
+        const match = known.find((candidate) => candidate.id === labelId)
+          ?? known.find((candidate) => candidate.id.trim().toLowerCase() === wanted);
+        if (!match) return { ids: [] };
+        labelId = match.id;
+      }
+      let response: GmailListMessagesResponse;
+      try {
+        response = await client.listMessages({
+          maxResults: GMAIL_LABEL_PAGE_SIZE,
+          labelIds: [labelId],
+          includeSpamTrash: true,
+          ...(page.pageToken ? { pageToken: page.pageToken } : {}),
+        });
+      } catch (error) {
+        if (page.pageToken && error instanceof Error && /Gmail API request failed \((?:400|404)\)/.test(error.message)) {
+          throw new GmailPageTokenRejectedError();
+        }
+        throw error;
+      }
+      return {
+        ids: response.messages.map((message) => message.id).filter((id) => id),
+        ...(response.nextPageToken ? { nextPageToken: response.nextPageToken } : {}),
+      };
+    },
+  };
+}
+
 export function gmailConnectorStoreClassification(
   ownerRules: readonly OwnerTierRule[] = [],
 ): ConnectorStoreClassificationOptions {
@@ -860,10 +923,11 @@ class RestGmailApiClient implements GmailApiClient {
   async listMessages(request: GmailListMessagesRequest): Promise<GmailListMessagesResponse> {
     const params = new URLSearchParams({
       maxResults: String(request.maxResults),
-      includeSpamTrash: 'false',
+      includeSpamTrash: request.includeSpamTrash === true ? 'true' : 'false',
     });
     if (request.pageToken) params.set('pageToken', request.pageToken);
     if (request.query) params.set('q', request.query);
+    for (const labelId of request.labelIds ?? []) params.append('labelIds', labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
     const record = asRecord(json, 'Gmail messages list response');
     return {
