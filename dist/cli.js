@@ -30513,7 +30513,8 @@ var init_local_index = __esm(() => {
       const row = this.db.query("SELECT locator_uri FROM items WHERE item_pk = ?").get(itemPk);
       this.db.query(`
       UPDATE items
-      SET title = NULL, search_text = NULL, locator_uri = ?, sender_label = NULL, reactions_json = NULL
+      SET title = NULL, search_text = NULL, locator_uri = ?, reactions_json = NULL,
+        sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, authored_at = NULL, updated_at = NULL
       WHERE item_pk = ?
     `).run(screenedSecretLocator(row.locator_uri), itemPk);
     }

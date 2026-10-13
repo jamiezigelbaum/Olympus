@@ -73,6 +73,25 @@ function existingStorePaths(fx: TierFixture): string[] {
   return Object.values(fx.paths).filter((path) => existsSync(path));
 }
 
+/**
+ * What a Secret's row may still hold: what the secret-locations index keeps
+ * (identity, scope facts, a content hash, a screened locator) plus the
+ * tombstone's own bookkeeping. Every other column must be NULL.
+ */
+const SECRET_ROW_COLUMNS = new Set([
+  'item_pk', 'provider', 'family', 'account_scope', 'provider_item_id', 'provider_thread_id',
+  'provider_conversation_id', 'normalized_conversation', 'provider_file_id', 'provider_event_id',
+  'local_item_id', 'source_version', 'locator_uri', 'mime_type', 'content_hash',
+  'source_scope_generation', 'source_scope_revision', 'source_scope_folder_keys_json',
+  'fetched_at', 'indexed_at', 'trust_tier', 'tombstoned', 'deleted_at', 'sync_run_id',
+]);
+
+function expectSecretRow(row: Record<string, unknown>): void {
+  expect(row).toMatchObject({ tombstoned: 1, trust_tier: 'S5' });
+  const extra = Object.entries(row).filter(([column, value]) => value !== null && !SECRET_ROW_COLUMNS.has(column));
+  expect(extra).toEqual([]);
+}
+
 describe('an item that becomes Secret keeps the location only', () => {
   test('owner-marked: a secret in the title is gone from every row, and a re-sync does not bring the item back', async () => {
     const fx = fixture();
@@ -90,6 +109,7 @@ describe('an item that becomes Secret keeps the location only', () => {
     expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
 
     const assertLocationOnly = () => {
+      let checked = 0;
       for (const path of existingStorePaths(fx)) {
         const rows = storedRows(path, localId('keys'));
         expect(JSON.stringify(rows)).not.toContain(FAKE_AWS_KEY);
@@ -97,17 +117,12 @@ describe('an item that becomes Secret keeps the location only', () => {
         expect(rows.fts).toEqual([]);
         expect(rows.locatorIdentities).toEqual([]);
         for (const row of rows.items) {
-          expect(row).toMatchObject({
-            tombstoned: 1,
-            trust_tier: 'S5',
-            title: null,
-            search_text: null,
-            locator_uri: null,
-            sender_label: null,
-            reactions_json: null,
-          });
+          expectSecretRow(row);
+          expect(row['locator_uri']).toBeNull();
+          checked += 1;
         }
       }
+      expect(checked).toBeGreaterThan(0);
     };
     assertLocationOnly();
     // The location index holds no more than the store rows: no title and no
@@ -145,12 +160,9 @@ describe('an item that becomes Secret keeps the location only', () => {
     const location = fx.secrets.get(identityOf('garden'));
     expect(location).toMatchObject({ title: null, locator: '/Files/garden-plan.txt' });
     const rows = storedRows(fx.paths.internal, localId('garden'));
-    expect(rows.items).toEqual([expect.objectContaining({
-      tombstoned: 1,
-      title: null,
-      locator_uri: location!.locator,
-      search_text: null,
-    })]);
+    expect(rows.items).toHaveLength(1);
+    expectSecretRow(rows.items[0]!);
+    expect(rows.items[0]!['locator_uri']).toBe(location!.locator);
     expect(rows.fts).toEqual([]);
     expect(rows.chunks).toEqual([]);
   });
@@ -169,7 +181,16 @@ describe('a stored item a later reading raises to S5 (one store, declared placem
     },
     mimeType: 'text/plain',
     content: { kind: 'text', text: `notes for ${id} about the quarterly review` },
-    metadata: Object.freeze({ name, title: name, pathDisplay: `/Files/${name}` }),
+    metadata: Object.freeze({
+      name,
+      title: name,
+      pathDisplay: `/Files/${name}`,
+      senderId: 'sender-1',
+      senderLabel: 'Ops Bot',
+      senderIsOwner: false,
+      authoredAt: '2026-10-01T09:00:00.000Z',
+      updatedAt: '2026-10-02T09:00:00.000Z',
+    }),
     fetchedAt: '2026-10-13T00:00:00.000Z',
   });
   const connector = (items: readonly RawItem[]): SourceConnector => ({
@@ -202,7 +223,9 @@ describe('a stored item a later reading raises to S5 (one store, declared placem
     const items = [item('id:keys', `deploy ${FAKE_AWS_KEY}.txt`), item('id:plan', 'launch-plan.txt'), item('id:old', 'old-notes.txt')];
     const internal = () => buildSourceSensitivity({ trustTier: 'S3', trustDomain: 'internal' });
     await store.syncFromConnector(connector(items), { fetchContent: true, placement: internal });
-    expect(JSON.stringify(storedRows(dbPath, `${ACCOUNT}:id:keys`).items)).toContain(FAKE_AWS_KEY);
+    const stored = storedRows(dbPath, `${ACCOUNT}:id:keys`).items;
+    expect(JSON.stringify(stored)).toContain(FAKE_AWS_KEY);
+    expect(stored[0]).toMatchObject({ sender_id: 'sender-1', sender_label: 'Ops Bot', authored_at: '2026-10-01T09:00:00.000Z' });
 
     // A later reading puts two of them at S5; the third is deleted at the provider.
     const raised = new Set(['id:keys', 'id:plan']);
@@ -216,14 +239,24 @@ describe('a stored item a later reading raises to S5 (one store, declared placem
 
     const keys = storedRows(dbPath, `${ACCOUNT}:id:keys`);
     expect(JSON.stringify(keys)).not.toContain(FAKE_AWS_KEY);
-    expect(keys.items).toEqual([expect.objectContaining({ tombstoned: 1, trust_tier: 'S5', title: null, search_text: null, locator_uri: null })]);
-    // A clean locator passes the same screen the location index uses; the title never stays.
-    expect(storedRows(dbPath, `${ACCOUNT}:id:plan`).items).toEqual([expect.objectContaining({
-      tombstoned: 1, trust_tier: 'S5', title: null, locator_uri: '/Files/launch-plan.txt', search_text: null,
-    })]);
+    expect(keys.items).toHaveLength(1);
+    expectSecretRow(keys.items[0]!);
+    expect(keys.items[0]!['locator_uri']).toBeNull();
+    // A clean locator passes the same screen the location index uses; nothing else stays.
+    const plan = storedRows(dbPath, `${ACCOUNT}:id:plan`).items;
+    expect(plan).toHaveLength(1);
+    expectSecretRow(plan[0]!);
+    expect(plan[0]!['locator_uri']).toBe('/Files/launch-plan.txt');
     // Not a Secret: a provider deletion's tombstone is unchanged by this.
     const old = storedRows(dbPath, `${ACCOUNT}:id:old`).items[0]!;
-    expect(old).toMatchObject({ tombstoned: 1, title: 'old-notes.txt', locator_uri: '/Files/old-notes.txt' });
+    expect(old).toMatchObject({
+      tombstoned: 1,
+      title: 'old-notes.txt',
+      locator_uri: '/Files/old-notes.txt',
+      sender_id: 'sender-1',
+      sender_label: 'Ops Bot',
+      authored_at: '2026-10-01T09:00:00.000Z',
+    });
     expect(String(old['search_text'])).toContain('old-notes.txt');
     expect(store.searchItems('deploy', 10)).toEqual([]);
   });
