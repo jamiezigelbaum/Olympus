@@ -127,6 +127,9 @@ function applyOne(
     // forgotten by the side stores.
     if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === 'secrets') {
       forgetSecretInSideStores({ ledger, identity });
+      // Nothing stored is left to tombstone (an earlier settlement got that
+      // far): under tombstone_now its copy rows go too.
+      if (secretsDisposition() === 'tombstone_now') ledger.removeCopies(identity);
       report.secrets += 1;
     }
     return;

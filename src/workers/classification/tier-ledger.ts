@@ -1077,6 +1077,23 @@ export class TierLedger {
     }))();
   }
 
+  /** Note the extraction job ledgers this process has open (see `knownJobLedgerPaths`). */
+  noteJobLedgerPaths(paths: readonly string[]): void {
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const upsert = this.db.query(`
+        INSERT INTO known_job_ledgers (path, seen_at) VALUES (?, ?)
+        ON CONFLICT (path) DO UPDATE SET seen_at = excluded.seen_at
+      `);
+      for (const path of paths) upsert.run(path, now);
+    })();
+  }
+
+  /** Every extraction job ledger a worker noted here, so a Secret is cleared in each. */
+  knownJobLedgerPaths(): string[] {
+    return (this.db.query('SELECT path FROM known_job_ledgers ORDER BY path').all() as Array<{ path: string }>).map((row) => row.path);
+  }
+
   /** Note that a Secret's side stores are about to be cleared (see `classificationRead`). */
   noteSecretScrub(identity: TierLedgerIdentity): void {
     this.db.query(`
@@ -3575,6 +3592,12 @@ function tierLedgerMigrations(): SqliteMigration[] {
       name: 'secret_side_store_scrubs',
       up(db) {
         db.exec(`
+          -- The extraction job ledgers the worker has open, noted each tier
+          -- tick, so another process (the tier set command) clears them too.
+          CREATE TABLE IF NOT EXISTS known_job_ledgers (
+            path TEXT PRIMARY KEY,
+            seen_at TEXT NOT NULL
+          );
           CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,

@@ -101,9 +101,10 @@ export function settleSecretsCopies(options: {
  * Forget a Secrets item in the side stores that hold its names or a short
  * excerpt: delete its queued sniffer questions (the file beside `ledger`) and
  * clear the names its extraction jobs captured, for good. Files that do not
- * exist are not created. Never throws (the copies' fate must not wait on a
- * side file): a store that cannot be reached is logged and left as a debt in
- * the ledger, which `retrySecretSideStoreDebts` clears at the next tier tick.
+ * exist are not created. A side store that cannot be reached does not hold
+ * up the copies' fate: it is logged and left as a debt in the ledger, which
+ * `retrySecretSideStoreDebts` clears at the next tier tick. Throws only when
+ * that debt cannot be written down, so the settlement is made again.
  */
 export function forgetSecretInSideStores(options: {
   ledger: TierLedger;
@@ -148,13 +149,17 @@ export function forgetSecretInSideStores(options: {
   // The default ledger, any other this process opened (a runtime given its
   // own path), and any an earlier attempt still owes (whoever calls: a
   // listing must not settle a debt it never tried).
+  // The worker notes its own in the set ledger each tick, so a separate
+  // process (the tier set command) reaches a ledger at a configured path too.
   let owedBefore: string[] = [];
+  let known: string[] = [];
   try {
     owedBefore = ledger.secretSideStoreDebtJobLedgerPaths(identity);
+    known = ledger.knownJobLedgerPaths();
   } catch {
     // Read again at the next tick.
   }
-  const jobLedgers = [...new Set([...extractionJobsDbPaths(), ...owedBefore, ...(options.jobLedgerPaths ?? [])])];
+  const jobLedgers = [...new Set([...extractionJobsDbPaths(), ...known, ...owedBefore, ...(options.jobLedgerPaths ?? [])])];
   for (const jobsPath of jobLedgers) {
     try {
       const cleared = clearExtractionJobNames(jobsPath, {
@@ -173,11 +178,16 @@ export function forgetSecretInSideStores(options: {
       owedJobLedgers.push(jobsPath);
     }
   }
-  try {
-    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
-    else ledger.clearSecretSideStoreDebt(identity, jobLedgers);
-  } catch {
-    // The ledger itself unreachable: the copies' own settlement fails loudly elsewhere.
+  if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
+    // Owed and not written down, nothing would ever retry it: the Secrets
+    // settlement this is part of fails, and is made again.
+    ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
+  } else {
+    try {
+      ledger.clearSecretSideStoreDebt(identity, jobLedgers);
+    } catch {
+      // A debt left in place is only retried once more.
+    }
   }
   if (result.failed > 0) console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
   return result;
@@ -185,11 +195,20 @@ export function forgetSecretInSideStores(options: {
 
 /** Retry the side-store clearing of Secrets that could not be cleared before. Returns how many are now clear. */
 export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): number {
+  try {
+    ledger.noteJobLedgerPaths(extractionJobsDbPaths());
+  } catch {
+    // Noted again next tick.
+  }
   let cleared = 0;
   for (const identity of ledger.secretSideStoreDebts(limit)) {
     const { jobLedgerPaths, ...item } = identity;
-    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
-    if (result.failed === 0 && result.notDurable === 0) cleared += 1;
+    try {
+      const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
+      if (result.failed === 0 && result.notDurable === 0) cleared += 1;
+    } catch {
+      // Still owed: tried again next tick.
+    }
   }
   return cleared;
 }
@@ -226,8 +245,16 @@ export function settleUntrackedSecretsCopy(options: {
     } catch {
       ledger = undefined;
     }
-    if (ledger) forgetSecretInSideStores({ ledger, identity: options.identity });
-    else forgetSecretJobNames(options.identity);
+    if (!ledger) forgetSecretJobNames(options.identity);
+    else {
+      try {
+        forgetSecretInSideStores({ ledger, identity: options.identity });
+      } catch {
+        // The copy is already gone, so a retry of this settlement would not
+        // reach here again: said aloud instead.
+        console.warn('[tier] secrets: an item\'s side stores could not be cleared and the retry could not be recorded.');
+      }
+    }
   }
   return settled;
 }
