@@ -123,12 +123,13 @@ export function isGooglePublisherWebClientId(
  * per credential: a refresh looks it up here by client id, so a release that
  * rotates it reaches every connection.
  *
- * Empty until the owner's client is filled in. While empty, Google sign-in
- * keeps the Web client, relay and publisher exchange it used before, so this
- * module can ship ahead of the client without changing anyone's sign-in.
+ * The owner created this client ("Olympus Desktop (new)") on 2026-10-13. Were
+ * the literals ever emptied, Google sign-in would fall back to the Web client,
+ * relay and publisher exchange it used before.
  */
-export const DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = '';
-export const DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = '';
+export const DEFAULT_GOOGLE_DESKTOP_CLIENT_ID =
+  '1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com';
+export const DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = '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';
 
 /**
  * Every Google Desktop client Olympus has shipped, newest first, with its
@@ -149,6 +150,8 @@ export function googleDesktopClient(
   env: Record<string, string | undefined> = process.env,
 ): { clientId: string; clientSecret: string } | undefined {
   const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
+  // `none` turns it off: new sign-ins use the Web client, relay and exchange.
+  if (overrideId === 'none') return undefined;
   if (overrideId) {
     const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
     return overrideSecret ? { clientId: overrideId, clientSecret: overrideSecret } : undefined;

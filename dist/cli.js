@@ -3095,6 +3095,8 @@ function isGooglePublisherWebClientId(clientId, env = process.env) {
 }
 function googleDesktopClient(env = process.env) {
   const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
+  if (overrideId === "none")
+    return;
   if (overrideId) {
     const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
     return overrideSecret ? { clientId: overrideId, clientSecret: overrideSecret } : undefined;
@@ -3127,7 +3129,7 @@ function firstConfigured(...candidates) {
   }
   return;
 }
-var DEFAULT_DROPBOX_PUBLISHER_APP_KEY = "1y1l05nqd24xaaw", DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "", GOOGLE_DESKTOP_CLIENTS;
+var DEFAULT_DROPBOX_PUBLISHER_APP_KEY = "1y1l05nqd24xaaw", DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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", GOOGLE_DESKTOP_CLIENTS;
 var init_publisher_oauth_client = __esm(() => {
   GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
     DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
@@ -156257,7 +156259,7 @@ async function runConnect(args) {
   if (rawSource === "finish") {
     const address = args[1] && !args[1].startsWith("--") ? args[1] : await readApiKeyFromStdin();
     try {
-      return await finishPastedOAuthCallback(address, { workerRoot: loadConfig().email.baseUrl.replace(/\/v1\/?$/, "") });
+      return await finishPastedOAuthCallback(address, { workerRoot: new URL(loadConfig().email.baseUrl).origin });
     } catch (error2) {
       if (error2 instanceof PastedCallbackError)
         throw new OperationError("invalid_params", error2.message);

@@ -77,7 +77,7 @@ function useDesktopClient(on: boolean): void {
     process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID = DESKTOP_CLIENT_ID;
     process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET = DESKTOP_CLIENT_SECRET;
   } else {
-    delete process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID;
+    process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID = 'none';
     delete process.env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET;
   }
 }
@@ -90,6 +90,14 @@ describe('the Desktop client configuration', () => {
     expect(googleDesktopClientSecret(undefined)).toBeUndefined();
     expect(isGoogleDesktopClientId(DESKTOP_CLIENT_ID)).toBe(true);
     expect(googleDesktopClient({ OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID: DESKTOP_CLIENT_ID })).toBeUndefined();
+    expect(googleDesktopClient({ OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID: 'none' })).toBeUndefined();
+  });
+
+  test('Olympus ships its own Desktop client from the owner\'s Google project', () => {
+    const shipped = googleDesktopClient({});
+    expect(shipped?.clientId).toMatch(/^1027907846009-[a-z0-9]+\.apps\.googleusercontent\.com$/);
+    expect(shipped?.clientSecret).toMatch(/^GOCSPX-/);
+    expect(googleDesktopClientSecret(shipped?.clientId, {})).toBe(shipped?.clientSecret);
   });
 });
 
