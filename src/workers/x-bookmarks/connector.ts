@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // Contract 1 normalization for X bookmark snapshots. The real provider-facing
 // SourceConnector lives in api-connector.ts and owns auth, polling, pagination,
 // completeness, fetch, and classification; this module converts its bounded
@@ -109,7 +110,7 @@ export function defaultXBookmarksConnectorStoreDbPath(
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured) return configured;
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', 'x-bookmarks-connector-store.sqlite');
+  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'x-bookmarks-connector-store.sqlite');
 }
 
 export function xBookmarkLocalItemId(account: string, postId: string): string {

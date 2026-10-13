@@ -135,33 +135,6 @@ describe('Olympus secret store', () => {
     expect(JSON.stringify(calls)).not.toContain('x-refresh-token-fixture');
   });
 
-  test('libsecret backend roundtrips through secret-tool with a mock runner', async () => {
-    const values = new Map<string, string>();
-    const runner: CommandRunner = (_command, args, input) => {
-      const key = args[args.indexOf('key') + 1] ?? '';
-      if (args[0] === 'store') {
-        values.set(key, input ?? '');
-        return { status: 0, stdout: '', stderr: '' };
-      }
-      if (args[0] === 'lookup') {
-        const value = values.get(key);
-        return value ? { status: 0, stdout: `${value}\n`, stderr: '' } : { status: 1, stdout: '', stderr: '' };
-      }
-      if (args[0] === 'clear') {
-        values.delete(key);
-        return { status: 0, stdout: '', stderr: '' };
-      }
-      return { status: 1, stdout: '', stderr: '' };
-    };
-    const store = new LinuxLibsecretSecretStore({ runner });
-
-    await store.set('readwise.personal.token', 'readwise-token-fixture');
-
-    expect(await store.get('readwise.personal.token')).toBe('readwise-token-fixture');
-    await store.delete('readwise.personal.token');
-    expect(await store.get('readwise.personal.token')).toBeUndefined();
-  });
-
   test.skipIf(process.env.OLYMPUS_LIVE_KEYCHAIN_TEST !== '1')(
     'live macOS Keychain backend write is disabled',
     async () => {

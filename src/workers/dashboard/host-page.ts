@@ -93,6 +93,7 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
 }
 
 export interface ComputerHostPageInput {
+  modelReadiness?: readonly { name: string; state: string; detail: string; downloadBytes: number }[];
   /** The panel HTML, exactly as ChatGPT loads it (dashboard-resource.ts dashboardResourceHtml). */
   panelHtml: string;
   /** This browser's request origin, e.g. http://127.0.0.1:8787. */
@@ -356,6 +357,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     '</head>',
     `<body data-olympus-host="computer" data-locked="${locked ? 'true' : 'false'}">`,
     lockedGate(!locked),
+    ...(input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map(model => `<p><strong>${text(model.name)} — ${text(model.state)}</strong>: ${text(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p>`).join('')}</details>`] : []),
     // allow-scripts only: an opaque origin, so the panel can reach nothing of
     // this page's (cookies, storage, DOM) and talks only through postMessage.
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute(input.panelHtml)}"></iframe>`,

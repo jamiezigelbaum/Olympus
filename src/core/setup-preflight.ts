@@ -24,29 +24,32 @@ export interface SetupPreflightOptions {
 }
 
 export async function setupPreflight(options: SetupPreflightOptions): Promise<SetupPrerequisite[]> {
+  const inputEnv = options.env ?? (options.homeDir ? { HOME: options.homeDir } : process.env);
   // The managed worker.env counts as present. `olympus connect gemini` stores
   // the key there because that is where the supervised worker reads it from,
   // so a preflight reading only process.env reported the key missing straight
   // after the operator stored it -- and named the command they had just run.
   const env = environmentWithWorkerSetupEnv({
-    ...(options.env ? { env: options.env } : {}),
+    env: inputEnv,
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}),
   });
   // A shell export does not reach launchd/systemd. When checking a managed
   // install, only its persisted environment proves an env-secret prerequisite.
   // Keep scoped, standalone preflights usable when no install was selected.
-  const inputEnv = options.env ?? process.env;
   const managedInstall = options.workerEnvPath || options.homeDir
     || (inputEnv.HOME?.trim() && existsSync(workerSetupEnvPath(options)));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
-  const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
+  let secretStore = options.secretStore;
+  const getSecretStore = () => secretStore ??= createDefaultSecretStore({
+    env: process.platform === 'linux' && options.homeDir ? { ...env, HOME: options.homeDir } : env,
+  });
   const unmet: SetupPrerequisite[] = [];
   const seen = new Set<string>();
 
   for (const [profileId, profile] of Object.entries(options.config.modelProfiles)) {
     if (profile.secretRef) {
-      const prerequisite = await secretRefPrerequisite(profileId, profile, credentialEnv, secretStore);
+      const prerequisite = await secretRefPrerequisite(profileId, profile, credentialEnv, getSecretStore);
       if (prerequisite && !seen.has(prerequisite.id)) {
         seen.add(prerequisite.id);
         unmet.push(prerequisite);
@@ -69,7 +72,7 @@ async function secretRefPrerequisite(
   profileId: string,
   profile: SovereigntyModelProfile,
   env: Record<string, string | undefined>,
-  secretStore: Pick<SecretStore, 'get' | 'getSync'>,
+  getSecretStore: () => Pick<SecretStore, 'get' | 'getSync'>,
 ): Promise<SetupPrerequisite | undefined> {
   const ref = normalizeSecretRef(profile.secretRef ?? '');
   if (!ref) return undefined;
@@ -87,6 +90,7 @@ async function secretRefPrerequisite(
     };
   }
 
+  const secretStore = getSecretStore();
   const value = secretStore.getSync
     ? secretStore.getSync(ref.key)
     : await secretStore.get(ref.key);

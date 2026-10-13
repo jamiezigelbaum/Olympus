@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
 /**
  * Remote access state shared by the three processes that need it:
  *
@@ -120,6 +121,8 @@ export function resolveRemoteAccessMode(remote: OlympusConfig['remote']): Remote
 
 /** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus`, the worker's data root. */
 export function olympusDataDir(env: Record<string, string | undefined> = process.env): string {
+  const standalone = standaloneLinuxDataDir(env);
+  if (standalone) return standalone;
   const configured = env.XDG_DATA_HOME?.trim();
   const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), '.local', 'share');
   if (!raIsAbsolute(dataRoot)) throw new TypeError('XDG_DATA_HOME must be an absolute private data root.');
@@ -136,6 +139,7 @@ export function remoteAccessDir(env: Record<string, string | undefined> = proces
  * `resolveRemoteConnectionsDbPathForCli` finds the connection database.
  */
 export function remoteAccessDirForCli(env: Record<string, string | undefined> = process.env): string {
+  if (process.platform === 'linux') return remoteAccessDir(env);
   const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
   const xdg = env.XDG_DATA_HOME?.trim() || workerEnv?.XDG_DATA_HOME;
   return remoteAccessDir({ ...(env.HOME !== undefined ? { HOME: env.HOME } : {}), ...(xdg ? { XDG_DATA_HOME: xdg } : {}) });

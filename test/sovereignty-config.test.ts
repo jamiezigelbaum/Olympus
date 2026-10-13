@@ -70,8 +70,8 @@ function decoyHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'olympus-sovereignty-decoy-home-'));
   const decoy = buildEnvBridgeSovereigntyConfig({ OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'decoy-key' });
   for (const profile of Object.values(decoy.modelProfiles)) (profile as { provider: string }).provider = 'decoy-unknown-provider';
-  mkdirSync(join(home, '.olympus'), { recursive: true });
-  writeFileSync(join(home, '.olympus', 'sovereignty.json'), JSON.stringify(decoy));
+  mkdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus'), { recursive: true });
+  writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json'), JSON.stringify(decoy));
   return home;
 }
 

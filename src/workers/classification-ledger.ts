@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
 /**
  * The classification decision ledger: an append-only record of every change
  * to the model or prompt that judges which tier an item belongs in, and who
@@ -77,7 +78,7 @@ export function resolveClassificationLedgerPath(env: Record<string, string | und
   const configured = env[CLASSIFICATION_LEDGER_PATH_ENV]?.trim();
   if (configured) return configured;
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', 'classification-ledger.jsonl');
+  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'classification-ledger.jsonl');
 }
 
 export async function appendClassificationLedgerEntry(path: string, entry: ClassificationLedgerEntry): Promise<void> {

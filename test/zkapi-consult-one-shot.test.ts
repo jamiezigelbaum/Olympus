@@ -32,7 +32,7 @@ import {
   TRANSPORT_MODULE,
   runConsultInChildProcess,
   alive,
-  NO_CONFINEMENT_LABEL,
+  UNFILTERED_LABEL,
   ledger,
   expectNothingReserved,
   expectProcessesGone,
@@ -118,7 +118,7 @@ describe('zkAPI consult transport: one-shot session', () => {
       text: 'Generally, notice scales with term length.',
       providerVerification: 'verified',
       networkIdentity: 'not_verified',
-      routeLabel: `${NO_CONFINEMENT_LABEL}; lease settlement pending`,
+      routeLabel: `${UNFILTERED_LABEL}; lease settlement pending`,
       receipt: { settlement: 'pending', fence: 'held', reservedUsd: 1, postStopProbe: 'not_run' },
     });
     expect(session.state).toBe('replied');
@@ -136,7 +136,7 @@ describe('zkAPI consult transport: one-shot session', () => {
     expect(result).toMatchObject({
       ok: true,
       text: 'Generally, notice scales with term length.',
-      routeLabel: NO_CONFINEMENT_LABEL,
+      routeLabel: UNFILTERED_LABEL,
       receipt: { settlement: 'confirmed', fence: 'clear', postStopProbe: 'route_lost', reservedUsd: 1 },
     });
     expect(session.state).toBe('finished');
@@ -454,7 +454,7 @@ describe('zkAPI consult transport: one-shot session', () => {
       const { openZkapiConsultSession } = await import(${JSON.stringify(TRANSPORT_MODULE)});
       const options = JSON.parse(process.argv[1]);
       options.now = () => new Date(${JSON.stringify(NOW.toISOString())});
-      options.confinement = { level: 'none', limit: 'none', wrap: (argv) => [...argv], selfTest: async () => false };
+      options.confinement = { level: 'non_loopback_blocked', limit: 'test', wrap: (argv) => [...argv], selfTest: async () => true };
       const opened = await openZkapiConsultSession(options);
       if (!opened.ok) { console.log('open-failed ' + opened.error.code); process.exit(1); }
       const reply = await opened.session.send(${JSON.stringify(QUESTION)});

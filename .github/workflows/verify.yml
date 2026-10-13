@@ -114,6 +114,12 @@ jobs:
           bun-version: 1.3.14
       - name: Ensure shellcheck is available
         run: command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+      - name: Ensure private Secret Service test dependencies are available
+        run: |
+          if ! command -v dbus-daemon >/dev/null || ! /usr/bin/python3 -c 'from gi.repository import Gio, GLib'; then
+            sudo apt-get update
+            sudo apt-get install -y dbus-daemon python3-gi
+          fi
       - name: Install the qualified OpenClaw host for the plugin-loader test
         # The plugin entry is loaded by OpenClaw's synchronous loader, and that
         # test can only prove it against a real install. Without this it would

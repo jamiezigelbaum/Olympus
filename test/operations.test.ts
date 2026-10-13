@@ -55,7 +55,7 @@ function decoyOlympusHome(): string {
   mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
   const policy = buildEnvBridgeSovereigntyConfig({ OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'decoy-key' });
   for (const profile of Object.values(policy.modelProfiles)) (profile as { provider: string }).provider = 'decoy-unknown-provider';
-  writeFileSync(join(home, '.olympus', 'sovereignty.json'), JSON.stringify(policy));
+  writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json'), JSON.stringify(policy));
   writeFileSync(join(home, '.config', 'olympus', 'handles.json'), JSON.stringify({
     version: 1,
     handles: [{

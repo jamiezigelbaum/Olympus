@@ -12,17 +12,28 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   bunExecutableDigest,
+  checkLinuxSiteRelease,
   checkSiteRelease,
+  fileDigest,
   pinBunExecutable,
+  publishLinuxToSite,
+  prepareLinuxLocalBundle,
   publishToSite,
   readBunPins,
   readInstallScriptPins,
+  readLinuxRuntimePins,
   releaseTarballPath,
   renderInstallScript,
+  renderLinuxInstallScript,
+  validateLinuxRuntimePins,
+  verifyLinuxRuntimeArchive,
+  type LinuxRuntimePins,
 } from '../scripts/publish-release-to-site.ts';
 
 const REPO = resolve(import.meta.dir, '..');
 const TEMPLATE = readFileSync(join(REPO, 'scripts', 'install-macos.sh'), 'utf8');
+const LINUX_TEMPLATE = readFileSync(join(REPO, 'scripts', 'install-linux.sh'), 'utf8');
+const LINUX_RUNTIME = readLinuxRuntimePins(join(REPO, 'config', 'linux-runtime-pins.json'));
 const PINS = { version: '1.0.0-rc.1', sha256: 'a'.repeat(64), bytes: 1234 };
 const has = (tool: string): boolean => spawnSync('/bin/sh', ['-c', `command -v ${tool}`]).status === 0;
 const roots: string[] = [];
@@ -44,6 +55,34 @@ function fixture(version = '1.0.0-rc.1', packaged: { name: string; version: stri
   const artifact = join(root, `olympus-${version}.tgz`);
   expect(spawnSync('tar', ['-czf', artifact, '-C', join(root, 'build'), 'package']).status).toBe(0);
   return { root, artifact };
+}
+
+const cloneLinuxRuntime = (): LinuxRuntimePins => JSON.parse(JSON.stringify(LINUX_RUNTIME)) as LinuxRuntimePins;
+
+test('local Linux bundle pins the real installer without publishing unqualified runtime', () => {
+  const { root, artifact } = linuxFixture('pending-omarchy');
+  const output = join(root, 'acceptance');
+  const pins = prepareLinuxLocalBundle({ root, artifact, output });
+  expect(readInstallScriptPins(readFileSync(join(output, 'install-linux.sh'), 'utf8'))).toEqual({ version: pins.version, sha256: pins.sha256, bytes: pins.bytes });
+  expect(readFileSync(join(output, `olympus-${pins.version}.tgz`))).toEqual(readFileSync(artifact));
+  expect(readFileSync(join(output, 'install-linux.sh'), 'utf8')).toBe(renderLinuxInstallScript(LINUX_TEMPLATE, pins, LINUX_RUNTIME));
+  expect(readFileSync(join(output, 'uninstall-linux.sh'))).toEqual(readFileSync(join(root, 'site/uninstall-linux.sh')));
+  expect(existsSync(join(root, 'site/install-linux.sh'))).toBe(false);
+  expect(() => publishLinuxToSite({ root, artifact })).toThrow();
+  expect(() => prepareLinuxLocalBundle({ root, artifact, output })).toThrow();
+  expect(readFileSync(join(output, 'SHA256SUMS'), 'utf8')).toContain(fileDigest(artifact).sha256);
+  expect(readFileSync(join(output, 'README.txt'), 'utf8')).toContain(`sh ./install-linux.sh --tarball "$(pwd)/olympus-${pins.version}.tgz"`);
+}, 30_000);
+
+function linuxFixture(qualification: LinuxRuntimePins['bun']['qualification'] = 'qualified-omarchy') {
+  const result = fixture();
+  mkdirSync(join(result.root, 'config'));
+  copyFileSync(join(REPO, 'scripts', 'install-linux.sh'), join(result.root, 'scripts', 'install-linux.sh'));
+  copyFileSync(join(REPO, 'site', 'uninstall-linux.sh'), join(result.root, 'site', 'uninstall-linux.sh'));
+  const runtime = cloneLinuxRuntime();
+  runtime.bun.qualification = qualification;
+  writeFileSync(join(result.root, 'config', 'linux-runtime-pins.json'), `${JSON.stringify(runtime, null, 2)}\n`);
+  return { ...result, runtime };
 }
 
 describe('renderInstallScript', () => {
@@ -141,12 +180,167 @@ describe('publishToSite and checkSiteRelease', () => {
   }, 30_000);
 });
 
+describe('Linux runtime pins and rendering', () => {
+  test('requires the complete Linux x64 baseline manifest and refuses arm64', () => {
+    const missing = cloneLinuxRuntime() as unknown as { bun: Record<string, unknown> };
+    delete missing.bun.executableSha256;
+    expect(() => validateLinuxRuntimePins(missing)).toThrow('must contain exactly');
+
+    const arm64 = cloneLinuxRuntime() as unknown as { bun: Record<string, unknown> };
+    arm64.bun.platform = 'linux-arm64';
+    expect(() => validateLinuxRuntimePins(arm64)).toThrow('must be linux-x64');
+
+    const looseUrl = cloneLinuxRuntime() as unknown as { bun: Record<string, unknown> };
+    looseUrl.bun.url = 'https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64-baseline.zip';
+    expect(() => validateLinuxRuntimePins(looseUrl)).toThrow('exact versioned oven-sh baseline URL');
+
+    for (const [field, value, message] of [
+      ['version', '1.3.14-canary.1', 'stable X.Y.Z'],
+      ['bytes', 0, 'positive byte count'],
+      ['sha256', 'A'.repeat(64), '64 lowercase hex'],
+      ['glibcMin', '2.18', 'must be 2.17'],
+      ['cpuRequired', ['avx2'], 'exactly ["sse4_2"]'],
+    ] as const) {
+      const invalid = cloneLinuxRuntime() as unknown as { bun: Record<string, unknown> };
+      invalid.bun[field] = value;
+      expect(() => validateLinuxRuntimePins(invalid)).toThrow(message);
+    }
+  });
+
+  test('fills every Linux release/runtime placeholder, including pending fixtures', () => {
+    const rendered = renderLinuxInstallScript(LINUX_TEMPLATE, PINS, LINUX_RUNTIME);
+    expect(rendered).not.toMatch(/@[A-Z][A-Z0-9_]*@/i);
+    expect(rendered).toMatch(/^OLYMPUS_VERSION=1\.0\.0-rc\.1$/m);
+    expect(rendered).toMatch(/^BUN_VERSION=1\.3\.14$/m);
+    expect(rendered).toContain(`BUN_URL=${LINUX_RUNTIME.bun.url}`);
+    expect(rendered).toContain(`BUN_ENTRY=${LINUX_RUNTIME.bun.entry}`);
+    expect(rendered).toContain(`BUN_EXE_SHA256=${LINUX_RUNTIME.bun.executableSha256}`);
+    expect(rendered).toMatch(/^BUN_GLIBC_MIN=2\.17$/m);
+    expect(() => renderLinuxInstallScript(LINUX_TEMPLATE.replace('BUN_BYTES=@BUN_BYTES@\n', ''), PINS, LINUX_RUNTIME)).toThrow('exactly one');
+    expect(() => renderLinuxInstallScript(`${LINUX_TEMPLATE}BUN_SHA256=@BUN_SHA256@\n`, PINS, LINUX_RUNTIME)).toThrow('exactly one');
+    expect(() => renderLinuxInstallScript(`${LINUX_TEMPLATE}BUN_URL=https://example.test/bun.zip\n`, PINS, LINUX_RUNTIME)).toThrow('exactly one');
+    expect(() => renderLinuxInstallScript(`${LINUX_TEMPLATE}EXTRA=@UNKNOWN_PIN@\n`, PINS, LINUX_RUNTIME)).toThrow('unfilled placeholder');
+    expect(() => renderLinuxInstallScript(`${LINUX_TEMPLATE}extra=@unknown_pin@\n`, PINS, LINUX_RUNTIME)).toThrow('unfilled placeholder');
+    const path = join(mkdtempSync(join(tmpdir(), 'olympus-linux-render-')), 'install-linux.sh');
+    roots.push(resolve(path, '..'));
+    writeFileSync(path, rendered);
+    expect(spawnSync('/bin/sh', ['-n', path]).status).toBe(0);
+  }, 30_000);
+
+  test.skipIf(!has('zip') || !has('unzip'))('verifies the archive before reading the named executable and rejects tampering', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-linux-bun-pin-'));
+    roots.push(root);
+    const makeArchive = (directory: string, program: string): string => {
+      mkdirSync(join(directory, 'bun-linux-x64-baseline'), { recursive: true });
+      writeFileSync(join(directory, 'bun-linux-x64-baseline', 'bun'), program, { mode: 0o755 });
+      const archive = join(directory, 'bun-linux-x64-baseline.zip');
+      expect(spawnSync('zip', ['-qr', archive, 'bun-linux-x64-baseline'], { cwd: directory }).status).toBe(0);
+      return archive;
+    };
+    const goodDir = join(root, 'good');
+    const program = '#!/bin/sh\necho verified but never executed\n';
+    const archive = makeArchive(goodDir, program);
+    const runtime = cloneLinuxRuntime();
+    Object.assign(runtime.bun, {
+      ...fileDigest(archive),
+      executableSha256: createHash('sha256').update(program).digest('hex'),
+    });
+    expect(verifyLinuxRuntimeArchive(archive, runtime).executableSha256).toBe(runtime.bun.executableSha256);
+
+    writeFileSync(archive, Buffer.concat([readFileSync(archive), Buffer.from('tampered')]));
+    expect(() => verifyLinuxRuntimeArchive(archive, runtime)).toThrow('not the pinned Linux Bun archive');
+
+    const changedArchive = makeArchive(join(root, 'changed'), '#!/bin/sh\necho changed\n');
+    const changedRuntime = cloneLinuxRuntime();
+    Object.assign(changedRuntime.bun, fileDigest(changedArchive), { executableSha256: runtime.bun.executableSha256 });
+    expect(() => verifyLinuxRuntimeArchive(changedArchive, changedRuntime)).toThrow('executable SHA-256');
+  }, 30_000);
+});
+
+describe('publishLinuxToSite and checkLinuxSiteRelease', () => {
+  test('refuses pending qualification before writing any served asset', () => {
+    const pending = linuxFixture('pending-omarchy');
+    expect(() => publishLinuxToSite(pending)).toThrow('requires qualified-omarchy');
+    expect(existsSync(join(pending.root, 'site', 'install-linux.sh'))).toBe(false);
+    expect(existsSync(join(pending.root, 'site', 'releases'))).toBe(false);
+    expect(checkLinuxSiteRelease(pending.root).join('\n')).toContain('requires qualified-omarchy');
+  }, 30_000);
+
+  test('publishes Linux without changing Mac/prior assets and reuses identical same-version assets', () => {
+    const current = linuxFixture();
+    const prior = join(current.root, 'site', 'releases', '1.0.0-rc.0');
+    mkdirSync(prior, { recursive: true });
+    writeFileSync(join(prior, 'olympus-1.0.0-rc.0.tgz'), 'prior release');
+    writeFileSync(join(prior, 'olympus-1.0.0-rc.0.tgz.sha256'), 'prior checksum');
+    writeFileSync(join(current.root, 'site', 'install.sh'), 'mac installer');
+    writeFileSync(join(current.root, 'site', 'uninstall.sh'), 'mac uninstaller');
+
+    const result = publishLinuxToSite(current);
+    const firstInstaller = readFileSync(result.installScript, 'utf8');
+    expect(checkLinuxSiteRelease(current.root)).toEqual([]);
+    expect(readFileSync(join(prior, 'olympus-1.0.0-rc.0.tgz'), 'utf8')).toBe('prior release');
+    expect(readFileSync(join(current.root, 'site', 'install.sh'), 'utf8')).toBe('mac installer');
+    expect(readFileSync(join(current.root, 'site', 'uninstall.sh'), 'utf8')).toBe('mac uninstaller');
+    expect(() => publishLinuxToSite(current)).not.toThrow();
+
+    writeFileSync(result.tarball, 'different release');
+    expect(() => publishLinuxToSite(current)).toThrow('already exists with different contents');
+    expect(readFileSync(result.tarball, 'utf8')).toBe('different release');
+    expect(readFileSync(result.installScript, 'utf8')).toBe(firstInstaller);
+
+    copyFileSync(current.artifact, result.tarball);
+    writeFileSync(`${result.tarball}.sha256`, 'different checksum\n');
+    expect(() => publishLinuxToSite(current)).toThrow('.sha256 already exists with different contents');
+    expect(readFileSync(`${result.tarball}.sha256`, 'utf8')).toBe('different checksum\n');
+  }, 30_000);
+
+  test('Mac publishing cannot replace a same-version asset pinned by Linux', () => {
+    const current = linuxFixture();
+    const linux = publishLinuxToSite(current);
+    writeFileSync(join(current.root, 'site', 'install.sh'), 'existing Mac installer');
+    const alternateDir = join(current.root, 'alternate');
+    mkdirSync(alternateDir);
+    writeFileSync(join(current.root, 'build', 'package', 'variant'), 'different same-version bytes');
+    const alternate = join(alternateDir, 'olympus-1.0.0-rc.1.tgz');
+    expect(spawnSync('tar', ['-czf', alternate, '-C', join(current.root, 'build'), 'package']).status).toBe(0);
+    const before = {
+      tarball: readFileSync(linux.tarball),
+      checksum: readFileSync(`${linux.tarball}.sha256`),
+      linuxInstaller: readFileSync(linux.installScript),
+      macInstaller: readFileSync(join(current.root, 'site', 'install.sh')),
+    };
+
+    expect(() => publishToSite({ root: current.root, artifact: alternate })).toThrow('pinned by site/install-linux.sh');
+    expect(readFileSync(linux.tarball)).toEqual(before.tarball);
+    expect(readFileSync(`${linux.tarball}.sha256`)).toEqual(before.checksum);
+    expect(readFileSync(linux.installScript)).toEqual(before.linuxInstaller);
+    expect(readFileSync(join(current.root, 'site', 'install.sh'))).toEqual(before.macInstaller);
+    expect(checkLinuxSiteRelease(current.root)).toEqual([]);
+  }, 30_000);
+
+  test('the default site check includes served Linux tampering and qualification', () => {
+    const current = linuxFixture();
+    publishLinuxToSite(current);
+    publishToSite(current);
+    const linuxInstaller = join(current.root, 'site', 'install-linux.sh');
+    const served = readFileSync(linuxInstaller, 'utf8');
+    writeFileSync(linuxInstaller, served.replace('set -eu', 'set -u'));
+    expect(checkSiteRelease(current.root).join('\n')).toContain('site/install-linux.sh differs from scripts/install-linux.sh');
+
+    writeFileSync(linuxInstaller, served);
+    current.runtime.bun.qualification = 'pending-omarchy';
+    writeFileSync(join(current.root, 'config', 'linux-runtime-pins.json'), `${JSON.stringify(current.runtime, null, 2)}\n`);
+    expect(checkSiteRelease(current.root).join('\n')).toContain('Linux publication requires qualified-omarchy');
+  }, 30_000);
+});
+
 describe('site publishing wiring', () => {
   test('the served installer and tarballs are build products, never committed', () => {
     const ignore = readFileSync(join(REPO, '.gitignore'), 'utf8').split('\n');
     expect(ignore).toContain('site/install.sh');
+    expect(ignore).toContain('site/install-linux.sh');
     expect(ignore).toContain('site/releases/');
-    const tracked = spawnSync('git', ['ls-files', 'site/install.sh', 'site/releases'], { cwd: REPO, encoding: 'utf8' });
+    const tracked = spawnSync('git', ['ls-files', 'site/install.sh', 'site/install-linux.sh', 'site/releases'], { cwd: REPO, encoding: 'utf8' });
     expect(tracked.stdout.trim()).toBe('');
   }, 30_000);
 
@@ -192,7 +386,7 @@ describe('site publishing wiring', () => {
     ].join('\n'), { mode: 0o755 });
     const result = spawnSync('bash', [join(site, 'deploy', 'deploy.sh')], {
       encoding: 'utf8',
-      env: { PATH: `${shims}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: root, SITE_SSH_TARGET: 'deploy@site.test', SITE_REMOTE_DIR: remote, SITE_SSH_KEY: join(root, 'key') },
+      env: { PATH: `${shims}:${process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin'}`, ...(process.env.LD_LIBRARY_PATH ? { LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH } : {}), HOME: root, SITE_SSH_TARGET: 'deploy@site.test', SITE_REMOTE_DIR: remote, SITE_SSH_KEY: join(root, 'key') },
     });
     expect({ status: result.status, output: `${result.stdout}${result.stderr}` }).toEqual({ status: 0, output: `${result.stdout}${result.stderr}` });
     expect(readFileSync(join(remote, 'releases', '1.0.0-rc.1', 'olympus-1.0.0-rc.1.tgz'), 'utf8')).toBe('rc.1');

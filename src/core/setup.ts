@@ -225,6 +225,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
   const presetConfig = presetKeepingPublicTier(applyCloudLane(loadSovereigntyPreset(options.preset), cloudLane), sovereigntyPath);
   const unmetPrerequisites = await setupPreflight({
     config: presetConfig,
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.secretStore ? { secretStore: options.secretStore } : {}),
     // This install's own worker.env, not $HOME's: a wizard run against a

@@ -32,6 +32,7 @@ import {
   type SourceIngestionLedgerSnapshot,
 } from '../src/workers/source-ingestion-ledger.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
+import { EncryptedFileSecretStore } from '../src/core/secret-store.ts';
 
 const NOW = new Date('2026-08-18T12:00:00.000Z');
 
@@ -490,6 +491,7 @@ describe('the /dashboard.json route wires both new inputs', () => {
           },
         },
         sourceDashboard: {
+          secretStore: new EncryptedFileSecretStore({ encryptedFilePath: join(dir, 'secrets.enc'), keyFilePath: join(dir, 'secrets.key') }),
           sovereigntyEngine: fixtureSovereigntyEngine(),
           registryPath: join(dir, 'missing-handles.json'),
           ingestionDispositions: () => ({
