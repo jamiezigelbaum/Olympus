@@ -28,7 +28,7 @@ export function renderEngineSystemdUnit(l: LinuxEngineLayout, p: EngineProgram):
  return `[Unit]\nDescription=Olympus standalone engine\nStartLimitIntervalSec=0\n\n[Service]\nType=exec\nExecStart="${value(p.runtimePath,true)}" --no-env-file "${value(p.entryPath,true)}" __engine-run\nWorkingDirectory=${pathValue(p.workingDirectory)}\nEnvironment=${Object.entries(env).map(([k,v]) => `"${k}=${value(v)}"`).join(' ')}\nUMask=0077\nRestart=on-failure\nRestartSec=5\nRestartSteps=5\nRestartMaxDelaySec=300\nRestartPreventExitStatus=78\nKillMode=mixed\nTimeoutStopSec=30\nSendSIGKILL=yes\nStandardOutput=append:${pathValue(join(l.stateDir,'engine.log'))}\nStandardError=append:${pathValue(join(l.stateDir,'engine.err'))}\n\n[Install]\nWantedBy=default.target\n`;
 }
 export interface SystemdEngineFacts {
- state: 'running' | 'loaded' | 'not_loaded' | 'unknown'; enabled: boolean | null; active: boolean | null; failed: boolean | null;
+ state: 'running' | 'loaded' | 'not_loaded' | 'unknown'; enabled: boolean | null; enabled_runtime?: boolean; active: boolean | null; failed: boolean | null;
  pid: number | null; last_exit_code: number | null; control_group: string | null; result: string | null; fragment_path: string | null; detail: string;
 }
 export function inspectSystemdEngine(l: LinuxEngineLayout, exec: EngineExec = linuxEngineExec): SystemdEngineFacts {
@@ -45,7 +45,8 @@ export function inspectSystemdEngine(l: LinuxEngineLayout, exec: EngineExec = li
  const active = f.ActiveState === 'active'; const failed = f.ActiveState === 'failed'; const pid = Number(f.MainPID) || null;
  const code = /^\d+$/.test(f.ExecMainStatus ?? '') ? Number(f.ExecMainStatus) : null;
  return { state: active && pid ? 'running' : ['inactive','failed'].includes(f.ActiveState) ? (failed ? 'loaded' : 'not_loaded') : 'loaded',
- enabled: ['enabled','enabled-runtime','linked','linked-runtime'].includes(f.UnitFileState) ? f.UnitFileState === 'enabled' : f.UnitFileState === 'disabled' ? false : null,
+ enabled: ['enabled','enabled-runtime'].includes(f.UnitFileState) ? true : ['disabled','linked','linked-runtime'].includes(f.UnitFileState) ? false : null,
+ enabled_runtime: f.UnitFileState === 'enabled-runtime',
  active, failed, pid, last_exit_code: code, control_group: f.ControlGroup || null, result: f.Result || null, fragment_path: f.FragmentPath || null,
  detail: code === 78 ? 'Configuration failed (exit 78). Repair engine.json, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start.'
  : f.Result === 'start-limit-hit' ? 'Start limit reached; repair the unit and run systemctl --user reset-failed olympus-engine.service, then olympus engine start.'
@@ -359,6 +360,8 @@ interface LinuxInstallTransaction {
  before: {
   active: boolean;
   enabled: boolean;
+  /** Absent in older journals, whose enabled state was always persistent. */
+  enabledRuntime?: boolean;
   files: Record<string, LinuxFileSnapshot>;
   receipt: LinuxFileSnapshot;
   absentCreatedFiles:string[];
@@ -380,13 +383,13 @@ function writeSnapshot(backupDir:string,index:number,text:string|Buffer|null,mod
  const backupPath=join(backupDir,`file-${index}.backup`);writePrivateFileAtomicSync(backupPath,text);chmodSync(backupPath,0o600);syncCopiedFile(backupPath);
  return {present:true,backupPath,sha256:hashFile(backupPath),mode};
 }
-function createInstallTransaction(input:{layout:LinuxEngineLayout;action:'install'|'rollback';phase:LinuxInstallTransaction['phase'];active:boolean;enabled:boolean;receiptText:string|null}):LinuxInstallTransaction{
+function createInstallTransaction(input:{layout:LinuxEngineLayout;action:'install'|'rollback';phase:LinuxInstallTransaction['phase'];active:boolean;enabled:boolean;enabledRuntime:boolean;receiptText:string|null}):LinuxInstallTransaction{
  const backupDir=join(input.layout.stateDir,`.install-backup-${randomUUID()}`);createLinuxPrivateDirectory(backupDir);const root=lstatSync(backupDir);
  const files:Record<string,LinuxFileSnapshot>={};let index=0;
  for(const path of transactionManagedFiles(input.layout)){const text=existsSync(path)?readFileSync(path):null;const mode=text===null?0o600:lstatSync(path).mode&0o777;files[path]=writeSnapshot(backupDir,index++,text,mode);}
  const receipt=writeSnapshot(backupDir,index,input.receiptText);
  return {schema:'olympus.engine.install-transaction.v1',action:input.action,phase:input.phase,stagingPath:join(input.layout.packageDir,`.prepare-${process.pid}-${randomUUID()}`),
-  backupDir,backupDevice:root.dev,backupInode:root.ino,before:{active:input.active,enabled:input.enabled,files,receipt,
+  backupDir,backupDevice:root.dev,backupInode:root.ino,before:{active:input.active,enabled:input.enabled,enabledRuntime:input.enabledRuntime,files,receipt,
    absentCreatedFiles:transactionCreatedFiles(input.layout).filter(path=>!existsSync(path))}};
 }
 function writeInstallTransaction(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
@@ -408,6 +411,7 @@ function readInstallTransaction(layout: LinuxEngineLayout): LinuxInstallTransact
  const createdAllowed=new Set(transactionCreatedFiles(layout));const absent=value?.before?.absentCreatedFiles;
  if (value.schema !== 'olympus.engine.install-transaction.v1'||!['install','rollback'].includes(value.action)|| !['preparing','activating','rollback_required','qualified','recovered'].includes(value.phase)
   ||(value.desktopIconSha256!==undefined&&(!hasDesktop||!/^[0-9a-f]{64}$/.test(value.desktopIconSha256)))
+  || (value.before?.enabledRuntime!==undefined&&(typeof value.before.enabledRuntime!=='boolean'||(value.before.enabledRuntime&&!value.before.enabled)))
   || typeof value.before?.active!=='boolean'||typeof value.before?.enabled!=='boolean'||!snapshotValid(value.before?.receipt)
   || dirname(backupDir)!==layout.stateDir||!/^\.install-backup-[0-9a-f-]{36}$/.test(basename(backupDir))
   ||!Number.isSafeInteger(value.backupDevice)||value.backupDevice<0||!Number.isSafeInteger(value.backupInode)||value.backupInode<=0
@@ -482,7 +486,7 @@ function restoreInstallTransaction(layout: LinuxEngineLayout, exec: EngineExec, 
  for(const path of transaction.before.absentCreatedFiles)removeFileDurablySync(path);
  if(transaction.before.files[layout.launcherPath]!.present){chmodSync(layout.launcherPath,0o700);syncCopiedFile(layout.launcherPath);syncDirectorySync(dirname(layout.launcherPath));}
  systemdMust(exec, ['daemon-reload']);
- if (transaction.before.enabled) systemdMust(exec, ['enable', layout.unitPath]);
+ if (transaction.before.enabled) systemdMust(exec, ['enable', ...(transaction.before.enabledRuntime ? ['--runtime'] : []), layout.unitPath]);
  else if(transaction.before.files[layout.unitPath]!.present)systemdMust(exec,['disable','--now',SYSTEMD_ENGINE_UNIT]);
  if (transaction.before.active) systemdMust(exec, ['restart', SYSTEMD_ENGINE_UNIT]);
  else if (transaction.before.files[layout.unitPath]!.present) systemdMust(exec, ['stop', SYSTEMD_ENGINE_UNIT]);
@@ -614,7 +618,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   publishLinuxEngineReceipt(l,{installationState:'installed',lingerPredated});
   lifecycleCheckpoint(options,'receipt_published');
   for(const dir of [l.stateDir,l.cacheDir,dirname(l.unitPath),l.runtimeDir]) createLinuxPrivateDirectory(dir);
-  const transaction=createInstallTransaction({layout:l,action:'install',phase:'preparing',active:before.active===true,enabled:before.enabled===true,receiptText:originalReceipt});
+  const transaction=createInstallTransaction({layout:l,action:'install',phase:'preparing',active:before.active===true,enabled:before.enabled===true,enabledRuntime:before.enabled_runtime===true,receiptText:originalReceipt});
   writeInstallTransaction(l,transaction);
   lifecycleCheckpoint(options,'journal_published');
   try {
@@ -790,11 +794,21 @@ export function uninstallLinuxEngine(options: EngineServiceOptions & { reap?: En
  const l=linuxLayoutFor(options),exec=options.exec ?? linuxEngineExec;
  return locked(l,()=>{const stopped=stopLinuxEngine(options);const f=inspectSystemdEngine(l,exec);assertKnown(f);if(f.active || f.enabled!==false)throw new Error('Engine custody changed; uninstall refused.');
  const receipt=readLinuxEngineReceipt(l.receiptPath);
+ const deletedPaths=new Set<string>();
  for(const path of receipt?.ownedUnitLinks??[]){try{lstatSync(path);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')continue;throw error;}const artifact=receipt?.machineArtifacts.find(entry=>entry.path===path&&entry.kind==='symlink');
-  if(!artifact||linuxMachineArtifactDigest(path,'symlink')!==artifact.sha256)throw new Error(`The systemd link ${path} was replaced; it was retained.`);removeFileDurablySync(path);}
+  if(!artifact||linuxMachineArtifactDigest(path,'symlink')!==artifact.sha256)throw new Error(`The systemd link ${path} was replaced; it was retained.`);if(removeFileDurablySync(path))deletedPaths.add(path);}
+ const desktopPaths=Object.values(linuxDesktopEntryPaths(l)).filter(path=>existsSync(path));
  removeLinuxDesktopEntry(l,exec);
+ for(const path of desktopPaths)deletedPaths.add(path);
  const removed=removeFileDurablySync(l.unitPath);
- systemdMust(exec,['daemon-reload']);refreshMachineArtifacts(l);
+ if(removed)deletedPaths.add(l.unitPath);
+ systemdMust(exec,['daemon-reload']);
+ // Retained artifacts keep their original ownership proof. Re-hashing here
+ // would adopt user replacements and authorize their later full removal.
+ if(receipt)publishLinuxEngineReceipt(l,{
+  machineArtifacts:receipt.machineArtifacts.filter(entry=>!deletedPaths.has(entry.path)),
+  ownedUnitLinks:receipt.ownedUnitLinks.filter(path=>!deletedPaths.has(path)),
+ });
  return {ok:true as const,plist_path:l.unitPath,unloaded:stopped.stopped,removed_plist:removed,stopped_leftover_processes:stopped.stopped_leftover_processes,
  kept:[l.configDir,l.dataDir,l.stateDir,l.packageDir].map(path=>({path,what:'retained Olympus data or settings'})),next:'Settings, models, credentials, logs and package generations were retained. Account-wide linger was not changed.'}; });
 }
@@ -816,7 +830,7 @@ export async function rollbackLinuxEngine(options: EngineServiceOptions & {healt
   const currentUnit=readFileSync(l.unitPath,'utf8'),currentConfig=readFileSync(l.configPath,'utf8');
   if(!current.build||!previous.program.build)throw new Error('Rollback requires both durable generation build identities.');
   const before=inspectSystemdEngine(l,exec);assertKnown(before);
-  const transaction=createInstallTransaction({layout:l,action:'rollback',phase:'activating',active:before.active===true,enabled:before.enabled===true,receiptText:optionalText(l.receiptPath)});
+  const transaction=createInstallTransaction({layout:l,action:'rollback',phase:'activating',active:before.active===true,enabled:before.enabled===true,enabledRuntime:before.enabled_runtime===true,receiptText:optionalText(l.receiptPath)});
   writeInstallTransaction(l,transaction);lifecycleCheckpoint(options,'journal_published');lifecycleCheckpoint(options,'activating_published');refreshMachineArtifacts(l);
   const apply=async(p:EngineProgram,unit:string,config:string)=>{
    const observed=inspectSystemdEngine(l,exec);assertKnown(observed);if(observed.state!=='not_loaded')systemdMust(exec,['stop',SYSTEMD_ENGINE_UNIT]);removeReleasedWorkerSocket(l,observed,inspectSystemdEngine(l,exec),options);

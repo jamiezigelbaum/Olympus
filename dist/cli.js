@@ -64379,7 +64379,8 @@ function inspectSystemdEngine(l, exec = linuxEngineExec) {
   const code = /^\d+$/.test(f.ExecMainStatus ?? "") ? Number(f.ExecMainStatus) : null;
   return {
     state: active && pid ? "running" : ["inactive", "failed"].includes(f.ActiveState) ? failed ? "loaded" : "not_loaded" : "loaded",
-    enabled: ["enabled", "enabled-runtime", "linked", "linked-runtime"].includes(f.UnitFileState) ? f.UnitFileState === "enabled" : f.UnitFileState === "disabled" ? false : null,
+    enabled: ["enabled", "enabled-runtime"].includes(f.UnitFileState) ? true : ["disabled", "linked", "linked-runtime"].includes(f.UnitFileState) ? false : null,
+    enabled_runtime: f.UnitFileState === "enabled-runtime",
     active,
     failed,
     pid,
@@ -64790,6 +64791,7 @@ function createInstallTransaction(input) {
     before: {
       active: input.active,
       enabled: input.enabled,
+      enabledRuntime: input.enabledRuntime,
       files,
       receipt,
       absentCreatedFiles: transactionCreatedFiles(input.layout).filter((path) => !existsSync38(path))
@@ -64814,7 +64816,7 @@ function readInstallTransaction(layout) {
   const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname44(resolve11(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename8(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
   const createdAllowed = new Set(transactionCreatedFiles(layout));
   const absent = value2?.before?.absentCreatedFiles;
-  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname44(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join62(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join62(backupDir, `file-${allowedFiles.length}.backup`) || dirname44(resolve11(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname44(resolve11(value2.generationPath)) !== join62(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join62(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
+  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname44(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename8(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join62(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join62(backupDir, `file-${allowedFiles.length}.backup`) || dirname44(resolve11(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename8(value2.stagingPath)) || value2.generationPath !== undefined && (dirname44(resolve11(value2.generationPath)) !== join62(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename8(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename8(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join62(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value2.phase === "qualified" || value2.phase === "recovered") {
@@ -64929,7 +64931,7 @@ function restoreInstallTransaction(layout, exec, options) {
   }
   systemdMust(exec, ["daemon-reload"]);
   if (transaction.before.enabled)
-    systemdMust(exec, ["enable", layout.unitPath]);
+    systemdMust(exec, ["enable", ...transaction.before.enabledRuntime ? ["--runtime"] : [], layout.unitPath]);
   else if (transaction.before.files[layout.unitPath].present)
     systemdMust(exec, ["disable", "--now", SYSTEMD_ENGINE_UNIT]);
   if (transaction.before.active)
@@ -65125,7 +65127,7 @@ function installLinuxEngine(options) {
     lifecycleCheckpoint(options, "receipt_published");
     for (const dir of [l.stateDir, l.cacheDir, dirname44(l.unitPath), l.runtimeDir])
       createLinuxPrivateDirectory(dir);
-    const transaction = createInstallTransaction({ layout: l, action: "install", phase: "preparing", active: before.active === true, enabled: before.enabled === true, receiptText: originalReceipt });
+    const transaction = createInstallTransaction({ layout: l, action: "install", phase: "preparing", active: before.active === true, enabled: before.enabled === true, enabledRuntime: before.enabled_runtime === true, receiptText: originalReceipt });
     writeInstallTransaction(l, transaction);
     lifecycleCheckpoint(options, "journal_published");
     try {
@@ -65393,6 +65395,7 @@ function uninstallLinuxEngine(options) {
     if (f.active || f.enabled !== false)
       throw new Error("Engine custody changed; uninstall refused.");
     const receipt = readLinuxEngineReceipt(l.receiptPath);
+    const deletedPaths = new Set;
     for (const path of receipt?.ownedUnitLinks ?? []) {
       try {
         lstatSync24(path);
@@ -65404,12 +65407,22 @@ function uninstallLinuxEngine(options) {
       const artifact = receipt?.machineArtifacts.find((entry) => entry.path === path && entry.kind === "symlink");
       if (!artifact || linuxMachineArtifactDigest(path, "symlink") !== artifact.sha256)
         throw new Error(`The systemd link ${path} was replaced; it was retained.`);
-      removeFileDurablySync(path);
+      if (removeFileDurablySync(path))
+        deletedPaths.add(path);
     }
+    const desktopPaths = Object.values(linuxDesktopEntryPaths(l)).filter((path) => existsSync38(path));
     removeLinuxDesktopEntry(l, exec);
+    for (const path of desktopPaths)
+      deletedPaths.add(path);
     const removed = removeFileDurablySync(l.unitPath);
+    if (removed)
+      deletedPaths.add(l.unitPath);
     systemdMust(exec, ["daemon-reload"]);
-    refreshMachineArtifacts(l);
+    if (receipt)
+      publishLinuxEngineReceipt(l, {
+        machineArtifacts: receipt.machineArtifacts.filter((entry) => !deletedPaths.has(entry.path)),
+        ownedUnitLinks: receipt.ownedUnitLinks.filter((path) => !deletedPaths.has(path))
+      });
     return {
       ok: true,
       plist_path: l.unitPath,
@@ -65458,7 +65471,7 @@ async function rollbackLinuxEngine(options) {
       throw new Error("Rollback requires both durable generation build identities.");
     const before = inspectSystemdEngine(l, exec);
     assertKnown(before);
-    const transaction = createInstallTransaction({ layout: l, action: "rollback", phase: "activating", active: before.active === true, enabled: before.enabled === true, receiptText: optionalText(l.receiptPath) });
+    const transaction = createInstallTransaction({ layout: l, action: "rollback", phase: "activating", active: before.active === true, enabled: before.enabled === true, enabledRuntime: before.enabled_runtime === true, receiptText: optionalText(l.receiptPath) });
     writeInstallTransaction(l, transaction);
     lifecycleCheckpoint(options, "journal_published");
     lifecycleCheckpoint(options, "activating_published");
@@ -82638,7 +82651,7 @@ function createNativeProcessService(options) {
     reload: { configPrefixes: [...options.reload.configPrefixes] },
     async start(context2) {
       const requestedGeneration = ++generation;
-      await stopCurrent();
+      const previousChildReleased = await stopCurrent();
       if (requestedGeneration !== generation)
         return;
       const lifetime = {
@@ -82652,7 +82665,7 @@ function createNativeProcessService(options) {
         restartTimer: undefined,
         stableTimer: undefined,
         cleanupPromise: undefined,
-        previousChildReleased: false
+        previousChildReleased
       };
       current2 = lifetime;
       try {
@@ -82678,7 +82691,7 @@ function createNativeProcessService(options) {
       return await retirement;
     const lifetime = current2 ?? retiring;
     if (!lifetime)
-      return;
+      return false;
     current2 = undefined;
     retiring = lifetime;
     lifetime.stopping = true;
@@ -82696,10 +82709,11 @@ function createNativeProcessService(options) {
       }
       if (retiring === lifetime)
         retiring = undefined;
+      return lifetime.previousChildReleased;
     });
     retirement = cleanup;
     try {
-      await cleanup;
+      return await cleanup;
     } finally {
       if (retirement === cleanup)
         retirement = undefined;
