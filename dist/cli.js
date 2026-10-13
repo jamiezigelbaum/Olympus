@@ -24257,15 +24257,12 @@ function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
         DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
         WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
       `).run(item.provider, item.accountScope, item.providerItemId).changes;
-      if (retired > 0) {
+      if (retired > 0 && rereadsTableExists(db)) {
         db.query(`
-          UPDATE extraction_jobs SET
-            status = 'queued', attempts = 0,
-            leased_by_hash = NULL, leased_until = NULL, lease_token = NULL, lease_grant_ordinal = NULL,
-            last_error_hash = NULL, last_error_kind = NULL, next_retry_at = NULL,
-            temp_bytes_cleaned = 1, updated_at = ?
+          INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+          SELECT job_id FROM extraction_jobs
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND status = 'indexed'
-        `).run(new Date().toISOString(), item.provider, item.accountScope, item.providerItemId);
+        `).run(item.provider, item.accountScope, item.providerItemId);
       }
       return { retired, stillSecret: false };
     }).immediate();
@@ -24276,13 +24273,21 @@ function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
 function artifactsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
 }
+function takeRestoredReread(db, jobId) {
+  if (!rereadsTableExists(db))
+    return false;
+  return db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
+}
+function rereadsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
+}
 function claimsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTION_CLAIMS_TABLE) !== null;
 }
 function redactionsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
 }
-var FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", openLedgerPaths;
+var FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", openLedgerPaths;
 var init_job_names = __esm(() => {
   openLedgerPaths = new Map;
 });
@@ -99117,7 +99122,8 @@ class LocalFileExtractionJobStore {
         const existing = this.existingJob(ref, extractorKind, extractorVersion);
         const jobId = existing?.job_id ?? makeJobId();
         const name = itemNameRedacted(this.db, ref) ? null : ref.name ?? null;
-        const forceExisting = Boolean(existing) && force && status === "queued";
+        const reread = existing !== undefined && existing !== null && takeRestoredReread(this.db, existing.job_id);
+        const forceExisting = Boolean(existing) && (force || reread) && status === "queued";
         const reset = forceExisting ? 1 : 0;
         this.db.query(`
           INSERT INTO extraction_jobs (
@@ -100145,6 +100151,9 @@ function fileExtractionJobMigrations() {
           claimant TEXT NOT NULL,
           claimed_at TEXT NOT NULL,
           PRIMARY KEY (provider, account_scope, provider_item_id, claimant)
+        );
+        CREATE TABLE IF NOT EXISTS ${SECRET_RESTORED_REREADS_TABLE} (
+          job_id TEXT PRIMARY KEY
         );
       `);
     }
