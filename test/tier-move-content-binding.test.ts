@@ -82,8 +82,10 @@ test('a background Personal verdict releases the edited held body, never the pri
 });
 
 test('a background Private verdict still hides first and moves upward even if stored content differs', async () => {
-  const f = lane({ id: 'binding-test', judge: () => ({ verdict: 'undecided' }) });
+  // This scenario starts Personal-first with a persisted background question.
+  const f = lane({ id: 'binding-test', judge: () => ({ verdict: 'undecided', queued: true }) });
   await f.sync(newBody);
+  expect(f.stores.internal!.localContent(localId('edited'))?.chunks.join('')).toBe(newBody);
   const applied = f.ledger.applySnifferVerdict(identity, {
     pass: 'content', tier: 'secure', reason: 'content:sniffer:binding-test:private', modelId: 'binding-test',
   }, { placementFor: d => f.set.placementFor(d) });
