@@ -127,10 +127,13 @@ export interface TierSnifferSubject {
   providerConversationId?: string;
 }
 
+/** Queue priority for an item held as someone's own record: ahead of ordinary background judgments. */
+export const HELD_RECORD_PRIORITY = 10;
+
 export interface TierSnifferRequest {
   pass: 'metadata' | 'content';
-  /** Held records go ahead of ordinary background judgments. */
-  priority?: 'normal' | 'high';
+  /** Higher values run first (held records use HELD_RECORD_PRIORITY); aging still reserves progress for old questions. */
+  priority?: number;
   /** Content-free reason the item was flagged, e.g. `names:health`. */
   flags: readonly string[];
   /**
@@ -153,7 +156,7 @@ export interface TierSnifferRequest {
  */
 export type TierSnifferVerdict =
   | { verdict: 'undecided' }
-  | { verdict: 'decided'; tier: 'private' | 'secure'; code: string };
+  | { verdict: 'decided'; tier: 'private' | 'secure' | 'secrets'; code: string };
 
 export interface TierSniffer {
   readonly id: string;
@@ -678,7 +681,7 @@ function metadataPass(args: {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
       pass: 'metadata',
-      priority: 'high',
+      priority: HELD_RECORD_PRIORITY,
       flags,
       material: snifferNames(signals),
       mapRevision: args.mapRevision,
@@ -817,7 +820,7 @@ function contentPass(args: {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
       pass: 'content',
-      priority: recordFlags.length > 0 || metadata.pending ? 'high' : 'normal',
+      priority: recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
       flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary))),
       mapRevision: args.mapRevision,

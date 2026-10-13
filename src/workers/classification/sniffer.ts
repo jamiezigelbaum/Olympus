@@ -385,7 +385,10 @@ export class CachedTierSniffer implements TierSniffer {
 
   judge(request: TierSnifferRequest): TierSnifferVerdict {
     const material = request.material?.trim();
-    if (!material || snifferMaterialCarriesSecret(material)) return { verdict: 'undecided' };
+    if (!material) return { verdict: 'undecided' };
+    // A deterministic refusal is terminal, using the existing Secrets disposition.
+    // The model still returns Personal or Private only.
+    if (snifferMaterialCarriesSecret(material)) return { verdict: 'decided', tier: 'secrets', code: 'secret_refused' };
     // Material that tries to instruct the model is Private at once, and is
     // neither queued nor sent.
     const injectionRule = snifferInjectionRule(material);
@@ -410,6 +413,7 @@ export class CachedTierSniffer implements TierSniffer {
           material,
           mapRevision,
           flags: request.flags,
+          ...(request.priority !== undefined ? { priority: request.priority } : {}),
         });
       }
     } catch {

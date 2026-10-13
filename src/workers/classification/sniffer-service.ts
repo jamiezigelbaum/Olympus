@@ -1,9 +1,10 @@
 // The worker's background tick for the privacy-safe sniffer: a bounded
-// `runSnifferPass` over every connector store, on an interval, one pass at a
-// time. It yields to answers (it shares the private pool Argus answers from)
+// `runSnifferPass` over every connector store, continuously while work remains.
+// It yields only to actual inference using the same local model
 // and does nothing until the owner has approved the exact classifier model
 // and prompt version in the classification ledger.
 
+import { Database } from 'bun:sqlite';
 import type { AnalystModel } from '../../core/analyst.ts';
 import {
   CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL,
@@ -23,14 +24,12 @@ import { snifferPromptVersions } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
-  defaultSnifferMaxCallsPerPass,
   SnifferCallBudget,
   runSnifferPass,
   type SnifferPassReport,
   type SnifferTarget,
 } from './sniffer-resolver.ts';
 import { existsSync } from 'node:fs';
-import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
@@ -38,6 +37,7 @@ import {
   DEFAULT_TIER_REJUDGE_PER_PASS,
   emptyTierRejudgeReport,
   rejudgeRoutedItems,
+  settleRoutedSecrets,
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
@@ -54,7 +54,7 @@ import {
   type TierLedgerRecord,
 } from './tier-ledger.ts';
 
-export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60_000;
+export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1_000;
 
 /**
  * A connector store, by what the sniffer needs: its path, and the tiered
@@ -100,6 +100,7 @@ export interface TierSnifferServiceOptions {
    */
   abandonAfterMs?: number;
   maxCallsPerPass?: number;
+  passTimeMs?: number;
   maxCallsPerDay?: number;
   /** Any other reason to yield the private pool (the pass also yields to `answersInFlight` and `breakerOpen`). */
   shouldYield?: () => boolean;
@@ -107,11 +108,7 @@ export interface TierSnifferServiceOptions {
   breakerOpen?: () => boolean;
   /** The model's install state when it is not available (content-free, e.g. `failed`), for the waiting reason. */
   modelState?: () => string | undefined;
-  /**
-   * True while answers are in flight. The pass's automatic tier moves
-   * (which re-embed items on this computer) wait for them as well, so an
-   * answer never shares the machine with background work it can avoid.
-   */
+  /** True only while foreground inference uses this same local model. Moves drain independently. */
   answersInFlight?: () => boolean;
   now?: () => Date;
   log?: (line: string) => void;
@@ -181,10 +178,13 @@ export interface TierAutoMoveReport {
 }
 
 export interface TierClassificationBacklog {
-  /** Items with an open sniffer question (held pending, Private). */
+  /** Union of pending ledger items and items with open questions, including re-judges. */
   checkingItems: number;
   /** Questions still to ask (an item can have a names and an excerpt question). */
   remainingQuestions: number;
+  pendingItems: number;
+  pendingWithoutQuestion: number;
+  oldestPendingAgeMs: number;
   summary: string;
   /** The sniffer is waiting for the owner to approve its model and prompt. */
   awaitingOwnerApproval: boolean;
@@ -225,6 +225,9 @@ export class TierSnifferService {
   private readonly options: TierSnifferServiceOptions;
   private readonly budget: SnifferCallBudget;
   private timer: ReturnType<typeof setInterval> | undefined;
+  private continuation: ReturnType<typeof setTimeout> | undefined;
+  private readonly moveAbort = new AbortController();
+  private moving: Promise<TierAutoMoveReport> | undefined;
   private running = false;
   private runningSinceMs = 0;
   private overrunReported = false;
@@ -234,6 +237,7 @@ export class TierSnifferService {
   private passGeneration = 0;
   /** The last reported reason a tick asked nothing (or 'asking'). */
   private waitingReason: string | undefined;
+  private lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
   private readonly moveFailures = new Map<string, number>();
@@ -255,13 +259,24 @@ export class TierSnifferService {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => { void this.runOnce(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
+    this.timer = setInterval(() => { void this.drainMoves(); void this.runOnce(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
     this.timer.unref?.();
+    this.wake();
+  }
+
+  /** Real local contention ended: resume immediately, including between idle polls. */
+  wake(): void {
+    if (this.stopped || this.continuation) return;
+    this.continuation = setTimeout(() => { this.continuation = undefined; void this.runOnce(); }, 0);
+    this.continuation.unref?.();
   }
 
   /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
   stop(): void {
     this.stopped = true;
+    this.moveAbort.abort();
+    if (this.continuation) clearTimeout(this.continuation);
+    this.continuation = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
@@ -286,29 +301,48 @@ export class TierSnifferService {
   backlog(): TierClassificationBacklog {
     let checkingItems = 0;
     let remainingQuestions = 0;
+    let pendingItems = 0;
+    let pendingWithoutQuestion = 0;
+    let oldestPendingAgeMs = 0;
     for (const ledgerPath of this.ledgerPaths()) {
-      // Read-only, and only where a sniffer queue exists: a status read never
-      // creates or migrates a sniffer file beside a ledger that has none.
-      const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ':memory:' || !existsSync(path)) continue;
-      let store: TierSnifferStore | undefined;
+      let db: Database | undefined;
       try {
-        store = new TierSnifferStore({ dbPath: path, readOnly: true });
-        const counts = store.counts();
-        checkingItems += counts.items;
-        remainingQuestions += counts.questions;
+        db = new Database(ledgerPath, { readonly: true, create: false });
+        db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+        const path = tierSnifferPathForLedger(ledgerPath);
+        const hasQueue = existsSync(path);
+        if (hasQueue) db.query('ATTACH DATABASE ? AS queue').run(path);
+        const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
+          WHERE q.provider = t.provider AND q.account_scope = t.account_scope
+          AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : '0';
+        const pending = db.query(`SELECT COUNT(*) AS n,
+          SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing,
+          MIN(decided_at) AS oldest FROM tier_items t WHERE state = 'pending'`).get() as { n: number; missing: number | null; oldest: string | null };
+        pendingItems += pending.n;
+        pendingWithoutQuestion += pending.missing ?? 0;
+        checkingItems += pending.n;
+        if (pending.oldest) oldestPendingAgeMs = Math.max(oldestPendingAgeMs, this.clockMs() - Date.parse(pending.oldest));
+        if (hasQueue) {
+          remainingQuestions += (db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+          checkingItems += (db.query(`SELECT COUNT(*) AS n FROM (
+            SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM queue.sniffer_questions q
+            WHERE NOT EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
+              AND t.provider = q.provider AND t.account_scope = q.account_scope
+              AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id))`).get() as { n: number }).n;
+        }
       } catch {
-        // An unreadable queue contributes nothing; its items stay pending.
-      } finally {
-        store?.close();
-      }
+        // No writes, migrations, or invented zero-valued rows on a status read.
+      } finally { db?.close(); }
     }
     return {
       checkingItems,
       remainingQuestions,
+      pendingItems, pendingWithoutQuestion, oldestPendingAgeMs,
       summary: checkingItems === 0
         ? 'No items waiting for classification.'
         : `Checking ${checkingItems} item${checkingItems === 1 ? '' : 's'}, about ${remainingQuestions} question${remainingQuestions === 1 ? '' : 's'} remaining.`
+          + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : '')
+          + (oldestPendingAgeMs >= 3_600_000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60_000)} minutes.` : '')
           + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ''),
       awaitingOwnerApproval: this.lastTick?.state === 'awaiting_owner_approval',
       ...(checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}),
@@ -375,7 +409,17 @@ export class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
+    if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
+      this.lastBacklogLogMs = this.clockMs();
+      const backlog = this.backlog();
+      if (backlog.checkingItems > 0) this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs}.`);
+    }
     if (this.stopped) this.closeLedgers();
+    else if (this.timer && tick.state === 'ran' && !this.yieldNow()
+      && tick.report.stoppedBy !== 'daily_budget' && tick.report.stoppedBy !== 'transport_failures'
+      && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls
+        || (tick.autoMoves?.moved ?? 0) > 0 || (tick.rejudged?.seen ?? 0) > 0
+        || tick.report.stoppedBy === 'preempted')) this.wake();
     return tick;
   }
 
@@ -527,6 +571,7 @@ export class TierSnifferService {
       } catch {
         // Starting is best effort; the next tick tries again.
       }
+      await this.drainMoves();
       return { state: 'model_unavailable', modelId: lane.modelId };
     }
     const ownerContext = this.options.ownerContext?.();
@@ -569,6 +614,7 @@ export class TierSnifferService {
         status: 'pending',
         entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
       });
+      await this.drainMoves();
       return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
     }
     // Items decided under an older classifier or sniffer prompt are judged
@@ -583,6 +629,12 @@ export class TierSnifferService {
         ledger,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...(planner ? { placementFor: planner } : {}),
+        settleSecrets: (question, decision) => {
+          const set = tierSetForLedger(ledgerPath);
+          if (!set) return false;
+          const exported = set.ledger.copies(question).map(copy => set.store(copy.trustDomain)?.exportItemCopy(question)).find(Boolean);
+          return exported ? settleRoutedSecrets(set, question, decision, exported, { findingKinds: ['sniffer_secret_refusal'] }) : false;
+        },
       });
     }
     const report = await runSnifferPass({
@@ -592,7 +644,8 @@ export class TierSnifferService {
       promptVersion: versions.cache,
       ...(ownerContext ? { ownerContext } : {}),
       budget: this.budget,
-      maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
+      maxCallsPerPass: this.options.maxCallsPerPass,
+      passTimeMs: this.options.passTimeMs,
       shouldYield: () => this.yieldNow(),
       signal,
     });
@@ -600,16 +653,27 @@ export class TierSnifferService {
       this.options.log?.(
         `Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied `
         + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), `
-        + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}.`,
+        + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}; `
+        + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}.`,
       );
     }
-    const autoMoves = this.options.autoMoves && !signal.aborted && !this.answering() && this.options.autoMoves.localEmbeddingsOnly()
-      ? await this.runAutoMoves(this.options.autoMoves, signal)
-      : undefined;
+    const autoMoves = await this.drainMoves();
     // A move that just landed may have carried an item whose owner override
     // came while it was queued: apply the override now, not a tick later.
     if (autoMoves && autoMoves.moved > 0) this.applyOwnerOverrides();
     return { state: 'ran', report, ...(rejudged.seen > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
+  }
+
+  private async drainMoves(): Promise<TierAutoMoveReport | undefined> {
+    try {
+      if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly()) return undefined;
+      if (!this.moving) this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal)
+        .finally(() => { this.moving = undefined; });
+      return await this.moving;
+    } catch (error) {
+      this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : 'unknown'}); queued moves will retry.`);
+      return undefined;
+    }
   }
 
   private answering(): boolean {
@@ -771,7 +835,7 @@ export class TierSnifferService {
         continue;
       }
       for (const record of queued) {
-        if (budget === 0 || signal.aborted || this.answering()) break;
+        if (budget === 0 || signal.aborted) break;
         budget -= 1;
         const identity = recordIdentity(record);
         const failureKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}\u0000${record.generation}`;
@@ -928,14 +992,14 @@ function setEmbedsWithBuiltInOnly(set: TieredStoreSet): boolean {
 export function tierSnifferServiceEnv(env: Record<string, string | undefined>): {
   enabled: boolean;
   intervalMs: number;
-  /** Absent: the lane's default pace (10 a minute local, 30 on Venice). */
+  /** Optional legacy override; absent means time-bounded passes. */
   maxCallsPerPass?: number;
   maxCallsPerDay: number;
 } {
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
   return {
     enabled: !(enabledRaw === '0' || enabledRaw === 'false' || enabledRaw === 'no' || enabledRaw === 'off'),
-    intervalMs: positiveInteger(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 5_000),
+    intervalMs: positiveInteger(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim()
       ? { maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) }
       : {}),

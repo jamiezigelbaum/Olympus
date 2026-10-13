@@ -20,7 +20,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import type { TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
-export const TIER_SNIFFER_SCHEMA_VERSION = 1;
+export const TIER_SNIFFER_SCHEMA_VERSION = 2;
 
 export type SnifferPass = 'metadata' | 'content';
 export type SnifferTier = 'personal' | 'private';
@@ -54,6 +54,9 @@ export interface SnifferQuestion {
   flags: string[];
   attempts: number;
   queuedAt: string;
+  priority: number;
+  /** Stable insertion order for items queued in the same millisecond. */
+  sequence: number;
 }
 
 export function snifferMaterialHash(pass: SnifferPass, material: string): string {
@@ -155,12 +158,13 @@ export class TierSnifferStore {
     material: string;
     mapRevision: string;
     flags: readonly string[];
+    priority?: number;
   }): void {
     const materialHash = snifferMaterialHash(question.pass, question.material);
     this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
@@ -168,6 +172,7 @@ export class TierSnifferStore {
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
+        priority = excluded.priority,
         flags_json = excluded.flags_json
     `).run(
       ...subjectParams(question.subject),
@@ -177,6 +182,7 @@ export class TierSnifferStore {
       question.material,
       JSON.stringify([...question.flags]),
       this.now().toISOString(),
+      Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority!))) : 0,
     );
   }
 
@@ -188,14 +194,30 @@ export class TierSnifferStore {
     return row ? questionFromRow(row) : undefined;
   }
 
-  /** Oldest questions first; the background pass reads these in bounded pages. */
+  /** Recent/high priority first; one in five dispatches serves the oldest aged question. */
   listQuestions(options: { pass?: SnifferPass; limit?: number } = {}): SnifferQuestion[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
-    const rows = options.pass
-      ? this.db.query('SELECT * FROM sniffer_questions WHERE pass = ? ORDER BY question_pk LIMIT ?').all(options.pass, limit)
-      : this.db.query('SELECT * FROM sniffer_questions ORDER BY question_pk LIMIT ?').all(limit);
-    return (rows as QuestionRow[]).map(questionFromRow);
+    const where = options.pass ? 'WHERE pass = ?' : '';
+    const params = options.pass ? [options.pass] : [];
+    const rows = this.db.query(`SELECT * FROM sniffer_questions ${where}
+      ORDER BY priority DESC, queued_at DESC, question_pk DESC LIMIT ?`).all(...params, limit) as QuestionRow[];
+    // Include the oldest even when it lies beyond the recent page.
+    const oldest = this.db.query(`SELECT * FROM sniffer_questions ${where}
+      ORDER BY queued_at, question_pk LIMIT 1`).get(...params) as QuestionRow | null;
+    if (oldest && !rows.some(row => row.question_pk === oldest.question_pk)) rows.push(oldest);
+    return rows.map(questionFromRow);
   }
+
+  dispatchCount(): number {
+    const used = (this.db.query('SELECT dispatches FROM sniffer_schedule WHERE id = 1').get() as { dispatches: number }).dispatches;
+    return used;
+  }
+
+  recordDispatch(): void {
+    this.db.exec('UPDATE sniffer_schedule SET dispatches = dispatches + 1 WHERE id = 1');
+  }
+
+  clockMs(): number { return this.now().getTime(); }
 
   deleteQuestion(subject: TierSnifferSubject, pass: SnifferPass): boolean {
     return this.db.query(`
@@ -244,6 +266,8 @@ export class TierSnifferStore {
 }
 
 interface QuestionRow {
+  question_pk: number;
+  priority: number;
   provider: string;
   account_scope: string;
   conversation_key: string;
@@ -270,6 +294,8 @@ function questionFromRow(row: QuestionRow): SnifferQuestion {
     flags: JSON.parse(row.flags_json) as string[],
     attempts: row.attempts,
     queuedAt: row.queued_at,
+    priority: row.priority ?? 0,
+    sequence: row.question_pk,
   };
 }
 
@@ -287,7 +313,7 @@ function restrictFiles(dbPath: string): void {
 function snifferMigrations(): SqliteMigration[] {
   return [
     {
-      version: TIER_SNIFFER_SCHEMA_VERSION,
+      version: 1,
       name: 'create_tier_sniffer',
       up(db) {
         db.exec(`
@@ -319,6 +345,16 @@ function snifferMigrations(): SqliteMigration[] {
             UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
           );
         `);
+      },
+    },
+    {
+      version: 2,
+      name: 'priority_and_aging',
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
+          CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
+          INSERT INTO sniffer_schedule VALUES (1, 0);`);
       },
     },
   ];

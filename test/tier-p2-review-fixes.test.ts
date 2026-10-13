@@ -42,7 +42,7 @@ import { sharingInfoFromDropboxJson } from '../src/workers/dropbox-files/provide
 import { resolveSnifferLane, SnifferLaneRefusedError, type SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
-  defaultSnifferMaxCallsPerPass,
+  DEFAULT_SNIFFER_PASS_TIME_MS,
   runSnifferPass,
   SnifferCallBudget,
 } from '../src/workers/classification/sniffer-resolver.ts';
@@ -520,11 +520,10 @@ describe('6b. one item per call: no name can steer another item', () => {
 });
 
 describe('pace, daily cap and the visible backlog', () => {
-  test('defaults: 20,000 calls a day; 10 a minute on a local model, 30 on Venice', () => {
+  test('defaults: 20,000 calls a day, prompt idle polling, optional legacy call cap', () => {
     expect(DEFAULT_SNIFFER_MAX_CALLS_PER_DAY).toBe(20_000);
-    expect(defaultSnifferMaxCallsPerPass('local')).toBe(10);
-    expect(defaultSnifferMaxCallsPerPass('venice')).toBe(30);
-    expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, intervalMs: 60_000, maxCallsPerDay: 20_000 });
+    expect(DEFAULT_SNIFFER_PASS_TIME_MS).toBe(5_000);
+    expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, intervalMs: 1_000, maxCallsPerDay: 20_000 });
     expect(tierSnifferServiceEnv({ OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS: '5' }).maxCallsPerPass).toBe(5);
   });
 
@@ -582,7 +581,8 @@ describe('pace, daily cap and the visible backlog', () => {
     const snifferPath = tierSnifferPathForLedger(tierLedgerPathForStore(storePath));
     expect(existsSync(snifferPath)).toBe(false);
     expect(service.backlog()).toMatchObject({ checkingItems: 0, remainingQuestions: 0 });
-    expect(service.backlog()).toMatchObject({ checkingItems: 0 });
+    ledger.recordDecision(subject(99), classifyItemTiers({ signals: { title: 'bank letter' }, subject: subject(99) }));
+    expect(service.backlog()).toMatchObject({ checkingItems: 1, pendingItems: 1, pendingWithoutQuestion: 1, remainingQuestions: 0 });
     expect(existsSync(snifferPath)).toBe(false);
   });
 });

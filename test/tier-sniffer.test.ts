@@ -170,6 +170,7 @@ describe('secrets are never sent', () => {
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'health', confidence: 0.9 }));
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
       expect(report.secretRefused).toBe(1);
+      for (const n of [1, 2]) expect(ledger.getCurrent(subject(n))).toMatchObject({ state: 'current', contentTier: 'secrets', metadataPending: false, contentPending: false });
       expect(model.requests.every((request) => !request.prompt.includes(FAKE_AWS_KEY))).toBe(true);
       expect(store.counts().questions).toBe(0);
     } finally {
@@ -748,4 +749,130 @@ describe('vocabulary-only detector hits (owner ruling 2026-10-01)', () => {
     const record = await judgedAs({ tier: 'personal', category: 'health', confidence: 0.95 });
     expect(record).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer' });
   });
+});
+
+
+describe('recent questions and bounded passes', () => {
+  test('a new item overtakes an old backlog, with priority first', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      for (let n = 1; n <= 12; n++) recordFlagged(ledger, store, n, `bank letter ${n}`);
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+      expect(model.requests[0]!.prompt).toContain('bank letter 12');
+      store.enqueue({ subject: subject(1), pass: 'metadata', material: 'bank urgent', flags: [], mapRevision: 'none', priority: 10 });
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+      expect(model.requests[1]!.prompt).toContain('bank urgent');
+    } finally { store.close(); ledger.close(); }
+  });
+
+  test('old questions progress despite a stream of newer high priority arrivals', async () => {
+    let clock = new Date('2026-01-01T00:00:00Z');
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:', now: () => clock });
+    try {
+      recordFlagged(ledger, store, 1, 'bank oldest');
+      clock = new Date('2026-01-01T02:00:00Z');
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+      for (let n = 2; n <= 7; n++) {
+        recordFlagged(ledger, store, n, `bank newer ${n}`);
+        store.enqueue({ subject: subject(n), pass: 'metadata', material: `bank newer ${n}`, flags: [], mapRevision: 'none', priority: 10 });
+        await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+      }
+      expect(model.requests[0]!.prompt).toContain('bank newer 2');
+      expect(model.requests.some(r => r.prompt.includes('bank oldest'))).toBe(true);
+    } finally { store.close(); ledger.close(); }
+  });
+
+  test('time bounds a pass instead of the old ten-call default, and reports call and wait time', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      for (let n = 1; n <= 15; n++) recordFlagged(ledger, store, n, `bank timing ${n}`);
+      let elapsed = 0;
+      const model = spyModel((_, items) => { elapsed += 100; return verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }); });
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, passTimeMs: 1200, monotonicNow: () => elapsed });
+      expect(report.calls).toBe(12);
+      expect(report.stoppedBy).toBe('pass_budget');
+      expect(report.callMs).toBe(1200);
+      expect(report.maxQueueWaitMs).toBeGreaterThanOrEqual(0);
+    } finally { store.close(); ledger.close(); }
+  });
+});
+
+test('aging also serves a quiet store while another store receives priority work', async () => {
+  let clock = new Date('2026-01-01T00:00:00Z');
+  const ledgers = [new TierLedger({ dbPath: ':memory:' }), new TierLedger({ dbPath: ':memory:' })];
+  const stores = [new TierSnifferStore({ dbPath: ':memory:', now: () => clock }), new TierSnifferStore({ dbPath: ':memory:', now: () => clock })];
+  try {
+    recordFlagged(ledgers[0]!, stores[0]!, 1, 'bank quiet oldest');
+    clock = new Date('2026-01-01T02:00:00Z');
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    for (let n = 2; n <= 7; n++) {
+      recordFlagged(ledgers[1]!, stores[1]!, n, `bank busy ${n}`);
+      stores[1]!.enqueue({ subject: subject(n), pass: 'metadata', material: `bank busy ${n}`, flags: [], mapRevision: 'none', priority: 10 });
+      await runSnifferPass({ targets: ledgers.map((ledger, i) => ({ ledger, sniffer: stores[i]! })), lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+    }
+    expect(model.requests.some(r => r.prompt.includes('bank quiet oldest'))).toBe(true);
+  } finally { stores.forEach(s => s.close()); ledgers.forEach(l => l.close()); }
+});
+
+test('independent move drain failures are contained and retried', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sniffer-move-retry-'));
+  const installed = new InstalledTierClassification({ env: {} });
+  const lines: string[] = [];
+  let attempts = 0;
+  const service = new TierSnifferService({
+    installed, lane: LOCAL_LANE, model: spyModel(() => ''), stores: () => [],
+    classificationLedgerPath: join(dir, 'classification.jsonl'),
+    modelAvailable: () => false, intervalMs: 5,
+    log: line => lines.push(line),
+    autoMoves: { embeddingLedgerPath: join(dir, 'embedding.jsonl'), localEmbeddingsOnly: () => {
+      attempts++;
+      if (attempts <= 2) throw new Error('synthetic failure');
+      return true;
+    } },
+  });
+  try {
+    service.start();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(attempts).toBeGreaterThan(2);
+    expect(lines.some(line => line.includes('move drain failed (Error)'))).toBe(true);
+  } finally { service.stop(); installed.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('completed passes continue without waiting for the idle timer', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sniffer-continuation-'));
+  const storePath = join(dir, 'items.sqlite');
+  const ledgerPath = `${storePath}.tier-ledger.sqlite`;
+  const ledger = new TierLedger({ dbPath: ledgerPath });
+  const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+  const queue = installed.snifferStoreForLedger(ledgerPath);
+  let calls = 0;
+  let resolveDone!: () => void;
+  const done = new Promise<void>(resolve => { resolveDone = resolve; });
+  const model = spyModel((_, items) => {
+    if (++calls === 12) resolveDone();
+    return verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 });
+  });
+  const classificationLedgerPath = join(dir, 'classification.jsonl');
+  await appendClassificationLedgerEntry(classificationLedgerPath, {
+    recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Synthetic fixture approval',
+    approved_by: 'owner', status: 'complete', model_id: LOCAL_LANE.modelId, lane: LOCAL_LANE.kind,
+    profile_id: LOCAL_LANE.profileId, prompt_version: SNIFFER_PROMPT_VERSION,
+  });
+  const service = new TierSnifferService({ installed, lane: LOCAL_LANE, model,
+    stores: () => [{ dbPath: storePath, tierSetBinding: () => ({ ledgerPath }) }], classificationLedgerPath,
+    intervalMs: 60_000, maxCallsPerPass: 1,
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    for (let n = 1; n <= 12; n++) recordFlagged(ledger, queue, n, `bank continuation ${n}`);
+    service.start();
+    await Promise.race([done, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('idle timer stalled work')), 2_000); })]);
+    expect(calls).toBe(12);
+    // Allow the final model result to settle before closing the fixture.
+    await new Promise(resolve => setTimeout(resolve, 5));
+  } finally { if (timeout) clearTimeout(timeout); service.stop(); installed.close(); ledger.close(); rmSync(dir, { recursive: true, force: true }); }
 });

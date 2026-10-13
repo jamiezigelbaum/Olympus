@@ -237,7 +237,7 @@ function registeredBuiltIn(verdict: string | ((request: AnalystModelRequest) => 
   return { prompts, builtIn, started: () => started };
 }
 
-function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: { localEmbeddingsOnly?: boolean; maxPerPass?: number } = {}) {
+function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: { localEmbeddingsOnly?: boolean; maxPerPass?: number; rejudgePerPass?: number } = {}) {
   const service = new TierSnifferService({
     installed: install.installed,
     lane: BUILT_IN_SNIFFER_LANE,
@@ -248,6 +248,7 @@ function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: { l
     startModel: () => builtIn.startIfIdle?.(),
     ownerContext: () => ownerWords,
     autoApproveBuiltIn: true,
+    ...(options.rejudgePerPass !== undefined ? { rejudgePerPass: options.rejudgePerPass } : {}),
     autoMoves: {
       localEmbeddingsOnly: () => options.localEmbeddingsOnly ?? true,
       embeddingLedgerPath: join(root, 'embedding-ledger.jsonl'),
@@ -1078,4 +1079,49 @@ describe('12d. a revoked owner move is cancelled or replanned, never stranded (r
     expect(currentCopies(fx.ledger, d1).map((copy) => copy.corpusId)).toEqual([CORPORA.secure_local]);
     expect(fx.ledger.listMoving()).toEqual([]);
   });
+});
+
+
+test('a preempted pass drains its completed verdict moves independently', async () => {
+  let service: TierSnifferService;
+  let calls = 0;
+  const builtIn: BuiltInPrivateModel = {
+    available: () => true,
+    model: { async complete(request) {
+      calls++;
+      if (calls === 2) { service.preempt(); throw new Error('aborted'); }
+      return { text: PERSONAL_VERDICT, modelId: 'built_in' };
+    } },
+  };
+  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+  service = snifferFor(install, builtIn);
+  const result = await service.runOnce();
+  expect(result).toMatchObject({ state: 'ran', report: { stoppedBy: 'preempted', verdictsApplied: 1 }, autoMoves: { moved: 1 } });
+  expect(install.lane.ledger.listMoving()).toHaveLength(0);
+});
+
+test('saving unchanged privacy settings adds no model calls', async () => {
+  const { service, prompts } = await gardenSettledPersonal();
+  const description = 'My health and money matters.';
+  writePrivacyProfile({ description, rules: [] }, { env });
+  ownerWords = description;
+  for (let n = 0; n < 3; n++) await service.runOnce();
+  const before = prompts.length;
+  writePrivacyProfile({ description, rules: [] }, { env });
+  for (let n = 0; n < 3; n++) await service.runOnce();
+  expect(prompts.length).toBe(before);
+});
+
+test('a queued secret settles a routed item through the existing Secrets disposition', async () => {
+  const model = registeredBuiltIn(PERSONAL_VERDICT);
+  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+  const queue = install.installed.snifferStoreForLedger(install.lane.ledger.dbPath);
+  const row = install.lane.ledger.getCurrent(garden)!;
+  queue.enqueue({ subject: garden, pass: 'content', material: `credential ${FAKE_AWS_KEY}`, mapRevision: row.mapRevision, flags: [] });
+  const service = snifferFor(install, model.builtIn, { rejudgePerPass: 0 });
+  await service.runOnce();
+  expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', metadataTier: 'secrets', contentTier: 'secrets', metadataPending: false, contentPending: false });
+  expect(install.lane.ledger.copies(garden)).toHaveLength(0);
+  expect(model.prompts.every(p => !p.prompt.includes(FAKE_AWS_KEY))).toBe(true);
+  expect(queue.questionFor(garden, 'content')).toBeUndefined();
 });

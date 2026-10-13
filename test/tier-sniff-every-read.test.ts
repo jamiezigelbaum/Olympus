@@ -28,6 +28,7 @@ import {
   type TierSniffer,
   type TierSnifferRequest,
   type TierSnifferVerdict,
+  HELD_RECORD_PRIORITY,
 } from '../src/workers/classification/tier-classifier.ts';
 
 // A lab report as extracted: values, units and reference ranges, no detector
@@ -64,7 +65,7 @@ describe('every read item is judged; only own-record signals hold content', () =
     expect(asked).toHaveLength(1);
     expect(asked[0]!.pass).toBe('content');
     expect(asked[0]!.flags).toContain('content:own_record:measurement');
-    expect(asked[0]!.priority).toBe('high');
+    expect(asked[0]!.priority).toBe(HELD_RECORD_PRIORITY);
     // The folder path and title travel with the excerpt.
     expect(asked[0]!.material).toStartWith('Names: 2026-06-29 blood work 1.pdf | /2 Areas/Health/Labs/');
     expect(asked[0]!.material).toContain('Excerpt: Laboratorio Central.');
