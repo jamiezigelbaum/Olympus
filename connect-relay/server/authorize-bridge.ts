@@ -53,14 +53,17 @@ export function authorizeBridge(url: URL, options: BridgeOptions): Response {
   const target = `${engineOrigin}/connect/authorize${query}`;
   const nonce = randomBytes(16).toString('base64');
   const app = bridgeAppName(url.searchParams.get('client_id'));
-  const heading = app ? `Approve ${app} on your computer` : 'Approve on your computer';
+  // Olympus runs on a Mac or an Omarchy computer, so the page says computer. ChatGPT's page keeps the words OpenAI's
+  // directory reviewers were shown ("Mac"; fixtures/reviewer-path/golden.json) until that review ends.
+  const where = app === 'ChatGPT' ? 'Mac' : 'computer';
+  const heading = app ? `Approve ${app} on your ${where}` : `Approve on your ${where}`;
   const body = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Approve on your computer · Olympus</title>
+<title>Approve on your ${where} · Olympus</title>
 <style nonce="${nonce}">
   :root { color-scheme: light dark; --fg: #1d1d1f; --muted: #6e6e73; --bg: #fbfbfd; --accent: #0a66d8; }
   @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --muted: #a1a1a6; --bg: #111113; --accent: #4c9bff; } }
@@ -78,15 +81,15 @@ export function authorizeBridge(url: URL, options: BridgeOptions): Response {
 <body>
 <main>
   <h1>${heading}</h1>
-  <p>Olympus asks for approval on the computer where it runs, so only you can connect it.</p>
-  <a class="button" id="continue" href="${escapeHtml(target)}">Continue on this computer</a>
+  <p>Olympus asks for approval on the ${where} where it runs, so only you can connect it.</p>
+  <a class="button" id="continue" href="${escapeHtml(target)}">Continue on this ${where}</a>
   ${options.demo ? `<section class="demo">
     <p>Reviewing Olympus for a directory? Use the demo, with made-up sample data.</p>
     <a class="button demo-button" id="demo" href="${escapeHtml(`/connect/demo/authorize${query}`)}">Reviewing Olympus? Sign in to the demo</a>
   </section>` : ''}
   <section id="missing">
     <h2>Olympus did not answer on this computer</h2>
-    <p>Open this page on the computer where Olympus runs, or install Olympus first.</p>
+    <p>Open this page on the ${where} where Olympus runs, or install Olympus first.</p>
     <a class="button" href="${escapeHtml(options.installUrl)}" rel="noopener">Install Olympus</a>
   </section>
 </main>

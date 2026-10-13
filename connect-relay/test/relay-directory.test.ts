@@ -29,7 +29,7 @@ const PUBLIC_HOST = 'mcp.olympus.test';
 const DIRECTORY_METADATA = `https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/openai/mcp`;
 const MCP_METADATA = `https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/mcp`;
 const challengeFor = (metadata: string) => [
-  `Bearer resource_metadata="${metadata}", error="invalid_token", error_description="Connect Olympus on your computer to use this tool."`,
+  `Bearer resource_metadata="${metadata}", error="invalid_token", error_description="Connect Olympus on your Mac to use this tool."`,
 ];
 
 const dirs: string[] = [];

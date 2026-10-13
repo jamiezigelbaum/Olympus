@@ -72,21 +72,7 @@ describe('what the relay answers itself on the reviewer\'s path', () => {
   test('equals the submitted relay\'s answers, step by step', async () => {
     const current = await recordReviewerPath(ROOT);
     expect(current.map((answer) => answer.name)).toEqual(golden.map((answer) => answer.name));
-    for (const [index, answer] of current.entries()) {
-      const submitted = golden[index]!;
-      // Linux W5 deliberately changes only this page's platform wording.
-      // Keep the submitted fixture immutable. Do not deploy this branch while
-      // OpenAI review is open without the anchor's go.
-      // The branch also neutralizes the two fixed disconnected-owner messages;
-      // submitted tool descriptions, resources and all other bytes remain pinned.
-      const platformCopy = JSON.parse(JSON.stringify(submitted)
-        .replaceAll('Olympus is not connected to ChatGPT yet. If Olympus is on your Mac, connect it; otherwise install it first.', 'Olympus is not connected to ChatGPT yet. If Olympus is on your computer, connect it; otherwise install it first.')
-        .replaceAll('Connect Olympus on your Mac to use this tool.', 'Connect Olympus on your computer to use this tool.')) as RecordedAnswer;
-      const expected = submitted.name === 'connect page'
-        ? { ...submitted, body: String(submitted.body).replaceAll('your Mac', 'your computer').replaceAll('the Mac', 'the computer').replaceAll('this Mac', 'this computer') }
-        : platformCopy;
-      expect(answer).toEqual(expected);
-    }
+    for (const [index, answer] of current.entries()) expect(answer).toEqual(golden[index]!);
   });
 });
 

@@ -32,7 +32,7 @@ const PUBLIC_HOST = 'mcp.olympus.test';
 /** The account-linking challenge every tool sends a caller without a token (on the directory endpoint, the only one that answers one). */
 const LINKING_CHALLENGE = [
   `Bearer resource_metadata="https://${PUBLIC_HOST}/.well-known/oauth-protected-resource/openai/mcp", error="invalid_token", `
-    + 'error_description="Connect Olympus on your computer to use this tool."',
+    + 'error_description="Connect Olympus on your Mac to use this tool."',
 ];
 
 interface WorkerRecord {
@@ -435,7 +435,7 @@ describe('routing', () => {
     const html = await bridge.text();
     expect(html).toContain('href="http://127.0.0.1:8010/connect/authorize?response_type=code&amp;client_id=https%3A%2F%2Fchatgpt.com%2Foauth%2Fclient.json&amp;state=a%22%3Cb"');
     expect(html).toContain('Install Olympus');
-    expect(html).toContain('<h1>Approve ChatGPT on your computer</h1>');
+    expect(html).toContain('<h1>Approve ChatGPT on your Mac</h1>');
     expect(bridge.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
 
     // The heading names a pinned app from a fixed list; anything else is unnamed and never echoed.
@@ -443,10 +443,10 @@ describe('routing', () => {
     expect(await heading('https://claude.ai/oauth/mcp-oauth-client-metadata')).toBe('Approve Claude on your computer');
     expect(await heading('https://grok.com/oauth/mcp-client.json')).toBe('Approve Grok on your computer');
     expect(await heading('https://cursor.com/oauth/mcp-client.json')).toBe('Approve Grok Bot or Cursor on your computer');
-    expect(await heading('https://chatgpt.com/oauth/cb_1/client.json')).toBe('Approve ChatGPT on your computer');
+    expect(await heading('https://chatgpt.com/oauth/cb_1/client.json')).toBe('Approve ChatGPT on your Mac');
     expect(await heading('https://evil.example/<b>Claude</b>')).toBe('Approve on your computer');
     expect(await (await fetch(`${relay.url}/connect/authorize?state=s`)).text()).toContain('<h1>Approve on your computer</h1>');
-    // All approval pages use the platform-neutral wording.
+    // ChatGPT's page keeps the wording OpenAI's directory reviewers were shown (reviewer-path.test.ts).
     const claudePage = await (await fetch(`${relay.url}/connect/authorize?client_id=${encodeURIComponent('https://claude.ai/oauth/mcp-oauth-client-metadata')}`)).text();
     expect(claudePage).toContain('Continue on this computer</a>');
     expect(claudePage).not.toMatch(/\bMac\b/);

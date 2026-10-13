@@ -380,8 +380,8 @@ export class InstallSession {
 
 export function gatewayError(status: number): Response {
   const message = status === 504
-    ? 'Olympus on your computer did not answer in time.'
-    : 'The connection to Olympus on your computer was interrupted.';
+    ? 'Olympus on your Mac did not answer in time.'
+    : 'The connection to Olympus on your Mac was interrupted.';
   return new Response(JSON.stringify({ error: status === 504 ? 'gateway_timeout' : 'bad_gateway', message }), {
     status,
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },

@@ -157,7 +157,7 @@ export async function checkReviewerPath(host: string, options: { demo: boolean; 
     const response = await fetch(`/connect/authorize?${query}`);
     const page = await response.text();
     if (response.status !== 200) return `HTTP ${response.status}`;
-    if (!page.includes('<h1>Approve ChatGPT on your computer</h1>')) return 'heading is not "Approve ChatGPT on your computer"';
+    if (!page.includes('<h1>Approve ChatGPT on your Mac</h1>')) return 'heading is not "Approve ChatGPT on your Mac"';
     if (!page.includes('Reviewing Olympus? Sign in to the demo')) return 'no demo sign-in button';
     return undefined;
   });

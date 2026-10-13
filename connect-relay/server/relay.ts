@@ -519,7 +519,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     if (!admitted.ok) {
       log('request_refused', { install: installTag(installId), reason: admitted.reason });
       return admitted.reason === 'busy'
-        ? json(503, { error: 'busy', message: 'Olympus on your computer is busy. Try again shortly.' }, { 'Retry-After': '5' })
+        ? json(503, { error: 'busy', message: 'Olympus on your Mac is busy. Try again shortly.' }, { 'Retry-After': '5' })
         : tooMany();
     }
     const session = sessions.get(installId);
@@ -715,7 +715,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       route: 'api',
       ip,
       dashboard: false,
-      offline: () => json(503, { error: 'temporarily_unavailable', error_description: 'Olympus on your computer is offline. Try again when your computer is awake.' }, { 'Retry-After': '30' }),
+      offline: () => json(503, { error: 'temporarily_unavailable', error_description: 'Olympus on your Mac is offline. Try again when your Mac is awake.' }, { 'Retry-After': '30' }),
       unknown,
     });
   };
@@ -735,7 +735,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     },
   );
   const expiredLink = () => browserPage(404, 'This Olympus link has expired or was already used. Go back to ChatGPT and try again.');
-  const macOffline = () => browserPage(503, 'Olympus on your computer is offline. Wake your computer, then try again from ChatGPT.', { 'Retry-After': '30' });
+  const macOffline = () => browserPage(503, 'Olympus on your Mac is offline. Wake your Mac, then try again from ChatGPT.', { 'Retry-After': '30' });
 
   /**
    * `GET /go/<oly2g.installId.secret>`: a one-time hand-off link, routed by
