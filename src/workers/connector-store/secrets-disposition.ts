@@ -3,8 +3,9 @@
 //
 // THE ONE PLACE this is decided. Every path that turns an item into Secrets
 // reads it: the sync's router (tiered-store-set.ts), the extraction landing
-// sink (file-extraction/tiered-store-sink.ts), the move primitive
-// (tier-move.ts) and the tier migration (classification/tier-migration.ts).
+// sinks (file-extraction/tiered-store-sink.ts and, for a store no ledger
+// tracks, file-extraction/store-sink.ts), the move primitive (tier-move.ts)
+// and the tier migration (classification/tier-migration.ts).
 //
 // - `tombstone_now` (today's behavior, design section 4.2 "Mandatory"): every
 //   copy is tombstoned at once — chunks, FTS rows and vectors deleted — and
@@ -19,7 +20,7 @@
 
 import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
 import type { TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
-import type { LocalConnectorStore } from './local-index.ts';
+import type { ConnectorStoreItemWriteClaim, ConnectorStoreOwnershipKind, LocalConnectorStore } from './local-index.ts';
 
 export type SecretsDisposition = 'tombstone_now' | 'hide_until_purge';
 
@@ -69,4 +70,29 @@ export function settleSecretsCopies(options: {
   }
   if (disposition === 'tombstone_now') options.ledger.removeCopies(options.identity);
   return { disposition, chunks };
+}
+
+/**
+ * Apply the policy to a Secrets item in a store no tier ledger tracks a copy
+ * for (a plain store, or a tiered set's legacy leg holding an unrouted item).
+ * Hiding is a ledger copy row, and such a copy has none, so under either
+ * disposition it cannot be kept hidden: it is tombstoned and keeps its
+ * location only, exactly as the store's own sync treats an S5 item. The
+ * store fences the tombstone like the write it replaces (exclusions, identity,
+ * owner skip, claim generation) and says which way it went.
+ */
+export function settleUntrackedSecretsCopy(options: {
+  store: LocalConnectorStore;
+  identity: SourceItemIdentity;
+  connectorId: string;
+  metadata: Readonly<Record<string, unknown>>;
+  skipOwner?: { connectorId: string; ownershipKind: ConnectorStoreOwnershipKind };
+  writeClaim?: ConnectorStoreItemWriteClaim;
+}): ReturnType<LocalConnectorStore['tombstoneSecretsExtraction']> {
+  return options.store.tombstoneSecretsExtraction(options.identity, {
+    connectorId: options.connectorId,
+    metadata: options.metadata,
+    ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
+    ...(options.writeClaim ? { writeClaim: options.writeClaim } : {}),
+  });
 }
