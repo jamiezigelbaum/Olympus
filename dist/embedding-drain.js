@@ -14859,7 +14859,7 @@ function isTextualMimeType(mimeType) {
 function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read.secret) : options?.sniffer;
+  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read) : options?.sniffer;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
@@ -14874,13 +14874,14 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
 }
-function secretFencedSniffer(sniffer, ledger, identity, secretWhenRead) {
-  if (secretWhenRead)
-    return sniffer;
-  return {
-    id: sniffer.id,
-    judge: (request) => sniffer.judge({ ...request, stillAsk: () => !ledger.itemIsSecret(identity) })
+function secretFencedSniffer(sniffer, ledger, identity, read) {
+  const stillAsk = () => {
+    const now = ledger.classificationRead(identity);
+    if (!now.secret)
+      return true;
+    return read?.secret === true && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
+  return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
 }
 var DEFAULT_TIER_FOR_DOMAIN;
 var init_tier_placement = __esm(() => {
@@ -18013,7 +18014,7 @@ var init_local_index = __esm(() => {
           mimeType: item.mimeType,
           subject: item.identity
         }, {
-          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, false) } : {},
+          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity) } : {},
           ...override ? { override } : {},
           ...inputs?.retirePublic ? { retirePublic: true } : {}
         });
@@ -24792,7 +24793,7 @@ function rejudgeStoredContent(set, record, options) {
     ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
     subject: identity
   }, {
-    ...options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity, false) } : {},
+    ...options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity) } : {},
     ...options.retirePublic ? { retirePublic: true } : {}
   });
   const decision = {
