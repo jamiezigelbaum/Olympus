@@ -6348,6 +6348,8 @@ function preflightLinuxEngineLayout(layout, options = {}) {
       join10(layout.configHome, "systemd/user/olympus-worker.service")
     ];
     const managed = new Set([layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir, layout.unitPath, layout.launcherPath, layout.openHandlerPath]);
+    if (layout.dataDir === join10(layout.dataHome, "olympus"))
+      managed.add(join10(layout.dataDir, "engine"));
     const recoverableEmptyDirectory = (p) => {
       const info = stat2(p);
       return managed.has(p) && Boolean(info?.isDirectory() && info.uid === uid && (info.mode & 63) === 0 && readdirSync(p).length === 0);
