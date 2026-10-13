@@ -1,0 +1,11 @@
+name: Feature request
+description: An idea for Olympus.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What you would like Olympus to do, and why it would help.
+    validations:
+      required: true

@@ -9419,6 +9419,522 @@ var init_embeddings = __esm(() => {
   };
 });
 
+// src/core/secret-patterns.ts
+function trimValueEnd(value) {
+  let end = value.length;
+  while (end > 0 && ";,)]}".includes(value[end - 1]))
+    end -= 1;
+  while (end > 0 && value[end - 1] === ".")
+    end -= 1;
+  return value.slice(0, end);
+}
+function stripNonAlphanumeric(word) {
+  const isAlphanumeric = (code) => code >= 48 && code <= 57 || code >= 97 && code <= 122;
+  const lower = word.toLowerCase();
+  let start = 0;
+  let end = lower.length;
+  while (start < end && !isAlphanumeric(lower.charCodeAt(start)))
+    start += 1;
+  while (end > start && !isAlphanumeric(lower.charCodeAt(end - 1)))
+    end -= 1;
+  return lower.slice(start, end);
+}
+function isBareLiteral(value) {
+  if (value.length > 24)
+    return false;
+  let end = value.length;
+  while (end > 0 && ".,;".includes(value[end - 1]))
+    end -= 1;
+  return BARE_LITERALS.has(value.slice(0, end).toLowerCase());
+}
+function isVariableReference(value) {
+  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$/s.exec(value);
+  if (!match)
+    return false;
+  const name = match[1];
+  if (match[2])
+    return match[2].startsWith("/");
+  return name.includes("_") || name === name.toUpperCase() || !/[0-9]/.test(name) && name === name.toLowerCase();
+}
+function isPlaceholderValue(value, lineRest = "") {
+  const v = value.trim();
+  if (!v)
+    return true;
+  if (v.startsWith("<") && (v.includes(">") || lineRest.includes(">")))
+    return true;
+  if (v.startsWith("(") && (v.includes(")") || lineRest.includes(")")))
+    return true;
+  if (/^[[{].*[\]}]$/.test(v))
+    return true;
+  if (/\$\{|\{\{|<%|%\(|\$\(|^%[A-Za-z_]+%$/.test(v))
+    return true;
+  if (isVariableReference(v))
+    return true;
+  if (MASKED_RUN.test(v))
+    return true;
+  if (/^(.)\1+$/.test(v))
+    return true;
+  if (isBareLiteral(v))
+    return true;
+  return PLACEHOLDER_WORDS.test(v);
+}
+function isPropertyLookup(value) {
+  if (!MEMBER_CHAIN.test(value))
+    return false;
+  return value.split(".").some((segment) => CREDENTIAL_WORD.test(segment) || COMMON_OBJECTS.has(segment.toLowerCase()));
+}
+function isNotLiteralCredential(value) {
+  return CODE_LOOKUP.test(value) || IDENTIFIER_NAME.test(value) && CREDENTIAL_WORD.test(value) || CALL_EXPRESSION.test(value) || isPropertyLookup(value) || TYPE_ANNOTATION.test(value) || /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(value);
+}
+function hasCredentialShape(value) {
+  return /[0-9]/.test(value) || /[^A-Za-z0-9_.\-\s]/.test(value);
+}
+function isPlausiblePassphrase(value, minLength) {
+  const v = value.trim();
+  if (v.length < minLength || v.length > 160)
+    return false;
+  if (/[?:]$/.test(v) || /\bhttps?:\/\//i.test(v))
+    return false;
+  if (isPlaceholderValue(v) || isNotLiteralCredential(v))
+    return false;
+  const words = v.split(/\s+/);
+  if (words.length < 2 || words.length > 14)
+    return false;
+  if (CREDENTIAL_NOUN.test(stripNonAlphanumeric(words[words.length - 1])))
+    return false;
+  return !words.some((word) => PROSE_WORDS.has(stripNonAlphanumeric(word)));
+}
+function leadBefore(input, index, limit) {
+  const window2 = input.slice(Math.max(0, index - limit), index);
+  const newline = Math.max(window2.lastIndexOf(`
+`), window2.lastIndexOf("\r"));
+  return newline === -1 ? window2 : window2.slice(newline + 1);
+}
+function restOfLine(match) {
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const window2 = input.slice(end, end + 200);
+  const newline = window2.search(/[\r\n]/);
+  return newline === -1 ? window2 : window2.slice(0, newline);
+}
+function assignedValue(groups) {
+  const quotedValue = groups.dq ?? groups.sq ?? groups.bq;
+  if (quotedValue !== undefined)
+    return { value: quotedValue.trim(), quoted: true, tail: "" };
+  const raw = groups.uv ?? "";
+  const value = trimValueEnd(raw).trim();
+  return { value, quoted: false, tail: raw.slice(value.length) };
+}
+function isIdentifierHandOff(match, assigned) {
+  if (assigned.quoted || !BARE_IDENTIFIER.test(assigned.value))
+    return false;
+  if (CODE_LEAD.test(leadBefore(match.input ?? "", match.index ?? 0, 80)))
+    return true;
+  return /[;)]/.test(assigned.tail) && (assigned.value.includes("_") || /[a-z][A-Z]/.test(assigned.value));
+}
+function endsTheLine(match) {
+  const rest = restOfLine(match).trim();
+  return rest === "" || /^(?:#|\/\/|;|--)/.test(rest);
+}
+function assignmentAccepted(match) {
+  const groups = match.groups ?? {};
+  const keyword = (groups.kw ?? "").toLowerCase();
+  const assigned = assignedValue(groups);
+  const { value, quoted } = assigned;
+  if (!value)
+    return false;
+  const rest = value.startsWith("<") || value.startsWith("(") ? restOfLine(match) : "";
+  if (isPlaceholderValue(value, quoted ? "" : rest) || isNotLiteralCredential(value))
+    return false;
+  const isPassword = keyword.startsWith("pass");
+  const isSecret = isPassword || keyword.startsWith("secret");
+  if (/\s/.test(value))
+    return isSecret && isPlausiblePassphrase(value, 6);
+  if (quoted && isSecret)
+    return value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase());
+  if (isIdentifierHandOff(match, assigned))
+    return false;
+  let strong = true;
+  if (keyword === "secret" || keyword === "token") {
+    const start = match.index ?? 0;
+    const lead = (match.input ?? "").slice(Math.max(0, start - 48), start);
+    if (keyword === "token" && NON_CREDENTIAL_TOKEN_PREFIX.test(lead))
+      return false;
+    const attached = /[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(lead);
+    if (!attached) {
+      const previous = /([A-Za-z]+) $/.exec(lead)?.[1]?.toLowerCase();
+      strong = previous !== undefined && STRONG_QUALIFIERS.has(previous);
+      if (!strong && /[?&]$/.test(lead))
+        return false;
+    }
+  }
+  if (!strong)
+    return value.length >= 12 && hasCredentialShape(value);
+  if (value.length >= 12)
+    return true;
+  if (value.length >= 8 && hasCredentialShape(value))
+    return true;
+  return isPassword && !groups.nl && value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase()) && endsTheLine(match);
+}
+function maskedProviderToken(token) {
+  const body = token.replace(/^(?:github_pat_|[A-Za-z]+[_-])+/, "");
+  return !body || MASKED_RUN.test(body) || /^(.)\1+$/.test(body) || /example|your|placeholder/i.test(body);
+}
+function envAssignmentAccepted(match) {
+  const groups = match.groups ?? {};
+  const key = groups.ek ?? "";
+  if (!ENV_CREDENTIAL_KEY.test(key))
+    return false;
+  if (NON_CREDENTIAL_KEY_TAIL.test(key) || NON_CREDENTIAL_CAMEL_TAIL.test(key))
+    return false;
+  const assigned = assignedValue(groups);
+  const { value, quoted } = assigned;
+  if (value.replace(/\s+/g, "").length < 6)
+    return false;
+  const rest = value.startsWith("<") || value.startsWith("(") ? restOfLine(match) : "";
+  if (isPlaceholderValue(value, quoted ? "" : rest) || isNotLiteralCredential(value))
+    return false;
+  if (/\s/.test(value) && !isPlausiblePassphrase(value, 6))
+    return false;
+  return !isIdentifierHandOff(match, assigned);
+}
+function blockScalarAccepted(match) {
+  const groups = match.groups ?? {};
+  const keyword = (groups.kw ?? "").toLowerCase();
+  const value = (groups.bv ?? "").trim();
+  if (!value || value.startsWith("#"))
+    return false;
+  const keyLead = leadBefore(match.input ?? "", match.index ?? 0, 200);
+  const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? "").length;
+  if ((groups.ind ?? "").length <= keyIndent)
+    return false;
+  if (isPlaceholderValue(value) || isNotLiteralCredential(value))
+    return false;
+  const isSecret = keyword.startsWith("pass") || keyword.startsWith("secret");
+  if (/\s/.test(value))
+    return isSecret && isPlausiblePassphrase(value, 6);
+  return value.length >= (isSecret ? 6 : 8);
+}
+var PROSE_WORDS, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "above",
+    "below",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "enter",
+    "expired",
+    "expires",
+    "forgot",
+    "forgotten",
+    "guideline",
+    "guidelines",
+    "hidden",
+    "incorrect",
+    "information",
+    "instruction",
+    "instructions",
+    "invalid",
+    "least",
+    "letters",
+    "link",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "need",
+    "needed",
+    "needs",
+    "number",
+    "numbers",
+    "optional",
+    "please",
+    "policies",
+    "policy",
+    "protected",
+    "provide",
+    "provided",
+    "required",
+    "requirements",
+    "reset",
+    "see",
+    "send",
+    "sent",
+    "setting",
+    "settings",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "strength",
+    "symbols",
+    "unchanged",
+    "use",
+    "used",
+    "using",
+    "via"
+  ]);
+  MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_-]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme",
+    "enabled",
+    "disabled",
+    "encrypted",
+    "hashed",
+    "unknown",
+    "tbd",
+    "pending",
+    "missing"
+  ]);
+  CODE_LOOKUP = /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|system\.getenv|deno\.env|getenv|environ|env|config|settings|secrets?|self|this|args|opts|options|params|req|request|ctx|vault|input)[.[(]/i;
+  CALL_EXPRESSION = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/;
+  MEMBER_CHAIN = /^[A-Za-z_$][A-Za-z_$]*(?:\.[A-Za-z_$][A-Za-z_$]*)+$/;
+  COMMON_OBJECTS = new Set([
+    "user",
+    "users",
+    "body",
+    "data",
+    "form",
+    "state",
+    "props",
+    "creds",
+    "credentials",
+    "account",
+    "profile",
+    "session",
+    "auth",
+    "db",
+    "app",
+    "json",
+    "response",
+    "res",
+    "row",
+    "record",
+    "item",
+    "model"
+  ]);
+  TYPE_ANNOTATION = /^(?:secretstr(?:ing)?|optional[[<]|option<|union[[<]|promise<|record<|array<|string\s*\||[a-z]+\s*\|\s*(?:undefined|null))/i;
+  BARE_IDENTIFIER = /^[A-Za-z_$][A-Za-z_$]*$/;
+  CREDENTIAL_WORD = /pass(?:word|wd|phrase|code)|secret|token|api[_-]?key|credential/i;
+  CREDENTIAL_NOUN = /^(?:pass(?:word|phrase|code)|passwd|secret|token|credential)s?$/;
+  IDENTIFIER_NAME = /^[A-Za-z]+(?:[_-][A-Za-z]+)+$/;
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  NON_CREDENTIAL_TOKEN_PREFIX = /(?:page|sync|cursor|continuation|resume|batch|delta|csrf|xsrf|nonce)[_ .-]?$/i;
+  CODE_LEAD = /(?:^|[^\w$])(?:const|let|var|val|final|static|public|private|protected|readonly|def)\s+[^=:\n]*$|[\w$]+\.[\w$]*$/;
+  ENV_KEY_WORDS = String.raw`pass(?:word|wd|phrase|code)|pwd|secret|token(?!s)|api[_-]?key|private[_-]?key`;
+  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+  NON_CREDENTIAL_KEY_TAIL = /[_.-](?:file|path|dir|url|uri|hash|hashed|salt|type|length|len|ttl|expiry|expires|expiration|policy|field|header|endpoint|name|label|count|size|min|max|regex|pattern|prefix|id)$/i;
+  NON_CREDENTIAL_CAMEL_TAIL = /[a-z](?:File|Path|Dir|Url|Uri|Hash|Hashed|Salt|Type|Length|Ttl|Expiry|Expires|Name|Label|Count|Size|Min|Max|Regex|Pattern|Prefix|Id)$/;
+  KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{11,159})$`, "gim");
+  URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
+  AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
+  AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
+  AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
+  LEGACY_CREDENTIAL_ASSIGNMENT = /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi;
+  SHARED_SECRET_PATTERNS = [
+    {
+      findingType: "private_key_material",
+      label: "private_key",
+      pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
+      confidence: 1
+    },
+    {
+      findingType: "aws_access_key_id",
+      label: "aws_access_key_id",
+      pattern: /\bAKIA[0-9A-Z]{16}\b/g,
+      confidence: 0.98
+    },
+    {
+      findingType: "slack_token",
+      label: "slack_token",
+      pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
+      confidence: 0.98
+    },
+    {
+      findingType: "api_secret_token",
+      label: "openai_key",
+      pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
+      confidence: 0.95
+    },
+    {
+      findingType: "api_secret_token",
+      label: "github_token",
+      pattern: /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "stripe_key",
+      pattern: /(?<![A-Za-z0-9])(?:(?:sk|rk)_live_|whsec_)[A-Za-z0-9]{16,}/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_api_key",
+      pattern: /(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}/g,
+      confidence: 0.95,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_oauth_client_secret",
+      pattern: /(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_oauth_token",
+      pattern: /(?<![A-Za-z0-9/])(?:1\/\/0[A-Za-z0-9_-]{30,}|ya29\.[A-Za-z0-9_-]{20,})/g,
+      confidence: 0.95,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: LEGACY_CREDENTIAL_ASSIGNMENT,
+      confidence: 0.9
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: CREDENTIAL_ASSIGNMENT,
+      confidence: 0.9,
+      accept: assignmentAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: ENV_ASSIGNMENT,
+      confidence: 0.85,
+      accept: envAssignmentAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: BLOCK_SCALAR,
+      confidence: 0.85,
+      accept: blockScalarAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "password",
+      pattern: LABELLED_PASSPHRASE,
+      confidence: 0.85,
+      accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? "", 12)
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_url",
+      pattern: URL_USERINFO,
+      confidence: 0.9,
+      accept: (match) => {
+        const password = match.groups?.pw ?? "";
+        return !isPlaceholderValue(password) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(password);
+      }
+    },
+    {
+      findingType: "credential_assignment",
+      label: "authorization_header",
+      pattern: AUTHORIZATION_HEADER,
+      confidence: 0.9,
+      accept: (match) => !isPlaceholderValue(match.groups?.tok ?? "")
+    },
+    {
+      findingType: "api_secret_token",
+      label: "azure_key",
+      pattern: AZURE_KEY,
+      confidence: 0.95,
+      accept: (match) => !isPlaceholderValue(match.groups?.key ?? "")
+    },
+    {
+      findingType: "api_secret_token",
+      label: "azure_sas_signature",
+      pattern: AZURE_SAS_SIGNATURE,
+      confidence: 0.9,
+      accept: (match) => !isPlaceholderValue(match.groups?.sig ?? "")
+    }
+  ];
+});
+
 // src/workers/dropbox-files/content-policy.ts
 import { createHash as createHash4 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
@@ -9458,6 +9974,8 @@ function scanPatterns(text2, patterns, structuralRefJson) {
       const matchedText = match[0]?.trim();
       if (!matchedText)
         continue;
+      if (pattern.accept && !pattern.accept(match))
+        continue;
       findings.push({
         finding_type: pattern.findingType,
         finding_hash: hashFinding(pattern.findingType, matchedText),
@@ -9483,40 +10001,16 @@ function dedupeFindings(findings) {
 function hashFinding(type, matchedText) {
   return createHash4("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
-var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
+var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-10-13", SECRET_PATTERNS, REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
-  SECRET_PATTERNS = [
-    {
-      findingType: "private_key_material",
-      pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
-      confidence: 1,
-      trustTier: "S5"
-    },
-    {
-      findingType: "aws_access_key_id",
-      pattern: /\bAKIA[0-9A-Z]{16}\b/g,
-      confidence: 0.98,
-      trustTier: "S5"
-    },
-    {
-      findingType: "slack_token",
-      pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
-      confidence: 0.98,
-      trustTier: "S5"
-    },
-    {
-      findingType: "api_secret_token",
-      pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
-      confidence: 0.95,
-      trustTier: "S5"
-    },
-    {
-      findingType: "credential_assignment",
-      pattern: /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi,
-      confidence: 0.9,
-      trustTier: "S5"
-    }
-  ];
+  init_secret_patterns();
+  SECRET_PATTERNS = SHARED_SECRET_PATTERNS.map((shared) => ({
+    findingType: shared.findingType,
+    pattern: shared.pattern,
+    confidence: shared.confidence,
+    trustTier: "S5",
+    ...shared.accept ? { accept: shared.accept } : {}
+  }));
   REVIEW_PATTERNS = [
     {
       findingType: "hostile_instruction",
@@ -11584,8 +12078,8 @@ class TierLedger {
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
   }
   queueOwnerRaise(identity, decision, trustDomain, options = {}) {
-    if (decision.decidedBy !== "override")
-      throw new Error("Only an owner override is queued this way.");
+    if (decision.decidedBy !== "override" && decision.decidedBy !== "owner_rule")
+      throw new Error("Only an owner override or owner rule is queued this way.");
     if (!(trustDomain in TRUST_DOMAIN_RANK))
       throw new Error(`Unknown trust domain "${trustDomain}".`);
     let result = "none";
@@ -16486,6 +16980,9 @@ function createConnectorStoreLocatorIdentityIndex(db) {
     END;
   `);
 }
+function foldLocator(locator) {
+  return locator.normalize("NFC").toLowerCase();
+}
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
@@ -16690,7 +17187,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -17919,6 +18416,9 @@ var init_local_index = __esm(() => {
         indexedItems: Number(indexed.count)
       };
     }
+    locatorIdentityIndexReady() {
+      return this.locatorIdentityIndexState().completed;
+    }
     locatorIdentityIndexState() {
       const state = this.db.query(`
       SELECT cursor_item_pk, completed
@@ -18050,6 +18550,77 @@ var init_local_index = __esm(() => {
       if (!this.locatorIdentityIndexState().completed)
         return;
       return this.activeIdentityForLocator(input);
+    }
+    activeItemsUnderLocatorIfIndexed(input) {
+      if (!this.locatorIdentityIndexState().completed)
+        return [];
+      const folder = input.locatorUri.replace(/\/+$/, "");
+      if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
+        return [];
+      const toRow = (row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : [];
+      const exact = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= LOWER(?) || '/'
+        AND locator.normalized_locator < LOWER(?) || '0'
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit).flatMap(toRow);
+      if (exact.length > 0 || !/[^\u0000-\u007f]/.test(folder))
+        return exact;
+      const folded = folder.normalize("NFC");
+      const cut = folded.search(/[^\u0000-\u007f]/);
+      const head = (cut < 0 ? folded : folded.slice(0, cut)).replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+      const range = head === "" ? { sql: "", params: [] } : {
+        sql: "AND locator.normalized_locator >= ? AND locator.normalized_locator < ?",
+        params: [head, head.slice(0, -1) + String.fromCharCode(head.charCodeAt(head.length - 1) + 1)]
+      };
+      const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
+      const wanted = `${foldLocator(folder)}/`;
+      const matches = [];
+      const candidates = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        ${range.sql}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+    `);
+      let examined = 0;
+      for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params)) {
+        examined += 1;
+        if (examined > maxCandidates)
+          return [];
+        if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted))
+          continue;
+        matches.push(...toRow(row));
+        if (matches.length >= input.limit)
+          break;
+      }
+      return matches;
     }
     activeItemForLocator(input) {
       const identity = this.activeIdentityForLocator(input);
@@ -23703,164 +24274,6 @@ var init_tier_rejudge = __esm(() => {
   init_tier_ledger();
 });
 
-// src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash8 } from "node:crypto";
-function sweepOwnerRuleRaises(options) {
-  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
-  const { set } = options;
-  const classification = set.classification();
-  if (!classification || classification.unavailableReason)
-    return report;
-  const ledger = set.ledger;
-  const raising = (classification.rules ?? []).filter(isRaisingRule);
-  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
-  const state = readState(ledger.readMeta(SWEEP_META_KEY));
-  const done = state.done.filter((key2) => keyed.has(key2));
-  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
-  if (pendingKeys.length === 0) {
-    if (done.length !== state.done.length || state.pending)
-      writeState(ledger, { done });
-    return report;
-  }
-  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
-  const resume = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending.after : undefined;
-  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
-  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
-  for (const record of rows) {
-    report.scanned += 1;
-    try {
-      raiseIfMatched(set, record, pendingRules, classification);
-    } catch {
-      continue;
-    }
-  }
-  if (rows.length < limit) {
-    writeState(ledger, { done: [...done, ...pendingKeys] });
-  } else {
-    report.complete = false;
-    writeState(ledger, { done, pending: { rules: pendingKeys, after: identityOf3(rows.at(-1)) } });
-  }
-  return report;
-  function raiseIfMatched(set2, record, rules, inputs) {
-    if (record.state === "moving" || record.contentTier === "secrets" || record.metadataTier === "secrets")
-      return;
-    const identity = identityOf3(record);
-    if (set2.ledger.getOverride(identity))
-      return;
-    const current2 = set2.ledger.copies(identity).filter((copy) => copy.state === "current");
-    const names = copyServingLayer(current2, "metadata");
-    const domain = names ? set2.domainForCorpus(names.corpusId) : undefined;
-    const exported = domain ? set2.store(domain)?.exportItemCopy(identity) : undefined;
-    if (!exported)
-      return;
-    const signals = storedSignals(exported);
-    const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
-    if (matched.length === 0)
-      return;
-    const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-    const metadataTier = maxTier(record.metadataTier, ruleTier);
-    if (tierRank(metadataTier) <= tierRank(record.metadataTier))
-      return;
-    const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
-      rules: [...inputs.rules ?? []],
-      ...inputs.retirePublic ? { retirePublic: true } : {}
-    });
-    const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
-    const contentTier = maxTier(record.contentTier, metadataTier);
-    const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
-    const decision = {
-      metadataTier,
-      contentTier,
-      decidedBy: "owner_rule",
-      reasons: [
-        ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
-        ...record.reasons.filter((reason) => reason.startsWith("content:"))
-      ],
-      state: contentPending ? "pending" : "current",
-      contentRead: record.contentRead,
-      metadataPending: false,
-      contentPending,
-      metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
-      metadataFlagged: record.metadataFlagged,
-      engineVersion: record.engineVersion,
-      mapRevision: record.mapRevision,
-      snifferId: classified.snifferId
-    };
-    if (metadataTier === "secrets") {
-      if (settleRoutedSecrets(set2, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }))
-        report.secrets += 1;
-      return;
-    }
-    set2.ledger.recordRoutedPlacement(identity, decision, set2.placementFor(decision));
-    report.raised += 1;
-  }
-}
-function isRaisingRule(rule) {
-  return tierRank(rule.tier) > tierRank("private");
-}
-function ruleKey(rule) {
-  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
-}
-function storedSignals(copy) {
-  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-  const title = text2(copy.columns["title"]);
-  const locator = text2(copy.columns["locator_uri"]);
-  const path = locator?.startsWith("/") ? locator : undefined;
-  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
-  let folderKeys = [];
-  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
-  if (keysJson) {
-    try {
-      const parsed = JSON.parse(keysJson);
-      if (Array.isArray(parsed))
-        folderKeys = parsed.filter((key2) => typeof key2 === "string");
-    } catch {
-      folderKeys = [];
-    }
-  }
-  if (copy.identity.providerConversationId)
-    folderKeys.push(copy.identity.providerConversationId);
-  return {
-    ...title ? { title } : {},
-    ...path ? { path } : {},
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...sender ? { sender } : {}
-  };
-}
-function readState(raw) {
-  if (!raw)
-    return { done: [] };
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
-      ...parsed.pending && Array.isArray(parsed.pending.rules) ? { pending: parsed.pending } : {}
-    };
-  } catch {
-    return { done: [] };
-  }
-}
-function writeState(ledger, state) {
-  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
-}
-function sameKeys(left, right) {
-  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
-}
-function identityOf3(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
-var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep";
-var init_tier_rules_sweep = __esm(() => {
-  init_tier_classifier();
-  init_tier_ledger();
-  init_tier_rejudge();
-});
-
 // src/workers/connector-store/tier-override-settle.ts
 function applyOwnerOverrides(options) {
   const report = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0 };
@@ -23884,7 +24297,7 @@ function applyOwnerOverrides(options) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity = identityOf4(record);
+  const identity = identityOf3(record);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
@@ -23950,7 +24363,7 @@ function storedCopy(set, identity) {
   }
   return;
 }
-function identityOf4(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -23961,6 +24374,253 @@ function identityOf4(record) {
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_tier_rejudge();
+});
+
+// src/workers/connector-store/tier-rules-sweep.ts
+import { createHash as createHash8 } from "node:crypto";
+function sweepOwnerRuleRaises(options) {
+  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
+  const { set } = options;
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason)
+    return report;
+  const ledger = set.ledger;
+  const raising = (classification.rules ?? []).filter((rule) => isRaisingRule(rule) && !isLabelRule(rule));
+  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
+  const state = readState(ledger.readMeta(SWEEP_META_KEY));
+  const done = state.done.filter((key2) => keyed.has(key2));
+  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
+  if (pendingKeys.length === 0) {
+    if (done.length !== state.done.length || state.pending)
+      writeState(ledger, { done });
+    return report;
+  }
+  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
+  const progress = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending : undefined;
+  const held = [...progress?.held ?? []];
+  let overflow = progress?.overflow === true;
+  const attempt = (record) => {
+    report.scanned += 1;
+    let raised;
+    try {
+      raised = raiseRoutedItem(set, record, pendingRules, classification);
+    } catch {
+      raised = "deferred";
+    }
+    if (raised === "raised")
+      report.raised += 1;
+    else if (raised === "secrets")
+      report.secrets += 1;
+    else if (raised === "deferred") {
+      if (held.length < MAX_HELD_ITEMS)
+        held.push(identityOf4(record));
+      else
+        overflow = true;
+    }
+  };
+  if (progress?.retry && !progress.overflow) {
+    const retrying = held.splice(0);
+    for (const identity of retrying) {
+      const record = ledger.getCurrent(identity);
+      if (record?.routed)
+        attempt(record);
+    }
+    if (held.length === 0) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+    return report;
+  }
+  const resume = progress?.after;
+  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
+  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
+  for (const record of rows)
+    attempt(record);
+  if (rows.length < limit) {
+    if (held.length === 0 && !overflow) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, overflow ? { done } : { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+  } else {
+    report.complete = false;
+    writeState(ledger, {
+      done,
+      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+    });
+  }
+  return report;
+}
+function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
+  if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+    return "unchanged";
+  const identity = identityOf4(record);
+  if (set.ledger.getOverride(identity))
+    return "unchanged";
+  const copies = set.ledger.copies(identity);
+  const exported = storedCopyOf(set, identity, copies);
+  const signals = { ...exported ? storedSignals(exported) : {}, ...extraSignals };
+  const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
+  if (!exported) {
+    if (copies.length === 0)
+      return "unchanged";
+    return matched.length > 0 || rules.some((rule) => !isLabelRule(rule)) ? "deferred" : "unchanged";
+  }
+  if (matched.length === 0)
+    return "unchanged";
+  const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
+  const metadataTier = maxTier(record.metadataTier, ruleTier);
+  const moving = record.state === "moving";
+  if (!moving && tierRank(metadataTier) <= tierRank(record.metadataTier))
+    return "unchanged";
+  const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
+    rules: [...inputs.rules ?? []],
+    ...inputs.retirePublic ? { retirePublic: true } : {}
+  });
+  const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
+  const contentTier = maxTier(record.contentTier, metadataTier);
+  const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
+  const decision = {
+    metadataTier,
+    contentTier,
+    decidedBy: "owner_rule",
+    reasons: [
+      ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
+      ...record.reasons.filter((reason) => reason.startsWith("content:"))
+    ],
+    state: contentPending ? "pending" : "current",
+    contentRead: record.contentRead,
+    metadataPending: false,
+    contentPending,
+    metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: classified.snifferId
+  };
+  if (metadataTier === "secrets") {
+    return settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }) ? "secrets" : "unchanged";
+  }
+  if (moving) {
+    return set.ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision)) === "none" ? "unchanged" : "raised";
+  }
+  set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  return "raised";
+}
+function storedCopyOf(set, identity, copies) {
+  const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
+  const ordered = [
+    ...names ? [names] : [],
+    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"))
+  ];
+  for (const copy of ordered) {
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (exported)
+      return exported;
+  }
+  return;
+}
+function isLabelRule(rule) {
+  return rule.match.kind === "label";
+}
+function isRaisingRule(rule) {
+  return tierRank(rule.tier) > tierRank("private");
+}
+function ruleKey(rule) {
+  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+}
+function storedSignals(copy) {
+  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const title = text2(copy.columns["title"]);
+  const locator = text2(copy.columns["locator_uri"]);
+  const path = locator?.startsWith("/") ? locator : undefined;
+  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
+  let folderKeys = [];
+  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
+  if (keysJson) {
+    try {
+      const parsed = JSON.parse(keysJson);
+      if (Array.isArray(parsed))
+        folderKeys = parsed.filter((key2) => typeof key2 === "string");
+    } catch {
+      folderKeys = [];
+    }
+  }
+  if (copy.identity.providerConversationId)
+    folderKeys.push(copy.identity.providerConversationId);
+  return {
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...sender ? { sender } : {}
+  };
+}
+function readState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const pending = parsePending(parsed.pending);
+    return {
+      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
+      ...pending ? { pending } : {}
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function parsePending(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const pending = value;
+  if (!Array.isArray(pending.rules) || !pending.rules.every((key2) => typeof key2 === "string"))
+    return;
+  if (pending.after !== undefined && !isIdentity(pending.after))
+    return;
+  if (pending.held !== undefined && (!Array.isArray(pending.held) || !pending.held.every(isIdentity)))
+    return;
+  if (pending.retry !== undefined && pending.retry !== true)
+    return;
+  if (pending.overflow !== undefined && pending.overflow !== true)
+    return;
+  if (pending.retry === true && (!Array.isArray(pending.held) || pending.held.length === 0))
+    return;
+  return {
+    rules: pending.rules,
+    ...pending.after ? { after: pending.after } : {},
+    ...pending.held ? { held: pending.held } : {},
+    ...pending.retry === true ? { retry: true } : {},
+    ...pending.overflow === true ? { overflow: true } : {}
+  };
+}
+function isIdentity(value) {
+  const record = value;
+  return typeof record === "object" && record !== null && typeof record.provider === "string" && typeof record.accountScope === "string" && typeof record.providerItemId === "string" && (record.providerConversationId === undefined || typeof record.providerConversationId === "string");
+}
+function writeState(ledger, state) {
+  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
+}
+function sameKeys(left, right) {
+  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
+}
+function identityOf4(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep", MAX_HELD_ITEMS = 200;
+var init_tier_rules_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_override_settle();
   init_tier_rejudge();
 });
 
@@ -24504,6 +25164,7 @@ var init_dropbox2 = __esm(() => {
 });
 // src/core/opsec.ts
 var init_opsec = __esm(() => {
+  init_secret_patterns();
   init_types();
 });
 
@@ -26635,12 +27296,14 @@ class RestGmailApiClient {
   async listMessages(request) {
     const params = new URLSearchParams({
       maxResults: String(request.maxResults),
-      includeSpamTrash: "false"
+      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
     });
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     if (request.query)
       params.set("q", request.query);
+    for (const labelId of request.labelIds ?? [])
+      params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
     const record = asRecord7(json, "Gmail messages list response");
     return {
@@ -32781,6 +33444,7 @@ var init_gmail_live_control = __esm(() => {
 var GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
+  init_tier_rules_sweep();
   init_embeddings();
   init_gmail();
   init_gmail_live_control();

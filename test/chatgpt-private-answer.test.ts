@@ -226,12 +226,14 @@ describe('one-time jobs', () => {
       reset: () => { resets += 1; },
     });
     // Claim-time analyses only: this is the path a claim takes without a usable precompute.
-    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 50, audit: (event) => events.push(event), precompute: false });
+    // `stuck` (summary) hits its short deadline; `next` (full) has a long one,
+    // so a slow runner sealing its answer cannot fail it on its own deadline.
+    const jobs = makeJobs(model, { now: 0 }, { analysisTimeoutMs: 50, fullAnalysisTimeoutMs: 60_000, audit: (event) => events.push(event), precompute: false });
     const stuck = jobs.begin({ question: 'stuck', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
-    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE }).jobId!;
+    const next = jobs.begin({ question: 'next', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE, detail: 'full' }).jobId!;
     const panel = await generatePanelKeyPair();
     expect((await jobs.claim(stuck, panel.publicKey)).status).toBe(202);
-    await Bun.sleep(120);
+    await until(() => resets === 1);
     expect(await jobs.claim(stuck, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     // The deadline runs from the claim; a job claimed after the stuck one failed runs at once.
     expect((await jobs.claim(next, panel.publicKey)).status).toBe(202);

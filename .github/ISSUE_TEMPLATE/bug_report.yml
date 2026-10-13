@@ -1,0 +1,57 @@
+name: Bug report
+description: Something in Olympus is not working as described.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are public. Leave out personal information, message content, file names you would rather keep private, and any log output you have not checked. Security problems go to a [private report](https://github.com/jamiezigelbaum/Olympus/security/advisories/new), not here.
+  - type: dropdown
+    id: computer
+    attributes:
+      label: Computer
+      options:
+        - Mac (Apple silicon)
+        - Omarchy (Linux)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Olympus version
+      description: Run `olympus --version` in a terminal.
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: app
+    attributes:
+      label: AI app
+      options:
+        - ChatGPT
+        - Claude
+        - Grok
+        - Grok Bot
+        - Dots
+        - Claude Code
+        - Codex
+        - OpenClaw
+        - Hermes
+        - Other MCP app
+        - None (the dashboard or the olympus command)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did or asked, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Engine status
+      description: The output of `olympus engine status`, if relevant. Check it before pasting.
+      render: json
