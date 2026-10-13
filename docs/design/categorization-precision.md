@@ -95,8 +95,8 @@ The shared classifier now separates waiting from placement:
 Implementation: classifier `2026-10-13.p5` records an open background
 content question with `content:personal_first` for no-signal items. The same
 ledger verdict application and hide-before-move transaction handles a later
-Private verdict. Own-record requests expose `priority: "high"`; other requests
-use `"normal"` (queue scheduling consumes this separately). Structured identifiers,
+Private verdict. Own-record requests use numeric `HELD_RECORD_PRIORITY = 10`; other requests
+use `0`. The queue honors this priority and reserves progress for aged work. Structured identifiers,
 Secrets, owner rules, source floors and image restrictions retain precedence.
 Gmail and Drive use the shared placement planner: cleared names stay Personal
 when only the body is held. Names with unsafe metadata are still withheld;

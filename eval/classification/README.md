@@ -92,13 +92,15 @@ specific queued rule provenance requires the resolver owner's integration.
 
 ## Integration handoff
 
-Cache model identity is **deferred**, not fixed in this slice. A prototype using
-the actual model spec exposed a P1: the service uses the same `modelId` for both
-cache keys and approval/revocation. Changing `built_in` silently bypasses an
-owner revocation recorded against that stable ID. The unsafe prototype was
-removed. Separate a stable approval identity from the actual weights/revision
-cache identity in the resolver/service/store integration, then test old and new
-revocations and a changed-model cache miss. Those files belong to other builders.
+Cache model identity is integrated on `claude/tier-sorting` (2026-10-13).
+Owner approvals and revocations retain the stable `built_in` identity. Cache
+and re-judge identity use the pinned model, revision and weights SHA-256;
+configured lanes use their model identity. Full classification input hashes
+bind cached and in-flight answers even when the bounded excerpt is unchanged.
+Obsolete model-decided metadata floors are re-asked alongside content; owner
+rules and overrides are retained. Re-judging keeps the existing placement
+until both answers settle. Synthetic regressions cover changed-model cache
+misses, sticky revocations, changed inputs and old metadata floors.
 
 For the 95-row evidence, rows 56, 59–61 and 90–92 can reach judgment under the
 new screen if their full material contains only the benign shapes; their bodies
