@@ -92,7 +92,7 @@ for (const value of ['xxxx', '****', '<token>', 'password', 'example']) test(`ge
 
 test('encoded non-URL secrets are caught by the same floor and dispatch screen', () => {
   for (const encode of entityEncoders) {
-    const text = encode('-----BEGIN PRIVATE KEY-----');
+    const text = encode(['-----BEGIN', 'PRIVATE KEY-----'].join(' '));
     expect(detectSecretFindingKinds(text)).toContain('private_key_material');
     expect(snifferMaterialCarriesSecret(text)).toBe(true);
     expect(screenedSecretLocator(text)).toBeNull();
