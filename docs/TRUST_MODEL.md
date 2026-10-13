@@ -56,8 +56,10 @@ with the `no-sensitive` preset by `olympus engine install`) and OpenClaw
 installs on any preset. It shows **Personal → Private → Secrets** (Secret in
 ChatGPT copy), and the classifier lifts any Public verdict to Personal
 (reason `tier:public_retired`). A policy written before 1.0 defines Public and
-keeps it unchanged; Olympus never removes it. A policy that defines only one
-half of Public is refused.
+keeps it unchanged; Olympus never removes it. Re-running setup with `--force`
+on such an install keeps a Public tier, routed and embedded like the new
+posture's Personal tier, as presets were before 1.0. A policy that defines
+only one half of Public is refused.
 
 ## Sensitivity Tiers
 
