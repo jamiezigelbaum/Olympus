@@ -47,8 +47,13 @@ private models if you choose a Venice-only setup.
 - **Personal:** ChatGPT, Claude or Grok can read the parts that answer your
   question, and cite them.
 - **Private:** only a model on your computer reads it (or Venice, if you turn
-  it on); your AI app never sees the text. In ChatGPT, only you see the answer.
-- **Secret:** passwords, recovery codes and keys never go anywhere.
+  it on); your AI app never gets the item itself. In ChatGPT, only you see the
+  answer; other apps get an answer written from it, which can repeat what it
+  says.
+- **Secret:** passwords, recovery codes and keys that Olympus recognizes are
+  never stored or sent.
+
+Labels are automatic and can be wrong.
 
 Everything is stored and searched on your computer: the search index is built
 there, by a model small enough for a computer with 8 GB of memory. There is no
@@ -170,11 +175,14 @@ Olympus sorts every item, one by one, into one of three tiers:
 - **Private**: things you keep to yourself, such as health, money or family
   matters. What they say is never sent to ChatGPT. Olympus answers from
   them on your computer, in the private answer panel (below).
-- **Secret**: passwords, recovery codes and keys. No model ever reads them,
-  and Olympus never answers from them.
+- **Secret**: passwords, recovery codes and keys. What Olympus recognizes as a
+  Secret is not stored, never reaches a model, and is never answered from.
+  Recognition looks for common forms (private keys, API keys, labeled
+  passwords) and can miss others.
 
 Olympus decides on your computer. Once its built-in private model is ready, it
-checks every item it reads before treating it as Personal. In the dashboard,
+checks every item it reads before treating it as Personal. Labels are
+automatic and can be wrong. In the dashboard,
 **Privacy** asks *"What's private for you?"*: answer in your own words. You
 can also mark folders, Gmail labels or senders as always Private.
 
@@ -228,7 +236,7 @@ ChatGPT **can** see:
 ChatGPT **can't** see:
 
 - What your Private items say, or the private answers made from them.
-- Your Secret items, ever.
+- Secret items Olympus recognizes.
 - Folders you skip, or what the files in Names-only folders say.
 - API keys or passwords: you never enter one in ChatGPT. Optional extras such
   as a Venice account are set up on your computer.
@@ -246,11 +254,12 @@ Olympus relay as ChatGPT, with one click to approve on your computer; apps
 on your computer, such as Claude Code, Codex and Hermes, connect there
 directly. Guides: <https://olympusplugin.ai/install/>.
 
-They search what is Personal, with citations, like ChatGPT. They never see
-the text of your Private items or your Secrets. For Private items they get
-only an answer that the private model on your computer (or Venice, if you set
-it up) writes from them, checked for secrets, with each item's title, path,
-source and author. ChatGPT is stricter: it gets no answer from Private items
+They search what is Personal, with citations, like ChatGPT. They never get
+your Private items themselves or the Secrets Olympus recognizes. For Private
+items they get only an answer that the private model on your computer (or
+Venice, if you set it up) writes from them, checked for secrets, with each
+item's title, path, source and author. That answer can repeat what the items
+say. ChatGPT is stricter: it gets no answer from Private items
 at all, and shows one only in its private answer panel. When no Private answer
 can be given, the question waits in Olympus on your computer and **Needs you**
 says so: open the dashboard's
@@ -603,9 +612,10 @@ pairing code from the Agents page, and the Grok API takes an address plus a
 key from **Create key** (shown once).
 
 Every connected agent gets the same privacy rules
-as your OpenClaw agent. It never sees Private source text or Secrets. For
-Private items it receives only answers that Venice or a local model reasoned
-out, with each item's title, path, source and author. The Agents page
+as your OpenClaw agent. It never gets Private items themselves or the Secrets
+Olympus recognizes. For Private items it receives only answers that Venice or
+a local model wrote from them, which can repeat what they say, with each
+item's title, path, source and author. The Agents page
 lists connected agents with when each was added and last used, and
 **Revoke** removes one. `olympus connections list|revoke|pair|add` does the
 same from a terminal.
@@ -759,7 +769,13 @@ Deep-dive docs: [contracts and architecture](docs/CONTRACTS.md) ·
 
 ## License
 
-[MIT](LICENSE) — free for any use, including commercial.
+[MIT](LICENSE) — free for any use, including commercial. Olympus is provided
+as is, without warranty; keep your own backups. Olympus is published by Open
+Coordination Unlimited, Inc. Its hosted relay is governed by the
+[Terms of Service](https://olympusplugin.ai/terms/) and
+[Privacy Policy](https://olympusplugin.ai/privacy/). Third-party code and data
+notices: `THIRD_PARTY_NOTICES.md` and
+[docs/THIRD_PARTY_DATA.md](docs/THIRD_PARTY_DATA.md).
 
 Want to suggest a change? See [CONTRIBUTING.md](CONTRIBUTING.md): fork,
 branch, open a PR. Read access doesn't include direct pushes — everything
