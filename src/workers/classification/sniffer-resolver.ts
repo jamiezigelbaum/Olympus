@@ -233,6 +233,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     promptVersion,
     mapRevision: question.mapRevision,
   });
+  const sameQuestion = (target: SnifferTarget, question: SnifferQuestion): boolean => {
+    const current = target.sniffer.questionFor(question, question.pass);
+    return current?.materialHash === question.materialHash && current.mapRevision === question.mapRevision;
+  };
   const apply = (item: WorkItem, verdict: Omit<StoredSnifferVerdict, 'decidedAt'>): void => {
     const tier = snifferTierKey(verdict);
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
@@ -241,7 +245,11 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       reason: `${item.question.pass}:sniffer:${id}:${snifferReasonCode(verdict)}`,
       modelId: options.lane.modelId,
       mapRevision: item.question.mapRevision,
-    }, item.target.placementFor ? { placementFor: item.target.placementFor } : {});
+    }, {
+      ...(item.target.placementFor ? { placementFor: item.target.placementFor } : {}),
+      questionStillCurrent: () => sameQuestion(item.target, item.question),
+    });
+    if (applied?.outcome === 'stale_question') { report.staleDropped += 1; return; }
     if (applied?.outcome === 'stale_map') {
       // The map changed while this was being asked: re-ask under the new one.
       const row = item.target.ledger.getCurrent(item.question);
@@ -250,6 +258,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       report.staleRekeyed += 1;
       return;
     }
+    if (applied?.outcome === 'held_moving') return;
     if (applied?.outcome === 'needs_placement') {
       // A routed item whose set is not open here: the verdict is cached, the
       // question stays, and the next pass (or sync) with the set applies it.
@@ -257,7 +266,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       return;
     }
     if (applied?.outcome === 'queued_move') report.movesQueued += 1;
-    item.target.sniffer.deleteQuestion(item.question, item.question.pass);
+    item.target.sniffer.deleteQuestion(item.question, item.question.pass, item.question.materialHash);
+    if (!applied || applied.outcome === 'unchanged') return;
     report.verdictsApplied += 1;
     if (verdict.failSafe) report.failSafePrivate += 1;
     else if (tier === 'private') report.resolvedPersonal += 1;
@@ -459,9 +469,12 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         }
         continue;
       }
+      // A malformed old answer must not spend the newer question's retry budget.
+      const currentGroup = group.filter(item => sameQuestion(item.target, item.question));
+      if (currentGroup.length === 0) { report.staleDropped += group.length; continue; }
       // The model answered but not for this item: count the attempt, and
       // after the last one resolve to Private and cache that.
-      const attempts = Math.max(...group.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
+      const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
       if (attempts >= SNIFFER_MAX_ATTEMPTS) {
         const failSafe = { tier: 'private' as const, category: 'other', confidence: 0, failSafe: true };
         for (const item of group) {

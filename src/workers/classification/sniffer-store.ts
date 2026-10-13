@@ -156,11 +156,13 @@ export class TierSnifferStore {
     subject: TierSnifferSubject;
     pass: SnifferPass;
     material: string;
+    /** Full classification input digest, including text outside the excerpt. */
+    materialHash?: string;
     mapRevision: string;
     flags: readonly string[];
     priority?: number;
   }): void {
-    const materialHash = snifferMaterialHash(question.pass, question.material);
+    const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
     this.db.query(`
       INSERT INTO sniffer_questions (
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
@@ -219,11 +221,12 @@ export class TierSnifferStore {
 
   clockMs(): number { return this.now().getTime(); }
 
-  deleteQuestion(subject: TierSnifferSubject, pass: SnifferPass): boolean {
+  deleteQuestion(subject: TierSnifferSubject, pass: SnifferPass, materialHash?: string): boolean {
     return this.db.query(`
       DELETE FROM sniffer_questions
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(...subjectParams(subject), pass).changes > 0;
+        AND (? IS NULL OR material_hash = ?)
+    `).run(...subjectParams(subject), pass, materialHash ?? null, materialHash ?? null).changes > 0;
   }
 
   /**

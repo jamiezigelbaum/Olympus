@@ -399,13 +399,19 @@ export class TierLedger {
       /** The map revision the question was asked under; a different current one makes the verdict stale. */
       mapRevision?: string;
     },
-    options: { placementFor?: (decision: TierDecision) => TierPlacementPlan } = {},
+    options: { placementFor?: (decision: TierDecision) => TierPlacementPlan; questionStillCurrent?: () => boolean } = {},
   ): { outcome: SnifferVerdictOutcome; record: TierLedgerRecord } | undefined {
     assertTier(verdict.tier);
     let outcome: SnifferVerdictOutcome | undefined;
     this.db.transaction(() => {
       const existing = this.readRow(identity);
       if (!existing) return;
+      // Checked under the ledger write lock: a newer queued version cannot
+      // be settled by an answer to superseded material.
+      if (options.questionStillCurrent && !options.questionStillCurrent()) {
+        outcome = 'stale_question';
+        return;
+      }
       if (verdict.pass === 'content') {
         const question = this.rejudgeQuestion(identity);
         if (question) {
@@ -3001,7 +3007,7 @@ interface EffectiveRow {
 }
 
 /** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
-export type SnifferVerdictOutcome = TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
+export type SnifferVerdictOutcome = 'stale_question' | TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
 
 /** A settled row as the classifier decision the P1b router takes. */
 function decisionOfRow(row: EffectiveRow): TierDecision {

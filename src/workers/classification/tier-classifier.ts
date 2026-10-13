@@ -23,6 +23,7 @@
 //   steps put it and marks the item pending until the background pass
 //   (sniffer-resolver.ts) asks the privacy-safe model.
 
+import { createHash } from 'node:crypto';
 import type {
   SourceClassificationSignals,
   SourceClassificationTier,
@@ -142,6 +143,8 @@ export interface TierSnifferRequest {
    * the classifier does not ask the sniffer about an item it found a secret in.
    */
   material?: string;
+  /** Digest of the full input, so an unchanged excerpt cannot reuse a changed document's verdict. */
+  materialHash?: string;
   /** Always TIER_MAP_REVISION (a cache-key part kept from the retired sensitivity map). */
   mapRevision?: string;
   subject?: TierSnifferSubject;
@@ -684,6 +687,7 @@ function metadataPass(args: {
       priority: HELD_RECORD_PRIORITY,
       flags,
       material: snifferNames(signals),
+      materialHash: createHash('sha256').update(JSON.stringify(['metadata', names])).digest('hex'),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });
@@ -823,6 +827,7 @@ function contentPass(args: {
       priority: recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
       flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary))),
+      materialHash: createHash('sha256').update(JSON.stringify(['content', args.names, text])).digest('hex'),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });

@@ -876,3 +876,34 @@ test('completed passes continue without waiting for the idle timer', async () =>
     await new Promise(resolve => setTimeout(resolve, 5));
   } finally { if (timeout) clearTimeout(timeout); service.stop(); installed.close(); ledger.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+for (const pass of ['metadata', 'content'] as const) {
+  test(`a superseded ${pass} answer cannot settle or delete the newer question`, async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+      const classify = (version: string) => {
+        const decision = classifyItemTiers({
+          signals: { title: pass === 'metadata' ? `SSN 123-45-6789 ${version}` : 'Record' },
+          ...(pass === 'content' ? { text: `Patient name: Morgan Example. ${version}` } : {}),
+          subject: subject(1),
+        }, { sniffer });
+        ledger.recordDecision(subject(1), decision);
+      };
+      classify('old');
+      const model = spyModel((_, items) => {
+        classify('new private record');
+        return verdictsFor(items, { tier: 'personal', category: 'ordinary', confidence: 1 });
+      });
+      const result = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+      expect(result.verdictsApplied).toBe(0);
+      expect(ledger.getCurrent(subject(1))?.[pass === 'metadata' ? 'metadataPending' : 'contentPending']).toBe(true);
+      expect(store.questionFor(subject(1), pass)?.material).toContain('new private record');
+      const currentModel = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'health', confidence: 1 }));
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model: currentModel });
+      expect(currentModel.requests[0]!.prompt).toContain('new private record');
+      expect(ledger.getCurrent(subject(1))?.[pass === 'metadata' ? 'metadataTier' : 'contentTier']).toBe('secure');
+    } finally { store.close(); ledger.close(); }
+  });
+}

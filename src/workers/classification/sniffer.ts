@@ -398,7 +398,7 @@ export class CachedTierSniffer implements TierSniffer {
     const mapRevision = request.mapRevision ?? 'none';
     try {
       const cached = this.store.getVerdict({
-        materialHash: snifferMaterialHash(request.pass, material),
+        materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
         modelId: this.lane.modelId,
         promptVersion: this.promptVersion,
         mapRevision,
@@ -411,6 +411,7 @@ export class CachedTierSniffer implements TierSniffer {
           subject: request.subject,
           pass: request.pass,
           material,
+          ...(request.materialHash ? { materialHash: request.materialHash } : {}),
           mapRevision,
           flags: request.flags,
           ...(request.priority !== undefined ? { priority: request.priority } : {}),
