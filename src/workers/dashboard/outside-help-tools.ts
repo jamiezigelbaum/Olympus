@@ -24,6 +24,12 @@ export interface DashboardOutsideHelpTool {
   readonly source: ManagedToolSource | 'outdated' | 'configured' | 'configured_missing';
   /** The path set in the route, for the two `configured` sources. */
   readonly path?: string;
+  /**
+   * Where the program runs from when a command typed in Terminal has to name
+   * it: Olympus's own install (a private folder, on no PATH) or a copy found
+   * outside PATH. Absent when the bare program name works.
+   */
+  readonly executable?: string;
   /** For `outdated`: the version installed now, and the pinned one the update installs. */
   readonly installedVersion?: string;
   readonly version?: string;
@@ -86,6 +92,28 @@ const C = DASHBOARD_OUTSIDE_HELP_TOOLS_COPY;
 
 /** Polling interval while an install runs. */
 export const DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS = 1500;
+
+/**
+ * One shell word for `value`: as is when it holds only plain path characters,
+ * else in single quotes (a quote inside is closed, escaped and reopened). The
+ * form zsh, bash, sh and fish all read as the same one argument, so a path
+ * like "~/Library/Application Support/Olympus/..." pastes into Terminal intact.
+ */
+export function shellWord(value: string): string {
+  return /^[A-Za-z0-9_@%+:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * What the Set up zkAPI steps type for the zkAPI program: the path of the one
+ * Olympus will run (the route's own path, Olympus's install, or a copy outside
+ * PATH), quoted for the shell, since the install puts nothing on PATH; the
+ * bare name only when none is known (not installed yet, or on PATH).
+ */
+export function outsideHelpDaemonCommand(tools: DashboardOutsideHelpTools | undefined): string {
+  const entry = tools?.tools.find((item) => item.tool === 'zkapi-clientd');
+  const program = entry?.source === 'configured' ? entry.path : entry?.executable;
+  return program ? shellWord(program) : 'zkapi-clientd';
+}
 
 /** A part the install button fixes: not installed, or an earlier Olympus build. */
 function installable(entry: DashboardOutsideHelpTool): boolean {
