@@ -204,10 +204,40 @@ export function settleUntrackedSecretsCopy(options: {
   skipOwner?: { connectorId: string; ownershipKind: ConnectorStoreOwnershipKind };
   writeClaim?: ConnectorStoreItemWriteClaim;
 }): ReturnType<LocalConnectorStore['tombstoneSecretsExtraction']> {
-  return options.store.tombstoneSecretsExtraction(options.identity, {
+  const settled = options.store.tombstoneSecretsExtraction(options.identity, {
     connectorId: options.connectorId,
     metadata: options.metadata,
     ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
     ...(options.writeClaim ? { writeClaim: options.writeClaim } : {}),
   });
+  // Settled as a Secret: the side stores forget it too, whether or not the
+  // store's own tier decision could be recorded (that write is best effort).
+  if (settled === 'tombstoned') {
+    let ledger: TierLedger | undefined;
+    try {
+      ledger = options.store.tierLedger();
+    } catch {
+      ledger = undefined;
+    }
+    if (ledger) forgetSecretInSideStores({ ledger, identity: options.identity });
+    else forgetSecretJobNames(options.identity);
+  }
+  return settled;
+}
+
+/** A store with no tier ledger: no sniffer queue sits beside it, so only the job names. */
+function forgetSecretJobNames(identity: SourceItemIdentity): void {
+  let failed = 0;
+  for (const jobsPath of extractionJobsDbPaths()) {
+    try {
+      clearExtractionJobNames(jobsPath, {
+        provider: identity.provider,
+        accountScope: identity.accountScope,
+        providerItemId: identity.providerItemId,
+      });
+    } catch {
+      failed += 1;
+    }
+  }
+  if (failed > 0) console.warn(`[tier] secrets: ${failed} extraction job ledger(s) could not forget an item's name.`);
 }

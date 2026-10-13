@@ -2660,16 +2660,18 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read.secret) } : {}),
+          ...(inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, false) } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
       );
-      const recorded = ledger.recordContentDecision(item.identity, content) !== undefined;
-      // Its text made it Secrets (the extraction sink tombstoned the copy):
+      const recorded = ledger.recordContentDecision(item.identity, content);
+      // Secrets as recorded (a newer Secrets decision is kept as the floor):
       // the side stores forget its names and excerpt too.
-      if (recorded && content.contentTier === 'secrets') forgetSecretInSideStores({ ledger, identity: item.identity });
-      return recorded;
+      if (recorded && (recorded.record.contentTier === 'secrets' || recorded.record.metadataTier === 'secrets')) {
+        forgetSecretInSideStores({ ledger, identity: item.identity });
+      }
+      return recorded !== undefined;
     } catch {
       return false;
     }

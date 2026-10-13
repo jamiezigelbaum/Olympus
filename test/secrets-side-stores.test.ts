@@ -25,6 +25,7 @@ import { tierSnifferPathForLedger } from '../src/workers/classification/tier-led
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
+import { settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
 import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { registerExtractionJobsDbPath, SECRET_ITEM_REDACTIONS_TABLE } from '../src/workers/file-extraction/job-names.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
@@ -499,6 +500,45 @@ describe('a legacy item (never routed by a set) judged Secret', () => {
     const item = { identity: subject, metadata: { title: 'ops note' }, mimeType: 'text/plain' } as unknown as RawItem;
     expect(store.recordExtractedContentTier(item, `The deploy key is ${FAKE_AWS_KEY} until Friday.`)).toBe(true);
     expect(ledger.getCurrent(subject)?.contentTier).toBe('secrets');
+    expect(sniffer.questionFor(subject, 'content')).toBeUndefined();
+    expect(jobs.get(jobId!)?.ref.name).toBeUndefined();
+  });
+
+  test('settled Secret by the extraction sink keeps no queued question or job name, even with no tier decision recorded', async () => {
+    const dir = workspace('olympus-secret-side-legacy-');
+    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
+    pointJobsEnvAt(jobsPath);
+    const ledger = new TierLedger({ dbPath: join(dir, 'legacy.tier-ledger.sqlite') });
+    const store = new LocalConnectorStore({
+      dbPath: join(dir, 'legacy.sqlite'),
+      corpusId: 'internal.legacy.files',
+      family: 'file',
+      trustDomain: 'internal',
+      tierLedger: ledger,
+    });
+    const sniffer = new TierSnifferStore({ dbPath: tierSnifferPathForLedger(ledger.dbPath) });
+    const jobs = new LocalFileExtractionJobStore(jobsPath);
+    cleanups.push(() => {
+      jobs.close();
+      sniffer.close();
+      store.close();
+      ledger.close();
+    });
+    const subject = identityOf('ops');
+    await store.syncFromConnector(fixtureConnector(() => [{ id: 'ops', name: 'ops note', text: 'Weekly notes.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    sniffer.enqueue({ subject, pass: 'content', material: 'ops note', mapRevision: 'none', flags: [] });
+    const [jobId] = jobs.enqueue({
+      refs: [{
+        corpusId: 'internal.legacy.files', provider: PROVIDER, accountScope: ACCOUNT, approvedScopeKey: 'fixture:/Files',
+        providerItemId: 'ops', localItemId: fixtureLocalId({ id: 'ops' }), sourceVersion: 'v1', name: 'ops note',
+      }],
+      extractorKind: 'text',
+      extractorVersion: 'v1',
+    }).jobRefs.map((entry) => entry.jobId);
+
+    // The sink's Secrets floor tombstones the copy; recording the decision is a separate best-effort write, not made here.
+    expect(settleUntrackedSecretsCopy({ store, identity: subject, connectorId: 'fixture_lane', metadata: { title: 'ops note' } })).toBe('tombstoned');
+    expect(ledger.getCurrent(subject)?.contentTier).not.toBe('secrets');
     expect(sniffer.questionFor(subject, 'content')).toBeUndefined();
     expect(jobs.get(jobId!)?.ref.name).toBeUndefined();
   });

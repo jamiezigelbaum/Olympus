@@ -706,7 +706,7 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
           }
           const read = ledger.classificationRead(item.identity);
           const override = read.override;
-          const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity, read.secret) : undefined;
+          const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity, false) : undefined;
           // A photo's picture judgment, when the photo judge made one here.
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
           const decision = classifyItemTiers(

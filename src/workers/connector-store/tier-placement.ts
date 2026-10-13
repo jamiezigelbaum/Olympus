@@ -204,7 +204,9 @@ export function decideItemTiers(
  * listing is the fresh truth (its secret gone, it is asked about again).
  * `secretWhenRead` must come from the same snapshot as the override the pass
  * classifies with (`TierLedger.classificationRead`), or a Secrets marking
- * between the two reads would leave a stale pass unfenced.
+ * between the two reads would leave a stale pass unfenced. A pass over a
+ * stored item (extraction, re-judge, migration) reads other ledger state
+ * too and passes false: always fenced.
  */
 export function secretFencedSniffer(
   sniffer: TierSniffer,
