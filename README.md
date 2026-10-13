@@ -45,8 +45,8 @@ Every email, file and message is judged on your own computer: **Personal**,
 
 - **Personal:** ChatGPT, Claude or Grok can read the parts that answer your
   question, and cite them.
-- **Private:** only a model on your computer reads it; your AI app never sees
-  the text. In ChatGPT, only you see the answer.
+- **Private:** only a model on your computer reads it (or Venice, if you turn
+  it on); your AI app never sees the text. In ChatGPT, only you see the answer.
 - **Secret:** passwords, recovery codes and keys never go anywhere.
 
 Everything is stored and searched on your computer: the search index is built
