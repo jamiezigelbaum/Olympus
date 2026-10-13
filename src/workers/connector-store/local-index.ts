@@ -85,7 +85,7 @@ import {
   type ConnectorStorePlacement,
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
-import { forgetSecretInSideStores } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, retireSecretRedactions } from './secrets-disposition.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
   sourceExclusionOutcomeIsUnevaluable,
@@ -3889,6 +3889,9 @@ export class LocalConnectorStore {
       // either (the router's routed path does the same).
       if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
         forgetSecretInSideStores({ ledger, identity: item.identity });
+      } else {
+        // Left Secrets in this write: its job names come back.
+        retireSecretRedactions(ledger, { identity: item.identity });
       }
     } catch {
       run.ledgerFailed = true;

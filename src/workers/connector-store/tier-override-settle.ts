@@ -33,7 +33,7 @@ import {
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
-import { forgetSecretInSideStores, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -83,6 +83,9 @@ export function applyOwnerOverrides(options: {
       // Left as it was; the next pass (or the item's next listing) applies it.
     }
   }
+  // Items that left Secrets since the last tick (here, in a listing, a move
+  // landing or another process): their job names come back.
+  retireSecretRedactions(ledger);
   return report;
 }
 

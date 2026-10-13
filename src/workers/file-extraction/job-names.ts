@@ -16,6 +16,10 @@
  * transaction, so a planning pass that listed the item before it became
  * Secrets cannot write the name back (a new job, or a refreshed one).
  *
+ * An item that later leaves Secrets (the owner's restore, a re-decision) has
+ * its markers retired again (`retireExtractionJobRedaction`, driven by the
+ * tier ledger's record of the change).
+ *
  * Every ledger file this process opens for writing is registered here, so a
  * runtime given its own path (not the default) is cleared too. Another
  * process (the `tier set` command) cannot see that registry: it leaves the
@@ -145,6 +149,39 @@ export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemK
             WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
           `).run(item.provider, item.accountScope, item.providerItemId).changes;
       return { cleared, durable };
+    }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * Retire an item's redaction markers in the ledger file at `dbPath`: the item
+ * left Secrets, so its later jobs keep their names and artifacts again.
+ * Every marker of the provider item goes (any local id: the caller has
+ * checked no item with that provider item id is Secrets). `stillSecret` is
+ * asked again inside this ledger's write lock, and nothing is removed when it
+ * says yes: an item that becomes Secrets writes its marker only after its
+ * decision is recorded, and that write waits for this lock, so a marker is
+ * either never removed or written back. Names already cleared stay cleared.
+ */
+export function retireExtractionJobRedaction(
+  dbPath: string,
+  item: Omit<ExtractionJobItemKey, 'localItemId'>,
+  stillSecret: () => boolean,
+): { retired: number; stillSecret: boolean } {
+  if (dbPath === ':memory:' || !existsSync(dbPath)) return { retired: 0, stillSecret: false };
+  const db = new Database(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!redactionsTableExists(db)) return { retired: 0, stillSecret: false };
+    return db.transaction(() => {
+      if (stillSecret()) return { retired: 0, stillSecret: true };
+      const retired = db.query(`
+        DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      return { retired, stillSecret: false };
     }).immediate();
   } finally {
     closeSqliteStore(db);

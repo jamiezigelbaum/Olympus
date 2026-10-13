@@ -93,7 +93,7 @@ import {
 } from './tier-placement.ts';
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
-import { forgetSecretInSideStores, secretsDisposition } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, retireSecretRedactions, secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
@@ -632,11 +632,18 @@ export class TieredStoreSet {
 
   /**
    * @internal Whether a routed item's current copies have all vanished from
-   * their stores (a lane evicted them on its own). Only then may a new
-   * placement replace the ledger rows without a move.
+   * their stores (a lane evicted them on its own), or it has no copy rows at
+   * all and no store serves it (a Secret whose copies were tombstoned, now
+   * restored by the owner; a deleted item that reappears). Only then may a
+   * new placement replace the ledger rows without a move: there is nothing
+   * visible to move.
    */
   routedCopiesGone(identity: SourceItemIdentity): boolean {
-    const current = this.ledger.copies(identity).filter((copy) => copy.state === 'current');
+    const copies = this.ledger.copies(identity);
+    if (copies.length === 0) {
+      return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
+    }
+    const current = copies.filter((copy) => copy.state === 'current');
     if (current.length === 0) return false;
     return current.every((copy) => {
       const domain = this.domainForCorpus(copy.corpusId);
@@ -1208,6 +1215,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity),
       ...(deferred ? { stagedLandingAllowed: true } : {}),
     });
+    // Left Secrets in this write (the owner's restore): its extraction jobs
+    // keep their names again from this listing's enqueue on.
+    if (recorded.outcome !== 'secrets') retireSecretRedactions(ledger, { identity });
     switch (recorded.outcome) {
       case 'secrets':
         this.counts.itemsSecrets += 1;

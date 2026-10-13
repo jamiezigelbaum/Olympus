@@ -25,7 +25,7 @@ import { tierSnifferPathForLedger } from '../src/workers/classification/tier-led
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
-import { settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
+import { retireSecretRedactions, settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
 import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { registerExtractionJobsDbPath, SECRET_ITEM_REDACTIONS_TABLE } from '../src/workers/file-extraction/job-names.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
@@ -398,6 +398,78 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     // A planning pass that listed the file before it became Secret.
     jobs.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1', force: true });
     expect(jobs.get(gardenJob!)?.ref.name).toBeUndefined();
+  });
+
+  test('a false-positive Secret the owner restores gets its job names and artifacts back; marked Secret again, it loses them again', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    const jobs = jobStore(dir);
+    const owedElsewhere = join(dir, 'gone-runtime-jobs.sqlite');
+    // Judged Secret by its name at listing: its jobs keep no name.
+    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.ledger.itemIsSecret(identityOf('keys'))).toBe(true);
+    const [secretJob] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    expect(jobs.get(secretJob!)?.ref.name).toBeUndefined();
+    // A clearing still owed in a ledger a runtime once knew.
+    fx.ledger.recordSecretSideStoreDebt({ ...identityOf('keys'), localItemId: fixtureLocalId(KEYS) }, [owedElsewhere]);
+
+    // The owner says "not a secret"; the item's next listing decides it again.
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [{ ...KEYS, version: 'v2' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.ledger.itemIsSecret(identityOf('keys'))).toBe(false);
+    // Placed afresh: its copies were tombstoned, so there is nothing to move.
+    expect(fx.ledger.getCurrent(identityOf('keys'))).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(fx.stores.internal!.itemPresence(identityOf('keys')).active).toBe(true);
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+    expect(fx.ledger.secretRedactionRetirements()).toEqual([]);
+    const restored = jobs.enqueue({ refs: [{ ...ref(KEYS), sourceVersion: 'v2' }], extractorKind: 'text', extractorVersion: 'v1' });
+    const [restoredJob] = restored.jobRefs.map((entry) => entry.jobId);
+    expect(jobs.get(restoredJob!)?.ref.name).toBe(KEYS.name);
+    const [lease] = jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs.filter((job) => job.jobId === restoredJob);
+    expect(jobs.record({
+      jobId: restoredJob!,
+      status: 'indexed',
+      leaseToken: lease!.leaseToken,
+      derivations: [{ artifactKind: 'sheet', structuralRef: { kind: 'sheet', sheet: 'deploy keys' }, chars: 40 }],
+    }).artifactsRecorded).toBe(1);
+    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(KEYS))).toHaveLength(1);
+    // The worker's tick neither re-clears it nor brings an owed clearing back.
+    applyOwnerOverrides({ set: fx.set });
+    expect(jobs.get(restoredJob!)?.ref.name).toBe(KEYS.name);
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+
+    // Marked Secret again: the names and artifacts go, and stay gone.
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+    expect(jobs.get(restoredJob!)?.ref.name).toBeUndefined();
+    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(KEYS))).toEqual([]);
+    applyOwnerOverrides({ set: fx.set });
+    const [again] = jobs.enqueue({ refs: [{ ...ref(KEYS), sourceVersion: 'v3' }], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    expect(jobs.get(again!)?.ref.name).toBeUndefined();
+  });
+
+  test('a retirement is never carried out while the item is Secrets', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    const jobs = jobStore(dir);
+    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    // Restored, then the owner marks it Secret before any retirement runs:
+    // the Secrets decision cancels the retirement in the same write.
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    const raw = new Database(fx.ledger.dbPath);
+    try {
+      raw.exec(`UPDATE tier_items SET metadata_tier = 'private', content_tier = 'private' WHERE provider_item_id = 'keys'`);
+    } finally {
+      raw.close();
+    }
+    expect(fx.ledger.secretRedactionRetirements()).toEqual([expect.objectContaining({ providerItemId: 'keys' })]);
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+    // Not yet decided Secrets again (the override alone): the retirement is
+    // dropped, the marker stays.
+    expect(retireSecretRedactions(fx.ledger)).toBe(0);
+    expect(fx.ledger.secretRedactionRetirements()).toEqual([]);
+    const [job] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    expect(jobs.get(job!)?.ref.name).toBeUndefined();
   });
 });
 

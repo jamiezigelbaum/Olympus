@@ -24,13 +24,19 @@
 // extraction job ledger's captured names are cleared, for good (a later
 // enqueue cannot write them back). A Secret keeps its
 // location only, wherever it was written down (docs/TRUST_MODEL.md).
+//
+// An item that leaves Secrets (the owner's "not a secret" or a lower tier,
+// then the item decided again) gets its job names back on its next enqueue:
+// the tier ledger records the change in the deciding write itself and
+// cancels any clearing still owed, and `retireSecretRedactions` removes the
+// item's redaction markers from every job ledger.
 
 import { existsSync } from 'node:fs';
 import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
 import { TierSnifferStore } from '../classification/sniffer-store.ts';
 import type { TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
-import { clearExtractionJobNames, extractionJobsDbPaths } from '../file-extraction/job-names.ts';
+import { clearExtractionJobNames, extractionJobsDbPaths, retireExtractionJobRedaction } from '../file-extraction/job-names.ts';
 import type { ConnectorStoreItemWriteClaim, ConnectorStoreOwnershipKind, LocalConnectorStore } from './local-index.ts';
 
 export type SecretsDisposition = 'tombstone_now' | 'hide_until_purge';
@@ -185,6 +191,56 @@ export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): numb
     if (result.failed === 0 && result.notDurable === 0) cleared += 1;
   }
   return cleared;
+}
+
+/**
+ * Retire the redaction markers of items that left Secrets (the tier ledger
+ * records each such change in the deciding write; see its
+ * `secret_redaction_retirement` migration), in the default job ledger, every
+ * other this process opened, and any the item still owed a clearing in. Only
+ * `identity`'s when given (a listing, before it enqueues the item). A marker
+ * is never removed while any item with the same provider item id is Secrets
+ * (checked again inside each job ledger's write lock); such a retirement is
+ * dropped, and the item's next exit from Secrets records a new one. A job
+ * ledger that cannot be reached keeps the retirement for the next tier tick.
+ * Never throws. Returns how many retirements were carried out.
+ */
+export function retireSecretRedactions(ledger: TierLedger, options: { identity?: TierLedgerIdentity; limit?: number } = {}): number {
+  let pending: ReturnType<TierLedger['secretRedactionRetirements']>;
+  try {
+    pending = ledger.secretRedactionRetirements(options);
+  } catch {
+    return 0;
+  }
+  let retired = 0;
+  for (const retirement of pending) {
+    const item = { provider: retirement.provider, accountScope: retirement.accountScope, providerItemId: retirement.providerItemId };
+    const stillSecret = () => ledger.providerItemIsSecret(item);
+    let failed = 0;
+    let secret = false;
+    try {
+      secret = stillSecret();
+    } catch {
+      failed += 1;
+    }
+    if (!secret && failed === 0) {
+      for (const jobsPath of new Set([...extractionJobsDbPaths(), ...retirement.jobLedgerPaths])) {
+        try {
+          if (retireExtractionJobRedaction(jobsPath, item, stillSecret).stillSecret) secret = true;
+        } catch {
+          failed += 1;
+        }
+      }
+    }
+    if (failed > 0 && !secret) continue;
+    try {
+      ledger.settleSecretRedactionRetirement(retirement.id);
+      if (!secret) retired += 1;
+    } catch {
+      // Retried at the next tick; retiring again is harmless.
+    }
+  }
+  return retired;
 }
 
 /**
