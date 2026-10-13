@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installBuiltInReasoning } from '../src/workers/source-index/built-in-reasoning/install.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
+import { downloadPinnedFile } from '../src/workers/source-index/pinned-download.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -112,3 +113,49 @@ for (const contentRange of ['bytes 1-63/64', 'bytes 0-64/64', 'bytes 0-63/65', '
     expect(existsSync(`${f.target}.partial`) ? statSync(`${f.target}.partial`).size : 0).toBe(0);
   });
 }
+
+test('a chunk already written can be freed while the next read is still pending', async () => {
+  // Racing each read against one long-lived abort promise kept every chunk
+  // reachable until the range ended: 6.2 GB resident for a 1.5 GB download.
+  const root = mkdtempSync(join(tmpdir(), 'olympus-bounded-download-'));
+  roots.push(root);
+  const size = 2 * block.length;
+  let first: WeakRef<Uint8Array> | undefined;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let written!: () => void;
+  const firstWritten = new Promise<void>((resolve) => { written = resolve; });
+  let pulls = 0;
+  const target = join(root, 'model');
+  const done = downloadPinnedFile({
+    fetchImpl: (async () => new Response(new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        pulls += 1;
+        if (pulls === 1) {
+          const chunk = new Uint8Array(block);
+          first = new WeakRef(chunk);
+          controller.enqueue(chunk);
+          return;
+        }
+        await gate;
+        controller.enqueue(new Uint8Array(block));
+        controller.close();
+      },
+    }), { status: 206, headers: { 'Content-Range': `bytes 0-${size - 1}/${size}` } })) as unknown as typeof fetch,
+    url: 'https://test/model', target, partial: `${target}.partial`, expectedBytes: size,
+    algorithm: 'sha256', digest: digest(size), encoding: 'hex', noun: 'test model',
+    stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: false,
+    error: (_reason, message) => new Error(message),
+    onStart: () => {}, onProgress: (bytes) => { if (bytes > 0) written(); },
+  });
+  await firstWritten;
+  for (let round = 0; round < 3; round += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    Bun.gc(true);
+  }
+  const retained = first?.deref() !== undefined;
+  release();
+  await done;
+  expect(retained).toBe(false);
+  expect(statSync(target).size).toBe(size);
+});

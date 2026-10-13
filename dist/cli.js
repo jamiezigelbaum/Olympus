@@ -1568,15 +1568,6 @@ async function downloadPinnedFile(options) {
       const end = Math.min(expectedBytes - 1, start + REQUEST_BYTES - 1);
       const controller = new AbortController;
       let timer;
-      let rejectAbort;
-      const aborted = new Promise((_resolve, reject) => {
-        rejectAbort = reject;
-      });
-      const onAbort = () => rejectAbort(controller.signal.reason);
-      controller.signal.addEventListener("abort", onAbort, { once: true });
-      aborted.catch(() => {
-        return;
-      });
       const armStall = () => {
         clearTimeout(timer);
         timer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
@@ -1587,11 +1578,11 @@ async function downloadPinnedFile(options) {
       try {
         armStall();
         try {
-          response = await Promise.race([fetchImpl(url, {
+          response = await untilAborted(fetchImpl(url, {
             redirect: "follow",
             signal: controller.signal,
             headers: { Range: `bytes=${start}-${end}`, "Accept-Encoding": "identity" }
-          }), aborted]);
+          }), controller.signal);
         } catch (cause) {
           throw error("download_failed", `Could not reach the download server for the ${noun} (${message(cause)}).`);
         }
@@ -1629,7 +1620,7 @@ async function downloadPinnedFile(options) {
           armStall();
           let part;
           try {
-            part = await Promise.race([reader.read(), aborted]);
+            part = await untilAborted(reader.read(), controller.signal);
           } catch (cause) {
             throw new InterruptedRead(message(cause));
           }
@@ -1669,7 +1660,6 @@ async function downloadPinnedFile(options) {
             return;
           });
         controller.abort();
-        controller.signal.removeEventListener("abort", onAbort);
       }
       if (retry)
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * 2 ** (retries - 1)));
@@ -1705,6 +1695,20 @@ async function hashPartial(path, hash, timeoutMs) {
     clearTimeout(timer);
     stream.destroy();
   }
+}
+function untilAborted(work, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      work.catch(() => {
+        return;
+      });
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 function message(cause) {
   return cause instanceof Error ? cause.message : String(cause);
