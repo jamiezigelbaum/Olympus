@@ -27,7 +27,7 @@ import {
   type TierDecision,
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
-import type { TierLedger } from '../classification/tier-ledger.ts';
+import type { TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
 
 /**
@@ -172,9 +172,17 @@ export function decideItemTiers(
   text: string | undefined,
   options: ConnectorStoreTierClassification | undefined,
   ledger: TierLedger | undefined,
-  extra: { namesOnly?: boolean } = {},
+  extra: { namesOnly?: boolean; contentFetchFailed?: boolean } = {},
 ): TierDecision {
-  const override = ledger?.getOverride(item.identity);
+  const read = ledger?.classificationRead(item.identity);
+  const override = read?.override;
+  // Only a listing that read the item's text is fresh enough to ask about an
+  // item recorded Secrets (an unread one keeps the recorded content tier).
+  // Blank text counts as unread, exactly as the classifier treats it.
+  const fresh = text?.trim() ? extra.contentFetchFailed !== true : false;
+  const sniffer = options?.sniffer && ledger && read
+    ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh })
+    : options?.sniffer;
   return classifyItemTiers(
     {
       signals: connector.classificationSignals(item),
@@ -188,9 +196,42 @@ export function decideItemTiers(
     },
     {
       ...(options?.rules ? { rules: options.rules } : {}),
-      ...(options?.sniffer ? { sniffer: options.sniffer } : {}),
+      ...(sniffer ? { sniffer } : {}),
       ...(override ? { override } : {}),
       ...(options?.retirePublic ? { retirePublic: true } : {}),
     },
   );
+}
+
+/**
+ * The sniffer for one pass over one item, fenced against the item becoming
+ * Secrets while the pass runs: a question is queued only if the item is not
+ * Secrets in the ledger at that moment (read under the queue's lock), so the
+ * names or excerpt the Secrets disposition just cleared are not queued
+ * again. A listing that read the item Secrets already (`read`, the snapshot
+ * it classifies with: `TierLedger.classificationRead`) is the fresh truth, its
+ * secret gone, and may still ask, but only while the owner's override is the
+ * one it read and no Secrets clearing ran since (the item's scrub revision):
+ * a Secrets marking since then, by the owner or a detector, fences it. A
+ * pass over a stored item (extraction, re-judge, migration) may ask only while
+ * the item is not Secrets. Every pass passes the snapshot it took before
+ * reading the item, and any Secrets clearing since then fences it.
+ */
+export function secretFencedSniffer(
+  sniffer: TierSniffer,
+  ledger: TierLedger,
+  identity: TierLedgerIdentity,
+  read: ReturnType<TierLedger['classificationRead']>,
+  options: { mayAskSecret?: boolean } = {},
+): TierSniffer {
+  const stillAsk = (): boolean => {
+    const now = ledger.classificationRead(identity);
+    // Any clearing since the read fences the pass, whether or not a Secrets
+    // decision was recorded (an extraction sink's untracked tombstone).
+    if (now.scrubRevision !== read.scrubRevision) return false;
+    if (!now.secret) return true;
+    return options.mayAskSecret === true && read.secret
+      && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
+  };
+  return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
 }

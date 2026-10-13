@@ -62,6 +62,7 @@ import type { TierLedger } from '../classification/tier-ledger.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
+import { secretFencedSniffer } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 /** Items re-judged per call (one call per sniffer tick, per set). */
@@ -162,7 +163,8 @@ export function rejudgeStoredContent(
   const { report, key, autoMoves } = options;
   const ledger = set.ledger;
   const identity = identityOf(record);
-  if (ledger.getOverride(identity)) {
+  const read = ledger.classificationRead(identity);
+  if (read.override) {
     if (key) ledger.markRejudged(identity, key);
     report.skipped += 1;
     return;
@@ -188,7 +190,9 @@ export function rejudgeStoredContent(
   // A failed cache/queue operation is not an open question. Leave all retry
   // stamps and receipts untouched until every needed question is persisted.
   let questionNotQueued = false;
-  const sniffer: TierSniffer | undefined = options.sniffer && {
+  // Fenced for both passes: a pass that began before the item became
+  // Secrets queues none of its names or excerpt (tier-placement.ts).
+  const counting: TierSniffer | undefined = options.sniffer && {
     id: options.sniffer.id,
     judge(request) {
       const verdict = options.sniffer!.judge(request);
@@ -196,6 +200,7 @@ export function rejudgeStoredContent(
       return verdict;
     },
   };
+  const sniffer = counting && secretFencedSniffer(counting, ledger, identity, read);
   const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity);
   const content = classifyContentTier(
     {

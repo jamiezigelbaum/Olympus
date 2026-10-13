@@ -47,6 +47,7 @@ import {
 import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverrides } from '../connector-store/tier-override-settle.ts';
+import { retireSecretRedactions, retrySecretSideStoreDebts } from '../connector-store/secrets-disposition.ts';
 import { sweepImageContentToPrivate } from '../connector-store/tier-image-content-sweep.ts';
 import { applyMediaJudgments } from '../connector-store/tier-media-judgment-sweep.ts';
 import {
@@ -836,7 +837,19 @@ export class TierSnifferService {
   private applyOwnerOverrides(): void {
     for (const ledgerPath of this.ledgerPaths()) {
       const set = tierSetForLedger(ledgerPath);
-      if (!set) continue;
+      if (!set) {
+        // A store's own ledger (no set to apply overrides through): its
+        // Secrets whose side stores could not be cleared are retried here,
+        // and items that left Secrets get their job names back.
+        try {
+          const ledger = this.ledgerAt(ledgerPath);
+          retrySecretSideStoreDebts(ledger);
+          retireSecretRedactions(ledger);
+        } catch {
+          // Retried next tick.
+        }
+        continue;
+      }
       try {
         const report = applyOwnerOverrides({ set });
         if (report.raised > 0 || report.lowered > 0 || report.secrets > 0 || report.updated > 0) {

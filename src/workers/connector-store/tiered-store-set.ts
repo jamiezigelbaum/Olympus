@@ -74,6 +74,7 @@ import {
   type TierCopyPlan,
   TierLedger as TierLedgerClass,
   type TierLedger,
+  type TierLedgerIdentity,
   type TierPlacementPlan,
 } from '../classification/tier-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
@@ -97,7 +98,7 @@ import {
 } from './tier-placement.ts';
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
-import { secretsDisposition } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, retireSecretRedactions, secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
@@ -634,14 +635,17 @@ export class TieredStoreSet {
 
   /**
    * @internal Whether a routed item's current copies have all vanished from
-   * their stores (a lane evicted them on its own). Only then may a new
-   * placement replace the ledger rows without a move.
+   * their stores (a lane evicted them on its own), or it has no copy rows at
+   * all and no store serves it (a Secret whose copies were tombstoned, now
+   * restored by the owner; a deleted item that reappears). Only then may a
+   * new placement replace the ledger rows without a move: there is nothing
+   * visible to move.
    */
-  routedCopiesGone(identity: SourceItemIdentity): boolean {
+  routedCopiesGone(identity: TierLedgerIdentity): boolean {
     const copies = this.ledger.copies(identity);
     // A previously routed Secret or provider-deleted item has no source to
     // move. A fresh placement is safe; staged/hidden move copies are not.
-    if (copies.length === 0) return true;
+    if (copies.length === 0) return this.routedWithoutAnyCopy(identity);
     const current = copies.filter((copy) => copy.state === 'current');
     if (current.length === 0) return false;
     return current.every((copy) => {
@@ -649,6 +653,15 @@ export class TieredStoreSet {
       const store = domain ? this.store(domain) : undefined;
       return store !== undefined && !store.itemPresence(identity).active;
     });
+  }
+
+  /**
+   * @internal A routed item with no copy rows at all that no store serves (a
+   * Secret whose copies were tombstoned): nothing visible, nothing to move.
+   */
+  routedWithoutAnyCopy(identity: TierLedgerIdentity): boolean {
+    if (this.ledger.copies(identity).length > 0) return false;
+    return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
   }
 
   /** @internal Whether any store of the set has ever held a row for this item. */
@@ -1178,7 +1191,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const classification = this.classification;
     // Names-only by the owner's choice: the text never arrives, so the names
     // are the whole decision and the item never waits on it.
-    let decision = decideItemTiers(connector, item, text, classification, ledger, { namesOnly: deferred && input.metadataOnly });
+    let decision = decideItemTiers(connector, item, text, classification, ledger, {
+      namesOnly: deferred && input.metadataOnly,
+      ...(input.contentFetchFailed ? { contentFetchFailed: true } : {}),
+    });
     // With the owner's rules file or map unusable, the decision (made with
     // the last good ones) may not place anything below Private: hold it
     // pending (secure_local, embedding held) until the file is fixed.
@@ -1225,12 +1241,17 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity),
       ...(deferred ? { stagedLandingAllowed: true } : {}),
     });
+    // Left Secrets in this write (the owner's restore): its extraction jobs
+    // keep their names again from this listing's enqueue on.
+    if (recorded.outcome !== 'secrets') retireSecretRedactions(ledger, { identity });
     switch (recorded.outcome) {
       case 'secrets':
         this.counts.itemsSecrets += 1;
         // The ledger write above hid every copy. The one Secrets policy
         // (secrets-disposition.ts) decides whether they are tombstoned now or
-        // kept, hidden, for an owner-approved purge.
+        // kept, hidden, for an owner-approved purge. Either way the side
+        // stores forget the item's names and excerpt now.
+        forgetSecretInSideStores({ ledger, identity });
         if (secretsDisposition() === 'hide_until_purge') return { kind: 'hold', reason: 'secrets' };
         this.copyRemovals.set(identityKey(identity), identity);
         return { kind: 'delete', corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: 'secrets' };

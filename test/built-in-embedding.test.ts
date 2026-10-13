@@ -237,6 +237,36 @@ describe('built-in embedding installer', () => {
     expect(existsSync(join(dir, 'install.lock'))).toBe(false);
   });
 
+  test('a reader interruption automatically resumes the search model with a bounded Range', async () => {
+    const dir = temporaryDir();
+    const served = servedAssets();
+    const ranges: Array<string | null> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const original = await served.fetchImpl(input);
+      if (String(input) !== served.model.model.url) return original;
+      const body = new Uint8Array(await original.arrayBuffer());
+      const range = new Headers(init?.headers).get('range');
+      ranges.push(range);
+      const start = range ? Number(/bytes=(\d+)-/.exec(range)![1]) : 0;
+      if (ranges.length > 1) return new Response(body.slice(start), {
+        status: 206, headers: { 'Content-Range': `bytes ${start}-${body.length - 1}/${body.length}` },
+      });
+      let sent = false;
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (sent) { controller.error(new Error('Out of memory')); return; }
+          sent = true;
+          controller.enqueue(body.slice(0, 7));
+        },
+      }));
+    }) as typeof fetch;
+    const installed = await installBuiltInEmbedding({
+      env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir }, model: served.model, skipRuntime: true, fetchImpl,
+    });
+    expect(ranges).toEqual([`bytes=0-${served.model.model.bytes - 1}`, `bytes=7-${served.model.model.bytes - 1}`]);
+    expect(sha256(readFileSync(installed.modelPath))).toBe(served.model.model.sha256);
+  });
+
   test('a checksum mismatch installs nothing and is reported as failed', async () => {
     const dir = temporaryDir();
     const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };

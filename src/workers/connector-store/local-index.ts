@@ -81,9 +81,11 @@ import {
   decideItemTiers,
   placeInExistingStore,
   resolveStoreTierClassification,
+  secretFencedSniffer,
   type ConnectorStorePlacement,
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
+import { forgetSecretInSideStores, retireSecretRedactions } from './secrets-disposition.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
   sourceExclusionOutcomeIsUnevaluable,
@@ -2630,9 +2632,10 @@ export class LocalConnectorStore {
       if (inputs?.unavailableReason) return false;
       const ledger = this.tierLedger();
       if (!ledger) return false;
+      const read = ledger.classificationRead(item.identity);
       const existing = ledger.getCurrent(item.identity);
       if (!existing) return false;
-      const override = ledger.getOverride(item.identity);
+      const override = read.override;
       // The item's names travel with the text, as they do in the tiered
       // sink: the detectors' origin hint and the sniffer read them too.
       const metadataString = (keys: readonly string[]): string | undefined => {
@@ -2657,12 +2660,18 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sniffer ? { sniffer: inputs.sniffer } : {}),
+          ...(inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read) } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
       );
-      return ledger.recordContentDecision(item.identity, content) !== undefined;
+      const recorded = ledger.recordContentDecision(item.identity, content);
+      // Secrets as recorded (a newer Secrets decision is kept as the floor):
+      // the side stores forget its names and excerpt too.
+      if (recorded && (recorded.record.contentTier === 'secrets' || recorded.record.metadataTier === 'secrets')) {
+        forgetSecretInSideStores({ ledger, identity: item.identity });
+      }
+      return recorded !== undefined;
     } catch {
       return false;
     }
@@ -3876,6 +3885,15 @@ export class LocalConnectorStore {
         trustDomain: stored.trustDomain,
         trustTier: stored.trustTier,
       });
+      // A legacy item Secrets as recorded (a recorded Secrets content tier
+      // stays when this listing could not read the text): its side stores
+      // keep nothing of it either (the router's routed path does the same).
+      if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets' || ledger.itemIsSecret(item.identity)) {
+        forgetSecretInSideStores({ ledger, identity: item.identity });
+      } else {
+        // Left Secrets in this write: its job names come back.
+        retireSecretRedactions(ledger, { identity: item.identity });
+      }
     } catch {
       run.ledgerFailed = true;
       run.gaps.push('tier_ledger_unavailable: four-tier decisions were not recorded for the rest of this run; storage was unaffected.');
@@ -4185,7 +4203,7 @@ export class LocalConnectorStore {
     return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
   }
 
-  itemPresence(identity: SourceItemIdentity): ConnectorStoreItemPresence {
+  itemPresence(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): ConnectorStoreItemPresence {
     const row = this.db.query(`
       SELECT source_version, content_hash, tombstoned
       FROM items
