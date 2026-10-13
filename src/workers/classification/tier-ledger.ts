@@ -41,6 +41,12 @@ import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledg
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
 export const TIER_LEDGER_SCHEMA_VERSION = 8;
 
+/** A scrub's start: the revision it took and the item's generation then. */
+export interface SecretScrubMark {
+  revision: number;
+  generation: number | null;
+}
+
 export type TierLedgerState = 'pending' | 'current' | 'moving';
 
 /**
@@ -1078,9 +1084,11 @@ export class TierLedger {
   }
 
   /**
-   * Secrets items whose current generation has not had its side stores
-   * cleared (see `markSecretSideStoresCleared`) and that owe no written-down
-   * debt (`secretSideStoreDebts` has those), a bounded page.
+   * Secrets items whose latest scrub at their current generation has not
+   * completed (see `markSecretSideStoresCleared`) and that owe no
+   * written-down debt (`secretSideStoreDebts` has those), a bounded page.
+   * A scrub begun later than a completed one (a name queued again) leaves
+   * the item here until it too completes.
    */
   unsettledSecretSideStores(limit = 100): TierLedgerIdentity[] {
     const rows = this.db.query(`
@@ -1090,7 +1098,7 @@ export class TierLedger {
         ON s.provider = i.provider AND s.account_scope = i.account_scope
         AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
       WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
-        AND (s.cleared_generation IS NULL OR s.cleared_generation < i.generation)
+        AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
         AND NOT EXISTS (
           SELECT 1 FROM secret_side_store_debt d
           WHERE d.provider = i.provider AND d.account_scope = i.account_scope
@@ -1111,15 +1119,18 @@ export class TierLedger {
     }));
   }
 
-  /** The item's side stores are clear as of its current generation. */
-  markSecretSideStoresCleared(identity: TierLedgerIdentity): void {
+  /**
+   * The scrub begun at `mark` (`noteSecretScrub`) completed: recorded only if
+   * no later scrub began and the item's generation has not moved since.
+   */
+  markSecretSideStoresCleared(identity: TierLedgerIdentity, mark: SecretScrubMark): void {
     this.db.query(`
-      INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision, cleared_generation)
-      VALUES (?, ?, ?, ?, 0, (SELECT generation FROM tier_items
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?))
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
-      DO UPDATE SET cleared_generation = excluded.cleared_generation
-    `).run(...idParams(identity), ...idParams(identity));
+      UPDATE secret_side_store_scrubs SET cleared_generation = ?, cleared_revision = revision
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND revision = ?
+        AND ? IS (SELECT generation FROM tier_items
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?)
+    `).run(mark.generation, ...idParams(identity), mark.revision, mark.generation, ...idParams(identity));
   }
 
   /** Note the extraction job ledgers this process has open (see `knownJobLedgerPaths`). */
@@ -1140,12 +1151,19 @@ export class TierLedger {
   }
 
   /** Note that a Secret's side stores are about to be cleared (see `classificationRead`). */
-  noteSecretScrub(identity: TierLedgerIdentity): void {
-    this.db.query(`
-      INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision)
-      VALUES (?, ?, ?, ?, 1)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET revision = revision + 1
-    `).run(...idParams(identity));
+  noteSecretScrub(identity: TierLedgerIdentity): SecretScrubMark {
+    return this.db.transaction(() => {
+      this.db.query(`
+        INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision)
+        VALUES (?, ?, ?, ?, 1)
+        ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET revision = revision + 1
+      `).run(...idParams(identity));
+      const generation = this.db.query(`
+        SELECT generation FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).get(...idParams(identity)) as { generation: number } | null;
+      return { revision: this.secretScrubRevision(identity), generation: generation?.generation ?? null };
+    })();
   }
 
   private secretScrubRevision(identity: TierLedgerIdentity): number {
@@ -3663,6 +3681,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
             seen_at TEXT NOT NULL
           );
           ALTER TABLE secret_side_store_scrubs ADD COLUMN cleared_generation INTEGER;
+          ALTER TABLE secret_side_store_scrubs ADD COLUMN cleared_revision INTEGER;
           CREATE INDEX IF NOT EXISTS tier_items_secrets
             ON tier_items (provider, account_scope, conversation_key, provider_item_id)
             WHERE metadata_tier = 'secrets' OR content_tier = 'secrets';
