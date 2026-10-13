@@ -64,7 +64,8 @@ const MAX_TRAVERSAL_ITEMS = 100_000;
 /**
  * How far past a deleted folder's page the connector reads, once, to learn
  * which files the rest of the delta lists as present (a moved or renamed
- * folder). Past this the folder is expanded without that proof.
+ * folder). A delta longer than this cannot be proven, and is then not
+ * expanded at all (see the deleted-entry handling in listItems).
  */
 const DELETED_FOLDER_LOOKAHEAD_ENTRIES = 50_000;
 const DROPBOX_PAGE_CURSOR_PREFIX = 'dbxp1:';
@@ -118,6 +119,8 @@ export interface DropboxDeletedDescendant {
 
 export interface DropboxSourceConnectorOptions {
   account: string;
+  /** Test seam: how far past a deleted folder's page the read-ahead may go. */
+  deletedFolderLookaheadEntries?: number;
   approvedScopeKey?: string;
   connectorId?: string;
   broker?: CredentialBroker;
@@ -293,6 +296,7 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
         // This is the exact `truncated` arm of the frozen contract: no unread
         // tail is skipped and no oversized page can wedge every later run.
         const providerPageLimit = Math.min(MAX_PAGE_LIMIT, limit);
+        const lookaheadEntries = options.deletedFolderLookaheadEntries ?? DELETED_FOLDER_LOOKAHEAD_ENTRIES;
         let cursor = initialCursor;
         let hasMore = true;
         let remaining = limit;
@@ -307,28 +311,30 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
         const liveItemIds = new Set<string>();
         const deletedItemIds = new Set<string>();
         // Whether liveItemIds already covers EVERY later page of the delta.
-        let lookaheadAttempted = false;
         let lookaheadComplete = false;
-        const lookAhead = async (fromCursor: string): Promise<boolean> => {
-          lookaheadAttempted = true;
+        let lookaheadCapped = false;
+        // 'complete': every later page's live ids are in liveItemIds.
+        // 'capped': the delta is longer than the read-ahead allows (permanent).
+        // 'failed': a read error or timeout (transient: the pass retries).
+        const lookAhead = async (fromCursor: string): Promise<'complete' | 'capped' | 'failed'> => {
           let seen = 0;
           let next = fromCursor;
           try {
             for (;;) {
               const ahead = await client.listFolderContinue({ cursor: next, limit: providerPageLimit });
+              // Checked before the page is taken in, so the set stays bounded.
+              if (seen + ahead.entries.length > lookaheadEntries) return 'capped';
               for (const entry of ahead.entries) {
                 if (entry.tag !== 'deleted') liveItemIds.add(entry.id);
               }
-              if (!ahead.hasMore) return true;
+              if (!ahead.hasMore) return 'complete';
               seen += ahead.entries.length;
               const following = ahead.cursor?.trim();
-              if (!following || following === next || seen >= DELETED_FOLDER_LOOKAHEAD_ENTRIES) return false;
+              if (!following || following === next) return 'failed';
               next = following;
             }
           } catch {
-            // The pass reads these pages itself next; a failure here only
-            // means the proof is missing, and the page-end rule below applies.
-            return false;
+            return 'failed';
           }
         };
         while (hasMore && remaining > 0) {
@@ -372,7 +378,6 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
           const fetchedAt = nowIso();
           const items: RawItem[] = [];
           let consumed = 0;
-          let expandedDeletedFolder = false;
           for (const entry of available) {
             if (remaining <= 0) break;
             if (entry.tag !== 'deleted') {
@@ -385,15 +390,33 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
             // Held rather than skipped: see DropboxDeletedItemIdentityResolver.lookupsReady.
             if (deletion.length > 0 && options.deletedItemIdentityResolver?.lookupsReady?.() === false) break;
             // Out of scope: the event is not this lane's, and neither is its subtree.
-            let descendants = deletion.length === 0
+            let descendants = deletion.length === 0 || lookaheadCapped
               ? []
               : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
-            if (descendants.length > 0 && hasMore && !lookaheadAttempted) {
+            if (descendants.length > 0 && hasMore && !lookaheadComplete) {
               // Deleting a descendant drops its text, and a file that the
               // delta lists again further on (a moved folder) would come back
-              // without it. Read ahead for those files first.
-              lookaheadComplete = await lookAhead(nextCursor!);
-              descendants = expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+              // without it. So a folder is only expanded once the rest of the
+              // delta is known not to list its files again.
+              const proof = await lookAhead(nextCursor!);
+              if (proof === 'failed') {
+                // Not proven, and not provable right now: leave the entry
+                // unconsumed so the cursor stays on it and the next pass
+                // tries again. Expanding anyway could take down files that
+                // are only being moved.
+                break;
+              }
+              if (proof === 'capped') {
+                // A delta this long never gets proven, however often it is
+                // retried, and holding would stall this account's sync for
+                // good. The folder's own deletion stands alone, as it did
+                // before folders were expanded.
+                lookaheadCapped = true;
+                descendants = [];
+              } else {
+                lookaheadComplete = true;
+                descendants = expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+              }
             }
             if (descendants.length >= remaining) {
               // The deleted folder's subtree does not fit in what is left of
@@ -417,7 +440,6 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
               if (item.metadata['deletedIdentityResolved'] === true) deletedItemIds.add(item.identity.providerItemId);
               items.push(item);
             }
-            if (descendants.length > 0) expandedDeletedFolder = true;
             remaining -= descendants.length + 1;
             consumed += 1;
           }
@@ -445,13 +467,7 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
             ...(nextCursor ? { nextCursor } : {}),
             done: !hasMore,
           };
-          // Without proof that no later page lists a deleted file again, a
-          // pass that expanded a deleted folder ends with its page. The
-          // shared router keeps ONE plan per item for a whole pass, so a moved
-          // file that this page deleted and a LATER page re-added would be
-          // routed by the delete. The re-add lands in the next pass, where the
-          // item is simply present again.
-          if (!hasMore || remaining === 0 || (expandedDeletedFolder && !lookaheadComplete)) return;
+          if (!hasMore || remaining === 0) return;
           cursor = { providerCursor: nextCursor! };
         }
       })();
@@ -654,7 +670,7 @@ function rawItemFromDeletedEntry(
  * The paths a deleted entry may be known by in the index: the display path the
  * rows were stored under and the provider's own lower-cased form. Both are
  * rooted, have no trailing slash (the store matches `<path>/` so `/a/b` never
- * claims `/a/bc`), and are deduplicated the way the store lower-cases them.
+ * claims `/a/bc`), and are deduplicated the way the store folds them.
  * A path that is not rooted (an id reference) has no descendants to find.
  */
 function deletedFolderPaths(entry: DropboxDeletedMetadataEntry): string[] {
@@ -663,7 +679,9 @@ function deletedFolderPaths(entry: DropboxDeletedMetadataEntry): string[] {
   for (const candidate of [entry.pathDisplay, entry.pathLower]) {
     const folder = candidate?.trim().replace(/\/+$/, '');
     if (!folder || !folder.startsWith('/')) continue;
-    const key = folder.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+    // Folded the way the store matches (composed, lower-cased in every script), so
+    // the display path and its provider-lowered twin are one lookup, display first.
+    const key = folder.normalize('NFC').toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     paths.push(folder);

@@ -277,7 +277,7 @@ describe('a deleted Dropbox folder takes its indexed descendants with it', () =>
       expect(store.searchItems('pelican', 10).map((row) => row.sourceItem.providerItemId).sort()).toEqual(['id:a', 'id:b']);
     });
 
-    test('when the later pages cannot be read ahead, the folder\'s page still ends the pass, and the move restores the files on the next', async () => {
+    test('when the later pages cannot be read right now, the folder event is held, nothing is deleted, and the next pass applies the move with text intact', async () => {
       const root = workspace();
       const store = laneStore(join(root, 'store.sqlite'));
       const base = client(crossPage);
@@ -287,24 +287,54 @@ describe('a deleted Dropbox folder takes its indexed descendants with it', () =>
         async listFolderContinue(request) {
           if (request.cursor === 'cursor-2' && readAheadFails) {
             readAheadFails = false;
-            throw new Error('transient');
+            throw new Error('timeout');
           }
           return base.listFolderContinue(request);
         },
       };
       const sync = handler(store, 'personal', flaky);
       await sync.pull({ approved_scope_key: SCOPE });
+      for (const id of ['id:a', 'id:b', 'id:c']) expect((await landText(store, id, `The pelican of ${id} nests here.`)).accepted).toBe(true);
 
       const first = await sync.pull({ approved_scope_key: SCOPE });
-      // Without the look-ahead the delete is applied as before and the pass ends with its page...
+      // The event was not consumed and no descendant was touched: text included.
       expect(first.receipt.counts.traversal_complete).toBe(0);
-      expectInactive(store, ['id:a', 'id:b', 'id:c']);
+      expectActive(store, [...UNDER_DOCS, ...BESIDE_DOCS]);
+      expect(store.searchItems('pelican', 10).map((row) => row.sourceItem.providerItemId).sort()).toEqual(['id:a', 'id:b', 'id:c']);
 
-      // ...so the next page's re-add is not overruled, and the files come back.
       const second = await sync.pull({ approved_scope_key: SCOPE });
       expect(second.receipt.counts.traversal_complete).toBe(1);
       expectActive(store, ['id:a', 'id:b']);
-      expectInactive(store, ['id:c']);
+      expectInactive(store, ['id:c', 'id:sub', 'id:deep', 'id:docs']);
+      expect(store.searchItems('pelican', 10).map((row) => row.sourceItem.providerItemId).sort()).toEqual(['id:a', 'id:b']);
+    });
+
+    test('a delta too long to read ahead is never proven, so it is not expanded and does not stall the account: only the folder itself goes', async () => {
+      const { store, sync } = singleStoreLane(crossPage);
+      await sync.pull({ approved_scope_key: SCOPE });
+      for (const id of ['id:a', 'id:b', 'id:c']) expect((await landText(store, id, `The pelican of ${id} nests here.`)).accepted).toBe(true);
+
+      const connector = createDropboxSourceConnector({
+        account: 'personal',
+        approvedScopeKey: SCOPE,
+        broker: broker(),
+        deletedFolderLookaheadEntries: 2,
+        deletedItemIdentityResolver: {
+          activeIdentityForLocatorIfIndexed: (input) => store.activeIdentityForLocatorIfIndexed(input),
+          activeItemsUnderLocatorIfIndexed: (input) => store.activeItemsUnderLocatorIfIndexed(input),
+        },
+        metadataClient: client(crossPage),
+      });
+      const items = [];
+      let done = false;
+      for await (const page of connector.listItems({ cursor: 'cursor-1' })) {
+        items.push(...page.items);
+        done = page.done;
+      }
+      // The pass did not stall: it read both pages. The folder's own row is deleted, the files below it are not touched.
+      expect(done).toBe(true);
+      const deletions = items.filter((item) => item.metadata['deleted'] === true).map((item) => item.identity.providerItemId);
+      expect(deletions).toEqual(['id:docs']);
     });
   });
 
@@ -502,6 +532,49 @@ describe('LocalConnectorStore.activeItemsUnderLocatorIfIndexed', () => {
     expect(under(store, '/Approved/Ecole')).toEqual(['id:e3']);
     expect(under(store, '/Approved/\u00c9cole', 1)).toHaveLength(1);
     expect(under(store, '/Approved/\u00c9col')).toEqual([]);
+  });
+
+  test('a non-ASCII folder is matched exactly on the index first, and the folded scan is bounded', async () => {
+    const store = laneStore(join(workspace(), 'store.sqlite'));
+    await handler(store, 'personal', client({
+      initial: [
+        file('id:e1', '/Approved/\u00c9cole/a.txt'),
+        file('id:e2', '/Approved/\u00c9cole/Sub/b.txt'),
+        file('id:o1', '/Approved/Other/1.txt'),
+        file('id:o2', '/Approved/Other/2.txt'),
+        file('id:o3', '/Approved/Other/3.txt'),
+      ],
+    })).pull({ approved_scope_key: SCOPE });
+    const bounded = (locatorUri: string, maxFoldCandidates: number) => store
+      .activeItemsUnderLocatorIfIndexed({ provider: 'dropbox', accountScope: 'personal', locatorUri, limit: 100, maxFoldCandidates })
+      .map((row) => row.identity.providerItemId)
+      .sort();
+
+    // The spelling the rows were stored under needs no scan at all: even a bound of one finds everything.
+    expect(bounded('/Approved/\u00c9cole', 1)).toEqual(['id:e1', 'id:e2']);
+    // A different spelling needs the folded scan, which looks at every row under the ASCII head
+    // ('/approved/') and so cannot finish inside a smaller bound...
+    expect(bounded('/approved/\u00e9cole', 4)).toEqual([]);
+    // ...and answers with nothing rather than part of the folder, and finds all of it when it can finish.
+    expect(bounded('/approved/\u00e9cole', 5)).toEqual(['id:e1', 'id:e2']);
+  });
+
+  test('narrows the folded scan by the ASCII text before the first non-ASCII character', async () => {
+    const store = laneStore(join(workspace(), 'store.sqlite'));
+    await handler(store, 'personal', client({
+      initial: [
+        file('id:c1', '/Approved/Caf\u00e9/m.txt'),
+        file('id:x1', '/Approved/Other/1.txt'),
+        file('id:x2', '/Approved/Other/2.txt'),
+        file('id:x3', '/Approved/Other/3.txt'),
+      ],
+    })).pull({ approved_scope_key: SCOPE });
+    // '/approved/caf' only reaches the one row that starts that way, so a bound of one is enough.
+    expect(store
+      .activeItemsUnderLocatorIfIndexed({
+        provider: 'dropbox', accountScope: 'personal', locatorUri: '/APPROVED/CAFE\u0301'.toLowerCase(), limit: 100, maxFoldCandidates: 1,
+      })
+      .map((row) => row.identity.providerItemId)).toEqual(['id:c1']);
   });
 
   test('skips tombstoned rows', async () => {

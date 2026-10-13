@@ -15015,35 +15015,37 @@ function createDropboxSourceConnector(options) {
           throw new Error("Dropbox source connector requires native recursive listing.");
         }
         const providerPageLimit = Math.min(MAX_PAGE_LIMIT, limit);
+        const lookaheadEntries = options.deletedFolderLookaheadEntries ?? DELETED_FOLDER_LOOKAHEAD_ENTRIES;
         let cursor = initialCursor;
         let hasMore = true;
         let remaining = limit;
         const requestedPages = new Set;
         const liveItemIds = new Set;
         const deletedItemIds = new Set;
-        let lookaheadAttempted = false;
         let lookaheadComplete = false;
+        let lookaheadCapped = false;
         const lookAhead = async (fromCursor) => {
-          lookaheadAttempted = true;
           let seen = 0;
           let next = fromCursor;
           try {
             for (;; ) {
               const ahead = await client.listFolderContinue({ cursor: next, limit: providerPageLimit });
+              if (seen + ahead.entries.length > lookaheadEntries)
+                return "capped";
               for (const entry of ahead.entries) {
                 if (entry.tag !== "deleted")
                   liveItemIds.add(entry.id);
               }
               if (!ahead.hasMore)
-                return true;
+                return "complete";
               seen += ahead.entries.length;
               const following = ahead.cursor?.trim();
-              if (!following || following === next || seen >= DELETED_FOLDER_LOOKAHEAD_ENTRIES)
-                return false;
+              if (!following || following === next)
+                return "failed";
               next = following;
             }
           } catch {
-            return false;
+            return "failed";
           }
         };
         while (hasMore && remaining > 0) {
@@ -15084,7 +15086,6 @@ function createDropboxSourceConnector(options) {
           const fetchedAt = nowIso();
           const items = [];
           let consumed = 0;
-          let expandedDeletedFolder = false;
           for (const entry of available) {
             if (remaining <= 0)
               break;
@@ -15097,10 +15098,19 @@ function createDropboxSourceConnector(options) {
             const deletion = scopedItems([entry], fetchedAt);
             if (deletion.length > 0 && options.deletedItemIdentityResolver?.lookupsReady?.() === false)
               break;
-            let descendants = deletion.length === 0 ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
-            if (descendants.length > 0 && hasMore && !lookaheadAttempted) {
-              lookaheadComplete = await lookAhead(nextCursor);
-              descendants = expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            let descendants = deletion.length === 0 || lookaheadCapped ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            if (descendants.length > 0 && hasMore && !lookaheadComplete) {
+              const proof = await lookAhead(nextCursor);
+              if (proof === "failed") {
+                break;
+              }
+              if (proof === "capped") {
+                lookaheadCapped = true;
+                descendants = [];
+              } else {
+                lookaheadComplete = true;
+                descendants = expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+              }
             }
             if (descendants.length >= remaining) {
               for (const descendant of descendants.slice(0, remaining)) {
@@ -15119,8 +15129,6 @@ function createDropboxSourceConnector(options) {
                 deletedItemIds.add(item.identity.providerItemId);
               items.push(item);
             }
-            if (descendants.length > 0)
-              expandedDeletedFolder = true;
             remaining -= descendants.length + 1;
             consumed += 1;
           }
@@ -15144,7 +15152,7 @@ function createDropboxSourceConnector(options) {
             ...nextCursor ? { nextCursor } : {},
             done: !hasMore
           };
-          if (!hasMore || remaining === 0 || expandedDeletedFolder && !lookaheadComplete)
+          if (!hasMore || remaining === 0)
             return;
           cursor = { providerCursor: nextCursor };
         }
@@ -15316,7 +15324,7 @@ function deletedFolderPaths(entry) {
     const folder = candidate?.trim().replace(/\/+$/, "");
     if (!folder || !folder.startsWith("/"))
       continue;
-    const key = folder.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+    const key = folder.normalize("NFC").toLowerCase();
     if (seen.has(key))
       continue;
     seen.add(key);
@@ -26215,7 +26223,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -27594,29 +27602,7 @@ var init_local_index = __esm(() => {
         },
         locatorUri: row.locator_uri
       }] : [];
-      const nonAscii = /[^\u0000-\u007f]/.exec(folder);
-      if (!nonAscii) {
-        const rows = this.db.query(`
-        SELECT
-          i.provider_item_id, i.provider_file_id, i.local_item_id,
-          i.source_version, i.locator_uri
-        FROM item_locator_identities locator
-        JOIN items i ON i.item_pk = locator.item_pk
-        WHERE locator.provider = ?
-          AND locator.account_scope = ?
-          AND locator.normalized_conversation = ''
-          AND locator.normalized_locator >= LOWER(?) || '/'
-          AND locator.normalized_locator < LOWER(?) || '0'
-          AND i.tombstoned = 0
-        ORDER BY locator.normalized_locator, locator.item_pk
-        LIMIT ?
-      `).all(input.provider, input.accountScope, folder, folder, input.limit);
-        return rows.flatMap(toRow);
-      }
-      const directory = folder.slice(0, folder.lastIndexOf("/", nonAscii.index));
-      const wanted = `${foldLocator(folder)}/`;
-      const matches = [];
-      const candidates = this.db.query(`
+      const exact = this.db.query(`
       SELECT
         i.provider_item_id, i.provider_file_id, i.local_item_id,
         i.source_version, i.locator_uri
@@ -27629,8 +27615,38 @@ var init_local_index = __esm(() => {
         AND locator.normalized_locator < LOWER(?) || '0'
         AND i.tombstoned = 0
       ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit).flatMap(toRow);
+      if (exact.length > 0 || !/[^\u0000-\u007f]/.test(folder))
+        return exact;
+      const folded = folder.normalize("NFC");
+      const cut = folded.search(/[^\u0000-\u007f]/);
+      const head = (cut < 0 ? folded : folded.slice(0, cut)).replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+      const range = head === "" ? { sql: "", params: [] } : {
+        sql: "AND locator.normalized_locator >= ? AND locator.normalized_locator < ?",
+        params: [head, head.slice(0, -1) + String.fromCharCode(head.charCodeAt(head.length - 1) + 1)]
+      };
+      const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
+      const wanted = `${foldLocator(folder)}/`;
+      const matches = [];
+      const candidates = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        ${range.sql}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
     `);
-      for (const row of candidates.iterate(input.provider, input.accountScope, directory, directory)) {
+      let examined = 0;
+      for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params)) {
+        examined += 1;
+        if (examined > maxCandidates)
+          return [];
         if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted))
           continue;
         matches.push(...toRow(row));

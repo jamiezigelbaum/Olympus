@@ -4297,6 +4297,8 @@ export class LocalConnectorStore {
     accountScope: string;
     locatorUri: string;
     limit: number;
+    /** Test seam: how many narrowed rows the non-ASCII fallback may examine. */
+    maxFoldCandidates?: number;
   }): Array<{ identity: SourceItemIdentity; locatorUri: string }> {
     if (!this.locatorIdentityIndexState().completed) return [];
     const folder = input.locatorUri.replace(/\/+$/, '');
@@ -4324,40 +4326,13 @@ export class LocalConnectorStore {
         }]
       : [];
     type Row = Parameters<typeof toRow>[0];
-    const nonAscii = /[^\u0000-\u007f]/.exec(folder);
-    if (!nonAscii) {
-      // `/` sorts immediately before `0`, so [folder + '/', folder + '0') is
-      // exactly the set of strings that start with `folder + '/'`. A range on
-      // the projection's own index, not a LIKE scan, and no wildcard escaping.
-      const rows = this.db.query(`
-        SELECT
-          i.provider_item_id, i.provider_file_id, i.local_item_id,
-          i.source_version, i.locator_uri
-        FROM item_locator_identities locator
-        JOIN items i ON i.item_pk = locator.item_pk
-        WHERE locator.provider = ?
-          AND locator.account_scope = ?
-          AND locator.normalized_conversation = ''
-          AND locator.normalized_locator >= LOWER(?) || '/'
-          AND locator.normalized_locator < LOWER(?) || '0'
-          AND i.tombstoned = 0
-        ORDER BY locator.normalized_locator, locator.item_pk
-        LIMIT ?
-      `).all(input.provider, input.accountScope, folder, folder, input.limit) as Row[];
-      return rows.flatMap(toRow);
-    }
-    // The projection lower-cases with SQLite's LOWER(), which is ASCII-only and
-    // does not normalize, while a provider's path_lower folds every script and
-    // may compose accents differently from the stored display path. So a path
-    // with non-ASCII characters is matched in two steps: the index narrows to
-    // the ASCII-only directories above the first non-ASCII segment (identical
-    // under any folding or composition), then the rows are compared with both
-    // sides NFC-normalized and lower-cased in full. Rare, and bounded by the
-    // account's rows under that directory.
-    const directory = folder.slice(0, folder.lastIndexOf('/', nonAscii.index));
-    const wanted = `${foldLocator(folder)}/`;
-    const matches: Array<{ identity: SourceItemIdentity; locatorUri: string }> = [];
-    const candidates = this.db.query(`
+    // `/` sorts immediately before `0`, so [folder + '/', folder + '0') is
+    // exactly the set of strings that start with `folder + '/'`. A range on
+    // the projection's own index, not a LIKE scan, and no wildcard escaping.
+    // SQLite's LOWER() is ASCII-only, so for a path with non-ASCII characters
+    // this is an exact match on those characters: the common case, since the
+    // deletion carries the same display spelling the rows were stored under.
+    const exact = (this.db.query(`
       SELECT
         i.provider_item_id, i.provider_file_id, i.local_item_id,
         i.source_version, i.locator_uri
@@ -4370,8 +4345,47 @@ export class LocalConnectorStore {
         AND locator.normalized_locator < LOWER(?) || '0'
         AND i.tombstoned = 0
       ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit) as Row[]).flatMap(toRow);
+    if (exact.length > 0 || !/[^\u0000-\u007f]/.test(folder)) return exact;
+    // Nothing under that exact spelling, and the path has non-ASCII characters.
+    // A provider's path_lower folds every script and may compose accents
+    // differently from the stored display path, so match again with both sides
+    // NFC-normalized and lower-cased in full. The index can only narrow this
+    // by the ASCII text before the first non-ASCII character (identical under
+    // any folding or composition), so the narrowed rows are compared in JS,
+    // and at most `maxFoldCandidates` of them: a longer candidate list is
+    // answered with nothing (the folder's own deletion still applies) rather
+    // than stalling the process on a whole-account scan or deleting a part.
+    const folded = folder.normalize('NFC');
+    const cut = folded.search(/[^\u0000-\u007f]/);
+    const head = (cut < 0 ? folded : folded.slice(0, cut)).replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+    const range = head === ''
+      ? { sql: '', params: [] as string[] }
+      : {
+          sql: 'AND locator.normalized_locator >= ? AND locator.normalized_locator < ?',
+          params: [head, head.slice(0, -1) + String.fromCharCode(head.charCodeAt(head.length - 1) + 1)],
+        };
+    const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
+    const wanted = `${foldLocator(folder)}/`;
+    const matches: Array<{ identity: SourceItemIdentity; locatorUri: string }> = [];
+    const candidates = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        ${range.sql}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
     `);
-    for (const row of candidates.iterate(input.provider, input.accountScope, directory, directory) as Iterable<Row>) {
+    let examined = 0;
+    for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params) as Iterable<Row>) {
+      examined += 1;
+      if (examined > maxCandidates) return [];
       if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted)) continue;
       matches.push(...toRow(row));
       if (matches.length >= input.limit) break;
@@ -14228,6 +14242,9 @@ function createConnectorStoreLocatorIdentityIndex(db: Database): void {
     END;
   `);
 }
+
+/** The most rows one non-ASCII folder lookup compares in JS before it gives up and answers with nothing. */
+const LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50_000;
 
 /** A locator as the provider's own folding sees it: composed, and lower-cased in every script. */
 function foldLocator(locator: string): string {

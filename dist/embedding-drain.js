@@ -16672,7 +16672,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -18051,29 +18051,7 @@ var init_local_index = __esm(() => {
         },
         locatorUri: row.locator_uri
       }] : [];
-      const nonAscii = /[^\u0000-\u007f]/.exec(folder);
-      if (!nonAscii) {
-        const rows = this.db.query(`
-        SELECT
-          i.provider_item_id, i.provider_file_id, i.local_item_id,
-          i.source_version, i.locator_uri
-        FROM item_locator_identities locator
-        JOIN items i ON i.item_pk = locator.item_pk
-        WHERE locator.provider = ?
-          AND locator.account_scope = ?
-          AND locator.normalized_conversation = ''
-          AND locator.normalized_locator >= LOWER(?) || '/'
-          AND locator.normalized_locator < LOWER(?) || '0'
-          AND i.tombstoned = 0
-        ORDER BY locator.normalized_locator, locator.item_pk
-        LIMIT ?
-      `).all(input.provider, input.accountScope, folder, folder, input.limit);
-        return rows.flatMap(toRow);
-      }
-      const directory = folder.slice(0, folder.lastIndexOf("/", nonAscii.index));
-      const wanted = `${foldLocator(folder)}/`;
-      const matches = [];
-      const candidates = this.db.query(`
+      const exact = this.db.query(`
       SELECT
         i.provider_item_id, i.provider_file_id, i.local_item_id,
         i.source_version, i.locator_uri
@@ -18086,8 +18064,38 @@ var init_local_index = __esm(() => {
         AND locator.normalized_locator < LOWER(?) || '0'
         AND i.tombstoned = 0
       ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit).flatMap(toRow);
+      if (exact.length > 0 || !/[^\u0000-\u007f]/.test(folder))
+        return exact;
+      const folded = folder.normalize("NFC");
+      const cut = folded.search(/[^\u0000-\u007f]/);
+      const head = (cut < 0 ? folded : folded.slice(0, cut)).replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+      const range = head === "" ? { sql: "", params: [] } : {
+        sql: "AND locator.normalized_locator >= ? AND locator.normalized_locator < ?",
+        params: [head, head.slice(0, -1) + String.fromCharCode(head.charCodeAt(head.length - 1) + 1)]
+      };
+      const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
+      const wanted = `${foldLocator(folder)}/`;
+      const matches = [];
+      const candidates = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        ${range.sql}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
     `);
-      for (const row of candidates.iterate(input.provider, input.accountScope, directory, directory)) {
+      let examined = 0;
+      for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params)) {
+        examined += 1;
+        if (examined > maxCandidates)
+          return [];
         if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted))
           continue;
         matches.push(...toRow(row));
