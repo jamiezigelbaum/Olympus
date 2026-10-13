@@ -8835,6 +8835,7 @@ var init_public_surface = __esm(() => {
     "connect readwise",
     "connect gemini",
     "connect status",
+    "connect finish",
     "connections add",
     "connections pair",
     "connections list",

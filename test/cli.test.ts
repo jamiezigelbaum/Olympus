@@ -304,6 +304,13 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('connect finish is on the public surface and checks the pasted address before calling the engine', async () => {
+    const result = await runBinExit(['connect', 'finish', 'https://evil.example/oauth/callback/gmail?code=c&state=s']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).not.toContain('Unknown command:');
+    expect(`${result.stdout}${result.stderr}`).toContain('not an Olympus sign-in address');
+  }, 30_000);
+
   test('every declared public leaf command has non-executing help', async () => {
     for (const command of V0_4_PUBLIC_CLI_COMMANDS) {
       const result = await runBinExit([...command.split(' '), '--help']);
