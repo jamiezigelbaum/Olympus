@@ -34,7 +34,7 @@
 import { existsSync } from 'node:fs';
 import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
 import { TierSnifferStore } from '../classification/sniffer-store.ts';
-import type { TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import type { SecretScrubMark, TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { clearExtractionJobNames, extractionJobsDbPaths, retireExtractionJobRedaction } from '../file-extraction/job-names.ts';
 import type { ConnectorStoreItemWriteClaim, ConnectorStoreOwnershipKind, LocalConnectorStore } from './local-index.ts';
@@ -152,8 +152,9 @@ export function forgetSecretInSideStores(options: {
   }
   // Committed before the queue is cleared: a listing that read the item
   // before this point is fenced from queuing it again (tier-placement.ts).
+  let mark: SecretScrubMark | undefined;
   try {
-    ledger.noteSecretScrub(identity);
+    mark = ledger.noteSecretScrub(identity);
   } catch {
     result.failed += 1;
   }
@@ -222,11 +223,11 @@ export function forgetSecretInSideStores(options: {
       ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
     } else {
       ledger.clearSecretSideStoreDebt(identity, jobLedgers);
-      ledger.markSecretSideStoresCleared(identity);
+      if (mark) ledger.markSecretSideStoresCleared(identity, mark);
     }
   } catch {
-    // Not written down: a Secrets item not marked cleared is found again at
-    // the next tier tick (`retrySecretSideStoreDebts`).
+    // Not written down: a Secrets item whose latest scrub is not marked
+    // complete is found again at the next tier tick (`retrySecretSideStoreDebts`).
   }
   if (result.failed > 0) console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
   return result;
