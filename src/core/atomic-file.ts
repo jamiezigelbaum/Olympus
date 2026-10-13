@@ -47,7 +47,7 @@ export async function writePrivateFileAtomic(path: string, text: string): Promis
 }
 
 /** The synchronous twin, for callers already committed to sync file access. */
-export function writePrivateFileAtomicSync(path: string, text: string, options: { onPublished?: () => void } = {}): void {
+export function writePrivateFileAtomicSync(path: string, text: string | Uint8Array, options: { onPublished?: () => void } = {}): void {
   const temp = temporaryPathFor(path);
   try {
     const descriptor = openSync(temp, 'wx', 0o600);

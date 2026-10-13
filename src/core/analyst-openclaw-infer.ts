@@ -16,6 +16,8 @@
 // stdout is a JSON object: { ok, provider, model, outputs: [{ text }] }, or
 // { ok: false, error } on failure.
 
+import { accessSync, constants } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { OperationError } from './operation-error.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import {
@@ -71,6 +73,9 @@ class SpawnOpenClawRunner implements OpenClawCommandRunner {
     args: string[],
     options: { timeoutMs?: number } = {},
   ): Promise<OpenClawCommandResult> {
+    // On Linux under emulation Bun can report a missing absolute executable as
+    // exit 127 rather than a spawn ENOENT. Preserve the same categorical error.
+    if (isAbsolute(command)) accessSync(command, constants.X_OK);
     const child = Bun.spawn([command, ...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
     const timeout = options.timeoutMs
       ? setTimeout(() => child.kill(), options.timeoutMs)

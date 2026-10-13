@@ -152,15 +152,15 @@ describe('the relay child reads it', () => {
     const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => route(request) });
     try {
       const target = `http://127.0.0.1:${server.port}`;
-      const entries = await readSurfaceEntries(target, SECRET);
+      const entries = await readSurfaceEntries(target, SECRET, fetch);
       expect(entries?.map((item) => [item.fingerprint, item.surface])).toEqual([[fingerprintOf(chatgpt.tokens.accessToken), 'chatgpt']]);
-      expect(await readSurfaceEntries(target, 'wrong-secret')).toBeUndefined();
+      expect(await readSurfaceEntries(target, 'wrong-secret', fetch)).toBeUndefined();
     } finally {
       server.stop(true);
     }
     const junk = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ v: 1, entries: [{ fingerprint: 'x', surface: 'admin' }] }) });
     try {
-      expect(await readSurfaceEntries(`http://127.0.0.1:${junk.port}`, SECRET)).toBeUndefined();
+      expect(await readSurfaceEntries(`http://127.0.0.1:${junk.port}`, SECRET, fetch)).toBeUndefined();
     } finally {
       junk.stop(true);
     }

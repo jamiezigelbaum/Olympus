@@ -650,7 +650,9 @@ export function chatgptDashboardClient(
       : 'you@your-server';
     const path = openPath(href);
     return {
-      onComputer: 'ssh -N -L ' + port + ':127.0.0.1:' + port + ' ' + target,
+      onComputer: typeof remote.socketPath === 'string' && /^\/[A-Za-z0-9_./-]+\/olympus\/worker\.sock$/.test(remote.socketPath) && !remote.socketPath.split('/').some((part: string) => part === '..' || part === '.')
+        ? 'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:' + port + ':' + remote.socketPath + ' ' + target
+        : 'ssh -N -L ' + port + ':127.0.0.1:' + port + ' ' + target,
       onServer: 'olympus dashboard --no-open' + (path ? ' --target ' + path : ''),
       port,
     };
@@ -1823,6 +1825,10 @@ export function chatgptDashboardClient(
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
+    showModels: () => {
+      state.open.models = true;
+      closeScreen('', false, 'summary:models');
+    },
     // An Olympus host starts sign-in on the computer itself, so its link is
     // the provider's own page, not a one-time mcp.olympusplugin.ai link.
     directSignIn: () => state.hostKind !== '',

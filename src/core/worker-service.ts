@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { homedir, platform as osPlatform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -15,7 +16,7 @@ import { isWorkerAuthTokenPlaceholder } from './worker-auth.ts';
 
 export type WorkerServicePlatform = 'darwin' | 'linux';
 export type WorkerServiceAction = 'install' | 'status' | 'start' | 'stop' | 'restart' | 'uninstall';
-export type WorkerServiceState = 'active' | 'inactive' | 'failed' | 'missing' | 'unknown';
+export type WorkerServiceState = 'active' | 'inactive' | 'failed' | 'transitioning' | 'missing' | 'unknown';
 
 export interface WorkerServiceExecResult {
   status: number | null;
@@ -464,6 +465,9 @@ function classifyWorkerServiceState(
     if (result.status === 0 && status === 'active') return 'active';
     if (status === 'inactive') return unitPresent ? 'inactive' : 'missing';
     if (status === 'failed') return 'failed';
+    // These units may still own processes or a queued automatic restart.
+    // They can be stopped, but do not qualify as healthy or quiescent.
+    if (['activating', 'deactivating', 'reloading'].includes(status)) return 'transitioning';
     if (!unitPresent && (result.status === 3 || result.status === 4)) return 'missing';
     return 'unknown';
   }
@@ -499,7 +503,9 @@ function defaultWorkerServiceExec(command: string, args: string[]): WorkerServic
   };
 }
 
-export function workerServicePaths(platform: WorkerServicePlatform, homeDir: string): {
+// The legacy lifecycle owns paths beneath its explicit home. XDG selectors
+// belong to an explicitly supplied engine environment, never an ambient user.
+export function workerServicePaths(platform: WorkerServicePlatform, homeDir: string, env: Record<string, string | undefined> = {}): {
   label: string;
   unitPath: string;
   envPath: string;
@@ -517,11 +523,12 @@ export function workerServicePaths(platform: WorkerServicePlatform, homeDir: str
       errorLogPath: join(logDir, 'worker.err'),
     };
   }
-  const stateDir = join(homeDir, '.local', 'state', 'olympus', 'worker');
+  const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
+  const stateDir = join(layout.stateHome, 'olympus', 'worker');
   return {
     label: 'olympus-worker',
-    unitPath: join(homeDir, '.config', 'systemd', 'user', 'olympus-worker.service'),
-    envPath: join(homeDir, '.config', 'olympus', 'worker.env'),
+    unitPath: join(layout.configHome, 'systemd', 'user', 'olympus-worker.service'),
+    envPath: layout.workerEnvPath,
     logPath: join(stateDir, 'worker.log'),
     errorLogPath: join(stateDir, 'worker.err'),
   };

@@ -42,7 +42,13 @@ export type DashboardSessionSecretSource = 'file' | 'created' | 'regenerated' | 
 export function loadOrCreateDashboardSessionSecret(
   options: WorkerAuthTokenLookupOptions & { path?: string } = {},
 ): { secret: string; source: DashboardSessionSecretSource; path: string } {
-  const path = options.path ?? dashboardSessionSecretPath(options);
+  let path = options.path ?? '';
+  try { path ||= dashboardSessionSecretPath(options); }
+  catch {
+    // Receipt/path discovery can fail before the file IO (for example ENOTDIR).
+    // The same memory-only fallback applies; never guess another persisted root.
+    return { secret: newDashboardSessionSecret(), source: 'memory', path };
+  }
   let existing: 'valid' | 'missing' | 'invalid' = 'missing';
   try {
     const stats = lstatSync(path);

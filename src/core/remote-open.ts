@@ -1,3 +1,5 @@
+import { linuxGraphicalSessionReadiness } from './linux-desktop-opener.ts';
+import { workerSocketPath } from './worker-transport.ts';
 /**
  * Remote mode: Olympus runs on a server, and the screens that only work on the
  * computer running Olympus (keys, X sign-in, Telegram and WhatsApp pairing)
@@ -23,8 +25,9 @@ import { openTargetPath, type OpenTarget } from './open-targets.ts';
  * The engine's declaration that it runs on a server (owner decision,
  * 2026-10-10: the engine declares remote mode; the panel does not infer it).
  * `on` / `off` are set by the owner or the install guide (`olympus server-mode`);
- * `auto` (the default) decides from the host: a Linux or other Unix host with
- * no desktop session (neither DISPLAY nor WAYLAND_DISPLAY) is a server; macOS
+ * `auto` (the default) checks the current Linux graphical session, not the
+ * display variables inherited by a worker started before login; other Unix
+ * hosts use DISPLAY or WAYLAND_DISPLAY. Without a desktop it is a server; macOS
  * and Windows are computers someone sits at.
  */
 export const SERVER_MODE_ENV = 'OLYMPUS_SERVER_MODE';
@@ -71,6 +74,7 @@ export function resolveServerMode(input: {
   env: Record<string, string | undefined>;
   fileEnv?: Record<string, string | undefined> | undefined;
   platform?: string;
+  desktopReady?: () => boolean;
 }): ServerMode {
   const setting = parseServerModeSetting(input.fileEnv?.[SERVER_MODE_ENV])
     ?? parseServerModeSetting(input.env[SERVER_MODE_ENV])
@@ -83,7 +87,7 @@ export function resolveServerMode(input: {
   if (setting === 'off') return withTarget({ remote: false, setting, basis: 'declared' });
   const platform = input.platform ?? process.platform;
   if (platform === 'darwin' || platform === 'win32') return withTarget({ remote: false, setting, basis: 'desktop_platform' });
-  if (input.env.DISPLAY?.trim() || input.env.WAYLAND_DISPLAY?.trim()) {
+  if (platform === 'linux' ? (input.desktopReady?.() ?? linuxGraphicalSessionReadiness().ready) : (input.env.DISPLAY?.trim() || input.env.WAYLAND_DISPLAY?.trim())) {
     return withTarget({ remote: false, setting, basis: 'desktop_session' });
   }
   return withTarget({ remote: true, setting, basis: 'no_desktop_session' });
@@ -122,14 +126,40 @@ export interface RemoteOpenInstructions {
  * a browser-only user): a tunnel from the computer, then a fresh link from
  * the server, opened in the computer's browser.
  */
-export function remoteOpenInstructions(input: { port: number; sshTarget?: string; target?: OpenTarget }): RemoteOpenInstructions {
+export function remoteOpenInstructions(input: { port: number; sshTarget?: string; target?: OpenTarget; socketPath?: string }): RemoteOpenInstructions {
   const port = isValidPort(input.port) ? input.port : DEFAULT_ENGINE_PORT;
   const sshTarget = isValidSshTarget(input.sshTarget) ? input.sshTarget.trim() : SSH_TARGET_PLACEHOLDER;
   const path = input.target ? openTargetPath(input.target) : 'dashboard';
+  const socket = input.socketPath === undefined ? undefined : sshSocketPath(input.socketPath);
   return {
-    onComputer: `ssh -N -L ${port}:127.0.0.1:${port} ${sshTarget}`,
+    onComputer: socket ? `ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:${socket} ${sshTarget}` : `ssh -N -L ${port}:127.0.0.1:${port} ${sshTarget}`,
     onServer: `olympus dashboard --no-open${path === 'dashboard' ? '' : ` --target ${path}`}`,
   };
+}
+
+/** Resolve at each page read: linger can outlive the graphical login session. */
+export function resolveAgentApprovalHost(input: {
+  env: Record<string, string | undefined>;
+  fileEnv?: Record<string, string | undefined> | undefined;
+  platform?: NodeJS.Platform;
+  port: number;
+  desktopBridgeReady?: () => boolean;
+  desktopReady?: () => boolean;
+}) {
+  const platform = input.platform ?? process.platform;
+  if (platform !== 'linux') return { platform };
+  const bridgeReady = input.desktopBridgeReady?.() ?? false;
+  const mode = resolveServerMode({ ...input, desktopReady: () => bridgeReady });
+  if (!mode.remote && bridgeReady) return { platform, headless: false };
+  // Without a confirmed owner bridge, Linux browsers need the authenticated
+  // socket forward. Never suggest an unavailable TCP listener.
+  return { platform, headless: true, approvalHandoff: () => {
+    if (!mode.sshTarget) return undefined;
+    try {
+      return remoteOpenInstructions({ port: input.port, sshTarget: mode.sshTarget,
+        socketPath: workerSocketPath({ platform, env: input.env })! }).onComputer;
+    } catch { return undefined; }
+  } };
 }
 
 /** How long the agent's tunnel stays up when nothing is using it (the link itself lasts 15 minutes). */
@@ -164,16 +194,28 @@ export type RemoteOpenPlatform = 'macos' | 'linux' | 'windows';
  * integer, the SSH target matches isValidSshTarget, and the link matches the
  * minted shape, so nothing reaches a shell that was not built here.
  */
-export function remoteOpenNodeCommands(input: { port: number; sshTarget: string; link: string }): Record<RemoteOpenPlatform, RemoteOpenNodeCommands> {
+export function remoteOpenNodeCommands(input: { port: number; sshTarget: string; link: string; socketPath?: string }): Record<RemoteOpenPlatform, RemoteOpenNodeCommands> {
   if (!isValidPort(input.port)) throw new Error('remote open: invalid port');
   if (!isValidSshTarget(input.sshTarget)) throw new Error('remote open: invalid ssh target');
   if (!isOpeningLinkForCommandLine(input.link)) throw new Error('remote open: invalid link');
   const port = input.port;
   const target = input.sshTarget.trim();
-  const forward = `-o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:127.0.0.1:${port} ${target} sleep ${REMOTE_TUNNEL_SECONDS}`;
+  const destination = input.socketPath === undefined ? `127.0.0.1:${port}` : sshSocketPath(input.socketPath);
+  const forward = `-o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:${destination} ${target} sleep ${REMOTE_TUNNEL_SECONDS}`;
   return {
     macos: { tunnel: `ssh -f ${forward}`, open: `open '${input.link}'`, tunnelInBackground: false },
     linux: { tunnel: `ssh -f ${forward}`, open: `xdg-open '${input.link}'`, tunnelInBackground: false },
     windows: { tunnel: `ssh ${forward}`, open: `cmd /c start "" "${input.link}"`, tunnelInBackground: true },
   };
+}
+
+/** Safe as one SSH forwarding token. Colons and
+ * shell syntax are refused; they cannot be represented across all client shells. */
+function sshSocketPath(path: string): string {
+  if (!isSshWorkerSocketPath(path)) throw new Error('Remote open requires a shell-safe absolute worker socket path.');
+  return path;
+}
+
+export function isSshWorkerSocketPath(path: unknown): path is string {
+  return typeof path === 'string' && /^\/[A-Za-z0-9_./-]+\/olympus\/worker\.sock$/.test(path) && !path.split('/').some(p => p === '..' || p === '.');
 }

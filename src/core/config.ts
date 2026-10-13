@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute as isAbsolutePath, join, resolve } from 'node:path';
 import { OperationError } from './operation-error.ts';
+import { resolveLinuxEngineLayout, readLinuxEngineReceipt } from './linux-engine-layout.ts';
 import {
   defaultSourceCorpusRegistryConfig,
   parsePublicSourceCorpusRegistryConfig,
@@ -384,9 +385,12 @@ export function loadConfig(
  */
 function installedEngineConfig(env: Record<string, string | undefined>): Record<string, unknown> | undefined {
   const home = env.HOME?.trim() || homedir();
-  const enginePath = join(home, '.olympus', 'engine.json');
+  const layout = process.platform === 'linux' ? resolveLinuxEngineLayout(env) : undefined;
+  const receipt = layout ? readLinuxEngineReceipt(layout.receiptPath) : undefined;
+  if (receipt && receipt.installationState !== 'installed') return undefined;
+  const enginePath = receipt ? layout!.configPath : join(home, '.olympus', 'engine.json');
   // ENGINE_LABEL in core/engine-service.ts (not imported: that module imports this one's dependents).
-  const agentPath = join(home, 'Library', 'LaunchAgents', 'ai.olympusplugin.engine.plist');
+  const agentPath = receipt ? layout!.unitPath : join(home, 'Library', 'LaunchAgents', 'ai.olympusplugin.engine.plist');
   if (env.OLYMPUS_ENGINE_HOST !== '1' && !existsSync(agentPath)) return undefined;
   if (!existsSync(enginePath)) return undefined;
   let parsed: unknown;

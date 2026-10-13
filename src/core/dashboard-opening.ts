@@ -1,3 +1,4 @@
+import { workerFetch } from './worker-transport.ts';
 /**
  * Minting the dashboard's one-time opening link (`/dashboard/launch#…`).
  *
@@ -118,7 +119,7 @@ export async function mintDashboardOpeningUrl(
       `Run ${hint} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
     );
   }
-  const fetchImpl = dependencies.fetchImpl ?? fetch;
+  const fetchImpl = dependencies.fetchImpl ?? workerFetch;
   let response: Response;
   try {
     response = await fetchImpl(`${base}/dashboard/control/launch${dependencies.remote === true ? '?purpose=remote' : ''}`, {
@@ -130,14 +131,14 @@ export async function mintDashboardOpeningUrl(
   } catch {
     throw new OperationError(
       'email_unreachable',
-      'The configured Olympus worker did not answer the opening request.',
+      `The Olympus worker at ${base} did not answer the opening request.`,
       `Start the worker (${hint} worker status) and run this again.`,
     );
   }
   if (!response.ok) {
     throw new OperationError(
       'email_unreachable',
-      `The configured Olympus worker refused the opening request with HTTP ${response.status}.`,
+      `The Olympus worker at ${base} refused the opening request with HTTP ${response.status}.`,
       `Check ${hint} worker status, then run this again.`,
     );
   }

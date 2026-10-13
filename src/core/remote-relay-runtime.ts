@@ -1,3 +1,4 @@
+import { createWorkerFetch } from './worker-transport.ts';
 /**
  * The relay child: what `olympus __relay-service-run` runs under the Gateway's
  * native relay service (`native-relay-service.ts`).
@@ -44,6 +45,8 @@ export const RELAY_TARGET_ENV = 'OLYMPUS_RELAY_TARGET';
 
 export interface RelayRuntimeOptions {
   env: Record<string, string | undefined>;
+  /** Transport seam for tests using a deliberate TCP worker fixture. */
+  fetch?: typeof fetch;
   instanceId: string;
   /** Test seam: the full session URL (a local relay over ws://). */
   relayUrl?: string;
@@ -59,9 +62,9 @@ export interface RelayRuntimeOptions {
  * The worker's offline tool-list mapping, checked against the wire shape, or
  * undefined when the worker cannot say right now (the relay keeps what it had).
  */
-export async function readSurfaceEntries(target: string, relaySecret: string): Promise<SurfaceEntry[] | undefined> {
+export async function readSurfaceEntries(target: string, relaySecret: string, workerFetch: typeof fetch): Promise<SurfaceEntry[] | undefined> {
   try {
-    const response = await fetch(`${target}${RELAY_SURFACES_PATH}`, {
+    const response = await workerFetch(`${target}${RELAY_SURFACES_PATH}`, {
       headers: { [RELAYED_REQUEST_HEADER]: relaySecret },
       signal: AbortSignal.timeout(5_000),
     });
@@ -124,16 +127,18 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
   const relaySecret = randomBytes(32).toString('base64url');
   writeRelaySecret(dir, relaySecret);
 
+  const workerFetch = options.fetch ?? createWorkerFetch({ env: options.env });
   const client = new RelayClient({
     relayHost,
     ...(options.relayUrl ? { relayUrl: options.relayUrl } : {}),
     identity,
     target,
+    fetch: workerFetch,
     relaySecret,
     // A demo install also forwards reviewer sign-in; every other install never does.
     forwardedPaths: demoInstallMarked(dir) ? [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH] : FORWARDED_PATHS,
     onStatus,
-    surfaces: () => readSurfaceEntries(target, relaySecret),
+    surfaces: () => readSurfaceEntries(target, relaySecret, workerFetch),
     ...(options.surfaceSyncMs ? { surfaceSyncMs: options.surfaceSyncMs } : {}),
     ...(options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {}),
     ...(options.backoff ? { backoff: options.backoff } : {}),

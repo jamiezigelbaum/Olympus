@@ -1,3 +1,5 @@
+import { beginLinuxOpenHandlerMutation, linuxInstalledBuild, linuxLayoutFor, syncLinuxOpenHandlerReceipt, withLinuxEngineLifecycleLockAsync } from './linux-engine-service.ts';
+import { workerFetch } from './worker-transport.ts';
 /**
  * `olympus engine install|uninstall|status|start|stop|restart|rollback|logs`: the standalone
  * macOS engine's command surface. Mechanics live in engine-service.ts; this
@@ -7,12 +9,15 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { configFromPluginConfig } from './config.ts';
 import { engineBriefReport } from './engine-brief.ts';
 import { engineStatusPath, type EngineStatusFile } from './engine-host.ts';
 import {
   engineConflictWarnings,
   enginePaths,
+  engineServicePaths,
+  waitForEngineHealthy,
   inspectEngine,
   installEngineVerified,
   readEngineConfig,
@@ -45,6 +50,8 @@ export const ENGINE_CLI_USAGE = {
 } as const;
 
 export interface EngineCliDeps {
+  /** Internal reentrant marker: the public Linux lifecycle command already owns kernel custody. */
+  lifecycleLocked?: boolean;
   homeDir?: string;
   exec?: EngineExec;
   uid?: number;
@@ -69,7 +76,12 @@ const DEFAULT_OPEN_HANDLER = { install: installOpenHandler, uninstall: uninstall
 
 export async function runEngineCommand(args: string[], deps: EngineCliDeps = {}): Promise<unknown> {
   const [command, ...rest] = args;
+  if((deps.platform??process.platform)==='linux'&&!deps.lifecycleLocked&&['install','uninstall','rollback'].includes(command??'')){
+    const layout=linuxLayoutFor(deps);
+    return withLinuxEngineLifecycleLockAsync(layout,()=>runEngineCommand(args,{...deps,lifecycleLocked:true}));
+  }
   const service = {
+    ...(deps.env ? { env: deps.env } : {}),
     ...(deps.homeDir ? { homeDir: deps.homeDir } : {}),
     ...(deps.exec ? { exec: deps.exec } : {}),
     ...(deps.uid !== undefined ? { uid: deps.uid } : {}),
@@ -81,10 +93,18 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     const { plist, ...summary } = result;
     // The link handler never decides whether the install worked: a handler
     // that could not be built is a warning, and the Terminal fallback stays.
-    const handler = options.dryRun ? undefined : openHandlerFor(deps)?.install({
+    const linux=(deps.platform ?? process.platform)==='linux';
+    const handlerApi=options.dryRun || (linux&&!result.ok)?undefined:openHandlerFor(deps);
+    if(linux&&handlerApi)beginLinuxOpenHandlerMutation(service);
+    let handler = handlerApi?.install({
       ...openHandlerOptions(deps, service),
       program: { runtimePath: result.program.runtimePath, entryPath: result.program.entryPath, workingDirectory: result.program.workingDirectory },
     });
+    if(linux&&handler&&handler.action==='installed'){
+      try{syncLinuxOpenHandlerReceipt(service,true);}
+      catch(error){openHandlerFor(deps)?.uninstall(openHandlerOptions(deps,service));try{syncLinuxOpenHandlerReceipt(service,false);}catch{}handler={...handler,ok:false,action:'failed',detail:`The Linux handler ownership receipt could not be committed: ${error instanceof Error?error.message:'unknown error'}`};}
+    }
+    else if(linux&&handlerApi)syncLinuxOpenHandlerReceipt(service,false);
     if (handler && !handler.ok) summary.warnings.push(`olympus:// links will not open Olympus: ${handler.detail ?? 'the link handler could not be installed.'}`);
     return {
       ...summary,
@@ -104,21 +124,39 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     expectNoArgs('uninstall', rest);
     const result = uninstallEngine(service);
     const handler = openHandlerFor(deps)?.uninstall(openHandlerOptions(deps, service));
+    if((deps.platform??process.platform)==='linux'&&handler?.ok)syncLinuxOpenHandlerReceipt(service,false);
     return handler ? { ...result, open_handler: handler } : result;
   }
   if (command === 'restart') {
-    return restartEngine({ ...service, ...parseNowArg('restart', rest) });
+    const since = Date.now();
+    const result = restartEngine({ ...service, ...parseNowArg('restart', rest) });
+    if ((deps.platform ?? process.platform) !== 'linux') return result;
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), since }, { ...deps.health, exec: deps.exec });
+    return { ...result, ok: health.ok, health };
   }
   if (command === 'stop') {
     return stopEngine({ ...service, ...parseNowArg('stop', rest) });
   }
   if (command === 'start') {
     expectNoArgs('start', rest);
-    return startEngine(service);
+    const since = Date.now();
+    const result = startEngine(service);
+    if ((deps.platform ?? process.platform) !== 'linux') return result;
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), ...(result.action === 'already_running' ? {} : { since }) }, { ...deps.health, exec: deps.exec });
+    return { ...result, ok: health.ok, health };
   }
   if (command === 'rollback') {
     expectNoArgs('rollback', rest);
-    return rollbackEngine({ ...service, ...(deps.health ? { health: deps.health } : {}) });
+    const result=await rollbackEngine({ ...service, ...(deps.health ? { health: deps.health } : {}) });
+    if((deps.platform??process.platform)!=='linux'||!result.ok)return result;
+    const handlerApi=openHandlerFor(deps);if(handlerApi)beginLinuxOpenHandlerMutation(service);
+    let handler=handlerApi?.install({...openHandlerOptions(deps,service),program:{runtimePath:join(dirname(result.app_dir),'runtime/bun'),entryPath:join(result.app_dir,'dist/cli.js'),workingDirectory:result.app_dir}});
+    if(handler?.action==='installed'){
+      try{syncLinuxOpenHandlerReceipt(service,true);}catch(error){openHandlerFor(deps)?.uninstall(openHandlerOptions(deps,service));try{syncLinuxOpenHandlerReceipt(service,false);}catch{}
+       handler={...handler,ok:false,action:'failed',detail:`The Linux handler ownership receipt could not be committed: ${error instanceof Error?error.message:'unknown error'}`};}
+    }
+    else if(handlerApi)syncLinuxOpenHandlerReceipt(service,false);
+    return handler?{...result,open_handler:handler}:result;
   }
   if (command === 'status') {
     // The bar widget's one-line read (engine-brief.ts): no token, no slow checks.
@@ -129,10 +167,10 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
   if (command === 'logs') {
     const options = parseLogsArgs(rest);
     if (options.follow) {
-      await followEngineLogs(deps.homeDir ?? homedir(), options.lines);
+      await followEngineLogs(deps, options.lines);
       return undefined;
     }
-    return readEngineLogs({ ...(deps.homeDir ? { homeDir: deps.homeDir } : {}), lines: options.lines });
+    return readEngineLogs({ ...service, lines: options.lines });
   }
   throw new OperationError('invalid_params', `Unknown engine command: ${command ?? ''}`.trim(), 'Run olympus engine --help.');
 }
@@ -153,9 +191,9 @@ function openHandlerOptions(deps: EngineCliDeps, service: { homeDir?: string; pl
 export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Record<string, unknown>> {
   const homeDir = deps.homeDir ?? homedir();
   const env = { ...(deps.env ?? process.env), HOME: homeDir };
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ ...deps, homeDir });
   const agent = inspectEngine({
-    homeDir,
+    homeDir, env,
     ...(deps.exec ? { exec: deps.exec } : {}),
     ...(deps.uid !== undefined ? { uid: deps.uid } : {}),
     ...(deps.platform ? { platform: deps.platform } : {}),
@@ -175,8 +213,10 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const relayStatus = readRemoteAccessStatus(relayDir);
   const relayRunning = relayProcessRunning(relayDir);
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
-  const worker = await probeWorker(deps.fetchImpl ?? fetch, baseUrl);
+  const worker = await probeWorker(deps.fetchImpl ?? workerFetch, baseUrl, paths.linux?.workerSocketPath);
+  const linuxHealth = paths.linux ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ ...deps, homeDir }) }, { ...deps.health, timeoutMs: 0, fetchImpl: deps.fetchImpl, exec: deps.exec }) : undefined;
   const missing: string[] = [];
+  if (linuxHealth && !linuxHealth.ok) missing.push(linuxHealth.reason ?? 'Linux engine health is unknown.');
   if (!agent.installed) missing.push('The engine agent is not installed: run olympus engine install.');
   else if (agent.state === 'not_loaded') missing.push('The engine agent is installed but not loaded: run olympus engine install.');
   if (!pluginConfig && !configError) missing.push(`${paths.configPath} is missing: run olympus engine install.`);
@@ -188,7 +228,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
     missing.push('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
   }
   return {
-    ok: agent.state === 'running' && worker.reachable && !configError && (remoteMode.mode !== 'relay' || relayRunning),
+    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && (remoteMode.mode !== 'relay' || relayRunning),
     host: openclaw
       ? { mode: 'standalone', openclaw: 'installed (optional; not used by the engine)', openclaw_path: openclaw }
       : { mode: 'standalone', openclaw: 'not installed (not needed)' },
@@ -209,7 +249,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
       public_personal: 'answered in ChatGPT from evidence returned by the Olympus MCP tools',
       private: 'answered by the configured local model or Venice; never sent to ChatGPT',
     },
-    warnings: engineConflictWarnings(homeDir),
+    warnings: engineConflictWarnings(homeDir, deps.platform ?? process.platform, env),
     missing,
   };
 }
@@ -223,13 +263,14 @@ function readEngineStatusFile(env: Record<string, string | undefined>): EngineSt
   }
 }
 
-async function probeWorker(fetchImpl: typeof fetch, baseUrl: string): Promise<{ reachable: boolean; detail: string }> {
+async function probeWorker(fetchImpl: typeof fetch, baseUrl: string, socket?: string): Promise<{ reachable: boolean; detail: string; built_in_models?: unknown; desktop_bridge?: unknown }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 1_500);
   try {
-    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/health`, { method: 'GET', signal: controller.signal });
+    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/health`, { method: 'GET', signal: controller.signal, ...(socket ? { unix: socket } : {}) });
+    const health = socket && response.ok ? await response.json() as { built_in_models?: unknown; desktop_bridge?: unknown } : undefined;
     await response.body?.cancel().catch(() => undefined);
-    return { reachable: response.ok, detail: `HTTP ${response.status}` };
+    return { reachable: response.ok, detail: `HTTP ${response.status}`, ...(health?.built_in_models ? { built_in_models: health.built_in_models } : {}), ...(health?.desktop_bridge ? { desktop_bridge: health.desktop_bridge } : {}) };
   } catch {
     return { reachable: false, detail: 'no answer' };
   } finally {
@@ -237,8 +278,8 @@ async function probeWorker(fetchImpl: typeof fetch, baseUrl: string): Promise<{ 
   }
 }
 
-async function followEngineLogs(homeDir: string, lines: number): Promise<void> {
-  const paths = enginePaths(homeDir);
+async function followEngineLogs(deps: EngineCliDeps, lines: number): Promise<void> {
+  const paths = engineServicePaths(deps);
   const child = spawn('tail', ['-n', String(lines), '-F', paths.logPath, paths.errorLogPath], { stdio: ['ignore', 'pipe', 'ignore'] });
   const reader = createInterface({ input: child.stdout });
   reader.on('line', (line) => console.log(redactLogLine(line)));

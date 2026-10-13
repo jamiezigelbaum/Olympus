@@ -1,3 +1,4 @@
+import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { createHmac } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -37,8 +38,7 @@ export function workerAuthTokenFromConfig(
  * every tool call fail 401 against the worker setup started, until a manual
  * Gateway restart (first install on a clean Linux user, 2026-09-23). Resolving
  * per call keeps the precedence and the unresolved-SecretRef refusal of
- * `workerAuthTokenFromConfig`; only the worker.env layer can move, and its read
- * is cached on the file's stat.
+ * `workerAuthTokenFromConfig`; only the worker.env layer can move.
  */
 export function workerAuthTokenProvider(
   config: OlympusConfig,
@@ -89,20 +89,14 @@ export function readWorkerSetupEnv(options: WorkerAuthTokenLookupOptions = {}): 
   try {
     const stat = statSync(path, { bigint: true });
     if (!stat.isFile() || (stat.mode & 0o077n) !== 0n) return undefined;
-    // Long-lived Gateway callers read this per request; the key changes on any
-    // rewrite, in place (mtime/ctime/size) or by atomic rename (inode).
-    const key = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.mode}`;
-    const cached = setupEnvCache.get(path);
-    if (cached?.key === key) return { ...cached.env };
-    const env = parseWorkerSetupEnv(readFileSync(path, 'utf8'));
-    setupEnvCache.set(path, { key, env });
-    return { ...env };
+    // Same-size rewrites can share even nanosecond stat timestamps on the
+    // filesystem. Read the small file each time so a rotated token takes
+    // effect immediately; stat equality is not proof of equal contents.
+    return parseWorkerSetupEnv(readFileSync(path, 'utf8'));
   } catch {
     return undefined;
   }
 }
-
-const setupEnvCache = new Map<string, { key: string; env: Record<string, string> }>();
 
 /**
  * The environment a managed Olympus install actually runs with: the process
@@ -135,8 +129,12 @@ export function environmentWithWorkerSetupEnv(
 }
 
 export function workerSetupEnvPath(options: WorkerAuthTokenLookupOptions = {}): string {
-  const env = options.env ?? process.env;
-  return options.workerEnvPath ?? join(
+  // An explicit home selects an install; ambient XDG roots may name another.
+  // Callers with a resolved engine environment can still supply it explicitly.
+  const env = options.env ?? (options.homeDir ? {} : process.env);
+  if (options.workerEnvPath) return options.workerEnvPath;
+  if (process.platform === 'linux') return resolveLinuxEngineLayout({ ...env, HOME: options.homeDir ?? env.HOME }).workerEnvPath;
+  return join(
     options.homeDir ?? optionalToken(env.HOME) ?? homedir(),
     '.config',
     'olympus',

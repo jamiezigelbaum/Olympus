@@ -403,6 +403,8 @@ export interface EmailSourceConnector {
 }
 
 export interface EmailSourceWorkerOptions {
+  /** Local Linux notices, outside the frozen ChatGPT panel bundle. */
+  localModelReadiness?: () => readonly { name: string; state: string; detail: string; downloadBytes: number }[];
   connector?: EmailSourceConnector;
   sourceAnswer?: SourceIndexAnswerHandler;
   /**
@@ -644,6 +646,7 @@ export interface EmailSourceWorkerOptions {
   recheckCredentials?: () => WorkerCredentialDegradation[];
   /** Remote agent connections behind the Setup page's "Connect an agent" panel. */
   agentConnections?: DashboardAgentConnectionsBackend;
+  agentConnectHost?: () => import('../dashboard/agents.ts').AgentConnectHost;
   basePath?: string;
 }
 
@@ -1259,6 +1262,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (page === 'host') {
             return new Response(renderComputerHostPage({
               panelHtml: dashboardResourceHtml(),
+              ...(options.localModelReadiness ? { modelReadiness: options.localModelReadiness() } : {}),
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...(controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {}),
               ...(dashboardReadToken(url) ? { readToken: dashboardReadToken(url)! } : {}),
@@ -1287,6 +1291,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               options: {
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
+                ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
               },
             }));
           }

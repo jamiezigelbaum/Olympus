@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { isLoopbackAddress, requestPeerAddress } from '../core/request-peer.ts';
+import { isLoopbackAddress, requestPeerAddress, requestFromOwnerSocket } from '../core/request-peer.ts';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
 import {
   DASHBOARD_LAUNCH_MINT_PATH,
@@ -32,6 +32,7 @@ export interface WorkerBearerAuthOptions {
    * bearer.
    */
   sessionSecret?: string;
+  requireOwnerSocket?: boolean;
 }
 
 /**
@@ -197,7 +198,7 @@ export function withWorkerBearerAuth(
       if (!origin || !isLoopbackOrigin(origin)) return dashboardControlForbiddenResponse('origin_mismatch');
       // The socket peer, as the server recorded it (core/request-peer.ts):
       // loopback, or no mint. A request with no recorded peer is remote.
-      if (!isLoopbackAddress(requestPeerAddress(request))) return dashboardControlForbiddenResponse('origin_mismatch');
+      if (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request)))) return dashboardControlForbiddenResponse('origin_mismatch');
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), 'local');
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }

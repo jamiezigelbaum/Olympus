@@ -1,9 +1,9 @@
 /**
  * Answers in flight on this worker (source answers, ChatGPT evidence
- * searches, private answer panel jobs). Answers come first: when the count
- * goes from 0 to 1 the worker preempts background model work (the tier
- * sniffer aborts its in-flight call), and while it is above 0 that work
- * yields (the sniffer's `shouldYield`). It resumes on its next tick.
+ * searches, private answer panel jobs). These leases coordinate owner and
+ * background jobs, without implying local model contention. The separate
+ * createLocalModelActivity registry wraps actual local inference dispatches
+ * to preempt and resume sorting only on the resource in use.
  *
  * Each begin() is a lease. A lease never released (an answer whose promise
  * never settles, a begin() without its end()) would hold background work
@@ -13,7 +13,7 @@
  * A lease is the owner's own work unless it says it is `background` (a remote
  * agent's answer on a connection that is not ChatGPT,
  * docs/design/background-agents.md section E). Both count as busy for the
- * sniffer; only the owner's work counts as `interactive`, which queued
+ * job scheduler; only the owner's work counts as `interactive`, which queued
  * background answers wait behind (core/source-answer-jobs.ts priority), and
  * `onInteractiveIdle` says when the last of it ends.
  */
@@ -142,3 +142,38 @@ export function createAnswerActivity(onBusy: () => void, options: AnswerActivity
   };
   return activity;
 }
+
+/** Actual local inference leases, separate from search/answer UI activity. */
+export function localModelResourceKey(profile: { baseUrl?: string; model?: string }): string {
+  return `${profile.baseUrl?.replace(/\/+$/, '') ?? ''}\u0000${profile.model ?? ''}`;
+}
+
+export function createLocalModelActivity() {
+  const resources = new Map<string, ReturnType<typeof createAnswerActivity>>();
+  const busyListeners = new Map<string, Set<() => void>>();
+  const get = (key: string) => {
+    let activity = resources.get(key);
+    if (!activity) {
+      activity = createAnswerActivity(() => {
+        for (const listener of busyListeners.get(key) ?? []) listener();
+      });
+      resources.set(key, activity);
+    }
+    return activity;
+  };
+  return {
+    busy: (key: string) => get(key).busy,
+    run: <T>(key: string, work: () => Promise<T>) => get(key).run(work),
+    onBusy(key: string, listener: () => void) {
+      const listeners = busyListeners.get(key) ?? new Set<() => void>();
+      busyListeners.set(key, listeners);
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    onIdle: (key: string, listener: () => void) => get(key).onInteractiveIdle(listener),
+    track<T extends import('../core/analyst.ts').AnalystModel>(key: string, model: T): T {
+      return { ...model, complete: request => get(key).run(() => model.complete(request)) };
+    },
+  };
+}
+export type LocalModelActivity = ReturnType<typeof createLocalModelActivity>;

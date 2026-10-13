@@ -44,6 +44,8 @@ import {
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferCacheModelId } from '../src/workers/classification/sniffer.ts';
+import { snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { runTierCommand, runTierSet } from '../src/workers/classification/tier-cli.ts';
 import { classifyItemTiers, TIER_CLASSIFIER_VERSION, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
@@ -62,6 +64,7 @@ import {
 import { moveTieredItem, TierMoveRefusedError } from '../src/workers/connector-store/tier-move.ts';
 import { defaultStoreTrustTier } from '../src/workers/connector-store/tier-placement.ts';
 import { settleNamesOnlyItems } from '../src/workers/connector-store/tier-names-only-settle.ts';
+import { rejudgeStoredContent, emptyTierRejudgeReport } from '../src/workers/connector-store/tier-rejudge.ts';
 import { sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
@@ -100,7 +103,7 @@ const FILES = [
 ] as const;
 
 const PRIVATE_VERDICT = '{"verdicts":[{"i":1,"tier":"private","category":"financial","confidence":0.9}]}';
-const PERSONAL_VERDICT = '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.97}]}';
+const PERSONAL_VERDICT = '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","ownRecord":false,"privateKind":"none","confidence":0.97}]}';
 
 let root: string;
 let env: Record<string, string>;
@@ -126,7 +129,12 @@ afterEach(() => {
 
 let ownerWords: string | undefined;
 
-async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE; extract?: boolean } = {}) {
+async function freshInstall(options: {
+  lane?: typeof BUILT_IN_SNIFFER_LANE;
+  extract?: boolean;
+  gardenOwnRecord?: boolean;
+  structuredBankName?: boolean;
+} = {}) {
   ownerWords = undefined;
   const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
   const installed = configureInstalledTierClassification({
@@ -144,7 +152,12 @@ async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE; extr
     lane.internal.current()?.close();
     lane.public.current()?.close();
   });
-  const entries = FILES.map((file) => ({ tag: 'file' as const, id: file.id, name: file.name, pathDisplay: file.path, rev: 'r1' }));
+  const entries = FILES.map((file) => {
+    const name = options.structuredBankName && file.id === 'id:bank'
+      ? 'bank letter SSN 123-45-6789.pdf'
+      : file.name;
+    return { tag: 'file' as const, id: file.id, name, pathDisplay: file.path, rev: 'r1' };
+  });
   const metadataClient: DropboxMetadataClient = {
     supportsNativeRecursive: true,
     async listFolder(): Promise<DropboxMetadataPage> { return { entries, cursor: 'c1', hasMore: false }; },
@@ -167,7 +180,9 @@ async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE; extr
         localItemId: `personal:${file.id}`,
         sourceVersion: 'r1',
       },
-      text: file.text,
+      text: options.gardenOwnRecord && file.id === 'id:garden'
+        ? `${file.text}\nPatient name: Morgan Example`
+        : file.text,
       extractorKind: 'local_text',
       extractorVersion: 'test',
       fetchedAt: '2026-10-01T00:00:00.000Z',
@@ -225,7 +240,7 @@ function registeredBuiltIn(verdict: string | ((request: AnalystModelRequest) => 
   return { prompts, builtIn, started: () => started };
 }
 
-function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: { localEmbeddingsOnly?: boolean; maxPerPass?: number } = {}) {
+function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: { localEmbeddingsOnly?: boolean; maxPerPass?: number; rejudgePerPass?: number } = {}) {
   const service = new TierSnifferService({
     installed: install.installed,
     lane: BUILT_IN_SNIFFER_LANE,
@@ -236,6 +251,7 @@ function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: { l
     startModel: () => builtIn.startIfIdle?.(),
     ownerContext: () => ownerWords,
     autoApproveBuiltIn: true,
+    ...(options.rejudgePerPass !== undefined ? { rejudgePerPass: options.rejudgePerPass } : {}),
     autoMoves: {
       localEmbeddingsOnly: () => options.localEmbeddingsOnly ?? true,
       embeddingLedgerPath: join(root, 'embedding-ledger.jsonl'),
@@ -249,7 +265,11 @@ function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: { l
 /** Garden judged Personal by the model and moved there: its held copy stays kept (superseded) in the Private store. */
 async function gardenSettledPersonal(verdict: string | ((request: AnalystModelRequest) => string) = PERSONAL_VERDICT) {
   const model = registeredBuiltIn(verdict);
-  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, gardenOwnRecord: true });
+  const held = install.lane.ledger.getCurrent(garden)!;
+  expect(held).toMatchObject({ metadataTier: 'private', metadataPending: false, contentTier: 'private', contentPending: true });
+  expect(held.reasons).toContain('content:own_record:named_holder');
+  expect(await olympusSearch(install, 'pruning plan')).not.toContain('Orchard pruning plan');
   const service = snifferFor(install, model.builtIn);
   for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
   expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private' });
@@ -462,12 +482,12 @@ describe('4. a re-judge that finds a secret in stored text', () => {
 });
 
 describe('6 and T-1. a private model that is not ready', () => {
-  test('read items wait for it (never Personal before it judges them), and the sniffer starts its download', async () => {
+  test('own-record items wait for it (never Personal before it judges them), and the sniffer starts its download', async () => {
     let ready = false;
     const model = registeredBuiltIn(PERSONAL_VERDICT, () => ready);
-    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
-    // The built-in lane exists but its model is not downloaded: the unflagged
-    // file is held for it, not released to ChatGPT.
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, gardenOwnRecord: true });
+    // The built-in lane exists but its model is not downloaded: the populated
+    // record is held for it even though its names remain Personal.
     expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentPending: true });
     expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
     const service = snifferFor(install, model.builtIn);
@@ -560,7 +580,7 @@ describe('9. built-in default approvals', () => {
 
 describe('11a. items a names-only folder covers stop waiting for text', () => {
   test('a row recorded before p4, pending on text that never comes, is settled on its names without a re-list', async () => {
-    const install = await freshInstall({ extract: false });
+    const install = await freshInstall({ extract: false, structuredBankName: true });
     expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentRead: false, contentPending: true });
     expect(install.lane.ledger.getCurrent(garden)!.reasons).toContain('content:unread');
     // Not names-only yet: nothing settles.
@@ -618,13 +638,14 @@ describe('12. a per-item owner override applies to an item already stored (no fi
     const service = snifferFor(install, model.builtIn);
     for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
     expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
-    expect(currentCopies(install, bank)).toEqual([SECURE_CORPUS]);
+    // Personal names remain in the Personal store while Private content rests securely.
+    expect(currentCopies(install, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
     expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
 
     const set = await runTierCommand(['set', 'id:bank', 'personal'], { storePaths: storePaths() });
     expect(set).toMatchObject({ results: [{ override: 'Personal', outcome: 'set_applies_next_pass' }] });
     // A lowering exposes nothing before the move: still Private until it lands.
-    expect(currentCopies(install, bank)).toEqual([SECURE_CORPUS]);
+    expect(currentCopies(install, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
 
     await service.runOnce();
     expect(install.lane.ledger.getCurrent(bank)).toMatchObject({
@@ -699,13 +720,13 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
   const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
     ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
 
-  /** The bank letter judged Private by the model and resting in the Private store. */
+  /** The bank letter's content judged Private, with its Personal names retained separately. */
   async function bankPrivate() {
     const model = registeredBuiltIn(PRIVATE_VERDICT);
     const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
     const service = snifferFor(install, model.builtIn);
     for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
-    expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
+    expect(currentCopies(install.lane.ledger, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
     return { install, service };
   }
 
@@ -724,12 +745,13 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
       beforeFlip: () => { raised = runTierSet(['id:bank', 'private'], { storePaths: storePaths() }); },
     });
     await expect(move).rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
-    // Replacing the override cancelled the lower in the same write (it hid
-    // nothing): the item is already Private where it rests, nothing to raise.
-    expect(raised).toMatchObject({ results: [{ override: 'Private', outcome: 'set_applies_next_pass' }] });
-    // Never current in the Personal store; the staged copy is kept hidden.
-    expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
+    // The owner raises the previously Personal names too, so every copy is
+    // hidden before the stale lower can publish; the new raise then lands.
+    expect(raised).toMatchObject({ results: [{ override: 'Private', outcome: 'hidden_now_move_queued' }] });
+    expect(currentCopies(install.lane.ledger, bank)).toEqual([]);
     expect(install.lane.ledger.copies(bank).find((copy) => copy.corpusId === INTERNAL_CORPUS)).toMatchObject({ state: 'superseded' });
+    await service.runOnce();
+    expect(currentCopies(install.lane.ledger, bank)).toEqual([SECURE_CORPUS]);
     expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
     expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
 
@@ -751,7 +773,7 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
     ledger.setOverride(bank, { kind: 'tier', tier: 'private' });
     expect(applyOwnerOverrides({ set: install.lane.set, afterRead: () => ledger.clearOverride(bank) })).toMatchObject({ lowered: 0 });
     expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
-    expect(currentCopies(ledger, bank)).toEqual([SECURE_CORPUS]);
+    expect(currentCopies(ledger, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
   });
 
   test('a queued lower whose override was cleared before it lands is cancelled: a move read before never lands', async () => {
@@ -770,7 +792,7 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
     })).rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
     await service.runOnce();
     expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'secure' });
-    expect(currentCopies(ledger, bank)).toEqual([SECURE_CORPUS]);
+    expect(currentCopies(ledger, bank)).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
     expect(await olympusSearch(install, 'loan terms')).not.toContain('Orchard loan terms');
   });
 
@@ -831,17 +853,17 @@ describe('12c. owner overrides under interleaving, round 2 (review of PR #255)',
   const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
     ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId).sort();
   const verdicts = (tier: string, category: string, confidence: number) =>
-    JSON.stringify({ verdicts: [1, 2, 3, 4, 5, 6].map((i) => ({ i, tier, category, confidence })) });
+    JSON.stringify({ verdicts: [1, 2, 3, 4, 5, 6].map((i) => ({ i, tier, category, confidence, ownRecord: tier === 'private', privateKind: tier === 'private' ? category : 'none' })) });
 
   test('an owner raise that needs no move: a lower read before it is refused, and no flip lands below the owner', async () => {
     const { dir, cleanup } = tempDir('olympus-tier-stale-lower-');
     closers.push(cleanup);
     const fx = openTierFixture(dir, { embed: false });
     closers.push(() => fx.close());
-    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]), { fetchContent: true });
     const d1 = fixtureIdentityOf('d1');
     const judged = (metadataTier: 'private' | 'secure', contentTier: 'private' | 'secure'): TierDecision => ({
-      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'x' }),
+      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'Plain notes about the spring beds.' }),
       metadataTier, contentTier, decidedBy: 'sniffer', state: 'current',
       contentRead: true, contentPending: false, metadataPending: false,
     });
@@ -904,10 +926,10 @@ describe('12c. owner overrides under interleaving, round 2 (review of PR #255)',
     closers.push(cleanup);
     const fx = openTierFixture(dir, { embed: false });
     closers.push(() => fx.close());
-    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]), { fetchContent: true });
     const d1 = fixtureIdentityOf('d1');
     const split: TierDecision = {
-      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'x' }),
+      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'Plain notes about the spring beds.' }),
       metadataTier: 'public', contentTier: 'secure', decidedBy: 'sniffer', state: 'current',
       contentRead: true, contentPending: false, metadataPending: false,
     };
@@ -1060,4 +1082,117 @@ describe('12d. a revoked owner move is cancelled or replanned, never stranded (r
     expect(currentCopies(fx.ledger, d1).map((copy) => copy.corpusId)).toEqual([CORPORA.secure_local]);
     expect(fx.ledger.listMoving()).toEqual([]);
   });
+});
+
+
+test('a preempted pass drains its completed verdict moves independently', async () => {
+  let service: TierSnifferService;
+  let calls = 0;
+  const builtIn: BuiltInPrivateModel = {
+    available: () => true,
+    model: { async complete(request) {
+      calls++;
+      if (calls === 2) { service.preempt(); throw new Error('aborted'); }
+      return { text: PERSONAL_VERDICT, modelId: 'built_in' };
+    } },
+  };
+  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, gardenOwnRecord: true });
+  service = snifferFor(install, builtIn);
+  const result = await service.runOnce();
+  expect(result).toMatchObject({ state: 'ran', report: { stoppedBy: 'preempted', verdictsApplied: 1 }, autoMoves: { moved: 1 } });
+  expect(install.lane.ledger.listMoving()).toHaveLength(0);
+});
+
+test('saving unchanged privacy settings adds no model calls', async () => {
+  const { service, prompts } = await gardenSettledPersonal();
+  const description = 'My health and money matters.';
+  writePrivacyProfile({ description, rules: [] }, { env });
+  ownerWords = description;
+  for (let n = 0; n < 3; n++) await service.runOnce();
+  const before = prompts.length;
+  writePrivacyProfile({ description, rules: [] }, { env });
+  for (let n = 0; n < 3; n++) await service.runOnce();
+  expect(prompts.length).toBe(before);
+});
+
+test('a queued secret settles a routed item through the existing Secrets disposition', async () => {
+  const model = registeredBuiltIn(PERSONAL_VERDICT);
+  const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+  const queue = install.installed.snifferStoreForLedger(install.lane.ledger.dbPath);
+  const row = install.lane.ledger.getCurrent(garden)!;
+  queue.enqueue({ subject: garden, pass: 'content', material: `credential ${FAKE_AWS_KEY}`, mapRevision: row.mapRevision, flags: [] });
+  const service = snifferFor(install, model.builtIn, { rejudgePerPass: 0 });
+  await service.runOnce();
+  expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', metadataTier: 'secrets', contentTier: 'secrets', metadataPending: false, contentPending: false });
+  expect(install.lane.ledger.copies(garden)).toHaveLength(0);
+  expect(model.prompts.every(p => !p.prompt.includes(FAKE_AWS_KEY))).toBe(true);
+  expect(queue.questionFor(garden, 'content')).toBeUndefined();
+});
+
+for (const authority of ['model', 'model-private-body', 'model-waiting-body', 'owner-rule', 'override'] as const) {
+  test(`old Private metadata is rejudged only for model decisions and stays sealed without all original signals (${authority})`, async () => {
+    const { install } = await gardenSettledPersonal();
+    const ledger = install.lane.ledger;
+    const old: TierDecision = {
+      ...classifyItemTiers({ signals: { title: 'orchard-plan.pdf' }, text: 'ordinary notes' }),
+      metadataTier: 'secure', contentTier: 'secure', decidedBy: 'sniffer',
+      engineVersion: TIER_CLASSIFIER_VERSION,
+      reasons: [authority === 'owner-rule' ? 'metadata:owner_rule:pathPrefix:keep:prior' : 'metadata:sniffer:local:old-prompt:financial:0.95', 'content:metadata_floor'],
+    };
+    ledger.recordRoutedPlacement(garden, old, install.lane.set.placementFor(old));
+    await moveTieredItem({ set: install.lane.set, identity: { ...garden, family: 'file', localItemId: 'personal:id:garden' }, decision: old, replaceOwnSupersededCopy: true });
+    if (authority === 'override') ledger.setOverride(garden, { kind: 'tier', tier: 'secure' });
+    ownerWords = 'Routine notices are shareable; personal records are private.';
+    const model = registeredBuiltIn(request => {
+      if (request.prompt.includes('is the NAMES')) return PERSONAL_VERDICT;
+      if (authority === 'model-waiting-body') throw new Error('body judgment unavailable');
+      return authority === 'model-private-body' ? PRIVATE_VERDICT : PERSONAL_VERDICT;
+    });
+    const service = snifferFor(install, model.builtIn);
+    for (let pass = 0; pass < 4; pass++) await service.runOnce();
+    if (authority.startsWith('model')) {
+      expect(model.prompts.some(p => p.prompt.includes('NAMES') && p.prompt.includes('orchard-plan'))).toBe(true);
+      // Labels were not stored. A new Personal answer cannot prove that
+      // the original names are safe; a connector relist must reassess them.
+      expect(ledger.getCurrent(garden)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+      expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
+    } else {
+      expect(model.prompts.some(p => p.prompt.includes('orchard-plan'))).toBe(false);
+      expect(ledger.getCurrent(garden)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+    }
+  });
+}
+
+test('metadata rejudges bind the full names even when the model excerpt is identical', async () => {
+  const { install } = await gardenSettledPersonal();
+  const store = install.lane.internal.current()!;
+  const original = store.exportItemCopy(garden)!;
+  const requests: import('../src/workers/classification/tier-classifier.ts').TierSnifferRequest[] = [];
+  const queue = install.installed.snifferStoreForLedger(install.lane.ledger.dbPath);
+  const cached = new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE);
+  const metadataAnswers: string[] = [];
+  const record = { ...install.lane.ledger.getCurrent(garden)!, reasons: ['metadata:sniffer:local:old-prompt:financial:0.95'] };
+  for (const suffix of ['old notice', 'new record']) {
+    store.importItemCopy({ ...original, columns: { ...original.columns, title: `${'Shared long title '.repeat(40)}${suffix}` } }, {
+      trustTier: defaultStoreTrustTier('internal'), syncConnectorId: 'test-resync',
+    });
+    rejudgeStoredContent(install.lane.set, record, { autoMoves: true, report: emptyTierRejudgeReport(),
+      sniffer: { id: cached.id, judge(request) {
+        requests.push(request);
+        const answer = cached.judge(request);
+        if (request.pass === 'metadata') metadataAnswers.push(answer.verdict);
+        return answer;
+      } },
+    });
+    const request = requests.find(request => request.pass === 'metadata')!;
+    queue.putVerdict({ materialHash: request.materialHash ?? snifferMaterialHash('metadata', request.material!),
+      modelId: snifferCacheModelId(BUILT_IN_SNIFFER_LANE), promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+    { tier: 'personal', category: 'ordinary', confidence: 1, failSafe: false });
+  }
+  const names = requests.filter(request => request.pass === 'metadata');
+  expect(names).toHaveLength(2);
+  expect(names[0]!.material).toBe(names[1]!.material);
+  expect(names[0]!.materialHash).toBeDefined();
+  expect(names[0]!.materialHash).not.toBe(names[1]!.materialHash);
+  expect(metadataAnswers).toEqual(['undecided', 'undecided']);
 });

@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../../../core/linux-engine-layout.ts';
 // Fetches, verifies and installs the built-in private reasoning model and the
 // llama.cpp server that runs it into the Olympus data directory, once. Every
 // file is checked against the pinned manifest before it is used; a file that
@@ -210,7 +211,7 @@ function builtInReasoningRoot(env: Record<string, string | undefined>): string {
 /** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models`. */
 export function olympusModelsDir(env: Record<string, string | undefined> = process.env): string {
   const dataRoot = env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share');
-  return join(dataRoot, 'openclaw', 'olympus', 'models');
+  return join(standaloneLinuxDataDir(env) ?? join(dataRoot, 'openclaw', 'olympus'), 'models');
 }
 
 /**

@@ -15,17 +15,18 @@ export interface SimulatedReadinessServer {
  * Binding port 0 and reading back the port the child actually bound both removes
  * the collision and makes a bind failure surface here rather than be masked.
  */
-export async function startSimulatedReadinessServer(): Promise<SimulatedReadinessServer> {
+export async function startSimulatedReadinessServer(socketPath?: string): Promise<SimulatedReadinessServer> {
   const script = [
-    "const server = Bun.serve({",
-    "  hostname: '127.0.0.1',",
-    "  port: 0,",
-    "  fetch(request) {",
+    "const handler = (request) => {",
     "    const url = new URL(request.url);",
     "    if (url.pathname !== '/v1/health') return new Response('not found', { status: 404 });",
     "    return Response.json({ reachable: true, status: 'ok' });",
-    "  },",
-    "});",
+    "};",
+    "const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });",
+    ...(socketPath ? [
+      "process.umask(0o177);",
+      `Bun.serve({ unix: ${JSON.stringify(socketPath)}, fetch: handler });`,
+    ] : []),
     "console.log(server.port);",
     "await new Promise(() => {});",
   ].join('\n');

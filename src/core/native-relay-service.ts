@@ -35,7 +35,7 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
  */
 const DEFAULT_STABLE_UPTIME_MS = 60_000;
 /** Only what the child needs: it handles internet traffic and gets no credentials. */
-const CHILD_ENV_PASSTHROUGH = ['HOME', 'XDG_DATA_HOME', 'PATH', 'TMPDIR', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS'] as const;
+const CHILD_ENV_PASSTHROUGH = ['HOME', 'XDG_DATA_HOME', 'PATH', 'TMPDIR', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', ...(process.platform === 'linux' ? ['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'] : [])] as const;
 
 export interface NativeRelayServiceOptions {
   initialPluginConfig: unknown;
@@ -210,13 +210,14 @@ function prepareRelayStart(
 /**
  * The worker the relay forwards to, as the worker itself binds it: a
  * Gateway-managed worker listens on `email.baseUrl`; a worker run from
- * worker.env listens on its OLYMPUS_EMAIL_SOURCE_HOST/PORT.
+ * worker.env listens on its OLYMPUS_WORKER_BIND_HOST (else the legacy
+ * OLYMPUS_EMAIL_SOURCE_HOST) and OLYMPUS_EMAIL_SOURCE_PORT.
  */
 function workerOrigin(config: OlympusConfig, env: NodeJS.ProcessEnv): string | undefined {
   if (!config.worker.service.enabled) {
     const port = env.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
     if (port && /^\d{1,5}$/.test(port)) {
-      const host = env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || '127.0.0.1';
+      const host = env.OLYMPUS_WORKER_BIND_HOST?.trim() || env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || '127.0.0.1';
       return loopbackWorkerOrigin(`http://${host === '::1' ? '[::1]' : host}:${port}`);
     }
   }

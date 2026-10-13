@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
 /**
  * Remote access state shared by the three processes that need it:
  *
@@ -120,6 +121,8 @@ export function resolveRemoteAccessMode(remote: OlympusConfig['remote']): Remote
 
 /** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus`, the worker's data root. */
 export function olympusDataDir(env: Record<string, string | undefined> = process.env): string {
+  const standalone = standaloneLinuxDataDir(env);
+  if (standalone) return standalone;
   const configured = env.XDG_DATA_HOME?.trim();
   const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), '.local', 'share');
   if (!raIsAbsolute(dataRoot)) throw new TypeError('XDG_DATA_HOME must be an absolute private data root.');
@@ -136,6 +139,7 @@ export function remoteAccessDir(env: Record<string, string | undefined> = proces
  * `resolveRemoteConnectionsDbPathForCli` finds the connection database.
  */
 export function remoteAccessDirForCli(env: Record<string, string | undefined> = process.env): string {
+  if (process.platform === 'linux') return remoteAccessDir(env);
   const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
   const xdg = env.XDG_DATA_HOME?.trim() || workerEnv?.XDG_DATA_HOME;
   return remoteAccessDir({ ...(env.HOME !== undefined ? { HOME: env.HOME } : {}), ...(xdg ? { XDG_DATA_HOME: xdg } : {}) });
@@ -471,7 +475,8 @@ function localWorkerOrigin(input: {
   if (reported) return reported;
   const port = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
   if (port && /^\d{1,5}$/.test(port)) {
-    const host = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || '127.0.0.1';
+    // The worker's own bind precedence (workers/http.ts resolveWorkerBindHost).
+    const host = input.layeredEnv.OLYMPUS_WORKER_BIND_HOST?.trim() || input.layeredEnv.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || '127.0.0.1';
     const origin = originOf(`http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port}`);
     if (origin) return origin;
   }
@@ -486,6 +491,21 @@ function originOf(value: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The loopback origin that reaches a worker at `value`, or undefined. A
+ * worker bound to every address (`0.0.0.0`, `::`) is reached on its loopback;
+ * any other non-loopback origin is refused, so a caller holding the worker
+ * bearer never sends it off this computer.
+ */
+export function reachableLoopbackWorkerOrigin(value: string | undefined): string | undefined {
+  const origin = originOf(value);
+  if (!origin) return undefined;
+  const url = new URL(origin);
+  if (url.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
+  else if (url.hostname === '[::]') url.hostname = '[::1]';
+  return loopbackWorkerOrigin(url.origin);
 }
 
 /** A loopback http origin the relay may forward to, or undefined. */

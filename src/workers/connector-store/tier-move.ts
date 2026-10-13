@@ -26,12 +26,13 @@
 
 import type { SourceItemIdentity, SourceTrustDomain } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import type { TierDecision, TierKey } from '../classification/tier-classifier.ts';
+import { contentDigestReason, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   placementIsRaise,
   TierLedgerGenerationConflictError,
   tierLedgerIdentityKey,
+  trustDomainRank,
   type TierLedger,
   type TierLedgerIdentity,
   type TierCopy,
@@ -70,6 +71,9 @@ export class TierMoveRefusedError extends Error {
     this.name = 'TierMoveRefusedError';
   }
 }
+
+/** The lowering verdict does not authorize the stored content. */
+export class TierMoveContentChangedError extends TierMoveRefusedError {}
 
 export type TierMoveEmbeddingIdentity = Pick<
   SourceEmbeddingProvider,
@@ -202,6 +206,23 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     }
     return exports.get(copy.corpusId);
   };
+  const contentSource = copyServingLayer(sources, 'content');
+  const contentDestination = copyServingLayer(placement.copies, 'content');
+  if (contentSource && contentDestination
+    && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
+    const exported = exportFrom(contentSource);
+    const evidence = decision ?? record;
+    const digest = exported && contentDigestReason(exported.chunks.map(chunk => chunk.boundedText).join(''));
+    const receipts = evidence.reasons.filter(reason => reason.startsWith('content:sha256:'));
+    if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
+      // Release an ordinary stale lower from `moving` so a re-fetch/rejudge
+      // can replace it. Never undo a hide-first raise (including mixed moves).
+      if (!raise && record.state === 'moving') {
+        ledger.abandonMove(identity, { expectedGeneration: record.generation });
+      }
+      throw new TierMoveContentChangedError('Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.');
+    }
+  }
   // Staging a destination rewrites that store's row. A copy kept there as
   // superseded (an earlier move's) would be lost before any approved purge:
   // refuse instead, and leave the item where it is. A kept copy holding the

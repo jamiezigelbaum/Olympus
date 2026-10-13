@@ -145,6 +145,7 @@ function assemble(options: AssembleOptions = {}): void {
   };
   handle = withRemoteOAuthRoutes(
     createRemoteOAuthHandler({
+      platform: 'darwin', // Existing Mac approval fixtures, independent of the test host.
       publicUrls,
       connections: () => store,
       now: () => clock,

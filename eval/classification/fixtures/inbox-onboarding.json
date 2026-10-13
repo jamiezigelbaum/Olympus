@@ -1,0 +1,1068 @@
+{
+  "schemaVersion": 1,
+  "description": "Complete synthetic emails; no real message bodies. Labels from owner settings and 2026-10-13 rulings. fakeJudgment is a scripted model response, not a quality oracle.",
+  "privacyProfile": {
+    "schemaVersion": 1,
+    "description": "family, health, finances\nAbout family: private — Family members' medical records, Family legal and money papers (divorce, custody, trusts), Private family conversations and journals; fine to share — School plans and family logistics, Alumni, contact and address lists, Family history and photos.\nAbout health: private — My lab, test and medical results, Prescriptions and clinic or visit notes, Therapy sessions, Health-data exports; fine to share — Wellness programs, diets and detox plans, Health books, guides and courses, Product or supplement test reports.\nAbout money: private — Bank, card, brokerage and crypto statements, Tax and payroll papers, Invoices, bills and receipts, Loans and proof of funds; fine to share — Articles and guides about money, Crypto project whitepapers and research, Prices and quotes I am researching.",
+    "rules": [],
+    "updatedAt": "2026-10-13T11:04:46.054Z"
+  },
+  "items": [
+    {
+      "id": "inbox-01",
+      "templateFamily": "inbox-tutorial",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-01T09:00:00Z",
+        "subject": "Welcome to your inbox",
+        "body": "Hello Avery,\n\nOrganize mail with labels and search. Visit the help page to learn more.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-02",
+      "templateFamily": "inbox-tutorial",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-02T09:00:00Z",
+        "subject": "Your first search",
+        "body": "Hello Avery,\n\nTry searching by sender. Reply with your feedback on the tutorial.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-03",
+      "templateFamily": "inbox-tutorial",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-03T09:00:00Z",
+        "subject": "Gmail shortcuts",
+        "body": "Hello Avery,\n\nPress the search button to find a message. Developer: Example Company\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-04",
+      "templateFamily": "inbox-tutorial",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-04T09:00:00Z",
+        "subject": "Storage tips",
+        "body": "Hello Avery,\n\nArchive old newsletters when you have finished reading them.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-05",
+      "templateFamily": "everyday-invitation",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-05T09:00:00Z",
+        "subject": "Weekend rides",
+        "body": "Hello Avery,\n\nUber offers discounted rides this weekend. View destinations in the app.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-06",
+      "templateFamily": "everyday-invitation",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-06T09:00:00Z",
+        "subject": "Lunch reminder",
+        "body": "Hello Avery,\n\nPlease buy apples and bread on the way home.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-07",
+      "templateFamily": "everyday-invitation",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-07T09:00:00Z",
+        "subject": "A message to myself",
+        "body": "Hello Avery,\n\nTesting the new inbox. This is a complete test message.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-08",
+      "templateFamily": "everyday-invitation",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-08T09:00:00Z",
+        "subject": "Museum afternoon",
+        "body": "Hello Avery,\n\nMeet at the museum entrance at two. Bring a jacket.\n\nRegards,\nExample team\n\n> Earlier itinerary:\nWalk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. Walk through the garden and follow the marked trail. "
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-09",
+      "templateFamily": "finance-onboarding",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-09T09:00:00Z",
+        "subject": "Stripe setup",
+        "body": "Hello Avery,\n\nWelcome to Stripe. Learn how invoices and payouts work before opening your shop.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-10",
+      "templateFamily": "finance-onboarding",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-10T09:00:00Z",
+        "subject": "Stripe email confirmed",
+        "body": "Hello Avery,\n\nYour email address has been confirmed. Ignore the previous verification email.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-11",
+      "templateFamily": "finance-onboarding",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-11T09:00:00Z",
+        "subject": "Stripe next steps",
+        "body": "Hello Avery,\n\nExplore the payment dashboard. This introduction explains statements and fees.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-12",
+      "templateFamily": "finance-onboarding",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-12T09:00:00Z",
+        "subject": "Coinbase welcome",
+        "body": "Hello Avery,\n\nWelcome to Coinbase. Read our beginner guide to crypto markets.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-13",
+      "templateFamily": "account-research-notice",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-13T09:00:00Z",
+        "subject": "Coinbase research bulletin",
+        "body": "Hello Avery,\n\nResearch note: network fees and whitepapers can help compare projects.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-14",
+      "templateFamily": "account-research-notice",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-14T09:00:00Z",
+        "subject": "GitHub token added",
+        "body": "Hello Avery,\n\nA token named Example Build was added to your GitHub account. No token value is included. Review the settings page if this was unexpected.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-15",
+      "templateFamily": "account-research-notice",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-15T09:00:00Z",
+        "subject": "GitHub token expired",
+        "body": "Hello Avery,\n\nThe Example Build token has expired. Create a replacement in settings when needed.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-16",
+      "templateFamily": "account-research-notice",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-16T09:00:00Z",
+        "subject": "GitHub OAuth application approved",
+        "body": "Hello Avery,\n\nYou authorized the Example Planner OAuth app. Developer: Example Company. Reply with your enrollment reference if support requested it. App metadata: {\"category\":\"developer-tools\"}.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-17",
+      "templateFamily": "security-confirmation",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-17T09:00:00Z",
+        "subject": "New sign-in",
+        "body": "Hello Avery,\n\nA new sign-in was recorded on a Linux computer. Review recent activity in your account.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "identity",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-18",
+      "templateFamily": "security-confirmation",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-18T09:00:00Z",
+        "subject": "Recovery download completed",
+        "body": "Hello Avery,\n\nYour recovery kit download completed. This notification contains no recovery values.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "identity",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-19",
+      "templateFamily": "security-confirmation",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-19T09:00:00Z",
+        "subject": "Email address confirmed",
+        "body": "Hello Avery,\n\nYour contact email was verified successfully. You can close the setup page.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "identity",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-20",
+      "templateFamily": "security-activity",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-20T09:00:00Z",
+        "subject": "Google security notification",
+        "body": "Hello Avery,\n\nA new browser signed in. Open account settings to review devices.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "identity",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-21",
+      "templateFamily": "security-activity",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-21T09:00:00Z",
+        "subject": "Venice acknowledgment",
+        "body": "Hello Avery,\n\nWe received your setup request. Your account is ready to explore the documentation.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "identity",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-22",
+      "templateFamily": "security-activity",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-22T09:00:00Z",
+        "subject": "Confirmação de acesso",
+        "body": "Hello Avery,\n\nFoi iniciado um acesso num novo navegador. Consulte a atividade nas definições da conta.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "identity",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-23",
+      "templateFamily": "developer-enrollment",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-23T09:00:00Z",
+        "subject": "Apple Developer enrollment received",
+        "body": "Hello Avery,\n\nYour enrollment request has been received. Reply with your enrollment reference if you contact support. Developer: Example Company.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "identity",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-24",
+      "templateFamily": "developer-enrollment",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-24T09:00:00Z",
+        "subject": "D-U-N-S lookup received",
+        "body": "Hello Avery,\n\nWe received your organization lookup request. You will receive a status update when the lookup completes.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "identity",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-25",
+      "templateFamily": "developer-status",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-25T09:00:00Z",
+        "subject": "Apple Developer agreement status",
+        "body": "Hello Avery,\n\nThe updated program agreement is available to review in your account. This email contains no agreement terms, signature or filled form.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "work",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-26",
+      "templateFamily": "developer-status",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-26T09:00:00Z",
+        "subject": "Developer membership active",
+        "body": "Hello Avery,\n\nYour membership is active. Browse the developer documentation to get started.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "work",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-27",
+      "templateFamily": "financial-record-table",
+      "split": "dev",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-27T09:00:00Z",
+        "subject": "Invoice September",
+        "body": "Hello Avery,\n\nInvoice INV-101. Billed to Avery Example. Design services EUR 320.00. Amount due EUR 320.00 by 30 September.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "financial",
+        "ownRecord": true,
+        "privateKind": "financial",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-28",
+      "templateFamily": "financial-record-table",
+      "split": "dev",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-28T09:00:00Z",
+        "subject": "Receipt for desk",
+        "body": "Hello Avery,\n\nReceipt R-202 for Avery Example. Desk EUR 180.00, paid 12 September. Tax EUR 33.66 included.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "financial",
+        "ownRecord": true,
+        "privateKind": "financial",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-29",
+      "templateFamily": "financial-record-table",
+      "split": "dev",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-01T09:00:00Z",
+        "subject": "Monthly account statement",
+        "body": "Hello Avery,\n\nAccount holder Avery Example. Opening balance EUR 920.00; deposit EUR 500.00; closing balance EUR 1420.00.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "financial",
+        "ownRecord": true,
+        "privateKind": "financial",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-30",
+      "templateFamily": "financial-record-table",
+      "split": "dev",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-02T09:00:00Z",
+        "subject": "Payout statement",
+        "body": "Hello Avery,\n\nPayout statement for Avery Example: sales EUR 700.00, fees EUR 21.00, net payout EUR 679.00.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "financial",
+        "ownRecord": true,
+        "privateKind": "financial",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-31",
+      "templateFamily": "financial-record-prose",
+      "split": "held-out",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-03T09:00:00Z",
+        "subject": "Fatura de serviços",
+        "body": "Hello Avery,\n\nFatura FT-404 para Avery Example: serviços EUR 95,00, imposto EUR 21,85. Total a pagar EUR 116,85.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "financial",
+        "ownRecord": true,
+        "privateKind": "financial",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-32",
+      "templateFamily": "financial-record-prose",
+      "split": "held-out",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-04T09:00:00Z",
+        "subject": "Your purchase receipt",
+        "body": "Hello Avery,\n\nAvery Example paid EUR 24.00 for a notebook on 18 September. Receipt R-405; balance due zero.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "financial",
+        "ownRecord": true,
+        "privateKind": "financial",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-33",
+      "templateFamily": "financial-record-prose",
+      "split": "held-out",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-05T09:00:00Z",
+        "subject": "Work reimbursement",
+        "body": "Hello Avery,\n\nWork reimbursement record for Avery Example: rail ticket EUR 42.00, hotel EUR 90.00. Amount paid EUR 132.00.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "work",
+        "ownRecord": true,
+        "privateKind": "financial",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-34",
+      "templateFamily": "financial-record-prose",
+      "split": "held-out",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-06T09:00:00Z",
+        "subject": "Your quarterly statement",
+        "body": "Hello Avery,\n\nAvery Example: portfolio opening value EUR 2300.00, dividend EUR 12.00, closing value EUR 2312.00.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "financial",
+        "ownRecord": true,
+        "privateKind": "financial",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-35",
+      "templateFamily": "clinical-results",
+      "split": "dev",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-07T09:00:00Z",
+        "subject": "Lab result for Avery",
+        "body": "Hello Avery,\n\nPatient Avery Example. Glucose 94 mg/dL (reference 70-100). Collected 12 September. Reviewed by the clinic.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "health",
+        "ownRecord": true,
+        "privateKind": "health",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-36",
+      "templateFamily": "clinical-results",
+      "split": "dev",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-08T09:00:00Z",
+        "subject": "Clinic follow-up",
+        "body": "Hello Avery,\n\nPatient Avery Example. Visit note: persistent wheeze. Prescription: use the inhaler as directed and return in one week.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "health",
+        "ownRecord": true,
+        "privateKind": "health",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-37",
+      "templateFamily": "clinical-narrative",
+      "split": "held-out",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-09T09:00:00Z",
+        "subject": "Votre compte rendu",
+        "body": "Hello Avery,\n\nPatiente Avery Example. Résultat de votre examen: inflammation persistante. Prochain rendez-vous dans deux semaines.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "health",
+        "ownRecord": true,
+        "privateKind": "health",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-38",
+      "templateFamily": "product-lab",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-10T09:00:00Z",
+        "subject": "Supplement batch test report",
+        "body": "Hello Avery,\n\nProduct batch TEST-9: vitamin content 98 percent of label claim. This laboratory report measures the product, not a patient.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "health",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-39",
+      "templateFamily": "family-conversation",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-11T09:00:00Z",
+        "subject": "School pickup",
+        "body": "Hello Avery,\n\nPlease collect Robin from school at four. Reply with the pickup location.\n\n> Yesterday: I can bring the sports bag.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "family",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-40",
+      "templateFamily": "family-journal",
+      "split": "held-out",
+      "label": "secure",
+      "rationale": "Own record or private conversation covered by the frozen owner description.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-12T09:00:00Z",
+        "subject": "Private family journal",
+        "body": "Hello Avery,\n\nMy private family journal: I feel hurt after the argument with my sister. These are the private words we exchanged about our relationship.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "private",
+        "category": "family",
+        "ownRecord": false,
+        "privateKind": "family",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-41",
+      "templateFamily": "money-education",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-13T09:00:00Z",
+        "subject": "Guide to household finance",
+        "body": "Hello Avery,\n\nA guide to comparing savings rates and understanding compound interest. Examples describe imaginary households.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-42",
+      "templateFamily": "researched-quote",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Ordinary notice or an explicit fine-to-share exception; no private record or credential.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-14T09:00:00Z",
+        "subject": "Estimate for a possible bicycle",
+        "body": "Hello Avery,\n\nRequested research quote: touring bicycle EUR 600, optional rack EUR 40. No order has been placed and nothing is owed.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "financial",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-43",
+      "templateFamily": "credential-body",
+      "split": "dev",
+      "label": "secrets",
+      "rationale": "Synthetic credential in the complete message; never model input.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-15T09:00:00Z",
+        "subject": "Temporary access material",
+        "body": "Hello Avery,\n\nUse this synthetic access material: {{CREDENTIAL}}\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-44",
+      "templateFamily": "credential-body",
+      "split": "dev",
+      "label": "secrets",
+      "rationale": "Synthetic credential in the complete message; never model input.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-16T09:00:00Z",
+        "subject": "Temporary access material",
+        "body": "Hello Avery,\n\nUse this synthetic access material: {{CREDENTIAL}}\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-45",
+      "templateFamily": "credential-body",
+      "split": "dev",
+      "label": "secrets",
+      "rationale": "Synthetic credential in the complete message; never model input.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-17T09:00:00Z",
+        "subject": "Temporary access material",
+        "body": "Hello Avery,\n\nUse this synthetic access material: {{CREDENTIAL}}\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-46",
+      "templateFamily": "credential-other-location",
+      "split": "held-out",
+      "label": "secrets",
+      "rationale": "Synthetic credential in the complete message; never model input.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-18T09:00:00Z",
+        "subject": "Access material {{CREDENTIAL}}",
+        "body": "Hello Avery,\n\nSee the details below.\n\nRegards,\nExample team"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "secrets"
+    },
+    {
+      "id": "inbox-47",
+      "templateFamily": "credential-other-location",
+      "split": "held-out",
+      "label": "secrets",
+      "rationale": "Synthetic credential in the complete message; never model input.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-19T09:00:00Z",
+        "subject": "Temporary access material",
+        "body": "Hello Avery,\n\nSee the details below.\n\nRegards,\nExample team\n\n> Previous message: {{CREDENTIAL}}"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    },
+    {
+      "id": "inbox-48",
+      "templateFamily": "credential-other-location",
+      "split": "held-out",
+      "label": "secrets",
+      "rationale": "Synthetic credential in the complete message; never model input.",
+      "email": {
+        "from_": "notices@example.test",
+        "to": "Avery Example <avery@example.test>",
+        "date": "2026-09-20T09:00:00Z",
+        "subject": "Temporary access material",
+        "body": "Hello Avery,\n\nSee the details below.\n\nRegards,\nExample team\nThis is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. This is ordinary setup documentation. \n{{CREDENTIAL}}"
+      },
+      "fakeJudgment": {
+        "tier": "personal",
+        "category": "ordinary",
+        "ownRecord": false,
+        "privateKind": "none",
+        "confidence": 0.95
+      },
+      "metadataLabel": "private"
+    }
+  ]
+}

@@ -1,16 +1,26 @@
 # Google token-exchange endpoint
 
-Status: canonical for the publisher-owned Google token exchange — **legacy
-only since 2026-10-13**
+Status: **RETIRED 2026-10-13** — historical record of the publisher-owned
+Google token exchange
+
+**Retired 2026-10-13, before the 1.0.0 launch (owner's go).** The Worker
+`olympus-google-exchange`, its route `auth.olympusplugin.ai/exchange/*`, its
+secrets, and the `RATE_LIMIT_KV` namespace with every stored account hash and
+first-sign-in time were deleted, following "Retirement" below. The return page
+at `auth.olympusplugin.ai/oauth/callback/` stays: Dropbox uses it. A Google
+connection that still records `exchangeVia: 'publisher_endpoint'` (made by a
+1.0.0 release candidate) can no longer refresh; it needs Olympus 1.0.0 and
+then **Reconnect Google**. Everything below describes the Worker as it was.
 
 **Legacy (owner decision 2026-10-13).** New Google sign-ins no longer use this
 Worker: they happen on the user's computer with Olympus's Google Desktop
 client, and the engine exchanges and refreshes tokens with Google directly
 ([`OAUTH_RELAY.md`, "Google sign-in on the computer"](OAUTH_RELAY.md#google-sign-in-on-the-computer)).
-This Worker stays deployed only for connections made through the Web client
-before then (`exchangeVia: 'publisher_endpoint'`), which keep refreshing
-through it and are offered a one-time **Reconnect Google**. Retiring it is a
-later step that needs the owner's explicit go. Its user counter no longer sees
+This ships in Olympus 1.0.0. The Worker stays deployed only for connections
+made through the Web client by the 1.0.0 release candidates
+(`exchangeVia: 'publisher_endpoint'`), which keep refreshing through it and are
+offered a one-time **Reconnect Google**. Retiring it is a later step that needs
+the owner's explicit go; see "Retirement" below. Its user counter no longer sees
 new sign-ins, so its capacity answer and stats undercount from 2026-10-13 on.
 
 **Deployment status: DEPLOYED.** Verified live on 2026-09-03 —
@@ -698,6 +708,50 @@ before the new behaviour is actually serving.
    public source — is exactly the kind of finding that review exists to
    catch. Plan verification to start once the soft launch is inside the
    Testing cap, per the existing guidance.
+
+## Retirement
+
+Only with the owner's explicit go. The privacy policy promises that the
+account hashes and first-sign-in times are "kept until we retire the service,
+then deleted" (owner decision 2026-10-13), so deleting them is part of
+retiring, not optional cleanup.
+
+1. **Record the cut-off receipt.** `/exchange/stats` counts sign-ins, not
+   refreshes, so it cannot show whether release-candidate connections still
+   refresh here, and nothing else can for installs we do not run. The receipt
+   is therefore two things, written into the retirement PR or ledger entry
+   before step 2:
+   - an inventory of the installs we run (each `~/.config/olympus/handles.json`),
+     listing every Google connection with `oauth2Refresh.exchangeVia:
+     'publisher_endpoint'`, and the reviewer demo engine's included even while
+     it is frozen; if the demo engine has one, stop here until its review ends;
+   - the owner's explicit acceptance that every such connection, and any
+     tester's, stops refreshing at retirement and needs Olympus 1.0.0 and then
+     **Reconnect Google** (a release candidate's own Reconnect also goes
+     through this Worker, so it cannot recover before updating).
+2. **Remove the route and the Worker.** Delete the `auth.olympusplugin.ai/exchange/*`
+   Worker Route, then the Worker (`bunx wrangler delete` from `exchange/`).
+   The relay page at `/oauth/callback/` on the same host stays: Dropbox still
+   returns through it.
+3. **Delete the stored account data.** Every `google-users:*` key in the
+   `RATE_LIMIT_KV` namespace (the per-account hashes with their first-sign-in
+   times, and the running total) has no TTL and must be deleted:
+   ```bash
+   bunx wrangler kv key list --remote --binding RATE_LIMIT_KV --prefix google-users: | jq '[.[].name]' > keys.json
+   bunx wrangler kv bulk delete --remote --binding RATE_LIMIT_KV keys.json
+   ```
+   (Wrangler 4 runs `kv` commands against local storage without `--remote`.)
+   Confirm with the same `key list` that nothing is left, then delete the
+   namespace itself (`bunx wrangler kv namespace delete --binding
+   RATE_LIMIT_KV`); the per-IP rate-limit keys in it expire on their own within
+   about a minute. Delete `keys.json` afterwards.
+4. **Delete the Worker's secrets** with the Worker (the Web client secret,
+   `USER_COUNT_HMAC_KEY`, `STATS_TOKEN`), and the Web client secret in the
+   Google Cloud console if the Web client is also retired.
+5. **Update the privacy policy** (owned by the legal review) to drop the
+   sign-in service, its retention line, and its hosting row, keeping the
+   Cloudflare return page while Dropbox uses it. Then mark this document
+   retired.
 
 ## Keeping this endpoint out of the public package
 
