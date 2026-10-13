@@ -669,14 +669,15 @@ describe('a side store that cannot be reached when the item becomes Secret', () 
   });
 });
 
-describe('a Secret whose side stores could not be cleared and whose debt could not be written down', () => {
-  test('is not settled: its copies are kept for the next pass, which clears both', async () => {
+describe('a Secret whose side stores could not be cleared and whose debt could not be updated', () => {
+  test('is still found: its generation was never marked cleared, and the next tick clears it', async () => {
     const dir = workspace('olympus-secret-side-debt-');
     const fx = fixture(dir);
     const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
     pointJobsEnvAt(jobsPath);
+    const spec: FixtureSpec = { id: 'keys', name: 'keys.txt', text: 'Weekly notes.' };
     fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
-    await fx.set.sync(fixtureConnector(() => [{ id: 'keys', name: 'keys.txt', text: 'Weekly notes.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    await fx.set.sync(fixtureConnector(() => [spec]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     writeFileSync(jobsPath, 'not a database');
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
     const record = spyOn(TierLedger.prototype, 'recordSecretSideStoreDebt').mockImplementation(() => {
@@ -684,17 +685,47 @@ describe('a Secret whose side stores could not be cleared and whose debt could n
     });
     try {
       fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
-      expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 0 });
+      expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
     } finally {
       record.mockRestore();
       warn.mockRestore();
     }
-    expect(fx.ledger.copies(identityOf('keys')).length).toBeGreaterThan(0);
-
-    rmSync(jobsPath);
-    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
-    expect(fx.ledger.copies(identityOf('keys'))).toEqual([]);
     expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+    expect(fx.ledger.unsettledSecretSideStores()).toEqual([expect.objectContaining({ providerItemId: 'keys' })]);
+    // The ledger comes back holding the name.
+    rmSync(jobsPath);
+    const jobs = new LocalFileExtractionJobStore(jobsPath);
+    const lane = { corpusId: CORPORA.secure_local, provider: PROVIDER, accountScope: ACCOUNT, approvedScopeKey: 'fixture:/Files' };
+    const [jobId] = jobs.enqueue({
+      refs: [{ ...lane, providerItemId: 'keys', localItemId: fixtureLocalId(spec), sourceVersion: 'v1', name: spec.name }],
+      extractorKind: 'text',
+      extractorVersion: 'v1',
+    }).jobRefs.map((entry) => entry.jobId);
+    jobs.close();
+
+    applyOwnerOverrides({ set: fx.set });
+    expect(rawJobName(jobsPath, jobId!)).toBeNull();
+    expect(fx.ledger.unsettledSecretSideStores()).toEqual([]);
+  });
+
+  test('a ledger opened by an earlier build of this change (schema 7) gains the job-ledger notes and the cleared generations', () => {
+    const dir = workspace('olympus-secret-side-ledger-');
+    const path = join(dir, 'set.tier-ledger.sqlite');
+    new TierLedger({ dbPath: path }).close();
+    const raw = new Database(path);
+    raw.exec(`
+      DROP TABLE known_job_ledgers;
+      ALTER TABLE secret_side_store_scrubs DROP COLUMN cleared_generation;
+      UPDATE schema_version SET version = 7 WHERE store_id = '${TIER_LEDGER_SQLITE_STORE_ID}';
+    `);
+    raw.close();
+
+    const ledger = new TierLedger({ dbPath: path });
+    cleanups.push(() => ledger.close());
+    ledger.noteJobLedgerPaths(['/x/jobs.sqlite']);
+    expect(ledger.knownJobLedgerPaths()).toEqual(['/x/jobs.sqlite']);
+    expect(ledger.unsettledSecretSideStores()).toEqual([]);
+    ledger.markSecretSideStoresCleared(identityOf('ops'));
   });
 });
 

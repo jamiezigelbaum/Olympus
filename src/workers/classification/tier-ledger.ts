@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 8;
+export const TIER_LEDGER_SCHEMA_VERSION = 9;
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
 
@@ -1075,6 +1075,51 @@ export class TierLedger {
       secret: this.itemIsSecret(identity),
       scrubRevision: this.secretScrubRevision(identity),
     }))();
+  }
+
+  /**
+   * Secrets items whose current generation has not had its side stores
+   * cleared (see `markSecretSideStoresCleared`) and that owe no written-down
+   * debt (`secretSideStoreDebts` has those), a bounded page.
+   */
+  unsettledSecretSideStores(limit = 100): TierLedgerIdentity[] {
+    const rows = this.db.query(`
+      SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+      FROM tier_items i
+      LEFT JOIN secret_side_store_scrubs s
+        ON s.provider = i.provider AND s.account_scope = i.account_scope
+        AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
+      WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
+        AND (s.cleared_generation IS NULL OR s.cleared_generation < i.generation)
+        AND NOT EXISTS (
+          SELECT 1 FROM secret_side_store_debt d
+          WHERE d.provider = i.provider AND d.account_scope = i.account_scope
+            AND d.conversation_key = i.conversation_key AND d.provider_item_id = i.provider_item_id
+        )
+      LIMIT ?
+    `).all(Math.max(1, Math.min(limit, 1_000))) as Array<{
+      provider: string;
+      account_scope: string;
+      conversation_key: string;
+      provider_item_id: string;
+    }>;
+    return rows.map((row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+    }));
+  }
+
+  /** The item's side stores are clear as of its current generation. */
+  markSecretSideStoresCleared(identity: TierLedgerIdentity): void {
+    this.db.query(`
+      INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision, cleared_generation)
+      VALUES (?, ?, ?, ?, 0, (SELECT generation FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?))
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
+      DO UPDATE SET cleared_generation = excluded.cleared_generation
+    `).run(...idParams(identity), ...idParams(identity));
   }
 
   /** Note the extraction job ledgers this process has open (see `knownJobLedgerPaths`). */
@@ -3672,12 +3717,6 @@ function tierLedgerMigrations(): SqliteMigration[] {
       name: 'secret_side_store_scrubs',
       up(db) {
         db.exec(`
-          -- The extraction job ledgers the worker has open, noted each tier
-          -- tick, so another process (the tier set command) clears them too.
-          CREATE TABLE IF NOT EXISTS known_job_ledgers (
-            path TEXT PRIMARY KEY,
-            seen_at TEXT NOT NULL
-          );
           CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,
@@ -3686,6 +3725,27 @@ function tierLedgerMigrations(): SqliteMigration[] {
             revision INTEGER NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
+        `);
+      },
+    },
+    {
+      // The extraction job ledgers the worker has open, noted each tier tick,
+      // so another process (the tier set command) clears them too; and which
+      // generation of a Secrets item last had its side stores cleared, so
+      // every tick finds a Secret whose clearing never finished (whatever
+      // made it Secrets, debt written down or not).
+      version: 8,
+      name: 'secret_side_stores_settled',
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS known_job_ledgers (
+            path TEXT PRIMARY KEY,
+            seen_at TEXT NOT NULL
+          );
+          ALTER TABLE secret_side_store_scrubs ADD COLUMN cleared_generation INTEGER;
+          CREATE INDEX IF NOT EXISTS tier_items_secrets
+            ON tier_items (provider, account_scope, conversation_key, provider_item_id)
+            WHERE metadata_tier = 'secrets' OR content_tier = 'secrets';
         `);
       },
     },
