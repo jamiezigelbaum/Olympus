@@ -18734,6 +18734,38 @@ class TierLedger {
       scrubRevision: this.secretScrubRevision(identity)
     }))();
   }
+  unsettledSecretSideStores(limit = 100) {
+    const rows = this.db.query(`
+      SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+      FROM tier_items i
+      LEFT JOIN secret_side_store_scrubs s
+        ON s.provider = i.provider AND s.account_scope = i.account_scope
+        AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
+      WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
+        AND (s.cleared_generation IS NULL OR s.cleared_generation < i.generation)
+        AND NOT EXISTS (
+          SELECT 1 FROM secret_side_store_debt d
+          WHERE d.provider = i.provider AND d.account_scope = i.account_scope
+            AND d.conversation_key = i.conversation_key AND d.provider_item_id = i.provider_item_id
+        )
+      LIMIT ?
+    `).all(Math.max(1, Math.min(limit, 1000)));
+    return rows.map((row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+    }));
+  }
+  markSecretSideStoresCleared(identity) {
+    this.db.query(`
+      INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision, cleared_generation)
+      VALUES (?, ?, ?, ?, 0, (SELECT generation FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?))
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
+      DO UPDATE SET cleared_generation = excluded.cleared_generation
+    `).run(...idParams(identity), ...idParams(identity));
+  }
   noteJobLedgerPaths(paths) {
     const now = this.now().toISOString();
     this.db.transaction(() => {
@@ -20388,16 +20420,10 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 7,
       name: "secret_side_store_scrubs",
       up(db) {
         db.exec(`
-          -- The extraction job ledgers the worker has open, noted each tier
-          -- tick, so another process (the tier set command) clears them too.
-          CREATE TABLE IF NOT EXISTS known_job_ledgers (
-            path TEXT PRIMARY KEY,
-            seen_at TEXT NOT NULL
-          );
           CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,
@@ -20408,10 +20434,26 @@ function tierLedgerMigrations() {
           );
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "secret_side_stores_settled",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS known_job_ledgers (
+            path TEXT PRIMARY KEY,
+            seen_at TEXT NOT NULL
+          );
+          ALTER TABLE secret_side_store_scrubs ADD COLUMN cleared_generation INTEGER;
+          CREATE INDEX IF NOT EXISTS tier_items_secrets
+            ON tier_items (provider, account_scope, conversation_key, provider_item_id)
+            WHERE metadata_tier = 'secrets' OR content_tier = 'secrets';
+        `);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 7, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 8, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -24218,13 +24260,14 @@ function forgetSecretInSideStores(options) {
       owedJobLedgers.push(jobsPath);
     }
   }
-  if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
-    ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
-  } else {
-    try {
+  try {
+    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker)
+      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
+    else {
       ledger.clearSecretSideStoreDebt(identity, jobLedgers);
-    } catch {}
-  }
+      ledger.markSecretSideStoresCleared(identity);
+    }
+  } catch {}
   if (result.failed > 0)
     console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
   return result;
@@ -24236,11 +24279,18 @@ function retrySecretSideStoreDebts(ledger, limit = 100) {
   let cleared = 0;
   for (const identity of ledger.secretSideStoreDebts(limit)) {
     const { jobLedgerPaths, ...item } = identity;
-    try {
-      const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
-      if (result.failed === 0 && result.notDurable === 0)
-        cleared += 1;
-    } catch {}
+    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
+    if (result.failed === 0 && result.notDurable === 0)
+      cleared += 1;
+  }
+  let unsettled = [];
+  try {
+    unsettled = ledger.unsettledSecretSideStores(limit);
+  } catch {}
+  for (const identity of unsettled) {
+    const result = forgetSecretInSideStores({ ledger, identity });
+    if (result.failed === 0 && result.notDurable === 0)
+      cleared += 1;
   }
   return cleared;
 }
