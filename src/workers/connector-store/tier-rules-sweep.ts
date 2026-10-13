@@ -36,11 +36,13 @@ import {
 } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
+  type TierCopy,
   type TierLedgerIdentity,
   type TierLedgerRecord,
 } from '../classification/tier-ledger.ts';
 import type { SourceClassificationSignals } from '../../core/contracts.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
+import { leastPrivateDomain } from './tier-override-settle.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -162,7 +164,7 @@ export function sweepOwnerRuleRaises(options: { set: TieredStoreSet; limit?: num
   return report;
 }
 
-/** What raising one routed item did. `deferred`: a move in flight holds it, so the rule could not act yet. */
+/** What raising one routed item did. `deferred`: the rule could not be judged or acted on yet; try again. */
 type RaiseOutcome = 'raised' | 'secrets' | 'unchanged' | 'deferred';
 
 /**
@@ -170,6 +172,14 @@ type RaiseOutcome = 'raised' | 'secrets' | 'unchanged' | 'deferred';
  * acts (nothing is ever lowered here), an owner override or a Secrets row is
  * left alone, and `extraSignals` carries facts the store does not keep (a
  * provider's labels for the item).
+ *
+ * A move in flight does not exempt an item: its names are read from whichever
+ * copy is stored (a raise that hid its sources leaves them in their stores),
+ * and the move is made safe in one ledger write (`queueOwnerRaise`): a move
+ * toward tiers below the rule's is retargeted, and a copy still served below
+ * the rule's tier (a move queued without hiding) is hidden. Secrets outrank
+ * any move. `deferred` is returned only when the rule could not be judged or
+ * acted on now: names that cannot be read back from an item that has copies.
  */
 function raiseRoutedItem(
   set: TieredStoreSet,
@@ -181,26 +191,24 @@ function raiseRoutedItem(
   if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') return 'unchanged';
   const identity = identityOf(record);
   if (set.ledger.getOverride(identity)) return 'unchanged';
-  const current = set.ledger.copies(identity).filter((copy) => copy.state === 'current');
-  const names = copyServingLayer(current, 'metadata');
-  const domain = names ? set.domainForCorpus(names.corpusId) : undefined;
-  const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+  const copies = set.ledger.copies(identity);
+  const exported = storedCopyOf(set, identity, copies);
   const signals: SourceClassificationSignals = { ...(exported ? storedSignals(exported) : {}), ...extraSignals };
   const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
+  if (!exported) {
+    // Names that cannot be read back: an item with copies is retried unless
+    // every rule is a label rule the provider's labels already ruled out; one
+    // with no copy at all is not searchable.
+    if (copies.length === 0) return 'unchanged';
+    return matched.length > 0 || rules.some((rule) => !isLabelRule(rule)) ? 'deferred' : 'unchanged';
+  }
   if (matched.length === 0) return 'unchanged';
   const ruleTier = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
-  // A move in flight keeps its own decision: one already heading to this tier
-  // is hidden and needs nothing; one heading elsewhere is raised once it lands.
-  if (record.state === 'moving') {
-    const heading = maxTier(record.metadataTier, record.targetMetadataTier ?? record.metadataTier);
-    return tierRank(heading) >= tierRank(ruleTier) ? 'unchanged' : 'deferred';
-  }
-  // Names that cannot be read back: an item still served somewhere is retried,
-  // one with no current copy is not searchable at all.
-  if (!exported) return current.length > 0 ? 'deferred' : 'unchanged';
   const metadataTier = maxTier(record.metadataTier, ruleTier);
-  // Only a raise acts here; content is never below the names.
-  if (tierRank(metadataTier) <= tierRank(record.metadataTier)) return 'unchanged';
+  const moving = record.state === 'moving';
+  // Only a raise acts here; content is never below the names. A move in
+  // flight is judged by where it is going and what is served meanwhile.
+  if (!moving && tierRank(metadataTier) <= tierRank(record.metadataTier)) return 'unchanged';
   // The names' reason codes exactly as a listing states them.
   const classified = classifyItemTiers(
     { signals, provider: record.provider, subject: identity },
@@ -231,12 +239,40 @@ function raiseRoutedItem(
     snifferId: classified.snifferId,
   };
   if (metadataTier === 'secrets') {
+    // Secrets hide every copy, a move in flight included.
     return settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] })
       ? 'secrets'
       : 'unchanged';
   }
+  if (moving) {
+    return set.ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision)) === 'none'
+      ? 'unchanged'
+      : 'raised';
+  }
   set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
   return 'raised';
+}
+
+/**
+ * The item's stored copy for its names: the copy serving them, else any other
+ * (a raise in flight hides its sources but leaves them in their stores).
+ */
+function storedCopyOf(
+  set: TieredStoreSet,
+  identity: TierLedgerIdentity,
+  copies: readonly TierCopy[],
+): ConnectorStoreItemCopy | undefined {
+  const names = copyServingLayer(copies.filter((copy) => copy.state === 'current'), 'metadata');
+  const ordered = [
+    ...(names ? [names] : []),
+    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === 'current') - Number(left.state === 'current')),
+  ];
+  for (const copy of ordered) {
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (exported) return exported;
+  }
+  return undefined;
 }
 
 /** A provider's answer to "which of your items carry this label". */
@@ -273,10 +309,15 @@ export interface LabelRuleSweepReport {
 }
 
 interface LabelSweepState {
-  /** Label rules every labelled stored item was raised for. */
+  /** Label rules every labelled stored item was raised for (and, at the last recheck, still is). */
   done: string[];
-  /** A walk in progress: the rule, the provider page to resume at, and whether a move in flight held an item back. */
-  walk?: { rule: string; pageToken: string; deferred?: boolean } | undefined;
+  /**
+   * Walks in progress, one per rule: the provider page to resume at, and
+   * whether an item the rule could not act on yet was seen earlier in the walk.
+   * Kept for applied rules too, so a recheck of a large label covers it over
+   * successive runs instead of re-reading its first pages every time.
+   */
+  walks?: Record<string, { pageToken: string; deferred?: boolean }> | undefined;
 }
 
 /**
@@ -287,14 +328,16 @@ interface LabelSweepState {
  * after the mail was stored would otherwise never see it applied.
  *
  * A rule is recorded as applied only after the provider answered every page
- * and every stored item it named was raised or already at or above the rule's
- * tier; a failure leaves it pending and the next call retries (resuming at the
- * last page read). Progress is kept per provider account in the set ledger.
- * Items stored from here on are classified with their labels at listing.
+ * and every stored item it named was raised or already safe; a failure leaves
+ * it pending and the next call retries (resuming at the last page read).
+ * Progress is kept per provider account in the set ledger. Items stored from
+ * here on are classified with their labels at listing.
  *
  * `recheck` also walks the rules already applied (a label can be put on stored
- * mail later): it resumes and records nothing for them, but a stored item it
- * cannot raise yet makes that rule pending again.
+ * mail later). A walk that does not finish (the page bound, a provider
+ * failure) or that leaves an item the rule could not act on makes that rule
+ * pending again, so it is retried and reported until a walk finishes clean;
+ * its page is kept, so the next recheck carries on from there.
  */
 export async function sweepLabelRuleRaises(options: {
   set: TieredStoreSet;
@@ -321,26 +364,31 @@ export async function sweepLabelRuleRaises(options: {
   const stored = readLabelState(written);
   // A removed rule is forgotten, so adding it back sweeps again.
   const done = new Set(stored.done.filter((key) => keyed.has(key)));
-  let walk = stored.walk && keyed.has(stored.walk.rule) && !done.has(stored.walk.rule) ? stored.walk : undefined;
+  const walks = new Map(Object.entries(stored.walks ?? {}).filter(([key]) => keyed.has(key)));
   const save = () => {
-    const state: LabelSweepState = { done: [...done].sort(), ...(walk ? { walk } : {}) };
+    const state: LabelSweepState = {
+      done: [...done].sort(),
+      ...(walks.size > 0 ? { walks: Object.fromEntries([...walks].sort(([left], [right]) => (left < right ? -1 : 1))) } : {}),
+    };
     const next = JSON.stringify(state);
-    if (next === written || (written === undefined && done.size === 0 && !walk)) return;
+    if (next === written || (written === undefined && done.size === 0 && walks.size === 0)) return;
     ledger.writeMeta(metaKey, next);
     written = next;
   };
-  const queue = [...keyed.keys()].filter((key) => options.recheck === true || !done.has(key)).sort();
+  // Rules still pending first, then (on a recheck) the applied ones.
+  const queue = [...keyed.keys()]
+    .filter((key) => options.recheck === true || !done.has(key))
+    .sort((left, right) => Number(done.has(left)) - Number(done.has(right)) || (left < right ? -1 : 1));
   let pagesLeft = Math.max(1, options.maxPages ?? DEFAULT_LABEL_SWEEP_PAGES);
-  try {
-    for (const key of queue) {
-      if (pagesLeft <= 0) break;
-      const rule = keyed.get(key)!;
-      const wasPending = !done.has(key);
-      const resumed = wasPending && walk?.rule === key ? walk : undefined;
-      let pageToken = resumed?.pageToken;
-      let deferred = resumed?.deferred === true;
-      report.rules += 1;
-      let finished = false;
+  for (const key of queue) {
+    if (pagesLeft <= 0) break;
+    const rule = keyed.get(key)!;
+    const resumed = walks.get(key);
+    let pageToken = resumed?.pageToken;
+    let deferred = resumed?.deferred === true;
+    report.rules += 1;
+    let finished = false;
+    try {
       let firstPage = true;
       while (pagesLeft > 0) {
         pagesLeft -= 1;
@@ -350,7 +398,7 @@ export async function sweepLabelRuleRaises(options: {
         } catch (error) {
           // A refused resume token restarts the walk; any other failure keeps
           // the last good page so the next call picks up there.
-          if (error instanceof LabelPageRejectedError && firstPage && resumed) walk = undefined;
+          if (error instanceof LabelPageRejectedError && firstPage && resumed) walks.delete(key);
           throw error;
         }
         firstPage = false;
@@ -366,21 +414,24 @@ export async function sweepLabelRuleRaises(options: {
           finished = true;
           break;
         }
-        if (wasPending) {
-          walk = { rule: key, pageToken, ...(deferred ? { deferred: true } : {}) };
-          save();
-        }
+        walks.set(key, { pageToken, ...(deferred ? { deferred: true } : {}) });
+        save();
       }
-      if (!finished) break;
-      // Every page answered. An item a move in flight held back keeps the rule
-      // pending: the next call walks it again once the move has landed.
-      if (deferred) done.delete(key);
-      else done.add(key);
-      if (walk?.rule === key) walk = undefined;
-      save();
+    } catch {
+      // The provider could not answer: the rule is not (or no longer) applied,
+      // the last page stays saved, and the next call retries.
     }
-  } catch {
-    // The provider could not answer: the rule stays pending and the next call retries.
+    if (!finished) {
+      done.delete(key);
+      save();
+      break;
+    }
+    // Every page answered. An item the rule could not act on yet (a move it
+    // could not settle) keeps the rule pending: the next call walks it again.
+    if (deferred) done.delete(key);
+    else done.add(key);
+    walks.delete(key);
+    save();
   }
   save();
   report.pending = [...keyed.keys()].filter((key) => !done.has(key)).length;
@@ -407,13 +458,19 @@ function raiseLabelled(
 function readLabelState(raw: string | undefined): LabelSweepState {
   if (!raw) return { done: [] };
   try {
-    const parsed = JSON.parse(raw) as Partial<LabelSweepState>;
-    const walk = parsed.walk;
+    const parsed = JSON.parse(raw) as { done?: unknown; walks?: unknown };
+    const walks: Record<string, { pageToken: string; deferred?: boolean }> = {};
+    if (parsed.walks && typeof parsed.walks === 'object' && !Array.isArray(parsed.walks)) {
+      for (const [key, walk] of Object.entries(parsed.walks as Record<string, unknown>)) {
+        const entry = walk as { pageToken?: unknown; deferred?: unknown } | null;
+        if (entry && typeof entry.pageToken === 'string' && entry.pageToken) {
+          walks[key] = { pageToken: entry.pageToken, ...(entry.deferred === true ? { deferred: true } : {}) };
+        }
+      }
+    }
     return {
       done: Array.isArray(parsed.done) ? parsed.done.filter((key): key is string => typeof key === 'string') : [],
-      ...(walk && typeof walk.rule === 'string' && typeof walk.pageToken === 'string'
-        ? { walk: { rule: walk.rule, pageToken: walk.pageToken, ...(walk.deferred === true ? { deferred: true } : {}) } }
-        : {}),
+      ...(Object.keys(walks).length > 0 ? { walks } : {}),
     };
   } catch {
     return { done: [] };
@@ -467,25 +524,38 @@ function storedSignals(copy: ConnectorStoreItemCopy): SourceClassificationSignal
 function readState(raw: string | undefined): SweepState {
   if (!raw) return { done: [] };
   try {
-    const parsed = JSON.parse(raw) as Partial<SweepState>;
-    const pending = parsed.pending;
+    const parsed = JSON.parse(raw) as { done?: unknown; pending?: unknown };
+    const pending = parsePending(parsed.pending);
     return {
       done: Array.isArray(parsed.done) ? parsed.done.filter((key): key is string => typeof key === 'string') : [],
-      ...(pending && Array.isArray(pending.rules)
-        ? {
-            pending: {
-              rules: pending.rules,
-              ...(pending.after ? { after: pending.after } : {}),
-              ...(Array.isArray(pending.held) ? { held: pending.held.filter(isIdentity) } : {}),
-              ...(pending.retry === true ? { retry: true } : {}),
-              ...(pending.overflow === true ? { overflow: true } : {}),
-            },
-          }
-        : {}),
+      ...(pending ? { pending } : {}),
     };
   } catch {
     return { done: [] };
   }
+}
+
+/**
+ * A pass in progress, or undefined when what was saved cannot be trusted (the
+ * pass then starts over): a retry pass retries what it held, so one with
+ * nothing held is not a pass that finished.
+ */
+function parsePending(value: unknown): SweepState['pending'] | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const pending = value as { rules?: unknown; after?: unknown; held?: unknown; retry?: unknown; overflow?: unknown };
+  if (!Array.isArray(pending.rules) || !pending.rules.every((key) => typeof key === 'string')) return undefined;
+  if (pending.after !== undefined && !isIdentity(pending.after)) return undefined;
+  if (pending.held !== undefined && (!Array.isArray(pending.held) || !pending.held.every(isIdentity))) return undefined;
+  if (pending.retry !== undefined && pending.retry !== true) return undefined;
+  if (pending.overflow !== undefined && pending.overflow !== true) return undefined;
+  if (pending.retry === true && (!Array.isArray(pending.held) || pending.held.length === 0)) return undefined;
+  return {
+    rules: pending.rules as string[],
+    ...(pending.after ? { after: pending.after as TierLedgerIdentity } : {}),
+    ...(pending.held ? { held: pending.held as TierLedgerIdentity[] } : {}),
+    ...(pending.retry === true ? { retry: true } : {}),
+    ...(pending.overflow === true ? { overflow: true } : {}),
+  };
 }
 
 function isIdentity(value: unknown): value is TierLedgerIdentity {

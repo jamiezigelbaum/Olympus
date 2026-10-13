@@ -1583,7 +1583,8 @@ export class TierLedger {
   /**
    * An owner per-item override that RAISES a routed item, applied at once by
    * `olympus tier set` (a process that does not hold the item's tiered store
-   * set) and by the set's override pass. In ONE write:
+   * set) and by the set's override pass; an owner RULE that newly matches an
+   * item mid-move (tier-rules-sweep.ts) is raised the same way. In ONE write:
    *
    * - Not moving: when any layer is served from a store less private than
    *   `trustDomain` (the override tier's store), every current copy is hidden
@@ -1607,7 +1608,7 @@ export class TierLedger {
     trustDomain: SourceTrustDomain,
     options: { guard?: TierOwnerOverrideGuard } = {},
   ): TierOwnerRaiseOutcome {
-    if (decision.decidedBy !== 'override') throw new Error('Only an owner override is queued this way.');
+    if (decision.decidedBy !== 'override' && decision.decidedBy !== 'owner_rule') throw new Error('Only an owner override or owner rule is queued this way.');
     if (!(trustDomain in TRUST_DOMAIN_RANK)) throw new Error(`Unknown trust domain "${trustDomain}".`);
     let result: TierOwnerRaiseOutcome = 'none';
     this.db.transaction(() => {

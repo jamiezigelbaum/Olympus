@@ -11103,17 +11103,18 @@ var init_tier_rejudge = __esm(() => {
   init_tier_ledger();
 });
 
-// src/workers/connector-store/tier-rules-sweep.ts
-var init_tier_rules_sweep = __esm(() => {
+// src/workers/connector-store/tier-override-settle.ts
+var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_tier_rejudge();
 });
 
-// src/workers/connector-store/tier-override-settle.ts
-var init_tier_override_settle = __esm(() => {
+// src/workers/connector-store/tier-rules-sweep.ts
+var init_tier_rules_sweep = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_tier_override_settle();
   init_tier_rejudge();
 });
 

@@ -5,6 +5,7 @@
 // Personal and kept reaching ChatGPT. Now the Gmail lane asks Gmail which
 // messages carry the label and raises the stored ones (hidden first), and the
 // rule counts as applied only after Gmail answered every page.
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ import {
   configureInstalledTierClassification,
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
-import type { OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, type OwnerTierRule, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import {
   createConnectorStoreContentProvider,
@@ -429,23 +430,6 @@ describe('the label pass itself', () => {
     expect(lane.ledger.getCurrent(identity('b'))).toMatchObject({ state: 'moving' });
   });
 
-  test('a message whose move is in flight keeps the rule pending until it can be raised', async () => {
-    const lane = await pagedLane(['a']);
-    setRules([rule]);
-    const set = lane.tierSet;
-    const record = lane.ledger.getCurrent(identity('a'))!;
-    // An automatic move toward Personal is in flight (as a lowering migration would leave it).
-    lane.ledger.beginMove(identity('a'), { metadataTier: 'private', contentTier: 'private' }, record.generation);
-    const source = { listLabelled: async () => ({ ids: ['a'] }) };
-
-    expect(await sweepLabelRuleRaises({ set, provider: 'gmail', accountScope: ACCOUNT, source })).toMatchObject({ raised: 0, pending: 1 });
-    expect(lane.ledger.readMeta(LABEL_STATE_KEY) ?? '').not.toContain('"done":["');
-
-    // The move is called off (it would only have kept the item Personal); the next pass raises it.
-    lane.ledger.abandonMove(identity('a'), { expectedGeneration: record.generation });
-    expect(await sweepLabelRuleRaises({ set, provider: 'gmail', accountScope: ACCOUNT, source })).toMatchObject({ raised: 1, pending: 0 });
-  });
-
   test('a fresh database with no mail and no saved state applies the rule cleanly, and bad saved state starts over', async () => {
     const lane = openLane(fakeGmail([]));
     setRules([rule]);
@@ -479,32 +463,177 @@ describe('the label pass itself', () => {
   });
 });
 
+/** The decision a sniffer or migration would record for an item, to queue a move without a listing. */
+function movingTo(tier: 'private' | 'secure'): TierDecision {
+  return {
+    ...classifyItemTiers({ signals: { title: 'x' }, text: 'x' }),
+    metadataTier: tier,
+    contentTier: tier,
+    decidedBy: 'sniffer',
+    reasons: ['metadata:default:personal', 'content:sniffer'],
+    state: 'current',
+    contentPending: false,
+    metadataPending: false,
+  };
+}
+
+const orchardSender: OwnerTierRule = {
+  id: 'owner-sender-orchard', source: 'gmail', match: { kind: 'sender', value: '@orchard.example' }, tier: 'secure', strength: 'force',
+};
+
+const orchardMail = (id: string, subject: string, body: string, labels = ['INBOX']) =>
+  message(id, { subject, body, labels, from: 'Pat <pat@orchard.example>' });
+
+describe('a move in flight does not exempt an item from a rule', () => {
+  test('a raise queued without hiding is hidden by the label rule, not left served', async () => {
+    const { lane } = await ingestTwo();
+    // A re-judge on an install whose moves wait for the migration: heading to Private, the Personal copy still served.
+    const queued = lane.ledger.recordRoutedPlacement(identity('pruning'), movingTo('secure'), lane.tierSet.placementFor(movingTo('secure')), { queueWithoutHiding: true });
+    expect(queued.outcome).toBe('queued_move');
+    expect(await olympusSearch(lane, 'apple pruning cellar')).toContain('Pruning the apple trees');
+
+    saveLabelRule();
+    await lane.handler.pull({ max_items: 50 });
+
+    expect(lane.ledger.copies(identity('pruning')).filter((copy) => copy.state === 'current')).toEqual([]);
+    expect(await olympusSearch(lane, 'apple pruning cellar')).not.toContain('Pruning the apple trees');
+    expect(lane.ledger.getCurrent(identity('pruning'))).toMatchObject({ state: 'moving', targetMetadataTier: 'secure' });
+  });
+
+  test('a lowering move queued for Private mail is retargeted to the rule\'s tier', async () => {
+    const client = fakeGmail([orchardMail('fence', 'Orchard fence', 'Fence quote for the orchard.', ['INBOX', 'Label_7'])]);
+    const lane = openLane(client, { ownerRules: [orchardSender] });
+    await lane.handler.pull({ max_items: 50 });
+    expect(lane.ledger.getCurrent(identity('fence'))).toMatchObject({ state: 'current', metadataTier: 'secure' });
+    // A migration queues the mail to move down to Personal; it is still Private today.
+    const queued = lane.ledger.recordRoutedPlacement(identity('fence'), movingTo('private'), lane.tierSet.placementFor(movingTo('private')));
+    expect(queued.outcome).toBe('queued_move');
+    expect(lane.ledger.getCurrent(identity('fence'))).toMatchObject({ state: 'moving', targetMetadataTier: 'private' });
+
+    saveLabelRule();
+    await lane.handler.pull({ max_items: 50 });
+
+    expect(lane.ledger.getCurrent(identity('fence'))).toMatchObject({ state: 'moving', targetMetadataTier: 'secure', targetContentTier: 'secure', decidedBy: 'owner_rule' });
+  });
+
+  test('a stored-names rule reads the names of a hidden item, so a Secrets rule still reaches mail on its way to Private', async () => {
+    const client = fakeGmail([orchardMail('fence', 'Orchard fence', 'Fence quote for the orchard cellar.')]);
+    const lane = openLane(client);
+    await lane.handler.pull({ max_items: 50 });
+    writeOwnerTierRules([orchardSender], { env });
+    expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ raised: 1, complete: true });
+    // Hidden first, on its way to Private: no copy is served, so its names cannot be read from one.
+    expect(lane.ledger.getCurrent(identity('fence'))).toMatchObject({ state: 'moving', targetMetadataTier: 'secure' });
+    expect(lane.ledger.copies(identity('fence')).filter((copy) => copy.state === 'current')).toEqual([]);
+
+    writeOwnerTierRules([orchardSender, { ...orchardSender, id: 'owner-sender-orchard-secrets', tier: 'secrets' }], { env });
+    expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ secrets: 1, complete: true });
+    expect(lane.ledger.getCurrent(identity('fence'))).toMatchObject({ contentTier: 'secrets' });
+    expect(await olympusSearch(lane, 'orchard fence cellar')).not.toContain('Fence quote');
+  });
+});
+
 describe('the stored-names pass is honest about what it skipped', () => {
-  test('an item whose move is in flight keeps the rule pending (only it is retried) until the rule can act on it', async () => {
+  test('an item the rule could not be judged on keeps the rule pending (only it is retried) until it can be', async () => {
     const client = fakeGmail([
-      message('first', { subject: 'Orchard fence', body: 'Fence quote for the orchard.', labels: ['INBOX'], from: 'Pat <pat@orchard.example>' }),
-      message('second', { subject: 'Orchard gate', body: 'Gate quote for the orchard.', labels: ['INBOX'], from: 'Pat <pat@orchard.example>' }),
+      orchardMail('first', 'Orchard fence', 'Fence quote for the orchard.'),
+      orchardMail('second', 'Orchard gate', 'Gate quote for the orchard.'),
       message('other', { subject: 'Watering rota', body: 'Watering the roses.', labels: ['INBOX'], from: 'Sam <sam@example.com>' }),
     ]);
     const lane = openLane(client);
     await lane.handler.pull({ max_items: 50 });
-    // A move toward Personal is in flight for one of the two matching messages.
-    const first = lane.ledger.getCurrent(identity('first'))!;
-    lane.ledger.beginMove(identity('first'), { metadataTier: 'private', contentTier: 'private' }, first.generation);
-    writeOwnerTierRules([{ id: 'owner-sender-orchard', source: 'gmail', match: { kind: 'sender', value: '@orchard.example' }, tier: 'secure', strength: 'force' }], { env });
+    // A routed item whose copy the store no longer holds: its names cannot be read, so no rule can be judged on it.
+    const ghost = { provider: 'gmail', accountScope: ACCOUNT, providerItemId: 'ghost', family: 'email' as const };
+    lane.ledger.recordRoutedPlacement(ghost, movingTo('private'), lane.tierSet.placementFor(movingTo('private')));
+    writeOwnerTierRules([orchardSender], { env });
 
-    // The other match is raised; the held one is not, and the rule is not done.
-    expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ scanned: 3, raised: 1, complete: false });
-    expect(lane.ledger.getCurrent(identity('second'))).toMatchObject({ state: 'moving', targetMetadataTier: 'secure', decidedBy: 'owner_rule' });
+    // The matches are raised; the unreadable one is not, and the rule is not done.
+    expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ scanned: 4, raised: 2, complete: false });
     expect(JSON.parse(lane.ledger.readMeta('owner_rules_sweep')!).done).toEqual([]);
-    // Retried alone, and still held while the move is in flight.
+    // Retried alone, and still held.
     expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ scanned: 1, raised: 0, complete: false });
 
-    lane.ledger.abandonMove(identity('first'), { expectedGeneration: first.generation });
-    expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ scanned: 1, raised: 1, complete: true });
-    expect(lane.ledger.getCurrent(identity('first'))).toMatchObject({ state: 'moving', targetMetadataTier: 'secure', decidedBy: 'owner_rule' });
+    // Once it has no copy at all it is no longer searchable, and the rule can be recorded.
+    lane.ledger.removeCopies(ghost);
+    expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ scanned: 1, complete: true });
     expect(JSON.parse(lane.ledger.readMeta('owner_rules_sweep')!).done).toHaveLength(1);
     expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ scanned: 0, complete: true });
     expect(lane.ledger.getCurrent(identity('other'))).toMatchObject({ state: 'current' });
+  });
+
+  test.each([
+    ['a malformed held identity', { rules: 'KEYS', retry: true, held: [{ provider: 7 }] }],
+    ['a retry with nothing to retry', { rules: 'KEYS', retry: true }],
+    ['a retry with an empty list', { rules: 'KEYS', retry: true, held: [] }],
+  ] as const)('saved progress with %s starts the pass over instead of finishing it unscanned', async (_name, saved) => {
+    const client = fakeGmail([orchardMail('first', 'Orchard fence', 'Fence quote for the orchard.')]);
+    const lane = openLane(client);
+    await lane.handler.pull({ max_items: 50 });
+    writeOwnerTierRules([orchardSender], { env });
+    const key = createHash('sha256')
+      .update(JSON.stringify([orchardSender.id, orchardSender.source ?? '', orchardSender.match.kind, orchardSender.match.value, orchardSender.tier, orchardSender.strength]))
+      .digest('hex')
+      .slice(0, 24);
+    lane.ledger.writeMeta('owner_rules_sweep', JSON.stringify({ done: [], pending: { ...saved, rules: [key] } }));
+
+    expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ scanned: 1, raised: 1, complete: true });
+    expect(lane.ledger.getCurrent(identity('first'))).toMatchObject({ state: 'moving', decidedBy: 'owner_rule' });
+  });
+});
+
+describe('rechecking a rule that was already applied', () => {
+  const rule: OwnerTierRule = { id: 'owner-label-seven', source: 'gmail', match: { kind: 'label', value: 'Label_7' }, tier: 'secure', strength: 'force' };
+
+  /** A label of one id per page, whose members can change between runs. */
+  function pagedLabel(members: () => string[], requested: Array<string | undefined>) {
+    return {
+      async listLabelled(_label: string, page: { pageToken?: string }) {
+        requested.push(page.pageToken);
+        const ids = members();
+        const at = page.pageToken ? Number(page.pageToken) : 0;
+        return { ids: [ids[at]!], ...(at + 1 < ids.length ? { nextPageToken: String(at + 1) } : {}) };
+      },
+    };
+  }
+
+  test('a large label is covered over successive rechecks, not its first pages every time', async () => {
+    const messages = ['a', 'b', 'c'].map((id) => message(id, { subject: `Note ${id}`, body: `Body of note ${id}.`, labels: ['INBOX'] }));
+    const lane = openLane(fakeGmail(messages));
+    await lane.handler.pull({ max_items: 50 });
+    writeOwnerTierRules([rule], { env });
+    let members = ['a'];
+    const requested: Array<string | undefined> = [];
+    const source = pagedLabel(() => members, requested);
+    const sweep = (recheck: boolean) => sweepLabelRuleRaises({ set: lane.tierSet, provider: 'gmail', accountScope: ACCOUNT, source, recheck, maxPages: 1 });
+
+    expect(await sweep(false)).toMatchObject({ raised: 1, pending: 0 });
+    // The owner later labels two more messages, past what one recheck reads.
+    members = ['a', 'b', 'c'];
+    expect(await sweep(true)).toMatchObject({ raised: 0, pending: 1 });
+    expect(await sweep(true)).toMatchObject({ raised: 1, pending: 1 });
+    expect(await sweep(true)).toMatchObject({ raised: 1, pending: 0 });
+
+    expect(requested).toEqual([undefined, undefined, '1', '2']);
+    expect(lane.ledger.getCurrent(identity('c'))).toMatchObject({ state: 'moving', decidedBy: 'owner_rule' });
+  });
+
+  test('a failed recheck makes the rule pending and reported again until a recheck succeeds', async () => {
+    const { client, lane } = await ingestTwo();
+    saveLabelRule();
+    const applied = await lane.handler.pull({ max_items: 50 });
+    expect(applied.receipt.warnings ?? []).not.toContain(GMAIL_LABEL_RULES_PENDING_WARNING);
+
+    client.failLabelListing = true;
+    const failed = await lane.handler.reconcile();
+    expect(failed.receipt.warnings).toContain(GMAIL_LABEL_RULES_PENDING_WARNING);
+    expect(JSON.parse(lane.ledger.readMeta(LABEL_STATE_KEY)!).done).toEqual([]);
+
+    // The pull retries it too, and keeps reporting while Gmail cannot answer.
+    expect((await lane.handler.pull({ max_items: 50 })).receipt.warnings).toContain(GMAIL_LABEL_RULES_PENDING_WARNING);
+
+    client.failLabelListing = false;
+    const recovered = await lane.handler.reconcile();
+    expect(recovered.receipt.warnings ?? []).not.toContain(GMAIL_LABEL_RULES_PENDING_WARNING);
+    expect(JSON.parse(lane.ledger.readMeta(LABEL_STATE_KEY)!).done).toHaveLength(1);
   });
 });
