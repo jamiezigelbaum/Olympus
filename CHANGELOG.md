@@ -21,7 +21,8 @@
   Olympus hid comes back.
 - **Model downloads use bounded memory.** The private and search models
   download in pieces and retry a dropped connection; the private model
-  resumes where it stopped.
+  resumes where it stopped when the server supports it, or safely restarts
+  from zero when it does not.
 - **No Public tier on any new install.** Every privacy posture now sets up
   Personal, Private and Secret only, on OpenClaw as on ChatGPT: anything
   that would have been Public is Personal. Installs made before 1.0 keep
