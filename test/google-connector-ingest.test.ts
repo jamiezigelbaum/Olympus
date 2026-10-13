@@ -50,12 +50,12 @@ describe('Google connector-store ingestion', () => {
     expect(client.listCalls).toBe(1);
     expect(client.getCalls).toEqual(['msg-plain', 'msg-therapy']);
 
-    // New messages are routed by their recorded tiers (P1b): the other leg
-    // skips each as routed elsewhere, not as a rejection.
+    // Cleared names are Personal even when the own-record body is held
+    // Private. The internal lane indexes both names, but only the plain body.
     expect(result.internal.itemsSeen).toBe(2);
-    expect(result.internal.itemsIndexed).toBe(1);
+    expect(result.internal.itemsIndexed).toBe(2);
     expect(result.internal.itemsRejected).toBe(0);
-    expect(result.internal.itemsRoutedElsewhere).toBe(1);
+    expect(result.internal.itemsRoutedElsewhere).toBe(0);
     expect(result.secure.itemsSeen).toBe(2);
     expect(result.secure.itemsIndexed).toBe(1);
     expect(result.secure.itemsRejected).toBe(0);
@@ -76,7 +76,8 @@ describe('Google connector-store ingestion', () => {
     await expect(secureStore.embedChunks({ provider: cloud })).rejects.toThrow('local/private');
     const embeddedText = cloud.embedCalls.flat().map((input) => `${input.title ?? ''}\n${input.text}`).join('\n');
     expect(embeddedText).toContain('Apollo launch plan');
-    expect(embeddedText).not.toContain('therapy');
+    expect(embeddedText).not.toContain('Patient: Morgan Example');
+    expect((await localContent(internalStore, 'personal:msg-therapy'))?.chunks).toEqual([]);
     internalStore.close();
     secureStore.close();
   });
@@ -109,13 +110,12 @@ describe('Google connector-store ingestion', () => {
     expect(client.listCalls).toBe(1);
     expect(client.contentCalls).toEqual(['file-plain', 'file-therapy', 'file-passwords']);
 
-    // New files are routed by their recorded tiers (P1b): each lands in its
-    // tier's store and the other legs skip it as routed elsewhere, not as a
-    // rejection. The Secret lands in no store at all (location only).
+    // Cleared names are Personal while the own-record body is Private.
+    // The Secret lands in no store at all (location only).
     expect(result.internal.itemsSeen).toBe(3);
-    expect(result.internal.itemsIndexed).toBe(1);
+    expect(result.internal.itemsIndexed).toBe(2);
     expect(result.internal.itemsRejected).toBe(0);
-    expect(result.internal.itemsRoutedElsewhere).toBe(2);
+    expect(result.internal.itemsRoutedElsewhere).toBe(1);
     expect(result.secure.itemsSeen).toBe(3);
     expect(result.secure.itemsIndexed).toBe(1);
     expect(result.secure.itemsRejected).toBe(0);
@@ -139,7 +139,9 @@ describe('Google connector-store ingestion', () => {
     await expect(secureStore.embedChunks({ provider: cloud })).rejects.toThrow('local/private');
     const embeddedText = cloud.embedCalls.flat().map((input) => `${input.title ?? ''}\n${input.text}`).join('\n');
     expect(embeddedText).toContain('Apollo roadmap');
+    expect(embeddedText).not.toContain('Patient: Morgan Example');
     expect(embeddedText).not.toContain('Therapy worksheet');
+    expect((await localContent(internalStore, 'personal:file-therapy'))?.chunks).toEqual([]);
     expect(embeddedText).not.toContain('password');
     internalStore.close();
     secureStore.close();
@@ -176,7 +178,7 @@ function fakeGmailClient(): GmailApiClient & { listCalls: number; getCalls: stri
         threadId: 'thread-therapy',
         subject: 'Therapy appointment',
         from: 'Clinic <care@example.com>',
-        body: 'Therapy appointment notes for next week.',
+        body: 'Patient: Morgan Example. Therapy appointment notes for next week.',
         labels: ['INBOX'],
       });
     },
@@ -192,7 +194,7 @@ type CountingDriveApiClient = GoogleDriveApiClient & {
 function fakeDriveClient(): CountingDriveApiClient {
   const text = new Map([
     ['file-plain', 'Apollo roadmap notes for the connector-store launch.'],
-    ['file-therapy', 'Therapy worksheet and private care notes.'],
+    ['file-therapy', 'Patient: Morgan Example. Therapy worksheet and private care notes.'],
     // A real secret in the text: the secret detector decides Secrets.
     ['file-passwords', 'account,username,password\nexample,alice,secret\n-----BEGIN RSA ' + 'PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'],
   ]);

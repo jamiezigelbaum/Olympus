@@ -32,6 +32,7 @@ import {
   type SnifferLane,
 } from '../src/workers/classification/sniffer-lane.ts';
 import { SnifferCallBudget, runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
+import { BUILT_IN_SNIFFER_LANE, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { classifyItemTiers, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
@@ -41,6 +42,7 @@ import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool
 // Built at runtime so the repository's credential-pattern check never sees a
 // literal key in the diff.
 const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+const STRUCTURED_METADATA_LABEL = 'SSN 123-45-6789';
 
 function approvalKey(lane: SnifferLane) {
   return { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
@@ -77,7 +79,7 @@ function spyModel(respond: (request: AnalystModelRequest, items: Array<Record<st
 
 /** Answers every item with the same verdict. */
 function verdictsFor(items: Array<Record<string, unknown>>, verdict: { tier: string; category: string; confidence: number }): string {
-  return JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ...verdict })) });
+  return JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ownRecord: ['health', 'therapy', 'financial', 'legal', 'identity'].includes(verdict.category), privateKind: ['health', 'therapy', 'financial', 'legal', 'identity'].includes(verdict.category) ? verdict.category : 'none', ...verdict })) });
 }
 
 function subject(n: number) {
@@ -85,10 +87,11 @@ function subject(n: number) {
 }
 
 /** Record a flagged, metadata-only item through the real classifier + cached sniffer. */
-function recordFlagged(ledger: TierLedger, store: TierSnifferStore, n: number, title: string): void {
+function recordFlagged(ledger: TierLedger, store: TierSnifferStore, n: number, title: string) {
   const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-  const decision = classifyItemTiers({ signals: { title }, subject: subject(n) }, { sniffer });
+  const decision = classifyItemTiers({ signals: { title, labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(n) }, { sniffer });
   ledger.recordDecision(subject(n), decision);
+  return decision;
 }
 
 describe('lane selection and refusal', () => {
@@ -160,14 +163,18 @@ describe('secrets are never sent', () => {
       const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
       const decision = classifyItemTiers({ signals: { title: 'bank letters', labels: [FAKE_AWS_KEY] }, subject: subject(1) }, { sniffer });
       ledger.recordDecision(subject(1), decision);
+      expect(decision).toMatchObject({ metadataTier: 'secrets', contentTier: 'secrets', state: 'current', metadataPending: false, contentPending: false });
       expect(store.counts().questions).toBe(0);
 
       // A question that somehow carries a secret (written directly) never leaves.
       recordFlagged(ledger, store, 2, 'lab results');
       store.enqueue({ subject: subject(2), pass: 'metadata', material: `lab results ${FAKE_AWS_KEY}`, mapRevision: 'none', flags: ['names:health'] });
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'health', confidence: 0.9 }));
-      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store, settleSecrets(question, decision) {
+        ledger.recordDecision(question, decision); return true;
+      } }], lane: LOCAL_LANE, model });
       expect(report.secretRefused).toBe(1);
+      for (const n of [1, 2]) expect(ledger.getCurrent(subject(n))).toMatchObject({ state: 'current', contentTier: 'secrets', metadataPending: false, contentPending: false });
       expect(model.requests.every((request) => !request.prompt.includes(FAKE_AWS_KEY))).toBe(true);
       expect(store.counts().questions).toBe(0);
     } finally {
@@ -213,7 +220,7 @@ describe('batching, cache and threshold', () => {
 
       // A re-sync of an unchanged item is decided synchronously from the cache.
       const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-      const again = classifyItemTiers({ signals: { title: 'therapy' }, subject: subject(0) }, { sniffer });
+      const again = classifyItemTiers({ signals: { title: 'therapy', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(0) }, { sniffer });
       expect(again.metadataPending).toBe(false);
       expect(again.reasons).toContain(`metadata:sniffer:${snifferId(LOCAL_LANE)}:ordinary:0.95`);
       expect(store.counts().questions).toBe(0);
@@ -241,20 +248,19 @@ describe('batching, cache and threshold', () => {
     }
   });
 
-  test('Personal needs confidence >= 0.9 and never covers a hard category', () => {
+  test('Personal needs confidence >= 0.9; topic alone does not override it', () => {
     expect(snifferTierKey({ tier: 'personal', category: 'ordinary', confidence: 0.89 })).toBe('secure');
     expect(snifferTierKey({ tier: 'personal', category: 'ordinary', confidence: 0.9 })).toBe('private');
     for (const category of ['health', 'therapy', 'financial', 'legal', 'identity']) {
-      expect(snifferTierKey({ tier: 'personal', category, confidence: 0.99 })).toBe('secure');
+      expect(snifferTierKey({ tier: 'personal', category, confidence: 0.99 })).toBe('private');
     }
     expect(snifferTierKey({ tier: 'private', category: 'ordinary', confidence: 0.1 })).toBe('secure');
   });
 
-  test('a Private verdict with a non-private category is Personal; fail-safe and other stay Private', () => {
-    // Calibration 2026-10-05: the built-in model paired "private" with "work"
-    // on ordinary project notes. The category the prompt defines decides.
+  test('a Private verdict stays Private regardless of topic', () => {
+    // A work topic cannot release a private record or owner-protected work matter.
     for (const category of ['work', 'reference', 'ordinary']) {
-      expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('private');
+      expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('secure');
     }
     for (const category of ['other', 'intimate', 'family', 'health', 'financial']) {
       expect(snifferTierKey({ tier: 'private', category, confidence: 0.95 })).toBe('secure');
@@ -274,7 +280,7 @@ describe('batching, cache and threshold', () => {
     ] }), expected);
     expect(parsed.size).toBe(0);
     expect(parseSnifferBatchResponse('not json', expected).size).toBe(0);
-    expect(parseSnifferBatchResponse('```json\n{"verdicts":[{"i":1,"tier":"private","category":"legal","confidence":0.8}]}\n```', expected).get(1)).toEqual({ tier: 'private', category: 'legal', confidence: 0.8 });
+    expect(parseSnifferBatchResponse('```json\n{"verdicts":[{"i":1,"tier":"private","category":"legal","confidence":0.8}]}\n```', expected).get(1)).toMatchObject({ tier: 'private', category: 'legal', confidence: 0.8 });
   });
 
   test('a Private answer in the model\'s own words is kept; a Personal one is not', () => {
@@ -284,8 +290,8 @@ describe('batching, cache and threshold', () => {
       { i: 2, tier: 'private', category: 'spiritual', confidence: 0.95 },
       { i: 3, tier: 'personal', category: 'spiritual', confidence: 0.95 },
     ] }), expected);
-    expect(parsed.get(1)).toEqual({ tier: 'private', category: 'financial', confidence: 0.95 });
-    expect(parsed.get(2)).toEqual({ tier: 'private', category: 'other', confidence: 0.95 });
+    expect(parsed.get(1)).toMatchObject({ tier: 'private', category: 'financial', confidence: 0.95 });
+    expect(parsed.get(2)).toMatchObject({ tier: 'private', category: 'other', confidence: 0.95 });
     expect(parsed.has(3)).toBe(false);
   });
 
@@ -335,7 +341,7 @@ describe('fail-safe behaviour', () => {
       expect(third.failSafePrivate).toBe(1);
       expect(ledger.getCurrent(subject(1))).toMatchObject({ metadataTier: 'secure', metadataPending: false });
       expect(ledger.getCurrent(subject(1))?.reasons).toContain(`metadata:sniffer:${snifferId(LOCAL_LANE)}:unresolved:0.00`);
-      const again = classifyItemTiers({ signals: { title: 'divorce papers' }, subject: subject(1) }, { sniffer: new CachedTierSniffer(store, LOCAL_LANE) });
+      const again = classifyItemTiers({ signals: { title: 'divorce papers', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(1) }, { sniffer: new CachedTierSniffer(store, LOCAL_LANE) });
       expect(again.metadataTier).toBe('secure');
     } finally {
       store.close();
@@ -347,7 +353,7 @@ describe('fail-safe behaviour', () => {
     const store = new TierSnifferStore({ dbPath: ':memory:' });
     store.close();
     const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-    const decision = classifyItemTiers({ signals: { title: 'bank' }, subject: subject(1) }, { sniffer });
+    const decision = classifyItemTiers({ signals: { title: 'bank', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(1) }, { sniffer });
     expect(decision.metadataPending).toBe(true);
     expect(decision.metadataTier).toBe('private');
   });
@@ -374,7 +380,7 @@ describe('fail-safe behaviour', () => {
     try {
       const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
       // Pass 1 flags the names; the text is read, so pass 2 asks about an excerpt too.
-      const decision = classifyItemTiers({ signals: { title: 'bank' }, text: 'Lunch plans for Saturday at noon.', subject: subject(1) }, { sniffer });
+      const decision = classifyItemTiers({ signals: { title: 'bank', labels: [STRUCTURED_METADATA_LABEL] }, text: 'Lunch plans for Saturday at noon.', subject: subject(1) }, { sniffer });
       ledger.recordDecision(subject(1), decision);
       expect(store.counts().byPass).toEqual({ metadata: 1, content: 1 });
       const model = spyModel((request, items) => request.prompt.includes('EXCERPT')
@@ -417,7 +423,7 @@ describe('work selection', () => {
     const store = new TierSnifferStore({ dbPath: ':memory:' });
     try {
       const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-      ledger.recordDecision(subject(1), classifyItemTiers({ signals: { title: 'divorce' }, text: 'Notes for Thursday.', subject: subject(1) }, { sniffer }));
+      ledger.recordDecision(subject(1), classifyItemTiers({ signals: { title: 'divorce', labels: [STRUCTURED_METADATA_LABEL] }, text: 'Notes for Thursday.', subject: subject(1) }, { sniffer }));
       expect(store.counts().byPass).toEqual({ metadata: 1, content: 1 });
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'legal', confidence: 0.95 }));
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
@@ -703,7 +709,7 @@ describe('bounds and the owner-approval gate', () => {
 
   test('the prompt version is derived from the prompt text, so an edit is a new version', () => {
     expect(SNIFFER_PROMPT_VERSION).toMatch(/^p-[0-9a-f]{12}$/);
-    expect(snifferId(LOCAL_LANE)).toBe(`local:${SNIFFER_PROMPT_VERSION}`);
+    expect(snifferId(LOCAL_LANE)).toStartWith(`local:${SNIFFER_PROMPT_VERSION}.m`);
   });
 });
 
@@ -723,8 +729,10 @@ describe('vocabulary-only detector hits (owner ruling 2026-10-01)', () => {
         subject: subject(1),
       }, { sniffer });
       ledger.recordDecision(subject(1), decision);
-      // Held: pending, waiting on the content question, not decided by the words.
-      expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true, contentTier: 'private' });
+      // Personal-first: usable while the content question waits; topic words do not hold it.
+      expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true, contentTier: 'private', metadataFlagged: false });
+      expect(ledger.getCurrent(subject(1))?.reasons).toContain('content:personal_first');
+      expect(store.counts().byPass).toEqual({ metadata: 0, content: 1 });
       const model = spyModel((_, items) => verdictsFor(items, verdict));
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
       expect(report.verdictsApplied).toBe(1);
@@ -741,8 +749,392 @@ describe('vocabulary-only detector hits (owner ruling 2026-10-01)', () => {
     expect(record).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
   });
 
-  test('a health category stays Private even when the model pairs it with personal', async () => {
+  test('an own health record stays Private even when the model pairs it with personal', async () => {
     const record = await judgedAs({ tier: 'personal', category: 'health', confidence: 0.95 });
     expect(record).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer' });
   });
+});
+
+
+describe('recent questions and bounded passes', () => {
+  test('a new item overtakes an old backlog, with priority first', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      for (let n = 1; n <= 12; n++) recordFlagged(ledger, store, n, `bank letter ${n}`);
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+      expect(model.requests[0]!.prompt).toContain('bank letter 12');
+      store.enqueue({ subject: subject(1), pass: 'metadata', material: 'bank urgent', flags: [], mapRevision: 'none', priority: 20 });
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+      expect(model.requests[1]!.prompt).toContain('bank urgent');
+    } finally { store.close(); ledger.close(); }
+  });
+
+  test('old questions progress despite a stream of newer high priority arrivals', async () => {
+    let clock = new Date('2026-01-01T00:00:00Z');
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:', now: () => clock });
+    try {
+      recordFlagged(ledger, store, 1, 'bank oldest');
+      clock = new Date('2026-01-01T02:00:00Z');
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+      for (let n = 2; n <= 7; n++) {
+        recordFlagged(ledger, store, n, `bank newer ${n}`);
+        store.enqueue({ subject: subject(n), pass: 'metadata', material: `bank newer ${n}`, flags: [], mapRevision: 'none', priority: 10 });
+        await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+      }
+      expect(model.requests[0]!.prompt).toContain('bank newer 2');
+      expect(model.requests.some(r => r.prompt.includes('bank oldest'))).toBe(true);
+    } finally { store.close(); ledger.close(); }
+  });
+
+  test('time bounds a pass instead of the old ten-call default, and reports call and wait time', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      for (let n = 1; n <= 15; n++) recordFlagged(ledger, store, n, `bank timing ${n}`);
+      let elapsed = 0;
+      const model = spyModel((_, items) => { elapsed += 100; return verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }); });
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, passTimeMs: 1200, monotonicNow: () => elapsed });
+      expect(report.calls).toBe(12);
+      expect(report.stoppedBy).toBe('pass_budget');
+      expect(report.callMs).toBe(1200);
+      expect(report.maxQueueWaitMs).toBeGreaterThanOrEqual(0);
+    } finally { store.close(); ledger.close(); }
+  });
+});
+
+test('aging also serves a quiet store while another store receives priority work', async () => {
+  let clock = new Date('2026-01-01T00:00:00Z');
+  const ledgers = [new TierLedger({ dbPath: ':memory:' }), new TierLedger({ dbPath: ':memory:' })];
+  const stores = [new TierSnifferStore({ dbPath: ':memory:', now: () => clock }), new TierSnifferStore({ dbPath: ':memory:', now: () => clock })];
+  try {
+    recordFlagged(ledgers[0]!, stores[0]!, 1, 'bank quiet oldest');
+    clock = new Date('2026-01-01T02:00:00Z');
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    for (let n = 2; n <= 7; n++) {
+      recordFlagged(ledgers[1]!, stores[1]!, n, `bank busy ${n}`);
+      stores[1]!.enqueue({ subject: subject(n), pass: 'metadata', material: `bank busy ${n}`, flags: [], mapRevision: 'none', priority: 10 });
+      await runSnifferPass({ targets: ledgers.map((ledger, i) => ({ ledger, sniffer: stores[i]! })), lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+    }
+    expect(model.requests.some(r => r.prompt.includes('bank quiet oldest'))).toBe(true);
+  } finally { stores.forEach(s => s.close()); ledgers.forEach(l => l.close()); }
+});
+
+test('independent move drain failures are contained and retried', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sniffer-move-retry-'));
+  const installed = new InstalledTierClassification({ env: {} });
+  const lines: string[] = [];
+  let attempts = 0;
+  const service = new TierSnifferService({
+    installed, lane: LOCAL_LANE, model: spyModel(() => ''), stores: () => [],
+    classificationLedgerPath: join(dir, 'classification.jsonl'),
+    modelAvailable: () => false, intervalMs: 5,
+    log: line => lines.push(line),
+    autoMoves: { embeddingLedgerPath: join(dir, 'embedding.jsonl'), localEmbeddingsOnly: () => {
+      attempts++;
+      if (attempts <= 2) throw new Error('synthetic failure');
+      return true;
+    } },
+  });
+  try {
+    service.start();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(attempts).toBeGreaterThan(2);
+    expect(lines.some(line => line.includes('move drain failed (Error)'))).toBe(true);
+  } finally { service.stop(); installed.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('completed passes continue without waiting for the idle timer', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sniffer-continuation-'));
+  const storePath = join(dir, 'items.sqlite');
+  const ledgerPath = `${storePath}.tier-ledger.sqlite`;
+  const ledger = new TierLedger({ dbPath: ledgerPath });
+  const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+  const queue = installed.snifferStoreForLedger(ledgerPath);
+  let calls = 0;
+  let resolveDone!: () => void;
+  const done = new Promise<void>(resolve => { resolveDone = resolve; });
+  const model = spyModel((_, items) => {
+    if (++calls === 12) resolveDone();
+    return verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 });
+  });
+  const classificationLedgerPath = join(dir, 'classification.jsonl');
+  await appendClassificationLedgerEntry(classificationLedgerPath, {
+    recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Synthetic fixture approval',
+    approved_by: 'owner', status: 'complete', model_id: LOCAL_LANE.modelId, lane: LOCAL_LANE.kind,
+    profile_id: LOCAL_LANE.profileId, prompt_version: SNIFFER_PROMPT_VERSION,
+  });
+  const service = new TierSnifferService({ installed, lane: LOCAL_LANE, model,
+    stores: () => [{ dbPath: storePath, tierSetBinding: () => ({ ledgerPath }) }], classificationLedgerPath,
+    intervalMs: 60_000, maxCallsPerPass: 1,
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    for (let n = 1; n <= 12; n++) recordFlagged(ledger, queue, n, `bank continuation ${n}`);
+    service.start();
+    await Promise.race([done, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('idle timer stalled work')), 2_000); })]);
+    expect(calls).toBe(12);
+    // Allow the final model result to settle before closing the fixture.
+    await new Promise(resolve => setTimeout(resolve, 5));
+  } finally { if (timeout) clearTimeout(timeout); service.stop(); installed.close(); ledger.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const pass of ['metadata', 'content'] as const) {
+  test(`a superseded ${pass} answer cannot settle or delete the newer question`, async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+      const classify = (version: string) => {
+        const decision = classifyItemTiers({
+          signals: { title: pass === 'metadata' ? `SSN 123-45-6789 ${version}` : 'Record' },
+          ...(pass === 'content' ? { text: `Patient name: Morgan Example. ${version}` } : {}),
+          subject: subject(1),
+        }, { sniffer });
+        ledger.recordDecision(subject(1), decision);
+      };
+      classify('old');
+      const model = spyModel((_, items) => {
+        classify('new private record');
+        return verdictsFor(items, { tier: 'personal', category: 'ordinary', confidence: 1 });
+      });
+      const result = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+      expect(result.verdictsApplied).toBe(0);
+      expect(ledger.getCurrent(subject(1))?.[pass === 'metadata' ? 'metadataPending' : 'contentPending']).toBe(true);
+      expect(store.questionFor(subject(1), pass)?.material).toContain('new private record');
+      const currentModel = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'health', confidence: 1 }));
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model: currentModel });
+      expect(currentModel.requests[0]!.prompt).toContain('new private record');
+      expect(ledger.getCurrent(subject(1))?.[pass === 'metadata' ? 'metadataTier' : 'contentTier']).toBe('secure');
+    } finally { store.close(); ledger.close(); }
+  });
+}
+
+test('a model revision changes cache and rejudge identity but preserves approval identity', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    const first = { ...LOCAL_LANE, modelId: 'built_in', cacheModelId: 'weights-sha256-a' };
+    const second = { ...first, cacheModelId: 'weights-sha256-b' };
+    const material = 'Ordinary reminder';
+    store.putVerdict({ materialHash: snifferMaterialHash('content', material), modelId: first.cacheModelId, promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+      { tier: 'personal', category: 'ordinary', confidence: 1, failSafe: false });
+    expect(new CachedTierSniffer(store, first).judge({ pass: 'content', material, flags: [] })).toMatchObject({ verdict: 'decided', tier: 'private' });
+    expect(new CachedTierSniffer(store, second).judge({ pass: 'content', material, flags: [] })).toEqual({ verdict: 'undecided' });
+    expect(new CachedTierSniffer(store, second).id).not.toBe(new CachedTierSniffer(store, first).id);
+    // The stable approval key remains unchanged across a weights update.
+    expect(approvalKey(second)).toEqual(approvalKey(first));
+    ledger.recordDecision(subject(1), { ...classifyItemTiers({ signals: {}, text: material }), contentPending: true, state: 'pending' });
+    store.enqueue({ subject: subject(1), pass: 'content', material, flags: [], mapRevision: 'none' });
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    const result = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: second, model });
+    expect(result).toMatchObject({ calls: 1, cacheHits: 0, resolvedPrivate: 1 });
+    expect(new CachedTierSniffer(store, second).judge({ pass: 'content', material, flags: [] })).toMatchObject({ verdict: 'decided', tier: 'secure' });
+  } finally { store.close(); ledger.close(); }
+});
+
+
+test('a built-in weights change cannot bypass an owner revocation', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sniffer-revision-'));
+  const installed = new InstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(dir, 'rules.json') } });
+  const model = spyModel(() => { throw new Error('revoked model must never run'); });
+  const ledgerPath = join(dir, 'approval.jsonl');
+  try {
+    await appendClassificationLedgerEntry(ledgerPath, {
+      recorded_at: new Date().toISOString(), kind: 'classifier_model_revoked', what: 'Owner declines local classification.',
+      model_id: 'built_in', lane: 'local', profile_id: 'built_in', prompt_version: 'older-prompt', approved_by: 'owner', status: 'complete',
+    });
+    for (const cacheModelId of ['model-a:revision-a:hash-a', 'model-b:revision-b:hash-b']) {
+      const runtime = resolveTierSnifferRuntime({ engine: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')),
+        builtIn: { model, available: () => true, cacheModelId } });
+      expect(runtime.source).toBe('built_in');
+      if (runtime.source !== 'built_in') throw new Error('missing built-in');
+      expect(runtime.lane).toMatchObject({ modelId: 'built_in', cacheModelId });
+      const service = new TierSnifferService({ installed, lane: runtime.lane, model, stores: () => [], classificationLedgerPath: ledgerPath, autoApproveBuiltIn: true });
+      try { expect(await service.runOnce()).toMatchObject({ state: 'awaiting_owner_approval', modelId: 'built_in' }); }
+      finally { service.stop(); }
+    }
+    expect(model.requests).toHaveLength(0);
+  } finally { installed.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a changed document tail invalidates an in-flight answer even when its excerpt is unchanged', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+    const classify = (suffix: string) => {
+      const decision = classifyItemTiers({ signals: { title: 'Record' },
+        text: `Patient name: Morgan Example. ${'Ordinary detail. '.repeat(300)}${suffix}`, subject: subject(1) }, { sniffer });
+      ledger.recordDecision(subject(1), decision);
+    };
+    classify('Revision A.');
+    const first = store.questionFor(subject(1), 'content')!;
+    const model = spyModel((_, items) => {
+      classify('Revision B.');
+      return verdictsFor(items, { tier: 'personal', category: 'ordinary', confidence: 1 });
+    });
+    const result = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 1 });
+    const next = store.questionFor(subject(1), 'content')!;
+    expect(next.material).toBe(first.material);
+    expect(next.materialHash).not.toBe(first.materialHash);
+    expect(result.verdictsApplied).toBe(0);
+    classify('Revision B.'); // The cached old answer cannot settle the new input either.
+    expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true });
+  } finally { store.close(); ledger.close(); }
+});
+
+
+test('encoded credential URLs are refused both before queueing and before model dispatch', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  const material = 'Open https://example.test/?%61ccess%5F%74oken=synthetic-credential';
+  try {
+    const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+    expect(sniffer.judge({ pass: 'content', subject: subject(1), material, flags: [], mapRevision: 'none' }))
+      .toMatchObject({ verdict: 'decided', tier: 'secrets' });
+    expect(store.counts().questions).toBe(0);
+    recordFlagged(ledger, store, 2, 'bank letter');
+    store.enqueue({ subject: subject(2), pass: 'metadata', material, flags: [], mapRevision: 'none' });
+    const model = spyModel(() => { throw new Error('must not dispatch'); });
+    let settled = 0;
+    const report = await runSnifferPass({ targets: [{ ledger, sniffer: store, settleSecrets(question, decision) {
+      settled++; ledger.recordDecision(question, decision); return true;
+    } }], lane: LOCAL_LANE, model });
+    expect(report.secretRefused).toBe(1);
+    expect(settled).toBe(1);
+    expect(model.requests).toEqual([]);
+    expect(store.counts().questions).toBe(0);
+  } finally { store.close(); ledger.close(); }
+});
+
+test('aging skips blocked moves on both sides of the oldest eligible question', async () => {
+  let clock = new Date('2026-01-01T00:00:00Z');
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:', now: () => clock });
+  try {
+    for (let n = 1; n <= 8; n++) {
+      recordFlagged(ledger, store, n, `bank age candidate ${n}`);
+      if (n !== 2 && n !== 7) ledger.beginMove(subject(n), { metadataTier: 'secure', contentTier: 'secure' }, ledger.getCurrent(subject(n))!.generation);
+      clock = new Date(clock.getTime() + 1000);
+    }
+    clock = new Date('2026-01-01T02:00:00Z');
+    for (let i = 0; i < 4; i++) store.recordDispatch();
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, pendingPageSize: 1, maxCallsPerPass: 1 });
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]!.prompt).toContain('bank age candidate 2');
+    expect(store.questionFor(subject(1), 'metadata')).toBeDefined();
+    expect(store.questionFor(subject(8), 'metadata')).toBeDefined();
+  } finally { store.close(); ledger.close(); }
+});
+
+
+for (const blocked of ['moving', 'unreadable'] as const)
+test(`a large ${blocked} backlog has bounded examination and still serves aged eligible work`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sniffer-scan-'));
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const dbPath = join(dir, 'queue.sqlite');
+  let clock = new Date('2026-01-01T00:00:00Z');
+  let store = new TierSnifferStore({ dbPath, now: () => clock });
+  try {
+    for (let n = 1; n <= 1200; n++) {
+      recordFlagged(ledger, store, n, `bank backlog ${n}`);
+      if (blocked === 'moving' && n !== 600 && n !== 601) ledger.beginMove(subject(n), { metadataTier: 'secure', contentTier: 'secure' }, ledger.getCurrent(subject(n))!.generation);
+      clock = new Date(clock.getTime() + 1000);
+    }
+    clock = new Date('2026-01-02T00:00:00Z');
+    for (let n = 0; n < 4; n++) store.recordDispatch();
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    for (let tick = 0; tick < 25 && model.requests.length < 2; tick++) {
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store, screenStoredQuestion: question =>
+        blocked === 'unreadable' && !['600', '601'].some(n => question.providerItemId === subject(Number(n)).providerItemId) ? 'unreadable' : 'clean' }], lane: LOCAL_LANE, model, pendingPageSize: 1, maxCallsPerPass: 1 });
+      expect(report.pendingSeen).toBeLessThanOrEqual(128);
+      // A tick may reopen the store; progress must survive that boundary.
+      store.close(); store = new TierSnifferStore({ dbPath, now: () => clock });
+    }
+    expect(model.requests).toHaveLength(2);
+    expect(model.requests[0]!.prompt).toContain('bank backlog 600');
+    expect(model.requests[1]!.prompt).toContain('bank backlog 601');
+  } finally { store.close(); ledger.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const path of [
+  '?&#97;ccess&#95;&#116;oken=', '#&#x61;ccess&lowbar;token=',
+  '?%70ass%77ord=%26', '#%61ccess%5F%74oken=', '?%2561ccess%255F%2574oken=',
+  '?view=1&amp;%61ccess%5F%74oken=', '#/route?%61ccess%5F%74oken=',
+]) test(`normalized credential URL ${path} never queues or dispatches`, async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  const material = `Open https://example.test/${path}${['a7B9c2D4', 'e6F8g1H3'].join('')}`;
+  try {
+    expect(classifyItemTiers({ signals: { title: 'Notes' }, text: material }).contentTier).toBe('secrets');
+    const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+    expect(sniffer.judge({ pass: 'content', subject: subject(1), material, flags: [], mapRevision: 'none' }))
+      .toMatchObject({ verdict: 'decided', tier: 'secrets' });
+    recordFlagged(ledger, store, 2, 'bank letter');
+    store.enqueue({ subject: subject(2), pass: 'metadata', material, flags: [], mapRevision: 'none' });
+    const model = spyModel(() => { throw new Error('must not dispatch'); });
+    const report = await runSnifferPass({ targets: [{ ledger, sniffer: store, settleSecrets(question, decision) {
+      ledger.recordDecision(question, decision); return true;
+    } }], lane: LOCAL_LANE, model });
+    expect(report.secretRefused).toBe(1);
+    expect(model.requests).toEqual([]);
+    expect(store.counts().questions).toBe(0);
+  } finally { store.close(); ledger.close(); }
+});
+
+for (const url of ['https://user:password@example.test/report', 'https://example.test/?password=xxxx',
+  'https://example.test/#%61ccess_token=xxxx', 'https://user:%70assword@example.test/report']) {
+  test(`example credential stays available for ordinary judgment: ${url}`, () => {
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      const material = `Documentation: ${url}`;
+      expect(classifyItemTiers({ signals: { title: 'Documentation' }, text: material }).contentTier).toBe('private');
+      expect(new CachedTierSniffer(store, LOCAL_LANE).judge({ pass: 'content', subject: subject(1), material, flags: [], mapRevision: 'none' }))
+        .toMatchObject({ verdict: 'undecided' });
+      expect(store.counts().questions).toBe(1);
+    } finally { store.close(); }
+  });
+}
+
+
+test('a discovered oldest question survives until its reserved aging dispatch', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  let clock = new Date('2026-01-01T00:00:00Z');
+  const store = new TierSnifferStore({ dbPath: ':memory:', now: () => clock });
+  try {
+    for (let n = 1; n <= 257; n++) {
+      recordFlagged(ledger, store, n, `bank pinned oldest ${n}`);
+      if (n <= 256) ledger.beginMove(subject(n), { metadataTier: 'secure', contentTier: 'secure' }, ledger.getCurrent(subject(n))!.generation);
+    }
+    store.recordDispatch();
+    clock = new Date('2026-01-02T00:00:00Z');
+    const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
+    for (let tick = 0; tick < 20; tick++) {
+      recordFlagged(ledger, store, 258 + tick, `bank fresh ${tick}`);
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, pendingPageSize: 1, maxCallsPerPass: 1 });
+    }
+    expect(model.requests.some(request => request.prompt.includes('bank pinned oldest 257'))).toBe(true);
+  } finally { store.close(); ledger.close(); }
+});
+
+
+test('a map revision changed during a model call keeps the old answer stale', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    const decision = recordFlagged(ledger, store, 1, 'bank notice');
+    const model = spyModel((_, items) => {
+      ledger.recordDecision(subject(1), { ...decision, mapRevision: 'new-map' });
+      return verdictsFor(items, { tier: 'personal', category: 'ordinary', confidence: 1 });
+    });
+    const result = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
+    expect(result.verdictsApplied).toBe(0);
+    expect(result.staleRekeyed).toBe(1);
+    expect(ledger.getCurrent(subject(1))?.metadataPending).toBe(true);
+    expect(store.questionFor(subject(1), 'metadata')?.mapRevision).toBe('new-map');
+  } finally { store.close(); ledger.close(); }
 });

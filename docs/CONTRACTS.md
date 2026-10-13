@@ -318,6 +318,49 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-13 (no contract type version change): tier classifier
+  `2026-10-13.p6`, owner-approved Personal-first (2026-10-04;
+  `docs/design/categorization-precision.md` step 2). Content without
+  own-record signals can be Personal before its individual privacy-safe model
+  judgment; own-record signals hold content, and a later Private verdict hides
+  the Personal copy before its move. Independently cleared names remain
+  available while content waits. Secrets, owner rules, source floors and image
+  restrictions retain precedence. This changes classification semantics, not
+  the SourceConnector, EvidencePack or Analyst shapes: their versions and
+  canonical fingerprint are unchanged; stored tier keys and existing connector
+  callers remain compatible.
+  Migration/rejudging: no source-contract schema migration or bulk rewrite of
+  stored copies. The sniffer store upgrades additively to schema 3 on writable open.
+  The v2 migration gives existing questions priority 0 and adds a dispatch
+  counter for aging; v3 adds oldest/pass-specific queue indexes and the
+  `sniffer_scan` table for durable bounded-scan cursors and pinned oldest
+  candidates. Existing queued questions, cached verdicts and the dispatch
+  counter are preserved; cursors start empty. Read-only status readers do not
+  migrate or write the store. Older writers that know only schema 1 or 2
+  refuse to open a migrated v3 store; this is not a downgrade migration.
+  The classifier version invalidates older decisions for the existing bounded
+  background rejudge path, subject to its owner-rule, override and pending-state
+  exclusions. Existing placements remain while a model question waits;
+  lowering requires a receipt matching the full stored text, and nonautomatic moves still await the
+  owner-approved migration. Rejudging does not release old held bodies merely
+  because p6 is installed.
+  Eval evidence: `test/tier-personal-first.test.ts` covers immediate ordinary
+  content, held own-records, names/body separation and hide-before-move;
+  `test/classification-eval.test.ts` exercises the synthetic classification
+  corpus with a deterministic fake sniffer. These are wiring/regression proof,
+  not a real-model or owner-labeled held-out quality receipt. The 95-email export
+  lacks bodies and cannot establish per-row content outcomes. The plan's
+  real-corpus eval remains required before rollout (precision improves and
+  Private recall stays at least 99%); a missed own-record signal can expose
+  content before the model raises it, which cannot recall an earlier cloud use.
+  The steering screen is a heuristic over shared canonical text and bounded
+  instruction/schema structure. A successful steer can affect only the
+  steering item's own tier, never another item: each model call judges one
+  quoted item. The worst case is the email's own content being treated as
+  Personal. The screen cannot prove that semantic steering is absent.
+  Critical-review gate: PR #330 remains a critical classification change and
+  needs fresh independent review of its current head and this release boundary
+  before merge, alongside required CI under `docs/ENGINEERING_PROCESS.md`.
 - 2026-10-10 (no version change) — **AD-1 retired.** The panel's outside
   block and its envelope were removed with the automatic escalation
   (Anonymous answers redesign, step 3). The panel again carries only the

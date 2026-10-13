@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createAnswerActivity } from '../src/workers/answer-activity.ts';
+import { createAnswerActivity, createLocalModelActivity } from '../src/workers/answer-activity.ts';
 
 describe('answer activity', () => {
   test('preempts on the first answer and releases each lease once', () => {
@@ -46,4 +46,23 @@ describe('answer activity', () => {
     await expect(activity.run(async () => { throw new Error('x'); })).rejects.toThrow('x');
     expect(activity.busy).toBe(false);
   });
+});
+
+
+test('cloud-only search never aborts local sorting; only the same local model does, and idle resumes it', async () => {
+  let preempts = 0;
+  let wakes = 0;
+  const models = createLocalModelActivity();
+  models.onBusy('built_in', () => preempts++);
+  models.onIdle('built_in', () => wakes++);
+  const answers = createAnswerActivity(() => undefined);
+  await answers.run(async () => { expect(models.busy('built_in')).toBe(false); });
+  await models.run('other-local-model', async () => undefined);
+  expect(preempts).toBe(0);
+  await models.run('built_in', async () => {
+    expect(models.busy('built_in')).toBe(true);
+    expect(preempts).toBe(1);
+  });
+  await Promise.resolve();
+  expect(wakes).toBe(1);
 });

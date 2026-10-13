@@ -221,7 +221,7 @@ describe('P1c Dropbox lane', () => {
       fetchedAt: '2026-09-23T00:00:00.000Z',
     });
     expect((await land('id:integral', 'Integral theory maps quadrants, levels and lines of development.')).accepted).toBe(true);
-    expect((await land('id:scan', 'The lab results confirm the diagnosis; the patient starts treatment.')).accepted).toBe(true);
+    expect((await land('id:scan', 'The lab results confirm the diagnosis; patient SSN 123-45-6789 is on file.')).accepted).toBe(true);
     // Reference material is Personal: searchable (and cloud-embeddable) in the Personal store.
     expect(ids(internal, 'quadrants')).toEqual(['id:integral']);
     // Private content stays Private; its names stay Personal.
@@ -356,7 +356,7 @@ describe('P1c X content recovery', () => {
     // Private text: the names copy stays in the internal store with no text.
     await lane.set.sync(createXBookmarksSourceConnector({
       account: 'personal',
-      posts: [{ id: '2076846914813788163', text: 'The lab results confirm the diagnosis; treatment starts Monday.' }],
+      posts: [{ id: '2076846914813788163', text: 'The lab results confirm the diagnosis; patient SSN 123-45-6789 starts treatment Monday.' }],
       fetchedAt: '2026-07-30T10:00:00.000Z',
     }), { fetchContent: true, placement: X_BOOKMARKS_STORE_PLACEMENT });
     expect(lane.ledger.copies({ provider: 'x', accountScope: 'personal', providerItemId: '2076846914813788163' })
@@ -412,7 +412,7 @@ describe('P1c Readwise and X lanes', () => {
     const specs: Spec[] = [
       ...legacy,
       { id: 'hl-book', title: 'Book highlight', text: 'Integral theory maps quadrants and levels.' },
-      { id: 'hl-private', title: 'My note', text: 'The lab results confirm the diagnosis; the patient starts treatment.' },
+      { id: 'hl-private', title: 'My note', text: 'The lab results confirm the diagnosis; patient SSN 123-45-6789 is on file.' },
       { id: 'hl-secret', title: 'Snippet', text: `deploy with key ${FAKE_AWS_KEY}` },
     ];
     await lane.set.sync(laneConnector('readwise', 'readwise', () => specs), { fetchContent: true, placement: READWISE_STORE_PLACEMENT });
@@ -500,7 +500,7 @@ describe('P1c WhatsApp lane: fail closed', () => {
     const { store, sync, internal, lane } = openLane(root, rules);
     await sync([
       { id: 'm1', conversation: 'chat-a', title: 'Garden club', text: 'See you at the allotment on Saturday.' },
-      { id: 'm2', conversation: 'chat-a', title: 'Garden club', text: 'The lab results confirm the diagnosis; treatment starts Monday.' },
+      { id: 'm2', conversation: 'chat-a', title: 'Garden club', text: 'The lab results confirm the diagnosis; patient SSN 123-45-6789 starts treatment Monday.' },
       // The same message id in another chat: its own identity, its own tier.
       { id: 'm1', conversation: 'chat-b', title: 'Family', text: 'See you at the allotment on Sunday.' },
     ]);

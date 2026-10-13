@@ -1,3 +1,5 @@
+import { decodeHTMLStrict } from 'entities';
+
 // The deterministic credential patterns shared by the Secrets floor and the
 // outbound guard.
 //
@@ -25,7 +27,8 @@
 //   - the floor is a SUPERSET of the one it replaced. The old assignment shape
 //     is kept verbatim and unfiltered (LEGACY_CREDENTIAL_ASSIGNMENT), and the
 //     other old shapes are unchanged, so nothing the previous floor classed as
-//     Secrets is ever let through (test/content-policy-secrets.test.ts replays
+//     Secrets is ever let through, except URL placeholders now parsed by the
+//     shared URL detector (test/content-policy-secrets.test.ts replays
 //     the old regexes over its whole corpus);
 //   - everything here runs on whole documents, so no pattern or check may
 //     backtrack super-linearly: trims are character walks, key names are read
@@ -46,30 +49,49 @@ export interface SharedSecretPattern {
   readonly confidence: number;
   /** Global, so callers can walk every hit. Use `secretPatternHits`. */
   readonly pattern: RegExp;
+  /** Delimiter-aware extraction for URL candidates. */
+  readonly extract?: (text: string) => RegExpMatchArray[];
   /** Cuts false positives after the regex matches. Absent means every match counts. */
   readonly accept?: (match: RegExpMatchArray) => boolean;
 }
 
-/** Every accepted hit of `spec` in `text`. */
-export function secretPatternHits(text: string, spec: SharedSecretPattern): RegExpMatchArray[] {
-  spec.pattern.lastIndex = 0;
+/** Every accepted hit, on both the original and the shared canonical form. */
+export function secretPatternHits(text: string, spec: SharedSecretPattern,
+  variants = secretScreeningVariants(text)): RegExpMatchArray[] {
   const hits: RegExpMatchArray[] = [];
-  for (const match of text.matchAll(spec.pattern)) {
-    if (!match[0]?.trim()) continue;
-    if (spec.accept && !spec.accept(match)) continue;
-    hits.push(match);
+  for (const variant of variants) {
+    // Recognized URL parameter keys are owned by the URL parser. Path and
+    // custom-key assignments retain their old screening. Otherwise a legacy regex
+    // sees an encoded or wrapped placeholder as a long literal credential.
+    const urls = spec.label === 'credential_assignment' || spec.label === 'password' || spec.label === 'azure_sas_signature'
+      ? credentialUrlMatches(variant).filter(url => URL.canParse(url[0])).flatMap(url => {
+        // Userinfo belongs to the same parser: a username such as `password`
+        // must not turn `:xxxx@host` into a legacy credential assignment.
+        const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*@)/i.exec(url[0]);
+        const userinfo: Array<readonly [number, number]> = authority
+          ? [[url.index! + authority[0].length - authority[1]!.length, url.index! + authority[0].length]] : [];
+        return [...userinfo,
+          ...[...url[0].matchAll(/[?#&]((?:&(?:#[xX][0-9a-f]+|#\d+|[a-z][a-z0-9]*);|[^?#&=])*)=/gi)].flatMap(parameter => {
+            const key = canonicalizeScreeningText(parameter[1]!.replace(/^amp;/, ''));
+            return CREDENTIAL_QUERY_KEY.test(key)
+              ? [[url.index! + parameter.index! + 1, url.index! + parameter.index! + parameter[0].length] as const] : [];
+          })];
+      }) : [];
+    spec.pattern.lastIndex = 0;
+    let urlAt = 0;
+    for (const match of spec.extract?.(variant) ?? variant.matchAll(spec.pattern)) {
+      while (urlAt < urls.length && urls[urlAt]![1] <= match.index!) urlAt++;
+      if (!match[0]?.trim() || (urls[urlAt] && match.index! >= urls[urlAt]![0])) continue;
+      if (!spec.accept || spec.accept(match)) hits.push(match);
+    }
   }
   return hits;
 }
 
-/** Whether `spec` has at least one accepted hit in `text`. */
-export function hasSecretPatternHit(text: string, spec: SharedSecretPattern): boolean {
-  spec.pattern.lastIndex = 0;
-  for (const match of text.matchAll(spec.pattern)) {
-    if (!match[0]?.trim()) continue;
-    if (!spec.accept || spec.accept(match)) return true;
-  }
-  return false;
+/** Whether `spec` has an accepted hit in either representation. */
+export function hasSecretPatternHit(text: string, spec: SharedSecretPattern,
+  variants = secretScreeningVariants(text)): boolean {
+  return secretPatternHits(text, spec, variants).length > 0;
 }
 
 // --- Value checks -------------------------------------------------------------
@@ -93,6 +115,126 @@ const PROSE_WORDS = new Set([
   'reset', 'retry', 'see', 'send', 'sent', 'setting', 'settings', 'shared', 'should', 'shown', 'sign',
   'strength', 'symbols', 'unchanged', 'use', 'used', 'using', 'via',
 ]);
+
+/**
+ * One bounded canonical form for every credential and steering screen. Four
+ * passes handle interleaved HTML entities and repeated percent encoding; NFKC
+ * runs on each pass so full-width escapes cannot hide the next layer. Keep
+ * scanning the original too: decoding may introduce URL/value delimiters.
+ * This is screening only, never a rewrite of stored text or model material.
+ */
+export function canonicalizeScreeningText(value: string): string {
+  for (let depth = 0; depth < 4; depth++) {
+    const next = decodeHTMLStrict(value.normalize('NFKC'))
+      .replace(/(?:%[0-9a-f]{2})+/gi, encoded => {
+        try { return decodeURIComponent(encoded); } catch {
+          // Malformed UTF-8 must not shield adjacent ASCII key/delimiter bytes.
+          return encoded.replace(/%([0-7][0-9a-f])/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+        }
+      })
+      .normalize('NFKC')
+      .replace(/[\p{Quotation_Mark}`]/gu, quote => /['‘’‚‛`]/.test(quote) ? "'" : '"');
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
+export function secretScreeningVariants(text: string): readonly string[] {
+  const canonical = canonicalizeScreeningText(text);
+  return canonical === text ? [text] : [text, canonical];
+}
+
+const URL_SCHEME = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\//gi;
+
+/**
+ * One forward walk: external wrappers end a URL, paired punctuation inside
+ * its path and an IPv6 authority do not. Preserve <token>-style values for the
+ * shared placeholder check. No regex can consume the rest of a document by
+ * treating a closing markdown/HTML/quote delimiter as credential bytes.
+ */
+function credentialUrlMatches(text: string): RegExpMatchArray[] {
+  const whole = text.trim();
+  // A whole locator can contain spaces/apostrophes in userinfo. Parse those
+  // original bytes before delimiter extraction; only an actual credential
+  // takes this path, so wrapped query placeholders never acquire punctuation.
+  if (urlCarriesCredential(whole, true)) {
+    return [Object.assign([whole] as [string], { index: text.indexOf(whole), input: text })];
+  }
+  const starts = new RegExp(URL_SCHEME);
+  const matches: RegExpMatchArray[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = starts.exec(text))) {
+    let end = starts.lastIndex;
+    let parens = 0;
+    let authority = true;
+    for (; end < text.length; end++) {
+      const char = text[end]!;
+      if (/[\s\p{Quotation_Mark}`>]/u.test(char)) break;
+      if (char === '<') {
+        const placeholder = text[end - 1] === '=' ? /^<[\w-]{1,64}>/.exec(text.slice(end, end + 66))?.[0] : undefined;
+        if (!placeholder) break;
+        end += placeholder.length - 1;
+      } else if (char === '[') {
+        const host = authority ? /^\[[a-f0-9:.]{2,45}\]/i.exec(text.slice(end, end + 47))?.[0] : undefined;
+        if (!host) break;
+        end += host.length - 1;
+      } else if (char === ']') break;
+      else if (char === '(') parens++;
+      else if (char === ')') { if (parens === 0) break; parens--; }
+      if ('/?#'.includes(char)) authority = false;
+    }
+    match[0] = text.slice(match.index, end);
+    matches.push(match);
+    starts.lastIndex = end;
+  }
+  return matches;
+}
+
+// One alias registry feeds URL, assignment and environment-key screening.
+// The legacy subset keeps its historical unfiltered floor; sig is URL-only
+// because the existing SAS detector treats it as a URL parameter.
+const CREDENTIAL_KEYS = [
+  { pattern: String.raw`api[_ -]?key`, legacy: true },
+  { pattern: String.raw`access[_ -]?token`, legacy: true },
+  { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+  { pattern: String.raw`client[_ -]?secret`, legacy: true },
+  { pattern: 'password', legacy: true },
+  { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+  { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+  { pattern: String.raw`private[_ -]?key` },
+  { pattern: 'secret' },
+  { pattern: String.raw`token(?!s)` },
+  { pattern: 'sig', urlOnly: true },
+];
+const CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter(key => !key.urlOnly).map(key => key.pattern).join('|');
+const LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter(key => key.legacy).map(key => key.pattern).join('|');
+const CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map(key => key.pattern).join('|')})$`, 'i');
+
+function urlCarriesCredential(candidate: string, userinfoOnly = false): boolean {
+  try {
+    const url = new URL(candidate);
+    const userinfo = canonicalizeScreeningText(url.password);
+    if (userinfo && !isPlaceholderValue(userinfo) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(userinfo)) return true;
+    if (userinfoOnly) return false;
+    for (const part of [url.search.slice(1), url.hash.slice(1).replace(/^[^?]*\?/, '')]) {
+      // Parse the original before decoding: %26 inside a credential is data.
+      for (const variant of secretScreeningVariants(part)) {
+        for (const [key, value] of new URLSearchParams(variant)) {
+          if (CREDENTIAL_QUERY_KEY.test(canonicalizeScreeningText(key))
+            && !isPlaceholderValue(canonicalizeScreeningText(value))) return true;
+        }
+      }
+    }
+  } catch { /* Not a URL; the other shared patterns still apply. */ }
+  return false;
+}
+
+/** Shared by body/metadata classification, dispatch, outbound and storage. */
+export function hasCredentialUrl(material: string): boolean {
+  return secretScreeningVariants(material).some(text =>
+    credentialUrlMatches(text).some(match => urlCarriesCredential(match[0])));
+}
 
 /** A mask or elision standing in for the real value: `****`, `xxxxx`, `abc...xyz`. */
 const MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
@@ -304,8 +446,8 @@ function assignmentAccepted(match: RegExpMatchArray): boolean {
   const rest = value.startsWith('<') || value.startsWith('(') ? restOfLine(match) : '';
   if (isPlaceholderValue(value, quoted ? '' : rest) || isNotLiteralCredential(value)) return false;
 
-  const isPassword = keyword.startsWith('pass');
-  const isSecret = isPassword || keyword.startsWith('secret');
+  const isPassword = keyword.startsWith('pass') || keyword === 'pwd';
+  const isSecret = isPassword || keyword.includes('secret');
 
   // Quoted values with spaces are the only spaced values this pattern sees.
   if (/\s/.test(value)) return isSecret && isPlausiblePassphrase(value, 6);
@@ -350,7 +492,7 @@ function maskedProviderToken(token: string): boolean {
 // --- Environment-style keys ---------------------------------------------------
 
 /** A key name that mentions a credential word anywhere in it: `DB_PASSWORD_PROD`, `Pwd`, `SECRET_KEY`. */
-const ENV_KEY_WORDS = String.raw`pass(?:word|wd|phrase|code)|pwd|secret|token(?!s)|api[_-]?key|private[_-]?key`;
+const ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
 const ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, 'i');
 /** Keys that name a property of a credential, not the credential: `TOKEN_TYPE`, `PASSWORD_FILE`. */
 const NON_CREDENTIAL_KEY_TAIL =
@@ -411,7 +553,7 @@ function blockScalarAccepted(match: RegExpMatchArray): boolean {
   const keyLead = leadBefore(match.input ?? '', match.index ?? 0, 200);
   const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? '').length;
   if ((groups.ind ?? '').length <= keyIndent) return false;
-  const isSecret = keyword.startsWith('pass') || keyword.startsWith('secret');
+  const isSecret = keyword.startsWith('pass') || keyword === 'pwd' || keyword.includes('secret');
   const judge = (value: string): boolean => {
     if (!value || isPlaceholderValue(value) || isNotLiteralCredential(value)) return false;
     if (/\s/.test(value)) return isSecret && isPlausiblePassphrase(value, 6);
@@ -428,7 +570,7 @@ function blockScalarAccepted(match: RegExpMatchArray): boolean {
 
 // --- Assignment shapes --------------------------------------------------------
 
-const KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
+const KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
 /** Optional closing quote or markdown emphasis, then the separator and its padding. */
 const SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
 const VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
@@ -476,7 +618,7 @@ const LABELLED_PASSPHRASE = new RegExp(
 );
 
 /** `scheme://user:password@host` connection strings. */
-const URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
+const URL_USERINFO = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]+)@/gi;
 
 /** `Authorization: Bearer <value>` (also Basic and Token). */
 const AUTHORIZATION_HEADER =
@@ -492,12 +634,17 @@ const AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/g
  * The assignment shape the floor had before the shared patterns, kept verbatim
  * and unfiltered. The filters above cut false positives from the NEW shapes;
  * this one is the floor's recall guarantee: every string it ever matched still
- * is Secrets (test/content-policy-secrets.test.ts replays it over the corpus).
+ * is Secrets outside parsed URL parameters (test/content-policy-secrets.test.ts
+ * replays it over the corpus). URL placeholders use the shared exclusion policy.
  */
 const LEGACY_CREDENTIAL_ASSIGNMENT =
-  /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi;
+  new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, 'gi');
 
 export const SHARED_SECRET_PATTERNS: readonly SharedSecretPattern[] = [
+  {
+    findingType: 'credential_assignment', label: 'credential_url', confidence: 0.9,
+    pattern: URL_SCHEME, extract: credentialUrlMatches, accept: match => urlCarriesCredential(match[0]),
+  },
   {
     findingType: 'private_key_material',
     label: 'private_key',
@@ -602,7 +749,7 @@ export const SHARED_SECRET_PATTERNS: readonly SharedSecretPattern[] = [
     pattern: URL_USERINFO,
     confidence: 0.9,
     accept: (match) => {
-      const password = match.groups?.pw ?? '';
+      const password = canonicalizeScreeningText(match.groups?.pw ?? '');
       return !isPlaceholderValue(password) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(password);
     },
   },

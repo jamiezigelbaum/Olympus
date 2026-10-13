@@ -30,7 +30,7 @@ import {
 const FAKE_AWS_KEY = ['AKIA', 'QRSTUVWXYZ234567'].join('');
 const SPECS: FixtureSpec[] = [
   { id: 'garden', name: 'orchard-plan.txt', text: 'Orchard pruning plan for the apple trees this winter.' },
-  { id: 'biopsy', name: 'biopsy results.txt', text: 'Orchard clinic: the lab results confirm the diagnosis.' },
+  { id: 'biopsy', name: 'biopsy results.txt', text: 'Orchard clinic: Patient: Morgan Example. Glucose 93 mg/dL; diagnosis recorded.' },
   { id: 'secret', name: 'orchard-deploy.env', text: `orchard deploy key ${FAKE_AWS_KEY} for the pipeline` },
 ];
 
@@ -89,7 +89,7 @@ describe('P1b answers', () => {
       title: 'orchard-deploy.env',
       findingKinds: ['aws_access_key_id'],
     })]);
-    expect(detail.classificationCoverage).toEqual([{ corpusId: CORPORA.secure_local, pendingClassificationItems: 1 }]);
+    expect(detail.classificationCoverage).toEqual([{ corpusId: CORPORA.internal, pendingClassificationItems: 1 }, { corpusId: CORPORA.secure_local, pendingClassificationItems: 1 }]);
     // Nothing of the Secret is in the pack the Analyst reads.
     const pack = JSON.stringify(detail.pack);
     expect(pack).not.toContain(FAKE_AWS_KEY);
@@ -105,7 +105,7 @@ describe('P1b answers', () => {
       },
       releaseSecureContent: true,
     });
-    expect(released.answer).toContain('1 item(s) pending classification in secure_local.fixture.files were searched by keyword only.');
+    expect(released.answer).toContain('2 item(s) pending classification in internal.fixture.files, secure_local.fixture.files were searched by keyword only.');
     expect(released.answer).toContain('1 Secret(s) matched by location only');
     expect(released.answer).not.toContain(FAKE_AWS_KEY);
   });

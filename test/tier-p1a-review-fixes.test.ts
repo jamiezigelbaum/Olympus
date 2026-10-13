@@ -34,7 +34,7 @@ import { X_BOOKMARKS_STORE_PLACEMENT } from '../src/workers/x-bookmarks/connecto
 const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
 
 const ID = { provider: 'fixture', accountScope: 'personal', providerItemId: 'item-1' };
-const HEALTH = 'The lab results confirm the diagnosis; the patient starts treatment.';
+const HEALTH = 'The lab results confirm the diagnosis; patient SSN 123-45-6789 is on file.';
 
 function withDir<T>(run: (dir: string) => T | Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-review-'));
@@ -56,7 +56,7 @@ describe('A: an unread decision never lowers a content tier', () => {
       const after = ledger.recordDecision(ID, unread).record;
       expect(after.contentTier).toBe('secure');
       expect(after.contentRead).toBe(true);
-      expect(after.reasons).toContain('content:detector:health:vocabulary');
+      expect(after.reasons).toContain('content:detector:identity:ssn');
       expect(after.generation).toBe(1);
     } finally {
       ledger.close();
@@ -150,11 +150,11 @@ describe('A: an unread decision never lowers a content tier', () => {
 describe('C: a lowering owner rule and the sniffer', () => {
   test('reproduction: therapy notes under a Public work/ folder are still flagged for the sniffer', () => {
     const rules = [{ id: 'work', match: { kind: 'pathPrefix' as const, value: '/work' }, tier: 'public' as const, strength: 'prior' as const }];
-    const decision = classifyItemTiers({ signals: { title: 'therapy notes', path: '/work/therapy notes.txt' } }, { rules });
+    const decision = classifyItemTiers({ signals: { title: 'therapy notes SSN 123-45-6789', path: '/work/therapy notes.txt' } }, { rules });
     expect(decision.metadataTier).toBe('public');
     expect(decision.metadataPending).toBe(true);
     expect(decision.state).toBe('pending');
-    expect(decision.reasons).toContain('metadata:possibly_private:names:personal_life');
+    expect(decision.reasons).toContain('metadata:possibly_private:names:identity:ssn');
   });
 });
 
