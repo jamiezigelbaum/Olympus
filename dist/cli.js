@@ -18742,7 +18742,7 @@ class TierLedger {
         ON s.provider = i.provider AND s.account_scope = i.account_scope
         AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
       WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
-        AND (s.cleared_generation IS NULL OR s.cleared_generation < i.generation)
+        AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
         AND NOT EXISTS (
           SELECT 1 FROM secret_side_store_debt d
           WHERE d.provider = i.provider AND d.account_scope = i.account_scope
@@ -18757,14 +18757,14 @@ class TierLedger {
       ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
     }));
   }
-  markSecretSideStoresCleared(identity) {
+  markSecretSideStoresCleared(identity, mark) {
     this.db.query(`
-      INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision, cleared_generation)
-      VALUES (?, ?, ?, ?, 0, (SELECT generation FROM tier_items
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?))
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
-      DO UPDATE SET cleared_generation = excluded.cleared_generation
-    `).run(...idParams(identity), ...idParams(identity));
+      UPDATE secret_side_store_scrubs SET cleared_generation = ?, cleared_revision = revision
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND revision = ?
+        AND ? IS (SELECT generation FROM tier_items
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?)
+    `).run(mark.generation, ...idParams(identity), mark.revision, mark.generation, ...idParams(identity));
   }
   noteJobLedgerPaths(paths) {
     const now = this.now().toISOString();
@@ -18781,11 +18781,18 @@ class TierLedger {
     return this.db.query("SELECT path FROM known_job_ledgers ORDER BY path").all().map((row) => row.path);
   }
   noteSecretScrub(identity) {
-    this.db.query(`
-      INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision)
-      VALUES (?, ?, ?, ?, 1)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET revision = revision + 1
-    `).run(...idParams(identity));
+    return this.db.transaction(() => {
+      this.db.query(`
+        INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision)
+        VALUES (?, ?, ?, ?, 1)
+        ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET revision = revision + 1
+      `).run(...idParams(identity));
+      const generation = this.db.query(`
+        SELECT generation FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).get(...idParams(identity));
+      return { revision: this.secretScrubRevision(identity), generation: generation?.generation ?? null };
+    })();
   }
   secretScrubRevision(identity) {
     const row = this.db.query(`
@@ -20445,6 +20452,7 @@ function tierLedgerMigrations() {
             seen_at TEXT NOT NULL
           );
           ALTER TABLE secret_side_store_scrubs ADD COLUMN cleared_generation INTEGER;
+          ALTER TABLE secret_side_store_scrubs ADD COLUMN cleared_revision INTEGER;
           CREATE INDEX IF NOT EXISTS tier_items_secrets
             ON tier_items (provider, account_scope, conversation_key, provider_item_id)
             WHERE metadata_tier = 'secrets' OR content_tier = 'secrets';
@@ -24212,8 +24220,9 @@ function forgetSecretInSideStores(options) {
   const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
   const owedJobLedgers = [];
+  let mark;
   try {
-    ledger.noteSecretScrub(identity);
+    mark = ledger.noteSecretScrub(identity);
   } catch {
     result.failed += 1;
   }
@@ -24265,7 +24274,8 @@ function forgetSecretInSideStores(options) {
       ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
     else {
       ledger.clearSecretSideStoreDebt(identity, jobLedgers);
-      ledger.markSecretSideStoresCleared(identity);
+      if (mark)
+        ledger.markSecretSideStoresCleared(identity, mark);
     }
   } catch {}
   if (result.failed > 0)
