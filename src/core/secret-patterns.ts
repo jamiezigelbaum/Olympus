@@ -64,12 +64,19 @@ export function secretPatternHits(text: string, spec: SharedSecretPattern,
     // custom-key assignments retain their old screening. Otherwise a legacy regex
     // sees an encoded or wrapped placeholder as a long literal credential.
     const urls = spec.label === 'credential_assignment' || spec.label === 'password' || spec.label === 'azure_sas_signature'
-      ? credentialUrlMatches(variant).filter(url => URL.canParse(url[0])).flatMap(url =>
-        [...url[0].matchAll(/[?#&]((?:&(?:#[xX][0-9a-f]+|#\d+|[a-z][a-z0-9]*);|[^?#&=])*)=/gi)].flatMap(parameter => {
-          const key = canonicalizeScreeningText(parameter[1]!.replace(/^amp;/, ''));
-          return CREDENTIAL_QUERY_KEY.test(key)
-            ? [[url.index! + parameter.index! + 1, url.index! + parameter.index! + parameter[0].length] as const] : [];
-        })) : [];
+      ? credentialUrlMatches(variant).filter(url => URL.canParse(url[0])).flatMap(url => {
+        // Userinfo belongs to the same parser: a username such as `password`
+        // must not turn `:xxxx@host` into a legacy credential assignment.
+        const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*@)/i.exec(url[0]);
+        const userinfo: Array<readonly [number, number]> = authority
+          ? [[url.index! + authority[0].length - authority[1]!.length, url.index! + authority[0].length]] : [];
+        return [...userinfo,
+          ...[...url[0].matchAll(/[?#&]((?:&(?:#[xX][0-9a-f]+|#\d+|[a-z][a-z0-9]*);|[^?#&=])*)=/gi)].flatMap(parameter => {
+            const key = canonicalizeScreeningText(parameter[1]!.replace(/^amp;/, ''));
+            return CREDENTIAL_QUERY_KEY.test(key)
+              ? [[url.index! + parameter.index! + 1, url.index! + parameter.index! + parameter[0].length] as const] : [];
+          })];
+      }) : [];
     spec.pattern.lastIndex = 0;
     let urlAt = 0;
     for (const match of spec.extract?.(variant) ?? variant.matchAll(spec.pattern)) {
@@ -184,12 +191,30 @@ function credentialUrlMatches(text: string): RegExpMatchArray[] {
   return matches;
 }
 
-const CREDENTIAL_QUERY_KEY = /^(?:access_token|refresh_token|api_key|client_secret|password|token|secret|sig)$/i;
+// One alias registry feeds URL, assignment and environment-key screening.
+// The legacy subset keeps its historical unfiltered floor; sig is URL-only
+// because the existing SAS detector treats it as a URL parameter.
+const CREDENTIAL_KEYS = [
+  { pattern: String.raw`api[_ -]?key`, legacy: true },
+  { pattern: String.raw`access[_ -]?token`, legacy: true },
+  { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+  { pattern: String.raw`client[_ -]?secret`, legacy: true },
+  { pattern: 'password', legacy: true },
+  { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+  { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+  { pattern: String.raw`private[_ -]?key` },
+  { pattern: 'secret' },
+  { pattern: String.raw`token(?!s)` },
+  { pattern: 'sig', urlOnly: true },
+];
+const CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter(key => !key.urlOnly).map(key => key.pattern).join('|');
+const LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter(key => key.legacy).map(key => key.pattern).join('|');
+const CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map(key => key.pattern).join('|')})$`, 'i');
 
 function urlCarriesCredential(candidate: string, userinfoOnly = false): boolean {
   try {
     const url = new URL(candidate);
-    const userinfo = canonicalizeScreeningText(url.password || url.username);
+    const userinfo = canonicalizeScreeningText(url.password);
     if (userinfo && !isPlaceholderValue(userinfo) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(userinfo)) return true;
     if (userinfoOnly) return false;
     for (const part of [url.search.slice(1), url.hash.slice(1).replace(/^[^?]*\?/, '')]) {
@@ -421,8 +446,8 @@ function assignmentAccepted(match: RegExpMatchArray): boolean {
   const rest = value.startsWith('<') || value.startsWith('(') ? restOfLine(match) : '';
   if (isPlaceholderValue(value, quoted ? '' : rest) || isNotLiteralCredential(value)) return false;
 
-  const isPassword = keyword.startsWith('pass');
-  const isSecret = isPassword || keyword.startsWith('secret');
+  const isPassword = keyword.startsWith('pass') || keyword === 'pwd';
+  const isSecret = isPassword || keyword.includes('secret');
 
   // Quoted values with spaces are the only spaced values this pattern sees.
   if (/\s/.test(value)) return isSecret && isPlausiblePassphrase(value, 6);
@@ -467,7 +492,7 @@ function maskedProviderToken(token: string): boolean {
 // --- Environment-style keys ---------------------------------------------------
 
 /** A key name that mentions a credential word anywhere in it: `DB_PASSWORD_PROD`, `Pwd`, `SECRET_KEY`. */
-const ENV_KEY_WORDS = String.raw`pass(?:word|wd|phrase|code)|pwd|secret|token(?!s)|api[_-]?key|private[_-]?key`;
+const ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
 const ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, 'i');
 /** Keys that name a property of a credential, not the credential: `TOKEN_TYPE`, `PASSWORD_FILE`. */
 const NON_CREDENTIAL_KEY_TAIL =
@@ -528,7 +553,7 @@ function blockScalarAccepted(match: RegExpMatchArray): boolean {
   const keyLead = leadBefore(match.input ?? '', match.index ?? 0, 200);
   const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? '').length;
   if ((groups.ind ?? '').length <= keyIndent) return false;
-  const isSecret = keyword.startsWith('pass') || keyword.startsWith('secret');
+  const isSecret = keyword.startsWith('pass') || keyword === 'pwd' || keyword.includes('secret');
   const judge = (value: string): boolean => {
     if (!value || isPlaceholderValue(value) || isNotLiteralCredential(value)) return false;
     if (/\s/.test(value)) return isSecret && isPlausiblePassphrase(value, 6);
@@ -545,7 +570,7 @@ function blockScalarAccepted(match: RegExpMatchArray): boolean {
 
 // --- Assignment shapes --------------------------------------------------------
 
-const KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
+const KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
 /** Optional closing quote or markdown emphasis, then the separator and its padding. */
 const SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
 const VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
@@ -613,7 +638,7 @@ const AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/g
  * replays it over the corpus). URL placeholders use the shared exclusion policy.
  */
 const LEGACY_CREDENTIAL_ASSIGNMENT =
-  /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi;
+  new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, 'gi');
 
 export const SHARED_SECRET_PATTERNS: readonly SharedSecretPattern[] = [
   {

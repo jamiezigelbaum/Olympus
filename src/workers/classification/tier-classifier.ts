@@ -160,7 +160,7 @@ export interface TierSnifferRequest {
  * the deterministic tier is already Private.
  */
 export type TierSnifferVerdict =
-  | { verdict: 'undecided' }
+  | { verdict: 'undecided'; /** True only after the question is durably queued. */ queued?: true }
   | { verdict: 'decided'; tier: 'private' | 'secure' | 'secrets'; code: string };
 
 export interface TierSniffer {
@@ -863,7 +863,7 @@ function contentPass(args: {
       reasons.splice(0, reasons.length, ...decided.reasons);
     } else {
       pending = true;
-      if (recordFlags.length === 0 && !metadata.pending) reasons.push(PERSONAL_FIRST_REASON);
+      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending) reasons.push(PERSONAL_FIRST_REASON);
       for (const flag of recordFlags) reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline) reasons.push(`content:borderline:${flag}`);
       reasons.push(`content:sniffer:${args.sniffer.id}:undecided`);

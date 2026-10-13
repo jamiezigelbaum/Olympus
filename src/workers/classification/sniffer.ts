@@ -470,6 +470,7 @@ export class CachedTierSniffer implements TierSniffer {
           flags: request.flags,
           ...(request.priority !== undefined ? { priority: request.priority } : {}),
         });
+        return { verdict: 'undecided', queued: true };
       }
     } catch {
       // Fail safe: an unreadable cache or queue leaves the item pending.

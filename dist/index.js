@@ -10332,7 +10332,7 @@ var init_media_cache = __esm(() => {
 });
 
 // src/core/secret-patterns.ts
-var PROSE_WORDS, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE;
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
   PROSE_WORDS = new Set([
     "above",
@@ -10399,6 +10399,22 @@ var init_secret_patterns = __esm(() => {
     "using",
     "via"
   ]);
+  CREDENTIAL_KEYS = [
+    { pattern: String.raw`api[_ -]?key`, legacy: true },
+    { pattern: String.raw`access[_ -]?token`, legacy: true },
+    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+    { pattern: String.raw`client[_ -]?secret`, legacy: true },
+    { pattern: "password", legacy: true },
+    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+    { pattern: String.raw`private[_ -]?key` },
+    { pattern: "secret" },
+    { pattern: String.raw`token(?!s)` },
+    { pattern: "sig", urlOnly: true }
+  ];
+  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
   PLACEHOLDER_WORDS = new RegExp([
     String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
     String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
@@ -10499,15 +10515,16 @@ var init_secret_patterns = __esm(() => {
     "email",
     "login"
   ]);
-  ENV_KEY_WORDS = String.raw`pass(?:word|wd|phrase|code)|pwd|secret|token(?!s)|api[_-]?key|private[_-]?key`;
+  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
   ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
-  KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
+  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
   SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
   VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
   CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
   ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
   BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
   LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
 });
 
 // src/workers/dropbox-files/content-policy.ts

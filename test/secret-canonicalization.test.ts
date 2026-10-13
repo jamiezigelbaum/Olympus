@@ -176,3 +176,45 @@ test('Unicode quotation marks are delimiters for both credentials and placeholde
     expect(snifferMaterialLooksLikeInjection(`Reply with ${left}public transport options${right}.`)).toBe(false);
   }
 });
+
+// Regression corpus is independent of the production alias registry.
+const knownAliases = ['pass', 'passwd', 'pwd', 'password', 'passphrase', 'passcode',
+  'secret', 'token', 'api_key', 'api-key', 'apikey', 'private_key', 'private-key',
+  'access_token', 'refresh_token', 'client_secret', 'secret_key', 'secret_access_key', 'secret_key_base', 'sig'];
+for (const key of knownAliases) test(`credential alias ${key} works in query, fragment and encoded forms`, () => {
+  for (const value of ['q7', 'xxxx', 'password']) {
+    for (const encode of [ (s: string) => s, percent, (s: string) => percent(percent(s)), ...entityEncoders ]) {
+      for (const text of [
+        ...['?', '#', '#/login?'].map(location => `https://example.test/login${location}${encode(key)}=${encode(value)}`),
+        `https://${encode(key)}:${encode(value)}@example.test/login`,
+      ]) {
+        const secret = value === 'q7';
+        expect(hasCredentialUrl(text), text).toBe(secret);
+        expect(detectSecretFindingKinds(text).length > 0, text).toBe(secret);
+        expect(snifferMaterialCarriesSecret(text), text).toBe(secret);
+        expect(secretLabelsInText(text).length > 0, text).toBe(secret);
+        expect(screenedSecretLocator(text) === null, text).toBe(secret);
+      }
+    }
+  }
+});
+for (const uri of ['https://alice@example.com/report', 'sftp://deploy@example.com/path',
+  'https://user:realpass9@host']) test(`userinfo requires a password: ${uri}`, () => {
+  for (const encode of [(s: string) => s, percent, ...entityEncoders]) {
+    const text = encode(uri);
+    const secret = uri.includes('realpass9');
+    expect(hasCredentialUrl(text)).toBe(secret);
+    expect(detectSecretFindingKinds(text).length > 0).toBe(secret);
+    expect(secretLabelsInText(text).length > 0).toBe(secret);
+    expect(snifferMaterialCarriesSecret(text)).toBe(secret);
+    expect(screenedSecretLocator(text) === null).toBe(secret);
+  }
+});
+
+for (const [name, key, value] of [
+  ['plain', 'pwd', 'q7'], ['percent', '%70%77%64', '%71%37'],
+  ['double-percent', '%2570%2577%2564', '%2571%2537'],
+  ['HTML entities', '&#112;&#119;&#100;', '&#113;&#55;'],
+]) test(`short pwd URL regression: ${name}`, () => {
+  expect(hasCredentialUrl(`https://example.test/login?${key}=${value}`)).toBe(true);
+});

@@ -9837,10 +9837,17 @@ var init_esm = __esm(() => {
 function secretPatternHits(text2, spec, variants = secretScreeningVariants(text2)) {
   const hits = [];
   for (const variant of variants) {
-    const urls = spec.label === "credential_assignment" || spec.label === "password" || spec.label === "azure_sas_signature" ? credentialUrlMatches(variant).filter((url) => URL.canParse(url[0])).flatMap((url) => [...url[0].matchAll(/[?#&]((?:&(?:#[xX][0-9a-f]+|#\d+|[a-z][a-z0-9]*);|[^?#&=])*)=/gi)].flatMap((parameter) => {
-      const key = canonicalizeScreeningText(parameter[1].replace(/^amp;/, ""));
-      return CREDENTIAL_QUERY_KEY.test(key) ? [[url.index + parameter.index + 1, url.index + parameter.index + parameter[0].length]] : [];
-    })) : [];
+    const urls = spec.label === "credential_assignment" || spec.label === "password" || spec.label === "azure_sas_signature" ? credentialUrlMatches(variant).filter((url) => URL.canParse(url[0])).flatMap((url) => {
+      const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*@)/i.exec(url[0]);
+      const userinfo = authority ? [[url.index + authority[0].length - authority[1].length, url.index + authority[0].length]] : [];
+      return [
+        ...userinfo,
+        ...[...url[0].matchAll(/[?#&]((?:&(?:#[xX][0-9a-f]+|#\d+|[a-z][a-z0-9]*);|[^?#&=])*)=/gi)].flatMap((parameter) => {
+          const key = canonicalizeScreeningText(parameter[1].replace(/^amp;/, ""));
+          return CREDENTIAL_QUERY_KEY.test(key) ? [[url.index + parameter.index + 1, url.index + parameter.index + parameter[0].length]] : [];
+        })
+      ];
+    }) : [];
     spec.pattern.lastIndex = 0;
     let urlAt = 0;
     for (const match of spec.extract?.(variant) ?? variant.matchAll(spec.pattern)) {
@@ -9920,7 +9927,7 @@ function credentialUrlMatches(text2) {
 function urlCarriesCredential(candidate, userinfoOnly = false) {
   try {
     const url = new URL(candidate);
-    const userinfo = canonicalizeScreeningText(url.password || url.username);
+    const userinfo = canonicalizeScreeningText(url.password);
     if (userinfo && !isPlaceholderValue(userinfo) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(userinfo))
       return true;
     if (userinfoOnly)
@@ -10065,8 +10072,8 @@ function assignmentAccepted(match) {
   const rest = value.startsWith("<") || value.startsWith("(") ? restOfLine(match) : "";
   if (isPlaceholderValue(value, quoted ? "" : rest) || isNotLiteralCredential(value))
     return false;
-  const isPassword = keyword.startsWith("pass");
-  const isSecret = isPassword || keyword.startsWith("secret");
+  const isPassword = keyword.startsWith("pass") || keyword === "pwd";
+  const isSecret = isPassword || keyword.includes("secret");
   if (/\s/.test(value))
     return isSecret && isPlausiblePassphrase(value, 6);
   if (PROSE_WORDS.has(stripNonAlphanumeric(value)))
@@ -10145,7 +10152,7 @@ function blockScalarAccepted(match) {
   const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? "").length;
   if ((groups.ind ?? "").length <= keyIndent)
     return false;
-  const isSecret = keyword.startsWith("pass") || keyword.startsWith("secret");
+  const isSecret = keyword.startsWith("pass") || keyword === "pwd" || keyword.includes("secret");
   const judge = (value) => {
     if (!value || isPlaceholderValue(value) || isNotLiteralCredential(value))
       return false;
@@ -10162,7 +10169,7 @@ function blockScalarAccepted(match) {
     return true;
   return lines.length > 1 && judge(lines.join(" "));
 }
-var PROSE_WORDS, URL_SCHEME, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+var PROSE_WORDS, URL_SCHEME, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
 var init_secret_patterns = __esm(() => {
   init_esm();
   PROSE_WORDS = new Set([
@@ -10231,7 +10238,22 @@ var init_secret_patterns = __esm(() => {
     "via"
   ]);
   URL_SCHEME = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\//gi;
-  CREDENTIAL_QUERY_KEY = /^(?:access_token|refresh_token|api_key|client_secret|password|token|secret|sig)$/i;
+  CREDENTIAL_KEYS = [
+    { pattern: String.raw`api[_ -]?key`, legacy: true },
+    { pattern: String.raw`access[_ -]?token`, legacy: true },
+    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+    { pattern: String.raw`client[_ -]?secret`, legacy: true },
+    { pattern: "password", legacy: true },
+    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+    { pattern: String.raw`private[_ -]?key` },
+    { pattern: "secret" },
+    { pattern: String.raw`token(?!s)` },
+    { pattern: "sig", urlOnly: true }
+  ];
+  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
   MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
   PLACEHOLDER_WORDS = new RegExp([
     String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
@@ -10343,12 +10365,12 @@ var init_secret_patterns = __esm(() => {
   ]);
   NON_CREDENTIAL_TOKEN_PREFIX = /(?:page|sync|cursor|continuation|resume|batch|delta|csrf|xsrf|nonce)[_ .-]?$/i;
   CODE_LEAD = /(?:^|[^\w$])(?:const|let|var|val|final|static|public|private|protected|readonly|def)\s+[^=:\n]*$|[\w$]+\.[\w$]*$/;
-  ENV_KEY_WORDS = String.raw`pass(?:word|wd|phrase|code)|pwd|secret|token(?!s)|api[_-]?key|private[_-]?key`;
+  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
   ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
   NON_CREDENTIAL_KEY_TAIL = /[_.-](?:file|path|dir|url|uri|hash|hashed|salt|type|length|len|ttl|expiry|expires|expiration|policy|field|header|endpoint|name|label|count|size|min|max|regex|pattern|prefix|id)$/i;
   NON_CREDENTIAL_CAMEL_TAIL = /[a-z](?:File|Path|Dir|Url|Uri|Hash|Hashed|Salt|Type|Length|Ttl|Expiry|Expires|Name|Label|Count|Size|Min|Max|Regex|Pattern|Prefix|Id)$/;
   COMMENT_LINE = /^#(?:\s|$)/;
-  KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
+  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
   SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
   VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
   CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
@@ -10359,7 +10381,7 @@ var init_secret_patterns = __esm(() => {
   AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
   AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
   AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
-  LEGACY_CREDENTIAL_ASSIGNMENT = /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi;
+  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
   SHARED_SECRET_PATTERNS = [
     {
       findingType: "credential_assignment",
@@ -11530,7 +11552,7 @@ function contentPass(args) {
       reasons.splice(0, reasons.length, ...decided.reasons);
     } else {
       pending = true;
-      if (recordFlags.length === 0 && !metadata.pending)
+      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending)
         reasons.push(PERSONAL_FIRST_REASON);
       for (const flag of recordFlags)
         reasons.push(`content:own_record:${flag}`);
@@ -25129,7 +25151,17 @@ function rejudgeStoredContent(set, record, options) {
   const sender = columnString(exported.columns["sender_label"]);
   const mimeType = columnString(exported.columns["mime_type"]);
   const folderKeys = storedFolderKeys(exported.columns["source_scope_folder_keys_json"]);
-  const metadata = rejudgeMetadata(record, options.sniffer, { title, path, sender, folderKeys }, identity);
+  let questionNotQueued = false;
+  const sniffer = options.sniffer && {
+    id: options.sniffer.id,
+    judge(request) {
+      const verdict = options.sniffer.judge(request);
+      if (verdict.verdict === "undecided" && verdict.queued !== true)
+        questionNotQueued = true;
+      return verdict;
+    }
+  };
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity);
   const content = classifyContentTier({
     text: text2,
     metadataTier: metadata.metadataTier,
@@ -25143,7 +25175,7 @@ function rejudgeStoredContent(set, record, options) {
     ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
     subject: identity
   }, {
-    ...options.sniffer ? { sniffer: options.sniffer } : {},
+    ...sniffer ? { sniffer } : {},
     ...options.retirePublic ? { retirePublic: true } : {}
   });
   const decision = {
@@ -25170,6 +25202,10 @@ function rejudgeStoredContent(set, record, options) {
       findingKinds: content.reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length))
     });
     report.secrets += 1;
+    return;
+  }
+  if (questionNotQueued) {
+    report.failed += 1;
     return;
   }
   if (content.contentPending && record.state === "pending") {
@@ -38595,6 +38631,7 @@ class CachedTierSniffer {
           flags: request.flags,
           ...request.priority !== undefined ? { priority: request.priority } : {}
         });
+        return { verdict: "undecided", queued: true };
       }
     } catch {}
     return { verdict: "undecided" };

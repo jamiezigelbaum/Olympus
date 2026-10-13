@@ -185,7 +185,18 @@ export function rejudgeStoredContent(
   const sender = columnString(exported.columns['sender_label']);
   const mimeType = columnString(exported.columns['mime_type']);
   const folderKeys = storedFolderKeys(exported.columns['source_scope_folder_keys_json']);
-  const metadata = rejudgeMetadata(record, options.sniffer, { title, path, sender, folderKeys }, identity);
+  // A failed cache/queue operation is not an open question. Leave all retry
+  // stamps and receipts untouched until every needed question is persisted.
+  let questionNotQueued = false;
+  const sniffer: TierSniffer | undefined = options.sniffer && {
+    id: options.sniffer.id,
+    judge(request) {
+      const verdict = options.sniffer!.judge(request);
+      if (verdict.verdict === 'undecided' && verdict.queued !== true) questionNotQueued = true;
+      return verdict;
+    },
+  };
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity);
   const content = classifyContentTier(
     {
       text,
@@ -201,7 +212,7 @@ export function rejudgeStoredContent(
       subject: identity,
     },
     {
-      ...(options.sniffer ? { sniffer: options.sniffer } : {}),
+      ...(sniffer ? { sniffer } : {}),
       ...(options.retirePublic ? { retirePublic: true } : {}),
     },
   );
@@ -231,6 +242,10 @@ export function rejudgeStoredContent(
         .map((reason) => reason.slice('content:secret:'.length)),
     });
     report.secrets += 1;
+    return;
+  }
+  if (questionNotQueued) {
+    report.failed += 1;
     return;
   }
   if (content.contentPending && record.state === 'pending') {
