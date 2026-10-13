@@ -67,12 +67,6 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
       const end = Math.min(expectedBytes - 1, start + REQUEST_BYTES - 1);
       const controller = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
-      let rejectAbort!: (reason: unknown) => void;
-      const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
-      // Fetch implementations and synthetic streams do not all honour signal.
-      const onAbort = (): void => rejectAbort(controller.signal.reason);
-      controller.signal.addEventListener('abort', onAbort, { once: true });
-      aborted.catch(() => undefined);
       const armStall = (): void => {
         clearTimeout(timer);
         timer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
@@ -83,10 +77,10 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
       try {
         armStall();
         try {
-          response = await Promise.race([fetchImpl(url, {
+          response = await untilAborted(fetchImpl(url, {
             redirect: 'follow', signal: controller.signal,
             headers: { Range: `bytes=${start}-${end}`, 'Accept-Encoding': 'identity' },
-          }), aborted]);
+          }), controller.signal);
         } catch (cause) {
           throw error('download_failed', `Could not reach the download server for the ${noun} (${message(cause)}).`);
         }
@@ -116,7 +110,7 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
         for (;;) {
           armStall();
           let part: Awaited<ReturnType<typeof reader.read>>;
-          try { part = await Promise.race([reader.read(), aborted]); }
+          try { part = await untilAborted(reader.read(), controller.signal); }
           catch (cause) { throw new InterruptedRead(message(cause)); }
           if (part.done) break;
           if (received + part.value.byteLength > responseEnd + 1) {
@@ -144,7 +138,6 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
         if (reader) { void reader.cancel().catch(() => undefined); reader.releaseLock(); }
         else if (response?.body) void response.body.cancel().catch(() => undefined);
         controller.abort();
-        controller.signal.removeEventListener('abort', onAbort);
       }
       if (retry) await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * 2 ** (retries - 1)));
     }
@@ -175,6 +168,27 @@ async function hashPartial(path: string, hash: ReturnType<typeof createHash>, ti
   const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
   try { for await (const bytes of stream) hash.update(bytes); }
   finally { clearTimeout(timer); stream.destroy(); }
+}
+
+/**
+ * Settles with `work`, or rejects once `signal` aborts: fetch implementations
+ * and synthetic streams do not all honour the signal. Each call has its own
+ * listener, removed when `work` settles. Racing every read against one
+ * long-lived abort promise kept each chunk reachable until that promise
+ * settled; on Bun a 1.5 GB download then peaked at 6.2 GB of memory
+ * (Omarchy laptop, 2026-10-13).
+ */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) {
+      work.catch(() => undefined);
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }
 
 function message(cause: unknown): string { return cause instanceof Error ? cause.message : String(cause); }
