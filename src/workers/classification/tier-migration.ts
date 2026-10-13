@@ -711,6 +711,8 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
           const decision = classifyItemTiers(
             {
               signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
+              // A link locator is screened for credentials as at ingestion.
+              ...(item.locatorUri ? { locators: [item.locatorUri] } : {}),
               provider: item.identity.provider,
               text: item.chunks.map((chunk) => chunk.text).join(''),
               ...(item.mimeType ? { mimeType: item.mimeType } : {}),

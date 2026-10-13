@@ -72,6 +72,7 @@ interface Spec {
   id: string;
   name: string;
   text: string;
+  url?: string;
 }
 
 const FILES = {
@@ -114,6 +115,7 @@ function rawItem(provider: string, spec: Spec, family: 'file' | 'readwise'): Raw
       name: spec.name,
       title: spec.name,
       ...(family === 'file' ? { pathDisplay: `/Files/${spec.name}` } : {}),
+      ...(spec.url ? { url: spec.url } : {}),
     }),
     fetchedAt: '2026-09-23T00:00:00.000Z',
   };
@@ -176,7 +178,7 @@ function asMoveIdentity(provider: RecordingProvider): TierMoveEmbeddingIdentity 
 }
 
 /** The pre-routing install: every file in one Private store, every library item in one Personal store, embedded. */
-async function rehearsal(): Promise<Rehearsal> {
+async function rehearsal(extraLibrary: readonly Spec[] = []): Promise<Rehearsal> {
   const { dir, cleanup } = tempDir('olympus-tier-p3-');
   cleanups.push(cleanup);
   const files = {
@@ -219,7 +221,7 @@ async function rehearsal(): Promise<Rehearsal> {
   });
   await syncAndEmbedFromConnector({
     store: libraryStore,
-    connector: connector('rehearsal-library', () => Object.values(LIBRARY), 'readwise'),
+    connector: connector('rehearsal-library', () => [...Object.values(LIBRARY), ...extraLibrary], 'readwise'),
     embeddingProvider: cloud,
     sync: {
       fetchContent: true,
@@ -407,6 +409,17 @@ describe('tier migration M0 (dry run)', () => {
     } finally {
       invalidate.mockRestore();
     }
+  });
+
+  test('a legacy item whose stored link carries a credential plans as Secrets', async () => {
+    // Ordinary text; only the stored locator holds the credential.
+    const context = await rehearsal([{ id: 'shared', name: 'Shared file', text: 'Notes about the orchard and the cider press.', url: `https://example.test/file?token=${'a7B9c2D4e6F8g1H3k5M7'}` }]);
+    const read = lanes(context, 'read');
+    const plan = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+    expect(plan.totals.secrets).toBe(2);
+    expect(plan.totals.moves).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'rehearsal.library', toNames: 'Secrets', toContent: 'Secrets', items: 1 }),
+    ]));
   });
 
   test('an owner override changes the plan (M1) and makes the earlier plan stale', async () => {
