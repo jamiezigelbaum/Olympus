@@ -6233,7 +6233,7 @@ function refreshLinuxDesktopCaches(layout, exec = runCache) {
 function writeLinuxDesktopEntry(layout, packageRoot, exec) {
   preflightLinuxDesktopEntry(layout);
   const paths = linuxDesktopEntryPaths(layout);
-  const icon = readFileSync10(join9(packageRoot, "assets/icon.png"));
+  const icon = readFileSync10(join9(packageRoot, LINUX_APP_ICON));
   for (const path of Object.values(paths))
     createLinuxPrivateDirectory(dirname6(path));
   writePrivateFileAtomicSync(paths.icon, icon);
@@ -6256,7 +6256,7 @@ function linuxDesktopEntryStatus(layout) {
     return { present: false, path: paths.desktop };
   }
 }
-var ID = "ai.olympusplugin.Olympus", digest = (path) => createHash3("sha256").update(readFileSync10(path)).digest("hex"), runCache = (command, args) => {
+var ID = "ai.olympusplugin.Olympus", LINUX_APP_ICON = "assets/app-icon.png", digest = (path) => createHash3("sha256").update(readFileSync10(path)).digest("hex"), runCache = (command, args) => {
   const result = spawnSync3(command, args, { encoding: "utf8", timeout: 3000 });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 };
@@ -68243,7 +68243,7 @@ function assertDesktopTransactionTargets(layout, transaction) {
   assertLinuxDesktopEntryOwnership(layout, [old, transaction.desktopIconSha256].filter((hash) => typeof hash === "string"));
 }
 function writeTransactionDesktop(layout, program, transaction, exec) {
-  transaction.desktopIconSha256 = hashFile(join65(program.workingDirectory, "assets/icon.png"));
+  transaction.desktopIconSha256 = hashFile(join65(program.workingDirectory, LINUX_APP_ICON));
   writeInstallTransaction(layout, transaction);
   writeLinuxDesktopEntry(layout, program.workingDirectory, exec);
 }
@@ -123851,6 +123851,17 @@ function hostProgram(input, bridge) {
     frame,
     callTool,
     openUrl(url) {
+      const own3 = Object.keys(input.bridge.links).map((key2) => input.bridge.links[key2]).concat(Object.keys(input.bridge.openTargets).map((key2) => input.bridge.openTargets[key2]));
+      let parsed;
+      try {
+        parsed = new URL(url, window.location.href);
+      } catch {
+        parsed = undefined;
+      }
+      if (parsed && (own3.indexOf(url) >= 0 || parsed.origin === window.location.origin)) {
+        window.location.assign(parsed.pathname + parsed.search + parsed.hash);
+        return;
+      }
       window.open(url, "_blank", "noopener");
     }
   });
