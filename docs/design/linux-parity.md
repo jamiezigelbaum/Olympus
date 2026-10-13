@@ -269,6 +269,6 @@ The test machine is the owner's Omarchy laptop.
 
 ## Out of scope
 
-Windows; video content; GPU builds of llama.cpp; bundling OCR or image
+Windows (planned separately in `windows-wsl.md`); video content; GPU builds of llama.cpp; bundling OCR or image
 libraries; live Apple Messages; any demo-box or listing change during the
 OpenAI review.

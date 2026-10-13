@@ -160,6 +160,24 @@ upgrade/rollback, and other critical changes also need an independent review
 receipt; live changes retain their separate explicit authorization and
 protocol. The implementing session owns the exact-main CI result after merge.
 
+## ChatGPT directory review (until OpenAI's result)
+
+- **The relay ships as normal.** Deploy it with
+  `connect-relay/deploy/deploy.sh` from an exact main commit. The script
+  checks the reviewer path on mcp.olympusplugin.ai before and after each
+  deploy (`connect-relay/deploy/reviewer-check.ts`) and rolls the relay back
+  on its own if the path changes. Never set `RELAY_REVIEWER_CHECK=off` for
+  this host to get past a failure; report the failing step instead.
+- **The relay can't change what reviewers see.** `/openai/mcp` serves the
+  listing pinned in `connect-relay/server/directory/approved.ts`, and
+  `connect-relay/test/reviewer-path.test.ts` fails CI on any drift. New tools
+  and pages go to `/mcp`. Changing the pinned listing is a new submission
+  that the owner decides on.
+- **The reviewer demo engine stays frozen** (`olympus-demo` on the
+  olympus-test host): no updates, config or data edits, or restarts. Releases
+  skip it. Ask the owner before touching it.
+- Details: `chatgpt-plugin/SUBMISSION.md`, "Reviewer demo".
+
 ## Current Milestone
 
 Use [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) as the source of truth for the

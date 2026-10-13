@@ -904,7 +904,7 @@ function absolute(value, name) {
     throw new Error(`${name} must be an absolute path without control characters.`);
   return resolve2(value);
 }
-function rawLayout(env) {
+function rawLayout(env, recordedDataDir) {
   const home = absolute(env.HOME || homedir(), "HOME");
   const root = (key, fallback) => absolute(env[key] || join2(home, fallback), key);
   const configHome = root("XDG_CONFIG_HOME", ".config");
@@ -914,7 +914,19 @@ function rawLayout(env) {
   const runtimeHome = env.XDG_RUNTIME_DIR ? absolute(env.XDG_RUNTIME_DIR, "XDG_RUNTIME_DIR") : "";
   const configDir = join2(configHome, "olympus");
   const runtimeDir = runtimeHome ? join2(runtimeHome, "olympus") : "";
-  const dataDir = join2(dataHome, "openclaw/olympus"), stateDir = join2(stateHome, "olympus/engine"), cacheDir = join2(cacheHome, "olympus/engine"), packageDir = join2(dataHome, "olympus/engine");
+  const xdgDataDir = join2(dataHome, "olympus");
+  const legacyDirs = [...new Set([join2(dataHome, "openclaw/olympus"), join2(home, ".local/share/openclaw/olympus")])];
+  if (recordedDataDir && ![xdgDataDir, ...legacyDirs].includes(recordedDataDir))
+    throw new Error("Invalid Linux data root in install receipt.");
+  const hasData = (path) => {
+    const info = stat2(path);
+    if (!info)
+      return false;
+    return !info.isDirectory() || info.isSymbolicLink() || readdirSync(path).some((name) => path !== xdgDataDir || name !== "engine");
+  };
+  const dataDir = recordedDataDir ?? (hasData(xdgDataDir) ? xdgDataDir : legacyDirs.find(hasData) ?? xdgDataDir);
+  const stateDir = join2(stateHome, "olympus/engine"), cacheDir = join2(cacheHome, "olympus/engine");
+  const packageDir = dataDir === xdgDataDir ? join2(dataHome, "olympus-engine") : join2(dataHome, "olympus/engine");
   const managedRoots = [configDir, dataDir, stateDir, cacheDir, packageDir];
   for (let i = 0;i < managedRoots.length; i += 1)
     for (let j = i + 1;j < managedRoots.length; j += 1) {
@@ -1003,7 +1015,7 @@ function readLinuxEngineReceipt(path, uid = process.getuid()) {
   if (!["installed", "recovery_pending", "data_retained"].includes(receipt.installationState))
     throw new Error(`${path} has an invalid installation state.`);
   const l = receipt.layout;
-  const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome });
+  const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome }, l.dataDir);
   if (!linuxEngineLayoutsEqual(l, expected) || l.receiptPath !== path)
     throw new Error(`${path} has an inconsistent install layout.`);
   const allowedLinkParents = new Set([join2(l.configHome, "systemd/user"), join2(l.home, ".config/systemd/user")]);
@@ -1034,17 +1046,29 @@ function readLinuxEngineReceipt(path, uid = process.getuid()) {
   return receipt;
 }
 function resolveLinuxEngineLayout(env = process.env) {
-  const requested = rawLayout(env);
-  const candidates = [...new Set([join2(requested.home, ".config/olympus/install-receipt.json"), requested.receiptPath])];
+  const home = absolute(env.HOME || homedir(), "HOME");
+  const configHome = absolute(env.XDG_CONFIG_HOME || join2(home, ".config"), "XDG_CONFIG_HOME");
+  const candidates = [...new Set([join2(home, ".config/olympus/install-receipt.json"), join2(configHome, "olympus/install-receipt.json")])];
   const present = candidates.filter((p) => stat2(p));
   if (present.length > 1)
     throw new Error(`Found multiple Olympus install receipts: ${present.join(", ")}. Select one installation after moving the other aside.`);
   const receipt = present[0] ? readLinuxEngineReceipt(present[0]) : undefined;
-  if (receipt && receipt.layout.home !== requested.home)
+  if (receipt && receipt.layout.home !== home)
     throw new Error(`${present[0]} belongs to another home.`);
-  return receipt?.layout ?? requested;
+  return receipt?.layout ?? rawLayout(env);
+}
+function standaloneLinuxDataDir(env = process.env) {
+  if (process.platform !== "linux")
+    return;
+  if (env.OLYMPUS_ENGINE_HOST !== "1" && (env.OPENCLAW_STATE_DIR || env.OPENCLAW_CONFIG_PATH || readOpenClawPluginRemote(env).hosted))
+    return;
+  const layout = resolveLinuxEngineLayout(env);
+  if (env.OLYMPUS_ENGINE_HOST === "1" || readLinuxEngineReceipt(layout.receiptPath))
+    return layout.dataDir;
+  return;
 }
 var init_linux_engine_layout = __esm(() => {
+  init_config();
   init_linux_desktop_entry();
   init_atomic_file();
 });
@@ -2210,7 +2234,7 @@ import { basename, dirname as dirname5, isAbsolute as isAbsolute4, join as join4
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
   const dataRoot = env.XDG_DATA_HOME?.trim() || join4(env.HOME?.trim() || homedir2(), ".local", "share");
-  const root = configured || join4(dataRoot, "openclaw", "olympus", "models", "built-in-embedding");
+  const root = configured || join4(standaloneLinuxDataDir(env) ?? join4(dataRoot, "openclaw", "olympus"), "models", "built-in-embedding");
   if (!isAbsolute4(root))
     throw new TypeError("The built-in embedding directory must be an absolute path.");
   return {
@@ -2756,6 +2780,7 @@ class ProgressReporter {
 }
 var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR", STALE_LOCK_MS, LOCK_POLL_MS = 1000, PROGRESS_WRITE_INTERVAL_MS = 500, DOWNLOAD_STALL_MS, BuiltInEmbeddingInstallError, verifiedThisProcess, RUNTIME_MARKER = "olympus-runtime.json";
 var init_assets = __esm(() => {
+  init_linux_engine_layout();
   init_manifest();
   init_tar();
   init_zip();
@@ -6525,7 +6550,7 @@ function readWorkerSetupEnv(options = {}) {
       return;
     const key = `${stat3.dev}:${stat3.ino}:${stat3.size}:${stat3.mtimeNs}:${stat3.ctimeNs}:${stat3.mode}`;
     const cached = setupEnvCache.get(path);
-    if (cached?.key === key)
+    if (process.platform !== "linux" && cached?.key === key)
       return { ...cached.env };
     const env = parseWorkerSetupEnv(readFileSync11(path, "utf8"));
     setupEnvCache.set(path, { key, env });
@@ -10054,6 +10079,522 @@ var init_embeddings = __esm(() => {
   };
 });
 
+// src/core/secret-patterns.ts
+function trimValueEnd(value) {
+  let end = value.length;
+  while (end > 0 && ";,)]}".includes(value[end - 1]))
+    end -= 1;
+  while (end > 0 && value[end - 1] === ".")
+    end -= 1;
+  return value.slice(0, end);
+}
+function stripNonAlphanumeric(word) {
+  const isAlphanumeric = (code) => code >= 48 && code <= 57 || code >= 97 && code <= 122;
+  const lower = word.toLowerCase();
+  let start = 0;
+  let end = lower.length;
+  while (start < end && !isAlphanumeric(lower.charCodeAt(start)))
+    start += 1;
+  while (end > start && !isAlphanumeric(lower.charCodeAt(end - 1)))
+    end -= 1;
+  return lower.slice(start, end);
+}
+function isBareLiteral(value) {
+  if (value.length > 24)
+    return false;
+  let end = value.length;
+  while (end > 0 && ".,;".includes(value[end - 1]))
+    end -= 1;
+  return BARE_LITERALS.has(value.slice(0, end).toLowerCase());
+}
+function isVariableReference(value) {
+  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$/s.exec(value);
+  if (!match)
+    return false;
+  const name = match[1];
+  if (match[2])
+    return match[2].startsWith("/");
+  return name.includes("_") || name === name.toUpperCase() || !/[0-9]/.test(name) && name === name.toLowerCase();
+}
+function isPlaceholderValue(value, lineRest = "") {
+  const v = value.trim();
+  if (!v)
+    return true;
+  if (v.startsWith("<") && (v.includes(">") || lineRest.includes(">")))
+    return true;
+  if (v.startsWith("(") && (v.includes(")") || lineRest.includes(")")))
+    return true;
+  if (/^[[{].*[\]}]$/.test(v))
+    return true;
+  if (/\$\{|\{\{|<%|%\(|\$\(|^%[A-Za-z_]+%$/.test(v))
+    return true;
+  if (isVariableReference(v))
+    return true;
+  if (MASKED_RUN.test(v))
+    return true;
+  if (/^(.)\1+$/.test(v))
+    return true;
+  if (isBareLiteral(v))
+    return true;
+  return PLACEHOLDER_WORDS.test(v);
+}
+function isPropertyLookup(value) {
+  if (!MEMBER_CHAIN.test(value))
+    return false;
+  return value.split(".").some((segment) => CREDENTIAL_WORD.test(segment) || COMMON_OBJECTS.has(segment.toLowerCase()));
+}
+function isNotLiteralCredential(value) {
+  return CODE_LOOKUP.test(value) || IDENTIFIER_NAME.test(value) && CREDENTIAL_WORD.test(value) || CALL_EXPRESSION.test(value) || isPropertyLookup(value) || TYPE_ANNOTATION.test(value) || /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^(?:\.{0,2}\/|~\/|[A-Za-z]:[\\/])/.test(value);
+}
+function hasCredentialShape(value) {
+  return /[0-9]/.test(value) || /[^A-Za-z0-9_.\-\s]/.test(value);
+}
+function isPlausiblePassphrase(value, minLength) {
+  const v = value.trim();
+  if (v.length < minLength || v.length > 160)
+    return false;
+  if (/[?:]$/.test(v) || /\bhttps?:\/\//i.test(v))
+    return false;
+  if (isPlaceholderValue(v) || isNotLiteralCredential(v))
+    return false;
+  const words = v.split(/\s+/);
+  if (words.length < 2 || words.length > 14)
+    return false;
+  if (CREDENTIAL_NOUN.test(stripNonAlphanumeric(words[words.length - 1])))
+    return false;
+  return !words.some((word) => PROSE_WORDS.has(stripNonAlphanumeric(word)));
+}
+function leadBefore(input, index, limit) {
+  const window2 = input.slice(Math.max(0, index - limit), index);
+  const newline = Math.max(window2.lastIndexOf(`
+`), window2.lastIndexOf("\r"));
+  return newline === -1 ? window2 : window2.slice(newline + 1);
+}
+function restOfLine(match) {
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const window2 = input.slice(end, end + 200);
+  const newline = window2.search(/[\r\n]/);
+  return newline === -1 ? window2 : window2.slice(0, newline);
+}
+function assignedValue(groups) {
+  const quotedValue = groups.dq ?? groups.sq ?? groups.bq;
+  if (quotedValue !== undefined)
+    return { value: quotedValue.trim(), quoted: true, tail: "" };
+  const raw = groups.uv ?? "";
+  const value = trimValueEnd(raw).trim();
+  return { value, quoted: false, tail: raw.slice(value.length) };
+}
+function isIdentifierHandOff(match, assigned) {
+  if (assigned.quoted || !BARE_IDENTIFIER.test(assigned.value))
+    return false;
+  if (CODE_LEAD.test(leadBefore(match.input ?? "", match.index ?? 0, 80)))
+    return true;
+  return /[;)]/.test(assigned.tail) && (assigned.value.includes("_") || /[a-z][A-Z]/.test(assigned.value));
+}
+function endsTheLine(match) {
+  const rest = restOfLine(match).trim();
+  return rest === "" || /^(?:#|\/\/|;|--)/.test(rest);
+}
+function assignmentAccepted(match) {
+  const groups = match.groups ?? {};
+  const keyword = (groups.kw ?? "").toLowerCase();
+  const assigned = assignedValue(groups);
+  const { value, quoted } = assigned;
+  if (!value)
+    return false;
+  const rest = value.startsWith("<") || value.startsWith("(") ? restOfLine(match) : "";
+  if (isPlaceholderValue(value, quoted ? "" : rest) || isNotLiteralCredential(value))
+    return false;
+  const isPassword = keyword.startsWith("pass");
+  const isSecret = isPassword || keyword.startsWith("secret");
+  if (/\s/.test(value))
+    return isSecret && isPlausiblePassphrase(value, 6);
+  if (quoted && isSecret)
+    return value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase());
+  if (isIdentifierHandOff(match, assigned))
+    return false;
+  let strong = true;
+  if (keyword === "secret" || keyword === "token") {
+    const start = match.index ?? 0;
+    const lead = (match.input ?? "").slice(Math.max(0, start - 48), start);
+    if (keyword === "token" && NON_CREDENTIAL_TOKEN_PREFIX.test(lead))
+      return false;
+    const attached = /[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(lead);
+    if (!attached) {
+      const previous = /([A-Za-z]+) $/.exec(lead)?.[1]?.toLowerCase();
+      strong = previous !== undefined && STRONG_QUALIFIERS.has(previous);
+      if (!strong && /[?&]$/.test(lead))
+        return false;
+    }
+  }
+  if (!strong)
+    return value.length >= 12 && hasCredentialShape(value);
+  if (value.length >= 12)
+    return true;
+  if (value.length >= 8 && hasCredentialShape(value))
+    return true;
+  return isPassword && !groups.nl && value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase()) && endsTheLine(match);
+}
+function maskedProviderToken(token) {
+  const body = token.replace(/^(?:github_pat_|[A-Za-z]+[_-])+/, "");
+  return !body || MASKED_RUN.test(body) || /^(.)\1+$/.test(body) || /example|your|placeholder/i.test(body);
+}
+function envAssignmentAccepted(match) {
+  const groups = match.groups ?? {};
+  const key = groups.ek ?? "";
+  if (!ENV_CREDENTIAL_KEY.test(key))
+    return false;
+  if (NON_CREDENTIAL_KEY_TAIL.test(key) || NON_CREDENTIAL_CAMEL_TAIL.test(key))
+    return false;
+  const assigned = assignedValue(groups);
+  const { value, quoted } = assigned;
+  if (value.replace(/\s+/g, "").length < 6)
+    return false;
+  const rest = value.startsWith("<") || value.startsWith("(") ? restOfLine(match) : "";
+  if (isPlaceholderValue(value, quoted ? "" : rest) || isNotLiteralCredential(value))
+    return false;
+  if (/\s/.test(value) && !isPlausiblePassphrase(value, 6))
+    return false;
+  return !isIdentifierHandOff(match, assigned);
+}
+function blockScalarAccepted(match) {
+  const groups = match.groups ?? {};
+  const keyword = (groups.kw ?? "").toLowerCase();
+  const value = (groups.bv ?? "").trim();
+  if (!value || value.startsWith("#"))
+    return false;
+  const keyLead = leadBefore(match.input ?? "", match.index ?? 0, 200);
+  const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? "").length;
+  if ((groups.ind ?? "").length <= keyIndent)
+    return false;
+  if (isPlaceholderValue(value) || isNotLiteralCredential(value))
+    return false;
+  const isSecret = keyword.startsWith("pass") || keyword.startsWith("secret");
+  if (/\s/.test(value))
+    return isSecret && isPlausiblePassphrase(value, 6);
+  return value.length >= (isSecret ? 6 : 8);
+}
+var PROSE_WORDS, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "above",
+    "below",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "enter",
+    "expired",
+    "expires",
+    "forgot",
+    "forgotten",
+    "guideline",
+    "guidelines",
+    "hidden",
+    "incorrect",
+    "information",
+    "instruction",
+    "instructions",
+    "invalid",
+    "least",
+    "letters",
+    "link",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "need",
+    "needed",
+    "needs",
+    "number",
+    "numbers",
+    "optional",
+    "please",
+    "policies",
+    "policy",
+    "protected",
+    "provide",
+    "provided",
+    "required",
+    "requirements",
+    "reset",
+    "see",
+    "send",
+    "sent",
+    "setting",
+    "settings",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "strength",
+    "symbols",
+    "unchanged",
+    "use",
+    "used",
+    "using",
+    "via"
+  ]);
+  MASKED_RUN = /(?:\*{3,}|•{3,}|…|\.{3,}|[xX]{5,})/;
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_-]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme",
+    "enabled",
+    "disabled",
+    "encrypted",
+    "hashed",
+    "unknown",
+    "tbd",
+    "pending",
+    "missing"
+  ]);
+  CODE_LOOKUP = /^(?:process\.env|import\.meta\.env|os\.environ|os\.getenv|system\.getenv|deno\.env|getenv|environ|env|config|settings|secrets?|self|this|args|opts|options|params|req|request|ctx|vault|input)[.[(]/i;
+  CALL_EXPRESSION = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(/;
+  MEMBER_CHAIN = /^[A-Za-z_$][A-Za-z_$]*(?:\.[A-Za-z_$][A-Za-z_$]*)+$/;
+  COMMON_OBJECTS = new Set([
+    "user",
+    "users",
+    "body",
+    "data",
+    "form",
+    "state",
+    "props",
+    "creds",
+    "credentials",
+    "account",
+    "profile",
+    "session",
+    "auth",
+    "db",
+    "app",
+    "json",
+    "response",
+    "res",
+    "row",
+    "record",
+    "item",
+    "model"
+  ]);
+  TYPE_ANNOTATION = /^(?:secretstr(?:ing)?|optional[[<]|option<|union[[<]|promise<|record<|array<|string\s*\||[a-z]+\s*\|\s*(?:undefined|null))/i;
+  BARE_IDENTIFIER = /^[A-Za-z_$][A-Za-z_$]*$/;
+  CREDENTIAL_WORD = /pass(?:word|wd|phrase|code)|secret|token|api[_-]?key|credential/i;
+  CREDENTIAL_NOUN = /^(?:pass(?:word|phrase|code)|passwd|secret|token|credential)s?$/;
+  IDENTIFIER_NAME = /^[A-Za-z]+(?:[_-][A-Za-z]+)+$/;
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  NON_CREDENTIAL_TOKEN_PREFIX = /(?:page|sync|cursor|continuation|resume|batch|delta|csrf|xsrf|nonce)[_ .-]?$/i;
+  CODE_LEAD = /(?:^|[^\w$])(?:const|let|var|val|final|static|public|private|protected|readonly|def)\s+[^=:\n]*$|[\w$]+\.[\w$]*$/;
+  ENV_KEY_WORDS = String.raw`pass(?:word|wd|phrase|code)|pwd|secret|token(?!s)|api[_-]?key|private[_-]?key`;
+  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+  NON_CREDENTIAL_KEY_TAIL = /[_.-](?:file|path|dir|url|uri|hash|hashed|salt|type|length|len|ttl|expiry|expires|expiration|policy|field|header|endpoint|name|label|count|size|min|max|regex|pattern|prefix|id)$/i;
+  NON_CREDENTIAL_CAMEL_TAIL = /[a-z](?:File|Path|Dir|Url|Uri|Hash|Hashed|Salt|Type|Length|Ttl|Expiry|Expires|Name|Label|Count|Size|Min|Max|Regex|Pattern|Prefix|Id)$/;
+  KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{11,159})$`, "gim");
+  URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
+  AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
+  AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
+  AZURE_SAS_SIGNATURE = /(?<=[?&;])sig=(?<sig>[A-Za-z0-9%+/_-]{30,}={0,3})/gi;
+  LEGACY_CREDENTIAL_ASSIGNMENT = /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi;
+  SHARED_SECRET_PATTERNS = [
+    {
+      findingType: "private_key_material",
+      label: "private_key",
+      pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
+      confidence: 1
+    },
+    {
+      findingType: "aws_access_key_id",
+      label: "aws_access_key_id",
+      pattern: /\bAKIA[0-9A-Z]{16}\b/g,
+      confidence: 0.98
+    },
+    {
+      findingType: "slack_token",
+      label: "slack_token",
+      pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
+      confidence: 0.98
+    },
+    {
+      findingType: "api_secret_token",
+      label: "openai_key",
+      pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
+      confidence: 0.95
+    },
+    {
+      findingType: "api_secret_token",
+      label: "github_token",
+      pattern: /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "stripe_key",
+      pattern: /(?<![A-Za-z0-9])(?:(?:sk|rk)_live_|whsec_)[A-Za-z0-9]{16,}/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_api_key",
+      pattern: /(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}/g,
+      confidence: 0.95,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_oauth_client_secret",
+      pattern: /(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}/g,
+      confidence: 0.97,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "api_secret_token",
+      label: "google_oauth_token",
+      pattern: /(?<![A-Za-z0-9/])(?:1\/\/0[A-Za-z0-9_-]{30,}|ya29\.[A-Za-z0-9_-]{20,})/g,
+      confidence: 0.95,
+      accept: (match) => !maskedProviderToken(match[0])
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: LEGACY_CREDENTIAL_ASSIGNMENT,
+      confidence: 0.9
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: CREDENTIAL_ASSIGNMENT,
+      confidence: 0.9,
+      accept: assignmentAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: ENV_ASSIGNMENT,
+      confidence: 0.85,
+      accept: envAssignmentAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_assignment",
+      pattern: BLOCK_SCALAR,
+      confidence: 0.85,
+      accept: blockScalarAccepted
+    },
+    {
+      findingType: "credential_assignment",
+      label: "password",
+      pattern: LABELLED_PASSPHRASE,
+      confidence: 0.85,
+      accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? "", 12)
+    },
+    {
+      findingType: "credential_assignment",
+      label: "credential_url",
+      pattern: URL_USERINFO,
+      confidence: 0.9,
+      accept: (match) => {
+        const password = match.groups?.pw ?? "";
+        return !isPlaceholderValue(password) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(password);
+      }
+    },
+    {
+      findingType: "credential_assignment",
+      label: "authorization_header",
+      pattern: AUTHORIZATION_HEADER,
+      confidence: 0.9,
+      accept: (match) => !isPlaceholderValue(match.groups?.tok ?? "")
+    },
+    {
+      findingType: "api_secret_token",
+      label: "azure_key",
+      pattern: AZURE_KEY,
+      confidence: 0.95,
+      accept: (match) => !isPlaceholderValue(match.groups?.key ?? "")
+    },
+    {
+      findingType: "api_secret_token",
+      label: "azure_sas_signature",
+      pattern: AZURE_SAS_SIGNATURE,
+      confidence: 0.9,
+      accept: (match) => !isPlaceholderValue(match.groups?.sig ?? "")
+    }
+  ];
+});
+
 // src/workers/dropbox-files/content-policy.ts
 import { createHash as createHash4 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
@@ -10093,6 +10634,8 @@ function scanPatterns(text2, patterns, structuralRefJson) {
       const matchedText = match[0]?.trim();
       if (!matchedText)
         continue;
+      if (pattern.accept && !pattern.accept(match))
+        continue;
       findings.push({
         finding_type: pattern.findingType,
         finding_hash: hashFinding(pattern.findingType, matchedText),
@@ -10118,40 +10661,16 @@ function dedupeFindings(findings) {
 function hashFinding(type, matchedText) {
   return createHash4("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
-var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
+var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-10-13", SECRET_PATTERNS, REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
-  SECRET_PATTERNS = [
-    {
-      findingType: "private_key_material",
-      pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
-      confidence: 1,
-      trustTier: "S5"
-    },
-    {
-      findingType: "aws_access_key_id",
-      pattern: /\bAKIA[0-9A-Z]{16}\b/g,
-      confidence: 0.98,
-      trustTier: "S5"
-    },
-    {
-      findingType: "slack_token",
-      pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
-      confidence: 0.98,
-      trustTier: "S5"
-    },
-    {
-      findingType: "api_secret_token",
-      pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
-      confidence: 0.95,
-      trustTier: "S5"
-    },
-    {
-      findingType: "credential_assignment",
-      pattern: /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi,
-      confidence: 0.9,
-      trustTier: "S5"
-    }
-  ];
+  init_secret_patterns();
+  SECRET_PATTERNS = SHARED_SECRET_PATTERNS.map((shared) => ({
+    findingType: shared.findingType,
+    pattern: shared.pattern,
+    confidence: shared.confidence,
+    trustTier: "S5",
+    ...shared.accept ? { accept: shared.accept } : {}
+  }));
   REVIEW_PATTERNS = [
     {
       findingType: "hostile_instruction",
@@ -12219,8 +12738,8 @@ class TierLedger {
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
   }
   queueOwnerRaise(identity, decision, trustDomain, options = {}) {
-    if (decision.decidedBy !== "override")
-      throw new Error("Only an owner override is queued this way.");
+    if (decision.decidedBy !== "override" && decision.decidedBy !== "owner_rule")
+      throw new Error("Only an owner override or owner rule is queued this way.");
     if (!(trustDomain in TRUST_DOMAIN_RANK))
       throw new Error(`Unknown trust domain "${trustDomain}".`);
     let result = "none";
@@ -14555,8 +15074,9 @@ var init_remote_public_url = __esm(() => {
 import { homedir as raHomedir } from "node:os";
 import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
 function olympusDataDir(env = process.env) {
-  if (process.platform === "linux")
-    return resolveLinuxEngineLayout(env).dataDir;
+  const standalone = standaloneLinuxDataDir(env);
+  if (standalone)
+    return standalone;
   const configured = env.XDG_DATA_HOME?.trim();
   const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), ".local", "share");
   if (!raIsAbsolute(dataRoot))
@@ -17103,6 +17623,9 @@ function createConnectorStoreLocatorIdentityIndex(db) {
     END;
   `);
 }
+function foldLocator(locator) {
+  return locator.normalize("NFC").toLowerCase();
+}
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
@@ -17307,7 +17830,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -18533,6 +19056,9 @@ var init_local_index = __esm(() => {
         indexedItems: Number(indexed.count)
       };
     }
+    locatorIdentityIndexReady() {
+      return this.locatorIdentityIndexState().completed;
+    }
     locatorIdentityIndexState() {
       const state = this.db.query(`
       SELECT cursor_item_pk, completed
@@ -18664,6 +19190,77 @@ var init_local_index = __esm(() => {
       if (!this.locatorIdentityIndexState().completed)
         return;
       return this.activeIdentityForLocator(input);
+    }
+    activeItemsUnderLocatorIfIndexed(input) {
+      if (!this.locatorIdentityIndexState().completed)
+        return [];
+      const folder = input.locatorUri.replace(/\/+$/, "");
+      if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
+        return [];
+      const toRow = (row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : [];
+      const exact = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= LOWER(?) || '/'
+        AND locator.normalized_locator < LOWER(?) || '0'
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit).flatMap(toRow);
+      if (exact.length > 0 || !/[^\u0000-\u007f]/.test(folder))
+        return exact;
+      const folded = folder.normalize("NFC");
+      const cut = folded.search(/[^\u0000-\u007f]/);
+      const head = (cut < 0 ? folded : folded.slice(0, cut)).replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+      const range = head === "" ? { sql: "", params: [] } : {
+        sql: "AND locator.normalized_locator >= ? AND locator.normalized_locator < ?",
+        params: [head, head.slice(0, -1) + String.fromCharCode(head.charCodeAt(head.length - 1) + 1)]
+      };
+      const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
+      const wanted = `${foldLocator(folder)}/`;
+      const matches = [];
+      const candidates = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        ${range.sql}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+    `);
+      let examined = 0;
+      for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params)) {
+        examined += 1;
+        if (examined > maxCandidates)
+          return [];
+        if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted))
+          continue;
+        matches.push(...toRow(row));
+        if (matches.length >= input.limit)
+          break;
+      }
+      return matches;
     }
     activeItemForLocator(input) {
       const identity = this.activeIdentityForLocator(input);
@@ -23125,7 +23722,7 @@ class BuiltInSourceEmbeddingProvider {
       return false;
     if (this.picturesHeld())
       return false;
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     const supported = model.kind === "litert" && model.embedder.vision;
     if (!supported && !this.imageSupportWarned) {
       this.imageSupportWarned = true;
@@ -23150,7 +23747,7 @@ class BuiltInSourceEmbeddingProvider {
         throw new BuiltInEmbeddingNotReadyError(this.status());
       }
     }
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     return this.embedLoaded(model, inputs, options.taskType);
   }
   loadedOnly() {
@@ -23170,6 +23767,15 @@ class BuiltInSourceEmbeddingProvider {
         return this.embedLoaded(model, inputs, options.taskType);
       }
     };
+  }
+  async ready() {
+    if (this.loaded)
+      return this.loaded;
+    try {
+      return await this.load();
+    } catch (error) {
+      throw new BuiltInEmbeddingNotReadyError(this.status(), error);
+    }
   }
   load() {
     if (this.loading)
@@ -23283,7 +23889,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedWithImageVectors(inputs) {
     if (inputs.length === 0)
       return { vectors: [], imageVectors: [] };
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert" || !this.spec.vision) {
       return { vectors: await this.embedLoaded(model, inputs, "RETRIEVAL_DOCUMENT"), imageVectors: inputs.map(() => {
         return;
@@ -23305,7 +23911,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedImageVectors(images) {
     if (images.length === 0)
       return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert" || !this.spec.vision) {
       throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
     }
@@ -23325,7 +23931,7 @@ class BuiltInSourceEmbeddingProvider {
   async embedPromptTexts(texts) {
     if (texts.length === 0)
       return [];
-    const model = this.loaded ?? await this.load();
+    const model = await this.ready();
     if (model.kind !== "litert")
       throw new Error("The photo judge needs the LiteRT model.");
     const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, "RETRIEVAL_DOCUMENT", new Set);
@@ -23549,11 +24155,11 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
   BuiltInEmbeddingNotReadyError = class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
     status;
-    constructor(status) {
+    constructor(status, cause) {
       super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0);
       this.name = "BuiltInEmbeddingNotReadyError";
       this.status = status;
-      this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : `The built-in search model is still being prepared (${status.percent}%).`;
+      this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
       this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
     }
   };
@@ -23568,7 +24174,7 @@ function resolveEmbeddingLedgerPath(env = process.env) {
   if (configured)
     return configured;
   const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir10(), ".local", "share");
-  return join17(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
+  return join17(standaloneLinuxDataDir(env) ?? join17(dataHome, "openclaw", "olympus"), "embedding-ledger.jsonl");
 }
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}
@@ -23697,6 +24303,7 @@ function isScope(value) {
 }
 var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH", EMBEDDING_LEDGER_OWNER_APPROVAL, EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
 var init_embedding_ledger = __esm(() => {
+  init_linux_engine_layout();
   EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
   EMBEDDING_LEDGER_KIND_TEXT = {
     model_decision: "Model decision",
@@ -24277,164 +24884,6 @@ var init_tier_rejudge = __esm(() => {
   init_tier_ledger();
 });
 
-// src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash8 } from "node:crypto";
-function sweepOwnerRuleRaises(options) {
-  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
-  const { set } = options;
-  const classification = set.classification();
-  if (!classification || classification.unavailableReason)
-    return report;
-  const ledger = set.ledger;
-  const raising = (classification.rules ?? []).filter(isRaisingRule);
-  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
-  const state = readState(ledger.readMeta(SWEEP_META_KEY));
-  const done = state.done.filter((key2) => keyed.has(key2));
-  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
-  if (pendingKeys.length === 0) {
-    if (done.length !== state.done.length || state.pending)
-      writeState(ledger, { done });
-    return report;
-  }
-  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
-  const resume = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending.after : undefined;
-  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
-  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
-  for (const record of rows) {
-    report.scanned += 1;
-    try {
-      raiseIfMatched(set, record, pendingRules, classification);
-    } catch {
-      continue;
-    }
-  }
-  if (rows.length < limit) {
-    writeState(ledger, { done: [...done, ...pendingKeys] });
-  } else {
-    report.complete = false;
-    writeState(ledger, { done, pending: { rules: pendingKeys, after: identityOf3(rows.at(-1)) } });
-  }
-  return report;
-  function raiseIfMatched(set2, record, rules, inputs) {
-    if (record.state === "moving" || record.contentTier === "secrets" || record.metadataTier === "secrets")
-      return;
-    const identity = identityOf3(record);
-    if (set2.ledger.getOverride(identity))
-      return;
-    const current2 = set2.ledger.copies(identity).filter((copy) => copy.state === "current");
-    const names = copyServingLayer(current2, "metadata");
-    const domain = names ? set2.domainForCorpus(names.corpusId) : undefined;
-    const exported = domain ? set2.store(domain)?.exportItemCopy(identity) : undefined;
-    if (!exported)
-      return;
-    const signals = storedSignals(exported);
-    const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
-    if (matched.length === 0)
-      return;
-    const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-    const metadataTier = maxTier(record.metadataTier, ruleTier);
-    if (tierRank(metadataTier) <= tierRank(record.metadataTier))
-      return;
-    const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
-      rules: [...inputs.rules ?? []],
-      ...inputs.retirePublic ? { retirePublic: true } : {}
-    });
-    const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
-    const contentTier = maxTier(record.contentTier, metadataTier);
-    const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
-    const decision = {
-      metadataTier,
-      contentTier,
-      decidedBy: "owner_rule",
-      reasons: [
-        ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
-        ...record.reasons.filter((reason) => reason.startsWith("content:"))
-      ],
-      state: contentPending ? "pending" : "current",
-      contentRead: record.contentRead,
-      metadataPending: false,
-      contentPending,
-      metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
-      metadataFlagged: record.metadataFlagged,
-      engineVersion: record.engineVersion,
-      mapRevision: record.mapRevision,
-      snifferId: classified.snifferId
-    };
-    if (metadataTier === "secrets") {
-      if (settleRoutedSecrets(set2, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }))
-        report.secrets += 1;
-      return;
-    }
-    set2.ledger.recordRoutedPlacement(identity, decision, set2.placementFor(decision));
-    report.raised += 1;
-  }
-}
-function isRaisingRule(rule) {
-  return tierRank(rule.tier) > tierRank("private");
-}
-function ruleKey(rule) {
-  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
-}
-function storedSignals(copy) {
-  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-  const title = text2(copy.columns["title"]);
-  const locator = text2(copy.columns["locator_uri"]);
-  const path = locator?.startsWith("/") ? locator : undefined;
-  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
-  let folderKeys = [];
-  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
-  if (keysJson) {
-    try {
-      const parsed = JSON.parse(keysJson);
-      if (Array.isArray(parsed))
-        folderKeys = parsed.filter((key2) => typeof key2 === "string");
-    } catch {
-      folderKeys = [];
-    }
-  }
-  if (copy.identity.providerConversationId)
-    folderKeys.push(copy.identity.providerConversationId);
-  return {
-    ...title ? { title } : {},
-    ...path ? { path } : {},
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...sender ? { sender } : {}
-  };
-}
-function readState(raw) {
-  if (!raw)
-    return { done: [] };
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
-      ...parsed.pending && Array.isArray(parsed.pending.rules) ? { pending: parsed.pending } : {}
-    };
-  } catch {
-    return { done: [] };
-  }
-}
-function writeState(ledger, state) {
-  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
-}
-function sameKeys(left, right) {
-  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
-}
-function identityOf3(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
-var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep";
-var init_tier_rules_sweep = __esm(() => {
-  init_tier_classifier();
-  init_tier_ledger();
-  init_tier_rejudge();
-});
-
 // src/workers/connector-store/tier-override-settle.ts
 function applyOwnerOverrides(options) {
   const report = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0 };
@@ -24458,7 +24907,7 @@ function applyOwnerOverrides(options) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity = identityOf4(record);
+  const identity = identityOf3(record);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
@@ -24524,7 +24973,7 @@ function storedCopy(set, identity) {
   }
   return;
 }
-function identityOf4(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -24535,6 +24984,253 @@ function identityOf4(record) {
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_tier_rejudge();
+});
+
+// src/workers/connector-store/tier-rules-sweep.ts
+import { createHash as createHash8 } from "node:crypto";
+function sweepOwnerRuleRaises(options) {
+  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
+  const { set } = options;
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason)
+    return report;
+  const ledger = set.ledger;
+  const raising = (classification.rules ?? []).filter((rule) => isRaisingRule(rule) && !isLabelRule(rule));
+  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
+  const state = readState(ledger.readMeta(SWEEP_META_KEY));
+  const done = state.done.filter((key2) => keyed.has(key2));
+  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
+  if (pendingKeys.length === 0) {
+    if (done.length !== state.done.length || state.pending)
+      writeState(ledger, { done });
+    return report;
+  }
+  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
+  const progress = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending : undefined;
+  const held = [...progress?.held ?? []];
+  let overflow = progress?.overflow === true;
+  const attempt = (record) => {
+    report.scanned += 1;
+    let raised;
+    try {
+      raised = raiseRoutedItem(set, record, pendingRules, classification);
+    } catch {
+      raised = "deferred";
+    }
+    if (raised === "raised")
+      report.raised += 1;
+    else if (raised === "secrets")
+      report.secrets += 1;
+    else if (raised === "deferred") {
+      if (held.length < MAX_HELD_ITEMS)
+        held.push(identityOf4(record));
+      else
+        overflow = true;
+    }
+  };
+  if (progress?.retry && !progress.overflow) {
+    const retrying = held.splice(0);
+    for (const identity of retrying) {
+      const record = ledger.getCurrent(identity);
+      if (record?.routed)
+        attempt(record);
+    }
+    if (held.length === 0) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+    return report;
+  }
+  const resume = progress?.after;
+  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
+  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
+  for (const record of rows)
+    attempt(record);
+  if (rows.length < limit) {
+    if (held.length === 0 && !overflow) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, overflow ? { done } : { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+  } else {
+    report.complete = false;
+    writeState(ledger, {
+      done,
+      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+    });
+  }
+  return report;
+}
+function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
+  if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+    return "unchanged";
+  const identity = identityOf4(record);
+  if (set.ledger.getOverride(identity))
+    return "unchanged";
+  const copies = set.ledger.copies(identity);
+  const exported = storedCopyOf(set, identity, copies);
+  const signals = { ...exported ? storedSignals(exported) : {}, ...extraSignals };
+  const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
+  if (!exported) {
+    if (copies.length === 0)
+      return "unchanged";
+    return matched.length > 0 || rules.some((rule) => !isLabelRule(rule)) ? "deferred" : "unchanged";
+  }
+  if (matched.length === 0)
+    return "unchanged";
+  const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
+  const metadataTier = maxTier(record.metadataTier, ruleTier);
+  const moving = record.state === "moving";
+  if (!moving && tierRank(metadataTier) <= tierRank(record.metadataTier))
+    return "unchanged";
+  const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
+    rules: [...inputs.rules ?? []],
+    ...inputs.retirePublic ? { retirePublic: true } : {}
+  });
+  const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
+  const contentTier = maxTier(record.contentTier, metadataTier);
+  const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
+  const decision = {
+    metadataTier,
+    contentTier,
+    decidedBy: "owner_rule",
+    reasons: [
+      ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
+      ...record.reasons.filter((reason) => reason.startsWith("content:"))
+    ],
+    state: contentPending ? "pending" : "current",
+    contentRead: record.contentRead,
+    metadataPending: false,
+    contentPending,
+    metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: classified.snifferId
+  };
+  if (metadataTier === "secrets") {
+    return settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }) ? "secrets" : "unchanged";
+  }
+  if (moving) {
+    return set.ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision)) === "none" ? "unchanged" : "raised";
+  }
+  set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  return "raised";
+}
+function storedCopyOf(set, identity, copies) {
+  const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
+  const ordered = [
+    ...names ? [names] : [],
+    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"))
+  ];
+  for (const copy of ordered) {
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (exported)
+      return exported;
+  }
+  return;
+}
+function isLabelRule(rule) {
+  return rule.match.kind === "label";
+}
+function isRaisingRule(rule) {
+  return tierRank(rule.tier) > tierRank("private");
+}
+function ruleKey(rule) {
+  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+}
+function storedSignals(copy) {
+  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const title = text2(copy.columns["title"]);
+  const locator = text2(copy.columns["locator_uri"]);
+  const path = locator?.startsWith("/") ? locator : undefined;
+  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
+  let folderKeys = [];
+  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
+  if (keysJson) {
+    try {
+      const parsed = JSON.parse(keysJson);
+      if (Array.isArray(parsed))
+        folderKeys = parsed.filter((key2) => typeof key2 === "string");
+    } catch {
+      folderKeys = [];
+    }
+  }
+  if (copy.identity.providerConversationId)
+    folderKeys.push(copy.identity.providerConversationId);
+  return {
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...sender ? { sender } : {}
+  };
+}
+function readState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const pending = parsePending(parsed.pending);
+    return {
+      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
+      ...pending ? { pending } : {}
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function parsePending(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const pending = value;
+  if (!Array.isArray(pending.rules) || !pending.rules.every((key2) => typeof key2 === "string"))
+    return;
+  if (pending.after !== undefined && !isIdentity(pending.after))
+    return;
+  if (pending.held !== undefined && (!Array.isArray(pending.held) || !pending.held.every(isIdentity)))
+    return;
+  if (pending.retry !== undefined && pending.retry !== true)
+    return;
+  if (pending.overflow !== undefined && pending.overflow !== true)
+    return;
+  if (pending.retry === true && (!Array.isArray(pending.held) || pending.held.length === 0))
+    return;
+  return {
+    rules: pending.rules,
+    ...pending.after ? { after: pending.after } : {},
+    ...pending.held ? { held: pending.held } : {},
+    ...pending.retry === true ? { retry: true } : {},
+    ...pending.overflow === true ? { overflow: true } : {}
+  };
+}
+function isIdentity(value) {
+  const record = value;
+  return typeof record === "object" && record !== null && typeof record.provider === "string" && typeof record.accountScope === "string" && typeof record.providerItemId === "string" && (record.providerConversationId === undefined || typeof record.providerConversationId === "string");
+}
+function writeState(ledger, state) {
+  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
+}
+function sameKeys(left, right) {
+  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
+}
+function identityOf4(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep", MAX_HELD_ITEMS = 200;
+var init_tier_rules_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_override_settle();
   init_tier_rejudge();
 });
 
@@ -24808,10 +25504,11 @@ function defaultDropboxConnectorStoreDbPath(env = process.env) {
   if (configured)
     return configured;
   const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir11(), ".local", "share");
-  return join18(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
+  return join18(standaloneLinuxDataDir(env) ?? join18(dataHome, "openclaw", "olympus"), "dropbox-files-connector-store.sqlite");
 }
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
+  init_linux_engine_layout();
   init_source_ingestion_exclusions();
   init_still_image_readiness();
   init_source_ingestion_policy();
@@ -25078,6 +25775,7 @@ var init_dropbox2 = __esm(() => {
 });
 // src/core/opsec.ts
 var init_opsec = __esm(() => {
+  init_secret_patterns();
   init_types();
 });
 
@@ -26399,6 +27097,7 @@ var init_manifest2 = __esm(() => {
 // src/workers/source-index/built-in-reasoning/install.ts
 var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
 var init_install = __esm(() => {
+  init_linux_engine_layout();
   init_manifest2();
   STALE_LOCK_MS2 = 60 * 60000;
   BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
@@ -27121,7 +27820,7 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
   const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir12(), ".local", "share");
-  return join23(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
+  return join23(standaloneLinuxDataDir(env) ?? join23(dataHome, "openclaw", "olympus"), "google-drive-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -27305,6 +28004,7 @@ function hashString3(value) {
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
+  init_linux_engine_layout();
   init_source_ingestion_exclusions();
   init_credential_broker();
   init_request_budget();
@@ -27499,6 +28199,12 @@ var init_unreadable_files = __esm(() => {
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
   CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
+});
+
+// src/core/google-signin-full-copy.ts
+var GOOGLE_SIGNIN_FULL_SENTENCE = "Google sign-in is full for the moment. We're working on it. For now, you can still connect Google by using your own Google app.", GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE;
+var init_google_signin_full_copy = __esm(() => {
+  GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE = `${GOOGLE_SIGNIN_FULL_SENTENCE} Open Olympus on your computer to set it up.`;
 });
 
 // src/workers/remote-oauth/consent-page.ts
@@ -28013,7 +28719,7 @@ function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
   const dataHome = env.XDG_DATA_HOME?.trim() || join26(homedir15(), ".local", "share");
-  return join26(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
+  return join26(standaloneLinuxDataDir(env) ?? join26(dataHome, "openclaw", "olympus"), "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -28036,12 +28742,14 @@ class RestGmailApiClient {
   async listMessages(request) {
     const params = new URLSearchParams({
       maxResults: String(request.maxResults),
-      includeSpamTrash: "false"
+      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
     });
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     if (request.query)
       params.set("q", request.query);
+    for (const labelId of request.labelIds ?? [])
+      params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
     const record = asRecord7(json, "Gmail messages list response");
     return {
@@ -28278,6 +28986,7 @@ function hashString4(value) {
 }
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
+  init_linux_engine_layout();
   init_mail_source_scope();
   init_sender_rules();
   init_credential_broker();
@@ -28311,10 +29020,11 @@ function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   if (configured)
     return configured;
   const dataHome = env.XDG_DATA_HOME?.trim() || join27(homedir16(), ".local", "share");
-  return join27(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
+  return join27(standaloneLinuxDataDir(env) ?? join27(dataHome, "openclaw", "olympus"), "readwise-connector-store.sqlite");
 }
 var READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
+  init_linux_engine_layout();
   init_atomic_file();
   init_credential_broker();
   init_connector_store();
@@ -28421,10 +29131,11 @@ function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   if (configured)
     return configured;
   const dataHome = env.XDG_DATA_HOME?.trim() || join28(homedir17(), ".local", "share");
-  return join28(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
+  return join28(standaloneLinuxDataDir(env) ?? join28(dataHome, "openclaw", "olympus"), "x-bookmarks-connector-store.sqlite");
 }
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
+  init_linux_engine_layout();
   init_connector_store();
   init_corpus_adapter3();
   init_folder_facets();
@@ -28443,6 +29154,7 @@ var init_grant_fence = __esm(() => {
 // src/workers/x-bookmarks/live-control.ts
 var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, EMPTY_SHA256, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
 var init_live_control2 = __esm(() => {
+  init_linux_engine_layout();
   init_sqlite_migrations();
   X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 5 * 60000;
   X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
@@ -28456,6 +29168,7 @@ var init_live_control2 = __esm(() => {
 // src/workers/x-bookmarks/reconcile-state.ts
 var X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2, FOLDER_FACET_REFRESH_LEASE_MS;
 var init_reconcile_state = __esm(() => {
+  init_linux_engine_layout();
   init_sqlite_migrations();
   FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
 });
@@ -28626,6 +29339,7 @@ var init_status = __esm(() => {
 // src/core/source-watch.ts
 var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_AVAILABLE_DELAY_MS, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, SYSTEM_CLOCK;
 var init_source_watch = __esm(() => {
+  init_linux_engine_layout();
   init_sqlite_migrations();
   SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
   SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
@@ -28987,7 +29701,8 @@ var init_vocabulary = __esm(() => {
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
-    changeModels: "Change"
+    changeModels: "Change",
+    useOwnGoogleApp: "Use your own Google app"
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
     back: "Back to Olympus",
@@ -29348,6 +30063,7 @@ var init_phases = __esm(() => {
 // src/workers/credential-health.ts
 var ROTATING_PROVIDERS, PASSIVE_EVIDENCE_MAX_AGE_MS, CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS, CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS;
 var init_credential_health = __esm(() => {
+  init_linux_engine_layout();
   init_atomic_file();
   init_connected_handles();
   init_credential_broker();
@@ -29472,7 +30188,9 @@ var init_public_source_capabilities = __esm(() => {
 // src/workers/source-dashboard.ts
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
+  init_linux_engine_layout();
   init_google_handle_compatibility();
+  init_google_signin_full_copy();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -34033,6 +34751,7 @@ var init_gmail_live_control = __esm(() => {
 var GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
+  init_tier_rules_sweep();
   init_embeddings();
   init_gmail();
   init_gmail_live_control();
@@ -34071,6 +34790,7 @@ var init_google_connectors = __esm(() => {
 
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
+  init_linux_engine_layout();
   init_connector_store();
   init_tiered_store_set();
   init_connector2();
@@ -34078,6 +34798,7 @@ var init_tier_set2 = __esm(() => {
 
 // src/workers/x-bookmarks/tier-set.ts
 var init_tier_set3 = __esm(() => {
+  init_linux_engine_layout();
   init_connector_store();
   init_tiered_store_set();
   init_connector3();
@@ -35345,6 +36066,7 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
 init_store_sync();
 
 // src/workers/file-extraction/job-store.ts
+init_linux_engine_layout();
 init_sqlite_migrations();
 var NETWORK_ERROR_KINDS = new Set([
   "network_unreachable",
@@ -35864,6 +36586,14 @@ init_apple_vision_ocr();
 
 // src/workers/email-source/index.ts
 init_google_handle_compatibility();
+
+// src/core/google-publisher-capacity.ts
+init_oauth_relay();
+init_google_signin_full_copy();
+var cache = new Map;
+var inFlight = new Map;
+
+// src/workers/email-source/index.ts
 init_source_account_binding();
 init_consent_page();
 init_analyst();
@@ -35884,6 +36614,7 @@ init_public_surface();
 init_unpaired_sources();
 
 // src/workers/source-index/answer-latency-log.ts
+init_linux_engine_layout();
 init_answer_latency_trace();
 var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
 
@@ -36346,6 +37077,7 @@ var COMPUTER_HOST_PAGE_CSP = [
 ].join("; ");
 
 // src/workers/dashboard/pages/local.ts
+init_google_signin_full_copy();
 init_source_dashboard();
 
 // src/workers/agent-connections.ts
@@ -36700,6 +37432,7 @@ init_store_sync();
 init_telegram_messages();
 
 // src/workers/source-scheduler-state.ts
+init_linux_engine_layout();
 init_sqlite_migrations();
 
 // src/workers/source-scheduler.ts
@@ -38344,6 +39077,7 @@ var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 init_privacy_profile();
 
 // src/workers/classification-ledger.ts
+init_linux_engine_layout();
 import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
 import { dirname as dirname24, join as join31 } from "node:path";
 var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
@@ -39314,6 +40048,7 @@ function setEmbedsWithBuiltInOnly(set) {
 }
 
 // src/workers/classification/tier-migration.ts
+init_linux_engine_layout();
 init_embedding_cost_estimates();
 init_operation_error();
 init_tier_move();

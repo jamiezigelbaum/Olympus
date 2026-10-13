@@ -341,6 +341,12 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
    * relay holds it: the caller calls `release` once the body is no longer
    * needed (the request was answered without reaching an install, or its
    * stream to the install is over). A body that cannot be charged is a 503.
+   *
+   * While the body uploads, its own deadlines govern the connection, not the
+   * connection idle limit: Bun sweeps that limit on a coarse tick, so it
+   * could close the transport before a timed-out upload's 408 is written.
+   * The limit is restored before any answer, so it still ends the transport
+   * behind every refusal.
    */
   const readBody = async (
     request: Request,
@@ -355,6 +361,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       log('request_refused', { reason: 'upload_capacity' });
       return { ok: false, response: tooMany() };
     }
+    server.timeout(request, 0);
     const reader = request.body.getReader();
     const refuse = (response: Response) => {
       void reader.cancel().catch(() => {});
@@ -417,6 +424,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       delivered = true;
       return { ok: true, body: buffer, release: ticket.release };
     } finally {
+      server.timeout(request, limits.connectionIdleTimeoutSeconds);
       if (!delivered) ticket.release();
     }
   };
@@ -956,7 +964,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     port: config.listen?.port ?? 8787,
     // A connection with nothing written to it for this long is closed: that is
     // what ends the transport behind a refusal or a timed-out upload, whatever
-    // the caller keeps sending. A request forwarded to an install lifts it
+    // the caller keeps sending. A body upload lifts it until the upload ends
+    // (readBody), and a request forwarded to an install lifts it
     // (toInstall), so long answers and quiet SSE streams are bounded by their
     // own per-stream timers instead (session.ts).
     idleTimeout: limits.connectionIdleTimeoutSeconds,

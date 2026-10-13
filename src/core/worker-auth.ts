@@ -90,11 +90,12 @@ export function readWorkerSetupEnv(options: WorkerAuthTokenLookupOptions = {}): 
   try {
     const stat = statSync(path, { bigint: true });
     if (!stat.isFile() || (stat.mode & 0o077n) !== 0n) return undefined;
-    // Long-lived Gateway callers read this per request; the key changes on any
-    // rewrite, in place (mtime/ctime/size) or by atomic rename (inode).
+    // Linux filesystems can give rapid same-length rewrites identical metadata.
+    // Never let that cache a rotated credential indefinitely. Mac keeps its
+    // existing metadata cache; Linux rereads the small owner-only file.
     const key = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.mode}`;
     const cached = setupEnvCache.get(path);
-    if (cached?.key === key) return { ...cached.env };
+    if (process.platform !== 'linux' && cached?.key === key) return { ...cached.env };
     const env = parseWorkerSetupEnv(readFileSync(path, 'utf8'));
     setupEnvCache.set(path, { key, env });
     return { ...env };

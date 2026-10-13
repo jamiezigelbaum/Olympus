@@ -1718,6 +1718,8 @@ export const DASHBOARD_CHATGPT_SETUP_LABELS = {
   chooseMail: 'Choose mail',
   disconnect: 'Disconnect',
   changeModels: 'Change',
+  /** Gmail and Drive's row while Olympus's own Google sign-in is full: the steps are on the computer. */
+  useOwnGoogleApp: 'Use your own Google app',
 } as const;
 
 /**
@@ -2537,14 +2539,15 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   blockerOther: 'Not ready yet ({code}).',
   stepsTitle: 'Set up zkAPI',
   stepsIntro: 'Install the parts above with one click, then run the rest in Terminal, in this order. This is the order that worked live.',
+  /** `{daemon}` is the zkAPI program as Terminal needs it named (outside-help-tools.ts outsideHelpDaemonCommand); `{secretRef}` the route's key reference. */
   steps: [
     'Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). On macOS, the confined route requires the Olympus zkapi-clientd fork 0.1.6-olympus2; the upstream 0.1.5/0.1.6 build cannot confirm it.',
-    'Run: zkapi-clientd config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.',
+    'Run: {daemon} config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.',
     'Wait until the tool prints "Private inference balance activated".',
-    'Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050',
-    'Run: zkapi-clientd config --require-api-key',
-    'Run: zkapi-clientd config --api-key <key>. Store the same key where the route\'s key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.',
-    'Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.',
+    'Run: {daemon} config --relay-url socks5://127.0.0.1:19050',
+    'Run: {daemon} config --require-api-key',
+    'Run: {daemon} config --api-key <key>. Store the same key where the route\'s key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.',
+    'Run: {daemon} config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.',
   ],
   costTitle: 'Cost and risk',
   costIntro: 'Nothing is sent until you accept these. If the wording changes, you are asked again.',

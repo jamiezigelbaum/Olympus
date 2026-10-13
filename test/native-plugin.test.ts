@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -17,6 +17,20 @@ import {
 import type { NativeWorkerServiceDefinition } from '../src/core/native-worker-service.ts';
 
 const originalFetch = globalThis.fetch;
+const workerTestOrigin = process.platform === 'linux' ? 'http://127.0.0.1:8010' : 'http://source-worker.test';
+let testSocket: ReturnType<typeof Bun.serve> | undefined;
+let testRuntime: string | undefined;
+let savedRuntime: string | undefined;
+beforeEach(() => {
+  if (process.platform !== 'linux') return;
+  savedRuntime = process.env.XDG_RUNTIME_DIR;
+  testRuntime = mkdtempSync(join(tmpdir(), 'plugin-worker-'));
+  mkdirSync(join(testRuntime, 'olympus'), { mode: 0o700 });
+  const socket = join(testRuntime, 'olympus/worker.sock');
+  testSocket = Bun.serve({ unix: socket, fetch: () => new Response('fixture') });
+  chmodSync(socket, 0o600);
+  process.env.XDG_RUNTIME_DIR = testRuntime;
+});
 
 interface NativeTool {
   name: string;
@@ -64,6 +78,12 @@ function registeredToolNames(pluginConfig: unknown, apiExtra: Record<string, unk
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  testSocket?.stop(true); testSocket = undefined;
+  if (testRuntime) {
+    rmSync(testRuntime, { recursive: true, force: true }); testRuntime = undefined;
+    if (savedRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = savedRuntime;
+  }
 });
 
 describe('native OpenClaw plugin adapter', () => {
@@ -417,7 +437,7 @@ describe('native OpenClaw plugin adapter', () => {
     try {
       plugin.register({
         config: {},
-        pluginConfig: { email: { enabled: true, baseUrl: 'http://source-worker.test/v1' } },
+        pluginConfig: { email: { enabled: true, baseUrl: `${workerTestOrigin}/v1` } },
         registerTool(tool: NativeTool) {
           const materialized = materializeTool(tool);
           tools.set(materialized.name, materialized);
@@ -448,7 +468,7 @@ describe('native OpenClaw plugin adapter', () => {
       // An explicit plugin credential still outranks worker.env.
       const pinned = new Map<string, NativeTool>();
       plugin.register({
-        pluginConfig: { email: { enabled: true, baseUrl: 'http://source-worker.test/v1' }, worker: { authToken: 'config-token' } },
+        pluginConfig: { email: { enabled: true, baseUrl: `${workerTestOrigin}/v1` }, worker: { authToken: 'config-token' } },
         registerTool(tool: NativeTool) {
           const materialized = materializeTool(tool);
           pinned.set(materialized.name, materialized);
@@ -823,7 +843,7 @@ describe('native OpenClaw plugin adapter', () => {
       pluginConfig: {
         email: {
           enabled: true,
-          baseUrl: 'http://source-worker.test',
+          baseUrl: workerTestOrigin,
         },
       },
       registerTool(tool: NativeTool) {
@@ -838,7 +858,7 @@ describe('native OpenClaw plugin adapter', () => {
       include_secure_local: true,
     }) as { content: Array<{ text: string }>; details: Record<string, unknown> } | undefined;
 
-    expect(calls[0]?.url).toBe('http://source-worker.test/v1/source/answer');
+    expect(calls[0]?.url).toBe(`${workerTestOrigin}/v1/source/answer`);
     expect(JSON.parse(calls[0]?.body ?? '{}').corpus_ids).toEqual([
       'secure_local.dropbox.files',
       'internal.telegram.messages',

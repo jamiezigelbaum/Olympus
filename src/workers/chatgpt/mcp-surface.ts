@@ -118,6 +118,13 @@ export interface ChatGptSurfaceOptions {
    * the named READ_ONLY_GRANT_EXCEPTIONS.
    */
   readOnly?: boolean;
+  /**
+   * Private answer jobs count as seen when their sealed answer is handed to
+   * the claiming panel (PrivateAnswerJobs.begin `seenOnDelivery`). The
+   * directory endpoint sets it: it serves the panel as submitted, which
+   * cannot acknowledge (directory-surface.ts).
+   */
+  privateAnswerSeenOnDelivery?: boolean;
 }
 
 export interface PrivateMatchProbeResult {
@@ -698,6 +705,7 @@ function beginPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfac
       detail,
       ...(caller ? { caller } : {}),
       ...(waiting ? { waiting } : {}),
+      ...(options.privateAnswerSeenOnDelivery ? { seenOnDelivery: true } : {}),
     });
   } catch {
     return { count: match.count, panelState: 'no_model' };

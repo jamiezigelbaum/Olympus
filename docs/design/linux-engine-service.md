@@ -112,8 +112,8 @@ needed to address it. A marked launcher carries that layout, not secrets.
 | Unit | `$XDG_CONFIG_HOME/systemd/user/olympus-engine.service` |
 | Config, sovereignty, worker environment, backend selection, install receipt | `$XDG_CONFIG_HOME/olympus/` |
 | Encrypted secrets and local wrapping key | `$XDG_CONFIG_HOME/olympus/secrets.enc` and `secrets.key` |
-| Package generations and pinned runtime generations | `$XDG_DATA_HOME/olympus/engine/` |
-| Existing indexes, model files, remote registration and child/status records | `$XDG_DATA_HOME/openclaw/olympus/` (compatibility namespace, no OpenClaw dependency) |
+| Package generations and pinned runtime generations | Fresh: `$XDG_DATA_HOME/olympus-engine/`; existing receipts keep `$XDG_DATA_HOME/olympus/engine/` |
+| Indexes, model files, remote registration and child/status records | Fresh standalone: `$XDG_DATA_HOME/olympus/`; existing standalone receipts keep their recorded legacy data root |
 | Install transactions, rollback receipts, engine/install logs | `$XDG_STATE_HOME/olympus/engine/` |
 | Disposable downloads | `$XDG_CACHE_HOME/olympus/engine/` |
 | Lifecycle lock and private worker socket (owner decision 2026-10-12) | `$XDG_RUNTIME_DIR/olympus/` |
@@ -1560,3 +1560,34 @@ Mac consent/agent fixtures passed byte-for-byte, and the CLI regression cases
 passed. Proven owner operations retain the worker's unbounded response idle
 timeout; unauthenticated TCP traffic keeps Bun's default idle deadline and
 request bodies have an independent five-second bound.
+
+
+### Linux PR preparation (2026-10-13)
+
+Standalone Linux data now uses `$XDG_DATA_HOME/olympus` (default
+`~/.local/share/olympus`). Shared store/model/ledger defaults follow the
+standalone install receipt, including when a shell changes its XDG variables.
+Mac and OpenClaw-hosted data defaults keep their historical layout.
+
+Existing receipts remain authoritative, including after keep-data uninstall
+or partial purge. Without a receipt, nonempty legacy data is selected in place
+when XDG has no user data; fresh-install preflight still refuses an unowned or
+competing installation. There is no automatic migration: avoiding database
+moves and duplicate copies avoids crash/recovery data loss. Fresh executable
+generations use sibling `olympus-engine`, keeping machinery removal separate
+from personal data. Legacy receipts keep both their data and package paths.
+
+The merged branch uses “on your computer” in relay approval and disconnected
+copy, and updates the deploy reviewer check accordingly. **Do not deploy the
+relay from this branch while OpenAI app review is open without the anchor's go.**
+The submitted directory assets and golden fixture remain unchanged; the current
+relay test explicitly accounts for only the platform wording changes.
+
+The design guard's implementation digest tracks the merged source. Its owner
+approval hashes remain unchanged. The panel and both computer-host wrappers
+need re-approval because the Linux remote-help command forwards to the owner
+Unix socket and includes `ExitOnForwardFailure=yes`. Mac Agents still matches
+its approved render. Exact HTML and candidate hashes are in the owner's
+`olympus-wt/tier-review-evidence/design-states/` handoff; the anchor owns approval
+and the rendered-state receipt update. This preparation does not authorize
+pushing, publishing Linux installers, relay deployment, or a live upgrade.

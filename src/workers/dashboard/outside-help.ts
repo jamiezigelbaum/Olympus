@@ -23,6 +23,7 @@ import { fill } from './vocabulary.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
   DASHBOARD_OUTSIDE_HELP_TOOLS_COPY,
+  outsideHelpDaemonCommand,
   outsideHelpToolsNeedAttention,
   renderOutsideHelpTools,
   renderOutsideHelpToolsFix,
@@ -291,6 +292,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   more.push(renderSetupSteps(
     route.state === 'configured' ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`,
     renderOutsideHelpTools(status.tools, { canEdit }),
+    outsideHelpDaemonCommand(status.tools),
   ));
   more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join('')}</div>`);
@@ -604,13 +606,15 @@ function renderStandard(standard: NonNullable<DashboardOutsideHelpStatus['standa
   return renderSection({ id: 'standard', title: C.title, summary, body });
 }
 
-function renderSetupSteps(secretRef: string, tools = ''): string {
-  const steps = W.steps.map((step) => fill(step, { secretRef }));
+function renderSetupSteps(secretRef: string, toolsHtml: string, daemon: string): string {
+  // One pass, so a path or reference that itself contains "{daemon}" or "{secretRef}" is never filled again.
+  const values: Readonly<Record<string, string>> = { secretRef, daemon };
+  const steps = W.steps.map((step) => step.replace(/\{(secretRef|daemon)\}/g, (_match, key: string) => values[key]!));
   return renderSection({
     id: 'steps',
     title: W.stepsTitle,
     summary: '',
-    body: `${tools}<div data-outside-steps><p class="pnote">${escapeHtml(W.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></div>`,
+    body: `${toolsHtml}<div data-outside-steps><p class="pnote">${escapeHtml(W.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></div>`,
   });
 }
 

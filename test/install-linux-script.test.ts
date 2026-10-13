@@ -141,15 +141,15 @@ esac
   const run = (extra: Record<string, string> = {}, args: string[] = []) => spawnSync(shell, [script, ...args], { env: env(extra), encoding: 'utf8', timeout: 15_000 });
   const calls = () => existsSync(log) ? text(log) : '';
   const uninstall = (extra: Record<string, string> = {}, args: string[] = []) => spawnSync(shell, [join(REPO, 'site/uninstall-linux.sh'), ...args], { env: env(extra), encoding: 'utf8', timeout: 15_000 });
-  const receipt = () => {
-    const engine = join(home, '.local/share/olympus/engine');
+  const receipt = (dataLayout: 'legacy' | 'xdg' = 'legacy') => {
+    const engine = join(home, dataLayout === 'xdg' ? '.local/share/olympus-engine' : '.local/share/olympus/engine');
     const generation = join(engine, 'generations', 'a'.repeat(64));
     const bun = join(generation, 'runtime/bun');
     const installedCli = join(generation, 'app/dist/cli.js');
     const configDir = join(home, '.config/olympus');
     const stateDir = join(home, '.local/state/olympus/engine');
     const cacheDir = join(home, '.cache/olympus/engine');
-    const dataDir = join(home, '.local/share/openclaw/olympus');
+    const dataDir = join(home, dataLayout === 'xdg' ? '.local/share/olympus' : '.local/share/openclaw/olympus');
     const unitPath = join(home, '.config/systemd/user/olympus-engine.service');
     const launcherPath = join(home, '.local/bin/olympus');
     for (const p of [dirname(bun), dirname(installedCli), configDir, stateDir, cacheDir, dataDir, dirname(unitPath), dirname(launcherPath), join(runtime, 'olympus')]) mkdirSync(p, { recursive: true, mode: 0o700 });
@@ -727,3 +727,21 @@ for (const purge of [false, true]) test(`desktop launcher removal in ${purge ? '
  expect({status:result.status,stderr:result.stderr}).toEqual({status:0,stderr:''});
  expect(existsSync(desktop)).toBe(false);expect(existsSync(icon)).toBe(false);
 });
+
+for (const dataLayout of ['legacy', 'xdg'] as const) {
+  for (const purge of [false, true]) {
+    test(`uninstall ${dataLayout}: ${purge ? 'purge removes' : 'keep-data retains'} the receipt data root`, () => {
+      const h = fixture('/bin/sh'); const r = h.receipt(dataLayout);
+      writeFileSync(join(r.dataDir, 'personal.sqlite'), 'personal');
+      mkdirSync(join(r.dataDir, 'engine'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(r.dataDir, 'engine/status.json'), '{}');
+      const other = join(h.home, dataLayout === 'xdg' ? '.local/share/openclaw/olympus' : '.local/share/olympus');
+      mkdirSync(other, { recursive: true, mode: 0o700 });
+      writeFileSync(join(other, 'unrelated.sqlite'), 'unrelated');
+      const result = h.uninstall({}, purge ? ['--purge', '--yes'] : []);
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
+      expect(existsSync(join(r.dataDir, 'personal.sqlite'))).toBe(!purge);
+      expect(readFileSync(join(other, 'unrelated.sqlite'), 'utf8')).toBe('unrelated');
+    });
+  }
+}

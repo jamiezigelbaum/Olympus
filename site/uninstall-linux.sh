@@ -208,13 +208,15 @@ if installation_state in {"recovery_pending","data_retained"} and mime_ownership
 required = ["home","configHome","dataHome","stateHome","cacheHome","runtimeHome","configDir","dataDir","stateDir","cacheDir","runtimeDir","packageDir","launcherPath","openHandlerPath","mimeappsPath","unitPath","receiptPath","workerSocketPath"]
 for key in required: absolute(layout.get(key), f"layout.{key}")
 if layout["home"] != os.environ.get("HOME") or layout["receiptPath"] != receipt_path or layout["runtimeHome"] != os.environ.get("XDG_RUNTIME_DIR"): fail("the receipt layout disagrees with this account/session.")
+allowed_data_roots = {os.path.join(layout["dataHome"], "olympus"), os.path.join(layout["dataHome"], "openclaw", "olympus"), os.path.join(layout["home"], ".local", "share", "openclaw", "olympus")}
+if layout["dataDir"] not in allowed_data_roots: fail("the receipt contains an inconsistent Linux layout (data root).")
 expected = {
     "configDir": os.path.join(layout["configHome"], "olympus"),
-    "dataDir": os.path.join(layout["dataHome"], "openclaw", "olympus"),
+    "dataDir": layout["dataDir"],
     "stateDir": os.path.join(layout["stateHome"], "olympus", "engine"),
     "cacheDir": os.path.join(layout["cacheHome"], "olympus", "engine"),
     "runtimeDir": os.path.join(layout["runtimeHome"], "olympus"),
-    "packageDir": os.path.join(layout["dataHome"], "olympus", "engine"),
+    "packageDir": os.path.join(layout["dataHome"], "olympus-engine") if layout["dataDir"] == os.path.join(layout["dataHome"], "olympus") else os.path.join(layout["dataHome"], "olympus", "engine"),
     "launcherPath": os.path.join(layout["home"], ".local", "bin", "olympus"),
     "openHandlerPath": os.path.join(layout["dataHome"], "applications", "ai.olympusplugin.open.desktop"),
     "mimeappsPath": os.path.join(layout["configHome"], "mimeapps.list"),
@@ -526,10 +528,10 @@ def purge_root(path):
 
 if purge:
     roots = sorted(set([layout["dataDir"],layout["packageDir"],layout["stateDir"],layout["cacheDir"]]), key=lambda p: p.count(os.sep), reverse=True)
-    purge_boundaries = {layout["dataDir"]:layout["dataHome"],layout["packageDir"]:layout["dataHome"],layout["stateDir"]:layout["stateHome"],layout["cacheDir"]:layout["cacheHome"]}
+    purge_boundaries = {layout["dataDir"]:(os.path.join(layout["home"], ".local", "share") if layout["dataDir"] == os.path.join(layout["home"], ".local", "share", "openclaw", "olympus") else layout["dataHome"]),layout["packageDir"]:layout["dataHome"],layout["stateDir"]:layout["stateHome"],layout["cacheDir"]:layout["cacheHome"]}
     for root in roots:
         absolute(root, "purge root")
-        if not beneath(root, purge_boundaries[root]) or os.path.basename(root) not in {"olympus","engine"}: fail(f"purge root is outside the Olympus boundary: {root}")
+        if not beneath(root, purge_boundaries[root]) or os.path.basename(root) not in {"olympus","engine","olympus-engine"}: fail(f"purge root is outside the Olympus boundary: {root}")
         purge_root(root)
     # Keep the receipt reachable until every other requested deletion finishes.
     for name in os.listdir(layout["configDir"]):

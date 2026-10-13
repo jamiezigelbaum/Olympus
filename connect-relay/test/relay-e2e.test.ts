@@ -21,8 +21,10 @@ import generatedRemoteSurface from '../server/generated/remote-tools.json';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 import generatedDashboard from '../server/generated/chatgpt-dashboard.json';
 import generatedSurface from '../server/generated/chatgpt-tools.json';
-import generatedPrivateAnswer from '../server/generated/chatgpt-private-answer.json';
-import generatedPrivateQuestion from '../server/generated/chatgpt-private-question.json';
+import approvedDashboard from '../server/directory/approved/dashboard.json';
+import approvedSurface from '../server/directory/approved/tools.json';
+import approvedPrivateAnswer from '../server/directory/approved/private-answer.json';
+import approvedPrivateQuestion from '../server/directory/approved/private-question.json';
 
 setDefaultTimeout(15_000);
 
@@ -317,9 +319,9 @@ describe('routing', () => {
     expect(init.result.protocolVersion).toBe('2025-11-25');
     expect(init.result.instructions).toBe(NOT_CONNECTED_MESSAGE);
     const list = await (await anonymous(rpc('tools/list'))).json();
-    // The engine's full ChatGPT tool set, so ChatGPT's model can pick an
-    // answer tool and so start linking.
-    expect(list.result.tools).toEqual(generatedSurface.tools);
+    // The submitted listing (server/directory/approved.ts), so ChatGPT's
+    // model can pick an answer tool and so start linking.
+    expect(list.result.tools).toEqual(approvedSurface.tools);
     expect(list.result.tools.map((tool: { name: string }) => tool.name))
       .toEqual([
         'olympus_dashboard',
@@ -346,24 +348,24 @@ describe('routing', () => {
     }
     const resources = await (await anonymous(rpc('resources/list'))).json();
     // The engine advertises content-versioned URIs (`<base>?v=<hash>`).
-    expect(resources.result.resources).toEqual(generatedSurface.resources);
+    expect(resources.result.resources).toEqual(approvedSurface.resources);
     expect(resources.result.resources).toEqual([
       { uri: expect.stringMatching(/^ui:\/\/olympus\/dashboard\?v=[0-9a-f]{12}$/), name: 'Olympus dashboard', mimeType: 'text/html;profile=mcp-app' },
       { uri: expect.stringMatching(/^ui:\/\/olympus\/private-answer\?v=[0-9a-f]{12}$/), name: 'Olympus private answer', mimeType: 'text/html;profile=mcp-app' },
       { uri: expect.stringMatching(/^ui:\/\/olympus\/private-question\?v=[0-9a-f]{12}$/), name: 'Olympus private question', mimeType: 'text/html;profile=mcp-app' },
     ]);
     const panel = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/private-answer' }))).json();
-    expect(panel.result.contents).toEqual(generatedPrivateAnswer.contents);
+    expect(panel.result.contents).toEqual(approvedPrivateAnswer.contents);
     const question = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/private-question' }))).json();
-    expect(question.result.contents).toEqual(generatedPrivateQuestion.contents);
+    expect(question.result.contents).toEqual(approvedPrivateQuestion.contents);
     expect(question.result.contents[0].text).toContain('/ask');
     const resource = await (await anonymous(rpc('resources/read', { uri: 'ui://olympus/dashboard' }))).json();
     // The dashboard lane's real bundle, not a placeholder.
-    expect(resource.result.contents).toEqual(generatedDashboard.contents);
+    expect(resource.result.contents).toEqual(approvedDashboard.contents);
     expect(resource.result.contents[0].mimeType).toBe('text/html;profile=mcp-app');
     expect(resource.result.contents[0].text).toContain('not_connected');
     // Every advertised (versioned) URI reads the same bundle; an unknown one does not.
-    for (const advertised of generatedSurface.resources as { uri: string }[]) {
+    for (const advertised of approvedSurface.resources as { uri: string }[]) {
       const read = await (await anonymous(rpc('resources/read', { uri: advertised.uri }))).json();
       expect(read.result.contents.length).toBe(1);
     }
@@ -379,7 +381,7 @@ describe('routing', () => {
     expect(dashboard.result.content).toEqual([{ type: 'text', text: NOT_CONNECTED_MESSAGE }]);
     // The tool's own UI metadata, plus the same linking challenge the
     // protected tools send, so ChatGPT offers Connect beside the dashboard.
-    expect(dashboard.result._meta).toEqual({ ...generatedSurface.tools[0]!._meta, 'mcp/www_authenticate': LINKING_CHALLENGE });
+    expect(dashboard.result._meta).toEqual({ ...approvedSurface.tools[0]!._meta, 'mcp/www_authenticate': LINKING_CHALLENGE });
     expect(dashboard.result.isError).toBeUndefined();
     // Every oauth2 tool, called without a token: the documented linking
     // trigger (isError + _meta["mcp/www_authenticate"]) on an HTTP 200.
@@ -444,6 +446,10 @@ describe('routing', () => {
     expect(await heading('https://chatgpt.com/oauth/cb_1/client.json')).toBe('Approve ChatGPT on your computer');
     expect(await heading('https://evil.example/<b>Claude</b>')).toBe('Approve on your computer');
     expect(await (await fetch(`${relay.url}/connect/authorize?state=s`)).text()).toContain('<h1>Approve on your computer</h1>');
+    // All approval pages use the platform-neutral wording.
+    const claudePage = await (await fetch(`${relay.url}/connect/authorize?client_id=${encodeURIComponent('https://claude.ai/oauth/mcp-oauth-client-metadata')}`)).text();
+    expect(claudePage).toContain('Continue on this computer</a>');
+    expect(claudePage).not.toMatch(/\bMac\b/);
   });
 });
 

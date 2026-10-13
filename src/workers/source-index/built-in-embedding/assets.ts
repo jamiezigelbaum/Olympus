@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../../../core/linux-engine-layout.ts';
 // Fetches, verifies and installs the built-in embedding model and its runtime
 // into the Olympus data directory, once. Every file is checked against the
 // pinned manifest before it is used; a file that does not match is deleted,
@@ -123,7 +124,7 @@ export function builtInEmbeddingPaths(
 ): BuiltInEmbeddingPaths {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
   const dataRoot = env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share');
-  const root = configured || join(dataRoot, 'openclaw', 'olympus', 'models', 'built-in-embedding');
+  const root = configured || join(standaloneLinuxDataDir(env) ?? join(dataRoot, 'openclaw', 'olympus'), 'models', 'built-in-embedding');
   if (!isAbsolute(root)) throw new TypeError('The built-in embedding directory must be an absolute path.');
   return {
     root,

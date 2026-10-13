@@ -27,7 +27,8 @@ test('XDG roots reach worker, data, engine and receipt; shell overrides cannot m
   expect(defaultOlympusConfigDir(env, 'linux')).toBe(layout.configDir);
   expect(defaultSovereigntyConfigPath(env)).toBe(layout.sovereigntyPath);
   expect(workerServicePaths('linux', home, env).envPath).toBe(layout.workerEnvPath);
-  expect(olympusDataDir(env)).toBe(join(home, 'data/openclaw/olympus'));
+  expect(layout.dataDir).toBe(join(home, 'data/olympus'));
+  expect(olympusDataDir({ ...env, OLYMPUS_ENGINE_HOST: '1' })).toBe(layout.dataDir);
   publishLinuxEngineReceipt(layout);
   expect(statSync(layout.receiptPath).mode & 0o777).toBe(0o600);
   expect(resolveLinuxEngineLayout({ ...env, XDG_DATA_HOME: join(home, 'wrong') }).dataDir).toBe(layout.dataDir);
@@ -61,7 +62,7 @@ test('symlink, unsafe runtime, relative root and foreign owner refuse without ch
 });
 test('overlapping managed XDG roots refuse before any install mutation',()=>{
  const {home,env}=fixture();
- expect(()=>resolveLinuxEngineLayout({...env,XDG_CONFIG_HOME:join(home,'data/openclaw/olympus/config')})).toThrow('must not overlap');
+ expect(()=>resolveLinuxEngineLayout({...env,XDG_CONFIG_HOME:join(home,'data/olympus/config')})).toThrow('must not overlap');
  expect(()=>resolveLinuxEngineLayout({...env,XDG_STATE_HOME:env.XDG_DATA_HOME})).toThrow('must not overlap');
 });
 test('two discoverable receipts refuse instead of picking an installation', () => {
@@ -85,4 +86,54 @@ test('matching receipt permits its verified default-root manager link, but never
  const {home,env}=fixture();const l=resolveLinuxEngineLayout(env);publishLinuxEngineReceipt(l);mkdirSync(join(l.configHome,'systemd/user'),{recursive:true,mode:0o700});writeFileSync(l.unitPath,'owned',{mode:0o600});
  const defaultDir=join(home,'.config/systemd/user');mkdirSync(defaultDir,{recursive:true,mode:0o700});const link=join(defaultDir,'olympus-engine.service');symlinkSync(l.unitPath,link);
  expect(()=>preflightLinuxEngineLayout(l)).not.toThrow();rmSync(link);symlinkSync('/unowned/unit',link);expect(()=>preflightLinuxEngineLayout(l)).toThrow('Existing Olympus');
+});
+
+test('a legacy standalone receipt keeps its data root even when empty or XDG has data', () => {
+  const { home, env } = fixture();
+  const layout = resolveLinuxEngineLayout(env);
+  const receipt = publishLinuxEngineReceipt(layout);
+  const legacy = join(env.XDG_DATA_HOME, 'openclaw/olympus');
+  const old = { ...receipt, layout: { ...layout, dataDir: legacy, packageDir: join(env.XDG_DATA_HOME, 'olympus/engine') } };
+  writeFileSync(layout.receiptPath, JSON.stringify(old), { mode: 0o600 });
+  expect(resolveLinuxEngineLayout(env).dataDir).toBe(legacy);
+  mkdirSync(legacy, { recursive: true, mode: 0o700 });
+  writeFileSync(join(legacy, 'retained.sqlite'), 'existing data');
+  mkdirSync(layout.dataDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(layout.dataDir, 'unrelated'), 'keep');
+  expect(olympusDataDir(env)).toBe(legacy);
+  expect(readFileSync(join(legacy, 'retained.sqlite'), 'utf8')).toBe('existing data');
+});
+test('standalone discovery uses nonempty legacy data in place, including before an XDG override', () => {
+  const { home, env } = fixture();
+  const legacy = join(home, '.local/share/openclaw/olympus');
+  mkdirSync(legacy, { recursive: true, mode: 0o700 });
+  writeFileSync(join(legacy, 'existing.sqlite'), 'keep');
+  expect(resolveLinuxEngineLayout(env).dataDir).toBe(legacy);
+});
+test('uninstalled and explicitly OpenClaw-hosted data paths keep the historical layout', () => {
+  const { env } = fixture();
+  expect(olympusDataDir(env)).toBe(join(env.XDG_DATA_HOME, 'openclaw/olympus'));
+  publishLinuxEngineReceipt(resolveLinuxEngineLayout(env));
+  expect(olympusDataDir({ ...env, OPENCLAW_STATE_DIR: '/openclaw-host' })).toBe(join(env.XDG_DATA_HOME, 'openclaw/olympus'));
+});
+
+test('default OpenClaw config keeps hosted stores on the legacy namespace beside an engine receipt', () => {
+  const { home, env } = fixture();
+  const layout = resolveLinuxEngineLayout(env); publishLinuxEngineReceipt(layout);
+  mkdirSync(join(home, '.openclaw'), { mode: 0o700 });
+  writeFileSync(join(home, '.openclaw/openclaw.json'), JSON.stringify({ plugins: { entries: { olympus: { enabled: true } } } }));
+  expect(olympusDataDir(env)).toBe(join(env.XDG_DATA_HOME, 'openclaw/olympus'));
+  expect(olympusDataDir({ ...env, OLYMPUS_ENGINE_HOST: '1' })).toBe(layout.dataDir);
+});
+test('receipt discovery validates the recorded legacy layout before considering fresh-root overlap', () => {
+  const { env } = fixture();
+  const layout = resolveLinuxEngineLayout(env), receipt = publishLinuxEngineReceipt(layout);
+  rmSync(layout.receiptPath);
+  const configHome = join(env.XDG_DATA_HOME, 'olympus/settings');
+  const oldLayout = Object.fromEntries(Object.entries(layout).map(([key, value]) => [key, value.startsWith(layout.configHome) ? configHome + value.slice(layout.configHome.length) : value]));
+  oldLayout.dataDir = join(env.XDG_DATA_HOME, 'openclaw/olympus');
+  oldLayout.packageDir = join(env.XDG_DATA_HOME, 'olympus/engine');
+  mkdirSync(oldLayout.configDir!, { recursive: true, mode: 0o700 });
+  writeFileSync(oldLayout.receiptPath!, JSON.stringify({ ...receipt, layout: oldLayout }), { mode: 0o600 });
+  expect(resolveLinuxEngineLayout({ ...env, XDG_CONFIG_HOME: configHome }).dataDir).toBe(oldLayout.dataDir!);
 });

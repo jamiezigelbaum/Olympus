@@ -118,6 +118,27 @@ recurring or expensive, and cheap to detect. Each blocking gate records:
 
 This keeps incidents from turning into permanent latency by default.
 
+Current blocking gates recorded here:
+
+- **ChatGPT directory reviewer path** (2026-10-12). Prevents a relay release
+  from changing what OpenAI's directory reviewers and directory users see on
+  `/openai/mcp`, or from breaking the frozen reviewer demo engine; and an
+  engine release from changing that listing or breaking the submitted pages.
+  CI: `connect-relay/test/reviewer-path.test.ts` (pinned listing digests, the
+  submitted relay's recorded answers, the submitted engine's relay client
+  against the current relay; a few seconds) and
+  `test/chatgpt-directory-approved.test.ts` (the engine serves the pinned
+  listing, current handlers accept the submitted schemas, the submitted pages
+  render current results; about ten seconds). Deploy:
+  `connect-relay/deploy/reviewer-check.ts` before and after
+  `connect-relay/deploy/deploy.sh` (about ten seconds; a failure after the
+  deploy rolls the relay binary back). False positives: none expected from
+  the pinned parts; the live check also needs the demo engine online, so it
+  runs with `RELAY_REVIEWER_CHECK=no-demo` when no demo is meant to run.
+  Owner: the session delivering relay changes. Retire the demo half when no
+  directory review or listing update is pending; the listing pin stays while
+  the plugin is listed, because the directory rescans `/openai/mcp`.
+
 ## Focused proof and CI triage
 
 Choose local proof from the changed surface instead of reflexively running the
@@ -157,6 +178,50 @@ consumer may promote only an exact matching receipt. Until that receipt path is
 accepted by the deploy gate, the existing exact-SHA green-main check remains
 authoritative; any mismatch falls back to a full main run rather than skipping
 proof.
+
+## Version numbers and releases
+
+Olympus uses semantic versioning (owner decision 2026-10-13). `1.0.0` is the
+launch release; after it:
+
+- `1.0.1`, `1.0.2`, ...: fixes only.
+- `1.1.0`, `1.2.0`, ...: new features; existing installs, connected sources
+  and settings keep working.
+- `2.0.0`: users must redo something (reconnect sources, re-index, a changed
+  config format), or a feature is removed.
+- A suffix (`1.1.0-beta.1`, `1.1.0-rc.1`) marks a test build that testers try
+  before everyone gets it. It is optional; fixes ship straight as the next
+  patch. A release candidate takes fixes only; a new feature moves to the next
+  minor version.
+- Every published build gets a new number. A number is never reused, and a
+  published artifact is never replaced under the same number.
+
+A release is two pull requests, a tag and a site publish:
+
+1. **Version PR** ("Release X.Y.Z"): `package.json`, `openclaw.plugin.json`
+   and `chatgpt-plugin/plugin.json` (kept equal by test), the version
+   assertion in `test/native-plugin.test.ts`, and a `CHANGELOG.md` entry.
+2. **Tag and GitHub release** `vX.Y.Z` on the merged commit, with the
+   `olympus-X.Y.Z.tgz` from `bun run release:artifact`. A suffixed version is
+   a GitHub pre-release; a plain `X.Y.Z` is a full release marked latest.
+3. **Pins PR** ("Point the install guide, quickstart and README at X.Y.Z"):
+   `INSTALL_FOR_AGENTS.md` (tag, asset, SHA-256, size, and the `prerelease`
+   value it requires, which is `false` for a plain version), the `README.md`
+   badge and install line, `docs/QUICKSTART.md`,
+   `scripts/owner-identifier-patterns.ts`, and the tests that check them.
+4. **Site**: publish the exact tarball attached to the GitHub release, never
+   a rebuild. Without `--artifact` the script builds a new tarball from the
+   current tree, and once the pins PR has changed the packaged guides its
+   bytes differ from the tagged release's. So:
+   `gh release download vX.Y.Z -p olympus-X.Y.Z.tgz -D <dir>`, then
+   `bun scripts/publish-release-to-site.ts --artifact <dir>/olympus-X.Y.Z.tgz`,
+   then `site/deploy/deploy.sh --dry-run` and `site/deploy/deploy.sh`
+   ([`chatgpt-plugin/SUBMISSION.md`](../chatgpt-plugin/SUBMISSION.md) has the
+   checks).
+
+The ChatGPT directory listing has its own version. It changes only with a new
+listing upload, which restarts OpenAI's review, so an engine release never
+re-uploads the listing on its own.
 
 ## Budgets and measurement
 

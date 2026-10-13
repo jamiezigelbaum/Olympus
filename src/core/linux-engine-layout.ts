@@ -1,3 +1,4 @@
+import { readOpenClawPluginRemote } from './config.ts';
 import { linuxDesktopEntryPaths } from './linux-desktop-entry.ts';
 /** One Linux layout shared by installers, services and consumers. No OpenClaw dependency. */
 import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
@@ -35,14 +36,29 @@ function absolute(value: string, name: string): string {
   if (!isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value)) throw new Error(`${name} must be an absolute path without control characters.`);
   return resolve(value);
 }
-function rawLayout(env: Env): LinuxEngineLayout {
+function rawLayout(env: Env, recordedDataDir?: string): LinuxEngineLayout {
   const home = absolute(env.HOME || homedir(), 'HOME');
   const root = (key: string, fallback: string) => absolute(env[key] || join(home, fallback), key);
   const configHome = root('XDG_CONFIG_HOME', '.config'); const dataHome = root('XDG_DATA_HOME', '.local/share');
   const stateHome = root('XDG_STATE_HOME', '.local/state'); const cacheHome = root('XDG_CACHE_HOME', '.cache');
   const runtimeHome = env.XDG_RUNTIME_DIR ? absolute(env.XDG_RUNTIME_DIR, 'XDG_RUNTIME_DIR') : '';
   const configDir = join(configHome, 'olympus'); const runtimeDir = runtimeHome ? join(runtimeHome, 'olympus') : '';
-  const dataDir=join(dataHome,'openclaw/olympus'),stateDir=join(stateHome,'olympus/engine'),cacheDir=join(cacheHome,'olympus/engine'),packageDir=join(dataHome,'olympus/engine');
+  const xdgDataDir = join(dataHome, 'olympus');
+  const legacyDirs = [...new Set([join(dataHome, 'openclaw/olympus'), join(home, '.local/share/openclaw/olympus')])];
+  // Receipts remain authoritative even after keep-data, partial purge or shell drift.
+  // Never move an existing database tree during startup or upgrade.
+  if (recordedDataDir && ![xdgDataDir, ...legacyDirs].includes(recordedDataDir)) throw new Error('Invalid Linux data root in install receipt.');
+  const hasData = (path: string) => {
+    const info = stat(path);
+    if (!info) return false;
+    // A non-directory or symlink is not absence; the managed-path preflight refuses it.
+    return !info.isDirectory() || info.isSymbolicLink() || readdirSync(path).some(name => path !== xdgDataDir || name !== 'engine');
+  };
+  const dataDir = recordedDataDir ?? (hasData(xdgDataDir) ? xdgDataDir : legacyDirs.find(hasData) ?? xdgDataDir);
+  const stateDir = join(stateHome, 'olympus/engine'), cacheDir = join(cacheHome, 'olympus/engine');
+  // New installs keep executable generations outside the purgeable user-data tree.
+  // Legacy receipts retain their original package directory byte for byte.
+  const packageDir = dataDir === xdgDataDir ? join(dataHome, 'olympus-engine') : join(dataHome, 'olympus/engine');
   const managedRoots=[configDir,dataDir,stateDir,cacheDir,packageDir];
   for(let i=0;i<managedRoots.length;i+=1)for(let j=i+1;j<managedRoots.length;j+=1){const forward=relative(managedRoots[i]!,managedRoots[j]!),reverse=relative(managedRoots[j]!,managedRoots[i]!);
    if(forward===''||(!forward.startsWith(`..${sep}`)&&forward!=='..'&&!isAbsolute(forward))||(!reverse.startsWith(`..${sep}`)&&reverse!=='..'&&!isAbsolute(reverse)))throw new Error(`Linux Olympus managed roots must not overlap: ${managedRoots[i]} and ${managedRoots[j]}.`);}
@@ -84,7 +100,7 @@ export function readLinuxEngineReceipt(path: string, uid = process.getuid!()): L
   if (receipt.schema !== 'olympus.engine.install.v1' || receipt.uid !== uid || !receipt.layout) throw new Error(`${path} is a foreign or invalid install receipt.`);
   if(!['installed','recovery_pending','data_retained'].includes(receipt.installationState))throw new Error(`${path} has an invalid installation state.`);
   const l = receipt.layout;
-  const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome });
+  const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome }, l.dataDir);
   if (!linuxEngineLayoutsEqual(l,expected) || l.receiptPath !== path) throw new Error(`${path} has an inconsistent install layout.`);
   const allowedLinkParents=new Set([join(l.configHome,'systemd/user'),join(l.home,'.config/systemd/user')]);
   if (!Array.isArray(receipt.ownedUnitLinks) || receipt.ownedUnitLinks.some(p => typeof p !== 'string' || !isAbsolute(p)
@@ -115,13 +131,14 @@ export function readLinuxEngineReceipt(path: string, uid = process.getuid!()): L
 }
 /** Discover the default and explicitly selected config root; receipt roots win over shell drift. */
 export function resolveLinuxEngineLayout(env: Env = process.env): LinuxEngineLayout {
-  const requested = rawLayout(env);
-  const candidates = [...new Set([join(requested.home, '.config/olympus/install-receipt.json'), requested.receiptPath])];
+  const home = absolute(env.HOME || homedir(), 'HOME');
+  const configHome = absolute(env.XDG_CONFIG_HOME || join(home, '.config'), 'XDG_CONFIG_HOME');
+  const candidates = [...new Set([join(home, '.config/olympus/install-receipt.json'), join(configHome, 'olympus/install-receipt.json')])];
   const present = candidates.filter(p => stat(p));
   if (present.length > 1) throw new Error(`Found multiple Olympus install receipts: ${present.join(', ')}. Select one installation after moving the other aside.`);
   const receipt = present[0] ? readLinuxEngineReceipt(present[0]) : undefined;
-  if (receipt && receipt.layout.home !== requested.home) throw new Error(`${present[0]} belongs to another home.`);
-  return receipt?.layout ?? requested;
+  if (receipt && receipt.layout.home !== home) throw new Error(`${present[0]} belongs to another home.`);
+  return receipt?.layout ?? rawLayout(env);
 }
 export function linuxEngineEnvironment(layout: LinuxEngineLayout): Record<string, string> {
   return { HOME: layout.home, XDG_CONFIG_HOME: layout.configHome, XDG_DATA_HOME: layout.dataHome, XDG_STATE_HOME: layout.stateHome,
@@ -176,4 +193,15 @@ export function publishLinuxEngineReceipt(layout: LinuxEngineLayout, updates: Pa
     rotation: { mechanism: 'host-copytruncate', maxBytes: 10 * 1024 * 1024, retained: 3 }, ...previous, ...updates };
   writePrivateFileAtomicSync(layout.receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
   return receipt;
+}
+
+/** Only standalone Linux processes/receipts opt into the new data root.
+ * OpenClaw-hosted and Mac callers keep their existing defaults.
+ */
+export function standaloneLinuxDataDir(env: Env = process.env): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  if (env.OLYMPUS_ENGINE_HOST !== '1' && (env.OPENCLAW_STATE_DIR || env.OPENCLAW_CONFIG_PATH || readOpenClawPluginRemote(env).hosted)) return undefined;
+  const layout = resolveLinuxEngineLayout(env);
+  if (env.OLYMPUS_ENGINE_HOST === '1' || readLinuxEngineReceipt(layout.receiptPath)) return layout.dataDir;
+  return undefined;
 }

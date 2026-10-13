@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -286,7 +287,7 @@ export function defaultXBookmarksReconcileStateDbPath(
   if (usageDbPath === ':memory:') return ':memory:';
   if (usageDbPath?.trim()) return `${usageDbPath.trim()}.reconcile`;
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', 'x-bookmarks-reconcile-state.sqlite');
+  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'x-bookmarks-reconcile-state.sqlite');
 }
 
 /**

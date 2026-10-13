@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -17,6 +20,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -138,7 +142,7 @@ func TestNativeCaptureRefusesUnpairedStoreBeforeConnecting(t *testing.T) {
 	_, _, _, err = startNativeCapture(stateDir, spoolDir, nativeCaptureConfig{
 		Active:     true,
 		InstanceID: nativeInstance,
-	}, container, factory)
+	}, nil, container, factory)
 	if err == nil {
 		t.Fatal("unpaired store must refuse to start native capture")
 	}
@@ -174,7 +178,7 @@ func TestNativeCaptureRefusalPrecedesSpoolSideEffects(t *testing.T) {
 	if _, _, _, err := startNativeCapture(stateDir, filepath.Join(stateDir, "missing", spoolDirName), nativeCaptureConfig{
 		Active:     true,
 		InstanceID: nativeInstance,
-	}, container, factory); err == nil {
+	}, nil, container, factory); err == nil {
 		t.Fatal("unpaired store must refuse before opening capture state")
 	}
 	if got := atomic.LoadInt32(calls); got != 0 {
@@ -978,5 +982,395 @@ func audioMessage(fileLength uint64) *waE2E.AudioMessage {
 		FileEncSHA256:     []byte{7, 8, 9},
 		DirectPath:        &directPath,
 		MediaKeyTimestamp: &timestamp,
+	}
+}
+
+// --- Startup dispatch and capture scope ----------------------------------------
+
+// dispatchRecorder stands in for every entry point run can reach, so a test can
+// prove which mode a command line selects without any provider connection.
+type dispatchRecorder struct {
+	calls         []string
+	pairStateDir  string
+	pairErr       error
+	nativeAllowed map[string]struct{}
+	manualAllowed map[string]struct{}
+}
+
+func (r *dispatchRecorder) deps() bridgeDeps {
+	return bridgeDeps{
+		pairOnly: func(stateDir string, _ *sqlstore.Container) error {
+			r.calls = append(r.calls, "pair-only")
+			r.pairStateDir = stateDir
+			return r.pairErr
+		},
+		native: func(_, _ string, _ nativeCaptureConfig, allowed map[string]struct{}, _ *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string, error) {
+			r.calls = append(r.calls, "native")
+			r.nativeAllowed = allowed
+			return nil, nil, nil, nil
+		},
+		manual: func(_, _ string, allowed map[string]struct{}, _ *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string) {
+			r.calls = append(r.calls, "manual")
+			r.manualAllowed = allowed
+			return nil, nil, nil
+		},
+		wait: func(*whatsmeow.Client, *spoolWriter, chan string) {
+			r.calls = append(r.calls, "wait")
+		},
+	}
+}
+
+// dispatchState points the daemon at a state directory that does not exist yet,
+// so a test can tell "refused before touching state" from "created state then
+// refused", and clears every mode switch inherited from the environment.
+func dispatchState(t *testing.T) string {
+	t.Helper()
+	stateDir := filepath.Join(t.TempDir(), "state")
+	t.Setenv(stateDirEnv, stateDir)
+	t.Setenv(nativeCaptureEnv, "")
+	t.Setenv(instanceIDEnv, "")
+	t.Setenv(allowedChatsEnv, "")
+	// run applies a private umask to the whole process; do not leak it into
+	// other tests.
+	previous := syscall.Umask(0o077)
+	syscall.Umask(previous)
+	t.Cleanup(func() { syscall.Umask(previous) })
+	return stateDir
+}
+
+func requireNoState(t *testing.T, stateDir string) {
+	t.Helper()
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Fatalf("state dir %s exists after a refused start: %v", stateDir, err)
+	}
+}
+
+func TestRunPairOnlyPairsAndNeverStartsCapture(t *testing.T) {
+	stateDir := dispatchState(t)
+	// Pairing must ignore the native-capture switch entirely, even a malformed
+	// one inherited from a service environment.
+	t.Setenv(nativeCaptureEnv, "tru")
+	recorder := &dispatchRecorder{}
+	if err := run([]string{"--pair-only"}, recorder.deps()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(recorder.calls, ",") != "pair-only" {
+		t.Fatalf("calls = %v, want only pair-only", recorder.calls)
+	}
+	if recorder.pairStateDir != stateDir {
+		t.Fatalf("pairing ran against %q, want %q", recorder.pairStateDir, stateDir)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, sessionDBName)); err != nil {
+		t.Fatalf("pairing needs the session store: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, spoolDirName)); !os.IsNotExist(err) {
+		t.Fatalf("pair-only created a spool dir: %v", err)
+	}
+}
+
+func TestRunPairOnlyReturnsThePairingFailureCode(t *testing.T) {
+	dispatchState(t)
+	recorder := &dispatchRecorder{pairErr: errors.New("pairing_timeout")}
+	err := run([]string{"--pair-only"}, recorder.deps())
+	if err == nil || err.Error() != "pairing_timeout" {
+		t.Fatalf("err = %v, want pairing_timeout", err)
+	}
+}
+
+func TestRunRefusesPairOnlyTogetherWithCaptureApproved(t *testing.T) {
+	stateDir := dispatchState(t)
+	t.Setenv(allowedChatsEnv, "chat-1@s.whatsapp.net")
+	recorder := &dispatchRecorder{}
+	err := run([]string{"--pair-only", "--capture-approved"}, recorder.deps())
+	if err == nil || err.Error() != "incompatible_modes" {
+		t.Fatalf("err = %v, want incompatible_modes", err)
+	}
+	if len(recorder.calls) != 0 {
+		t.Fatalf("calls = %v, want none", recorder.calls)
+	}
+	requireNoState(t, stateDir)
+}
+
+func TestRunCaptureApprovedFailsClosedWithoutAUsableScope(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		scope string
+		want  string
+	}{
+		{name: "unset", scope: "", want: "approved_chat_scope_required"},
+		{name: "blank entries", scope: " , ,", want: "approved_chat_scope_required"},
+		{name: "unparseable chat", scope: "chat-1@s.whatsapp.net,not-a-jid", want: "invalid_approved_chat_scope"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stateDir := dispatchState(t)
+			t.Setenv(allowedChatsEnv, test.scope)
+			recorder := &dispatchRecorder{}
+			err := run([]string{"--capture-approved"}, recorder.deps())
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("err = %v, want %s", err, test.want)
+			}
+			if len(recorder.calls) != 0 {
+				t.Fatalf("calls = %v, want capture never started", recorder.calls)
+			}
+			requireNoState(t, stateDir)
+		})
+	}
+}
+
+func TestRunCaptureApprovedHandsTheScopeToManualCapture(t *testing.T) {
+	dispatchState(t)
+	t.Setenv(allowedChatsEnv, "chat-1@s.whatsapp.net, 12036303990000000000@g.us")
+	recorder := &dispatchRecorder{}
+	if err := run([]string{"--capture-approved"}, recorder.deps()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(recorder.calls, ",") != "manual,wait" {
+		t.Fatalf("calls = %v, want manual capture then wait", recorder.calls)
+	}
+	if len(recorder.manualAllowed) != 2 ||
+		!chatCaptureAllowed("chat-1@s.whatsapp.net", recorder.manualAllowed) ||
+		!chatCaptureAllowed("12036303990000000000@g.us", recorder.manualAllowed) ||
+		chatCaptureAllowed("other@s.whatsapp.net", recorder.manualAllowed) {
+		t.Fatalf("manual capture got scope %v", recorder.manualAllowed)
+	}
+}
+
+func TestRunCaptureApprovedHandsTheScopeToNativeCapture(t *testing.T) {
+	dispatchState(t)
+	t.Setenv(nativeCaptureEnv, "true")
+	t.Setenv(instanceIDEnv, nativeInstance)
+	t.Setenv(allowedChatsEnv, "chat-1@s.whatsapp.net")
+	recorder := &dispatchRecorder{}
+	if err := run([]string{"--capture-approved"}, recorder.deps()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(recorder.calls, ",") != "native,wait" {
+		t.Fatalf("calls = %v, want native capture then wait", recorder.calls)
+	}
+	if !chatCaptureAllowed("chat-1@s.whatsapp.net", recorder.nativeAllowed) ||
+		chatCaptureAllowed("other@s.whatsapp.net", recorder.nativeAllowed) {
+		t.Fatalf("native capture got scope %v", recorder.nativeAllowed)
+	}
+}
+
+func TestRunCaptureApprovedWholeAccountScope(t *testing.T) {
+	dispatchState(t)
+	t.Setenv(allowedChatsEnv, "*")
+	recorder := &dispatchRecorder{}
+	if err := run([]string{"--capture-approved"}, recorder.deps()); err != nil {
+		t.Fatal(err)
+	}
+	if !chatCaptureAllowed("anyone@s.whatsapp.net", recorder.manualAllowed) {
+		t.Fatalf("whole-account scope rejected a chat: %v", recorder.manualAllowed)
+	}
+}
+
+// Without --capture-approved the historic behaviour stays: every chat, and the
+// scope variable is not consulted even when something left it in the
+// environment.
+func TestRunWithoutFlagsKeepsUnscopedCapture(t *testing.T) {
+	dispatchState(t)
+	t.Setenv(allowedChatsEnv, "chat-1@s.whatsapp.net")
+	manual := &dispatchRecorder{}
+	if err := run(nil, manual.deps()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(manual.calls, ",") != "manual,wait" || manual.manualAllowed != nil {
+		t.Fatalf("calls = %v scope = %v, want unscoped manual capture", manual.calls, manual.manualAllowed)
+	}
+
+	t.Setenv(nativeCaptureEnv, "true")
+	t.Setenv(instanceIDEnv, nativeInstance)
+	native := &dispatchRecorder{}
+	if err := run(nil, native.deps()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(native.calls, ",") != "native,wait" || native.nativeAllowed != nil {
+		t.Fatalf("calls = %v scope = %v, want unscoped native capture", native.calls, native.nativeAllowed)
+	}
+}
+
+func TestRunRejectsUnknownFlagsWithoutStartingAnything(t *testing.T) {
+	stateDir := dispatchState(t)
+	recorder := &dispatchRecorder{}
+	if err := run([]string{"--capture-everything"}, recorder.deps()); err == nil {
+		t.Fatal("unknown flag was accepted")
+	}
+	if len(recorder.calls) != 0 {
+		t.Fatalf("calls = %v, want none", recorder.calls)
+	}
+	requireNoState(t, stateDir)
+}
+
+// The TypeScript pairing code recovers a failure code from the LAST stderr line
+// shaped like "olympus-whatsapp-bridge: <code>". Prove the real main prints
+// that line and exits non-zero, by re-running this test binary as the daemon.
+func TestMainReportsStartupFailuresAsParsableStderrCodes(t *testing.T) {
+	if args := os.Getenv("OLYMPUS_BRIDGE_TEST_MAIN_ARGS"); args != "" {
+		os.Args = append([]string{"olympus-whatsapp-bridge"}, strings.Fields(args)...)
+		main()
+		return
+	}
+	for _, test := range []struct {
+		name string
+		args string
+		want string
+	}{
+		{name: "missing scope", args: "--capture-approved", want: "approved_chat_scope_required"},
+		{name: "incompatible modes", args: "--pair-only --capture-approved", want: "incompatible_modes"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stateDir := filepath.Join(t.TempDir(), "state")
+			command := exec.Command(os.Args[0], "-test.run=^TestMainReportsStartupFailuresAsParsableStderrCodes$")
+			command.Env = append(os.Environ(),
+				"OLYMPUS_BRIDGE_TEST_MAIN_ARGS="+test.args,
+				stateDirEnv+"="+stateDir,
+				allowedChatsEnv+"=",
+				nativeCaptureEnv+"=",
+			)
+			output, err := command.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+				t.Fatalf("daemon exit = %v, want a non-zero exit; output %q", err, output)
+			}
+			pattern := regexp.MustCompile(`(?m)olympus-whatsapp-bridge:\s*([a-z0-9_]+)\s*$`)
+			match := pattern.FindSubmatch(output)
+			if match == nil || string(match[1]) != test.want {
+				t.Fatalf("stderr %q does not end in the %s code", output, test.want)
+			}
+			requireNoState(t, stateDir)
+		})
+	}
+}
+
+func textEvent(chat types.JID, id string, text string) *events.Message {
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, Sender: chat},
+			ID:            types.MessageID(id),
+			PushName:      "Ada",
+			Timestamp:     time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC),
+		},
+		Message: &waE2E.Message{Conversation: &text},
+	}
+}
+
+// captureThroughHandler drives events through the real event handler and spool
+// writer under the given scope, returning every record that reached the spool.
+func captureThroughHandler(t *testing.T, allowed map[string]struct{}, downloader *fakeDownloader, mediaDir string, incoming ...*events.Message) []spoolRecord {
+	t.Helper()
+	spoolDir := t.TempDir()
+	writer := newSpoolWriter(spoolDir)
+	go writer.run()
+	audio := &audioMediaStore{
+		dir:          mediaDir,
+		maxFileBytes: audioMediaMaxFileBytes,
+		quotaBytes:   audioMediaQuotaBytes,
+		downloader:   downloader,
+	}
+	for _, evt := range incoming {
+		handleEvent(context.Background(), nil, audio, writer, make(chan string, 1), nil, allowed, evt)
+	}
+	writer.close()
+
+	files, err := filepath.Glob(filepath.Join(spoolDir, "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []spoolRecord
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			if line == "" {
+				continue
+			}
+			var rec spoolRecord
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				t.Fatalf("spool line %q: %v", line, err)
+			}
+			records = append(records, rec)
+		}
+	}
+	return records
+}
+
+func TestCaptureScopeOnlySpoolsApprovedChats(t *testing.T) {
+	approved := types.JID{User: "15551230001", Server: types.DefaultUserServer}
+	outside := types.JID{User: "15551230002", Server: types.DefaultUserServer}
+	scope := map[string]struct{}{approved.String(): {}}
+
+	records := captureThroughHandler(t, scope, &fakeDownloader{}, filepath.Join(t.TempDir(), "audio"),
+		textEvent(outside, "outside-1", "private note"),
+		textEvent(approved, "approved-1", "hello"),
+		textEvent(outside, "outside-2", "another private note"),
+		textEvent(types.JID{}, "no-chat", "no chat at all"),
+	)
+	if len(records) != 1 || records[0].ID != "approved-1" || records[0].ChatJID != approved.String() {
+		t.Fatalf("spool = %#v, want only the approved chat's message", records)
+	}
+}
+
+func TestCaptureScopeAppliesToReactions(t *testing.T) {
+	group := "12036303990000000000@g.us"
+	react := func() *events.Message {
+		return reactionEvent("reaction-1", reactionMessage("👍", "target-1", group, 1_700_000_000_000))
+	}
+
+	denied := captureThroughHandler(t, map[string]struct{}{"15551230001@s.whatsapp.net": {}}, &fakeDownloader{}, filepath.Join(t.TempDir(), "audio"), react())
+	if len(denied) != 0 {
+		t.Fatalf("reaction in an unapproved chat reached the spool: %#v", denied)
+	}
+	allowed := captureThroughHandler(t, map[string]struct{}{group: {}}, &fakeDownloader{}, filepath.Join(t.TempDir(), "audio"), react())
+	if len(allowed) != 1 || allowed[0].MediaType != "reaction" || allowed[0].ReactionKey != "👍" || allowed[0].ReactionTargetID != "target-1" {
+		t.Fatalf("reaction in an approved chat = %#v, want one reaction record", allowed)
+	}
+}
+
+// An out-of-scope voice note must not even be downloaded: the scope is enforced
+// before any per-message work, not only at the spool write.
+func TestCaptureScopeSkipsAudioDownloadForUnapprovedChats(t *testing.T) {
+	downloader := &fakeDownloader{bytes: []byte("voice-bytes")}
+	mediaDir := filepath.Join(t.TempDir(), "media", "audio")
+	scope := map[string]struct{}{"15551230001@s.whatsapp.net": {}}
+
+	records := captureThroughHandler(t, scope, downloader, mediaDir, audioEvent("voice:outside", audioMessage(10)))
+	if len(records) != 0 {
+		t.Fatalf("unapproved voice note was spooled: %#v", records)
+	}
+	if downloader.calls != 0 {
+		t.Fatalf("unapproved voice note was downloaded %d times", downloader.calls)
+	}
+	if _, err := os.Stat(mediaDir); !os.IsNotExist(err) {
+		t.Fatalf("media cache was created for an unapproved chat: %v", err)
+	}
+
+	scope = map[string]struct{}{"15551234567@s.whatsapp.net": {}}
+	records = captureThroughHandler(t, scope, downloader, mediaDir, audioEvent("voice:inside", audioMessage(10)))
+	if len(records) != 1 || records[0].DownloadStatus != "ok" || downloader.calls != 1 {
+		t.Fatalf("approved voice note: records %#v, downloads %d", records, downloader.calls)
+	}
+}
+
+func TestCaptureScopeWholeAccountAndUnscopedSpoolEverything(t *testing.T) {
+	chats := []types.JID{
+		{User: "15551230001", Server: types.DefaultUserServer},
+		{User: "12036303990000000000", Server: types.GroupServer},
+	}
+	for name, scope := range map[string]map[string]struct{}{
+		"whole account": {"*": {}},
+		"no flag":       nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			records := captureThroughHandler(t, scope, &fakeDownloader{}, filepath.Join(t.TempDir(), "audio"),
+				textEvent(chats[0], "one", "hello"),
+				textEvent(chats[1], "two", "hi"),
+			)
+			if len(records) != 2 {
+				t.Fatalf("spool = %#v, want both chats", records)
+			}
+		})
 	}
 }

@@ -890,6 +890,78 @@ describe('the install route', () => {
     const status = await adapter.status();
     expect(status.tools!.tools.find((entry) => entry.tool === 'zkapi-clientd')).toEqual({ tool: 'zkapi-clientd', label: 'zkAPI', source: 'outdated', installedVersion: '0.1.6', version: ZK });
   });
+
+  /** Olympus's pinned install of `tool`, as the installer leaves it, for the platform this runs on. */
+  function installPinned(env: { HOME: string }, tool: ManagedToolName): void {
+    const platformKey = managedToolsPlatform()!;
+    const pin = MANAGED_TOOL_PINS[tool];
+    const asset = pin.assets[platformKey]!;
+    const versionDir = join(managedToolsRoot({ env })!, tool, pin.version);
+    for (const file of new Set([...asset.required, asset.executable])) {
+      mkdirSync(dirname(join(versionDir, file)), { recursive: true, mode: 0o700 });
+      writeFileSync(join(versionDir, file), '#!/bin/sh\n', { mode: 0o700 });
+      for (let dir = dirname(join(versionDir, file)); dir.length >= versionDir.length; dir = dirname(dir)) chmodSync(dir, 0o700);
+    }
+    writeFileSync(join(versionDir, 'olympus-tool.json'), JSON.stringify({ schema: 1, tool, version: pin.version, platform: platformKey, asset: 'x', sha256: asset.sha256, installedAt: '2026-10-13T00:00:00.000Z' }), { mode: 0o600 });
+    for (let dir = dirname(versionDir); dir !== env.HOME; dir = dirname(dir)) chmodSync(dir, 0o700);
+  }
+
+  const consultAdapter = (env: Record<string, string>) => createDashboardConsultAdapter({
+    sovereignty: { config: loadSovereigntyPreset('local-first'), source: 'preset' },
+    secretPresent: () => false,
+    recoverSession: async () => { throw new Error('not used'); },
+    requestReload: () => { throw new Error('not used'); },
+    env,
+  });
+  const daemonEntry = (status: Awaited<ReturnType<ReturnType<typeof createDashboardConsultAdapter>['status']>>) => status.tools!.tools.find((entry) => entry.tool === 'zkapi-clientd')!;
+
+  test('after the one-click install the card names where the program is, so the Set up zkAPI commands run (the install puts nothing on PATH)', async () => {
+    if (!managedToolsPlatform() || !MANAGED_TOOL_PINS['zkapi-clientd'].assets[managedToolsPlatform()!]) return;
+    // A home with a space, as "~/Library/Application Support" has on a Mac.
+    const home = join(tempDir(), 'my home');
+    mkdirSync(home, { recursive: true });
+    const env = { HOME: home, PATH: join(home, 'empty-bin') };
+    const adapter = consultAdapter(env);
+    // Before the install nothing is known to run: the bare name, as before.
+    const before = await adapter.status();
+    expect(daemonEntry(before)).toMatchObject({ source: 'missing' });
+    expect(daemonEntry(before)).not.toHaveProperty('executable');
+    expect(renderOutsideHelpCard(before, { csrfToken: 'c', localSession: true })).toContain('<li>Run: zkapi-clientd config --usd N.');
+
+    installPinned(env, 'zkapi-clientd');
+    const installed = managedToolExecutable('zkapi-clientd', { env })!;
+    expect(installed).toContain('my home');
+    const after = await adapter.status();
+    expect(daemonEntry(after)).toMatchObject({ source: 'olympus', executable: installed });
+    const card = renderOutsideHelpCard(after, { csrfToken: 'c', localSession: true }).replaceAll('&#39;', "'").replaceAll('&lt;', '<').replaceAll('&gt;', '>');
+    const quoted = `'${installed}'`;
+    for (const tail of ['config --usd N.', 'config --relay-url socks5://127.0.0.1:19050</li>', 'config --require-api-key</li>', 'config --api-key <key>.', 'config --key-reuse-window-seconds 0.']) {
+      expect(card).toContain(`<li>Run: ${quoted} ${tail}`);
+    }
+    expect(card).not.toContain('<li>Run: zkapi-clientd ');
+  });
+
+  test('a copy on PATH is typed by its bare name; one only in a standard folder off PATH is named by path', async () => {
+    const home = tempDir();
+    const onPath = { HOME: home, PATH: join(home, 'bin') };
+    mkdirSync(join(home, 'bin'), { recursive: true });
+    writeFileSync(join(home, 'bin', 'zkapi-clientd'), '#!/bin/sh\n', { mode: 0o755 });
+    const viaPath = daemonEntry(await consultAdapter(onPath).status());
+    expect(viaPath).toMatchObject({ source: 'system' });
+    expect(viaPath).not.toHaveProperty('executable');
+
+    // The same program in ~/.local/bin, which is not on this PATH. The fallback
+    // folders are trusted only when no folder up to the root is writable by
+    // others (a Linux /tmp is), in which case nothing resolves and nothing is named.
+    const offPath = tempDir();
+    mkdirSync(join(offPath, '.local', 'bin'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(offPath, '.local', 'bin', 'zkapi-clientd'), '#!/bin/sh\n', { mode: 0o755 });
+    const env = { HOME: offPath, PATH: '/usr/bin:/bin' };
+    const resolved = resolveZkapiExecutable('zkapi-clientd', undefined, env);
+    const fallback = daemonEntry(await consultAdapter(env).status());
+    if (resolved) expect(fallback).toMatchObject({ source: 'system', executable: resolved });
+    else expect(fallback).not.toHaveProperty('executable');
+  });
 });
 
 describe('the card section', () => {

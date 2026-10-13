@@ -81,7 +81,8 @@ export interface RelayLimits {
   /**
    * Seconds an HTTP connection may sit with nothing written to it (Bun's
    * idleTimeout). Closes the transport behind every refusal and timed-out
-   * upload; a request forwarded to an install lifts it, so its own timers
+   * upload; a body upload lifts it until it ends (its own deadlines govern
+   * it), and a request forwarded to an install lifts it, so its own timers
    * (head, idle, total) govern long answers and streams instead. WebSocket
    * sessions have their own idle limit and heartbeat.
    */

@@ -182,6 +182,65 @@ function runCardScript(html: string, answer: (url: string, body: unknown) => Car
   return { window, document, posts, settle };
 }
 
+describe('Set up zkAPI names the program Olympus installed', () => {
+  const MANAGED = '/Users/ada/Library/Application Support/Olympus/tools/zkapi-clientd/0.1.6-olympus2/bin/zkapi-clientd';
+  const withDaemon = (daemon: Partial<NonNullable<DashboardOutsideHelpStatus['tools']>['tools'][number]>): DashboardOutsideHelpStatus => ({
+    ...status(),
+    tools: {
+      tools: [{ tool: 'tor', label: 'Tor', source: 'olympus' }, { tool: 'zkapi-clientd', label: 'zkAPI', source: 'olympus', ...daemon }],
+      install: { state: 'idle' },
+    },
+  });
+  const stepsOf = (value: DashboardOutsideHelpStatus): string[] => {
+    const html = page(value);
+    const list = html.slice(html.indexOf('class="ohsteps"'), html.indexOf('</ol>', html.indexOf('class="ohsteps"')));
+    return [...list.matchAll(/<li>(.*?)<\/li>/g)].map((match) => visibleText(match[1]!));
+  };
+  const commands = (steps: string[]): string[] => steps.filter((step) => step.includes(' config ')).map((step) => step.slice(0, step.indexOf(' config ') + ' config '.length));
+
+  test('after the one-click install, every command carries the installed program\'s quoted path (a folder with a space)', () => {
+    const steps = stepsOf(withDaemon({ executable: MANAGED }));
+    expect(steps).toHaveLength(7);
+    // Five commands, each starting with the one quoted path; none is the bare name.
+    expect(commands(steps)).toEqual(Array(5).fill(`Run: '${MANAGED}' config `));
+    expect(steps.some((step) => step.startsWith('Run: zkapi-clientd '))).toBe(false);
+    // The wording after the command is unchanged.
+    expect(steps[1]).toBe(`Run: '${MANAGED}' config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.`);
+    expect(steps[3]).toBe(`Run: '${MANAGED}' config --relay-url socks5://127.0.0.1:19050`);
+    expect(steps[6]).toBe(`Run: '${MANAGED}' config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.`);
+    // The key reference still fills.
+    expect(steps[5]).toContain('(env:OLYMPUS_ZKAPI_API_KEY)');
+    expect(steps[5]).not.toContain('{');
+  });
+
+  test('a path with a single quote is closed, escaped and reopened; a plain path is typed as is', () => {
+    expect(commands(stepsOf(withDaemon({ executable: "/Users/o'brien/tools/zkapi-clientd" })))[0]).toBe("Run: '/Users/o'\\''brien/tools/zkapi-clientd' config ");
+    expect(commands(stepsOf(withDaemon({ executable: '/home/ada/.local/share/olympus/tools/zkapi-clientd/0.1.6-olympus2/bin/zkapi-clientd' })))[0])
+      .toBe('Run: /home/ada/.local/share/olympus/tools/zkapi-clientd/0.1.6-olympus2/bin/zkapi-clientd config ');
+  });
+
+  test('the bare name stays only when no program is known to be off PATH: on PATH, not installed yet, or no tools facts', () => {
+    const bare = Array(5).fill('Run: zkapi-clientd config ');
+    expect(commands(stepsOf(withDaemon({ source: 'system' })))).toEqual(bare);
+    expect(commands(stepsOf(withDaemon({ source: 'missing' })))).toEqual(bare);
+    expect(commands(stepsOf(withDaemon({ source: 'outdated', installedVersion: '0.1.6' })))).toEqual(bare);
+    expect(commands(stepsOf(status()))).toEqual(bare);
+  });
+
+  test('a copy found outside PATH and a path set in the route are named too', () => {
+    expect(commands(stepsOf(withDaemon({ source: 'system', executable: '/opt/homebrew/bin/zkapi-clientd' })))).toEqual(Array(5).fill('Run: /opt/homebrew/bin/zkapi-clientd config '));
+    expect(commands(stepsOf(withDaemon({ source: 'configured', path: '/opt/zk tools/zkapi-clientd' })))).toEqual(Array(5).fill("Run: '/opt/zk tools/zkapi-clientd' config "));
+    // A configured path that is not there cannot be run; the steps keep the bare name.
+    expect(commands(stepsOf(withDaemon({ source: 'configured_missing', path: '/nowhere/zkapi-clientd' })))).toEqual(Array(5).fill('Run: zkapi-clientd config '));
+  });
+
+  test('a path that looks like a template slot is not filled twice', () => {
+    const steps = stepsOf(withDaemon({ executable: '/tmp/{secretRef} dir/zkapi-clientd' }));
+    expect(steps[1]!.startsWith("Run: '/tmp/{secretRef} dir/zkapi-clientd' config --usd N.")).toBe(true);
+    expect(steps[5]).toContain('(env:OLYMPUS_ZKAPI_API_KEY)');
+  });
+});
+
 describe('the Outside help page: states and copy', () => {
   test('off, route ready, acknowledged: one status line, no problems, everything else one collapsed line with its value', () => {
     const html = page(status());
@@ -206,7 +265,7 @@ describe('the Outside help page: states and copy', () => {
     // The honesty label keeps "network route not verified".
     expect(visibleText(html)).toContain('network route not verified');
     for (const line of W.disclosure) expect(html).toContain(line.replace(/'/g, '&#39;'));
-    for (const step of W.steps) expect(visibleText(html)).toContain(step.replace('{secretRef}', 'env:OLYMPUS_ZKAPI_API_KEY').slice(0, 40));
+    for (const step of W.steps) expect(visibleText(html)).toContain(step.replace('{secretRef}', 'env:OLYMPUS_ZKAPI_API_KEY').replaceAll('{daemon}', 'zkapi-clientd').slice(0, 40));
     // The seven setup steps, in the order that worked live (§A.14): one send, activation, relay, require key, api key, key reuse 0.
     const text = visibleText(html);
     const order = ['--usd N', 'Private inference balance activated', '--relay-url socks5://127.0.0.1:19050', '--require-api-key', '--api-key <key>', '--key-reuse-window-seconds 0'];

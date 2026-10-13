@@ -1,3 +1,4 @@
+import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
 /**
  * The embedding decision ledger: an append-only record of everything that has
  * ever changed the stored embeddings, and who agreed to it.
@@ -154,7 +155,7 @@ export function resolveEmbeddingLedgerPath(
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured) return configured;
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', 'embedding-ledger.jsonl');
+  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'embedding-ledger.jsonl');
 }
 
 /**

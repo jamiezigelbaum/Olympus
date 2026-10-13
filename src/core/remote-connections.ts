@@ -39,7 +39,7 @@ import {
 } from './remote-oauth-store.ts';
 import { revokeWaitingPrivateQuestions } from './waiting-private-questions.ts';
 import { credentialInstallId, mintCredential } from '../../connect-relay/shared/tokens.ts';
-import { readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
 
 export const REMOTE_CONNECTIONS_STORE_ID = 'remote-connections';
 export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 3;
@@ -159,10 +159,8 @@ export function resolveRemoteConnectionsDbPathForCli(
 ): string {
   const explicit = env[REMOTE_CONNECTIONS_DB_PATH_ENV]?.trim();
   if (explicit) return resolveRemoteConnectionsDbPath({ [REMOTE_CONNECTIONS_DB_PATH_ENV]: explicit });
-  if (process.platform === 'linux') {
-    const layout = resolveLinuxEngineLayout(env);
-    if (readLinuxEngineReceipt(layout.receiptPath)) return join(layout.dataDir, 'remote-connections.sqlite');
-  }
+  const standalone = standaloneLinuxDataDir(env);
+  if (standalone) return join(standalone, 'remote-connections.sqlite');
   // Located only from a HOME in the environment handed in, like
   // environmentWithWorkerSetupEnv: a scoped environment never reads the
   // process owner's install by accident.
@@ -178,7 +176,8 @@ export function resolveRemoteConnectionsDbPathForCli(
 export function defaultRemoteConnectionsDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  if (process.platform === 'linux') return join(resolveLinuxEngineLayout(env).dataDir, 'remote-connections.sqlite');
+  const standalone = standaloneLinuxDataDir(env);
+  if (standalone) return join(standalone, 'remote-connections.sqlite');
   const configured = env.XDG_DATA_HOME?.trim();
   const dataRoot = configured || join(env.HOME?.trim() || homedir(), '.local', 'share');
   if (!isAbsolute(dataRoot)) {

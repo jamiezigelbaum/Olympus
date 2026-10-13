@@ -157,6 +157,8 @@ interface MountOptions {
   replies?: RelayReply[];
   plaintext?: unknown;
   idb?: FakeIdb;
+  /** Key-store timeout, in ms; only for a store that never answers or fails. Otherwise the shipped default applies. */
+  keyStoreTimeoutMs?: number;
   claim?: Claim;
   /** When the host answers ui/initialize: ms after the request, or never. */
   initAfterMs?: number | 'never';
@@ -177,7 +179,9 @@ function mount(options: MountOptions = {}): Host {
     pollCapMs: options.pollCapMs ?? 5_000,
     fullPollCapMs: options.fullPollCapMs ?? 5_000,
     ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
-    keyStore: { timeoutMs: 30 },
+    // The key store keeps its shipped timeout unless a test asks otherwise: the fake answers through timer hops, and
+    // a short one lets a loaded CI runner give up on it (falling back to memory), so a re-mount finds no kept key.
+    ...(options.keyStoreTimeoutMs === undefined ? {} : { keyStore: { timeoutMs: options.keyStoreTimeoutMs } }),
     noteMs: 60_000,
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
@@ -919,12 +923,15 @@ describe('the height waits for the handshake', () => {
   const sizes = (host: Host) => host.sent.filter((m) => m.method === 'ui/notifications/size-changed').map((m) => m.params.height);
 
   test('a host that answers ui/initialize late gets the final height right after initialized, and again later', async () => {
-    const host = mount({ initAfterMs: 60, heightResendMs: 30, openai: { toolResponseMetadata: meta({ v: 1, count: 2, state: 'ready', jobId: JOB }) } });
+    // The test answers ui/initialize itself, so a loaded runner cannot finish the handshake before the answer shows.
+    const host = mount({ initAfterMs: 'never', initFallbackMs: 60_000, heightResendMs: 30, openai: { toolResponseMetadata: meta({ v: 1, count: 2, state: 'ready', jobId: JOB }) } });
     measure(host);
     // The precomputed answer arrives before the handshake finishes.
     await host.until(() => host.text().includes('31 March'), 'the answer');
     expect(sizes(host)).toEqual([]);
     expect(host.heights()).toEqual([]);
+    const init = host.sent.find((m) => m.method === 'ui/initialize');
+    host.win.dispatchEvent(new host.win.MessageEvent('message', { data: { jsonrpc: '2.0', id: init.id, result: { hostContext: { theme: 'light' } } }, source: host.win.parent as any }));
     await host.until(() => sizes(host).length > 0, 'the first size');
     const methods = host.sent.map((m) => m.method);
     expect(methods.indexOf('ui/notifications/initialized')).toBeLessThan(methods.indexOf('ui/notifications/size-changed'));
@@ -1001,8 +1008,8 @@ describe('the key across re-mounts', () => {
     const host = mount({ idb });
     await reveal(host);
     expect(host.fetched[0]!.body.publicKey).not.toBe(sample.publicKey);
-    await sleep(30);
-    expect(keys.has('oly2p.old')).toBe(false);
+    // The sweep runs after the answer shows; wait for it rather than for a fixed time.
+    await host.until(() => !keys.has('oly2p.old'), 'the day-old sweep');
     expect(keys.has('oly2p.fresh')).toBe(true);
     expect(keys.get(JOB)!.publicKey).toBe(host.fetched[0]!.body.publicKey);
   });
@@ -1010,9 +1017,10 @@ describe('the key across re-mounts', () => {
   for (const mode of ['throw', 'error', 'hang'] as const) {
     test(`IndexedDB that ${mode === 'hang' ? 'never answers' : mode === 'throw' ? 'throws' : 'fails to open'}: the key lives in memory; a re-mount is told the answer was opened elsewhere`, async () => {
       const claim: Claim = {};
-      const first = mount({ idb: fakeIndexedDb(mode), claim });
+      // A short timeout so the hanging store gives up well inside reveal()'s two-second wait.
+      const first = mount({ idb: fakeIndexedDb(mode), keyStoreTimeoutMs: 30, claim });
       await reveal(first);
-      const second = mount({ idb: fakeIndexedDb(mode), claim });
+      const second = mount({ idb: fakeIndexedDb(mode), keyStoreTimeoutMs: 30, claim });
       second.push(ready());
       await second.until(() => second.text().includes(W.claimed), 'the claimed sentence');
       expect(second.fetched[0]!.body.publicKey).not.toBe(first.fetched[0]!.body.publicKey);
