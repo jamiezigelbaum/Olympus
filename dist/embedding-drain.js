@@ -11584,8 +11584,8 @@ class TierLedger {
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
   }
   queueOwnerRaise(identity, decision, trustDomain, options = {}) {
-    if (decision.decidedBy !== "override")
-      throw new Error("Only an owner override is queued this way.");
+    if (decision.decidedBy !== "override" && decision.decidedBy !== "owner_rule")
+      throw new Error("Only an owner override or owner rule is queued this way.");
     if (!(trustDomain in TRUST_DOMAIN_RANK))
       throw new Error(`Unknown trust domain "${trustDomain}".`);
     let result = "none";
@@ -23725,164 +23725,6 @@ var init_tier_rejudge = __esm(() => {
   init_tier_ledger();
 });
 
-// src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash8 } from "node:crypto";
-function sweepOwnerRuleRaises(options) {
-  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
-  const { set } = options;
-  const classification = set.classification();
-  if (!classification || classification.unavailableReason)
-    return report;
-  const ledger = set.ledger;
-  const raising = (classification.rules ?? []).filter(isRaisingRule);
-  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
-  const state = readState(ledger.readMeta(SWEEP_META_KEY));
-  const done = state.done.filter((key2) => keyed.has(key2));
-  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
-  if (pendingKeys.length === 0) {
-    if (done.length !== state.done.length || state.pending)
-      writeState(ledger, { done });
-    return report;
-  }
-  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
-  const resume = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending.after : undefined;
-  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
-  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
-  for (const record of rows) {
-    report.scanned += 1;
-    try {
-      raiseIfMatched(set, record, pendingRules, classification);
-    } catch {
-      continue;
-    }
-  }
-  if (rows.length < limit) {
-    writeState(ledger, { done: [...done, ...pendingKeys] });
-  } else {
-    report.complete = false;
-    writeState(ledger, { done, pending: { rules: pendingKeys, after: identityOf3(rows.at(-1)) } });
-  }
-  return report;
-  function raiseIfMatched(set2, record, rules, inputs) {
-    if (record.state === "moving" || record.contentTier === "secrets" || record.metadataTier === "secrets")
-      return;
-    const identity = identityOf3(record);
-    if (set2.ledger.getOverride(identity))
-      return;
-    const current2 = set2.ledger.copies(identity).filter((copy) => copy.state === "current");
-    const names = copyServingLayer(current2, "metadata");
-    const domain = names ? set2.domainForCorpus(names.corpusId) : undefined;
-    const exported = domain ? set2.store(domain)?.exportItemCopy(identity) : undefined;
-    if (!exported)
-      return;
-    const signals = storedSignals(exported);
-    const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
-    if (matched.length === 0)
-      return;
-    const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-    const metadataTier = maxTier(record.metadataTier, ruleTier);
-    if (tierRank(metadataTier) <= tierRank(record.metadataTier))
-      return;
-    const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
-      rules: [...inputs.rules ?? []],
-      ...inputs.retirePublic ? { retirePublic: true } : {}
-    });
-    const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
-    const contentTier = maxTier(record.contentTier, metadataTier);
-    const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
-    const decision = {
-      metadataTier,
-      contentTier,
-      decidedBy: "owner_rule",
-      reasons: [
-        ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
-        ...record.reasons.filter((reason) => reason.startsWith("content:"))
-      ],
-      state: contentPending ? "pending" : "current",
-      contentRead: record.contentRead,
-      metadataPending: false,
-      contentPending,
-      metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
-      metadataFlagged: record.metadataFlagged,
-      engineVersion: record.engineVersion,
-      mapRevision: record.mapRevision,
-      snifferId: classified.snifferId
-    };
-    if (metadataTier === "secrets") {
-      if (settleRoutedSecrets(set2, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }))
-        report.secrets += 1;
-      return;
-    }
-    set2.ledger.recordRoutedPlacement(identity, decision, set2.placementFor(decision));
-    report.raised += 1;
-  }
-}
-function isRaisingRule(rule) {
-  return tierRank(rule.tier) > tierRank("private");
-}
-function ruleKey(rule) {
-  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
-}
-function storedSignals(copy) {
-  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-  const title = text2(copy.columns["title"]);
-  const locator = text2(copy.columns["locator_uri"]);
-  const path = locator?.startsWith("/") ? locator : undefined;
-  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
-  let folderKeys = [];
-  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
-  if (keysJson) {
-    try {
-      const parsed = JSON.parse(keysJson);
-      if (Array.isArray(parsed))
-        folderKeys = parsed.filter((key2) => typeof key2 === "string");
-    } catch {
-      folderKeys = [];
-    }
-  }
-  if (copy.identity.providerConversationId)
-    folderKeys.push(copy.identity.providerConversationId);
-  return {
-    ...title ? { title } : {},
-    ...path ? { path } : {},
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...sender ? { sender } : {}
-  };
-}
-function readState(raw) {
-  if (!raw)
-    return { done: [] };
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
-      ...parsed.pending && Array.isArray(parsed.pending.rules) ? { pending: parsed.pending } : {}
-    };
-  } catch {
-    return { done: [] };
-  }
-}
-function writeState(ledger, state) {
-  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
-}
-function sameKeys(left, right) {
-  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
-}
-function identityOf3(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
-var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep";
-var init_tier_rules_sweep = __esm(() => {
-  init_tier_classifier();
-  init_tier_ledger();
-  init_tier_rejudge();
-});
-
 // src/workers/connector-store/tier-override-settle.ts
 function applyOwnerOverrides(options) {
   const report = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0 };
@@ -23906,7 +23748,7 @@ function applyOwnerOverrides(options) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity = identityOf4(record);
+  const identity = identityOf3(record);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
@@ -23972,7 +23814,7 @@ function storedCopy(set, identity) {
   }
   return;
 }
-function identityOf4(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -23983,6 +23825,253 @@ function identityOf4(record) {
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_tier_rejudge();
+});
+
+// src/workers/connector-store/tier-rules-sweep.ts
+import { createHash as createHash8 } from "node:crypto";
+function sweepOwnerRuleRaises(options) {
+  const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
+  const { set } = options;
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason)
+    return report;
+  const ledger = set.ledger;
+  const raising = (classification.rules ?? []).filter((rule) => isRaisingRule(rule) && !isLabelRule(rule));
+  const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
+  const state = readState(ledger.readMeta(SWEEP_META_KEY));
+  const done = state.done.filter((key2) => keyed.has(key2));
+  const pendingKeys = [...keyed.keys()].filter((key2) => !done.includes(key2)).sort();
+  if (pendingKeys.length === 0) {
+    if (done.length !== state.done.length || state.pending)
+      writeState(ledger, { done });
+    return report;
+  }
+  const pendingRules = pendingKeys.map((key2) => keyed.get(key2));
+  const progress = state.pending && sameKeys(state.pending.rules, pendingKeys) ? state.pending : undefined;
+  const held = [...progress?.held ?? []];
+  let overflow = progress?.overflow === true;
+  const attempt = (record) => {
+    report.scanned += 1;
+    let raised;
+    try {
+      raised = raiseRoutedItem(set, record, pendingRules, classification);
+    } catch {
+      raised = "deferred";
+    }
+    if (raised === "raised")
+      report.raised += 1;
+    else if (raised === "secrets")
+      report.secrets += 1;
+    else if (raised === "deferred") {
+      if (held.length < MAX_HELD_ITEMS)
+        held.push(identityOf4(record));
+      else
+        overflow = true;
+    }
+  };
+  if (progress?.retry && !progress.overflow) {
+    const retrying = held.splice(0);
+    for (const identity of retrying) {
+      const record = ledger.getCurrent(identity);
+      if (record?.routed)
+        attempt(record);
+    }
+    if (held.length === 0) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+    return report;
+  }
+  const resume = progress?.after;
+  const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
+  const rows = ledger.listRouted({ ...resume ? { after: resume } : {}, limit });
+  for (const record of rows)
+    attempt(record);
+  if (rows.length < limit) {
+    if (held.length === 0 && !overflow) {
+      writeState(ledger, { done: [...done, ...pendingKeys] });
+    } else {
+      report.complete = false;
+      writeState(ledger, overflow ? { done } : { done, pending: { rules: pendingKeys, held, retry: true } });
+    }
+  } else {
+    report.complete = false;
+    writeState(ledger, {
+      done,
+      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+    });
+  }
+  return report;
+}
+function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
+  if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+    return "unchanged";
+  const identity = identityOf4(record);
+  if (set.ledger.getOverride(identity))
+    return "unchanged";
+  const copies = set.ledger.copies(identity);
+  const exported = storedCopyOf(set, identity, copies);
+  const signals = { ...exported ? storedSignals(exported) : {}, ...extraSignals };
+  const matched = rules.filter((rule) => ownerRuleMatches(rule, signals, record.provider));
+  if (!exported) {
+    if (copies.length === 0)
+      return "unchanged";
+    return matched.length > 0 || rules.some((rule) => !isLabelRule(rule)) ? "deferred" : "unchanged";
+  }
+  if (matched.length === 0)
+    return "unchanged";
+  const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
+  const metadataTier = maxTier(record.metadataTier, ruleTier);
+  const moving = record.state === "moving";
+  if (!moving && tierRank(metadataTier) <= tierRank(record.metadataTier))
+    return "unchanged";
+  const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
+    rules: [...inputs.rules ?? []],
+    ...inputs.retirePublic ? { retirePublic: true } : {}
+  });
+  const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
+  const contentTier = maxTier(record.contentTier, metadataTier);
+  const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
+  const decision = {
+    metadataTier,
+    contentTier,
+    decidedBy: "owner_rule",
+    reasons: [
+      ...ruleReasons.length > 0 ? ruleReasons : record.reasons.filter((reason) => !reason.startsWith("content:")),
+      ...record.reasons.filter((reason) => reason.startsWith("content:"))
+    ],
+    state: contentPending ? "pending" : "current",
+    contentRead: record.contentRead,
+    metadataPending: false,
+    contentPending,
+    metadataForced: record.metadataForced || matched.some((rule) => rule.strength === "force"),
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: classified.snifferId
+  };
+  if (metadataTier === "secrets") {
+    return settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }) ? "secrets" : "unchanged";
+  }
+  if (moving) {
+    return set.ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision)) === "none" ? "unchanged" : "raised";
+  }
+  set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  return "raised";
+}
+function storedCopyOf(set, identity, copies) {
+  const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
+  const ordered = [
+    ...names ? [names] : [],
+    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"))
+  ];
+  for (const copy of ordered) {
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (exported)
+      return exported;
+  }
+  return;
+}
+function isLabelRule(rule) {
+  return rule.match.kind === "label";
+}
+function isRaisingRule(rule) {
+  return tierRank(rule.tier) > tierRank("private");
+}
+function ruleKey(rule) {
+  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+}
+function storedSignals(copy) {
+  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const title = text2(copy.columns["title"]);
+  const locator = text2(copy.columns["locator_uri"]);
+  const path = locator?.startsWith("/") ? locator : undefined;
+  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
+  let folderKeys = [];
+  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
+  if (keysJson) {
+    try {
+      const parsed = JSON.parse(keysJson);
+      if (Array.isArray(parsed))
+        folderKeys = parsed.filter((key2) => typeof key2 === "string");
+    } catch {
+      folderKeys = [];
+    }
+  }
+  if (copy.identity.providerConversationId)
+    folderKeys.push(copy.identity.providerConversationId);
+  return {
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...sender ? { sender } : {}
+  };
+}
+function readState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const pending = parsePending(parsed.pending);
+    return {
+      done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
+      ...pending ? { pending } : {}
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function parsePending(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const pending = value;
+  if (!Array.isArray(pending.rules) || !pending.rules.every((key2) => typeof key2 === "string"))
+    return;
+  if (pending.after !== undefined && !isIdentity(pending.after))
+    return;
+  if (pending.held !== undefined && (!Array.isArray(pending.held) || !pending.held.every(isIdentity)))
+    return;
+  if (pending.retry !== undefined && pending.retry !== true)
+    return;
+  if (pending.overflow !== undefined && pending.overflow !== true)
+    return;
+  if (pending.retry === true && (!Array.isArray(pending.held) || pending.held.length === 0))
+    return;
+  return {
+    rules: pending.rules,
+    ...pending.after ? { after: pending.after } : {},
+    ...pending.held ? { held: pending.held } : {},
+    ...pending.retry === true ? { retry: true } : {},
+    ...pending.overflow === true ? { overflow: true } : {}
+  };
+}
+function isIdentity(value) {
+  const record = value;
+  return typeof record === "object" && record !== null && typeof record.provider === "string" && typeof record.accountScope === "string" && typeof record.providerItemId === "string" && (record.providerConversationId === undefined || typeof record.providerConversationId === "string");
+}
+function writeState(ledger, state) {
+  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
+}
+function sameKeys(left, right) {
+  return left.length === right.length && left.every((key2, index) => key2 === right[index]);
+}
+function identityOf4(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep", MAX_HELD_ITEMS = 200;
+var init_tier_rules_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_override_settle();
   init_tier_rejudge();
 });
 
@@ -26657,12 +26746,14 @@ class RestGmailApiClient {
   async listMessages(request) {
     const params = new URLSearchParams({
       maxResults: String(request.maxResults),
-      includeSpamTrash: "false"
+      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
     });
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     if (request.query)
       params.set("q", request.query);
+    for (const labelId of request.labelIds ?? [])
+      params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
     const record = asRecord7(json, "Gmail messages list response");
     return {
@@ -32803,6 +32894,7 @@ var init_gmail_live_control = __esm(() => {
 var GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
+  init_tier_rules_sweep();
   init_embeddings();
   init_gmail();
   init_gmail_live_control();
