@@ -59,7 +59,8 @@ Everything is stored and searched on your computer: the search index is built
 there, by a model small enough for a computer with 8 GB of memory. There is no
 hosted copy of your things, no account and no subscription. Olympus's
 publisher runs only a relay that passes your AI app's requests to your
-computer without storing them, and a Google sign-in service. For hard private
+computer without storing them, and the sign-in service for Olympus's shared
+Google app. For hard private
 questions you can reach stronger models: [Venice](https://venice.ai) runs
 private models that, under Venice's own terms, keep nothing you send, and
 zkAPI, from OpenAnonymity and the Ethereum Foundation, hides who is asking
