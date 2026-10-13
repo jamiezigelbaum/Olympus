@@ -222,6 +222,18 @@ export const filteredConfinement: ZkapiConfinement = {
   wrap: (argv) => [...argv],
   selfTest: async () => true,
 };
+/**
+ * The default stand-in: confinement that exists and passes its self-test but
+ * does not filter loopback ports, so a session runs without the managed
+ * companion flags. Level 'none' is never run (the session refuses it).
+ */
+export const unfilteredConfinement: ZkapiConfinement = {
+  level: 'non_loopback_blocked',
+  limit: 'test confinement (loopback not port-filtered)',
+  wrap: (argv) => [...argv],
+  selfTest: async () => true,
+};
+/** A platform with no network confinement: every session refuses it. */
 export const noConfinement: ZkapiConfinement = {
   level: 'none',
   limit: 'no network confinement is implemented on this platform',
@@ -287,7 +299,7 @@ export function transport(overrides: Partial<ZkapiConsultTransportOptions> = {})
     settings: settings(),
     statePath,
     env: { HOME: root, PATH: '/usr/bin:/bin', ZKAPI_CLIENTD_CONFIG_DIR: configDir },
-    confinement: noConfinement,
+    confinement: unfilteredConfinement,
     now: () => NOW,
     ...overrides,
   };
@@ -305,14 +317,14 @@ export async function portFree(port: number): Promise<boolean> {
 
 export const TRANSPORT_MODULE = join(import.meta.dir, '..', '..', 'src', 'core', 'consult-transport-zkapi.ts');
 
-/** Runs one consult in a separate Bun process over the same ledger, without confinement. */
+/** Runs one consult in a separate Bun process over the same ledger, with the unfiltered stand-in confinement. */
 export function startConsultInChildProcess(options: ZkapiConsultTransportOptions) {
   const { now: _now, confinement: _confinement, ...plain } = options;
   const script = `
     const { sendZkapiConsult } = await import(${JSON.stringify(TRANSPORT_MODULE)});
     const options = JSON.parse(process.argv[1]);
     options.now = () => new Date(${JSON.stringify(NOW.toISOString())});
-    options.confinement = { level: 'none', limit: 'none', wrap: (argv) => [...argv], selfTest: async () => false };
+    options.confinement = { level: 'non_loopback_blocked', limit: 'test', wrap: (argv) => [...argv], selfTest: async () => true };
     const result = await sendZkapiConsult(${JSON.stringify(QUESTION)}, options);
     console.log(JSON.stringify(result.ok ? { ok: true } : { ok: false, code: result.error.code }));
     process.exit(0);
@@ -337,7 +349,7 @@ export function alive(pid: number): boolean {
   }
 }
 
-export const NO_CONFINEMENT_LABEL = 'payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; no network confinement';
+export const UNFILTERED_LABEL = 'payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session\'s sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered';
 
 /** What each mocked operation advances virtual time by; distinct so a misplaced one shows. */
 export const OP = { selfTest: 1, now: 2, healthz: 3, inspect: 5, unauthenticatedProbe: 7, adminStatus: 11, models: 13, dispatch: 17, body: 19 } as const;
@@ -407,7 +419,7 @@ export function timedTransport(time: ReturnType<typeof virtualTime>, overrides: 
       time.advance(OP.now);
       return NOW;
     },
-    confinement: { ...noConfinement, selfTest: async () => { time.advance(OP.selfTest); return false; } },
+    confinement: { ...unfilteredConfinement, selfTest: async () => { time.advance(OP.selfTest); return true; } },
     fetchImpl,
     ...overrides,
     inspectListener: async (port) => {
@@ -545,6 +557,7 @@ export function doctorDeps(profile: Record<string, unknown> = {}, env: Record<st
     ingestionHealthStatePath: join(root, 'ingestion.json'),
     workerEnvPath: join(root, 'worker.env'),
     zkapiStatePath: statePath,
+    zkapiConfinement: unfilteredConfinement,
     now: () => NOW,
   };
 }

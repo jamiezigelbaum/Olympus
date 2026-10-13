@@ -36,8 +36,11 @@ export type DashboardOutsideHelpStandardMode = 'as_written' | 'light_cleanup' | 
 
 /** One word for the card's state line. */
 export interface DashboardOutsideHelpSummary {
-  /** `needs_acceptance`: on, but paused until the current statements are accepted. `blocked`: on, but another problem stops a question. */
-  readonly state: 'off' | 'on' | 'invalid' | 'route_not_configured' | 'fence_held' | 'needs_acceptance' | 'blocked';
+  /**
+   * `needs_acceptance`: on, but paused until the current statements are accepted. `blocked`: on, but another problem stops a question.
+   * `unavailable`: zkAPI cannot run on this computer at all (no network confinement); nothing is offered.
+   */
+  readonly state: 'off' | 'on' | 'invalid' | 'route_not_configured' | 'fence_held' | 'needs_acceptance' | 'blocked' | 'unavailable';
 }
 
 export interface DashboardOutsideHelpLanguage {
@@ -111,6 +114,13 @@ export interface DashboardOutsideHelpWriter {
 }
 
 export interface DashboardOutsideHelpStatus {
+  /**
+   * Set when zkAPI cannot run on this computer: no network confinement here
+   * (Linux until its launcher lands). Owner ruling 2026-10-12: no weaker
+   * mode, so the card says so in one line and offers no setup; the worker
+   * refuses Add zkAPI and turning on with the same words.
+   */
+  readonly unavailable?: 'confinement_unavailable';
   readonly settings: {
     readonly state: 'off' | 'on' | 'invalid';
     /** 0 when there is no valid file. */
@@ -171,6 +181,7 @@ export function outsideHelpStateLine(summary: DashboardOutsideHelpSummary): stri
 }
 
 export function summaryOf(status: DashboardOutsideHelpStatus): DashboardOutsideHelpSummary {
+  if (status.unavailable) return { state: 'unavailable' };
   if (status.settings.state === 'invalid') return { state: 'invalid' };
   if (status.route.state === 'not_configured') return { state: 'route_not_configured' };
   const readiness = status.route.readiness;
@@ -242,10 +253,12 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
   const on = status.settings.state === 'on';
+  // No network confinement here: the one line, and Turn off if it is on. Nothing to set up.
+  const unavailable = summary.state === 'unavailable';
   const parts: string[] = [];
   // Under the Private answers page's own "Anonymous answers" heading, no second title.
   if (input.untitled !== true) parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
-  if (canUnlock) {
+  if (canUnlock && (on || !unavailable)) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>`
       + `<button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button><span class="hint">${escapeHtml(W.unlockIntro)}</span>`
       + `<span class="actmsg" data-action-message role="status"></span></form>`);
@@ -255,6 +268,10 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const access: Access = canEdit ? 'edit' : canUnlock ? 'unlock' : 'read';
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
+  if (unavailable) {
+    const script = (canEdit || canUnlock) && on ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
+    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}`;
+  }
 
   // 2. Problems: one line each, one button each.
   parts.push(renderProblems(status, access));
@@ -278,8 +295,14 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join('')}</div>`);
 
-  const config = {
-    csrfToken: input.csrfToken ?? '',
+  const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
+  const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) });
+  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}${toolsScript}`;
+}
+
+function outsideHelpScriptConfig(csrfToken: string | undefined) {
+  return {
+    csrfToken: csrfToken ?? '',
     paths: DASHBOARD_OUTSIDE_HELP_PATHS,
     copy: {
       saving: W.saving,
@@ -292,22 +315,21 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
     },
     writerPollMs: OUTSIDE_HELP_WRITER_POLL_MS,
   };
-  const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config)}</script>` : '';
-  const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) });
-  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}${toolsScript}`;
 }
 
 function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: DashboardOutsideHelpSummary, access: Access): string {
   const route = status.route;
   const on = status.settings.state === 'on';
   const invalid = status.settings.state === 'invalid';
+  const unavailable = summary.state === 'unavailable';
   const blockedReason = invalid
     ? undefined
     : route.state === 'not_configured'
       ? W.enableBlockedRoute
       : !route.acknowledgements.complete ? W.enableBlockedAcks : undefined;
   // Locked: the switch's first click unlocks; read-only: no switch at all.
-  const button = access === 'read'
+  // Unavailable (no confinement here): nothing to turn on; Turn off stays while on.
+  const button = access === 'read' || (unavailable && !on)
     ? ''
     : access === 'unlock'
       ? unlockFirst(invalid ? W.replaceFile : on ? W.turnOff : W.turnOn, !on)
@@ -318,13 +340,13 @@ function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: Dashboar
         : blockedReason
           ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml(W.turnOn)}</button><span class="hint">${escapeHtml(blockedReason)}</span></span>`
           : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml(W.turnOn)}</button>`;
-  const tone = summary.state === 'on' ? 'on' : summary.state === 'off' ? 'off' : 'attn';
-  const usage = route.state === 'configured' && route.readiness ? usageLine(route.readiness) : '';
+  const tone = summary.state === 'on' ? 'on' : summary.state === 'off' || summary.state === 'unavailable' ? 'off' : 'attn';
+  const usage = !unavailable && route.state === 'configured' && route.readiness ? usageLine(route.readiness) : '';
   const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>`
     + `<span data-outside-state-text data-outside-state="${escapeHtml(summary.state)}">${escapeHtml(outsideHelpStateLine(summary))}</span></p>`
     + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml(usage)}</p>` : '')
     // Tor off is said where the reader looks first: the provider sees the address.
-    + (route.state === 'configured' && route.readiness?.torMode === 'off' ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml(W.addressVisible)}</p>` : '')
+    + (!unavailable && route.state === 'configured' && route.readiness?.torMode === 'off' ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml(W.addressVisible)}</p>` : '')
     + `</div>${button ? `<div class="pbuttons">${button}</div>` : ''}</div>`;
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="${invalid ? 'yes' : 'no'}">`
     + head + `<span class="actmsg" data-action-message role="status"></span></form>`;

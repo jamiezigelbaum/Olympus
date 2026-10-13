@@ -58160,6 +58160,7 @@ __export(exports_consult_transport_zkapi, {
   zkapiDailyLimitState: () => zkapiDailyLimitState,
   zkapiConsultReadiness: () => zkapiConsultReadiness,
   zkapiConsultInFlightOnDisk: () => zkapiConsultInFlightOnDisk,
+  zkapiConfinementAvailable: () => zkapiConfinementAvailable,
   validZkapiConsultQuestion: () => validZkapiConsultQuestion,
   trustedFallbackExecutable: () => trustedFallbackExecutable,
   standardExecutableDirectories: () => standardExecutableDirectories,
@@ -58387,8 +58388,12 @@ async function companionPorts(excluded) {
       server.close();
   }
 }
-function defaultZkapiConfinement() {
-  if (process.platform === "darwin" && existsSync34("/usr/bin/sandbox-exec")) {
+function zkapiConfinementAvailable(confinement) {
+  return confinement.level !== "none";
+}
+function defaultZkapiConfinement(host = {}) {
+  const platform2 = host.platform ?? process.platform;
+  if (platform2 === "darwin" && (host.sandboxAvailable ?? existsSync34("/usr/bin/sandbox-exec"))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
       level,
@@ -59071,6 +59076,8 @@ async function zkapiConsultReadiness(options) {
   const confinement = options.confinement ?? defaultZkapiConfinement();
   const money = zkapiMoneyStatus(settings, now);
   const blockers = settingsBlockers(money);
+  if (!zkapiConfinementAvailable(confinement))
+    blockers.unshift("confinement_unavailable");
   const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
   if (!apiKeyConfigured)
     blockers.push("daemon_api_key_missing");
@@ -59394,6 +59401,8 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
     cleanupCallerSignals();
     return fail(code);
   };
+  if (!zkapiConfinementAvailable(confinement))
+    return refuse2("confinement_unavailable");
   const blocked = settingsBlockers(zkapiMoneyStatus(settings, now())).find((code) => !(recovery && code === "acknowledgements_incomplete"));
   if (blocked)
     return refuse2(blocked);
@@ -59488,7 +59497,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
           Object.assign(ports, await companionPorts([ports.tor, ports.daemon]));
         if (await confinement.selfTest(workDir, childEnv, ports)) {
           receipt.confinementSelfTest = "passed";
-        } else if (confinement.level !== "none") {
+        } else {
           receipt.confinementSelfTest = "failed";
           return result = fail("confinement_self_test_failed");
         }
@@ -60185,6 +60194,7 @@ var init_consult_transport_zkapi = __esm(() => {
     daemon_api_key_rejected: "The daemon rejected the configured local API key.",
     session_process_exited: "The Tor client or the daemon of this session stopped unexpectedly.",
     confinement_self_test_failed: "The network confinement for this platform did not pass its self-test, so the session was refused.",
+    confinement_unavailable: "Anonymous answers need network confinement, which this computer does not have yet. Nothing was sent.",
     policy_unavailable: "The daemon could not load the model policy in time.",
     model_unavailable: "The selected model is not in the daemon's live model list.",
     daily_cap_reached: "The daily zkAPI request limit you set is reached.",
@@ -63580,7 +63590,7 @@ function degradedInput(degraded) {
 function unknownStatus(value2) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value2 };
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on Linux yet: they need network confinement, which this version of Olympus doesn't have on Linux. Nothing is ever sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -64392,7 +64402,8 @@ var init_vocabulary = __esm(() => {
       route_not_configured: "Anonymous answers: off · not set up",
       fence_held: "Anonymous answers: paused · unfinished payment",
       needs_acceptance: "Anonymous answers: paused · accept the updated statements",
-      blocked: "Anonymous answers: paused · needs a fix"
+      blocked: "Anonymous answers: paused · needs a fix",
+      unavailable: "Anonymous answers: not available on Linux yet"
     },
     experimental: "Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.",
     intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.",
@@ -64467,8 +64478,10 @@ var init_vocabulary = __esm(() => {
       route_not_configured: "Anonymous answers are off: zkAPI is not set up yet.",
       fence_held: "Paused: an earlier question has not finished paying yet.",
       needs_acceptance: "Paused until you accept the updated statements below.",
-      blocked: "Paused: fix the problem below."
+      blocked: "Paused: fix the problem below.",
+      unavailable: OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE
     },
+    confinementUnavailable: OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE,
     restartPending: "Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.",
     addressVisible: "Your network address will be visible to the provider.",
     routeUnknown: "Olympus could not check zkAPI right now.",
@@ -64543,7 +64556,8 @@ var init_vocabulary = __esm(() => {
       daily_cap_reached: "Today's question limit is reached.",
       spend_cap_reached: "Another question would pass today's spending limit.",
       state_unavailable: "Olympus could not read its record of questions on this computer.",
-      key_reuse_on: "The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off (the last step)."
+      key_reuse_on: "The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off (the last step).",
+      confinement_unavailable: OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE
     },
     blockerOther: "Not ready yet ({code}).",
     stepsTitle: "Set up zkAPI",
@@ -72723,6 +72737,7 @@ async function zkapiConsultTransportCheck(deps) {
       statePath,
       env,
       apiKeyPresent: secretRefPresent(profile.secretRef, env, deps),
+      ...deps.zkapiConfinement ? { confinement: deps.zkapiConfinement } : {},
       ...deps.now ? { now: deps.now } : {}
     });
     if (readiness.blockers.length > 0)
@@ -72735,6 +72750,7 @@ async function zkapiConsultTransportCheck(deps) {
     detail: `zkAPI route for anonymous answers: ${lines.join(" | ")}`,
     ...ok ? {} : {
       hint: [
+        lines.some((line) => line.includes("confinement_unavailable")) ? "Anonymous answers are not available on this computer: they need network confinement, which this version of Olympus does not have here. Nothing is ever sent without it." : undefined,
         lines.some((line) => line.includes("UNRESOLVED SESSION")) ? "An unfinished payment is held, so no anonymous answer can be sent until it is cleared. Open Anonymous answers in the dashboard and press Recover (one fixed request with no content, held at up to $6). If that wallet can no longer run, press Abandon instead; the unsettled request may then settle under another session's network identity." : undefined,
         lines.some((line) => line.includes("STRANDED PROCESSES")) ? "An earlier session left processes Olympus could not prove its own. Find the listed process groups (ps -o pid,pgid,command -g <pgid>), stop them yourself, or reboot; the next session then sees them gone. Never delete the zkAPI ledger to clear this." : undefined,
         "Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon."
@@ -96884,6 +96900,7 @@ var init_remote_result = __esm(() => {
     "daemon_api_key_rejected",
     "session_process_exited",
     "confinement_self_test_failed",
+    "confinement_unavailable",
     "policy_unavailable",
     "model_unavailable",
     "daily_cap_reached",
@@ -112097,6 +112114,8 @@ function outsideHelpStateLine(summary) {
   return DASHBOARD_OUTSIDE_HELP_COPY.state[summary.state];
 }
 function summaryOf(status) {
+  if (status.unavailable)
+    return { state: "unavailable" };
   if (status.settings.state === "invalid")
     return { state: "invalid" };
   if (status.route.state === "not_configured")
@@ -112128,16 +112147,21 @@ function renderOutsideHelpCard(status, input) {
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
   const on = status.settings.state === "on";
+  const unavailable2 = summary.state === "unavailable";
   const parts = [];
   if (input.untitled !== true)
     parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
-  if (canUnlock) {
+  if (canUnlock && (on || !unavailable2)) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
+  if (unavailable2) {
+    const script3 = (canEdit || canUnlock) && on ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script3}`;
+  }
   parts.push(renderProblems(status, access));
   if (route.state === "configured" && !route.acknowledgements.complete)
     parts.push(renderStatementsToAccept(access));
@@ -112157,8 +112181,13 @@ function renderOutsideHelpCard(status, input) {
   more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit })));
   more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
-  const config2 = {
-    csrfToken: input.csrfToken ?? "",
+  const script2 = canEdit || canUnlock ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+  const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
+  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}${toolsScript}`;
+}
+function outsideHelpScriptConfig(csrfToken) {
+  return {
+    csrfToken: csrfToken ?? "",
     paths: DASHBOARD_OUTSIDE_HELP_PATHS,
     copy: {
       saving: DASHBOARD_OUTSIDE_HELP_COPY.saving,
@@ -112171,19 +112200,17 @@ function renderOutsideHelpCard(status, input) {
     },
     writerPollMs: OUTSIDE_HELP_WRITER_POLL_MS
   };
-  const script2 = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config2)}</script>` : "";
-  const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
-  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}${toolsScript}`;
 }
 function renderStatusBlock(status, summary, access) {
   const route = status.route;
   const on = status.settings.state === "on";
   const invalid2 = status.settings.state === "invalid";
+  const unavailable2 = summary.state === "unavailable";
   const blockedReason = invalid2 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = access === "read" ? "" : access === "unlock" ? unlockFirst(invalid2 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid2 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
-  const tone = summary.state === "on" ? "on" : summary.state === "off" ? "off" : "attn";
-  const usage = route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
-  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
+  const button = access === "read" || unavailable2 && !on ? "" : access === "unlock" ? unlockFirst(invalid2 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid2 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
+  const usage = !unavailable2 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
+  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable2 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function usageLine(ready) {
@@ -139624,6 +139651,8 @@ function createDashboardConsultAdapter(options) {
   const statePath = options.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
   const location = options.settingsLocation ?? { env };
   const readiness = options.readiness ?? zkapiConsultReadiness;
+  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const confined = zkapiConfinementAvailable(confinement);
   const toolsJob = options.toolsJob ?? createManagedToolsJob({ env });
   const toolsState = options.toolsState ?? (() => {
     const settings = transport()?.settings;
@@ -139750,7 +139779,7 @@ function createDashboardConsultAdapter(options) {
     if (!transportOptions)
       return base;
     try {
-      const ready = await readiness({ ...transportOptions, apiKeyPresent: options.secretPresent(route.profile.secretRef), now: () => now() });
+      const ready = await readiness({ ...transportOptions, confinement, apiKeyPresent: options.secretPresent(route.profile.secretRef), now: () => now() });
       return {
         ...base,
         readiness: {
@@ -139803,6 +139832,7 @@ function createDashboardConsultAdapter(options) {
     return;
   };
   const invalid4 = (message, code = "invalid_params") => ({ ok: false, httpStatus: 400, code, message });
+  const confinementUnavailable = () => ({ ok: false, httpStatus: 409, code: "confinement_unavailable", message: MESSAGES2.confinementUnavailable });
   return {
     async installTools(update) {
       if (update.confirm !== true)
@@ -139813,6 +139843,7 @@ function createDashboardConsultAdapter(options) {
     },
     async status() {
       return {
+        ...confined ? {} : { unavailable: "confinement_unavailable" },
         settings: settingsView(),
         route: await routeView(),
         languages: languages(),
@@ -139994,6 +140025,8 @@ function createDashboardConsultAdapter(options) {
       const acknowledgementsComplete = () => acknowledgementsCurrent(zkapiProfile()?.profile.zkapi?.acknowledgements);
       const turningOn = enabled && !(current2.state === "valid" && current2.settings.enabled);
       if (turningOn) {
+        if (!confined)
+          return confinementUnavailable();
         const route = zkapiProfile();
         if (!route)
           return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
@@ -140076,6 +140109,8 @@ function createDashboardConsultAdapter(options) {
       return { ok: true, status_message: restarting ? MESSAGES2.routeSavedRestart : MESSAGES2.routeSavedNoRestart, restarting };
     },
     async addRoute(update) {
+      if (!confined)
+        return confinementUnavailable();
       if (update.confirm !== true)
         return invalid4(MESSAGES2.confirm, "confirmation_required");
       if (zkapiProfile())
@@ -140189,6 +140224,7 @@ var init_dashboard_consult = __esm(() => {
     conflict: "Anonymous answers were changed somewhere else since this page loaded. Reload the page to see the current setting.",
     invalidCurrent: "The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.",
     routeMissing: "Add zkAPI before turning anonymous answers on.",
+    confinementUnavailable: "Anonymous answers aren't available on Linux yet: they need network confinement, which this version of Olympus doesn't have on Linux. Nothing is ever sent without it.",
     acknowledgementsIncomplete: "Accept the statements on this page before turning anonymous answers on.",
     levelUnknown: "Choose what zkAPI may send: Standard or Strict.",
     levelSaved: "Saved.",

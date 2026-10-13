@@ -147,7 +147,7 @@ export const REMOTE_REFUSAL_CODES: readonly string[] = Object.freeze([
   'unresolved_session_other_wallet', 'no_unresolved_session', 'stranded_processes', 'daemon_already_running',
   'tor_port_busy', 'tor_bootstrap_failed', 'daemon_start_failed', 'daemon_version_unsupported',
   'daemon_supervisor_unsupported', 'relay_mismatch', 'key_reuse_on', 'key_reuse_unverified', 'daemon_keyless',
-  'daemon_identity_failed', 'daemon_api_key_rejected', 'session_process_exited', 'confinement_self_test_failed',
+  'daemon_identity_failed', 'daemon_api_key_rejected', 'session_process_exited', 'confinement_self_test_failed', 'confinement_unavailable',
   'policy_unavailable', 'model_unavailable', 'daily_cap_reached', 'spend_cap_reached', 'state_unavailable',
   'timeout', 'aborted', 'redirect_refused', 'response_too_large', 'invalid_response', 'daemon_error',
   'transport_failed', 'teardown_incomplete', 'authorization_refused', 'session_spent',

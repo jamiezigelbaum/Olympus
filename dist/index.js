@@ -18866,8 +18866,12 @@ async function listenProbe(port = 0, host = "127.0.0.1") {
   });
   return server;
 }
-function defaultZkapiConfinement() {
-  if (process.platform === "darwin" && existsSync9("/usr/bin/sandbox-exec")) {
+function zkapiConfinementAvailable(confinement) {
+  return confinement.level !== "none";
+}
+function defaultZkapiConfinement(host = {}) {
+  const platform2 = host.platform ?? process.platform;
+  if (platform2 === "darwin" && (host.sandboxAvailable ?? existsSync9("/usr/bin/sandbox-exec"))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
       level,
@@ -19257,6 +19261,8 @@ async function zkapiConsultReadiness(options) {
   const confinement = options.confinement ?? defaultZkapiConfinement();
   const money = zkapiMoneyStatus(settings, now);
   const blockers = settingsBlockers(money);
+  if (!zkapiConfinementAvailable(confinement))
+    blockers.unshift("confinement_unavailable");
   const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
   if (!apiKeyConfigured)
     blockers.push("daemon_api_key_missing");
@@ -22263,6 +22269,7 @@ async function zkapiConsultTransportCheck(deps) {
       statePath,
       env,
       apiKeyPresent: secretRefPresent(profile.secretRef, env, deps),
+      ...deps.zkapiConfinement ? { confinement: deps.zkapiConfinement } : {},
       ...deps.now ? { now: deps.now } : {}
     });
     if (readiness.blockers.length > 0)
@@ -22275,6 +22282,7 @@ async function zkapiConsultTransportCheck(deps) {
     detail: `zkAPI route for anonymous answers: ${lines.join(" | ")}`,
     ...ok ? {} : {
       hint: [
+        lines.some((line) => line.includes("confinement_unavailable")) ? "Anonymous answers are not available on this computer: they need network confinement, which this version of Olympus does not have here. Nothing is ever sent without it." : undefined,
         lines.some((line) => line.includes("UNRESOLVED SESSION")) ? "An unfinished payment is held, so no anonymous answer can be sent until it is cleared. Open Anonymous answers in the dashboard and press Recover (one fixed request with no content, held at up to $6). If that wallet can no longer run, press Abandon instead; the unsettled request may then settle under another session's network identity." : undefined,
         lines.some((line) => line.includes("STRANDED PROCESSES")) ? "An earlier session left processes Olympus could not prove its own. Find the listed process groups (ps -o pid,pgid,command -g <pgid>), stop them yourself, or reboot; the next session then sees them gone. Never delete the zkAPI ledger to clear this." : undefined,
         "Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon."

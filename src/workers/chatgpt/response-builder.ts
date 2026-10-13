@@ -595,7 +595,8 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     // Anonymous only when the network address was hidden (Tor, verified).
     // Visible (Tor off, or a bypass observed): the question was not
     // anonymous; not verified (Tor ran but the route could not be confirmed,
-    // e.g. no confinement on Linux) is told as what it is: the route says why.
+    // e.g. confinement that does not filter loopback ports) is told as what
+    // it is: the route says why. A computer with no confinement sends nothing.
     // The route reads without its money clauses inside ChatGPT (zkapi-copy.ts).
     const hidden = record.networkIdentity === 'hidden';
     const visible = record.networkIdentity === 'visible';

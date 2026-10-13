@@ -81,6 +81,8 @@ import {
   freePorts,
   freePort,
   filteredConfinement,
+  noConfinement,
+  unfilteredConfinement,
   root,
   configDir,
   statePath,
@@ -93,7 +95,7 @@ import {
   settings,
   transport,
   portFree,
-  NO_CONFINEMENT_LABEL,
+  UNFILTERED_LABEL,
   OP,
   virtualTime,
   timedTransport,
@@ -118,7 +120,7 @@ describe('zkAPI consult transport: a supervised session', () => {
       ok: true,
       text: 'Generally, notice scales with term length.',
       networkIdentity: 'not_verified',
-      routeLabel: NO_CONFINEMENT_LABEL,
+      routeLabel: UNFILTERED_LABEL,
       providerVerification: 'verified',
       receipt: {
         recovery: false,
@@ -126,7 +128,8 @@ describe('zkAPI consult transport: a supervised session', () => {
         inferenceAuth: 'verified',
         tor: 'per_consult',
         freshTorClient: true,
-        confinement: 'none',
+        confinement: 'non_loopback_blocked',
+        confinementSelfTest: 'passed',
         postStopProbe: 'route_lost',
         settlement: 'confirmed',
         fence: 'clear',
@@ -242,7 +245,7 @@ describe('zkAPI consult transport: a supervised session', () => {
     });
     writePlan({ bypassTor: false, postStopShape: 'unauthorized' });
     const inconclusive = await sendZkapiConsult(QUESTION, transport());
-    expect(inconclusive).toMatchObject({ ok: true, routeLabel: NO_CONFINEMENT_LABEL, receipt: { postStopProbe: 'inconclusive' } });
+    expect(inconclusive).toMatchObject({ ok: true, routeLabel: UNFILTERED_LABEL, receipt: { postStopProbe: 'inconclusive' } });
   }, SLOW);
 
   test('a reused key in the daemon log withdraws the key-isolation claim', async () => {
@@ -468,6 +471,81 @@ describe('zkAPI consult transport: macOS confinement', () => {
     } finally {
       otherLoopback.stop(true);
     }
+  }, SLOW);
+});
+
+// Owner ruling 2026-10-12: zkAPI refuses wherever network confinement cannot
+// run; there is no weaker mode. The platform is injected, never the host's.
+describe('zkAPI consult transport: a platform without network confinement', () => {
+  const CONFINEMENT_UNAVAILABLE = 'Anonymous answers need network confinement, which this computer does not have yet. Nothing was sent.';
+  const unconfined = (calls: string[]): ZkapiConfinement => ({
+    ...noConfinement,
+    wrap: (argv) => { calls.push('wrap'); return [...argv]; },
+    selfTest: async () => { calls.push('selfTest'); return false; },
+  });
+
+  test('a per-consult Tor session refuses before the self-test, Tor or the daemon starts', async () => {
+    const calls: string[] = [];
+    const result = await sendZkapiConsult(QUESTION, transport({ confinement: unconfined(calls) }));
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: 'confinement_unavailable',
+        message: CONFINEMENT_UNAVAILABLE,
+        outcome: 'not_sent',
+        receipt: { tor: 'per_consult', confinement: 'none', confinementSelfTest: 'not_run', freshTorClient: false },
+      },
+    });
+    expect(calls).toEqual([]);
+    expect(torRuns()).toEqual([]);
+    expect(events()).toEqual([]);
+    expect(await portFree(torPort)).toBe(true);
+    expect(await portFree(daemonPort)).toBe(true);
+    expect(zkapiUsageToday(statePath, NOW).count).toBe(0);
+  }, SLOW);
+
+  test('a session without Tor refuses too: the daemon never runs unconfined', async () => {
+    writePlan({ relayPort: null });
+    const calls: string[] = [];
+    const result = await sendZkapiConsult(QUESTION, transport({ settings: settings({ tor: 'off' }), confinement: unconfined(calls) }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'confinement_unavailable', message: CONFINEMENT_UNAVAILABLE, outcome: 'not_sent' } });
+    expect(calls).toEqual([]);
+    expect(events()).toEqual([]);
+    expect(completions()).toEqual([]);
+  }, SLOW);
+
+  test('the Linux default is no confinement, and a session with it refuses; macOS with its sandbox is filtered', async () => {
+    const linux = defaultZkapiConfinement({ platform: 'linux' });
+    expect(linux.level).toBe('none');
+    expect(await sendZkapiConsult(QUESTION, transport({ confinement: linux }))).toMatchObject({
+      ok: false, error: { code: 'confinement_unavailable', outcome: 'not_sent' },
+    });
+    expect(torRuns()).toEqual([]);
+    expect(events()).toEqual([]);
+    expect(defaultZkapiConfinement({ platform: 'darwin', sandboxAvailable: true }).level).toBe('loopback_filtered');
+    expect(defaultZkapiConfinement({ platform: 'darwin', sandboxAvailable: false }).level).toBe('none');
+  }, SLOW);
+
+  test('readiness names the missing confinement; a confined platform is not blocked by it', async () => {
+    expect((await zkapiConsultReadiness(transport({ confinement: noConfinement }))).blockers).toContain('confinement_unavailable');
+    for (const confinement of [filteredConfinement, unfilteredConfinement]) {
+      const ready = await zkapiConsultReadiness(transport({ confinement }));
+      expect(ready.blockers).not.toContain('confinement_unavailable');
+      expect(ready.blockers).toEqual([]);
+    }
+    const torOff = await zkapiConsultReadiness(transport({ settings: settings({ tor: 'off' }), confinement: noConfinement }));
+    expect(torOff.blockers).toContain('confinement_unavailable');
+  }, SLOW);
+
+  test('macOS unchanged: without Tor the session still runs, unconfined by design, on a confined platform', async () => {
+    writePlan({ relayPort: null });
+    expect(await sendZkapiConsult(QUESTION, transport({ settings: settings({ tor: 'off' }), confinement: filteredConfinement }))).toMatchObject({
+      ok: true,
+      networkIdentity: 'visible',
+      routeLabel: 'payment privacy only (network address visible)',
+      receipt: { tor: 'off', confinement: 'none', confinementSelfTest: 'not_run' },
+    });
+    expect(torRuns()).toEqual([]);
   }, SLOW);
 });
 
@@ -979,10 +1057,10 @@ describe('doctor: zkapi_consult_transport', () => {
     expect(await sendZkapiConsult(QUESTION, timedTransport(time))).toMatchObject({ ok: true });
     const after = await zkapiCheck(doctorDeps());
     expect(after.detail).toContain('requests today 1 (no limit set), worst-case authorized today $1.00 (no limit set;');
-    expect(after.detail).toContain('(ok): key reuse verified_off, local auth verified, Tor per_consult, confinement none (self-test not_run), settlement confirmed');
+    expect(after.detail).toContain('(ok): key reuse verified_off, local auth verified, Tor per_consult, confinement non_loopback_blocked (self-test passed), settlement confirmed');
     expect(after.detail).toContain(', stage timings lease acquire 1000 ms, confinement self-test 3001 ms, Tor start to bootstrapped 4002 ms,');
     expect(after.detail).toContain(`teardown 20000 ms, total ${time.values.at(-1)! - time.values[0]!} ms;`);
-    expect(after.detail).toContain(`route: ${NO_CONFINEMENT_LABEL}`);
+    expect(after.detail).toContain(`route: ${UNFILTERED_LABEL}`);
   }, SLOW);
 
   test('names what blocks, including an exhausted spend cap and an unresolved session', async () => {

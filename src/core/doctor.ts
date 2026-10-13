@@ -67,6 +67,7 @@ import {
   zkapiConsultReadiness,
   zkapiProcessExitMessage,
   zkapiStageRows,
+  type ZkapiConfinement,
   type ZkapiConsultReadiness,
 } from './consult-transport-zkapi.ts';
 import {
@@ -113,6 +114,8 @@ export interface DoctorDeps {
   workerEnvPath?: string;
   /** The persistent zkAPI consult ledger; defaults beside sovereignty.json. */
   zkapiStatePath?: string;
+  /** This platform's zkAPI network confinement; defaults to `defaultZkapiConfinement()`. */
+  zkapiConfinement?: ZkapiConfinement;
   /** The consult vocabulary pack states; defaults to hashing the installed packs. */
   consultVocabularyStatus?: () => readonly ConsultVocabularyFileStatus[];
   /**
@@ -667,6 +670,7 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
       statePath,
       env,
       apiKeyPresent: secretRefPresent(profile.secretRef, env, deps),
+      ...(deps.zkapiConfinement ? { confinement: deps.zkapiConfinement } : {}),
       ...(deps.now ? { now: deps.now } : {}),
     });
     if (readiness.blockers.length > 0) ok = false;
@@ -680,6 +684,9 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
       ? {}
       : {
         hint: [
+          lines.some((line) => line.includes('confinement_unavailable'))
+            ? 'Anonymous answers are not available on this computer: they need network confinement, which this version of Olympus does not have here. Nothing is ever sent without it.'
+            : undefined,
           lines.some((line) => line.includes('UNRESOLVED SESSION'))
             ? 'An unfinished payment is held, so no anonymous answer can be sent until it is cleared. Open Anonymous answers in the dashboard and press Recover (one fixed request with no content, held at up to $6). If that wallet can no longer run, press Abandon instead; the unsettled request may then settle under another session\'s network identity.'
             : undefined,

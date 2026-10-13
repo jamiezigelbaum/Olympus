@@ -28,7 +28,7 @@ import {
   completions,
   settings,
   transport,
-  NO_CONFINEMENT_LABEL,
+  UNFILTERED_LABEL,
   ledger,
   baseConfig,
   zkapiProfile,
@@ -42,7 +42,7 @@ describe('zkAPI consult transport: fence and recovery', () => {
     writePlan({ noSettlement: true });
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({
       ok: true,
-      routeLabel: `${NO_CONFINEMENT_LABEL}; lease settlement not confirmed`,
+      routeLabel: `${UNFILTERED_LABEL}; lease settlement not confirmed`,
       receipt: { settlement: 'not_confirmed', fence: 'held' },
     });
     expect(zkapiUnresolvedSession(statePath)).toBe(true);
