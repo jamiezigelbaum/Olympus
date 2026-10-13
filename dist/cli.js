@@ -22790,6 +22790,7 @@ __export(exports_remote_access, {
   remoteAccessDir: () => remoteAccessDir,
   relayProcessRunning: () => relayProcessRunning,
   readRemoteAccessStatus: () => readRemoteAccessStatus,
+  reachableLoopbackWorkerOrigin: () => reachableLoopbackWorkerOrigin,
   olympusDataDir: () => olympusDataDir,
   loopbackWorkerOrigin: () => loopbackWorkerOrigin,
   isRelayedRequest: () => isRelayedRequest,
@@ -23058,6 +23059,17 @@ function originOf(value) {
   } catch {
     return;
   }
+}
+function reachableLoopbackWorkerOrigin(value) {
+  const origin = originOf(value);
+  if (!origin)
+    return;
+  const url = new URL(origin);
+  if (url.hostname === "0.0.0.0")
+    url.hostname = "127.0.0.1";
+  else if (url.hostname === "[::]")
+    url.hostname = "[::1]";
+  return loopbackWorkerOrigin(url.origin);
 }
 function loopbackWorkerOrigin(value) {
   const origin = originOf(value);
@@ -77762,10 +77774,16 @@ async function readEngineBrief(deps) {
     if (pluginConfig)
       config = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
   } catch {}
-  const baseUrl = config.email.baseUrl || DEFAULT_BASE_URL;
-  const token = workerAuthTokenFromConfig(config, { env, homeDir });
+  const local = resolveRemoteAccessUrls({
+    layeredEnv: environmentWithWorkerSetupEnv({ env, homeDir }),
+    env,
+    status: readRemoteAccessStatus(remoteAccessDirForCli(env)),
+    configuredWorkerBaseUrl: config.email.baseUrl || DEFAULT_BASE_URL
+  }).local_url;
+  const loopback = reachableLoopbackWorkerOrigin(local);
+  const token = loopback ? workerAuthTokenFromConfig(config, { env, homeDir }) : undefined;
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const root = baseUrl.replace(/\/$/, "");
+  const root = `${loopback ?? local}/v1`;
   const [reachable, brief] = await Promise.all([
     probeHealth(fetchImpl, `${root}/health`, deps.healthTimeoutMs ?? 1000),
     token ? fetchBrief(fetchImpl, `${root}${ENGINE_BRIEF_PATH}`, token, deps.briefTimeoutMs ?? 2500) : Promise.resolve({ kind: "failed", detail: DETAIL.noAccess })
@@ -77845,6 +77863,7 @@ var ENGINE_BRIEF_SCHEMA = "olympus.engine.brief.v1", ENGINE_BRIEF_PATH = "/engin
 var init_engine_brief = __esm(() => {
   init_config();
   init_engine_service();
+  init_remote_access();
   init_worker_auth();
   UNITS = new Set(["files", "messages", "items"]);
   PHASES = new Set(["initial", "refresh"]);
@@ -157408,16 +157427,7 @@ function remoteAccessUrlsForCli(env) {
 function cliWorkerRoot(config2, env = process.env) {
   workerRootBaseUrl(config2.email.baseUrl);
   const local = remoteAccessUrlsForCli(env).local_url;
-  let candidate = local;
-  try {
-    const url = new URL(local);
-    if (url.hostname === "0.0.0.0")
-      url.hostname = "127.0.0.1";
-    else if (url.hostname === "[::]")
-      url.hostname = "[::1]";
-    candidate = url.origin;
-  } catch {}
-  const origin = loopbackWorkerOrigin(candidate);
+  const origin = reachableLoopbackWorkerOrigin(local);
   if (!origin) {
     throw new OperationError("config_error", `The Olympus worker resolves to ${local}, which is not a local address on this computer, so the worker token was not sent.`, "Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1 for the worker on this computer.");
   }

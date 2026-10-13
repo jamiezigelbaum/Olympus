@@ -488,6 +488,21 @@ function originOf(value: string | undefined): string | undefined {
   }
 }
 
+/**
+ * The loopback origin that reaches a worker at `value`, or undefined. A
+ * worker bound to every address (`0.0.0.0`, `::`) is reached on its loopback;
+ * any other non-loopback origin is refused, so a caller holding the worker
+ * bearer never sends it off this computer.
+ */
+export function reachableLoopbackWorkerOrigin(value: string | undefined): string | undefined {
+  const origin = originOf(value);
+  if (!origin) return undefined;
+  const url = new URL(origin);
+  if (url.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
+  else if (url.hostname === '[::]') url.hostname = '[::1]';
+  return loopbackWorkerOrigin(url.origin);
+}
+
 /** A loopback http origin the relay may forward to, or undefined. */
 export function loopbackWorkerOrigin(value: string | undefined): string | undefined {
   const origin = originOf(value);

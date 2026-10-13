@@ -128,7 +128,7 @@ import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
 import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
 import {
-  loopbackWorkerOrigin,
+  reachableLoopbackWorkerOrigin,
   readRemoteAccessStatus,
   relayProcessRunning,
   remoteAccessDirForCli,
@@ -2847,16 +2847,7 @@ function cliWorkerRoot(config: OlympusConfig, env: Record<string, string | undef
   // The configured value is still checked (no embedded credentials, /v1 or root path).
   workerRootBaseUrl(config.email.baseUrl);
   const local = remoteAccessUrlsForCli(env).local_url;
-  let candidate = local;
-  try {
-    const url = new URL(local);
-    if (url.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
-    else if (url.hostname === '[::]') url.hostname = '[::1]';
-    candidate = url.origin;
-  } catch {
-    // loopbackWorkerOrigin refuses it below.
-  }
-  const origin = loopbackWorkerOrigin(candidate);
+  const origin = reachableLoopbackWorkerOrigin(local);
   if (!origin) {
     throw new OperationError(
       'config_error',
