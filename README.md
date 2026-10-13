@@ -255,9 +255,10 @@ yourself away. Both are off until you turn them on.
 - **[Venice](https://venice.ai)** hides what you ask: private models, nothing
   stored. Add your Venice key under **Keys**, on your computer.
 - **zkAPI**, from OpenAnonymity and the Ethereum Foundation, hides who is
-  asking. Your computer strips your name, numbers and accounts, pays
-  anonymously and sends the question over Tor: no account, no card, no name,
-  just proof the question is paid for. Turn on **Anonymous answers** on the
+  asking. It pays anonymously and sends the question over Tor: no account, no
+  card, no name, just proof the question is paid for. In **Strict** mode your
+  computer first rewrites the question to take out your name, numbers and
+  accounts; **Standard** sends your own words, so leave those out yourself. Turn on **Anonymous answers** on the
   dashboard's [Private answers](https://olympusplugin.ai/open/private/) page.
   Anonymous answers are on a Mac only, for now.
 
