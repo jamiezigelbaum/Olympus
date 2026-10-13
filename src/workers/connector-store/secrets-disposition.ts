@@ -179,6 +179,13 @@ export function forgetSecretInSideStores(options: {
       owedJobLedgers.push(jobsPath);
     }
   }
+  // Every job ledger reached, so the item's restore later finds its marker
+  // there even after the runtime that knew the path has gone.
+  try {
+    ledger.noteExtractionJobLedgerPaths(jobLedgers.filter((path) => path !== ':memory:' && existsSync(path)));
+  } catch {
+    // Best effort: the default path and open ledgers are always visited.
+  }
   try {
     if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
     else ledger.clearSecretSideStoreDebt(identity, jobLedgers);
@@ -204,7 +211,8 @@ export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): numb
  * Retire the redaction markers of items that left Secrets (the tier ledger
  * records each such change in the deciding write; see its
  * `secret_redaction_retirement` migration), in the default job ledger, every
- * other this process opened, and any the item still owed a clearing in. Only
+ * other this process opened, every one a Secret was cleared in before, and
+ * any the item still owed a clearing in. Only
  * `identity`'s when given (a listing, before it enqueues the item). A marker
  * is never removed while any item with the same provider item id is Secrets
  * (checked again inside each job ledger's write lock); such a retirement is
@@ -219,6 +227,12 @@ export function retireSecretRedactions(ledger: TierLedger, options: { identity?:
   } catch {
     return 0;
   }
+  let knownJobLedgers: string[] = [];
+  try {
+    knownJobLedgers = ledger.extractionJobLedgerPaths();
+  } catch {
+    // The default path and open ledgers are still visited.
+  }
   let retired = 0;
   for (const retirement of pending) {
     const item = { provider: retirement.provider, accountScope: retirement.accountScope, providerItemId: retirement.providerItemId };
@@ -231,7 +245,7 @@ export function retireSecretRedactions(ledger: TierLedger, options: { identity?:
       failed += 1;
     }
     if (!secret && failed === 0) {
-      for (const jobsPath of new Set([...extractionJobsDbPaths(), ...retirement.jobLedgerPaths])) {
+      for (const jobsPath of new Set([...extractionJobsDbPaths(), ...knownJobLedgers, ...retirement.jobLedgerPaths])) {
         try {
           if (retireExtractionJobRedaction(jobsPath, item, stillSecret).stillSecret) secret = true;
         } catch {

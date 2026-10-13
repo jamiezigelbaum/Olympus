@@ -471,6 +471,55 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(jobs.get(again!)?.ref.name).toBeUndefined();
   });
 
+  test('an unchanged file restored by a lower tier is read again: its indexed job is queued, keeps its name and stores artifacts', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    const jobs = jobStore(dir);
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const [job] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    const sheet = { artifactKind: 'sheet' as const, structuralRef: { kind: 'sheet' as const, sheet: 'deploy keys' }, chars: 40 };
+    jobs.lease({ ...LANE_KEY, workerId: 'worker-1' });
+    jobs.record({ jobId: job!, status: 'indexed', derivations: [sheet] });
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(KEYS))).toEqual([]);
+
+    // Restored by a lower tier through the worker's pass, before any listing:
+    // nothing to move, so no move is queued that could never land.
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'private' });
+    applyOwnerOverrides({ set: fx.set });
+    expect(fx.ledger.getCurrent(identityOf('keys'))).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(fx.ledger.listMoving()).toEqual([]);
+    expect(jobs.get(job!)).toMatchObject({ status: 'queued' });
+    // The unchanged listing enqueues the same ref: the same job, named again.
+    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.stores.internal!.itemPresence(identityOf('keys')).active).toBe(true);
+    const [same] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    expect(same).toBe(job);
+    expect(jobs.get(job!)?.ref.name).toBe(KEYS.name);
+    const [lease] = jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs;
+    expect(lease?.jobId).toBe(job);
+    expect(jobs.record({ jobId: job!, status: 'indexed', leaseToken: lease!.leaseToken, derivations: [sheet] }).artifactsRecorded).toBe(1);
+  });
+
+  test('a job ledger only a closed runtime knew still has its marker retired on restore', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    const runtimePath = join(dir, 'runtime-jobs.sqlite');
+    const runtime = new LocalFileExtractionJobStore(runtimePath);
+    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    // Cleared there while the runtime held it open, then the runtime stops.
+    runtime.close();
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [{ ...KEYS, version: 'v2' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const reopened = new LocalFileExtractionJobStore(runtimePath);
+    cleanups.push(() => reopened.close());
+    const [job] = reopened.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    expect(reopened.get(job!)?.ref.name).toBe(KEYS.name);
+  });
+
   test('a retirement is never carried out while the item is Secrets', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);

@@ -2536,6 +2536,23 @@ export class TierLedger {
     this.db.query('DELETE FROM secret_redaction_retirement WHERE id = ?').run(id);
   }
 
+  /** Remember job ledgers a Secret's names were cleared in (see `extractionJobLedgerPaths`). */
+  noteExtractionJobLedgerPaths(paths: readonly string[]): void {
+    if (paths.length === 0) return;
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      for (const path of paths) {
+        this.db.query('INSERT OR IGNORE INTO extraction_job_ledger_paths (path, noted_at) VALUES (?, ?)').run(path, now);
+      }
+    })();
+  }
+
+  /** Every job ledger a Secret's names were ever cleared in through this ledger. */
+  extractionJobLedgerPaths(): string[] {
+    return (this.db.query('SELECT path FROM extraction_job_ledger_paths ORDER BY path').all() as Array<{ path: string }>)
+      .map((row) => row.path);
+  }
+
   /**
    * Whether any item with this provider item id is Secrets here (in any
    * conversation: the extraction job ledger keys an item without one), by
@@ -3659,7 +3676,9 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // never writes a marker back. Triggers, so every write that changes an
       // item's tiers (a listing, an override, a move landing, a legacy
       // decision, another process) is caught in its own transaction. Becoming
-      // Secrets again cancels a retirement not yet carried out.
+      // Secrets again cancels a retirement not yet carried out. Every job
+      // ledger a Secret was cleared in is remembered, so a retirement still
+      // reaches one whose runtime has since closed it.
       version: TIER_LEDGER_SCHEMA_VERSION,
       name: 'secret_redaction_retirement',
       up(db) {
@@ -3677,6 +3696,10 @@ function tierLedgerMigrations(): SqliteMigration[] {
             job_ledger_paths_json TEXT NOT NULL DEFAULT '[]',
             recorded_at TEXT NOT NULL,
             UNIQUE (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TABLE IF NOT EXISTS extraction_job_ledger_paths (
+            path TEXT PRIMARY KEY,
+            noted_at TEXT NOT NULL
           );
           CREATE TRIGGER IF NOT EXISTS tier_items_left_secrets
           AFTER UPDATE OF metadata_tier, content_tier, target_metadata_tier, target_content_tier ON tier_items

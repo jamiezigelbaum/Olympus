@@ -163,7 +163,9 @@ export function clearExtractionJobNames(dbPath: string, item: ExtractionJobItemK
  * asked again inside this ledger's write lock, and nothing is removed when it
  * says yes: an item that becomes Secrets writes its marker only after its
  * decision is recorded, and that write waits for this lock, so a marker is
- * either never removed or written back. Names already cleared stay cleared.
+ * either never removed or written back. Names already cleared stay cleared
+ * until the item's next enqueue; its indexed jobs are queued again, since
+ * their artifacts were deleted with the names.
  */
 export function retireExtractionJobRedaction(
   dbPath: string,
@@ -181,6 +183,19 @@ export function retireExtractionJobRedaction(
         DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
         WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
       `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      // Its indexed jobs lost their artifacts (and its store copies their
+      // extracted text) when it became Secrets: queued again, exactly as a
+      // forced enqueue resets them, so an unchanged file is read once more.
+      if (retired > 0) {
+        db.query(`
+          UPDATE extraction_jobs SET
+            status = 'queued', attempts = 0,
+            leased_by_hash = NULL, leased_until = NULL, lease_token = NULL, lease_grant_ordinal = NULL,
+            last_error_hash = NULL, last_error_kind = NULL, next_retry_at = NULL,
+            temp_bytes_cleaned = 1, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND status = 'indexed'
+        `).run(new Date().toISOString(), item.provider, item.accountScope, item.providerItemId);
+      }
       return { retired, stillSecret: false };
     }).immediate();
   } finally {

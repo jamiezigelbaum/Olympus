@@ -134,7 +134,12 @@ function applyOne(
     }
     return;
   }
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard });
+  // A Secret whose copies were tombstoned has nothing to move: its new
+  // placement is recorded afresh (served once its next listing writes it).
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    guard,
+    staleCopiesGone: set.routedCopiesGone(identity),
+  });
   switch (recorded.outcome) {
     case 'queued_move':
       if (recorded.raise) report.raised += 1;
