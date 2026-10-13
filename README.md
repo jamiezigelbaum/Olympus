@@ -60,8 +60,7 @@ there, by a model small enough for a computer with 8 GB of memory. There is no
 hosted copy of your things, no account and no subscription. Olympus's
 publisher runs only a relay that passes your AI app's requests to your
 computer without storing them. Google sign-in happens on your computer,
-directly with Google; Google connections made with a release candidate renew
-through a small sign-in service until you reconnect them. For hard private
+directly with Google. For hard private
 questions you can reach stronger models: [Venice](https://venice.ai) runs
 private models that, under Venice's own terms, keep nothing you send, and
 zkAPI, from OpenAnonymity and the Ethereum Foundation, hides who is asking
