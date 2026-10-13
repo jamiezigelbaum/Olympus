@@ -318,6 +318,13 @@ interface LabelSweepState {
    * successive runs instead of re-reading its first pages every time.
    */
   walks?: Record<string, { pageToken: string; deferred?: boolean }> | undefined;
+  /**
+   * Rule keys by when their last walk finished, least recently first. A run
+   * starts with the rule walked longest ago, so a rule that fills the page
+   * budget on its own cannot keep the rules behind it from ever being reached.
+   * A rule that has not finished a walk yet is ahead of every one that has.
+   */
+  order?: string[] | undefined;
 }
 
 /**
@@ -337,7 +344,9 @@ interface LabelSweepState {
  * mail later). A walk that does not finish (the page bound, a provider
  * failure) or that leaves an item the rule could not act on makes that rule
  * pending again, so it is retried and reported until a walk finishes clean;
- * its page is kept, so the next recheck carries on from there.
+ * its page is kept, so the next recheck carries on from there. Rules are
+ * walked least recently finished first, so every rule is reached in turn
+ * however many pages the others take.
  */
 export async function sweepLabelRuleRaises(options: {
   set: TieredStoreSet;
@@ -365,20 +374,24 @@ export async function sweepLabelRuleRaises(options: {
   // A removed rule is forgotten, so adding it back sweeps again.
   const done = new Set(stored.done.filter((key) => keyed.has(key)));
   const walks = new Map(Object.entries(stored.walks ?? {}).filter(([key]) => keyed.has(key)));
+  const order = (stored.order ?? []).filter((key, at, all) => keyed.has(key) && all.indexOf(key) === at);
   const save = () => {
     const state: LabelSweepState = {
       done: [...done].sort(),
+      ...(order.length > 0 ? { order: [...order] } : {}),
       ...(walks.size > 0 ? { walks: Object.fromEntries([...walks].sort(([left], [right]) => (left < right ? -1 : 1))) } : {}),
     };
     const next = JSON.stringify(state);
-    if (next === written || (written === undefined && done.size === 0 && walks.size === 0)) return;
+    if (next === written || (written === undefined && done.size === 0 && walks.size === 0 && order.length === 0)) return;
     ledger.writeMeta(metaKey, next);
     written = next;
   };
-  // Rules still pending first, then (on a recheck) the applied ones.
+  // The rule whose walk finished longest ago goes first (one that never has,
+  // first of all): the page budget is shared, so a fixed order would let an
+  // early rule that uses it up on every recheck starve the rules after it.
   const queue = [...keyed.keys()]
     .filter((key) => options.recheck === true || !done.has(key))
-    .sort((left, right) => Number(done.has(left)) - Number(done.has(right)) || (left < right ? -1 : 1));
+    .sort((left, right) => order.indexOf(left) - order.indexOf(right) || (left < right ? -1 : 1));
   let pagesLeft = Math.max(1, options.maxPages ?? DEFAULT_LABEL_SWEEP_PAGES);
   for (const key of queue) {
     if (pagesLeft <= 0) break;
@@ -431,6 +444,8 @@ export async function sweepLabelRuleRaises(options: {
     if (deferred) done.delete(key);
     else done.add(key);
     walks.delete(key);
+    // Only a finished walk counts as this rule's turn.
+    order.splice(0, order.length, ...order.filter((entry) => entry !== key), key);
     save();
   }
   save();
@@ -458,7 +473,7 @@ function raiseLabelled(
 function readLabelState(raw: string | undefined): LabelSweepState {
   if (!raw) return { done: [] };
   try {
-    const parsed = JSON.parse(raw) as { done?: unknown; walks?: unknown };
+    const parsed = JSON.parse(raw) as { done?: unknown; walks?: unknown; order?: unknown };
     const walks: Record<string, { pageToken: string; deferred?: boolean }> = {};
     if (parsed.walks && typeof parsed.walks === 'object' && !Array.isArray(parsed.walks)) {
       for (const [key, walk] of Object.entries(parsed.walks as Record<string, unknown>)) {
@@ -468,9 +483,11 @@ function readLabelState(raw: string | undefined): LabelSweepState {
         }
       }
     }
+    const order = Array.isArray(parsed.order) ? parsed.order.filter((key): key is string => typeof key === 'string') : [];
     return {
       done: Array.isArray(parsed.done) ? parsed.done.filter((key): key is string => typeof key === 'string') : [],
       ...(Object.keys(walks).length > 0 ? { walks } : {}),
+      ...(order.length > 0 ? { order } : {}),
     };
   } catch {
     return { done: [] };

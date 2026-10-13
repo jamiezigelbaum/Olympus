@@ -617,6 +617,40 @@ describe('rechecking a rule that was already applied', () => {
     expect(lane.ledger.getCurrent(identity('c'))).toMatchObject({ state: 'moving', decidedBy: 'owner_rule' });
   });
 
+  test('a rule that fills the whole page budget does not keep the rules behind it from being rechecked', async () => {
+    const messages = ['h1', 'h2', 'l1', 'l2'].map((id) => message(id, { subject: `Note ${id}`, body: `Body of note ${id}.`, labels: ['INBOX'] }));
+    const lane = openLane(fakeGmail(messages));
+    await lane.handler.pull({ max_items: 50 });
+    const rules: OwnerTierRule[] = ['Label_A', 'Label_B'].map((value) => ({
+      id: `owner-label-${value.toLowerCase()}`, source: 'gmail', match: { kind: 'label', value }, tier: 'secure', strength: 'force',
+    }));
+    writeOwnerTierRules(rules, { env });
+    // Whichever rule is walked first has two pages, exactly the recheck budget; the other has one.
+    let heavy: string | undefined;
+    let lightMembers = ['l1'];
+    const source = {
+      async listLabelled(label: string, page: { pageToken?: string }) {
+        heavy ??= label;
+        const ids = label === heavy ? ['h1', 'h2'] : lightMembers;
+        const at = page.pageToken ? Number(page.pageToken) : 0;
+        return { ids: [ids[at]!], ...(at + 1 < ids.length ? { nextPageToken: String(at + 1) } : {}) };
+      },
+    };
+    const sweep = (recheck: boolean, maxPages: number) => sweepLabelRuleRaises({ set: lane.tierSet, provider: 'gmail', accountScope: ACCOUNT, source, recheck, maxPages });
+
+    expect(await sweep(false, 10)).toMatchObject({ raised: 3, pending: 0 });
+    // The owner later puts the light label on another stored message.
+    lightMembers = ['l1', 'l2'];
+    expect(lane.ledger.getCurrent(identity('l2'))).not.toMatchObject({ state: 'moving' });
+
+    // The first rule finishes on the budget exactly; the next recheck must not start there again.
+    expect(await sweep(true, 2)).toMatchObject({ raised: 0, pending: 0 });
+    expect(await sweep(true, 2)).toMatchObject({ raised: 1 });
+    expect(lane.ledger.getCurrent(identity('l2'))).toMatchObject({ state: 'moving', decidedBy: 'owner_rule' });
+    // The heavy rule's walk is kept, and it finishes on a later recheck.
+    expect(await sweep(true, 2)).toMatchObject({ pending: 0 });
+  });
+
   test('a failed recheck makes the rule pending and reported again until a recheck succeeds', async () => {
     const { client, lane } = await ingestTwo();
     saveLabelRule();

@@ -33741,18 +33741,20 @@ async function sweepLabelRuleRaises(options) {
   const stored = readLabelState(written);
   const done = new Set(stored.done.filter((key2) => keyed.has(key2)));
   const walks = new Map(Object.entries(stored.walks ?? {}).filter(([key2]) => keyed.has(key2)));
+  const order = (stored.order ?? []).filter((key2, at, all) => keyed.has(key2) && all.indexOf(key2) === at);
   const save = () => {
     const state = {
       done: [...done].sort(),
+      ...order.length > 0 ? { order: [...order] } : {},
       ...walks.size > 0 ? { walks: Object.fromEntries([...walks].sort(([left], [right]) => left < right ? -1 : 1)) } : {}
     };
     const next = JSON.stringify(state);
-    if (next === written || written === undefined && done.size === 0 && walks.size === 0)
+    if (next === written || written === undefined && done.size === 0 && walks.size === 0 && order.length === 0)
       return;
     ledger.writeMeta(metaKey, next);
     written = next;
   };
-  const queue = [...keyed.keys()].filter((key2) => options.recheck === true || !done.has(key2)).sort((left, right) => Number(done.has(left)) - Number(done.has(right)) || (left < right ? -1 : 1));
+  const queue = [...keyed.keys()].filter((key2) => options.recheck === true || !done.has(key2)).sort((left, right) => order.indexOf(left) - order.indexOf(right) || (left < right ? -1 : 1));
   let pagesLeft = Math.max(1, options.maxPages ?? DEFAULT_LABEL_SWEEP_PAGES);
   for (const key2 of queue) {
     if (pagesLeft <= 0)
@@ -33805,6 +33807,7 @@ async function sweepLabelRuleRaises(options) {
     else
       done.add(key2);
     walks.delete(key2);
+    order.splice(0, order.length, ...order.filter((entry) => entry !== key2), key2);
     save();
   }
   save();
@@ -33835,9 +33838,11 @@ function readLabelState(raw) {
         }
       }
     }
+    const order = Array.isArray(parsed.order) ? parsed.order.filter((key2) => typeof key2 === "string") : [];
     return {
       done: Array.isArray(parsed.done) ? parsed.done.filter((key2) => typeof key2 === "string") : [],
-      ...Object.keys(walks).length > 0 ? { walks } : {}
+      ...Object.keys(walks).length > 0 ? { walks } : {},
+      ...order.length > 0 ? { order } : {}
     };
   } catch {
     return { done: [] };
