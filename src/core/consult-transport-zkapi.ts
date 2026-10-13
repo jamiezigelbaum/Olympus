@@ -108,7 +108,7 @@ const KILL_GRACE_MS = 3_000;
  * change between the listing and the send can move the actual hold, bounded
  * by $6. A newer version is refused until its allowance table is reviewed.
  */
-export const ZKAPI_SUPPORTED_DAEMON_VERSIONS = ['0.1.5', '0.1.6', '0.1.6-olympus2', '0.1.6-olympus3'] as const;
+export const ZKAPI_SUPPORTED_DAEMON_VERSIONS = ['0.1.5', '0.1.6', '0.1.6-olympus2', '0.1.6-olympus3', '0.1.6-olympus4'] as const;
 export const ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6_000_000;
 /** The fixed, content-free question a recovery-only session sends. */
 const RECOVERY_QUESTION = 'Reply with the single word OK.';
@@ -509,8 +509,8 @@ export const ZKAPI_CONSULT_ERROR_MESSAGES: Readonly<Record<ZkapiConsultErrorCode
   tor_port_busy: 'Something already listens on the zkAPI Tor port; Olympus needs it free to start a fresh Tor client.',
   tor_bootstrap_failed: 'The per-consult Tor client did not finish bootstrapping.',
   daemon_start_failed: 'zkapi-clientd serve did not become ready.',
-  daemon_version_unsupported: 'This zkapi-clientd version is not a reviewed version (0.1.5, 0.1.6, 0.1.6-olympus2 or 0.1.6-olympus3).',
-  daemon_supervisor_unsupported: 'This zkAPI app cannot enforce the managed anonymous route. Use the Olympus zkapi-clientd fork with companion custody support (0.1.6-olympus3); nothing was sent.',
+  daemon_version_unsupported: 'This zkapi-clientd version is not a reviewed version (0.1.5, 0.1.6, 0.1.6-olympus2, 0.1.6-olympus3 or 0.1.6-olympus4).',
+  daemon_supervisor_unsupported: 'This zkAPI app cannot enforce the managed anonymous route. Use the Olympus zkapi-clientd fork with companion custody support (0.1.6-olympus4); nothing was sent.',
   relay_mismatch: 'The daemon is not configured for the expected route (SOCKS5 when Tor is on, direct when Tor is off).',
   key_reuse_on: 'The daemon key-reuse window is on, so requests would be linkable; Olympus refuses to send.',
   key_reuse_unverified: 'The daemon did not confirm a fresh key for every request.',

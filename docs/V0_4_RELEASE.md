@@ -169,13 +169,16 @@ testers have exercised the normal product journey without custom engineering.
   Cursor's pinned client), Muse and the Grok API key path stay after 1.0.
 
 - **2026-10-13 — Linux anonymous answers qualification (local only).** W4
-  steps 3–4 integrated on the 1.0.0 base; Linux stays unavailable. The pinned
-  launcher passed the full Omarchy matrix, but the real daemon rejects required
-  companion custody on Linux before reaching `ready`. Activation is skipped;
-  a reviewed fork update and new bundle must precede another real-route proof.
-  The pinned Tor URL returned 404 (the identical archive verified from Tor's
-  archive mirror). Details and raw evidence: `design/linux-zkapi-confinement.md`,
-  “Step 5 qualification attempt”. Nothing pushed or deployed.
+  stays dark. Fork `22fffc86` adds reviewed pidfd and exact-socket Linux custody;
+  all four olympus4 bundles are reproducible and pinned locally, awaiting owner
+  publication. The new real launcher passes the full Omarchy matrix with zero
+  failures. The real route gets past custody but still cannot reach `ready`:
+  the daemon's existing preflight refuses the unfunded scratch wallet. No
+  funding, account creation or weaker preflight is authorized. Activation and
+  integrated activation review remain gated on a real ready-session receipt.
+  The Tor pin now uses the owner-specified permanent archive URL. Details and
+  raw evidence: `design/linux-zkapi-confinement.md`, “Olympus4 qualification”.
+  Nothing pushed or deployed.
 
 - **2026-10-13 — Linux W5 PR preparation (local only).** Merge current main,
   retain existing standalone data in place, and use XDG for fresh installs.

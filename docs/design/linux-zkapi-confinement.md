@@ -919,6 +919,61 @@ environment and binary hashes, installer results, integrated tests, route
 receipts and the explicit daemon refusal. The scratch route uses synthetic
 local credentials and never calls `send`.
 
+### Olympus4 qualification, 2026-10-13: unfunded-wallet prerequisite unmet
+
+The fork at `22fffc86ea0b09166530512dba7757bd84388dbc` implements Linux
+companion custody with an original-lifetime pidfd, bounded exact reverse socket
+ownership inspection, and host-procfs PID resolution through pidfd fdinfo.
+Darwin custody and shared transport code are unchanged. No launcher policy was
+widened: pidfd_open, poll/ppoll and procfs reads were already permitted;
+pidfd_getfd remains denied, and the seccomp golden is unchanged. A fresh
+independent static review found no grounded P1/P2 custody issue.
+
+All four olympus4 bundles were reproduced from committed HEAD using the
+official Go 1.27.1 Linux amd64 image on Sparta; hashes and sizes are in
+`private-answers.md`. The Olympus pin moves all platforms together under the
+existing shared-version contract; the Mac code paths are unchanged. Owner
+publication is pending, so these prepared URLs must not land before the release.
+The main merge was `ee3b392c`; PR #373 was still open when checked, so this
+branch applies the exact owner-specified Tor archive URL directly.
+
+On Omarchy (kernel 7.2.5-3-omarchy, Landlock ABI 10, Bun 1.3.14), the locally
+built archive was supplied through the installer fetch seam with the actual
+pinned SHA-256. The real launcher full matrix passed with **0 failures**, exit
+0, including lifecycle, framing, ablations, and zero stray launchers. As in the
+prior run, internal hardening and descriptor fault injections are covered by
+the fork's race-tested Go cases, not production runtime fault switches.
+
+**The Olympus session still did not reach `ready`.** The receipt reports a
+passed confinement self-test, fresh Tor, backend `linux_netns` / Landlock ABI
+10, and `session_process_exited` (daemon exit 1 during `daemonReadyMs`). A repeat
+with only the daemon's stderr captured gave the exact refusal:
+
+```text
+zkapi-clientd: the zkAPI wallet has no private balance; configure funding. Run zkapi-clientd config to review and complete configuration (use the same --config-dir if set)
+```
+
+The fork's `configuredWalletReady` reaches this refusal only after the real
+custody-gated wallet `Readiness` request succeeds. This establishes progress
+past Linux custody under the launcher, but is not a ready-session receipt or
+an authenticated Olympus transport block. Neither is claimed. The synthetic
+scratch wallet was not funded, no signing address/account was created, and no
+question was sent. The fence stayed clear with no lease.
+
+The owner waived a paid answer for this run, not the real `ready` prerequisite.
+The existing daemon requires private balance even to remain serving. That
+preflight is unchanged; no flag, fixture balance, or bypass was introduced.
+Disposition: preserve the dark implementation and **skip steps 6–7** pending
+an authorized way to satisfy the existing wallet prerequisite and obtain the
+required ready receipt. Dashboard copy, design-review receipts and the 1.0.0
+changelog's Linux limitation remain unchanged and accurate. This task does not
+authorize funding or using any existing private wallet.
+
+Raw logs and scripts: the release workspace's `logs/w4b-step5-*`, including
+`route.log`, `diagnostic-route.log`, `daemon-startup-error.log`, `matrix.log`,
+`matrix.json`, build environment and bundle fingerprints. Installed Olympus,
+its service and Omarchy configuration were untouched.
+
 Deferred by owner decision, each its own later work: Linux arm64 (launcher
 run on hardware; Tor has no Linux arm64 bundle), and an Ubuntu positive-path
 proof of the admin step.

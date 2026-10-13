@@ -421,23 +421,28 @@ install in the worker and returns at once. The card re-reads its page every
 
 ### Pins (verified 2026-10-07)
 
-**zkapi-clientd 0.1.6-olympus3** — release `clientd-v0.1.6-olympus3` of
+**zkapi-clientd 0.1.6-olympus4** — prepared release `clientd-v0.1.6-olympus4` of
 `jamiezigelbaum/zkapi`, built from fork commit
-`313646debbda96976c8a7df9da98e58f5a130092`. The managed route requires the
+`22fffc86ea0b09166530512dba7757bd84388dbc`. The managed route requires the
 fork's supervisor flags and companion custody. Linux x64 additionally
 requires the bundled confinement launcher; Linux activation remains dark.
-Base URL: `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus3/`.
+Base URL: `https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/`.
 
 | Platform | Asset | Bytes | SHA-256 |
 |---|---|---|---|
-| macOS arm64 | `zkapi-clientd_0.1.6-olympus3_darwin_arm64.tar.gz` | 23,233,790 | `e4d911dd43839fd25b23a96781fcf2628538c0f0f0ed7e791161843583284b14` |
-| macOS x86_64 | `zkapi-clientd_0.1.6-olympus3_darwin_amd64.tar.gz` | 23,924,430 | `2cfecfba8176141eaf8106f23f15d251e9f677287a5401412156bb288bba1851` |
-| Linux x86_64 | `zkapi-clientd_0.1.6-olympus3_linux_amd64.tar.gz` | 25,876,397 | `c306cfc86b3d4eee8e407b81cb48fbe148f7b771b77059cf16d5ca35504b152b` |
-| Linux arm64 | `zkapi-clientd_0.1.6-olympus3_linux_arm64.tar.gz` | 23,914,318 | `bde3b8851a0acd190e28906828afc3b508c985ee848dd997b3ee5b10f4212da4` |
+| macOS arm64 | `zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz` | 23,233,898 | `c438eda1e4e9698c8772c98b7e7cb37978f90efa2e9143830f91243e606d0a87` |
+| macOS x86_64 | `zkapi-clientd_0.1.6-olympus4_darwin_amd64.tar.gz` | 23,924,531 | `afa86277f57680345522b0e2707241578f17b15f2089d603546bf3cf2912f0e9` |
+| Linux x86_64 | `zkapi-clientd_0.1.6-olympus4_linux_amd64.tar.gz` | 25,885,185 | `069315f9d63b666b3eaa5195d9acd343403ef04f8690a7c6437371bfaf9db02a` |
+| Linux arm64 | `zkapi-clientd_0.1.6-olympus4_linux_arm64.tar.gz` | 23,923,385 | `cbc6df716dd555ba3b1ab87c585415a82703588ab149718374b30322c6af5489` |
 
-Verification, 2026-10-13: downloaded archives checked against the supplied
-release sizes and hashes. Linux x64 `bin/zkapi-confine` hashes to
-`d232669ee1e346874712b5d5c64623caf747c23da45fe36f1eee56ff7b10b796`, matching
+Verification, 2026-10-13: all four archives were built from the committed fork
+on Sparta with the official Go 1.27.1 Linux amd64 toolchain; each daemon and
+the Linux launcher matched a clean HEAD rebuild. Owner publication is still
+required before these URLs are usable. Mac moves from main's olympus2 pin to
+olympus4 for the shared version contract; its custody and transport code paths
+are unchanged. The required Mac transport regression ran on the Linux build
+host; the two native Seatbelt cases remain unrun under the remote-only rule. Linux x64 `bin/zkapi-confine` hashes to
+`bba6340ddf3b2e41ac1a142e803d4467f4d6b510cb4665d19282945fede8f4a3`, matching
 `share/zkapi-clientd/olympus-build.json`'s `zkapi_confine_sha256` and both
 recorded reproducibility builds. Install verifies this exact named field and
 binary digest before committing the install. At each session the supervisor
@@ -465,7 +470,7 @@ the route is named, with the fix, and gets no button, since installing would
 not change which program runs.
 
 **Tor Expert Bundle 15.0.24** (the current stable Tor Browser release; the
-binary carries tor 0.4.9.13). Base URL `https://dist.torproject.org/torbrowser/15.0.24/`.
+binary carries tor 0.4.9.13). Base URL `https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24/`.
 
 | Platform | Asset | Bytes | SHA-256 |
 |---|---|---|---|
