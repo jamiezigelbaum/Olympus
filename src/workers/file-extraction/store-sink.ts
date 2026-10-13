@@ -93,6 +93,12 @@ export const EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = 'store_item_tier_move_qu
  */
 export const EXTRACTION_SINK_SKIPPED_SECRETS = 'store_item_secrets';
 /**
+ * The text was judged Secret, but the item has since moved to another source
+ * revision, so this job's verdict is about a revision the store no longer
+ * holds. Nothing is changed; the current revision's own extraction decides it.
+ */
+export const EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = 'store_item_source_version_stale';
+/**
  * A still image's content (its picture, and any text read off it) rests only
  * in a Private store unless the photo judge found the picture ordinary
  * (docs/design/photo-embeddings.md). A store of any other trust domain refuses
@@ -409,6 +415,7 @@ export function createConnectorStoreExtractionSink(
           ambiguous: EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
           excluded: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
           metadata_only: EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
+          stale_version: EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE,
           owned_elsewhere: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
           stale_claim: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
         };

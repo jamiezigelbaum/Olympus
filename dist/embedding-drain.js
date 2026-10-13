@@ -17760,14 +17760,17 @@ var init_local_index = __esm(() => {
             COUNT(*) AS matching_provider_id_rows,
             SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
             MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
-            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-        `).get(normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), identity.provider, identity.accountScope, identity.providerItemId);
+        `).get(normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), identity.provider, identity.accountScope, identity.providerItemId);
           if (existing.matching_provider_id_rows > 1)
             return "ambiguous";
           if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1)
             return "missing";
+          if (identity.sourceVersion && existing.source_version !== null && existing.source_version !== identity.sourceVersion)
+            return "stale_version";
           if (options.skipOwner) {
             const owned = this.db.query(`
             SELECT 1 AS present FROM item_owners
@@ -34803,12 +34806,14 @@ var EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous";
 var EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only";
 var EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued";
 var EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets";
+var EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale";
 var EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
 
 // src/workers/file-extraction/runner.ts
 var SINK_SKIP_SETTLEMENTS = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
   [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
+  [EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE]: "failed_terminal",
   [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: "blocked_policy",
   [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: "blocked_policy",
   [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",

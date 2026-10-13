@@ -2031,6 +2031,7 @@ export type ConnectorStoreSecretsExtractionOutcome =
   | 'ambiguous'
   | 'excluded'
   | 'metadata_only'
+  | 'stale_version'
   | 'owned_elsewhere'
   | 'stale_claim';
 
@@ -3088,10 +3089,12 @@ export class LocalConnectorStore {
             COUNT(*) AS matching_provider_id_rows,
             SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
             MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
-            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         `).get(
+          normalizeConversationId(identity.providerConversationId),
           normalizeConversationId(identity.providerConversationId),
           normalizeConversationId(identity.providerConversationId),
           normalizeConversationId(identity.providerConversationId),
@@ -3103,9 +3106,15 @@ export class LocalConnectorStore {
           exact_identity_rows: number;
           item_pk: number | null;
           tombstoned: number | null;
+          source_version: string | null;
         };
         if (existing.matching_provider_id_rows > 1) return 'ambiguous';
         if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1) return 'missing';
+        // The text judged Secret is one revision's. When the row has since
+        // moved to another, that revision's verdict says nothing about the
+        // current one, whose own extraction decides it.
+        if (identity.sourceVersion && existing.source_version !== null
+          && existing.source_version !== identity.sourceVersion) return 'stale_version';
         if (options.skipOwner) {
           const owned = this.db.query(`
             SELECT 1 AS present FROM item_owners

@@ -42,6 +42,7 @@ import {
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
   EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
   EXTRACTION_SINK_SKIPPED_SECRETS,
+  EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE,
   createConnectorStoreExtractionSink,
   planExtractionSinkWrite,
 } from '../src/workers/file-extraction/store-sink.ts';
@@ -590,16 +591,15 @@ describe('extraction factory store sink: the Secrets floor', () => {
     }
   });
 
-  test('an earlier version whose text landed is removed when the new text is Secret', async () => {
+  test('text that landed earlier is removed when a re-read finds it Secret', async () => {
     const store = await seededStore();
     try {
       const sink = sinkFor(store);
       expect((await sink.accept(requestFor('An ordinary first draft.'))).accepted).toBe(true);
       expect(storedRows(store, 'ordinary').chunksWithNeedle).toBe(1);
 
-      const secret = await sink.accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, {
-        ref: refFor({ sourceVersion: 'rev-8' }),
-      }));
+      // A re-extraction of the same revision (a newer extractor) reads a secret.
+      const secret = await sink.accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, { extractorVersion: '2' }));
       expect(secret.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
       const rows = storedRows(store, 'ordinary');
       expect(rows.chunks).toBe(0);
@@ -643,6 +643,23 @@ describe('extraction factory store sink: the Secrets floor', () => {
       const item = storedRows(store, STRIPE_LIVE_KEY).item;
       expect(item?.tombstoned).toBe(0);
       expect(item?.title).toBe(SEEDED_TITLE);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a Secret in an older revision never removes the newer revision\'s row', async () => {
+    const store = await seededStore();
+    try {
+      // The row is at rev-7 with clean text; a job queued for rev-6 reads a secret.
+      expect((await sinkFor(store).accept(requestFor('The current revision, clean.'))).accepted).toBe(true);
+      const stale = await sinkFor(store).accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, {
+        ref: refFor({ sourceVersion: 'rev-6' }),
+      }));
+      expect(stale.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE);
+      const rows = storedRows(store, 'current revision');
+      expect(rows.chunksWithNeedle).toBe(1);
+      expect(rows.item?.tombstoned).toBe(0);
     } finally {
       store.close();
     }
