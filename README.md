@@ -40,8 +40,9 @@ someone else's cloud. Local models keep it home, but they are a step behind,
 and the best ones need an expensive computer under your desk. Olympus gives
 you both, on the laptop you already have.
 
-Every email, file and message is judged on your own computer: **Personal**,
-**Private** or **Secret**.
+Every email, file and message is judged, one by one, as **Personal**,
+**Private** or **Secret**: on your own computer by default, or by Venice's
+private models if you choose a Venice-only setup.
 
 - **Personal:** ChatGPT, Claude or Grok can read the parts that answer your
   question, and cite them.
