@@ -226,7 +226,7 @@ function lifecycleStatus(options: WorkerLifecycleOptions & { platform: WorkerSer
   return {
     schema_version: OLYMPUS_LIFECYCLE_SCHEMA_VERSION,
     action: 'status',
-    ok: service.state !== 'failed' && service.state !== 'unknown',
+    ok: ['active', 'inactive', 'missing'].includes(service.state),
     service,
     lifecycle_transaction: transaction
       ? {
@@ -313,7 +313,7 @@ function installOrUpgradeLifecycle(
     const managedBytesChanged = previousUnitBytes !== readManagedFileSnapshot(preview.unit_path)
       || previousEnvBytes !== readManagedFileSnapshot(preview.env_path);
     const postInstallRestart = effective.platform === 'linux'
-      && before.state === 'active'
+      && (before.state === 'active' || before.state === 'transitioning')
       && (action === 'upgrade' || managedBytesChanged)
       ? runWorkerServiceAction('restart', serviceActionOptions(effective))
       : undefined;
@@ -445,7 +445,7 @@ function activateManagedWorkerFiles(
       throw new OperationError('config_error', `Could not determine the existing Olympus worker state before setup activation: ${before.detail}.`);
     }
     runWorkerServiceAction('install', serviceActionOptions(effective));
-    if (before?.state === 'active') {
+    if (before?.state === 'active' || before?.state === 'transitioning') {
       runWorkerServiceAction('restart', serviceActionOptions(effective));
     }
     const service = settleWorkerServiceState(effective, ['active']);
@@ -626,7 +626,7 @@ function quiesceAttemptedWorker(
   }
   let stopped = inspectWorkerService(serviceActionOptions(options));
   let resetFailedDetail: string | undefined;
-  if (options.platform === 'linux' && stopped.state === 'failed') {
+  if (options.platform === 'linux' && (stopped.state === 'failed' || attempted.state === 'transitioning')) {
     // systemd latches a failed result: the stop above succeeded without
     // clearing it, and a rollback that refused here would leave the previous
     // managed files unrestored with every later lifecycle command re-entering
@@ -638,7 +638,7 @@ function quiesceAttemptedWorker(
       resetFailedDetail = error instanceof Error ? error.message : String(error);
     }
   }
-  if (stopped.state === 'active' || stopped.state === 'failed' || stopped.state === 'unknown') {
+  if (stopped.state !== 'inactive' && stopped.state !== 'missing') {
     throw new OperationError(
       'config_error',
       `Olympus lifecycle rollback could not prove the attempted worker was stopped (status ${stopped.state}).`,

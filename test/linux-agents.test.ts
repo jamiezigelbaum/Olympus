@@ -242,3 +242,9 @@ test('an active owner bridge selects local Linux browser instructions, never cha
   expect(resolveAgentApprovalHost({ platform: 'linux', env: { OLYMPUS_SERVER_MODE: 'on' }, port: 8010, desktopReady: () => true, desktopBridgeReady: () => true }).headless).toBe(true);
   expect(resolveAgentApprovalHost({ platform: 'darwin', env: {}, port: 8010, desktopBridgeReady: () => { throw new Error('Mac must not inspect Linux bridge'); } })).toEqual({ platform: 'darwin' });
 });
+
+test('the live owner bridge resolves a boot-started desktop without a second session probe', () => {
+ expect(resolveAgentApprovalHost({platform:'linux', env:{}, port:8010,
+  desktopBridgeReady:()=>true, desktopReady:()=>{throw new Error('must reuse live bridge');}}))
+  .toEqual({platform:'linux',headless:false});
+});

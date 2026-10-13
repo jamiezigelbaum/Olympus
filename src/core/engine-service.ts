@@ -474,7 +474,7 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
     ...(options.cwd ? { cwd: options.cwd } : {}),
   });
   const plist = renderEnginePlist({ paths, program, homeDir });
-  const warnings = engineConflictWarnings(homeDir);
+  const warnings = engineConflictWarnings(homeDir, 'darwin');
   const sovereigntyBlocker = existsSync(paths.sovereigntyPath)
     ? undefined
     : engineSovereigntySeedBlocker({ homeDir, workerEnvPath: paths.workerEnvPath, env: options.env ?? process.env });
@@ -1429,12 +1429,13 @@ function tailLines(path: string, lines: number): string[] {
 
 export { redactLogLine };
 
-/** Other hosts of the same worker on this Mac: they would compete for its port. */
-export function engineConflictWarnings(homeDir: string): string[] {
+/** Other hosts of the same worker on this computer. */
+export function engineConflictWarnings(homeDir: string, platform: string = process.platform, env: Record<string, string | undefined> = process.env): string[] {
   const warnings: string[] = [];
-  const legacy = workerServicePaths('darwin', homeDir).unitPath;
+  const linux = platform === 'linux';
+  const legacy = workerServicePaths(linux ? 'linux' : 'darwin', homeDir, env).unitPath;
   if (existsSync(legacy)) {
-    warnings.push(`The worker LaunchAgent from olympus worker install is present (${legacy}); it serves the same port. Run olympus worker uninstall so the engine owns the worker.`);
+    warnings.push(`The worker ${linux ? 'user service' : 'LaunchAgent'} from olympus worker install is present (${legacy}); ${linux ? 'it competes for the owner socket' : 'it serves the same port'}. Run olympus worker uninstall so the engine owns the worker.`);
   }
   return warnings;
 }

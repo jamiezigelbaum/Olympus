@@ -47,7 +47,7 @@ import REMOTE_SURFACE from './generated/remote-tools.json';
 
 /** Newest first; an `initialize` asking for one of these gets it back. */
 export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
-export const NOT_CONNECTED_MESSAGE = 'Olympus is not connected to ChatGPT yet. If Olympus is on your Mac, connect it; otherwise install it first.';
+export const NOT_CONNECTED_MESSAGE = 'Olympus is not connected to ChatGPT yet. If Olympus is on your computer, connect it; otherwise install it first.';
 
 /** The engine's ChatGPT tools, exactly as its tools/list declares them. */
 export const CHATGPT_TOOLS = CHATGPT_SURFACE.tools;
@@ -185,7 +185,7 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
 function linkingChallenge(protectedResourceMetadataUrl: string): { 'mcp/www_authenticate': string[] } {
   return {
     'mcp/www_authenticate': [
-      `Bearer resource_metadata="${protectedResourceMetadataUrl}", error="invalid_token", error_description="Connect Olympus on your Mac to use this tool."`,
+      `Bearer resource_metadata="${protectedResourceMetadataUrl}", error="invalid_token", error_description="Connect Olympus on your computer to use this tool."`,
     ],
   };
 }

@@ -53,7 +53,7 @@ export interface LinuxGraphicalSession {
 
 export interface LinuxGraphicalSessionUnavailable {
   ready: false;
-  reason: 'untrusted_systemctl' | 'inactive_graphical_session' | 'manager_environment_unavailable' | 'unsafe_runtime_directory' | 'unsupported_desktop' | 'stale_display';
+  reason: 'untrusted_systemctl' | 'inactive_graphical_session' | 'manager_environment_unavailable' | 'unsafe_runtime_directory' | 'stale_display';
 }
 
 export type LinuxGraphicalSessionReadiness = LinuxGraphicalSession | LinuxGraphicalSessionUnavailable;
@@ -100,11 +100,6 @@ export function linuxGraphicalSessionReadiness(
   const resolveRealpath = dependencies.realpath ?? resolvedRealpath;
   if (resolveRealpath(runtime) !== runtime || !runtimeInfo || runtimeInfo.symbolicLink || runtimeInfo.kind !== 'directory' || runtimeInfo.uid !== uid || (runtimeInfo.mode & 0o077) !== 0) {
     return { ready: false, reason: 'unsafe_runtime_directory' };
-  }
-
-  const desktop = manager.XDG_CURRENT_DESKTOP;
-  if (!desktop?.split(':').some((name) => /^(?:gnome|hyprland)$/i.test(name))) {
-    return { ready: false, reason: 'unsupported_desktop' };
   }
 
   const baseEnvironment = sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath);
@@ -225,7 +220,7 @@ export async function openLinuxDesktopPath(input: LinuxDesktopOpenInput): Promis
   const readReadiness = (): LinuxGraphicalSessionReadiness => dependencies.readiness?.() ?? linuxGraphicalSessionReadiness(dependencies);
   const readiness = readReadiness();
   if (!readiness.ready) {
-    throw new LinuxDesktopOpenError('desktop_unavailable', `No live graphical session is available (${readiness.reason}). Start a systemd-integrated GNOME/Hyprland session or use the remote panel/provider preview.`);
+    throw new LinuxDesktopOpenError('desktop_unavailable', `No live graphical session is available (${readiness.reason}). Sign in to your desktop, or open Olympus from another computer through SSH.`);
   }
   const original = validateOpenTarget(input.path, input.roots);
   if (!original) throw new LinuxDesktopOpenError('invalid_target', 'The local source is no longer a regular file inside an approved root.');

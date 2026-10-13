@@ -63,11 +63,11 @@ function installed() {
   return good(); };
  return {l,calls,exec,options:{platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),exec,consultInFlight:()=>undefined,cgroupEmpty:()=>true,workerStopped:()=>true}};
 }
-test('Linux lifecycle preserves persistent stop choice on restart, and stop removes custody before uninstall',()=>{
+test('Linux lifecycle re-enables boot start on restart, and stop removes custody before uninstall',()=>{
  const {l,calls,options}=installed();
  expect(stopEngine(options)).toMatchObject({ok:true,stopped:true});
  expect(calls).toContainEqual(['systemctl','--user','disable','--now','olympus-engine.service']);
- calls.length=0; restartEngine(options); expect(calls.some(a=>a.includes('enable'))).toBe(false);
+ calls.length=0; restartEngine(options); expect(calls).toContainEqual(['systemctl','--user','enable',l.unitPath]);
  stopEngine(options); calls.length=0; startEngine(options); expect(calls).toContainEqual(['systemctl','--user','enable',l.unitPath]);
  expect(uninstallEngine(options).removed_plist).toBe(true);
  expect(()=>readFileSync(l.unitPath)).toThrow(); expect(readFileSync(l.receiptPath,'utf8')).toContain('olympus.engine.install.v1');
@@ -185,4 +185,20 @@ test('inactive disabled service with retained escaped-child evidence never relea
 test('a disabled engine in automatic restart backoff retains data custody',()=>{
  const l=layout();const facts=inspectSystemdEngine(l,()=>good(`LoadState=loaded\nActiveState=activating\nSubState=auto-restart\nUnitFileState=disabled\nMainPID=0\nControlGroup=\nResult=exit-code\nExecMainStatus=1\nFragmentPath=${l.unitPath}\n`));
  expect(linuxEngineCustody(l,facts,{workerStopped:()=>true})).toBe('loaded');
+});
+
+test('start re-enables an already running but disabled engine', () => {
+ const {l,calls,options}=installed(); stopEngine(options);
+ options.exec('systemctl',['--user','start','olympus-engine.service']); calls.length=0;
+ expect(startEngine(options)).toMatchObject({ok:true,action:'already_running'});
+ expect(calls).toContainEqual(['systemctl','--user','enable',l.unitPath]);
+});
+
+import { engineConflictWarnings } from '../src/core/engine-service.ts';
+import { workerServicePaths } from '../src/core/worker-service.ts';
+test('conflict warnings include the legacy Linux user worker', () => {
+ const l=layout(), unit=workerServicePaths('linux',l.home,linuxEngineEnvironment(l)).unitPath;
+ mkdirSync(dirname(unit),{recursive:true});writeFileSync(unit,'legacy');
+ expect(engineConflictWarnings(l.home,'linux',linuxEngineEnvironment(l)).join(' ')).toContain(unit);
+ expect(engineConflictWarnings(l.home,'linux',linuxEngineEnvironment(l)).join(' ')).toContain('olympus worker uninstall');
 });

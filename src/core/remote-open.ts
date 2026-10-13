@@ -25,8 +25,9 @@ import { openTargetPath, type OpenTarget } from './open-targets.ts';
  * The engine's declaration that it runs on a server (owner decision,
  * 2026-10-10: the engine declares remote mode; the panel does not infer it).
  * `on` / `off` are set by the owner or the install guide (`olympus server-mode`);
- * `auto` (the default) decides from the host: a Linux or other Unix host with
- * no desktop session (neither DISPLAY nor WAYLAND_DISPLAY) is a server; macOS
+ * `auto` (the default) checks the current Linux graphical session, not the
+ * display variables inherited by a worker started before login; other Unix
+ * hosts use DISPLAY or WAYLAND_DISPLAY. Without a desktop it is a server; macOS
  * and Windows are computers someone sits at.
  */
 export const SERVER_MODE_ENV = 'OLYMPUS_SERVER_MODE';
@@ -147,8 +148,9 @@ export function resolveAgentApprovalHost(input: {
 }) {
   const platform = input.platform ?? process.platform;
   if (platform !== 'linux') return { platform };
-  const mode = resolveServerMode(input);
-  if (!mode.remote && input.desktopBridgeReady?.()) return { platform, headless: false };
+  const bridgeReady = input.desktopBridgeReady?.() ?? false;
+  const mode = resolveServerMode({ ...input, desktopReady: () => bridgeReady });
+  if (!mode.remote && bridgeReady) return { platform, headless: false };
   // Without a confirmed owner bridge, Linux browsers need the authenticated
   // socket forward. Never suggest an unavailable TCP listener.
   return { platform, headless: true, approvalHandoff: () => {

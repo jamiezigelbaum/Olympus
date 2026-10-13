@@ -53,14 +53,14 @@ export function authorizeBridge(url: URL, options: BridgeOptions): Response {
   const target = `${engineOrigin}/connect/authorize${query}`;
   const nonce = randomBytes(16).toString('base64');
   const app = bridgeAppName(url.searchParams.get('client_id'));
-  const heading = app ? `Approve ${app} on your Mac` : 'Approve on your Mac';
+  const heading = app ? `Approve ${app} on your computer` : 'Approve on your computer';
   const body = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Approve on your Mac · Olympus</title>
+<title>Approve on your computer · Olympus</title>
 <style nonce="${nonce}">
   :root { color-scheme: light dark; --fg: #1d1d1f; --muted: #6e6e73; --bg: #fbfbfd; --accent: #0a66d8; }
   @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --muted: #a1a1a6; --bg: #111113; --accent: #4c9bff; } }
@@ -78,15 +78,15 @@ export function authorizeBridge(url: URL, options: BridgeOptions): Response {
 <body>
 <main>
   <h1>${heading}</h1>
-  <p>Olympus asks for approval on the Mac where it runs, so only you can connect it.</p>
-  <a class="button" id="continue" href="${escapeHtml(target)}">Continue on this Mac</a>
+  <p>Olympus asks for approval on the computer where it runs, so only you can connect it.</p>
+  <a class="button" id="continue" href="${escapeHtml(target)}">Continue on this computer</a>
   ${options.demo ? `<section class="demo">
     <p>Reviewing Olympus for a directory? Use the demo, with made-up sample data.</p>
     <a class="button demo-button" id="demo" href="${escapeHtml(`/connect/demo/authorize${query}`)}">Reviewing Olympus? Sign in to the demo</a>
   </section>` : ''}
   <section id="missing">
     <h2>Olympus did not answer on this computer</h2>
-    <p>Open this page on the Mac where Olympus runs, or install Olympus first.</p>
+    <p>Open this page on the computer where Olympus runs, or install Olympus first.</p>
     <a class="button" href="${escapeHtml(options.installUrl)}" rel="noopener">Install Olympus</a>
   </section>
 </main>

@@ -2892,6 +2892,7 @@ export async function runDashboardCommand(
   const config = loadConfig();
   const base = workerRootBaseUrl(config.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config);
+  let desktopUnavailable = false;
   if ((dependencies.platform ?? process.platform) === 'linux' && !dependencies.noOpen) {
     if (!token) throw new OperationError('config_error', 'No worker auth token is configured. Run olympus setup first.');
     let response: Response;
@@ -2903,6 +2904,7 @@ export async function runDashboardCommand(
     if (!response.ok) throw new OperationError('email_unreachable', result.error ?? result.remedy ?? 'Desktop owner bridge unavailable; use the owner SSH socket forward.');
     if (result.state === 'listening' && result.opened && result.url && result.hint) return { url: result.url, opened: true, hint: result.hint };
     if (result.state !== 'headless') throw new OperationError('email_unreachable', 'Worker did not provide an owner-proven desktop route.');
+    desktopUnavailable = true;
   }
   const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint() });
   const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
@@ -2920,7 +2922,7 @@ export async function runDashboardCommand(
   return {
     url: openUrl,
     opened,
-    hint: handoff ? `On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen
+    hint: handoff ? `${desktopUnavailable ? 'No desktop session is available. ' : ''}On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen
       ? 'This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser.'
       : 'This link carries a single-use 15-minute ticket, not the worker token;'
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'

@@ -115,14 +115,14 @@ describe('live Linux graphical-session readiness', () => {
     expect(probe(0).ready).toBe(true);
   });
 
-  test('an active socket without a qualified GNOME or Hyprland resolver refuses readiness', () => {
+  test.each(['KDE', 'XFCE', 'sway', ''])('an active %s desktop uses the general opener', (desktop) => {
     expect(linuxGraphicalSessionReadiness({
       uid: 1000,
       trustExecutable: TRUSTED,
-      runSync: (argv) => argv.includes('is-active') ? OK('active\n') : OK('XDG_RUNTIME_DIR=/run/user/1000\nWAYLAND_DISPLAY=wayland-1\nXDG_CURRENT_DESKTOP=KDE\n'),
+      runSync: (argv) => argv.includes('is-active') ? OK('active\n') : OK(`XDG_RUNTIME_DIR=/run/user/1000\nWAYLAND_DISPLAY=wayland-1\nXDG_CURRENT_DESKTOP=${desktop}\n`),
       inspectPath: (path) => path.endsWith('wayland-1') ? info('socket', 0o600) : info('directory', 0o700),
       realpath: (path) => path,
-    })).toEqual({ ready: false, reason: 'unsupported_desktop' });
+    })).toMatchObject({ ready: true, kind: 'wayland' });
   });
 });
 

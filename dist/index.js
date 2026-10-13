@@ -14251,10 +14251,6 @@ function linuxGraphicalSessionReadiness(dependencies = {}) {
   if (resolveRealpath(runtime) !== runtime || !runtimeInfo || runtimeInfo.symbolicLink || runtimeInfo.kind !== "directory" || runtimeInfo.uid !== uid || (runtimeInfo.mode & 63) !== 0) {
     return { ready: false, reason: "unsafe_runtime_directory" };
   }
-  const desktop = manager.XDG_CURRENT_DESKTOP;
-  if (!desktop?.split(":").some((name) => /^(?:gnome|hyprland)$/i.test(name))) {
-    return { ready: false, reason: "unsupported_desktop" };
-  }
   const baseEnvironment = sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath);
   const wayland = manager.WAYLAND_DISPLAY;
   if (wayland && /^[A-Za-z0-9_.-]{1,128}$/.test(wayland)) {

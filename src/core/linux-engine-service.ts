@@ -756,13 +756,13 @@ export async function settleLinuxEngineInstall(
 export function linuxInstalledBuild(options: EngineServiceOptions): string | null { return currentProgram(linuxLayoutFor(options))?.build ?? null; }
 export function startLinuxEngine(options: EngineServiceOptions) {
  const l=linuxLayoutFor(options), exec=options.exec ?? linuxEngineExec; assertInstalled(l);
- return locked(l,()=>{ assertNoInterruptedInstall(l); const before=inspectSystemdEngine(l,exec); assertKnown(before); if(before.active)return {ok:true as const,action:'already_running' as const};
+ return locked(l,()=>{ assertNoInterruptedInstall(l); const before=inspectSystemdEngine(l,exec); assertKnown(before); if(before.active){systemdMust(exec,['enable',l.unitPath]);return {ok:true as const,action:'already_running' as const};}
   removeReleasedWorkerSocket(l,before,before,options);systemdMust(exec,['enable',l.unitPath]);systemdMust(exec,['start',SYSTEMD_ENGINE_UNIT]);return {ok:true as const,action:'started' as const}; });
 }
 export function restartLinuxEngine(options: EngineServiceOptions) {
  const l=linuxLayoutFor(options),exec=options.exec ?? linuxEngineExec; assertInstalled(l);
  return locked(l,()=>{assertNoInterruptedInstall(l);const before=inspectSystemdEngine(l,exec);assertKnown(before);waitForQuietEngine(options);if(before.state!=='not_loaded')systemdMust(exec,['stop',SYSTEMD_ENGINE_UNIT]);
-  removeReleasedWorkerSocket(l,before,inspectSystemdEngine(l,exec),options);systemdMust(exec,['link',l.unitPath]);systemdMust(exec,['daemon-reload']);assertKnown(inspectSystemdEngine(l,exec));systemdMust(exec,['start',SYSTEMD_ENGINE_UNIT]);return {ok:true as const,command:['systemctl','--user','start',SYSTEMD_ENGINE_UNIT]};});
+  removeReleasedWorkerSocket(l,before,inspectSystemdEngine(l,exec),options);systemdMust(exec,['link',l.unitPath]);systemdMust(exec,['daemon-reload']);assertKnown(inspectSystemdEngine(l,exec));systemdMust(exec,['enable',l.unitPath]);systemdMust(exec,['start',SYSTEMD_ENGINE_UNIT]);return {ok:true as const,command:['systemctl','--user','start',SYSTEMD_ENGINE_UNIT]};});
 }
 export function stopLinuxEngine(options: EngineServiceOptions & { reap?: EngineChildReapDeps }) {
  const l=linuxLayoutFor(options), exec=options.exec ?? linuxEngineExec; assertInstalled(l);

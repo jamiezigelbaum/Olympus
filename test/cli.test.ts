@@ -1168,6 +1168,7 @@ describe('CLI tool surface', () => {
       }]);
       expect(output).toMatchObject({ url: expectedUrl, opened: !linux });
       if (linux) {
+        expect(output.hint).toContain('No desktop session is available');
         expect(output.hint).toContain(`ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:${socket}`);
         expect(existsSync(openerLog)).toBe(false);
       } else {

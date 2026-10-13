@@ -957,10 +957,6 @@ function linuxGraphicalSessionReadiness(dependencies = {}) {
   if (resolveRealpath(runtime) !== runtime || !runtimeInfo || runtimeInfo.symbolicLink || runtimeInfo.kind !== "directory" || runtimeInfo.uid !== uid || (runtimeInfo.mode & 63) !== 0) {
     return { ready: false, reason: "unsafe_runtime_directory" };
   }
-  const desktop = manager.XDG_CURRENT_DESKTOP;
-  if (!desktop?.split(":").some((name) => /^(?:gnome|hyprland)$/i.test(name))) {
-    return { ready: false, reason: "unsupported_desktop" };
-  }
   const baseEnvironment = sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath);
   const wayland = manager.WAYLAND_DISPLAY;
   if (wayland && /^[A-Za-z0-9_.-]{1,128}$/.test(wayland)) {
@@ -4135,6 +4131,8 @@ ${result.stderr}`.trim().toLowerCase();
       return unitPresent ? "inactive" : "missing";
     if (status === "failed")
       return "failed";
+    if (["activating", "deactivating", "reloading"].includes(status))
+      return "transitioning";
     if (!unitPresent && (result.status === 3 || result.status === 4))
       return "missing";
     return "unknown";
@@ -60684,7 +60682,7 @@ function installEngineUnderFence(options = {}) {
     ...options.cwd ? { cwd: options.cwd } : {}
   });
   const plist = renderEnginePlist({ paths, program, homeDir });
-  const warnings = engineConflictWarnings(homeDir);
+  const warnings = engineConflictWarnings(homeDir, "darwin");
   const sovereigntyBlocker = existsSync36(paths.sovereigntyPath) ? undefined : engineSovereigntySeedBlocker({ homeDir, workerEnvPath: paths.workerEnvPath, env: options.env ?? process.env });
   const base = {
     ok: true,
@@ -61369,11 +61367,12 @@ function tailLines(path, lines) {
     return [];
   }
 }
-function engineConflictWarnings(homeDir) {
+function engineConflictWarnings(homeDir, platform2 = process.platform, env = process.env) {
   const warnings = [];
-  const legacy = workerServicePaths("darwin", homeDir).unitPath;
+  const linux = platform2 === "linux";
+  const legacy = workerServicePaths(linux ? "linux" : "darwin", homeDir, env).unitPath;
   if (existsSync36(legacy)) {
-    warnings.push(`The worker LaunchAgent from olympus worker install is present (${legacy}); it serves the same port. Run olympus worker uninstall so the engine owns the worker.`);
+    warnings.push(`The worker ${linux ? "user service" : "LaunchAgent"} from olympus worker install is present (${legacy}); ${linux ? "it competes for the owner socket" : "it serves the same port"}. Run olympus worker uninstall so the engine owns the worker.`);
   }
   return warnings;
 }
@@ -62573,8 +62572,10 @@ function startLinuxEngine(options) {
     assertNoInterruptedInstall(l);
     const before = inspectSystemdEngine(l, exec);
     assertKnown(before);
-    if (before.active)
+    if (before.active) {
+      systemdMust(exec, ["enable", l.unitPath]);
       return { ok: true, action: "already_running" };
+    }
     removeReleasedWorkerSocket2(l, before, before, options);
     systemdMust(exec, ["enable", l.unitPath]);
     systemdMust(exec, ["start", SYSTEMD_ENGINE_UNIT]);
@@ -62595,6 +62596,7 @@ function restartLinuxEngine(options) {
     systemdMust(exec, ["link", l.unitPath]);
     systemdMust(exec, ["daemon-reload"]);
     assertKnown(inspectSystemdEngine(l, exec));
+    systemdMust(exec, ["enable", l.unitPath]);
     systemdMust(exec, ["start", SYSTEMD_ENGINE_UNIT]);
     return { ok: true, command: ["systemctl", "--user", "start", SYSTEMD_ENGINE_UNIT] };
   });
@@ -74929,8 +74931,9 @@ function resolveAgentApprovalHost(input) {
   const platform2 = input.platform ?? process.platform;
   if (platform2 !== "linux")
     return { platform: platform2 };
-  const mode = resolveServerMode(input);
-  if (!mode.remote && input.desktopBridgeReady?.())
+  const bridgeReady = input.desktopBridgeReady?.() ?? false;
+  const mode = resolveServerMode({ ...input, desktopReady: () => bridgeReady });
+  if (!mode.remote && bridgeReady)
     return { platform: platform2, headless: false };
   return { platform: platform2, headless: true, approvalHandoff: () => {
     if (!mode.sshTarget)
@@ -99079,9 +99082,9 @@ __export(exports_remote_relay_runtime, {
   RELAY_HOST_ENV: () => RELAY_HOST_ENV
 });
 import { randomBytes as randomBytes17 } from "node:crypto";
-async function readSurfaceEntries(target, relaySecret) {
+async function readSurfaceEntries(target, relaySecret, workerFetch2) {
   try {
-    const response = await fetch(`${target}${RELAY_SURFACES_PATH}`, {
+    const response = await workerFetch2(`${target}${RELAY_SURFACES_PATH}`, {
       headers: { [RELAYED_REQUEST_HEADER]: relaySecret },
       signal: AbortSignal.timeout(5000)
     });
@@ -99136,16 +99139,17 @@ async function startRelayRuntime(options) {
   };
   const relaySecret = randomBytes17(32).toString("base64url");
   writeRelaySecret(dir, relaySecret);
+  const workerFetch2 = options.fetch ?? createWorkerFetch({ env: options.env });
   const client = new RelayClient({
     relayHost,
     ...options.relayUrl ? { relayUrl: options.relayUrl } : {},
     identity,
     target,
-    fetch: options.fetch ?? createWorkerFetch({ env: options.env }),
+    fetch: workerFetch2,
     relaySecret,
     forwardedPaths: demoInstallMarked(dir) ? [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH] : FORWARDED_PATHS,
     onStatus,
-    surfaces: () => readSurfaceEntries(target, relaySecret),
+    surfaces: () => readSurfaceEntries(target, relaySecret, workerFetch2),
     ...options.surfaceSyncMs ? { surfaceSyncMs: options.surfaceSyncMs } : {},
     ...options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {},
     ...options.backoff ? { backoff: options.backoff } : {}
@@ -143422,9 +143426,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   let desktopBridge;
   let desktopPoll;
   let desktopPollingClosed = false;
+  const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === "listening" });
   const worker = createEmailSourceWorker({
     ...process.platform === "linux" ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {},
-    agentConnectHost: () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === "listening" }),
+    agentConnectHost: agentApprovalHost,
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
       ...process.platform === "linux" ? { relayInstallId: () => remotePublicUrls()?.installId } : {},
@@ -144070,7 +144075,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     privateModel: chatgptPrivateModelState,
     transcription: dashboardTranscriptionState,
     remote: () => {
-      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv() });
+      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
       const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === "openclaw";
       return mode.remote ? { port, ...process.platform === "linux" ? { socketPath: workerSocketPath() } : {}, ...mode.sshTarget ? { sshTarget: mode.sshTarget } : {}, agent: underOpenClaw && mode.agentRoute } : undefined;
     },
@@ -147023,7 +147028,7 @@ function lifecycleStatus(options) {
   return {
     schema_version: OLYMPUS_LIFECYCLE_SCHEMA_VERSION,
     action: "status",
-    ok: service.state !== "failed" && service.state !== "unknown",
+    ok: ["active", "inactive", "missing"].includes(service.state),
     service,
     lifecycle_transaction: transaction ? {
       state: "interrupted",
@@ -147089,7 +147094,7 @@ function installOrUpgradeLifecycle(action, options) {
     updateTransactionPhase(effective, "activating");
     const serviceAction = runWorkerServiceAction("install", serviceActionOptions(effective));
     const managedBytesChanged = previousUnitBytes !== readManagedFileSnapshot(preview.unit_path) || previousEnvBytes !== readManagedFileSnapshot(preview.env_path);
-    const postInstallRestart = effective.platform === "linux" && before.state === "active" && (action === "upgrade" || managedBytesChanged) ? runWorkerServiceAction("restart", serviceActionOptions(effective)) : undefined;
+    const postInstallRestart = effective.platform === "linux" && (before.state === "active" || before.state === "transitioning") && (action === "upgrade" || managedBytesChanged) ? runWorkerServiceAction("restart", serviceActionOptions(effective)) : undefined;
     updateTransactionPhase(effective, "qualifying");
     const firstService = settleWorkerServiceState(effective, ["active"]);
     if (firstService.state !== "active") {
@@ -147159,7 +147164,7 @@ function activateManagedWorkerFiles(install, effective) {
       throw new OperationError("config_error", `Could not determine the existing Olympus worker state before setup activation: ${before.detail}.`);
     }
     runWorkerServiceAction("install", serviceActionOptions(effective));
-    if (before?.state === "active") {
+    if (before?.state === "active" || before?.state === "transitioning") {
       runWorkerServiceAction("restart", serviceActionOptions(effective));
     }
     const service = settleWorkerServiceState(effective, ["active"]);
@@ -147301,7 +147306,7 @@ function quiesceAttemptedWorker(options) {
   }
   let stopped = inspectWorkerService(serviceActionOptions(options));
   let resetFailedDetail;
-  if (options.platform === "linux" && stopped.state === "failed") {
+  if (options.platform === "linux" && (stopped.state === "failed" || attempted.state === "transitioning")) {
     try {
       resetFailedLinuxWorkerService(options.exec ? { exec: options.exec } : {});
       stopped = inspectWorkerService(serviceActionOptions(options));
@@ -147309,7 +147314,7 @@ function quiesceAttemptedWorker(options) {
       resetFailedDetail = error instanceof Error ? error.message : String(error);
     }
   }
-  if (stopped.state === "active" || stopped.state === "failed" || stopped.state === "unknown") {
+  if (stopped.state !== "inactive" && stopped.state !== "missing") {
     throw new OperationError("config_error", `Olympus lifecycle rollback could not prove the attempted worker was stopped (status ${stopped.state}).`, resetFailedDetail);
   }
 }
@@ -148701,7 +148706,7 @@ async function engineStatusReport(deps = {}) {
       public_personal: "answered in ChatGPT from evidence returned by the Olympus MCP tools",
       private: "answered by the configured local model or Venice; never sent to ChatGPT"
     },
-    warnings: engineConflictWarnings(homeDir),
+    warnings: engineConflictWarnings(homeDir, deps.platform ?? process.platform, env),
     missing
   };
 }
@@ -151155,6 +151160,7 @@ async function runDashboardCommand(dependencies = {}) {
   const config2 = loadConfig();
   const base = workerRootBaseUrl(config2.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config2);
+  let desktopUnavailable = false;
   if ((dependencies.platform ?? process.platform) === "linux" && !dependencies.noOpen) {
     if (!token)
       throw new OperationError("config_error", "No worker auth token is configured. Run olympus setup first.");
@@ -151181,6 +151187,7 @@ async function runDashboardCommand(dependencies = {}) {
       return { url: result.url, opened: true, hint: result.hint };
     if (result.state !== "headless")
       throw new OperationError("email_unreachable", "Worker did not provide an owner-proven desktop route.");
+    desktopUnavailable = true;
   }
   const openUrl = await mintDashboardOpeningUrl(base, token, { ...dependencies, commandHint: olympusCommandHint2() });
   const socketPath = validateWorkerSocket(dependencies.platform ? { platform: dependencies.platform } : {});
@@ -151196,7 +151203,7 @@ async function runDashboardCommand(dependencies = {}) {
   return {
     url: openUrl,
     opened,
-    hint: handoff ? `On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen ? "This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser." : `This link carries a single-use 15-minute ticket, not the worker token; open it in the browser you want unlocked, and the dashboard unlocks itself. For the read-only view link instead, run ${olympusCommandHint2()} dashboard --read-only.`
+    hint: handoff ? `${desktopUnavailable ? "No desktop session is available. " : ""}On your trusted computer, run: ${handoff} Then open the fresh link in its browser.` : dependencies.noOpen ? "This fresh single-use 15-minute link was not opened locally and is ready to hand to the intended browser." : `This link carries a single-use 15-minute ticket, not the worker token; open it in the browser you want unlocked, and the dashboard unlocks itself. For the read-only view link instead, run ${olympusCommandHint2()} dashboard --read-only.`
   };
 }
 async function runOpenCommand(args, dependencies = {}) {

@@ -4326,9 +4326,10 @@ export async function main(): Promise<void> {
   let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | undefined;
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
   let desktopPollingClosed = false;
+  const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
   const worker = createEmailSourceWorker({
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
-    agentConnectHost: () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' }),
+    agentConnectHost: agentApprovalHost,
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
       ...(process.platform === 'linux' ? { relayInstallId: () => remotePublicUrls()?.installId } : {}),
@@ -5185,7 +5186,7 @@ export async function main(): Promise<void> {
     // computer for them; anywhere else (a hand-run worker, or a Hermes
     // install that turned the route off) the panel shows the by-hand lines only.
     remote: () => {
-      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv() });
+      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
       const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw';
       return mode.remote
         ? { port, ...(process.platform === 'linux' ? { socketPath: workerSocketPath()! } : {}), ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw && mode.agentRoute }

@@ -16,7 +16,7 @@ import { isWorkerAuthTokenPlaceholder } from './worker-auth.ts';
 
 export type WorkerServicePlatform = 'darwin' | 'linux';
 export type WorkerServiceAction = 'install' | 'status' | 'start' | 'stop' | 'restart' | 'uninstall';
-export type WorkerServiceState = 'active' | 'inactive' | 'failed' | 'missing' | 'unknown';
+export type WorkerServiceState = 'active' | 'inactive' | 'failed' | 'transitioning' | 'missing' | 'unknown';
 
 export interface WorkerServiceExecResult {
   status: number | null;
@@ -465,6 +465,9 @@ function classifyWorkerServiceState(
     if (result.status === 0 && status === 'active') return 'active';
     if (status === 'inactive') return unitPresent ? 'inactive' : 'missing';
     if (status === 'failed') return 'failed';
+    // These units may still own processes or a queued automatic restart.
+    // They can be stopped, but do not qualify as healthy or quiescent.
+    if (['activating', 'deactivating', 'reloading'].includes(status)) return 'transitioning';
     if (!unitPresent && (result.status === 3 || result.status === 4)) return 'missing';
     return 'unknown';
   }

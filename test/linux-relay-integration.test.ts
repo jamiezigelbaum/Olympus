@@ -1,5 +1,5 @@
 // OLYMPUS_TEST_LANE: deploy
-import { expect, test } from 'bun:test';
+import { expect, test, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,3 +59,30 @@ test('all Linux agent credentials reach the owner socket through the outbound re
     expect(server.hostname).toBeUndefined();
   } finally { client.stop(); server.stop(true); store.close(); await relay.close(); rmSync(root, { recursive: true, force: true }); }
 }, 15_000);
+
+import { startRelayRuntime } from '../src/core/remote-relay-runtime.ts';
+import { RELAYED_REQUEST_HEADER, RELAY_SURFACES_PATH } from '../src/core/remote-access.ts';
+test.skipIf(process.platform !== 'linux')('runtime surface sync uses the owner socket and never sends its boot secret to TCP', async () => {
+ const root=mkdtempSync(join(tmpdir(),'relay-sync-'));
+ const env={HOME:root,XDG_RUNTIME_DIR:root,OLYMPUS_RELAY_HOST:'relay.example',OLYMPUS_RELAY_TARGET:'http://127.0.0.1:8010'};
+ const path=prepareWorkerSocket({env})!;
+ let socketReads=0, tcpSecrets=0;
+ const server=bindWorkerSocket(path,()=>Bun.serve({unix:path,fetch:request=>{
+  if(new URL(request.url).pathname===RELAY_SURFACES_PATH && request.headers.has(RELAYED_REQUEST_HEADER)) socketReads++;
+  return Response.json({v:1,entries:[]});
+ }}));
+ const relay=await startRelay({publicHost:'relay.example',registry:new MemoryInstallRegistry(),listen:{host:'127.0.0.1',port:0},log:()=>{}});
+ const nativeFetch=globalThis.fetch;
+ const spy=spyOn(globalThis,'fetch').mockImplementation(((input: RequestInfo | URL,init?: RequestInit)=>{
+  if(new Headers(init?.headers).has(RELAYED_REQUEST_HEADER) && !(init as RequestInit & {unix?:string})?.unix) {
+   tcpSecrets++; return Promise.resolve(new Response('',{status:503}));
+  }
+  return nativeFetch(input,init);
+ }) as typeof fetch);
+ let runtime: Awaited<ReturnType<typeof startRelayRuntime>> | undefined;
+ try {
+  runtime=await startRelayRuntime({env,instanceId:'fixture',relayUrl:`ws://127.0.0.1:${relay.port}/v2/connect`,surfaceSyncMs:25});
+  const until=Date.now()+1500;while(!socketReads && !tcpSecrets && Date.now()<until)await Bun.sleep(10);
+  expect(tcpSecrets).toBe(0);expect(socketReads).toBeGreaterThan(0);
+ } finally {await runtime?.stop();spy.mockRestore();server.stop(true);await relay.close();rmSync(root,{recursive:true,force:true});}
+},10000);

@@ -249,7 +249,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
       public_personal: 'answered in ChatGPT from evidence returned by the Olympus MCP tools',
       private: 'answered by the configured local model or Venice; never sent to ChatGPT',
     },
-    warnings: engineConflictWarnings(homeDir),
+    warnings: engineConflictWarnings(homeDir, deps.platform ?? process.platform, env),
     missing,
   };
 }
