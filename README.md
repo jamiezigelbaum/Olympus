@@ -98,7 +98,8 @@ sudo pacman -S --needed tesseract tesseract-data-eng poppler libvips libheif ffm
 curl -fsSL https://olympusplugin.ai/install-linux.sh | sh
 ```
 
-Either installs Olympus for your user only (no administrator password),
+Either installs Olympus for your user only (the installer itself needs no
+administrator password; on Omarchy, the `pacman` line above does),
 checks every download against a pinned SHA-256 before using it, keeps Olympus
 running in the background (a LaunchAgent on a Mac, a systemd user service on
 Omarchy), adds the `olympus` command, and waits until the engine proves it is
