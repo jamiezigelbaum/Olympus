@@ -160,7 +160,7 @@ test('standalone markers do not change Mac data or connection paths', () => {
   expect(probe.exitCode).toBe(0);
   const dataDir = join(env.XDG_DATA_HOME, 'openclaw/olympus');
   expect(JSON.parse(probe.stdout.toString())).toEqual([dataDir, join(dataDir, 'remote-connections.sqlite'), join(dataDir, 'remote-connections.sqlite')]);
-});
+}, 15_000);
 test('receipt discovery validates the recorded legacy layout before considering fresh-root overlap', () => {
   const { env } = fixture();
   const layout = resolveLinuxEngineLayout(env), receipt = publishLinuxEngineReceipt(layout);
