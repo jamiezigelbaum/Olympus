@@ -141,7 +141,7 @@ test('a chunk already written can be freed while the next read is still pending'
         controller.enqueue(new Uint8Array(block));
         controller.close();
       },
-    }), { status: 206, headers: { 'Content-Range': `bytes 0-${size - 1}/${size}` } })) as typeof fetch,
+    }), { status: 206, headers: { 'Content-Range': `bytes 0-${size - 1}/${size}` } })) as unknown as typeof fetch,
     url: 'https://test/model', target, partial: `${target}.partial`, expectedBytes: size,
     algorithm: 'sha256', digest: digest(size), encoding: 'hex', noun: 'test model',
     stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: false,
