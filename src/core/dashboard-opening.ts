@@ -131,14 +131,14 @@ export async function mintDashboardOpeningUrl(
   } catch {
     throw new OperationError(
       'email_unreachable',
-      'The configured Olympus worker did not answer the opening request.',
+      `The Olympus worker at ${base} did not answer the opening request.`,
       `Start the worker (${hint} worker status) and run this again.`,
     );
   }
   if (!response.ok) {
     throw new OperationError(
       'email_unreachable',
-      `The configured Olympus worker refused the opening request with HTTP ${response.status}.`,
+      `The Olympus worker at ${base} refused the opening request with HTTP ${response.status}.`,
       `Check ${hint} worker status, then run this again.`,
     );
   }

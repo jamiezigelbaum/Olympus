@@ -1,7 +1,16 @@
 # Google token-exchange endpoint
 
-Status: canonical for the publisher-owned Google token exchange — **legacy
-only since 2026-10-13**
+Status: **RETIRED 2026-10-13** — historical record of the publisher-owned
+Google token exchange
+
+**Retired 2026-10-13, before the 1.0.0 launch (owner's go).** The Worker
+`olympus-google-exchange`, its route `auth.olympusplugin.ai/exchange/*`, its
+secrets, and the `RATE_LIMIT_KV` namespace with every stored account hash and
+first-sign-in time were deleted, following "Retirement" below. The return page
+at `auth.olympusplugin.ai/oauth/callback/` stays: Dropbox uses it. A Google
+connection that still records `exchangeVia: 'publisher_endpoint'` (made by a
+1.0.0 release candidate) can no longer refresh; it needs Olympus 1.0.0 and
+then **Reconnect Google**. Everything below describes the Worker as it was.
 
 **Legacy (owner decision 2026-10-13).** New Google sign-ins no longer use this
 Worker: they happen on the user's computer with Olympus's Google Desktop

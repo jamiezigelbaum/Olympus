@@ -20,10 +20,11 @@ import {
   type SourceCorpusRegistry,
 } from '../core/source-corpus-registry.ts';
 import { SOURCE_TRUST_DOMAINS } from '../core/source-index/types.ts';
-import type {
-  SovereigntyEngine,
-  SovereigntyModelProfile,
-  SovereigntyProfileProvider,
+import {
+  isPublicTierRetired,
+  type SovereigntyEngine,
+  type SovereigntyModelProfile,
+  type SovereigntyProfileProvider,
 } from '../core/sovereignty.ts';
 import type { ConnectedHandleRegistry, ConnectedCredentialHandle } from './credential-broker/connected-handles.ts';
 import { WHATSAPP_UNOFFICIAL_CLIENT_NOTICE } from '../core/whatsapp-notice.ts';
@@ -1612,6 +1613,19 @@ export const DASHBOARD_SENSITIVITY_TIERS: DashboardSensitivityTiers = {
   ],
 };
 
+/**
+ * The sensitivity table for this install's policy: without a Public tier
+ * (every install made from 1.0 on) the S0 Public row is left out, since
+ * nothing is ever placed there; an older policy keeps it.
+ */
+export function dashboardSensitivityTiers(sovereigntyEngine: SovereigntyEngine): DashboardSensitivityTiers {
+  if (!isPublicTierRetired(sovereigntyEngine.config)) return DASHBOARD_SENSITIVITY_TIERS;
+  return {
+    ...DASHBOARD_SENSITIVITY_TIERS,
+    tiers: DASHBOARD_SENSITIVITY_TIERS.tiers.filter((tier) => tier.tier_label !== 'S0'),
+  };
+}
+
 export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] = [
   {
     source_id: 'gmail.email',
@@ -2256,7 +2270,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // opens a store of its own, so the exclusion facts arrive the same way the
     // per-source ingestion health does.
     excluded_by_configuration: excludedByConfiguration,
-    sensitivity_tiers: DASHBOARD_SENSITIVITY_TIERS,
+    sensitivity_tiers: dashboardSensitivityTiers(options.sovereigntyEngine),
     folder_picker: folderPicker,
     sources: cardsWithProgress,
     history: {
@@ -4962,13 +4976,17 @@ function trustDomainCards(
   unassigned: DashboardUnassignedCorpora,
   sovereigntyEngine: SovereigntyEngine,
 ): DashboardTrustDomainCard[] {
-  // The three product tiers always render, in this order, even at zero. Any
-  // other trust domain reaching this page still gets a card appended, so the
-  // tier totals can never sum to less than "Items found".
+  // The product tiers always render, in this order, even at zero; Public only
+  // where the policy keeps a Public tier (installs made before 1.0). Any
+  // other trust domain reaching this page, Public included, still gets a card
+  // appended, so the tier totals can never sum to less than "Items found".
+  const productDomains = isPublicTierRetired(sovereigntyEngine.config)
+    ? DASHBOARD_TRUST_DOMAINS.filter((trustDomain) => trustDomain !== 'public_safe')
+    : DASHBOARD_TRUST_DOMAINS;
   const extraDomains = [...sourceCards.flatMap((card) => card.tier_composition.map((tier) => tier.trust_domain)),
     ...unassigned.entries.map((entry) => entry.trust_domain)]
-    .filter((trustDomain) => !DASHBOARD_TRUST_DOMAINS.includes(trustDomain));
-  return [...DASHBOARD_TRUST_DOMAINS, ...new Set(extraDomains)].map((trustDomain) => {
+    .filter((trustDomain) => !productDomains.includes(trustDomain));
+  return [...productDomains, ...new Set(extraDomains)].map((trustDomain) => {
     // Count per corpus tier, not per source: one source (Gmail) legitimately
     // spans tiers once items classify individually.
     const tiers = sourceCards.flatMap((card) => card.tier_composition.filter((tier) => tier.trust_domain === trustDomain));

@@ -11,7 +11,7 @@ import {
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import {
   formatCliFatalError,
   runDashboardCommand,
@@ -330,14 +330,30 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
-  test('every declared public leaf command has non-executing help', async () => {
-    for (const command of V0_4_PUBLIC_CLI_COMMANDS) {
+  test('dashboard sends the worker token to the port worker.env gives the engine', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-cli-dashboard-port-'));
+    try {
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, '.config', 'olympus', 'worker.env'), 'OLYMPUS_EMAIL_SOURCE_PORT=1\nOLYMPUS_WORKER_AUTH_TOKEN=port-test-token\n', { mode: 0o600 });
+      const result = await runBinExit(['dashboard', '--no-open'], { HOME: home, OLYMPUS_CONFIG: join(home, 'missing-config.json') });
+      expect(result.code).toBe(1);
+      const output = `${result.stdout}${result.stderr}`;
+      expect(output).toContain('127.0.0.1:1');
+      expect(output).not.toContain('127.0.0.1:8010');
+      expect(output).not.toContain('port-test-token');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  for (const command of V0_4_PUBLIC_CLI_COMMANDS) {
+    test(`public leaf ${command} has non-executing help`, async () => {
       const result = await runBinExit([...command.split(' '), '--help']);
       expect(result.code).toBe(0);
       expect(result.stdout).toContain(`Usage: olympus ${command}`);
       expect(result.stderr).toBe('');
-    }
-  }, 30_000);
+    }, 30_000);
+  }
 
   test('every command group answers a bare --help with its usage', async () => {
     const groups = new Set(V0_4_PUBLIC_CLI_COMMANDS.filter((command) => command.includes(' ')).map((command) => command.split(' ')[0]!));
@@ -684,7 +700,7 @@ describe('CLI tool surface', () => {
         home,
       ], {
         cwd: process.cwd(),
-        env: { PATH: `${binDir}:${process.env.PATH ?? ''}` },
+        env: { HOME: home, PATH: `${binDir}:${process.env.PATH ?? ''}` },
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -997,6 +1013,57 @@ describe('CLI tool surface', () => {
         env.restore();
       }
     } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('the opening link is minted at the worker.env port, and never off this computer', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-dashboard-worker-env-origin-'));
+    const sent: Array<{ url: string; init: RequestInit }> = [];
+    const workerEnv = writeWorkerEnv(home, 'worker-env-port-token');
+    const env = withTemporaryEnv({
+      HOME: home,
+      OLYMPUS_CONFIG: join(home, 'missing-config.json'),
+      OLYMPUS_EMAIL_BASE_URL: undefined,
+      OLYMPUS_WORKER_AUTH_TOKEN: undefined,
+    });
+    try {
+      for (const [lines, origin] of [
+        ['OLYMPUS_EMAIL_SOURCE_PORT=8123\n', 'http://127.0.0.1:8123'],
+        ['OLYMPUS_EMAIL_SOURCE_HOST=0.0.0.0\nOLYMPUS_EMAIL_SOURCE_PORT=8124\n', 'http://127.0.0.1:8124'],
+        // The worker's canonical bind host outranks the legacy one, as the worker itself reads them.
+        ['OLYMPUS_WORKER_BIND_HOST=::1\nOLYMPUS_EMAIL_SOURCE_HOST=127.0.0.1\nOLYMPUS_EMAIL_SOURCE_PORT=8125\n', 'http://[::1]:8125'],
+      ] as const) {
+        sent.length = 0;
+        writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\n${lines}`);
+        const result = await runDashboardCommand({
+          platform: 'darwin',
+          fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+          noOpen: true,
+        });
+        expect(sent.map((request) => request.url)).toEqual([`${origin}/dashboard/control/launch`]);
+        expect(new Headers(sent[0]?.init.headers).get('Authorization')).toBe('Bearer worker-env-port-token');
+        expect(new URL(result.url).origin).toBe(origin);
+      }
+
+      for (const hosts of [
+        'OLYMPUS_EMAIL_SOURCE_HOST=192.0.2.10\n',
+        'OLYMPUS_WORKER_BIND_HOST=192.0.2.10\nOLYMPUS_EMAIL_SOURCE_HOST=127.0.0.1\n',
+      ]) {
+        sent.length = 0;
+        writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\n${hosts}OLYMPUS_EMAIL_SOURCE_PORT=8123\n`);
+        const error = await runDashboardCommand({
+          platform: 'darwin',
+          fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+          noOpen: true,
+        }).catch((failure: unknown) => failure);
+        expect(error).toBeInstanceOf(OperationError);
+        expect((error as OperationError).code).toBe('config_error');
+        expect((error as Error).message).toContain('not a local address');
+        expect(sent).toHaveLength(0);
+      }
+    } finally {
+      env.restore();
       rmSync(home, { recursive: true, force: true });
     }
   }, 30_000);
@@ -1395,7 +1462,7 @@ describe('CLI tool surface', () => {
         path,
       ], {
         cwd: process.cwd(),
-        env: { PATH: process.env.PATH ?? '' },
+        env: isolatedCliEnv(),
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -1432,7 +1499,7 @@ describe('CLI tool surface', () => {
         process.execPath, 'src/cli.ts', 'sovereignty', 'init', '--preset', 'local-only', '--path', path, '--force',
       ], {
         cwd: process.cwd(),
-        env: { PATH: process.env.PATH ?? '' },
+        env: isolatedCliEnv(),
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -1512,6 +1579,7 @@ describe('CLI tool surface', () => {
       ], {
         cwd: process.cwd(),
         env: {
+          HOME: dir,
           PATH: process.env.PATH ?? '',
           OLYMPUS_CONNECT_VENICE_MODELS_URL: modelsUrl,
         },
@@ -1565,7 +1633,7 @@ describe('CLI tool surface', () => {
         join(dir, 'secrets.key'),
       ], {
         cwd: process.cwd(),
-        env: { PATH: process.env.PATH ?? '' },
+        env: isolatedCliEnv(),
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -1599,6 +1667,7 @@ async function runToolsJson(config: Record<string, unknown>): Promise<Array<{ na
     const proc = Bun.spawn([process.execPath, 'src/cli.ts', '--tools-json'], {
       cwd: process.cwd(),
       env: {
+        HOME: dir,
         PATH: process.env.PATH ?? '',
         OLYMPUS_CONFIG: configPath,
       },
@@ -1619,13 +1688,27 @@ async function runToolsJson(config: Record<string, unknown>): Promise<Array<{ na
   }
 }
 
+// No child may fall back to the runner's passwd home (which need not exist).
+const cliHomes: string[] = [];
+afterEach(() => {
+  for (const home of cliHomes.splice(0)) rmSync(home, { recursive: true, force: true });
+});
+function isolatedCliEnv(env: Record<string, string | undefined> = {}): Record<string, string | undefined> {
+  let home = env.HOME;
+  if (!home) {
+    home = mkdtempSync(join(tmpdir(), 'olympus-cli-child-'));
+    cliHomes.push(home);
+  }
+  return { PATH: process.env.PATH ?? '', ...env, HOME: home };
+}
+
 async function runBin(
   args: string[],
   env: Record<string, string | undefined> = {},
 ): Promise<{ stdout: string; stderr: string }> {
   const proc = Bun.spawn(['bin/olympus', ...args], {
     cwd: process.cwd(),
-    env: { PATH: process.env.PATH ?? '', ...env },
+    env: isolatedCliEnv(env),
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -1646,7 +1729,7 @@ async function runBinExit(
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   const proc = Bun.spawn(['bin/olympus', ...args], {
     cwd: process.cwd(),
-    env: { PATH: process.env.PATH ?? '', ...env },
+    env: isolatedCliEnv(env),
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -1664,7 +1747,7 @@ async function runSourceCli(
 ): Promise<{ stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, 'src/cli.ts', ...args], {
     cwd: process.cwd(),
-    env: { PATH: process.env.PATH ?? '', ...env },
+    env: isolatedCliEnv(env),
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -1685,7 +1768,7 @@ async function runSourceCliExit(
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   const proc = Bun.spawn([process.execPath, 'src/cli.ts', ...args], {
     cwd: process.cwd(),
-    env: { PATH: process.env.PATH ?? '', ...env },
+    env: isolatedCliEnv(env),
     stdout: 'pipe',
     stderr: 'pipe',
   });

@@ -210,13 +210,14 @@ function prepareRelayStart(
 /**
  * The worker the relay forwards to, as the worker itself binds it: a
  * Gateway-managed worker listens on `email.baseUrl`; a worker run from
- * worker.env listens on its OLYMPUS_EMAIL_SOURCE_HOST/PORT.
+ * worker.env listens on its OLYMPUS_WORKER_BIND_HOST (else the legacy
+ * OLYMPUS_EMAIL_SOURCE_HOST) and OLYMPUS_EMAIL_SOURCE_PORT.
  */
 function workerOrigin(config: OlympusConfig, env: NodeJS.ProcessEnv): string | undefined {
   if (!config.worker.service.enabled) {
     const port = env.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
     if (port && /^\d{1,5}$/.test(port)) {
-      const host = env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || '127.0.0.1';
+      const host = env.OLYMPUS_WORKER_BIND_HOST?.trim() || env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || '127.0.0.1';
       return loopbackWorkerOrigin(`http://${host === '::1' ? '[::1]' : host}:${port}`);
     }
   }

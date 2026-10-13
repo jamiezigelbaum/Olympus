@@ -13740,6 +13740,7 @@ var init_source_dashboard = __esm(() => {
   init_ingestion_throughput();
   init_source_corpus_registry();
   init_types();
+  init_sovereignty();
   init_scheduler_markers();
   init_source_failure();
   init_answer_ready_coverage();
@@ -14827,10 +14828,10 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
       signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
     });
   } catch {
-    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${hint} worker status) and run this again.`);
+    throw new OperationError("email_unreachable", `The Olympus worker at ${base} did not answer the opening request.`, `Start the worker (${hint} worker status) and run this again.`);
   }
   if (!response.ok) {
-    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${hint} worker status, then run this again.`);
+    throw new OperationError("email_unreachable", `The Olympus worker at ${base} refused the opening request with HTTP ${response.status}.`, `Check ${hint} worker status, then run this again.`);
   }
   let ticket;
   try {
@@ -18862,7 +18863,7 @@ function workerOrigin(config, env) {
   if (!config.worker.service.enabled) {
     const port = env.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
     if (port && /^\d{1,5}$/.test(port)) {
-      const host = env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+      const host = env.OLYMPUS_WORKER_BIND_HOST?.trim() || env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
       return loopbackWorkerOrigin(`http://${host === "::1" ? "[::1]" : host}:${port}`);
     }
   }
