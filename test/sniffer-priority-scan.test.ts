@@ -55,3 +55,34 @@ for (const scenario of ['new metadata', 'new content', 'promoted'] as const) {
     } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
   }, 30_000);
 }
+
+test('re-enqueueing unchanged priority work keeps the recent scan moving through a blocked backlog', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sniffer-priority-'));
+  const dbPath = join(root, 'queue.sqlite');
+  const now = () => new Date('2026-10-13T00:00:00Z');
+  const store = new TierSnifferStore({ dbPath, now });
+  try {
+    const seed = new Database(dbPath);
+    try {
+      seed.query(`WITH RECURSIVE backlog(n) AS (
+        VALUES(1) UNION ALL SELECT n + 1 FROM backlog WHERE n < 5000
+      ) INSERT INTO sniffer_questions
+        (provider, account_scope, provider_item_id, pass, material_hash,
+         map_revision, material, flags_json, queued_at, priority)
+      SELECT 'fixture', 'synthetic', 'blocked-' || n, 'metadata', 'fixture-hash',
+        'none', 'synthetic question', '[]', '2026-01-01T00:00:00.000Z', 10 FROM backlog`).run();
+    } finally { seed.close(); }
+    const seen = new Set<string>();
+    for (let tick = 0; tick < 3; tick++) {
+      // A sync re-enqueues an already-queued held record with the same priority.
+      store.enqueue({
+        subject: { provider: 'fixture', accountScope: 'synthetic', providerItemId: 'blocked-1' },
+        pass: 'metadata', material: 'synthetic question', mapRevision: 'none', flags: [], priority: 10,
+      });
+      store.listQuestions({ pass: 'metadata', limit: 500, eligible: question => { seen.add(question.providerItemId); return false; } });
+    }
+    // Three ticks of 500 recent plus 500 oldest rows: 3000 distinct when both
+    // cursors advance, 2000 if every re-enqueue rewinds the recent scan.
+    expect(seen.size).toBe(3000);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+}, 30_000);

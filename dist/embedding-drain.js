@@ -16843,6 +16843,10 @@ class TierSnifferStore {
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk())
         return false;
+      const before = this.db.query(`
+        SELECT priority FROM sniffer_questions
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+      `).get(...subjectParams(question.subject), question.pass);
       this.db.query(`
       INSERT INTO sniffer_questions (
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
@@ -16857,7 +16861,7 @@ class TierSnifferStore {
         priority = excluded.priority,
         flags_json = excluded.flags_json
     `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority);
-      if (priority > 0) {
+      if (priority > 0 && (!before || priority > before.priority)) {
         this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
       }
       return true;
