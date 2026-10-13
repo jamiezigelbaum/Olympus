@@ -1591,3 +1591,32 @@ its approved render. Exact HTML and candidate hashes are in the owner's
 `olympus-wt/tier-review-evidence/design-states/` handoff; the anchor owns approval
 and the rendered-state receipt update. This preparation does not authorize
 pushing, publishing Linux installers, relay deployment, or a live upgrade.
+
+### 1.0.0 lifecycle follow-up (2026-10-13)
+
+Full purge removes empty state/cache `olympus` parents only when the installer
+recorded creating them and the private directory's device/inode still matches.
+Older receipts and pre-existing parents confer no cleanup authority. Nonempty
+parents and replacements stay. Failed-install recovery preserves this ownership.
+
+Kept-data adoption remains deferred: existing `data_retained` receipts have no
+retained inventory, so a deleted optional store or privacy file cannot be told
+apart from one never created. Removing the refusal would seed missing settings;
+the recovery journal also does not accept that prior receipt state. Retain the
+refusal until a completeness contract and migration/recovery proof exist. This
+is the builder brief's P0 skip-and-flag disposition, not an adoption implementation.
+
+Systemd registration uses the known default user unit-link location, not the
+localized `systemctl link` diagnostic. The install journal records which link
+paths were absent before the command. Failed activation removes only those
+new links whose owner and target still match, including when the command
+creates a link then fails; previous links are journaled and restored after disable, followed by a manager
+reload. A changed target
+refuses recovery and retains the journal. This also covers HOME paths with
+spaces and a custom XDG_CONFIG_HOME.
+
+Validation boundary: directory identity checking and `rmdir` are not one atomic
+operation against another process running as the same UID. A concurrent swap
+can lose an empty replacement directory, but `rmdir` cannot remove its contents
+or follow a final-component symlink. No rename/quarantine step is used, avoiding
+new data-orphaning risk. This metadata-only residual is disclosed for anchor review.

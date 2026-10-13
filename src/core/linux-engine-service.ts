@@ -1,7 +1,7 @@
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { userInfo } from 'node:os';
@@ -354,6 +354,9 @@ interface LinuxInstallTransaction {
  generationCreated?: boolean;
  generationArtifact?:LinuxMachineArtifact;
  desktopIconSha256?:string;
+ /** Write-ahead intent: only unit-search links absent before systemctl link. */
+ newUnitLinks?:string[];
+ priorUnitLinks?:Array<{path:string;target:string}>;
  backupDir:string;
  backupDevice:number;
  backupInode:number;
@@ -368,6 +371,33 @@ interface LinuxInstallTransaction {
  };
 }
 interface LinuxFileSnapshot{present:boolean;backupPath?:string;sha256?:string;mode?:number;}
+
+function unitLinkCandidates(layout: LinuxEngineLayout): string[] {
+ return [join(layout.home, '.config/systemd/user', SYSTEMD_ENGINE_UNIT)].filter(path => path !== layout.unitPath);
+}
+function ownedUnitLink(layout: LinuxEngineLayout, path: string): boolean {
+ const info = lstatSync(path, { throwIfNoEntry: false });
+ if (!info) return false;
+ assertLinuxManagedPath(dirname(path), process.getuid!(), 'directory');
+ if (!info.isSymbolicLink() || info.uid !== process.getuid!()
+   || resolve(dirname(path), readlinkSync(path)) !== layout.unitPath) {
+  throw new Error(`The systemd unit link changed at ${path}; it was retained.`);
+ }
+ return true;
+}
+function restorePriorUnitLinks(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
+ for (const {path,target} of transaction.priorUnitLinks ?? []) {
+  if (ownedUnitLink(layout,path)) continue;
+  assertLinuxManagedPath(dirname(path),process.getuid!(),'directory');
+  symlinkSync(target,path);
+  syncDirectorySync(dirname(path));
+ }
+}
+function removeNewUnitLinks(layout: LinuxEngineLayout, transaction: LinuxInstallTransaction): void {
+ for (const path of transaction.newUnitLinks ?? []) {
+  if (ownedUnitLink(layout, path)) removeFileDurablySync(path);
+ }
+}
 
 function transactionPath(layout: LinuxEngineLayout): string { return join(layout.stateDir, 'install-transaction.json'); }
 function transactionManagedFiles(layout: LinuxEngineLayout, desktop = true): string[] {
@@ -388,7 +418,8 @@ function createInstallTransaction(input:{layout:LinuxEngineLayout;action:'instal
  const files:Record<string,LinuxFileSnapshot>={};let index=0;
  for(const path of transactionManagedFiles(input.layout)){const text=existsSync(path)?readFileSync(path):null;const mode=text===null?0o600:lstatSync(path).mode&0o777;files[path]=writeSnapshot(backupDir,index++,text,mode);}
  const receipt=writeSnapshot(backupDir,index,input.receiptText);
- return {schema:'olympus.engine.install-transaction.v1',action:input.action,phase:input.phase,stagingPath:join(input.layout.packageDir,`.prepare-${process.pid}-${randomUUID()}`),
+ const priorUnitLinks=unitLinkCandidates(input.layout).filter(path=>ownedUnitLink(input.layout,path)).map(path=>({path,target:readlinkSync(path)}));
+ return {schema:'olympus.engine.install-transaction.v1',priorUnitLinks,action:input.action,phase:input.phase,stagingPath:join(input.layout.packageDir,`.prepare-${process.pid}-${randomUUID()}`),
   backupDir,backupDevice:root.dev,backupInode:root.ino,before:{active:input.active,enabled:input.enabled,enabledRuntime:input.enabledRuntime,files,receipt,
    absentCreatedFiles:transactionCreatedFiles(input.layout).filter(path=>!existsSync(path))}};
 }
@@ -410,6 +441,12 @@ function readInstallTransaction(layout: LinuxEngineLayout): LinuxInstallTransact
    &&/^[0-9a-f]{64}$/.test(snapshot.sha256??'')&&Number.isInteger(snapshot.mode)&&snapshot.mode!>=0&&snapshot.mode!<=0o777));
  const createdAllowed=new Set(transactionCreatedFiles(layout));const absent=value?.before?.absentCreatedFiles;
  if (value.schema !== 'olympus.engine.install-transaction.v1'||!['install','rollback'].includes(value.action)|| !['preparing','activating','rollback_required','qualified','recovered'].includes(value.phase)
+  ||(value.priorUnitLinks!==undefined&&(!Array.isArray(value.priorUnitLinks)
+    ||new Set(value.priorUnitLinks.map(entry=>entry?.path)).size!==value.priorUnitLinks.length
+    ||value.priorUnitLinks.some(entry=>!entry||!unitLinkCandidates(layout).includes(entry.path)||typeof entry.target!=='string'
+      ||/[\x00-\x1f\x7f]/.test(entry.target)||resolve(dirname(entry.path),entry.target)!==layout.unitPath)))
+  ||(value.newUnitLinks!==undefined&&(!Array.isArray(value.newUnitLinks)||new Set(value.newUnitLinks).size!==value.newUnitLinks.length
+    ||value.newUnitLinks.some(path=>!unitLinkCandidates(layout).includes(path))))
   ||(value.desktopIconSha256!==undefined&&(!hasDesktop||!/^[0-9a-f]{64}$/.test(value.desktopIconSha256)))
   || (value.before?.enabledRuntime!==undefined&&(typeof value.before.enabledRuntime!=='boolean'||(value.before.enabledRuntime&&!value.before.enabled)))
   || typeof value.before?.active!=='boolean'||typeof value.before?.enabled!=='boolean'||!snapshotValid(value.before?.receipt)
@@ -476,18 +513,22 @@ function restoreInstallTransaction(layout: LinuxEngineLayout, exec: EngineExec, 
  if (!transaction) return undefined;
  assertDesktopTransactionTargets(layout,transaction);
  if (transaction.phase === 'qualified' || transaction.phase === 'recovered' || transaction.phase === 'rollback_required') return transaction;
+ // disable may unlink registration links itself. Validate custody before it runs.
+ for (const path of [...(transaction.newUnitLinks??[]),...(transaction.priorUnitLinks??[]).map(entry=>entry.path)]) ownedUnitLink(layout,path);
  const currentFacts = inspectSystemdEngine(layout, exec);
  assertKnown(currentFacts);
  if (currentFacts.state !== 'not_loaded'||currentFacts.enabled!==false) systemdMust(exec, ['disable', '--now', SYSTEMD_ENGINE_UNIT]);
  const stoppedFacts=inspectSystemdEngine(layout,exec);assertKnown(stoppedFacts);
  removeReleasedWorkerSocket(layout,currentFacts,stoppedFacts,options);
+ removeNewUnitLinks(layout, transaction);
  for (const [path, snapshot] of Object.entries(transaction.before.files)) restoreOptionalFile(path, snapshot);
  if(Object.hasOwn(transaction.before.files,linuxDesktopEntryPaths(layout).desktop))refreshLinuxDesktopCaches(layout);
  for(const path of transaction.before.absentCreatedFiles)removeFileDurablySync(path);
  if(transaction.before.files[layout.launcherPath]!.present){chmodSync(layout.launcherPath,0o700);syncCopiedFile(layout.launcherPath);syncDirectorySync(dirname(layout.launcherPath));}
  systemdMust(exec, ['daemon-reload']);
  if (transaction.before.enabled) systemdMust(exec, ['enable', ...(transaction.before.enabledRuntime ? ['--runtime'] : []), layout.unitPath]);
- else if(transaction.before.files[layout.unitPath]!.present)systemdMust(exec,['disable','--now',SYSTEMD_ENGINE_UNIT]);
+ restorePriorUnitLinks(layout,transaction);
+ if(transaction.priorUnitLinks?.length)systemdMust(exec,['daemon-reload']);
  if (transaction.before.active) systemdMust(exec, ['restart', SYSTEMD_ENGINE_UNIT]);
  else if (transaction.before.files[layout.unitPath]!.present) systemdMust(exec, ['stop', SYSTEMD_ENGINE_UNIT]);
  transaction.phase='rollback_required';writeInstallTransaction(layout,transaction);
@@ -603,6 +644,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
  return locked(l,()=>{
   preflightSystemdEngine(l,exec,options.uid);
   preflightLinuxDesktopEntry(l);
+  for (const path of unitLinkCandidates(l)) assertLinuxManagedPath(dirname(path),process.getuid!(),'directory');
   assertNoInterruptedInstall(l);
   const before=inspectSystemdEngine(l,exec); assertKnown(before);
   if(options.dryRun) return {...base,wrote_plist:false,wrote_config:false,wrote_worker_env:false,sovereignty:{action:existsSync(l.sovereigntyPath)?'present':'would_seed',path:l.sovereigntyPath},action:'dry_run'};
@@ -612,6 +654,16 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   if(observedLinger===undefined)throw new Error('Olympus requires systemd-logind and a working user session. Linger could not be inspected; nothing was installed or upgraded.');
   if(!existingReceipt){publishLinuxEngineReceipt(l,{installationState:'recovery_pending',lingerPredated:observedLinger,ownedUnitLinks:[],machineArtifacts:[],openHandlerPending:false});lifecycleCheckpoint(options,'linger_receipt_published');}
   ensureEngineLinger(exec,options.uid,options.userName,options.notice);lifecycleCheckpoint(options,'linger_enabled');
+  // Ownership is earned only by creation, never by finding a same-user directory.
+  for (const parent of new Set([dirname(l.stateDir), dirname(l.cacheDir)])) {
+   if (existsSync(parent)) continue;
+   createLinuxPrivateDirectory(dirname(parent));
+   mkdirSync(parent, { mode: 0o700 });
+   syncDirectorySync(dirname(parent));
+   const info = lstatSync(parent);
+   const owned = readLinuxEngineReceipt(l.receiptPath)?.ownedEmptyParents ?? [];
+   publishLinuxEngineReceipt(l, { ownedEmptyParents: [...owned.filter(entry => entry.path !== parent), { path: parent, device: info.dev, inode: info.ino }] });
+  }
   const receiptBeforeInstall=readLinuxEngineReceipt(l.receiptPath)!;
   const originalReceipt=optionalText(l.receiptPath);
   const lingerPredated=receiptBeforeInstall.lingerPredated??observedLinger;
@@ -648,8 +700,13 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    const changed=oldUnit!==unit; if(changed) writePrivateFileAtomicSync(l.unitPath,unit);
    lifecycleCheckpoint(options,'unit_published');
    systemdMust(exec,['daemon-reload']);
-   const linkOutput=systemdMust(exec,['link',l.unitPath]);
-   const links=[...linkOutput.matchAll(/Created symlink (\S+) →/g)].map(m=>m[1]!.replace(/\.$/,''));
+   // systemctl diagnostics are localized and paths may contain whitespace.
+   // Journal absence before invoking it, including a command that creates a link
+   // and then fails or a crash before the receipt can be updated.
+   transaction.newUnitLinks=unitLinkCandidates(l).filter(path=>!lstatSync(path,{throwIfNoEntry:false}));
+   writeInstallTransaction(l,transaction);
+   systemdMust(exec,['link',l.unitPath]);
+   const links=transaction.newUnitLinks.filter(path=>ownedUnitLink(l,path));
    if(links.length) publishLinuxEngineReceipt(l,{ownedUnitLinks:[...new Set([...(readLinuxEngineReceipt(l.receiptPath)?.ownedUnitLinks ?? []),...links])]});
    systemdMust(exec,['daemon-reload']);
    const visible=inspectSystemdEngine(l,exec); assertKnown(visible);

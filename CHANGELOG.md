@@ -8,6 +8,10 @@
   widget, keys in the desktop keyring, and the same dashboard as on a Mac.
   On Omarchy the dashboard opens in its own app window, and the app launcher shows the Olympus mountain icon.
   Anonymous answers (zkAPI) are not available on Linux yet.
+- **Linux full removal cleans up empty cache and state folders** when the
+  installer recorded creating them. Pre-existing folders and other files stay.
+- **Linux install rollback removes the service link it created**, including
+  when the home folder contains spaces and configuration uses a custom folder.
 - **Better sorting for new items.** An item with nothing that marks it as
   your own record goes to Personal at once, and the local model checks it in
   the background, moving it up if it is Private. Your privacy settings

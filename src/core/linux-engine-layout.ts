@@ -28,6 +28,8 @@ export interface LinuxEngineReceipt {
   installationState: 'installed' | 'recovery_pending' | 'data_retained';
   ownedUnitLinks: string[]; lingerPredated?: boolean;
   machineArtifacts: LinuxMachineArtifact[];
+  /** Only parents created by this installer; old receipts confer no cleanup authority. */
+  ownedEmptyParents?: Array<{ path: string; device: number; inode: number }>;
   mimeOwnership?: { path: string; scheme: 'x-scheme-handler/olympus'; desktopId: 'ai.olympusplugin.open.desktop' };
   openHandlerPending?: boolean;
   rotation: { mechanism: 'host-copytruncate'; maxBytes: number; retained: number };
@@ -102,6 +104,13 @@ export function readLinuxEngineReceipt(path: string, uid = process.getuid!()): L
   const l = receipt.layout;
   const expected = rawLayout({ HOME: l.home, XDG_CONFIG_HOME: l.configHome, XDG_DATA_HOME: l.dataHome, XDG_STATE_HOME: l.stateHome, XDG_CACHE_HOME: l.cacheHome, XDG_RUNTIME_DIR: l.runtimeHome }, l.dataDir);
   if (!linuxEngineLayoutsEqual(l,expected) || l.receiptPath !== path) throw new Error(`${path} has an inconsistent install layout.`);
+  const parentPaths = new Set([dirname(l.stateDir), dirname(l.cacheDir)]);
+  if (receipt.ownedEmptyParents !== undefined && (!Array.isArray(receipt.ownedEmptyParents)
+    || new Set(receipt.ownedEmptyParents.map(entry => entry?.path)).size !== receipt.ownedEmptyParents.length
+    || receipt.ownedEmptyParents.some(entry => !entry || !parentPaths.has(entry.path)
+      || !Number.isSafeInteger(entry.device) || entry.device < 0 || !Number.isSafeInteger(entry.inode) || entry.inode <= 0))) {
+    throw new Error(`${path} has invalid empty-directory ownership.`);
+  }
   const allowedLinkParents=new Set([join(l.configHome,'systemd/user'),join(l.home,'.config/systemd/user')]);
   if (!Array.isArray(receipt.ownedUnitLinks) || receipt.ownedUnitLinks.some(p => typeof p !== 'string' || !isAbsolute(p)
     || p===l.unitPath||!allowedLinkParents.has(dirname(p))||!p.endsWith('/olympus-engine.service'))) throw new Error(`${path} has invalid unit links.`);
@@ -190,7 +199,7 @@ export function createLinuxPrivateDirectory(path: string): void {
   const parent = dirname(path); if (!stat(parent)) createLinuxPrivateDirectory(parent);
   mkdirSync(path, { mode: 0o700 });
 }
-export function publishLinuxEngineReceipt(layout: LinuxEngineLayout, updates: Partial<Pick<LinuxEngineReceipt, 'installationState' | 'ownedUnitLinks' | 'lingerPredated' | 'machineArtifacts' | 'mimeOwnership' | 'openHandlerPending'>> = {}): LinuxEngineReceipt {
+export function publishLinuxEngineReceipt(layout: LinuxEngineLayout, updates: Partial<Pick<LinuxEngineReceipt, 'installationState' | 'ownedUnitLinks' | 'lingerPredated' | 'machineArtifacts' | 'ownedEmptyParents' | 'mimeOwnership' | 'openHandlerPending'>> = {}): LinuxEngineReceipt {
   preflightLinuxEngineLayout(layout);
   const previous = readLinuxEngineReceipt(layout.receiptPath);
   createLinuxPrivateDirectory(layout.configDir);
