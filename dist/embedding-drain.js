@@ -11795,7 +11795,25 @@ class TierLedger {
     })();
   }
   classificationRead(identity) {
-    return this.db.transaction(() => ({ override: this.getOverride(identity), secret: this.itemIsSecret(identity) }))();
+    return this.db.transaction(() => ({
+      override: this.getOverride(identity),
+      secret: this.itemIsSecret(identity),
+      scrubRevision: this.secretScrubRevision(identity)
+    }))();
+  }
+  noteSecretScrub(identity) {
+    this.db.query(`
+      INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision)
+      VALUES (?, ?, ?, ?, 1)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET revision = revision + 1
+    `).run(...idParams(identity));
+  }
+  secretScrubRevision(identity) {
+    const row = this.db.query(`
+      SELECT revision FROM secret_side_store_scrubs
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
+    return row?.revision ?? 0;
   }
   itemIsSecret(identity) {
     const override = this.getOverride(identity);
@@ -13419,6 +13437,16 @@ function tierLedgerMigrations() {
             recorded_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
+          -- Bumped before every side-store clearing of a Secret, so a
+          -- classification pass can tell one happened since it read the item.
+          CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
         `);
       }
     }
@@ -14879,7 +14907,7 @@ function secretFencedSniffer(sniffer, ledger, identity, read) {
     const now = ledger.classificationRead(identity);
     if (!now.secret)
       return true;
-    return read?.secret === true && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
+    return read?.secret === true && read.scrubRevision === now.scrubRevision && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
   return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
 }
@@ -15214,6 +15242,11 @@ function forgetSecretInSideStores(options) {
   const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
   const owedJobLedgers = [];
+  try {
+    ledger.noteSecretScrub(identity);
+  } catch {
+    result.failed += 1;
+  }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ":memory:" && existsSync12(snifferPath)) {
     try {
