@@ -1215,7 +1215,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         // (secrets-disposition.ts) decides whether they are tombstoned now or
         // kept, hidden, for an owner-approved purge. Either way the side
         // stores forget the item's names and excerpt now.
-        forgetSecretInSideStores({ ledgerPath: ledger.dbPath, identity });
+        forgetSecretInSideStores({ ledger, identity });
         if (secretsDisposition() === 'hide_until_purge') return { kind: 'hold', reason: 'secrets' };
         this.copyRemovals.set(identityKey(identity), identity);
         return { kind: 'delete', corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: 'secrets' };

@@ -33,7 +33,7 @@ import {
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
-import { forgetSecretInSideStores, secretsDisposition } from './secrets-disposition.ts';
+import { forgetSecretInSideStores, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -66,6 +66,9 @@ export function applyOwnerOverrides(options: {
   } catch {
     // An override does not depend on the owner's map or rules.
   }
+  // Secrets whose side stores could not be cleared before: every tick tries
+  // again, listed or not.
+  retrySecretSideStoreDebts(ledger);
   const overrides = ledger.listRoutedOverrides();
   options.afterRead?.();
   for (const { record, override } of overrides) {
@@ -123,7 +126,7 @@ function applyOne(
     // No stored copy to read the location from: hidden all the same, and
     // forgotten by the side stores.
     if (ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard }).outcome === 'secrets') {
-      forgetSecretInSideStores({ ledgerPath: ledger.dbPath, identity });
+      forgetSecretInSideStores({ ledger, identity });
       report.secrets += 1;
     }
     return;

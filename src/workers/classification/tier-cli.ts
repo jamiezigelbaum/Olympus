@@ -247,7 +247,7 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
       // an extraction job captured). Its copies follow below or at the set's
       // next override pass.
       forgetSecretInSideStores({
-        ledgerPath: item.ledgerPath,
+        ledger,
         identity: { ...item.identity, ...(item.localItemId ? { localItemId: item.localItemId } : {}) },
       });
     }

@@ -20,7 +20,8 @@
 // Either way, too, the side stores that hold the item's names or a short
 // excerpt outside its store copies keep none of it (`forgetSecretInSideStores`):
 // the sniffer's queued questions (beside the set ledger) are deleted, and the
-// extraction job ledger's captured names are cleared. A Secret keeps its
+// extraction job ledger's captured names are cleared, for good (a later
+// enqueue cannot write them back). A Secret keeps its
 // location only, wherever it was written down (docs/TRUST_MODEL.md).
 
 import { existsSync } from 'node:fs';
@@ -28,7 +29,7 @@ import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-inde
 import { TierSnifferStore } from '../classification/sniffer-store.ts';
 import type { TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
-import { clearExtractionJobNames, defaultFileExtractionJobsDbPath } from '../file-extraction/job-names.ts';
+import { clearExtractionJobNames, extractionJobsDbPaths } from '../file-extraction/job-names.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 
 export type SecretsDisposition = 'tombstone_now' | 'hide_until_purge';
@@ -51,7 +52,7 @@ export interface ForgottenSecretSideStores {
   snifferQuestions: number;
   /** Extraction job rows whose captured name was cleared. */
   extractionJobNames: number;
-  /** Side stores that could not be reached; a later listing of the item tries again. */
+  /** Side stores that could not be reached; left as a ledger debt, retried every tier tick. */
   failed: number;
 }
 
@@ -88,27 +89,26 @@ export function settleSecretsCopies(options: {
     }
   }
   // Whichever way the copies go, the side stores forget the item now.
-  const sideStores = forgetSecretInSideStores({ ledgerPath: options.ledger.dbPath, identity });
+  const sideStores = forgetSecretInSideStores({ ledger: options.ledger, identity });
   if (disposition === 'tombstone_now') options.ledger.removeCopies(options.identity);
   return { disposition, chunks, sideStores };
 }
 
 /**
  * Forget a Secrets item in the side stores that hold its names or a short
- * excerpt: delete its queued sniffer questions (the file beside the set
- * ledger at `ledgerPath`) and clear the names its extraction jobs captured.
- * Files that do not exist are not created. Never throws (the copies' fate
- * must not wait on a side file): a store that cannot be reached is counted
- * and logged, and the router forgets again whenever a listing finds the item
- * Secrets.
+ * excerpt: delete its queued sniffer questions (the file beside `ledger`) and
+ * clear the names its extraction jobs captured, for good. Files that do not
+ * exist are not created. Never throws (the copies' fate must not wait on a
+ * side file): a store that cannot be reached is logged and left as a debt in
+ * the ledger, which `retrySecretSideStoreDebts` clears at the next tier tick.
  */
 export function forgetSecretInSideStores(options: {
-  ledgerPath: string;
+  ledger: TierLedger;
   identity: TierLedgerIdentity & { localItemId?: string };
 }): ForgottenSecretSideStores {
   const result: ForgottenSecretSideStores = { snifferQuestions: 0, extractionJobNames: 0, failed: 0 };
-  const { identity } = options;
-  const snifferPath = tierSnifferPathForLedger(options.ledgerPath);
+  const { identity, ledger } = options;
+  const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ':memory:' && existsSync(snifferPath)) {
     try {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath });
@@ -126,16 +126,35 @@ export function forgetSecretInSideStores(options: {
       result.failed += 1;
     }
   }
-  try {
-    result.extractionJobNames = clearExtractionJobNames(defaultFileExtractionJobsDbPath(process.env), {
-      provider: identity.provider,
-      accountScope: identity.accountScope,
-      providerItemId: identity.providerItemId,
-      ...(identity.localItemId ? { localItemId: identity.localItemId } : {}),
-    });
-  } catch {
-    result.failed += 1;
+  // The default ledger and any other this process opened (a runtime given
+  // its own path).
+  for (const jobsPath of extractionJobsDbPaths()) {
+    try {
+      result.extractionJobNames += clearExtractionJobNames(jobsPath, {
+        provider: identity.provider,
+        accountScope: identity.accountScope,
+        providerItemId: identity.providerItemId,
+        ...(identity.localItemId ? { localItemId: identity.localItemId } : {}),
+      });
+    } catch {
+      result.failed += 1;
+    }
   }
-  if (result.failed > 0) console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at its next listing.`);
+  try {
+    if (result.failed > 0) ledger.recordSecretSideStoreDebt(identity);
+    else ledger.clearSecretSideStoreDebt(identity);
+  } catch {
+    // The ledger itself unreachable: the copies' own settlement fails loudly elsewhere.
+  }
+  if (result.failed > 0) console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
   return result;
+}
+
+/** Retry the side-store clearing of Secrets that could not be cleared before. Returns how many are now clear. */
+export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): number {
+  let cleared = 0;
+  for (const identity of ledger.secretSideStoreDebts(limit)) {
+    if (forgetSecretInSideStores({ ledger, identity }).failed === 0) cleared += 1;
+  }
+  return cleared;
 }

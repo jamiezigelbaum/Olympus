@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 5;
+export const TIER_LEDGER_SCHEMA_VERSION = 6;
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
 
@@ -2355,6 +2355,45 @@ export class TierLedger {
    * `routed`, so a later reappearance is routed again rather than treated as
    * pre-P1b data.
    */
+  /** A Secret's side stores still hold its names: remember to clear them (see `secretSideStoreDebts`). */
+  recordSecretSideStoreDebt(identity: TierLedgerIdentity & { localItemId?: string }): void {
+    this.db.query(`
+      INSERT INTO secret_side_store_debt (provider, account_scope, conversation_key, provider_item_id, local_item_id, recorded_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
+        local_item_id = CASE WHEN excluded.local_item_id <> '' THEN excluded.local_item_id ELSE secret_side_store_debt.local_item_id END,
+        recorded_at = excluded.recorded_at
+    `).run(...idParams(identity), identity.localItemId ?? '', this.now().toISOString());
+  }
+
+  /** Secrets whose side stores are still to be cleared, oldest first. */
+  secretSideStoreDebts(limit = 100): Array<TierLedgerIdentity & { localItemId?: string }> {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, local_item_id
+      FROM secret_side_store_debt ORDER BY recorded_at LIMIT ?
+    `).all(Math.max(1, Math.min(limit, 1_000))) as Array<{
+      provider: string;
+      account_scope: string;
+      conversation_key: string;
+      provider_item_id: string;
+      local_item_id: string;
+    }>;
+    return rows.map((row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+      ...(row.local_item_id ? { localItemId: row.local_item_id } : {}),
+    }));
+  }
+
+  clearSecretSideStoreDebt(identity: TierLedgerIdentity): void {
+    this.db.query(`
+      DELETE FROM secret_side_store_debt
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity));
+  }
+
   removeCopies(identity: TierLedgerIdentity): TierCopy[] {
     let removed: TierCopy[] = [];
     this.db.transaction(() => {
@@ -3401,10 +3440,30 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // when the override queues a move. A move the owner then revokes is
       // cancelled or replanned under it (`settleRevokedOwnerMove`), so an
       // item that was waiting for its text keeps waiting for it.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 5,
       name: 'tier_owner_prior_decision',
       up(db) {
         db.exec('ALTER TABLE tier_items ADD COLUMN owner_prior_json TEXT;');
+      },
+    },
+    {
+      // Secrets whose side stores (sniffer questions, extraction job names)
+      // could not be cleared when they became Secrets: retried every tier
+      // tick until they are, whether or not the item is listed again.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'secret_side_store_debt',
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS secret_side_store_debt (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            local_item_id TEXT NOT NULL DEFAULT '',
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
       },
     },
   ];

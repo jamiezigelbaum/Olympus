@@ -84,6 +84,7 @@ import {
   type ConnectorStorePlacement,
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
+import { forgetSecretInSideStores } from './secrets-disposition.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
   sourceExclusionOutcomeIsUnevaluable,
@@ -3769,6 +3770,11 @@ export class LocalConnectorStore {
         trustDomain: stored.trustDomain,
         trustTier: stored.trustTier,
       });
+      // A legacy item judged Secrets: its side stores keep nothing of it
+      // either (the router's routed path does the same).
+      if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
+        forgetSecretInSideStores({ ledger, identity: item.identity });
+      }
     } catch {
       run.ledgerFailed = true;
       run.gaps.push('tier_ledger_unavailable: four-tier decisions were not recorded for the rest of this run; storage was unaffected.');

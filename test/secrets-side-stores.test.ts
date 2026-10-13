@@ -10,14 +10,18 @@
 // Becoming Secret, by the owner's word (with or without the engine running)
 // or by a later reading, deletes the first and clears the second, at once.
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   clearInstalledTierClassification,
   configureInstalledTierClassification,
 } from '../src/workers/classification/installed-tier-classification.ts';
+import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { runTierSet } from '../src/workers/classification/tier-cli.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
@@ -60,6 +64,16 @@ function fixture(dir: string): TierFixture {
 /** The owner's sniffer installed (it queues questions for pending items), as the worker installs it. */
 function installSniffer(dir: string) {
   return configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(dir, 'none.json') }, lane: LANE });
+}
+
+/** Point the default job ledger path at `path` for this test. */
+function pointJobsEnvAt(path: string): void {
+  const previous = process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV];
+  process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV] = path;
+  cleanups.push(() => {
+    if (previous === undefined) delete process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV];
+    else process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV] = previous;
+  });
 }
 
 function storePaths(fx: TierFixture): string[] {
@@ -125,16 +139,12 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     mimeType: 'text/plain',
   });
 
-  function jobStore(dir: string): LocalFileExtractionJobStore {
+  /** The ledger at the default path (env), or, `opened`, at a path only the runtime that opened it knows. */
+  function jobStore(dir: string, how: 'default' | 'opened' = 'default'): LocalFileExtractionJobStore {
     const path = join(dir, 'file-extraction-jobs.sqlite');
-    const previous = process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV];
-    process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV] = path;
+    if (how === 'default') pointJobsEnvAt(path);
     const store = new LocalFileExtractionJobStore(path);
-    cleanups.push(() => {
-      store.close();
-      if (previous === undefined) delete process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV];
-      else process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV] = previous;
-    });
+    cleanups.push(() => store.close());
     return store;
   }
 
@@ -169,12 +179,28 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(jobs.get(gardenJob)).toEqual(gardenBefore);
     expect(jobs.record({ jobId: gardenJob, status: 'indexed' }).status).toBe('indexed');
     expect(jobs.get(gardenJob)?.ref.name).toBe(GARDEN.name);
+
+    // A planning pass that listed the file before it became Secret enqueues
+    // its stale ref afterwards: the refreshed job and a new one stay nameless.
+    const stale = jobs.enqueue({
+      refs: [ref(KEYS), { ...ref(KEYS), sourceVersion: 'v2' }, ref(GARDEN)],
+      extractorKind: 'text',
+      extractorVersion: 'v1',
+      force: true,
+    });
+    const [refreshed, fresh, garden] = stale.jobRefs.map((entry) => jobs.get(entry.jobId)!);
+    expect(refreshed!.jobId).toBe(keysJob);
+    expect(refreshed!.ref.name).toBeUndefined();
+    expect(fresh!.jobId).not.toBe(keysJob);
+    expect(fresh!.ref.name).toBeUndefined();
+    expect(garden!.ref.name).toBe(GARDEN.name);
   });
 
-  test('marked Secret from the command: a job leased in flight loses the name and still records', async () => {
+  test('marked Secret from the command: a job leased in flight loses the name and still records, in a ledger at a non-default path', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
-    const jobs = jobStore(dir);
+    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    const jobs = jobStore(dir, 'opened');
     await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const [gardenJob] = jobs.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
     const [lease] = jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs;
@@ -188,17 +214,102 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
   });
 });
 
+describe('a side store that cannot be reached when the item becomes Secret', () => {
+  test('is left as a ledger debt and cleared at the next tier tick, without the item being listed again', async () => {
+    const dir = workspace('olympus-secret-side-debt-');
+    const fx = fixture(dir);
+    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
+    pointJobsEnvAt(jobsPath);
+    const spec: FixtureSpec = { id: 'keys', name: `deploy ${FAKE_AWS_KEY}.txt`, text: 'Weekly notes about the deploy runbook.' };
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [spec]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    // The job ledger cannot be read when the item becomes Secret (here: a
+    // damaged file; in life, a lock held past the busy timeout).
+    writeFileSync(jobsPath, 'not a database');
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+      expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+    // The ledger comes back holding the name (written before it became Secret).
+    rmSync(jobsPath);
+    const jobs = new LocalFileExtractionJobStore(jobsPath);
+    const lane = { corpusId: CORPORA.secure_local, provider: PROVIDER, accountScope: ACCOUNT, approvedScopeKey: 'fixture:/Files' };
+    const [jobId] = jobs.enqueue({
+      refs: [{ ...lane, providerItemId: 'keys', localItemId: fixtureLocalId(spec), sourceVersion: 'v1', name: spec.name }],
+      extractorKind: 'text',
+      extractorVersion: 'v1',
+    }).jobRefs.map((entry) => entry.jobId);
+    jobs.close();
+    // The copies are settled; the name is still there, owed.
+    expect(fx.ledger.copies(identityOf('keys'))).toEqual([]);
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([expect.objectContaining({ providerItemId: 'keys' })]);
+    const reader = () => {
+      const store = new LocalFileExtractionJobStore(jobsPath);
+      try {
+        return store.get(jobId!);
+      } finally {
+        store.close();
+      }
+    };
+    expect(reader()?.ref.name).toBe(spec.name);
+
+    // The next tick: no listing, no override change.
+    applyOwnerOverrides({ set: fx.set });
+    expect(reader()?.ref.name).toBeUndefined();
+    expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+  });
+});
+
+describe('a legacy item (never routed by a set) judged Secret', () => {
+  test('keeps no queued question or job name either', async () => {
+    const dir = workspace('olympus-secret-side-legacy-');
+    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
+    pointJobsEnvAt(jobsPath);
+    const ledger = new TierLedger({ dbPath: join(dir, 'legacy.tier-ledger.sqlite') });
+    const store = new LocalConnectorStore({
+      dbPath: join(dir, 'legacy.sqlite'),
+      corpusId: 'internal.legacy.files',
+      family: 'file',
+      trustDomain: 'internal',
+      tierLedger: ledger,
+    });
+    const sniffer = new TierSnifferStore({ dbPath: tierSnifferPathForLedger(ledger.dbPath) });
+    const jobs = new LocalFileExtractionJobStore(jobsPath);
+    cleanups.push(() => {
+      jobs.close();
+      sniffer.close();
+      store.close();
+      ledger.close();
+    });
+    const subject = identityOf('ops');
+    sniffer.enqueue({ subject, pass: 'metadata', material: 'ops note', mapRevision: 'none', flags: [] });
+    const [jobId] = jobs.enqueue({
+      refs: [{
+        corpusId: 'internal.legacy.files', provider: PROVIDER, accountScope: ACCOUNT, approvedScopeKey: 'fixture:/Files',
+        providerItemId: 'ops', localItemId: fixtureLocalId({ id: 'ops' }), sourceVersion: 'v1', name: 'ops note',
+      }],
+      extractorKind: 'text',
+      extractorVersion: 'v1',
+    }).jobRefs.map((entry) => entry.jobId);
+
+    const spec: FixtureSpec = { id: 'ops', name: 'ops note', text: `The deploy key is ${FAKE_AWS_KEY} until Friday.` };
+    await store.syncFromConnector(fixtureConnector(() => [spec]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(ledger.getCurrent(subject)).toMatchObject({ contentTier: 'secrets', routed: false });
+    expect(sniffer.questionFor(subject, 'metadata')).toBeUndefined();
+    expect(jobs.get(jobId!)?.ref.name).toBeUndefined();
+  });
+});
+
 describe('side stores that do not exist', () => {
   test('are not created by an item becoming Secret', async () => {
     const dir = workspace('olympus-secret-side-none-');
     const fx = fixture(dir);
-    const previous = process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV];
     const jobsPath = join(dir, 'never-created-jobs.sqlite');
-    process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV] = jobsPath;
-    cleanups.push(() => {
-      if (previous === undefined) delete process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV];
-      else process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV] = previous;
-    });
+    pointJobsEnvAt(jobsPath);
     await fx.set.sync(fixtureConnector(() => [{ id: 'garden', name: 'garden-plan.txt', text: 'Garden notes.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'secrets' });
     expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });

@@ -699,6 +699,38 @@ describe('tier migration M2-M6', () => {
     expect(servedFrom(context, FILE_CORPORA, context.files, 'keys')).toEqual({ names: [], content: [] });
   });
 
+  test('under hide_until_purge, a crash right after the Secrets flip still records the location on resume and keeps the copy hidden', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    const write = lanes(context, 'write');
+    const keys = identityOf('rehearsal-files', 'keys');
+    const flip = TierLedger.prototype.flipToSecrets;
+    const crash = spyOn(TierLedger.prototype, 'flipToSecrets').mockImplementation(function (this: TierLedger, ...args) {
+      flip.apply(this, args);
+      throw new Error('simulated crash after the Secrets flip');
+    });
+    try {
+      await expect(runTierMigration({
+        planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+        selector: 'source:rehearsal.files', secretsDisposition: 'hide_until_purge',
+      })).rejects.toThrow(/simulated crash/u);
+    } finally {
+      crash.mockRestore();
+    }
+    const set = write.lanes[0]!.set;
+    expect(set.secrets()!.get(keys)).toBeUndefined();
+
+    const resumed = await runTierMigration({
+      planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+      selector: 'source:rehearsal.files', secretsDisposition: 'hide_until_purge',
+    });
+    expect(resumed).toMatchObject({ state: 'done', secrets: 1 });
+    expect(set.secrets()!.get(keys)?.findingKinds).toContain('aws_access_key_id');
+    // Kept, hidden, for an approved purge: the policy this run was given.
+    expect(set.ledger.copies(keys).map((copy) => copy.state)).toEqual(['superseded']);
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'keys')).toEqual({ names: [], content: [] });
+  });
+
   test('the run stops before exceeding the approved chunks', async () => {
     const context = await rehearsal();
     const read = lanes(context, 'read');

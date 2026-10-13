@@ -1633,10 +1633,11 @@ async function migrateOne(
   if (record?.routed && record.state !== 'moving') {
     const copies = ledger.copies(proposal.identity);
     const current = currentPlacement(copies);
-    if (secrets && record.contentTier === 'secrets' && current.length === 0
-      && unsettledSecretsCopies(copies, context.secretsDisposition ?? secretsDisposition())) {
-      // Flipped, then stopped before the Secrets policy ran: the copies are
-      // hidden but still stored. Settle them now; never count them as moved.
+    if (secrets && record.contentTier === 'secrets' && current.length === 0 && copies.length > 0) {
+      // Flipped, then perhaps stopped before the location was recorded and
+      // the Secrets policy ran: the copies are hidden, and under
+      // `tombstone_now` still stored. Finish it (idempotent); never count the
+      // item as moved.
       return resumeSecretsSettle(lane, proposal, record, copies, context.secretsDisposition);
     }
     const done = secrets
@@ -1860,21 +1861,14 @@ function settleMigrationSecrets(
 }
 
 /**
- * Copies a Secrets item still keeps that the policy has not settled: under
- * `tombstone_now` any copy row at all (settling tombstones the copies, then
- * forgets the rows); under `hide_until_purge` none, since hidden and kept is
- * the settled state.
- */
-function unsettledSecretsCopies(copies: readonly TierCopy[], disposition: SecretsDisposition): boolean {
-  return disposition === 'tombstone_now' && copies.length > 0;
-}
-
-/**
  * A migration that stopped between `flipToSecrets` and the Secrets policy
  * (process killed, power lost): the ledger already says Secrets and hides
- * every copy, but the store rows are still there, untombstoned and
- * unscreened. Finish it: record the location if a hidden copy still reads,
- * then settle every copy the ledger lists.
+ * every copy, but the location may be unrecorded, the side stores may still
+ * hold the item's names, and under `tombstone_now` the store rows are still
+ * there, untombstoned and unscreened. Finish it: record the location if a
+ * hidden copy still reads, then hand every copy the ledger lists to the
+ * Secrets policy (which keeps them hidden under `hide_until_purge`). Each
+ * step is idempotent, so a run that had finished them changes nothing.
  */
 function resumeSecretsSettle(
   lane: TierMigrationLane,

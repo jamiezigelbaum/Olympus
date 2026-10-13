@@ -40,7 +40,13 @@ import {
   type SqliteMigration,
 } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
-import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, defaultFileExtractionJobsDbPath } from './job-names.ts';
+import {
+  FILE_EXTRACTION_JOBS_DB_PATH_ENV,
+  SECRET_ITEM_REDACTIONS_TABLE,
+  defaultFileExtractionJobsDbPath,
+  itemNameRedacted,
+  registerExtractionJobsDbPath,
+} from './job-names.ts';
 import type {
   ExtractionClaim,
   ExtractionDerivation,
@@ -51,7 +57,7 @@ import type {
 } from './types.ts';
 
 export const FILE_EXTRACTION_JOBS_STORE_ID = 'file-extraction-jobs';
-export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3;
+export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 4;
 export { FILE_EXTRACTION_JOBS_DB_PATH_ENV, defaultFileExtractionJobsDbPath };
 
 /**
@@ -597,6 +603,7 @@ export class LocalFileExtractionJobStore {
   readonly readonly: boolean;
   private readonly db: Database;
   private grantAuthorityId: string | undefined;
+  private unregisterPath: (() => void) | undefined;
 
   constructor(dbPath = defaultFileExtractionJobsDbPath(), options: FileExtractionJobStoreOptions = {}) {
     this.dbPath = dbPath;
@@ -624,10 +631,13 @@ export class LocalFileExtractionJobStore {
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
     if (!this.readonly) {
       runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
+      // The Secrets disposition clears names in every ledger this process writes.
+      this.unregisterPath = registerExtractionJobsDbPath(dbPath);
     }
   }
 
   close(): void {
+    this.unregisterPath?.();
     closeSqliteStore(this.db);
   }
 
@@ -670,6 +680,8 @@ export class LocalFileExtractionJobStore {
     let jobsSkippedTooLarge = 0;
     const jobRefs: EnqueueExtractionJobRef[] = [];
 
+    // IMMEDIATE: the Secrets redaction is read under the write lock, so a
+    // redaction committed by another connection is never missed.
     this.db.transaction(() => {
       for (const rawRef of request.refs) {
         const ref = requireItemRef(rawRef);
@@ -680,6 +692,9 @@ export class LocalFileExtractionJobStore {
           : 'queued';
         const existing = this.existingJob(ref, extractorKind, extractorVersion);
         const jobId = existing?.job_id ?? makeJobId();
+        // An item that became Secrets keeps no name here, even when this pass
+        // listed it before it did (job-names.ts).
+        const name = itemNameRedacted(this.db, ref) ? null : ref.name ?? null;
         const forceExisting = Boolean(existing) && force && status === 'queued';
         const reset = forceExisting ? 1 : 0;
 
@@ -725,7 +740,7 @@ export class LocalFileExtractionJobStore {
           ref.localItemId,
           ref.sourceVersion ?? '',
           ref.contentHash ?? '',
-          ref.name ?? null,
+          name,
           ref.mimeType ?? null,
           ref.sizeBytes ?? null,
           extractorKind,
@@ -763,7 +778,7 @@ export class LocalFileExtractionJobStore {
           status: forceExisting ? status : jobStatus(existing?.status) ?? status,
         });
       }
-    })();
+    }).immediate();
 
     return { jobsQueued, jobsExisting, jobsForced, jobsSkippedTooLarge, jobRefs };
   }
@@ -2123,6 +2138,23 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
         INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
         VALUES (1, ?, 0)
       `).run(randomUUID());
+    },
+  }, {
+    version: 4,
+    name: 'add_secret_item_redactions',
+    up(db) {
+      // Items that became Secrets: their jobs keep no name, now or on any
+      // later enqueue (job-names.ts). '' local id: every local id of the item.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ${SECRET_ITEM_REDACTIONS_TABLE} (
+          provider TEXT NOT NULL,
+          account_scope TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          local_item_id TEXT NOT NULL DEFAULT '',
+          redacted_at TEXT NOT NULL,
+          PRIMARY KEY (provider, account_scope, provider_item_id, local_item_id)
+        );
+      `);
     },
   }];
 }
