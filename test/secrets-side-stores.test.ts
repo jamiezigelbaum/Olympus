@@ -19,9 +19,12 @@ import {
   configureInstalledTierClassification,
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
+import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import type { AnalystModel } from '../src/core/analyst.ts';
+import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { runTierSet } from '../src/workers/classification/tier-cli.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
-import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
+import { TIER_LEDGER_SQLITE_STORE_ID, tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
@@ -79,6 +82,16 @@ function pointJobsEnvAt(path: string): void {
     if (previous === undefined) delete process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV];
     else process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV] = previous;
   });
+}
+
+/** One job's name, read without opening the store (which would upgrade an older ledger). */
+function rawJobName(path: string, jobId: string): string | null {
+  const raw = new Database(path, { readonly: true });
+  try {
+    return (raw.query('SELECT name FROM extraction_jobs WHERE job_id = ?').get(jobId) as { name: string | null }).name;
+  } finally {
+    raw.close();
+  }
 }
 
 function storePaths(fx: TierFixture): string[] {
@@ -147,7 +160,7 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     const lane = installed.forLedger(fx.ledger.dbPath).sniffer!;
     // A pass in flight: it read both items (neither Secret) and is about to ask.
     const staleRead = fx.ledger.classificationRead(identityOf('mortgage-letter'));
-    expect(staleRead).toEqual({ override: undefined, secret: false });
+    expect(staleRead).toMatchObject({ override: undefined, secret: false });
     const stale = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), staleRead);
     const other = secretFencedSniffer(lane, fx.ledger, identityOf('therapy-notes'), fx.ledger.classificationRead(identityOf('therapy-notes')));
 
@@ -190,6 +203,26 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     expect(store.questionFor(identityOf('mortgage-letter'), 'metadata')).toBeUndefined();
     ask();
     expect(JSON.stringify(store.listQuestions())).not.toContain('mortgage letter');
+  });
+
+  test('read as Secret, then cleared again by a detector with the override unchanged: queues nothing', async () => {
+    const dir = workspace('olympus-secret-side-sniffer-');
+    const installed = installSniffer(dir);
+    const fx = fixture(dir);
+    await fx.set.sync(fixtureConnector(() => [{ id: 'ops-note', name: 'ops note', version: 'v1', text: `The deploy key is ${FAKE_AWS_KEY} until Friday.` }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.ledger.getCurrent(identityOf('ops-note'))?.contentTier).toBe('secrets');
+    const store = installed.snifferStoreForLedger(fx.ledger.dbPath);
+    const lane = installed.forLedger(fx.ledger.dbPath).sniffer!;
+    // A listing reads it (Secrets, no override) and finds it changed: it would ask.
+    const read = fx.ledger.classificationRead(identityOf('ops-note'));
+    expect(read).toMatchObject({ secret: true, override: undefined });
+    const listing = secretFencedSniffer(lane, fx.ledger, identityOf('ops-note'), read);
+    // Meanwhile another pass detects the secret again and clears the side stores.
+    await fx.set.sync(fixtureConnector(() => [{ id: 'ops-note', name: 'ops note', version: 'v2', text: `Rotated: ${FAKE_AWS_KEY} is retired.` }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.ledger.classificationRead(identityOf('ops-note')).scrubRevision).toBeGreaterThan(read.scrubRevision);
+
+    listing.judge({ pass: 'metadata', flags: ['names:finance'], material: 'ops note', subject: identityOf('ops-note') });
+    expect(store.questionFor(identityOf('ops-note'), 'metadata')).toBeUndefined();
   });
 });
 
@@ -298,16 +331,6 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(recorded).toMatchObject({ status: 'indexed', artifactsRecorded: 0 });
     expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(GARDEN))).toEqual([]);
   });
-
-  /** One job's name, read without opening the store (which would upgrade an older ledger). */
-  function rawJobName(path: string, jobId: string): string | null {
-    const raw = new Database(path, { readonly: true });
-    try {
-      return (raw.query('SELECT name FROM extraction_jobs WHERE job_id = ?').get(jobId) as { name: string | null }).name;
-    } finally {
-      raw.close();
-    }
-  }
 
   test('marked Secret from the command in another process: owed until the worker, which knows its own ledger path, clears it', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
@@ -520,6 +543,65 @@ describe('a side store that cannot be reached when the item becomes Secret', () 
     applyOwnerOverrides({ set: fx.set });
     expect(reader()?.ref.name).toBeUndefined();
     expect(fx.ledger.secretSideStoreDebts()).toEqual([]);
+  });
+});
+
+describe('a Secret owed in a store\'s own ledger (no tier set)', () => {
+  test('is retried by the worker\'s tier tick', async () => {
+    const dir = workspace('olympus-secret-side-debt-');
+    const jobsPath = join(dir, 'runtime-jobs.sqlite');
+    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    const store = new LocalConnectorStore({
+      dbPath: join(dir, 'plain.sqlite'),
+      corpusId: 'internal.plain.files',
+      family: 'file',
+      trustDomain: 'internal',
+    });
+    const ledger = store.tierLedger()!;
+    const jobs = new LocalFileExtractionJobStore(jobsPath);
+    const [jobId] = jobs.enqueue({
+      refs: [{
+        corpusId: 'internal.plain.files', provider: PROVIDER, accountScope: ACCOUNT, approvedScopeKey: 'fixture:/Files',
+        providerItemId: 'ops', localItemId: fixtureLocalId({ id: 'ops' }), sourceVersion: 'v1', name: 'ops note',
+      }],
+      extractorKind: 'text',
+      extractorVersion: 'v1',
+    }).jobRefs.map((entry) => entry.jobId);
+    jobs.close();
+    // Owed when the job ledger could not be reached (its runtime since stopped).
+    ledger.recordSecretSideStoreDebt(identityOf('ops'), [jobsPath]);
+    const service = new TierSnifferService({
+      installed: installSniffer(dir),
+      lane: LANE as unknown as SnifferLane,
+      model: {} as AnalystModel,
+      stores: () => [store],
+      classificationLedgerPath: join(dir, 'classification-ledger.jsonl'),
+      modelAvailable: () => false,
+    });
+    cleanups.push(() => {
+      service.stop();
+      store.close();
+    });
+
+    await service.runOnce();
+    expect(rawJobName(jobsPath, jobId!)).toBeNull();
+    expect(ledger.secretSideStoreDebts()).toEqual([]);
+  });
+});
+
+describe('a tier ledger written by an earlier build of this change (schema 6)', () => {
+  test('gains the scrub revisions on open', () => {
+    const dir = workspace('olympus-secret-side-ledger-');
+    const path = join(dir, 'set.tier-ledger.sqlite');
+    new TierLedger({ dbPath: path }).close();
+    const raw = new Database(path);
+    raw.exec(`DROP TABLE secret_side_store_scrubs; UPDATE schema_version SET version = 6 WHERE store_id = '${TIER_LEDGER_SQLITE_STORE_ID}';`);
+    raw.close();
+
+    const ledger = new TierLedger({ dbPath: path });
+    cleanups.push(() => ledger.close());
+    ledger.noteSecretScrub(identityOf('ops'));
+    expect(ledger.classificationRead(identityOf('ops'))).toEqual({ override: undefined, secret: false, scrubRevision: 1 });
   });
 });
 

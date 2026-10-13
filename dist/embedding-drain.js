@@ -11795,7 +11795,25 @@ class TierLedger {
     })();
   }
   classificationRead(identity) {
-    return this.db.transaction(() => ({ override: this.getOverride(identity), secret: this.itemIsSecret(identity) }))();
+    return this.db.transaction(() => ({
+      override: this.getOverride(identity),
+      secret: this.itemIsSecret(identity),
+      scrubRevision: this.secretScrubRevision(identity)
+    }))();
+  }
+  noteSecretScrub(identity) {
+    this.db.query(`
+      INSERT INTO secret_side_store_scrubs (provider, account_scope, conversation_key, provider_item_id, revision)
+      VALUES (?, ?, ?, ?, 1)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET revision = revision + 1
+    `).run(...idParams(identity));
+  }
+  secretScrubRevision(identity) {
+    const row = this.db.query(`
+      SELECT revision FROM secret_side_store_scrubs
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
+    return row?.revision ?? 0;
   }
   itemIsSecret(identity) {
     const override = this.getOverride(identity);
@@ -13464,6 +13482,22 @@ function tierLedgerMigrations() {
       }
     },
     {
+      version: 7,
+      name: "secret_side_store_scrubs",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS secret_side_store_scrubs (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
+    },
+    {
       version: TIER_LEDGER_SCHEMA_VERSION,
       name: "secret_redaction_retirement",
       up(db) {
@@ -13512,7 +13546,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 7, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 8, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -14947,7 +14981,8 @@ function isTextualMimeType(mimeType) {
 function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read) : options?.sniffer;
+  const fresh = text2 !== undefined && extra.contentFetchFailed !== true;
+  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, fresh ? read : undefined) : options?.sniffer;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
@@ -14967,7 +15002,7 @@ function secretFencedSniffer(sniffer, ledger, identity, read) {
     const now = ledger.classificationRead(identity);
     if (!now.secret)
       return true;
-    return read?.secret === true && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
+    return read?.secret === true && read.scrubRevision === now.scrubRevision && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
   return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
 }
@@ -15323,6 +15358,11 @@ function forgetSecretInSideStores(options) {
   const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
   const owedJobLedgers = [];
+  try {
+    ledger.noteSecretScrub(identity);
+  } catch {
+    result.failed += 1;
+  }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ":memory:" && existsSync12(snifferPath)) {
     try {
@@ -18976,7 +19016,7 @@ var init_local_index = __esm(() => {
           trustDomain: stored.trustDomain,
           trustTier: stored.trustTier
         });
-        if (decision.contentTier === "secrets" || decision.metadataTier === "secrets") {
+        if (decision.contentTier === "secrets" || decision.metadataTier === "secrets" || ledger.itemIsSecret(item.identity)) {
           forgetSecretInSideStores({ ledger, identity: item.identity });
         } else {
           retireSecretRedactions(ledger, { identity: item.identity });
@@ -38572,6 +38612,7 @@ init_tier_rejudge();
 init_tier_names_only_settle();
 init_tier_rules_sweep();
 init_tier_override_settle();
+init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
@@ -38946,8 +38987,14 @@ class TierSnifferService {
   applyOwnerOverrides() {
     for (const ledgerPath of this.ledgerPaths()) {
       const set = tierSetForLedger(ledgerPath);
-      if (!set)
+      if (!set) {
+        try {
+          const ledger = this.ledgerAt(ledgerPath);
+          retrySecretSideStoreDebts(ledger);
+          retireSecretRedactions(ledger);
+        } catch {}
         continue;
+      }
       try {
         const report = applyOwnerOverrides({ set });
         if (report.raised > 0 || report.lowered > 0 || report.secrets > 0 || report.updated > 0) {

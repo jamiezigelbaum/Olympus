@@ -172,11 +172,16 @@ export function decideItemTiers(
   text: string | undefined,
   options: ConnectorStoreTierClassification | undefined,
   ledger: TierLedger | undefined,
-  extra: { namesOnly?: boolean } = {},
+  extra: { namesOnly?: boolean; contentFetchFailed?: boolean } = {},
 ): TierDecision {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read) : options?.sniffer;
+  // Only a listing that read the item's text is fresh enough to ask about an
+  // item recorded Secrets (an unread one keeps the recorded content tier).
+  const fresh = text !== undefined && extra.contentFetchFailed !== true;
+  const sniffer = options?.sniffer && ledger && read
+    ? secretFencedSniffer(options.sniffer, ledger, item.identity, fresh ? read : undefined)
+    : options?.sniffer;
   return classifyItemTiers(
     {
       signals: connector.classificationSignals(item),
@@ -203,7 +208,8 @@ export function decideItemTiers(
  * again. A listing that read the item Secrets already (`read`, the snapshot
  * it classifies with: `TierLedger.classificationRead`) is the fresh truth, its
  * secret gone, and may still ask, but only while the owner's override is the
- * one it read: a Secrets marking since then fences it like any stale pass. A
+ * one it read and no Secrets clearing ran since (the item's scrub revision):
+ * a Secrets marking since then, by the owner or a detector, fences it. A
  * pass over a stored item (extraction, re-judge, migration) passes no `read`:
  * it may ask only while the item is not Secrets.
  */
@@ -216,7 +222,9 @@ export function secretFencedSniffer(
   const stillAsk = (): boolean => {
     const now = ledger.classificationRead(identity);
     if (!now.secret) return true;
-    return read?.secret === true && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
+    return read?.secret === true
+      && read.scrubRevision === now.scrubRevision
+      && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
   return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
 }

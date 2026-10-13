@@ -3885,9 +3885,10 @@ export class LocalConnectorStore {
         trustDomain: stored.trustDomain,
         trustTier: stored.trustTier,
       });
-      // A legacy item judged Secrets: its side stores keep nothing of it
-      // either (the router's routed path does the same).
-      if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
+      // A legacy item Secrets as recorded (a recorded Secrets content tier
+      // stays when this listing could not read the text): its side stores
+      // keep nothing of it either (the router's routed path does the same).
+      if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets' || ledger.itemIsSecret(item.identity)) {
         forgetSecretInSideStores({ ledger, identity: item.identity });
       } else {
         // Left Secrets in this write: its job names come back.
