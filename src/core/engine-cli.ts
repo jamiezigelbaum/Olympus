@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { configFromPluginConfig } from './config.ts';
+import { engineBriefReport } from './engine-brief.ts';
 import { engineStatusPath, type EngineStatusFile } from './engine-host.ts';
 import {
   engineConflictWarnings,
@@ -34,7 +35,7 @@ import { readRemoteAccessStatus, relayProcessRunning, remoteAccessDirForCli, res
 export const ENGINE_CLI_USAGE = {
   'engine install': 'olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--now] [--dry-run]',
   'engine uninstall': 'olympus engine uninstall',
-  'engine status': 'olympus engine status',
+  'engine status': 'olympus engine status [--brief]',
   'engine start': 'olympus engine start',
   'engine stop': 'olympus engine stop [--now]',
   'engine restart': 'olympus engine restart [--now]',
@@ -120,6 +121,8 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     return rollbackEngine({ ...service, ...(deps.health ? { health: deps.health } : {}) });
   }
   if (command === 'status') {
+    // The bar widget's one-line read (engine-brief.ts): no token, no slow checks.
+    if (rest.length === 1 && rest[0] === '--brief') return engineBriefReport(deps);
     expectNoArgs('status', rest);
     return engineStatusReport(deps);
   }

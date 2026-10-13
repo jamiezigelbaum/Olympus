@@ -5169,6 +5169,8 @@ export async function main(): Promise<void> {
       return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
     },
   };
+  const { withEngineBriefRoute } = await import('../engine-brief-route.ts');
+  const { dashboardViewModel: engineBriefView } = await import('../chatgpt/mcp-surface.ts');
   const { createDashboardPanelTools } = await import('./dashboard-panel-tools.ts');
   dashboardPanelTools = createDashboardPanelTools({
     surface: () => chatgptSurface,
@@ -5242,7 +5244,9 @@ export async function main(): Promise<void> {
             ...chatgptSurface,
           },
         })),
-        withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),
+        // `GET /v1/engine/brief` (`olympus engine status --brief`) sits inside the
+        // bearer wrapper: it answers only a request that already proved the bearer.
+        withWorkerBearerAuth(withEngineBriefRoute(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, sessionSecret: dashboardSessionSecret.secret }),
       )),
     ))))),
   });

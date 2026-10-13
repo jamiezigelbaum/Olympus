@@ -796,7 +796,8 @@ async function runOperation(name: string, ctx: OperationContext, params: Record<
   return operation.handler(ctx, params);
 }
 
-async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: AbortSignal) {
+/** The V1 dashboard view model, from the surface's options: the one path the MCP dashboard tool and the engine brief share. */
+export async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: AbortSignal) {
   let view: SourceDashboardViewModel;
   try {
     view = await options.dashboardView(signal);
