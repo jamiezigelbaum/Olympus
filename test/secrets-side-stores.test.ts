@@ -148,8 +148,8 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     // A pass in flight: it read both items (neither Secret) and is about to ask.
     const staleRead = fx.ledger.classificationRead(identityOf('mortgage-letter'));
     expect(staleRead).toEqual({ override: undefined, secret: false });
-    const stale = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), staleRead.secret);
-    const other = secretFencedSniffer(lane, fx.ledger, identityOf('therapy-notes'), fx.ledger.classificationRead(identityOf('therapy-notes')).secret);
+    const stale = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), staleRead);
+    const other = secretFencedSniffer(lane, fx.ledger, identityOf('therapy-notes'), fx.ledger.classificationRead(identityOf('therapy-notes')));
 
     expect(runTierSet(['mortgage-letter', 'secrets'], { storePaths: storePaths(fx) }))
       .toMatchObject({ results: [{ override: 'Secrets', outcome: 'hidden_now' }] });
@@ -163,6 +163,33 @@ describe('a sniffer pass that read an item before it became Secret', () => {
     store.deleteItemQuestions(identityOf('therapy-notes'));
     other.judge({ pass: 'metadata', flags: ['names:health'], material: 'therapy notes', subject: identityOf('therapy-notes') });
     expect(queued('therapy-notes')).toEqual(['metadata']);
+  });
+
+  test('read as Secret under "not a secret", then marked Secret again: queues nothing; unchanged, it may still ask', async () => {
+    const dir = workspace('olympus-secret-side-sniffer-');
+    const installed = installSniffer(dir);
+    const fx = fixture(dir);
+    await fx.set.sync(fixtureConnector(() => [{ id: 'mortgage-letter', name: 'mortgage letter', text: 'Lunch with the neighbours on Friday.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(runTierSet(['mortgage-letter', 'secrets'], { storePaths: storePaths(fx) }))
+      .toMatchObject({ results: [{ override: 'Secrets' }] });
+    // The owner takes it back; the record is still Secrets until it is listed again.
+    fx.ledger.setOverride(identityOf('mortgage-letter'), { kind: 'not_secret' });
+    const store = installed.snifferStoreForLedger(fx.ledger.dbPath);
+    const lane = installed.forLedger(fx.ledger.dbPath).sniffer!;
+    const read = fx.ledger.classificationRead(identityOf('mortgage-letter'));
+    expect(read).toMatchObject({ secret: true, override: { kind: 'not_secret' } });
+    const listing = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'), read);
+    const ask = () => listing.judge({ pass: 'metadata', flags: ['names:finance'], material: 'mortgage letter', subject: identityOf('mortgage-letter') });
+
+    // Nothing changed since the read: the listing is the fresh truth and asks.
+    ask();
+    expect(store.questionFor(identityOf('mortgage-letter'), 'metadata')).toBeDefined();
+    // The owner marks it Secret again mid-pass: cleared, and not queued again.
+    expect(runTierSet(['mortgage-letter', 'secrets'], { storePaths: storePaths(fx) }))
+      .toMatchObject({ results: [{ override: 'Secrets' }] });
+    expect(store.questionFor(identityOf('mortgage-letter'), 'metadata')).toBeUndefined();
+    ask();
+    expect(JSON.stringify(store.listQuestions())).not.toContain('mortgage letter');
   });
 });
 

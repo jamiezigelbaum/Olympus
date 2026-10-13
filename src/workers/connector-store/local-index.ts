@@ -2660,7 +2660,7 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, false) } : {}),
+          ...(inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity) } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },

@@ -176,7 +176,7 @@ export function decideItemTiers(
 ): TierDecision {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read.secret) : options?.sniffer;
+  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read) : options?.sniffer;
   return classifyItemTiers(
     {
       signals: connector.classificationSignals(item),
@@ -200,23 +200,23 @@ export function decideItemTiers(
  * Secrets while the pass runs: a question is queued only if the item is not
  * Secrets in the ledger at that moment (read under the queue's lock), so the
  * names or excerpt the Secrets disposition just cleared are not queued
- * again. An item already Secrets when the pass read it is not fenced: its
- * listing is the fresh truth (its secret gone, it is asked about again).
- * `secretWhenRead` must come from the same snapshot as the override the pass
- * classifies with (`TierLedger.classificationRead`), or a Secrets marking
- * between the two reads would leave a stale pass unfenced. A pass over a
- * stored item (extraction, re-judge, migration) reads other ledger state
- * too and passes false: always fenced.
+ * again. A listing that read the item Secrets already (`read`, the snapshot
+ * it classifies with: `TierLedger.classificationRead`) is the fresh truth, its
+ * secret gone, and may still ask, but only while the owner's override is the
+ * one it read: a Secrets marking since then fences it like any stale pass. A
+ * pass over a stored item (extraction, re-judge, migration) passes no `read`:
+ * it may ask only while the item is not Secrets.
  */
 export function secretFencedSniffer(
   sniffer: TierSniffer,
   ledger: TierLedger,
   identity: TierLedgerIdentity,
-  secretWhenRead: boolean,
+  read?: ReturnType<TierLedger['classificationRead']>,
 ): TierSniffer {
-  if (secretWhenRead) return sniffer;
-  return {
-    id: sniffer.id,
-    judge: (request) => sniffer.judge({ ...request, stillAsk: () => !ledger.itemIsSecret(identity) }),
+  const stillAsk = (): boolean => {
+    const now = ledger.classificationRead(identity);
+    if (!now.secret) return true;
+    return read?.secret === true && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
+  return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
 }

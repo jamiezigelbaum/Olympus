@@ -189,7 +189,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           subject: identity,
         },
         {
-          ...(tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity, false) } : {}),
+          ...(tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity) } : {}),
           ...(override ? { override } : {}),
           ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },
