@@ -319,7 +319,7 @@ section consolidates and supersedes all other policy wording.
 ### Change log
 
 - 2026-10-13 (no contract type version change): tier classifier
-  `2026-10-13.p5`, owner-approved Personal-first (2026-10-04;
+  `2026-10-13.p6`, owner-approved Personal-first (2026-10-04;
   `docs/design/categorization-precision.md` step 2). Content without
   own-record signals can be Personal before its individual privacy-safe model
   judgment; own-record signals hold content, and a later Private verdict hides
@@ -330,14 +330,20 @@ section consolidates and supersedes all other policy wording.
   canonical fingerprint are unchanged; stored tier keys and existing connector
   callers remain compatible.
   Migration/rejudging: no source-contract schema migration or bulk rewrite of
-  stored copies. The sniffer queue upgrades additively to schema 2 (priority
-  defaults to 0 for existing questions, plus a dispatch counter for aging).
+  stored copies. The sniffer store upgrades additively to schema 3 on writable open.
+  The v2 migration gives existing questions priority 0 and adds a dispatch
+  counter for aging; v3 adds oldest/pass-specific queue indexes and the
+  `sniffer_scan` table for durable bounded-scan cursors and pinned oldest
+  candidates. Existing queued questions, cached verdicts and the dispatch
+  counter are preserved; cursors start empty. Read-only status readers do not
+  migrate or write the store. Older writers that know only schema 1 or 2
+  refuse to open a migrated v3 store; this is not a downgrade migration.
   The classifier version invalidates older decisions for the existing bounded
   background rejudge path, subject to its owner-rule, override and pending-state
   exclusions. Existing placements remain while a model question waits;
   lowering requires a receipt matching the full stored text, and nonautomatic moves still await the
   owner-approved migration. Rejudging does not release old held bodies merely
-  because p5 is installed.
+  because p6 is installed.
   Eval evidence: `test/tier-personal-first.test.ts` covers immediate ordinary
   content, held own-records, names/body separation and hide-before-move;
   `test/classification-eval.test.ts` exercises the synthetic classification
