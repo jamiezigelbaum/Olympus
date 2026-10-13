@@ -106629,6 +106629,7 @@ var init_source_watch_runtime = __esm(() => {
 
 // src/control-ui/browser-controller.ts
 function mountDashboardController(options) {
+  const landedHighlightMs = 4000;
   let canWrite = options.canWrite;
   let csrfToken = options.csrfToken || "";
   let signature = options.signature || "";
@@ -107443,7 +107444,7 @@ function mountDashboardController(options) {
     }
     const landed = focus;
     landed.classList.add("landed");
-    view3.setTimeout(() => landed.classList.remove("landed"), LANDED_HIGHLIGHT_MS);
+    view3.setTimeout(() => landed.classList.remove("landed"), landedHighlightMs);
     if (typeof focus.scrollIntoView === "function")
       focus.scrollIntoView({ block: "center" });
     focus.focus();
@@ -107496,7 +107497,6 @@ function mountDashboardController(options) {
     dispose
   };
 }
-var LANDED_HIGHLIGHT_MS = 4000;
 
 // src/workers/dashboard/theme.ts
 function dashboardThemeVariable(token) {
