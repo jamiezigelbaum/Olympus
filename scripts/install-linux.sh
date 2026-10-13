@@ -222,6 +222,9 @@ die() { printf '%s\n' "Olympus was not installed or upgraded: $*" >&2; exit 1; }
   "$WORK/bun" --no-env-file -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(s.ok!==true) process.exit(1)' "$WORK/status.json" \
     || die 'Lifecycle status is unhealthy or unknown; do not treat this as a healthy installation.'
   cat "$WORK/status.json"
+  say 'By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)'
+  say 'and acknowledge its Privacy Policy (https://olympusplugin.ai/privacy/).'
+  say 'Olympus is provided as is, without warranty. Keep your own backups.'
   say 'Installed for your user without an administrator password. Run ~/.local/bin/olympus engine status for later checks.'
   say 'Model readiness is reported separately by the engine.'
 ACTIVATE

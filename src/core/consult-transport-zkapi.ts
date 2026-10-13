@@ -17,7 +17,9 @@ import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 //
 // The Tor and daemon sequencing is ported from Vitalik Buterin's reference
 // wrapper scripts in ethereum/zkapi pull request #16 (commit
-// 7a46ef353fd3383e9917b0cffb8921b849e177a3, unmerged at port time):
+// 7a46ef353fd3383e9917b0cffb8921b849e177a3, unmerged at port time; ethereum/zkapi is
+// licensed MIT OR Apache-2.0, and its zkapi-clientd is MIT, Copyright (c) 2026
+// Open Anonymity Team):
 // `zkapi-serve-tor.sh` (throwaway `tor --ClientOnly 1 --PublishServerDescriptor 0
 // --DataDirectory <fresh> --SocksPort 127.0.0.1:<port> --SafeLogging 1
 // --__OwningControllerProcess <pid>`, wait for "Bootstrapped 100", then serve)

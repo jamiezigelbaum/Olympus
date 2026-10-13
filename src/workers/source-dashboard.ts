@@ -25,6 +25,7 @@ import type {
   SovereigntyProfileProvider,
 } from '../core/sovereignty.ts';
 import type { ConnectedHandleRegistry, ConnectedCredentialHandle } from './credential-broker/connected-handles.ts';
+import { WHATSAPP_UNOFFICIAL_CLIENT_NOTICE } from '../core/whatsapp-notice.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './dashboard/scheduler-markers.ts';
 import { sourceFailureKind, sourceFailureRef, type SourceFailureKind } from './dashboard/source-failure.ts';
 import {
@@ -1693,6 +1694,7 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
       source: 'whatsapp',
       instructions: [
         'WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).',
+        WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
         'Ask your agent to start WhatsApp pairing; this card updates once the scan completes.',
       ],
     },

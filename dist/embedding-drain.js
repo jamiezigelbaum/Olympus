@@ -10210,8 +10210,10 @@ function assignmentAccepted(match) {
   const isSecret = isPassword || keyword.startsWith("secret");
   if (/\s/.test(value))
     return isSecret && isPlausiblePassphrase(value, 6);
+  if (PROSE_WORDS.has(stripNonAlphanumeric(value)))
+    return false;
   if (quoted && isSecret)
-    return value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase());
+    return value.length >= 6;
   if (isIdentifierHandOff(match, assigned))
     return false;
   let strong = true;
@@ -10234,7 +10236,7 @@ function assignmentAccepted(match) {
     return true;
   if (value.length >= 8 && hasCredentialShape(value))
     return true;
-  return isPassword && !groups.nl && value.length >= 6 && !PROSE_WORDS.has(value.toLowerCase()) && endsTheLine(match);
+  return isPassword && !groups.nl && value.length >= 6 && endsTheLine(match);
 }
 function maskedProviderToken(token) {
   const body = token.replace(/^(?:github_pat_|[A-Za-z]+[_-])+/, "");
@@ -10256,29 +10258,56 @@ function envAssignmentAccepted(match) {
     return false;
   if (/\s/.test(value) && !isPlausiblePassphrase(value, 6))
     return false;
+  if (!/\s/.test(value) && PROSE_WORDS.has(stripNonAlphanumeric(value)))
+    return false;
   return !isIdentifierHandOff(match, assigned);
+}
+function blockScalarLines(match, keyIndent) {
+  const lines = [(match.groups?.bv ?? "").trim()];
+  const input = match.input ?? "";
+  const end = (match.index ?? 0) + match[0].length;
+  const following = input.slice(end, end + BLOCK_SCALAR_WINDOW).split(/\r?\n/);
+  for (let i = 1;i < following.length && lines.length < BLOCK_SCALAR_MAX_LINES; i += 1) {
+    const line = following[i];
+    const text2 = line.trim();
+    if (!text2)
+      continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= keyIndent)
+      break;
+    lines.push(text2);
+  }
+  return lines.filter((line) => line && !COMMENT_LINE.test(line));
 }
 function blockScalarAccepted(match) {
   const groups = match.groups ?? {};
   const keyword = (groups.kw ?? "").toLowerCase();
-  const value = (groups.bv ?? "").trim();
-  if (!value || value.startsWith("#"))
-    return false;
   const keyLead = leadBefore(match.input ?? "", match.index ?? 0, 200);
   const keyIndent = (/^[ \t]*/.exec(keyLead)?.[0] ?? "").length;
   if ((groups.ind ?? "").length <= keyIndent)
     return false;
-  if (isPlaceholderValue(value) || isNotLiteralCredential(value))
-    return false;
   const isSecret = keyword.startsWith("pass") || keyword.startsWith("secret");
-  if (/\s/.test(value))
-    return isSecret && isPlausiblePassphrase(value, 6);
-  return value.length >= (isSecret ? 6 : 8);
+  const judge = (value) => {
+    if (!value || isPlaceholderValue(value) || isNotLiteralCredential(value))
+      return false;
+    if (/\s/.test(value))
+      return isSecret && isPlausiblePassphrase(value, 6);
+    if (PROSE_WORDS.has(stripNonAlphanumeric(value)))
+      return false;
+    return value.length >= (isSecret ? 6 : 8);
+  };
+  const lines = blockScalarLines(match, keyIndent);
+  if (lines.length === 0)
+    return false;
+  if (judge(lines[0]))
+    return true;
+  return lines.length > 1 && judge(lines.join(" "));
 }
-var PROSE_WORDS, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
+var PROSE_WORDS, MASKED_RUN, PLACEHOLDER_WORDS, BARE_LITERALS, CODE_LOOKUP, CALL_EXPRESSION, MEMBER_CHAIN, COMMON_OBJECTS, TYPE_ANNOTATION, BARE_IDENTIFIER, CREDENTIAL_WORD, CREDENTIAL_NOUN, IDENTIFIER_NAME, STRONG_QUALIFIERS, NON_CREDENTIAL_TOKEN_PREFIX, CODE_LEAD, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, NON_CREDENTIAL_KEY_TAIL, NON_CREDENTIAL_CAMEL_TAIL, BLOCK_SCALAR_MAX_LINES = 16, BLOCK_SCALAR_WINDOW = 600, COMMENT_LINE, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, URL_USERINFO, AUTHORIZATION_HEADER, AZURE_KEY, AZURE_SAS_SIGNATURE, LEGACY_CREDENTIAL_ASSIGNMENT, SHARED_SECRET_PATTERNS;
 var init_secret_patterns = __esm(() => {
   PROSE_WORDS = new Set([
     "above",
+    "again",
     "below",
     "cannot",
     "change",
@@ -10323,6 +10352,7 @@ var init_secret_patterns = __esm(() => {
     "required",
     "requirements",
     "reset",
+    "retry",
     "see",
     "send",
     "sent",
@@ -10353,7 +10383,7 @@ var init_secret_patterns = __esm(() => {
     "insert[_-]?(?:your|here|key|token)",
     "[_-]here$",
     "^n/a$",
-    "not[_-]?set",
+    "not[_ -]?set",
     "^unset$"
   ].join("|"), "i");
   BARE_LITERALS = new Set([
@@ -10455,13 +10485,14 @@ var init_secret_patterns = __esm(() => {
   ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
   NON_CREDENTIAL_KEY_TAIL = /[_.-](?:file|path|dir|url|uri|hash|hashed|salt|type|length|len|ttl|expiry|expires|expiration|policy|field|header|endpoint|name|label|count|size|min|max|regex|pattern|prefix|id)$/i;
   NON_CREDENTIAL_CAMEL_TAIL = /[a-z](?:File|Path|Dir|Url|Uri|Hash|Hashed|Salt|Type|Length|Ttl|Expiry|Expires|Name|Label|Count|Size|Min|Max|Regex|Pattern|Prefix|Id)$/;
+  COMMENT_LINE = /^#(?:\s|$)/;
   KEYWORD = String.raw`(?<kw>pass(?:word|wd|phrase|code)|secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?|api[_ -]?key|private[_ -]?key|secret|token)`;
   SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
   VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
   CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
   ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
   BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
-  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{11,159})$`, "gim");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
   URL_USERINFO = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,15}:\/\/[^\s:/@"'<>]+:(?<pw>[^\s/@"'<>]{6,})@/gi;
   AUTHORIZATION_HEADER = /\bauthorization["'`]?[ \t]*[:=][ \t]*["']?(?:bearer|basic|token)[ \t]+(?<tok>[\w.~+/=-]{16,})/gi;
   AZURE_KEY = /(?<![A-Za-z0-9])(?:AccountKey|SharedAccessKey)[ \t]*=[ \t]*["']?(?<key>[A-Za-z0-9+/]{40,}={0,2})/gi;
@@ -10559,7 +10590,7 @@ var init_secret_patterns = __esm(() => {
       label: "password",
       pattern: LABELLED_PASSPHRASE,
       confidence: 0.85,
-      accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? "", 12)
+      accept: (match) => isPlausiblePassphrase(match.groups?.mv ?? "", 6)
     },
     {
       findingType: "credential_assignment",
@@ -15908,6 +15939,25 @@ function createConnectorStoreMediaJudgments(db) {
   addColumnIfMissing(db, "media_judgments", "attempts", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "media_judgments", "tier_checked_at", "TEXT");
 }
+function createConnectorStoreItemTextVersions(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_text_versions (
+      item_pk INTEGER PRIMARY KEY,
+      source_version TEXT,
+      recorded_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_item_text_version_capture
+    AFTER UPDATE OF source_version ON items
+    WHEN OLD.source_version IS NOT NEW.source_version
+    BEGIN
+      INSERT INTO item_text_versions (item_pk, source_version, recorded_at)
+      SELECT OLD.item_pk, OLD.source_version, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE EXISTS (SELECT 1 FROM chunks WHERE item_pk = OLD.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions WHERE item_pk = OLD.item_pk);
+    END;
+  `);
+}
 function createConnectorStoreChunkMediaReleases(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS chunk_media_releases (
@@ -17357,6 +17407,8 @@ function validateConnectorStoreSchema(db) {
   assertTriggerExists(db, "connector_store_chunk_media_release", "v13");
   assertExactTableColumns(db, "media_judgments", [...CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS], false, "v14");
   assertIndexColumns(db, "idx_connector_store_media_judgments_unapplied", ["media_sha256"], "v14");
+  assertExactTableColumns(db, "item_text_versions", ["item_pk", "source_version", "recorded_at"], false, "v14");
+  assertTriggerExists(db, "connector_store_item_text_version_capture", "v14");
 }
 function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
   validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
@@ -17940,6 +17992,7 @@ var init_local_index = __esm(() => {
     reactionsColumnPresent = false;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
+    itemTextVersionsPresent = false;
     mediaJudgmentsPresent = false;
     mediaHolder;
     stillImageFormatsRead;
@@ -17996,11 +18049,13 @@ var init_local_index = __esm(() => {
           runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
           createConnectorStoreChunkMediaReleases(this.db);
           createConnectorStoreMediaJudgments(this.db);
+          createConnectorStoreItemTextVersions(this.db);
           validateConnectorStoreSchema(this.db);
         }
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
         this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
+        this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
         const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
         this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
       } catch (error) {
@@ -19345,6 +19400,10 @@ var init_local_index = __esm(() => {
       const imagesWithoutPicture = readFormats.size > 0;
       const imageMimeSql = readFormats.size === STILL_IMAGE_FORMATS.length ? "LOWER(i.mime_type) LIKE 'image/%'" : `LOWER(i.mime_type) IN (${STILL_IMAGE_FORMATS.filter((format) => readFormats.has(format)).flatMap((format) => [...stillImageMimeTypes(format)]).map((mimeType) => `'${mimeType}'`).join(", ")})`;
       const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
+      const staleChunksSql = options.includeStaleChunks === true && this.itemTextVersionsPresent ? `OR EXISTS (
+            SELECT 1 FROM item_text_versions v
+            WHERE v.item_pk = i.item_pk AND v.source_version IS NOT i.source_version
+          )` : "";
       const query = this.db.query(`
       SELECT
         i.item_pk, i.family, i.provider, i.account_scope, i.provider_item_id,
@@ -19358,6 +19417,7 @@ var init_local_index = __esm(() => {
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${staleChunksSql}
           ${imagesWithoutPicture ? `OR (
             ${imageMimeSql}
             AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
@@ -19406,6 +19466,21 @@ var init_local_index = __esm(() => {
         ...skippedByDisposition > 0 ? { skippedByDisposition } : {},
         ...exhausted ? {} : { nextCursor: String(lastExaminedPk) }
       };
+    }
+    itemTextIsStale(localItemId) {
+      if (!this.itemTextVersionsPresent)
+        return false;
+      const row = this.db.query(`
+      SELECT 1 AS stale
+      FROM items i
+      JOIN item_text_versions v ON v.item_pk = i.item_pk
+      WHERE i.local_item_id = ?
+        AND i.tombstoned = 0
+        AND v.source_version IS NOT i.source_version
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+      LIMIT 1
+    `).get(localItemId);
+      return row !== null;
     }
     imageFormatReadsPictures(mimeType) {
       const format = stillImageFormatForMimeType(mimeType);
@@ -19735,6 +19810,7 @@ var init_local_index = __esm(() => {
             if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
               this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(existing.item_pk, this.now().toISOString());
             }
+            this.clearItemTextVersion(existing.item_pk);
             itemsUnchanged += 1;
             continue;
           }
@@ -21354,6 +21430,7 @@ var init_local_index = __esm(() => {
       if (text2 === undefined || text2.trim() === "") {
         this.db.transaction(() => {
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(itemPk);
+          this.clearItemTextVersion(itemPk);
           this.refreshFtsForItem(itemPk);
         })();
         return { chunksIndexed: 0, ftsContentChanged: true };
@@ -21397,6 +21474,7 @@ var init_local_index = __esm(() => {
           for (const chunk of desired) {
             update.run(chunk.embeddingHash, itemPk, chunk.index, chunk.embeddingHash);
           }
+          this.clearItemTextVersion(itemPk);
         })();
         return { chunksIndexed: 0, ftsContentChanged: false };
       }
@@ -21421,9 +21499,15 @@ var init_local_index = __esm(() => {
             insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
           }
         }
+        this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
       })();
       return { chunksIndexed: chunks.length, ftsContentChanged: true };
+    }
+    clearItemTextVersion(itemPk) {
+      if (!this.itemTextVersionsPresent)
+        return;
+      this.db.query("DELETE FROM item_text_versions WHERE item_pk = ?").run(itemPk);
     }
     reseasonItemEmbeddingInputs(itemPk, seasoning) {
       const chunks = this.db.query(`
@@ -22934,7 +23018,9 @@ var init_local_index = __esm(() => {
     "chunk_media_failures",
     "image_media_reads",
     "media_judgments",
-    "idx_connector_store_media_judgments_unapplied"
+    "idx_connector_store_media_judgments_unapplied",
+    "item_text_versions",
+    "connector_store_item_text_version_capture"
   ];
   CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
     "chunk_pk",
@@ -29373,7 +29459,6 @@ var init_source_watch = __esm(() => {
     now: () => new Date
   });
 });
-
 // src/workers/dashboard/scheduler-markers.ts
 var OPERATOR_PAUSED_SCHEDULER_MARKERS;
 var init_scheduler_markers = __esm(() => {
@@ -35729,7 +35814,8 @@ class DropboxExtractionSource {
       return { candidates: [], done: true };
     const readerOptions = {
       limit: options.limit,
-      withoutChunksOnly: true
+      withoutChunksOnly: true,
+      includeStaleChunks: true
     };
     if (options.cursor !== undefined)
       readerOptions.cursor = options.cursor;
@@ -36233,6 +36319,7 @@ var PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 init_types();
 init_engine();
 init_tier_classifier();
+init_tier_ledger();
 init_tiered_store_set();
 
 // src/workers/connector-store/tiered-extraction.ts

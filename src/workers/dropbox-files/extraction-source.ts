@@ -169,8 +169,20 @@ export class DropboxExtractionSource implements FileExtractionSource {
   }
 
   /**
-   * Candidates are items the store holds with no extracted text yet, narrowed
-   * to the configured lanes.
+   * Candidates are items the store holds with no extracted text yet, and items
+   * whose extracted text is from a revision the file has since moved past,
+   * narrowed to the configured lanes.
+   *
+   * The second kind is why `includeStaleChunks` is set. A metadata pull of an
+   * edited file advances its revision and content hash and leaves the chunks of
+   * the previous revision in place, so asking only for items without chunks
+   * would never read the edit and every search would keep answering from the
+   * old text. The store tells the two apart by a record of the revision the
+   * chunks were written for; an unchanged file has none and is not listed.
+   *
+   * The row hands this source the file's CURRENT revision and content hash, so
+   * the job for the edit is keyed by them (the job store's identity includes
+   * both) and is a new job beside the settled one for the old revision.
    *
    * An item whose `locator_uri` falls under no configured path prefix is not a
    * candidate at all: it is out of lane, and enqueuing it would put a job in
@@ -186,6 +198,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
     const readerOptions: ExtractionCandidateReaderOptions = {
       limit: options.limit,
       withoutChunksOnly: true,
+      includeStaleChunks: true,
     };
     if (options.cursor !== undefined) readerOptions.cursor = options.cursor;
     if (options.mimeTypes) readerOptions.mimeTypes = options.mimeTypes;
