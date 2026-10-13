@@ -12,9 +12,11 @@
   the background, moving it up if it is Private. Your privacy settings
   decide the tiers. Secret detection is stricter about real credentials
   (including encoded links) and no longer flags ordinary example links.
-- **Google sign-in happens on your computer**, directly with Google.
-- **Secrets keep their location only**, everywhere Olympus stores anything
-  about an item.
+- **Google sign-in happens on your computer**, directly with Google. Google
+  connections made with a release candidate need Reconnect Google.
+- **An item that becomes Secret keeps only a record of where it is** in
+  Olympus's index (its location, a screened title and the kinds of secret
+  found), so you can still find it.
 
 - **No Public tier on any new install.** Every privacy posture now sets up
   Personal, Private and Secret only, on OpenClaw as on ChatGPT: anything
