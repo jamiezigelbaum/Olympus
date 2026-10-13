@@ -5,6 +5,7 @@
     "": {
       "name": "olympus-source-checkout",
       "dependencies": {
+        "entities": "7.0.1",
         "franc-min": "6.2.0",
         "stemmer": "2.0.1",
         "stopwords-iso": "1.1.0",

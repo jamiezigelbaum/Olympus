@@ -4,7 +4,7 @@ import type {
   SourceTrustDomain,
   SourceTrustTier,
 } from './source-index/types.ts';
-import { SHARED_SECRET_PATTERNS, hasSecretPatternHit } from './secret-patterns.ts';
+import { SHARED_SECRET_PATTERNS, hasSecretPatternHit, secretScreeningVariants } from './secret-patterns.ts';
 import { isSecureSensitivity } from './source-index/types.ts';
 
 export type EvidenceConfidence = 'low' | 'medium' | 'high';
@@ -262,11 +262,17 @@ function defaultReleaseSurfaceForSensitivity(sensitivity: SourceSensitivity): Ev
  */
 export function secretLabelsInText(text: string): string[] {
   const labels = new Set<string>();
+  const variants = secretScreeningVariants(text);
   for (const { label, pattern } of SECRET_PATTERNS) {
-    if (pattern.test(text)) labels.add(label);
+    // Preserve the outbound guard's shorter non-URL thresholds; URL values
+    // use the same parser and placeholder exclusions as every other screen.
+    const shared = { label: ['private_key', 'openai_key', 'github_token', 'slack_token'].includes(label) ? label : 'credential_assignment',
+      findingType: 'credential_assignment' as const, confidence: 1,
+      pattern: new RegExp(pattern.source, `${pattern.flags}g`) };
+    if (hasSecretPatternHit(text, shared, variants)) labels.add(label);
   }
   for (const shared of SHARED_SECRET_PATTERNS) {
-    if (hasSecretPatternHit(text, shared)) labels.add(shared.label);
+    if (hasSecretPatternHit(text, shared, variants)) labels.add(shared.label);
   }
   return [...labels];
 }

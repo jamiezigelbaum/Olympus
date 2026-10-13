@@ -50,7 +50,7 @@ const LEGACY: Array<FixtureSpec & { body: string }> = [
 ];
 const NEW: Array<FixtureSpec & { body: string }> = [
   { id: 'new-integral', name: 'integral-theory-chapter.pdf', body: 'Integral theory maps quadrants, levels and lines of development.' },
-  { id: 'new-scan', name: 'scan-0413.pdf', body: 'The lab results confirm the diagnosis; the patient starts treatment next week.' },
+  { id: 'new-scan', name: 'scan-0413.pdf', body: 'The diagnosis is recorded for patient SSN 123-45-6789; follow up next week.' },
   { id: 'new-secret', name: 'deploy-notes.pdf', body: `deploy with aws key ${FAKE_AWS_KEY} tonight` },
 ];
 
@@ -325,11 +325,11 @@ describe('P1c: content that lands after listing', () => {
     expect(searchIds(lane.stores.secure_local, 'diagnosis')).toEqual(['new-scan']);
   });
 
-  test('names that look private keep the whole item Private and held from embedding; no cloud model sees Private text', async () => {
+  test('structured identifiers in names keep the whole item Private and held from embedding; no cloud model sees Private text', async () => {
     const dir = workspace();
     const lane = openLane(dir);
     cleanups.unshift(() => lane.close());
-    const pending = { id: 'new-bank', name: 'bank statement march.pdf', body: 'Opening balance and the transfers for March.' };
+    const pending = { id: 'new-bank', name: 'bank statement SSN 123-45-6789.pdf', body: 'Opening balance and the transfers for March.' };
     await listAll(lane, [...NEW, pending]);
     expect(lane.ledger.copies(identityOf('new-bank'))).toEqual([
       expect.objectContaining({ corpusId: CORPORA.secure_local, layers: 'both', state: 'current', embedHold: true }),

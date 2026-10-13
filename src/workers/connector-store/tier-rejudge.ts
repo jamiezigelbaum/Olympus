@@ -40,7 +40,12 @@
 
 import {
   classifyContentTier,
+  classifyItemTiers,
+  HELD_RECORD_PRIORITY,
+  SNIFFER_NAMES_MAX_CHARS,
+  tierSnifferInputHash,
   maxTier,
+  hasCredentialUrl,
   namesDecidedByOwner,
   TIER_CLASSIFIER_VERSION,
   type TierDecision,
@@ -52,6 +57,9 @@ import {
   type TierLedgerRecord,
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
+import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
+import type { LocalConnectorStore } from './local-index.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -163,7 +171,7 @@ export function rejudgeStoredContent(
   const serving = copyServingLayer(current, 'content');
   const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
   const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-  const text = exported?.chunks.map((chunk) => chunk.boundedText).join('\n') ?? '';
+  const text = exported?.chunks.map((chunk) => chunk.boundedText).join('') ?? '';
   if (!exported || !text.trim()) {
     // Nothing to read back: the decision stands, and the row is not re-read
     // until the classifier or the sniffer changes again.
@@ -176,12 +184,25 @@ export function rejudgeStoredContent(
   const path = columnString(exported.columns['locator_uri']);
   const sender = columnString(exported.columns['sender_label']);
   const mimeType = columnString(exported.columns['mime_type']);
+  const folderKeys = storedFolderKeys(exported.columns['source_scope_folder_keys_json']);
+  // A failed cache/queue operation is not an open question. Leave all retry
+  // stamps and receipts untouched until every needed question is persisted.
+  let questionNotQueued = false;
+  const sniffer: TierSniffer | undefined = options.sniffer && {
+    id: options.sniffer.id,
+    judge(request) {
+      const verdict = options.sniffer!.judge(request);
+      if (verdict.verdict === 'undecided' && verdict.queued !== true) questionNotQueued = true;
+      return verdict;
+    },
+  };
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity);
   const content = classifyContentTier(
     {
       text,
-      metadataTier: record.metadataTier,
-      metadataForced: record.metadataForced,
-      metadataFlagged: record.metadataFlagged,
+      metadataTier: metadata.metadataTier,
+      metadataForced: metadata.metadataForced,
+      metadataFlagged: metadata.metadataFlagged,
       metadataOwnerDecided: namesDecidedByOwner(record.reasons),
       ...(title ? { title } : {}),
       ...(path ? { path } : {}),
@@ -191,24 +212,24 @@ export function rejudgeStoredContent(
       subject: identity,
     },
     {
-      ...(options.sniffer ? { sniffer: options.sniffer } : {}),
+      ...(sniffer ? { sniffer } : {}),
       ...(options.retirePublic ? { retirePublic: true } : {}),
     },
   );
   const decision: TierDecision = {
-    metadataTier: record.metadataTier,
-    contentTier: maxTier(content.contentTier, record.metadataTier),
+    metadataTier: metadata.metadataTier,
+    contentTier: maxTier(content.contentTier, metadata.metadataTier),
     decidedBy: content.decidedBy,
     reasons: [
-      ...record.reasons.filter((reason) => !reason.startsWith('content:')),
+      ...metadata.reasons,
       ...content.reasons,
     ],
-    state: record.metadataPending || content.contentPending ? 'pending' : 'current',
+    state: metadata.metadataPending || content.contentPending ? 'pending' : 'current',
     contentRead: true,
-    metadataPending: record.metadataPending,
+    metadataPending: metadata.metadataPending,
     contentPending: content.contentPending,
-    metadataForced: record.metadataForced,
-    metadataFlagged: record.metadataFlagged,
+    metadataForced: metadata.metadataForced,
+    metadataFlagged: metadata.metadataFlagged,
     engineVersion: content.engineVersion,
     mapRevision: content.mapRevision,
     snifferId: content.snifferId,
@@ -223,14 +244,23 @@ export function rejudgeStoredContent(
     report.secrets += 1;
     return;
   }
+  if (questionNotQueued) {
+    report.failed += 1;
+    return;
+  }
   if (content.contentPending && record.state === 'pending') {
     // Already held for this question: the content pass just queued it again
     // (`subject` above); the sniffer's answer settles the row.
-    if (key) ledger.markHeldRejudged(record, key);
+    // Refresh the content receipt too: an old held row may predate receipts,
+    // or a refused move may have been judged against another stored body.
+    ledger.recordRoutedPlacement(identity, decision, {
+      copies: current, embedHold: current.some(copy => copy.embedHold),
+    }, { guard: { generation: record.generation, override: undefined } });
+    if (key) ledger.markHeldRejudged(ledger.getCurrent(identity)!, key);
     report.asked += 1;
     return;
   }
-  if (content.contentPending) {
+  if (content.contentPending || metadata.metadataPending) {
     // Asked, not hidden: the item stays where it is until the answer.
     if (ledger.openRejudgeQuestion(identity, {
       expectedGeneration: record.generation,
@@ -257,6 +287,75 @@ export function rejudgeStoredContent(
   else report.updated += 1;
 }
 
+/** Only a model's obsolete names verdict may be replaced here. Owner rules,
+ * overrides and provider floors retain their authority. The old placement
+ * stays in force while these new names and content questions are answered. */
+function rejudgeMetadata(
+  record: TierLedgerRecord,
+  sniffer: TierSniffer | undefined,
+  names: { title: string | undefined; path: string | undefined; sender: string | undefined; folderKeys: string[] },
+  subject: TierLedgerIdentity,
+): Pick<TierDecision, 'metadataTier' | 'metadataForced' | 'metadataFlagged' | 'metadataPending' | 'reasons'> {
+  const previous = { ...record, reasons: record.reasons.filter(reason => !reason.startsWith('content:')) };
+  if (!sniffer || record.state !== 'current' || record.metadataForced || namesDecidedByOwner(record.reasons)
+    || !record.reasons.some(reason => reason.startsWith('metadata:sniffer:') && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`))) return previous;
+  const signals = {
+    ...(names.title ? { title: names.title } : {}),
+    ...(names.path ? { path: names.path } : {}),
+    ...(names.sender ? { sender: names.sender } : {}),
+    folderKeys: names.folderKeys,
+  };
+  const fresh = classifyItemTiers({ signals, namesOnly: true });
+  // The store retains scope folder keys but not labels (nor all provider
+  // facts). An old model verdict may have relied on those missing signals.
+  // Re-judging may raise it, but only a connector relist with complete signals
+  // can lower the names and therefore their content floor.
+  const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason));
+  const baseline = maxTier(fresh.metadataTier, record.metadataTier);
+  if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
+  const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
+  const verdict = sniffer.judge({ pass: 'metadata', material, flags: ['names:rejudge'], subject,
+    materialHash: tierSnifferInputHash('metadata', signals),
+    mapRevision: fresh.mapRevision, priority: HELD_RECORD_PRIORITY });
+  const pending = verdict.verdict === 'undecided';
+  return {
+    metadataTier: pending ? baseline : maxTier(baseline, verdict.tier),
+    metadataForced: false,
+    metadataFlagged: pending || fresh.metadataFlagged,
+    metadataPending: pending,
+    reasons: [
+      ...fresh.reasons.filter(reason => reason.startsWith('metadata:') && !reason.startsWith('metadata:sniffer:') && !reason.startsWith('metadata:possibly_private:')),
+      ...providerReasons,
+      `metadata:sniffer:${sniffer.id}:${pending ? 'undecided' : verdict.code}`,
+    ],
+  };
+}
+
+/** A legacy row has no copy ledger: remove every actual copy before settling. */
+export function settleLegacySecrets(options: {
+  ledger: TierLedger;
+  stores: readonly Pick<LocalConnectorStore, 'exportItemCopy' | 'tombstoneCopy'>[];
+  locations: SecretLocationsIndex;
+  identity: TierLedgerIdentity;
+  decision: TierDecision;
+}): boolean {
+  const copies = options.stores.flatMap(store => {
+    const exported = store.exportItemCopy(options.identity);
+    return exported ? [{ store, exported }] : [];
+  });
+  // A crash after the last tombstone can leave only the location receipt.
+  // Without that durable evidence, keep the question for retry.
+  if (copies.length === 0 && !options.locations.get(options.identity)?.findingKinds.includes('sniffer_secret_refusal')) return false;
+  for (const { exported } of copies) recordSecretLocation(options.locations, options.decision, exported, { findingKinds: ['sniffer_secret_refusal'] });
+  // Legacy reads do not obey routed copy rows. Tombstone before the final
+  // ledger write; a partial failure retains the question and remaining copy.
+  for (const { store, exported } of copies) {
+    store.tombstoneCopy(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: 'S5' });
+  }
+  options.ledger.recordDecision(options.identity, options.decision);
+  return true;
+}
+
 /**
  * A routed item judged Secrets after it was stored (a re-judge found a
  * secret in its text; an owner rule made it Secrets): one ledger write hides
@@ -277,22 +376,8 @@ export function settleRoutedSecrets(
     ...(placement.guard ? { guard: placement.guard } : {}),
   });
   if (recorded.outcome !== 'secrets') return false;
-  const locator = columnString(exported.columns['locator_uri']);
-  const title = columnString(exported.columns['title']);
-  const namesReleasable = decision.metadataTier === 'public' || decision.metadataTier === 'private';
-  const folderKeys = storedFolderKeys(exported.columns['source_scope_folder_keys_json']);
-  const scopeGeneration = columnString(exported.columns['source_scope_generation']);
-  const scopeRevision = columnString(exported.columns['source_scope_revision']);
-  set.secrets()?.record({
-    identity: exported.identity,
-    ...(locator ? { locator } : {}),
-    ...(title && namesReleasable ? { title } : {}),
-    namesReleasable,
-    ...(folderKeys.length > 0 ? { folderKeys } : {}),
-    ...(scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {}),
-    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ['owner_marked_secret'],
-    ...(finding.text !== undefined ? { text: finding.text } : {}),
-  });
+  const locations = set.secrets();
+  if (locations) recordSecretLocation(locations, decision, exported, finding);
   settleSecretsCopies({
     ledger,
     identity: exported.identity,
@@ -304,6 +389,30 @@ export function settleRoutedSecrets(
     connectorId: TIER_REJUDGE_CONNECTOR_ID,
   });
   return true;
+}
+
+function recordSecretLocation(
+  locations: SecretLocationsIndex,
+  decision: TierDecision,
+  exported: ConnectorStoreItemCopy,
+  finding: { text?: string; findingKinds: readonly string[] },
+): void {
+  const locator = columnString(exported.columns['locator_uri']);
+  const title = columnString(exported.columns['title']);
+  const namesReleasable = decision.metadataTier === 'public' || decision.metadataTier === 'private';
+  const folderKeys = storedFolderKeys(exported.columns['source_scope_folder_keys_json']);
+  const scopeGeneration = columnString(exported.columns['source_scope_generation']);
+  const scopeRevision = columnString(exported.columns['source_scope_revision']);
+  locations.record({
+    identity: exported.identity,
+    ...(locator && !hasCredentialUrl(locator) ? { locator } : {}),
+    ...(title && namesReleasable ? { title } : {}),
+    namesReleasable,
+    ...(folderKeys.length > 0 ? { folderKeys } : {}),
+    ...(scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {}),
+    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ['owner_marked_secret'],
+    ...(finding.text !== undefined ? { text: finding.text } : {}),
+  });
 }
 
 function identityOf(record: TierLedgerRecord): TierLedgerIdentity {

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { SHARED_SECRET_PATTERNS } from '../../core/secret-patterns.ts';
+import { SHARED_SECRET_PATTERNS, secretPatternHits, secretScreeningVariants } from '../../core/secret-patterns.ts';
 
 export const DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = 'dropbox_deterministic_content_policy';
 export const DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = '2026-10-13';
@@ -50,14 +50,6 @@ interface DropboxContentPolicyPattern {
 
 // One credential pattern list for the Secrets floor and the outbound guard
 // (src/core/secret-patterns.ts), so a shape is never caught on one path only.
-const SECRET_PATTERNS: DropboxContentPolicyPattern[] = SHARED_SECRET_PATTERNS.map((shared) => ({
-  findingType: shared.findingType,
-  pattern: shared.pattern,
-  confidence: shared.confidence,
-  trustTier: 'S5',
-  ...(shared.accept ? { accept: shared.accept } : {}),
-}));
-
 const REVIEW_PATTERNS: DropboxContentPolicyPattern[] = [
   {
     findingType: 'hostile_instruction',
@@ -102,7 +94,13 @@ export function scanDropboxContentPolicyText(input: {
     };
   }
 
-  const secretFindings = scanPatterns(text, SECRET_PATTERNS, input.structuralRefJson);
+  const variants = secretScreeningVariants(text);
+  const secretFindings: DropboxContentPolicyFinding[] = SHARED_SECRET_PATTERNS.flatMap(spec =>
+    secretPatternHits(text, spec, variants).map(match => ({
+      finding_type: spec.findingType, finding_hash: hashFinding(spec.findingType, match[0]),
+      confidence: spec.confidence,
+      ...(input.structuralRefJson ? { structural_ref_json: input.structuralRefJson } : {}),
+    })));
   const reviewFindings = scanPatterns(text, REVIEW_PATTERNS, input.structuralRefJson);
   const findings = dedupeFindings([...secretFindings, ...reviewFindings]);
   const hasSecret = secretFindings.length > 0;

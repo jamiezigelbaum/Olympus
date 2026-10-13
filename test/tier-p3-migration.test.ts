@@ -76,14 +76,14 @@ interface Spec {
 
 const FILES = {
   garden: { id: 'garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden, the compost bins and the tomato beds.' },
-  therapy: { id: 'therapy', name: 'session-notes.txt', text: 'The oncologist reviewed the biopsy results; the diagnosis and the prescription follow.' },
-  medical: { id: 'medical', name: 'therapy-session.txt', text: 'The oncologist reviewed the biopsy results; the diagnosis and the prescription follow.' },
+  therapy: { id: 'therapy', name: 'session-notes.txt', text: 'The oncologist reviewed the biopsy results; patient SSN 123-45-6789; diagnosis and prescription follow.' },
+  medical: { id: 'medical', name: 'therapy-session SSN 123-45-6789.txt', text: 'The oncologist reviewed the biopsy results; patient SSN 123-45-6789; diagnosis and prescription follow.' },
   keys: { id: 'keys', name: 'deploy-notes.txt', text: `Deploy notes. The old key ${FAKE_AWS_KEY} was rotated last week.` },
 } satisfies Record<string, Spec>;
 
 const LIBRARY = {
   launch: { id: 'launch', name: 'Launch essay', text: 'An essay about the orchard launch and the cider press, saved for later reading.' },
-  journal: { id: 'journal', name: 'Reading note', text: 'Highlight: my psychiatrist adjusted the prescription after the diagnosis last spring.' },
+  journal: { id: 'journal', name: 'Reading note', text: 'Patient SSN 123-45-6789: my psychiatrist adjusted the prescription after the diagnosis last spring.' },
   essay: { id: 'essay', name: 'Long read', text: 'A long read about bridges, rivers and the engineers who built the old canal locks.' },
 } satisfies Record<string, Spec>;
 
@@ -810,7 +810,7 @@ describe('tier migration finishes moves a sync queued', () => {
     const specs: FixtureSpec[] = [{ id: 'new-garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden and the compost bins.' }];
     try {
       await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-      specs[0] = { ...specs[0]!, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432 for the seeds.' };
+      specs[0] = { ...specs[0]!, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432.' };
       const queued = await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
       expect(queued.routing.movesQueued).toBe(1);
     } finally {

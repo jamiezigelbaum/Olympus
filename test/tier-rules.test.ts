@@ -35,7 +35,7 @@ import {
 } from '../src/core/mail-source-scope.ts';
 
 const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
-const HEALTH = 'The lab results confirm the diagnosis; the patient starts treatment.';
+const HEALTH = 'The lab results confirm the diagnosis; patient SSN 123-45-6789 is on file.';
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -301,7 +301,7 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     const laneRule: OwnerTierRule = { id: 'lane', match: { kind: 'pathPrefix', value: '/notes' }, tier: 'secure', strength: 'force' };
     const merged = resolveStoreTierClassification({ rules: [laneRule] }, dbPath)!;
     expect(merged.rules?.map((rule) => rule.id)).toEqual(['lane', 'published']);
-    expect(merged.sniffer?.id).toMatch(/^local:p-[0-9a-f]{12}$/);
+    expect(merged.sniffer?.id).toMatch(/^local:p-[0-9a-f]{12}\.m[0-9a-f]{16}$/);
     clearInstalledTierClassification();
     expect(resolveStoreTierClassification({ rules: [laneRule] }, dbPath)).toEqual({ rules: [laneRule] });
   });
@@ -317,6 +317,23 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     const approved = await runTierCommand(['classifier', 'approve', '--why', 'Owner chose the local model for the sniffer.'], { env: withPolicy });
     expect(approved).toMatchObject({ recorded: { approved_by: 'owner', status: 'complete', kind: 'classifier_model_decision' } });
     expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: true, decision: 'approved' });
+  });
+
+  test('classifier CLI approval and decline use the worker prompt with owner privacy words', async () => {
+    const { dir, env } = setup();
+    const { writePrivacyProfile, privacyOwnerContext } = await import('../src/workers/classification/privacy-profile.ts');
+    const { snifferPromptVersions } = await import('../src/workers/classification/sniffer.ts');
+    const { loadSovereigntyPreset } = await import('../src/core/sovereignty.ts');
+    const withPolicy = { ...env, OLYMPUS_PRIVACY_PROFILE_PATH: join(dir, 'privacy.json'), OLYMPUS_SOVEREIGNTY_CONFIG_PATH: join(dir, 'policy.json') };
+    writeFileSync(withPolicy.OLYMPUS_SOVEREIGNTY_CONFIG_PATH, JSON.stringify(loadSovereigntyPreset('local-first')));
+    writePrivacyProfile({ description: 'Keep my health records private; routine notices are shareable.', rules: [] }, { env: withPolicy });
+    const expected = snifferPromptVersions(privacyOwnerContext({ env: withPolicy })).approval;
+    let time = 0;
+    const context = { env: withPolicy, now: () => new Date(1_800_000_000_000 + ++time * 1000) };
+    expect(await runTierCommand(['classifier', 'approve', '--why', 'Use my settings.'], context)).toMatchObject({ recorded: { prompt_version: expected } });
+    expect(await runTierCommand(['classifier', 'status'], context)).toMatchObject({ promptVersion: expected, decision: 'approved' });
+    expect(await runTierCommand(['classifier', 'decline'], context)).toMatchObject({ recorded: { prompt_version: expected } });
+    expect(await runTierCommand(['classifier', 'status'], context)).toMatchObject({ promptVersion: expected, decision: 'declined' });
   });
 
   test('tier classifier decline is recorded, so status tells declined from never asked', async () => {
