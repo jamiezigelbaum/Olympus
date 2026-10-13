@@ -14,9 +14,9 @@ use a remembered summary of this guide as the user-facing copy.
 
 This guide is the OpenClaw install path. If your operator wants Olympus in
 ChatGPT, Claude or Grok, stop here: the standalone engine installs on their
-Mac or Omarchy computer with one command (the ChatGPT plugin's own
-`olympus-setup` skill shows it), and the README's "Get started" section is the
-user guide. That path needs no OpenClaw.
+Mac or Omarchy computer with one command (on a Mac, the ChatGPT plugin's own
+`olympus-setup` skill shows it; on Omarchy, use the Linux command in the
+README), and the README's "Get started" section is the user guide. That path needs no OpenClaw.
 
 ## Normal setup sequence
 

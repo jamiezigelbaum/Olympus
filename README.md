@@ -52,7 +52,9 @@ private models if you choose a Venice-only setup.
 
 Everything is stored and searched on your computer: the search index is built
 there, by a model small enough for a computer with 8 GB of memory. There is no
-Olympus cloud, no account and no subscription. For hard private questions you
+Olympus cloud holding your data, no account and no subscription; the one
+Olympus server is a relay that passes your AI app's requests to your computer
+without storing them. For hard private questions you
 can reach stronger models without giving yourself away: [Venice](https://venice.ai)
 hides what you ask, and zkAPI, from OpenAnonymity and the Ethereum Foundation,
 hides who is asking (see [Stronger models, privately](#stronger-models-privately)).
