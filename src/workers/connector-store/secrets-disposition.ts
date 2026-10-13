@@ -208,17 +208,41 @@ export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): numb
     if (result.failed === 0 && result.notDurable === 0) cleared += 1;
   }
   // Secrets whose clearing never finished and was never written down.
-  let unsettled: TierLedgerIdentity[] = [];
+  let unsettled: Array<TierLedgerIdentity & { holdsCopies: boolean }> = [];
   try {
     unsettled = ledger.unsettledSecretSideStores(limit);
   } catch {
     // Read again next tick.
   }
-  for (const identity of unsettled) {
+  for (const { holdsCopies, ...identity } of unsettled) {
+    // A settlement the sniffer retries from its queued question (a refused
+    // credential) needs that question: it clears the side stores itself.
+    if (holdsCopies && snifferRetriesSettlement(ledger, identity)) continue;
     const result = forgetSecretInSideStores({ ledger, identity });
     if (result.failed === 0 && result.notDurable === 0) cleared += 1;
   }
   return cleared;
+}
+
+function snifferRetriesSettlement(ledger: TierLedger, identity: TierLedgerIdentity): boolean {
+  const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
+  if (snifferPath === ':memory:' || !existsSync(snifferPath)) return false;
+  try {
+    const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+    try {
+      const subject = {
+        provider: identity.provider,
+        accountScope: identity.accountScope,
+        providerItemId: identity.providerItemId,
+        ...(identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}),
+      };
+      return sniffer.questionFor(subject, 'content') !== undefined || sniffer.questionFor(subject, 'metadata') !== undefined;
+    } finally {
+      sniffer.close();
+    }
+  } catch {
+    return false;
+  }
 }
 
 /**
