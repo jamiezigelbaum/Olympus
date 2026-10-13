@@ -37876,7 +37876,10 @@ class TierSnifferService {
           const set = tierSetForLedger(ledgerPath);
           if (!set)
             return false;
-          const exported = set.ledger.copies(question).map((copy) => set.store(copy.trustDomain)?.exportItemCopy(question)).find(Boolean);
+          const current2 = set.ledger.copies(question).filter((copy) => copy.state === "current");
+          const serving = copyServingLayer(current2, question.pass);
+          const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
+          const exported = domain ? set.store(domain)?.exportItemCopy(question) : undefined;
           return exported ? settleRoutedSecrets(set, question, decision, exported, { findingKinds: ["sniffer_secret_refusal"] }) : false;
         }
       });

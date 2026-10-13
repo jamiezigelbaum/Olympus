@@ -1,5 +1,9 @@
 import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { join } from 'node:path';
+import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
+import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { classifyItemTiers, tierSnifferInputHash, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets } from '../src/workers/connector-store/tier-rejudge.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
@@ -9,6 +13,53 @@ const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0)) close(); });
 const identity = identityOf('record');
 const text = 'Ordinary orchard notes.';
+
+for (const [pass, otherState, otherLayers] of [
+  ['content', 'superseded', 'both'],
+  ['content', 'staged', 'both'],
+  ['content', 'current', 'metadata'],
+  ['metadata', 'current', 'metadata'],
+] as const) test(`secret refusal uses the current ${pass} copy with an earlier ${otherState}/${otherLayers} copy`, async () => {
+  const f = await storedPrivate();
+  for (const domain of ['internal', 'secure_local'] as const) {
+    const db = new Database(f.paths[domain]);
+    db.query(`UPDATE items SET title = ?, locator_uri = ?, source_scope_folder_keys_json = ?,
+      source_scope_generation = ?, source_scope_revision = ?`).run(
+      `${domain} notes`, `https://example.test/${domain}`, JSON.stringify([`${domain}-folder`]),
+      `${domain}-generation`, `${domain}-revision`,
+    );
+    db.close();
+  }
+  const decision = { ...classifyItemTiers({ signals: { title: 'Notes' }, text }),
+    metadataTier: 'secure' as const, contentTier: 'secure' as const, state: 'pending' as const,
+    metadataPending: pass === 'metadata', contentPending: pass === 'content' };
+  f.ledger.recordRoutedPlacement(identity, decision, f.set.placementFor(decision));
+  const db = new Database(f.ledger.dbPath);
+  db.query("UPDATE tier_copies SET copy_state = ?, layers = ? WHERE trust_domain = 'internal'").run(otherState, otherLayers);
+  db.query("UPDATE tier_copies SET layers = 'content' WHERE trust_domain = 'secure_local'").run();
+  db.close();
+  const installed = new InstalledTierClassification({ env: {} });
+  const queue = installed.snifferStoreForLedger(f.ledger.dbPath);
+  queue.enqueue({ subject: identity, pass, material: 'api_key=sk-abcdefghijklmnopqrstuvwxyz123456', flags: [], mapRevision: 'none' });
+  let calls = 0;
+  const service = new TierSnifferService({ installed, lane: BUILT_IN_SNIFFER_LANE,
+    model: { async complete() { calls++; throw new Error('secret must not reach the model'); } },
+    stores: () => [f.stores.secure_local!], classificationLedgerPath: join(f.dir, 'classification.jsonl'),
+    autoApproveBuiltIn: true,
+  });
+  try {
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { secretRefused: 1 } });
+    const servingDomain = pass === 'metadata' ? 'internal' : 'secure_local';
+    expect(f.secrets.get(identity)).toMatchObject({
+      locator: `https://example.test/${servingDomain}`, title: null,
+      folderKeys: [`${servingDomain}-folder`], scopeGeneration: `${servingDomain}-generation`,
+      scopeRevision: `${servingDomain}-revision`,
+    });
+    expect(calls).toBe(0);
+    expect(queue.listQuestions()).toEqual([]);
+    expect(f.ledger.copies(identity)).toEqual([]);
+  } finally { service.stop(); installed.close(); }
+});
 
 async function storedPrivate() {
   const tmp = tempDir();

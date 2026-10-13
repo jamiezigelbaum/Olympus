@@ -316,6 +316,38 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-13 (no contract type version change): tier classifier
+  `2026-10-13.p5`, owner-approved Personal-first (2026-10-04;
+  `docs/design/categorization-precision.md` step 2). Content without
+  own-record signals can be Personal before its individual privacy-safe model
+  judgment; own-record signals hold content, and a later Private verdict hides
+  the Personal copy before its move. Independently cleared names remain
+  available while content waits. Secrets, owner rules, source floors and image
+  restrictions retain precedence. This changes classification semantics, not
+  the SourceConnector, EvidencePack or Analyst shapes: their versions and
+  canonical fingerprint are unchanged; stored tier keys and existing connector
+  callers remain compatible.
+  Migration/rejudging: no source-contract schema migration or bulk rewrite of
+  stored copies. The sniffer queue upgrades additively to schema 2 (priority
+  defaults to 0 for existing questions, plus a dispatch counter for aging).
+  The classifier version invalidates older decisions for the existing bounded
+  background rejudge path, subject to its owner-rule, override and pending-state
+  exclusions. Existing placements remain while a model question waits;
+  lowering requires a receipt matching the full stored text, and nonautomatic moves still await the
+  owner-approved migration. Rejudging does not release old held bodies merely
+  because p5 is installed.
+  Eval evidence: `test/tier-personal-first.test.ts` covers immediate ordinary
+  content, held own-records, names/body separation and hide-before-move;
+  `test/classification-eval.test.ts` exercises the synthetic classification
+  corpus with a deterministic fake sniffer. These are wiring/regression proof,
+  not a real-model or owner-labeled held-out quality receipt. The 95-email export
+  lacks bodies and cannot establish per-row content outcomes. The plan's
+  real-corpus eval remains required before rollout (precision improves and
+  Private recall stays at least 99%); a missed own-record signal can expose
+  content before the model raises it, which cannot recall an earlier cloud use.
+  Critical-review gate: PR #330 remains a critical classification change and
+  needs fresh independent review of its current head and this release boundary
+  before merge, alongside required CI under `docs/ENGINEERING_PROCESS.md`.
 - 2026-10-10 (no version change) — **AD-1 retired.** The panel's outside
   block and its envelope were removed with the automatic escalation
   (Anonymous answers redesign, step 3). The panel again carries only the

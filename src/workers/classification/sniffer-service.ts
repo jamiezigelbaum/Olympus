@@ -49,6 +49,7 @@ import { applyMediaJudgments } from '../connector-store/tier-media-judgment-swee
 import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
+  copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   type TierLedgerIdentity,
@@ -633,7 +634,10 @@ export class TierSnifferService {
         settleSecrets: (question, decision) => {
           const set = tierSetForLedger(ledgerPath);
           if (!set) return false;
-          const exported = set.ledger.copies(question).map(copy => set.store(copy.trustDomain)?.exportItemCopy(question)).find(Boolean);
+          const current = set.ledger.copies(question).filter(copy => copy.state === 'current');
+          const serving = copyServingLayer(current, question.pass);
+          const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
+          const exported = domain ? set.store(domain)?.exportItemCopy(question) : undefined;
           return exported ? settleRoutedSecrets(set, question, decision, exported, { findingKinds: ['sniffer_secret_refusal'] }) : false;
         },
       });
