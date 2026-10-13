@@ -83,7 +83,7 @@ const POSITIVES: Array<[string, string]> = [
   ['Anthropic key', `claude uses ${ANTHROPIC}`],
   // The shapes the floor already had.
   ['AWS access key id', join('AK', 'IA', 'ABCDEFGHIJKLMNOP')],
-  ['private key header', '-----BEGIN OPENSSH PRIVATE KEY-----'],
+  ['private key header', join('-----BEGIN OPENSSH ', 'PRIVATE KEY-----')],
   ['Slack token', join('xo', 'xb-', '1234567890-abcdefghijklmnop')],
   // Connection strings and headers.
   ['URL with password', 'postgres://admin:Xk29fjQ81z@db.internal:5432/app'],
