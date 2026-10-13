@@ -13,9 +13,10 @@ operator-facing transition, read its required message block directly; do not
 use a remembered summary of this guide as the user-facing copy.
 
 This guide is the OpenClaw install path. If your operator wants Olympus in
-ChatGPT, stop here: the ChatGPT plugin's own `olympus-setup` skill installs
-the standalone engine on their Mac, and the README's "Olympus for ChatGPT"
-section is the user guide. That path needs no OpenClaw.
+ChatGPT, Claude or Grok, stop here: the standalone engine installs on their
+Mac or Omarchy computer with one command (the ChatGPT plugin's own
+`olympus-setup` skill shows it), and the README's "Get started" section is the
+user guide. That path needs no OpenClaw.
 
 ## Normal setup sequence
 
