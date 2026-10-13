@@ -8,7 +8,7 @@
 // - Under-confident Personal: for some ambiguous items it answers "personal"
 //   at 0.85, below the 0.9 threshold. The pipeline must still end them Private.
 // - Mislabelled hard category: for some hard-category items it answers
-//   "personal" with a hard category at 0.95. The hard-category guard must
+//   "personal" with a hard category at 0.95. The own-record guard must
 //   still end them Private.
 //
 // - Injection compliance: if ANY item in a batch tells it what to answer (or
@@ -20,7 +20,7 @@
 //   no JSON at all. The fail-safe must end those items Private.
 //
 // So a green fake-sniffer run proves the WIRING (batching, the cache, the
-// threshold, the hard-category guard, injection handling, fail-safe, never
+// threshold, the own-record guard, injection handling, fail-safe, never
 // Public); it says nothing about a real model's judgment. Run `bun run eval:classification --
 // --real` against a configured private lane for that.
 
@@ -55,14 +55,15 @@ export function createFakeSnifferModel(): AnalystModel & { stats: FakeSnifferSta
       const items = request.prompt
         .split('\n')
         .filter((line) => line.startsWith('{'))
-        .map((line) => JSON.parse(line) as FakeSnifferItem);
+        .map((line) => JSON.parse(line) as FakeSnifferItem)
+        .filter(item => typeof item.i === 'number');
       stats.items += items.length;
       const materials = items.map(materialOf);
       if (materials.some(obeys)) {
         stats.complied += 1;
         stats.compliedMaxBatch = Math.max(stats.compliedMaxBatch, items.length);
         return {
-          text: JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, tier: 'personal', category: 'ordinary', confidence: 0.99 })) }),
+          text: JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 0.99 })) }),
           modelId: 'eval-fake-sniffer',
         };
       }
@@ -99,12 +100,12 @@ function verdictFor(item: FakeSnifferItem): Record<string, unknown> {
   const hit = PRIVATE_VOCABULARY.find(([pattern]) => pattern.test(material));
   if (hit) {
     // Error mode 2: a hard category paired with "personal".
-    if (bucket < 15) return { i: item.i, tier: 'personal', category: hit[1], confidence: 0.95 };
+    if (bucket < 15) return { i: item.i, tier: 'personal', category: hit[1], ownRecord: true, privateKind: hit[1], confidence: 0.95 };
     // Error mode 1: an under-confident "personal".
-    if (bucket < 30) return { i: item.i, tier: 'personal', category: 'ordinary', confidence: 0.85 };
-    return { i: item.i, tier: 'private', category: hit[1], confidence: 0.92 };
+    if (bucket < 30) return { i: item.i, tier: 'personal', category: 'ordinary', ownRecord: true, privateKind: hit[1], confidence: 0.85 };
+    return { i: item.i, tier: 'private', category: hit[1], ownRecord: true, privateKind: hit[1], confidence: 0.92 };
   }
-  return { i: item.i, tier: 'personal', category: 'ordinary', confidence: 0.95 };
+  return { i: item.i, tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 0.95 };
 }
 
 /**

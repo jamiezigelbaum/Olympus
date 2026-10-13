@@ -25,8 +25,9 @@
 // what this pass read (`TierOwnerOverrideGuard`). Only tier overrides act here: `not-secret` needs the item's
 // signals and text, which its next listing supplies.
 
-import { classifyItemTiers, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { classifyItemTiers, contentDigestReason, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import {
+  copyServingLayer,
   trustDomainRank,
   type TierLedgerIdentity,
   type TierLedgerRecord,
@@ -137,9 +138,18 @@ function applyOne(
     }
     return;
   }
+  const placement = set.placementFor(decision);
+  const source = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
+  const destination = copyServingLayer(placement.copies, 'content');
+  if (source && destination && trustDomainRank(destination.trustDomain) < trustDomainRank(source.trustDomain)) {
+    // The owner authorizes this item's stored body. Bind that exact snapshot
+    // too: no re-list is needed, and a later changed body cannot borrow it.
+    const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
+    if (exported) decision.reasons.push(contentDigestReason(exported.chunks.map(chunk => chunk.boundedText).join('')));
+  }
   // A Secret whose copies were tombstoned has nothing to move: its new
   // placement is recorded afresh (served once its next listing writes it).
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+  const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
     guard,
     staleCopiesGone: set.routedWithoutAnyCopy(identity),
   });

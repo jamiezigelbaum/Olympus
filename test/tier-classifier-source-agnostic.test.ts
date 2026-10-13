@@ -39,6 +39,8 @@ const IMPORT_ALLOWLIST = new Set([
   // The shared location matcher (review P-5): path prefixes, folder keys, labels; no source names.
   '../../core/location-rules.ts',
   '../../core/sender-rules.ts',
+  // Shared credential decoding and placeholder exclusions; no connector policy.
+  '../../core/secret-patterns.ts',
   '../../core/source-index/types.ts',
   '../../core/sqlite-migrations.ts',
   '../../core/sqlite-store.ts',

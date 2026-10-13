@@ -368,7 +368,7 @@ import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-source
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
-import { createAnswerActivity } from '../answer-activity.ts';
+import { createAnswerActivity, createLocalModelActivity, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
@@ -1037,6 +1037,7 @@ async function createSovereigntyAnalystMap(input: {
   veniceReasoningHeadroomTokens: number | undefined;
   bootSecretResolver?: WorkerBootSecretResolver;
   builtInAnalyst?: Analyst;
+  localModelActivity?: LocalModelActivity;
 }): Promise<Map<string, {
   profile: SovereigntyResolvedProfile;
   backend: AnalystBackend;
@@ -1077,6 +1078,7 @@ async function createSovereigntyAnalystMap(input: {
       : createAnalystForSovereigntyProfile({
           profile,
           profileId: id,
+          ...(input.localModelActivity ? { localModelActivity: input.localModelActivity } : {}),
           olympusConfig: input.olympusConfig,
           env: input.env,
           veniceAnalystTimeoutMs: input.veniceAnalystTimeoutMs,
@@ -1317,6 +1319,7 @@ function analystBackendForSovereigntyProfile(profile: SovereigntyModelProfile): 
 export function createAnalystForSovereigntyProfile(input: {
   profile: SovereigntyModelProfile;
   profileId?: string;
+  localModelActivity?: LocalModelActivity;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
   veniceAnalystTimeoutMs: number | undefined;
@@ -1325,6 +1328,7 @@ export function createAnalystForSovereigntyProfile(input: {
 export function createAnalystForSovereigntyProfile(input: {
   profile: SovereigntyModelProfile;
   profileId?: string;
+  localModelActivity?: LocalModelActivity;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
   veniceAnalystTimeoutMs: number | undefined;
@@ -1334,6 +1338,7 @@ export function createAnalystForSovereigntyProfile(input: {
 export function createAnalystForSovereigntyProfile(input: {
   profile: SovereigntyModelProfile;
   profileId?: string;
+  localModelActivity?: LocalModelActivity;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
   veniceAnalystTimeoutMs: number | undefined;
@@ -1363,15 +1368,12 @@ export function createAnalystForSovereigntyProfile(input: {
       ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
       purpose: 'text_reasoning',
     };
-    return createAnalyst(
-      createDelphiAnalystModel(new DelphiClient(config, undefined, {
-        resolveSecretRef: () => apiKey,
-      }), {
-        profile: 'source_answer',
-        preflightTimeoutMs: 0,
-      }),
-      { auditSuspiciousDrafts: true },
-    );
+    const model = createDelphiAnalystModel(new DelphiClient(config, undefined, {
+      resolveSecretRef: () => apiKey,
+    }), { profile: 'source_answer', preflightTimeoutMs: 0 });
+    return createAnalyst(input.localModelActivity
+      ? input.localModelActivity.track(localModelResourceKey(profile), model) : model,
+    { auditSuspiciousDrafts: true });
   }
   if (profile.provider === 'openclaw-infer') {
     return createAnalyst(createOpenClawInferAnalystModel({
@@ -1850,9 +1852,12 @@ export async function main(): Promise<void> {
   // sniffer, the Private answer pool's fallback and ChatGPT's private answer
   // panel, so at most one local model server runs. Registered for the
   // sniffer before its runtime is resolved below.
+  const localModelActivity = createLocalModelActivity();
   const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
+  const answerBuiltInModel = workerBuiltInModel
+    ? localModelActivity.track('built_in', workerBuiltInModel.model) : undefined;
   registerBuiltInPrivateModel(workerBuiltInModel
-    ? { model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
+    ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
     : undefined);
   // Four-tier classification inputs for every lane: the owner's map, tier
   // rules, their own words about privacy, and the privacy-safe sniffer. The
@@ -1873,21 +1878,16 @@ export async function main(): Promise<void> {
   const privacyOwnerWords = (): string | undefined => privacyOwnerContext({ env: process.env });
   const installedTierClassification = configureInstalledTierClassification({
     env: process.env,
-    ...(snifferLane ? { lane: { kind: snifferLane.kind, modelId: snifferLane.modelId } } : {}),
+    ...(snifferLane ? { lane: snifferLane } : {}),
     ...(publicTierRetired ? { retirePublic: true } : {}),
     ownerContext: privacyOwnerWords,
   });
   // Shared with the answer handler so the sniffer reads the private pool's
   // breakers, and counts answers in flight so it never competes with one.
   const secureAnalystPoolState = new SecureAnalystPoolState();
-  // Set once the sniffer runs: aborts its in-flight call when an answer starts.
-  let preemptTierSniffer: (() => void) | undefined;
-  // Answers in flight (source answers, ChatGPT searches, private answer
-  // panel jobs): the first one preempts the sniffer, which yields until none
-  // is left. The private panel's answer and the sniffer share one local model.
-  // A lease never released (an answer that never settles) expires, so it
-  // cannot hold the sniffer off for good; said once each, content-free.
-  const answerActivity = createAnswerActivity(() => preemptTierSniffer?.(), {
+  // UI answer leases coordinate owner/background jobs. Actual local model
+  // dispatches have separate leases; cloud searches never preempt sorting.
+  const answerActivity = createAnswerActivity(() => undefined, {
     onExpired: (openMs) => console.warn(`Olympus answer activity: an answer still open after ${Math.round(openMs / 60_000)} min stopped holding background work.`),
   });
   // Set once the sniffer runs: its backlog, for the status surface.
@@ -3244,14 +3244,17 @@ export async function main(): Promise<void> {
           ? { timeoutMs: veniceAnalystTimeoutMs }
           : {}),
       });
-      const localSourceAnswerModel = createDelphiAnalystModel(
+      const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
+        ? olympusConfig.argus.lanes[analystLane]
+        : olympusConfig.argus.modelProfiles[analystProfile]), createDelphiAnalystModel(
         new DelphiClient(olympusConfig),
         process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
           ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
           : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
-      );
-      const builtInAnalystModel = workerBuiltInModel?.model;
+      ));
+      const builtInAnalystModel = answerBuiltInModel;
       const sovereigntyAnalysts = await createSovereigntyAnalystMap({
+        localModelActivity,
         engine: sovereigntyEngine,
         olympusConfig,
         env: process.env,
@@ -4661,7 +4664,7 @@ export async function main(): Promise<void> {
       })
     : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
-    model: workerBuiltInModel?.model,
+    model: answerBuiltInModel,
     eligible: privateEvidenceEligible,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,
@@ -4719,7 +4722,7 @@ export async function main(): Promise<void> {
     };
     const local = createLocalAnswerPath({
       lanes: sourceAnswerLanes,
-      model: workerBuiltInModel?.model,
+      model: answerBuiltInModel,
       available: () => workerBuiltInModel?.available() ?? false,
       relevanceEmbedding: () => builtInEmbeddingOnly(secureLocalPolicyEmbeddingProvider ?? sourceIndexEmbeddingProvider, loadedBuiltInEmbedding),
       sourceLinks: (item) => {
@@ -5263,6 +5266,8 @@ export async function main(): Promise<void> {
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
       : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver });
+  const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
+    : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
   const tierSniffer = snifferLane && snifferModel
     ? new TierSnifferService({
         installed: installedTierClassification,
@@ -5282,7 +5287,7 @@ export async function main(): Promise<void> {
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
-        answersInFlight: () => answerActivity.busy,
+        answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
         // Owner defaults 2026-10-01: the built-in private model is approved
@@ -5298,7 +5303,10 @@ export async function main(): Promise<void> {
         },
       })
     : undefined;
-  preemptTierSniffer = tierSniffer ? () => tierSniffer.preempt() : undefined;
+  if (tierSniffer && snifferResource) {
+    localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
+    localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
+  }
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   tierSniffer?.start();
 

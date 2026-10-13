@@ -11,7 +11,7 @@ import {
   runSetupDependencyCheck,
   runSetupWizard,
 } from '../src/core/setup.ts';
-import { loadSovereigntyEngine } from '../src/core/sovereignty.ts';
+import { isPublicTierRetired, loadSovereigntyEngine, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import { workerAuthTokenFromConfig } from '../src/core/worker-auth.ts';
 import {
   installWorkerService,
@@ -481,6 +481,32 @@ describe('olympus setup wizard', () => {
     }
   });
 
+  test('a forced re-setup keeps the Public tier of a policy written before 1.0; a new one has none', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-public-kept-'));
+    const policyPath = join(dir, 'sovereignty.json');
+    const common = {
+      yes: true, sovereigntyPath: policyPath, platform: 'linux' as const,
+      homeDir: dir, workingDirectory: dir, exec: linuxManager().exec, dependencyCheck: healthyDependencyCheck,
+      env: {}, secretStore: memorySecretStore({}),
+    };
+    const written = () => loadSovereigntyEngine({ configPath: policyPath, env: {} });
+    try {
+      await runIsolatedSetupWizard({ ...common, preset: 'private-cloud-only' });
+      expect(isPublicTierRetired(written().config)).toBe(true);
+
+      writeFileSync(policyPath, `${JSON.stringify(olderPolicyWithPublic(), null, 2)}\n`);
+      await runIsolatedSetupWizard({ ...common, preset: 'private-cloud-only', force: true });
+      const kept = written();
+      expect(isPublicTierRetired(kept.config)).toBe(false);
+      // Public now routes and embeds like the new posture's Personal tier.
+      expect(kept.resolveAnalystRoute({ trustDomain: 'public_safe' }).map(({ id }) => id))
+        .toEqual(kept.resolveAnalystRoute({ trustDomain: 'internal' }).map(({ id }) => id));
+      expect(kept.config.retrieval.trustDomains.public_safe).toEqual(kept.config.retrieval.trustDomains.internal);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('a failed policy restart is not masked by the old worker remaining active', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-policy-restart-failure-'));
     const policyPath = join(dir, 'sovereignty.json');
@@ -695,4 +721,18 @@ function memorySecretStore(secrets: Record<string, string | undefined>) {
     getSync: (key: string) => secrets[key],
     get: async (key: string) => secrets[key],
   };
+}
+
+/** A policy written before 1.0: local-first with the Public tier presets then shipped. */
+function olderPolicyWithPublic(): SovereigntyConfig {
+  const config = structuredClone(loadSovereigntyPreset('local-first'));
+  config.routes.public_safe = { analyst: ['cloud-openclaw-infer', 'local-source-answer'] };
+  config.retrieval.trustDomains.public_safe = {
+    minimumExecutionTrust: 'standard_cloud',
+    allowedEmbeddingTrust: ['local', 'standard_cloud'],
+    embeddingProfile: 'built-in-embedding',
+    allowCloudQuery: true,
+    activationMode: 'hybrid_shadow',
+  };
+  return config;
 }

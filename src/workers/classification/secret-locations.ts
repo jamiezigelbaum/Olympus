@@ -30,6 +30,7 @@ import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { detectSecretFindingKinds } from './engine.ts';
+import { hasCredentialUrl } from './tier-classifier.ts';
 
 import { SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsPathForStore } from './tier-ledger-path.ts';
 
@@ -45,7 +46,7 @@ export type SecretLocationIdentity = Pick<SourceItemIdentity, 'provider' | 'acco
  * same screen to the row of an item that becomes Secret after it was stored.
  */
 export function screenedSecretLocator(locator: string | null | undefined): string | null {
-  return locator?.trim() && detectSecretFindingKinds(locator).length === 0
+  return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0
     ? locator.trim().slice(0, 1_000)
     : null;
 }

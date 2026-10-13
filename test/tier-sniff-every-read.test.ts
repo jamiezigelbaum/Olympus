@@ -28,6 +28,7 @@ import {
   type TierSniffer,
   type TierSnifferRequest,
   type TierSnifferVerdict,
+  HELD_RECORD_PRIORITY,
 } from '../src/workers/classification/tier-classifier.ts';
 
 // A lab report as extracted: values, units and reference ranges, no detector
@@ -51,19 +52,20 @@ function answering(answer: TierSnifferVerdict, asked: TierSnifferRequest[] = [])
   return { id: 'local:test', judge: (request) => { asked.push(request); return answer; } };
 }
 
-describe('every read item is judged by the private model before it may be Personal', () => {
+describe('every read item is judged; only own-record signals hold content', () => {
   test('a lab report with no detector vocabulary is held pending, not Personal at once', () => {
     const asked: TierSnifferRequest[] = [];
     const decision = classifyItemTiers(
       { signals: LAB_NAMES, provider: 'fixture', text: LAB_REPORT },
       { sniffer: answering({ verdict: 'undecided' }, asked) },
     );
-    expect(TIER_CLASSIFIER_VERSION).toBe('2026-10-02.p4');
+    expect(TIER_CLASSIFIER_VERSION).toBe('2026-10-13.p6');
     expect(decision).toMatchObject({ contentRead: true, contentPending: true, state: 'pending', engineVersion: TIER_CLASSIFIER_VERSION });
     expect(decision.reasons).not.toContain('content:no_raise');
     expect(asked).toHaveLength(1);
     expect(asked[0]!.pass).toBe('content');
-    expect(asked[0]!.flags).toEqual([CONTENT_READ_SNIFFER_FLAG]);
+    expect(asked[0]!.flags).toContain('content:own_record:measurement');
+    expect(asked[0]!.priority).toBe(HELD_RECORD_PRIORITY);
     // The folder path and title travel with the excerpt.
     expect(asked[0]!.material).toStartWith('Names: 2026-06-29 blood work 1.pdf | /2 Areas/Health/Labs/');
     expect(asked[0]!.material).toContain('Excerpt: Laboratorio Central.');
@@ -81,8 +83,8 @@ describe('every read item is judged by the private model before it may be Person
   test('general reading on a sensitive topic is Personal when the model calls it reference material', () => {
     // The model's own answer for program rules: personal, "reference".
     expect(snifferTierKey({ tier: 'personal', category: 'reference', confidence: 0.95 })).toBe('private');
-    // A hard category still never resolves Personal, whatever tier the model pairs it with.
-    expect(snifferTierKey({ tier: 'personal', category: 'health', confidence: 0.99 })).toBe('secure');
+    // Topic alone cannot overturn a Personal verdict.
+    expect(snifferTierKey({ tier: 'personal', category: 'health', confidence: 0.99 })).toBe('private');
     const decision = classifyItemTiers(
       { signals: PROGRAM_NAMES, provider: 'fixture', text: PROGRAM_RULES },
       { sniffer: answering({ verdict: 'decided', tier: 'private', code: 'reference:0.95' }) },
@@ -120,7 +122,7 @@ describe('every read item is judged by the private model before it may be Person
   });
 
   test('with no private model, an unflagged read item is Personal at once (unchanged)', () => {
-    const decision = classifyItemTiers({ signals: LAB_NAMES, provider: 'fixture', text: LAB_REPORT });
+    const decision = classifyItemTiers({ signals: PROGRAM_NAMES, provider: 'fixture', text: PROGRAM_RULES });
     expect(decision).toMatchObject({ contentTier: 'private', state: 'current', contentPending: false });
     expect(decision.reasons).toContain('content:no_raise');
   });
@@ -128,10 +130,10 @@ describe('every read item is judged by the private model before it may be Person
 
 describe('the sniffer prompt asks one generic question', () => {
   test('a person\'s own records versus work, reference and their public-facing self, with names as signals', () => {
-    expect(SNIFFER_SYSTEM_PROMPT).toContain('own RECORDS, or their private inner life');
-    expect(SNIFFER_SYSTEM_PROMPT).toContain('PERSONAL, even when it is about the owner or names them');
-    expect(SNIFFER_SYSTEM_PROMPT).toContain('health or wellness material that is not one person\'s record');
-    expect(SNIFFER_SYSTEM_PROMPT).toContain('the names (title and folder path) count');
+    expect(SNIFFER_SYSTEM_PROMPT).toContain('ownRecord');
+    expect(SNIFFER_SYSTEM_PROMPT).toContain('fine-to-share clauses');
+    expect(SNIFFER_SYSTEM_PROMPT).toContain('category is the TOPIC');
+    expect(SNIFFER_SYSTEM_PROMPT).toContain('Use names as context');
     expect(SNIFFER_CATEGORIES).toContain('reference');
     const prompt = buildSnifferBatchPrompt('content', [{ i: 1, material: 'Names: a.pdf\nExcerpt: text' }]);
     expect(prompt).toContain('its NAMES (title, folder path, sender) when known, then a short EXCERPT');

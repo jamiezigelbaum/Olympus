@@ -296,10 +296,10 @@ describe('P1b visibility: never searchable in two tiers', () => {
     const fixture = await routedFixture([GARDEN, LAUNCH]);
     const specs: FixtureSpec[] = [
       // Re-judged more private: queued, hidden first.
-      { ...GARDEN, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432 for the seeds.' },
+      { ...GARDEN, version: 'v2', text: 'Compost notes. IBAN GB82WEST12345698765432.' },
       { ...LAUNCH },
       // New items arriving in the same run, one of them split across tiers.
-      { id: 'invoice', name: 'notes-0413.txt', text: 'Compost invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+      { id: 'invoice', name: 'notes-0413.txt', text: 'Compost invoice total and IBAN GB82WEST12345698765432.' },
       ...Array.from({ length: 40 }, (_, index) => ({ id: `bulk-${index}`, name: `bulk-${index}.txt`, text: `Compost rota number ${index}.` })),
     ];
     const observations: Array<{ metadata: string[]; content: string[] }> = [];

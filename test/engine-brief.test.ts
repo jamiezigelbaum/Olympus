@@ -243,6 +243,24 @@ describe('olympus engine status --brief', () => {
     expect(seen.find((call) => call.url === 'http://127.0.0.1:8010/v1/engine/brief')?.authorization).toBe(`Bearer ${token}`);
   });
 
+  test('the brief goes to the port worker.env gives the engine, and its bearer never leaves loopback', async () => {
+    const { home } = setup();
+    mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+    const workerEnv = join(home, '.config', 'olympus', 'worker.env');
+    const answering = { health: () => Response.json({ ok: true }), brief: () => Response.json(brief) };
+    writeFileSync(workerEnv, 'OLYMPUS_EMAIL_SOURCE_PORT=8123\n', { mode: 0o600 });
+    const seen: Array<{ url: string; authorization: string | null }> = [];
+    expect((await engineBriefReport({ ...common(home), exec: launchctl('running'), fetchImpl: workerFetch(answering, seen) })).state).toBe('running');
+    expect(seen.map((call) => call.url).sort()).toEqual(['http://127.0.0.1:8123/v1/engine/brief', 'http://127.0.0.1:8123/v1/health']);
+    expect(seen.find((call) => call.url.endsWith('/engine/brief'))?.authorization).toBe(`Bearer ${token}`);
+
+    writeFileSync(workerEnv, 'OLYMPUS_EMAIL_SOURCE_HOST=192.0.2.10\nOLYMPUS_EMAIL_SOURCE_PORT=8123\n', { mode: 0o600 });
+    seen.length = 0;
+    await engineBriefReport({ ...common(home), exec: launchctl('running'), fetchImpl: workerFetch(answering, seen) });
+    expect(seen.some((call) => call.url.endsWith('/engine/brief'))).toBe(false);
+    expect(seen.every((call) => call.authorization === null)).toBe(true);
+  });
+
   test('running but the worker is not answering yet is starting; a long-running host that stays silent is unhealthy', async () => {
     const { home, paths } = setup();
     const dead = workerFetch({});

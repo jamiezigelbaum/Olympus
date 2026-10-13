@@ -22,8 +22,7 @@
   },
   "routes": {
     "secure_local": { "pool": { "members": ["local-source-answer"] } },
-    "internal": { "analyst": ["cloud-openclaw-infer", "local-source-answer"] },
-    "public_safe": { "analyst": ["cloud-openclaw-infer", "local-source-answer"] }
+    "internal": { "analyst": ["cloud-openclaw-infer", "local-source-answer"] }
   },
   "retrieval": {
     "trustDomains": {
@@ -36,13 +35,6 @@
         "secureHandling": "answerable"
       },
       "internal": {
-        "minimumExecutionTrust": "standard_cloud",
-        "allowedEmbeddingTrust": ["local", "standard_cloud"],
-        "embeddingProfile": "built-in-embedding",
-        "allowCloudQuery": true,
-        "activationMode": "hybrid_shadow"
-      },
-      "public_safe": {
         "minimumExecutionTrust": "standard_cloud",
         "allowedEmbeddingTrust": ["local", "standard_cloud"],
         "embeddingProfile": "built-in-embedding",

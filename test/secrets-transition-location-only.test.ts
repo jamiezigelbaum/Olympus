@@ -261,3 +261,25 @@ describe('a stored item a later reading raises to S5 (one store, declared placem
     expect(store.searchItems('deploy', 10)).toEqual([]);
   });
 });
+
+
+for (const locator of [
+  `https://example.test/?&#97;ccess&#95;&#116;oken=${['a7B9c2D4', 'e6F8g1H3'].join('')}`,
+  `https://example.test/#&#x73;ig=${['a7B9c2D4', 'e6F8g1H3'].join('')}`,
+  `https://example.test/#%61ccess%5F%74oken=${['a7B9c2D4', 'e6F8g1H3'].join('')}`,
+  `https://example.test/?view=1&amp;%2561ccess%255F%2574oken=${['a7B9c2D4', 'e6F8g1H3'].join('')}`,
+]) test('Secrets tombstones discard encoded credential locators', async () => {
+  const fx = fixture();
+  await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const db = new Database(fx.paths.internal);
+  try { db.query('UPDATE items SET locator_uri = ? WHERE local_item_id = ?').run(locator, localId('garden')); }
+  finally { db.close(); }
+  fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'secrets' });
+  expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+  expect(fx.secrets.get(identityOf('garden'))?.locator).toBeNull();
+  const rows = storedRows(fx.paths.internal, localId('garden'));
+  expect(rows.items).toHaveLength(1);
+  expect(rows.items[0]!['locator_uri']).toBeNull();
+  expect(rows.chunks).toEqual([]);
+  expect(rows.fts).toEqual([]);
+});

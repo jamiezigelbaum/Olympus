@@ -27,11 +27,6 @@
       "analyst": [
         "cloud-openclaw-infer"
       ]
-    },
-    "public_safe": {
-      "analyst": [
-        "cloud-openclaw-infer"
-      ]
     }
   },
   "retrieval": {
@@ -48,16 +43,6 @@
         "secureHandling": "answerable"
       },
       "internal": {
-        "minimumExecutionTrust": "standard_cloud",
-        "allowedEmbeddingTrust": [
-          "local",
-          "standard_cloud"
-        ],
-        "embeddingProfile": "built-in-embedding",
-        "allowCloudQuery": true,
-        "activationMode": "hybrid_shadow"
-      },
-      "public_safe": {
         "minimumExecutionTrust": "standard_cloud",
         "allowedEmbeddingTrust": [
           "local",

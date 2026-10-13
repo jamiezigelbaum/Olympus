@@ -116,7 +116,7 @@ describe('WhatsApp: owner chat rules from tier-rules.json', () => {
     const { store, sync, internal } = openLane(root);
     await sync([
       { id: 'm1', conversation: 'chat-a', title: 'Garden club', text: 'See you at the allotment on Saturday.' },
-      { id: 'm2', conversation: 'chat-a', title: 'Garden club', text: 'The lab results confirm the diagnosis; treatment starts Monday.' },
+      { id: 'm2', conversation: 'chat-a', title: 'Garden club', text: 'The lab results confirm the diagnosis; patient SSN 123-45-6789 starts treatment Monday.' },
       { id: 'm3', conversation: 'chat-b', title: 'Family', text: 'See you at the allotment on Sunday.' },
     ]);
     expect(ids(internal(), 'allotment')).toEqual(['m1']);

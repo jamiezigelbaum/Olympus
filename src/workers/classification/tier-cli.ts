@@ -30,7 +30,8 @@ import {
   readClassificationLedger,
   resolveClassificationLedgerPath,
 } from '../classification-ledger.ts';
-import { SNIFFER_PROMPT_VERSION } from './sniffer.ts';
+import { snifferPromptVersions } from './sniffer.ts';
+import { privacyOwnerContext } from './privacy-profile.ts';
 import { SnifferLaneRefusedError, resolveSnifferLane } from './sniffer-lane.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './tier-classifier.ts';
@@ -467,6 +468,7 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
       throw error;
     }
   })();
+  const promptVersion = snifferPromptVersions(privacyOwnerContext({ env: context.env ?? process.env })).approval;
   const laneSummary = 'refused' in lane
     ? { lane: null, refused: lane.refused }
     : { lane: lane.kind, profile: lane.profileId, modelId: lane.modelId };
@@ -474,10 +476,10 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
     const ledger = await readClassificationLedger(ledgerPath);
     const decision = 'refused' in lane
       ? (lane.refused === 'no_private_lane' ? 'not_applicable' : 'refused')
-      : classifierDecision(ledger.entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION });
+      : classifierDecision(ledger.entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: promptVersion });
     return {
       ...laneSummary,
-      promptVersion: SNIFFER_PROMPT_VERSION,
+      promptVersion: promptVersion,
       approved: decision === 'approved',
       // What the install receipt reports: approved, declined, refused,
       // not_applicable (no Private lane), or not_asked (no owner answer
@@ -499,7 +501,6 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
     // lane, profile and model, and the prompt version derived from the
     // prompt text. Any change to one of them needs a new approval.
     const modelId = lane.modelId;
-    const promptVersion = SNIFFER_PROMPT_VERSION;
     const entry = {
       recorded_at: (context.now?.() ?? new Date()).toISOString(),
       kind: 'classifier_model_decision' as const,
@@ -526,9 +527,9 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
     const entry = {
       recorded_at: (context.now?.() ?? new Date()).toISOString(),
       kind: 'classifier_model_revoked' as const,
-      what: `The owner declined ${lane.kind} classifier model ${lane.modelId} (profile ${lane.profileId}) with prompt ${SNIFFER_PROMPT_VERSION} for the privacy sniffer; possibly-private items stay held as Private.`,
+      what: `The owner declined ${lane.kind} classifier model ${lane.modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer; possibly-private items stay held as Private.`,
       model_id: lane.modelId,
-      prompt_version: SNIFFER_PROMPT_VERSION,
+      prompt_version: promptVersion,
       lane: lane.kind,
       profile_id: lane.profileId,
       ...(why ? { why } : {}),

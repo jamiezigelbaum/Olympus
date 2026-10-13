@@ -1752,6 +1752,7 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   connectReopen: 'Open sign-in again',
   connectTimeout: 'Olympus has not heard back from {source} yet. If you finished signing in, check again.',
   connectFailed: 'Olympus could not start signing in to {source}. Try again.',
+  goToModels: 'Go to Models',
   connected: '{source} is connected.',
   foldersTitle: 'Choose folders',
   foldersIntro: 'Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.',

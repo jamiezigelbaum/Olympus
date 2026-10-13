@@ -30,7 +30,7 @@ function fixture() {
   const worker = createEmailSourceWorker({
     sourceIndexStatus: { async status() { return { kind: 'source_index_status', generated_at: new Date().toISOString(), corpora: [], policy: { read_only: true, raw_source_exposed: false, source_packets_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true } } as never; } },
     sourceDashboard: {
-      sovereigntyEngine: { config: { routes: {} } } as never, registryPath: join(dir, 'handles.json'), registryAdoptionIntervalMs: 0,
+      sovereigntyEngine: { config: { routes: {}, retrieval: { trustDomains: {} } } } as never, registryPath: join(dir, 'handles.json'), registryAdoptionIntervalMs: 0,
       ingestionDispositions: () => ({ rulesPath: rules, sources: [] }),
       fileSourceScopes: {
         summaries: () => [{ source_id: SOURCE, disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: true, status: 'scope_pending', account_generation: generation, scope_revision: revision }, { source_id: 'dropbox.files', disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'scope_pending', account_generation: generation, scope_revision: revision }],

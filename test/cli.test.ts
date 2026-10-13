@@ -324,6 +324,22 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('dashboard sends the worker token to the port worker.env gives the engine', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-cli-dashboard-port-'));
+    try {
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, '.config', 'olympus', 'worker.env'), 'OLYMPUS_EMAIL_SOURCE_PORT=1\nOLYMPUS_WORKER_AUTH_TOKEN=port-test-token\n', { mode: 0o600 });
+      const result = await runBinExit(['dashboard', '--no-open'], { HOME: home, OLYMPUS_CONFIG: join(home, 'missing-config.json') });
+      expect(result.code).toBe(1);
+      const output = `${result.stdout}${result.stderr}`;
+      expect(output).toContain('127.0.0.1:1');
+      expect(output).not.toContain('127.0.0.1:8010');
+      expect(output).not.toContain('port-test-token');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('every declared public leaf command has non-executing help', async () => {
     for (const command of V0_4_PUBLIC_CLI_COMMANDS) {
       const result = await runBinExit([...command.split(' '), '--help']);
@@ -989,6 +1005,55 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('the opening link is minted at the worker.env port, and never off this computer', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-dashboard-worker-env-origin-'));
+    const sent: Array<{ url: string; init: RequestInit }> = [];
+    const workerEnv = writeWorkerEnv(home, 'worker-env-port-token');
+    const env = withTemporaryEnv({
+      HOME: home,
+      OLYMPUS_CONFIG: join(home, 'missing-config.json'),
+      OLYMPUS_EMAIL_BASE_URL: undefined,
+      OLYMPUS_WORKER_AUTH_TOKEN: undefined,
+    });
+    try {
+      for (const [lines, origin] of [
+        ['OLYMPUS_EMAIL_SOURCE_PORT=8123\n', 'http://127.0.0.1:8123'],
+        ['OLYMPUS_EMAIL_SOURCE_HOST=0.0.0.0\nOLYMPUS_EMAIL_SOURCE_PORT=8124\n', 'http://127.0.0.1:8124'],
+        // The worker's canonical bind host outranks the legacy one, as the worker itself reads them.
+        ['OLYMPUS_WORKER_BIND_HOST=::1\nOLYMPUS_EMAIL_SOURCE_HOST=127.0.0.1\nOLYMPUS_EMAIL_SOURCE_PORT=8125\n', 'http://[::1]:8125'],
+      ] as const) {
+        sent.length = 0;
+        writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\n${lines}`);
+        const result = await runDashboardCommand({
+          fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+          noOpen: true,
+        });
+        expect(sent.map((request) => request.url)).toEqual([`${origin}/dashboard/control/launch`]);
+        expect(new Headers(sent[0]?.init.headers).get('Authorization')).toBe('Bearer worker-env-port-token');
+        expect(new URL(result.url).origin).toBe(origin);
+      }
+
+      for (const hosts of [
+        'OLYMPUS_EMAIL_SOURCE_HOST=192.0.2.10\n',
+        'OLYMPUS_WORKER_BIND_HOST=192.0.2.10\nOLYMPUS_EMAIL_SOURCE_HOST=127.0.0.1\n',
+      ]) {
+        sent.length = 0;
+        writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=worker-env-port-token\n${hosts}OLYMPUS_EMAIL_SOURCE_PORT=8123\n`);
+        const error = await runDashboardCommand({
+          fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+          noOpen: true,
+        }).catch((failure: unknown) => failure);
+        expect(error).toBeInstanceOf(OperationError);
+        expect((error as OperationError).code).toBe('config_error');
+        expect((error as Error).message).toContain('not a local address');
+        expect(sent).toHaveLength(0);
+      }
+    } finally {
+      env.restore();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('dashboard rejects missing credentials and unsafe worker URLs before sending a bearer', async () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-dashboard-input-boundaries-'));
     const configPath = join(home, 'missing-config.json');
@@ -1376,6 +1441,44 @@ describe('CLI tool surface', () => {
       expect(existsSync(path)).toBe(true);
       expect(JSON.parse(stdout)).toMatchObject({ ok: true, preset: 'no-sensitive', schemaVersion: 1 });
       expect(JSON.parse(readFileSync(path, 'utf8')).routes.secure_local.mode).toBe('disabled');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('sovereignty init --force keeps the Public tier of a policy written before 1.0', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-sovereignty-public-'));
+    const path = join(dir, 'sovereignty.json');
+    try {
+      const older = JSON.parse(readFileSync(join(process.cwd(), 'config/sovereignty/presets/local-first.json'), 'utf8'));
+      older.routes.public_safe = { analyst: ['cloud-openclaw-infer', 'local-source-answer'] };
+      older.retrieval.trustDomains.public_safe = {
+        minimumExecutionTrust: 'standard_cloud',
+        allowedEmbeddingTrust: ['local', 'standard_cloud'],
+        embeddingProfile: 'built-in-embedding',
+        allowCloudQuery: true,
+        activationMode: 'hybrid_shadow',
+      };
+      writeFileSync(path, JSON.stringify(older));
+      const proc = Bun.spawn([
+        process.execPath, 'src/cli.ts', 'sovereignty', 'init', '--preset', 'local-only', '--path', path, '--force',
+      ], {
+        cwd: process.cwd(),
+        env: { PATH: process.env.PATH ?? '' },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      if (code !== 0) throw new Error(stderr || stdout);
+
+      const written = JSON.parse(readFileSync(path, 'utf8'));
+      expect(written.routes.secure_local.pool.members).toEqual(['local-source-answer']);
+      expect(written.routes.public_safe).toEqual(written.routes.internal);
+      expect(written.retrieval.trustDomains.public_safe).toEqual(written.retrieval.trustDomains.internal);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -186,6 +186,8 @@ export function decideItemTiers(
   return classifyItemTiers(
     {
       signals: connector.classificationSignals(item),
+      locators: ['locatorUri', 'url', 'pathDisplay'].map(key => item.metadata[key])
+        .filter((value): value is string => typeof value === 'string'),
       provider: item.identity.provider,
       ...(text !== undefined ? { text } : {}),
       ...(extra.namesOnly ? { namesOnly: true } : {}),

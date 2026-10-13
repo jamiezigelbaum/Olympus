@@ -1823,6 +1823,10 @@ export function chatgptDashboardClient(
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
+    showModels: () => {
+      state.open.models = true;
+      closeScreen('', false, 'summary:models');
+    },
     // An Olympus host starts sign-in on the computer itself, so its link is
     // the provider's own page, not a one-time mcp.olympusplugin.ai link.
     directSignIn: () => state.hostKind !== '',

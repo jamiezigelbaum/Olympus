@@ -24,6 +24,7 @@ import type {
   GmailMessage,
 } from '../src/workers/google-connectors/gmail.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
+import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const openStores: LocalConnectorStore[] = [];
@@ -35,6 +36,23 @@ afterEach(() => {
 });
 
 describe('Gmail connector-store lane', () => {
+  test('held mail exposes only its cleared subject and sender, never its snippet or body', async () => {
+    const message = gmailMessage(1);
+    message.snippet = 'Snippetsealedmarker';
+    message.payload = { mimeType: 'text/plain', headers: [
+      { name: 'Subject', value: 'Orchid report' },
+      { name: 'From', value: 'Dr Example <clearedsender@example.test>' },
+    ], body: { data: Buffer.from('Patient: Morgan Example\nGlucose 93 mg/dL. Bodysealedmarker.').toString('base64url') } };
+    const lane = gmailLane({ client: fakeGmailClient([message]), maxMessages: 10,
+      sniffer: { id: 'fixture-waiting', judge: () => ({ verdict: 'undecided' }) },
+    });
+    await lane.handler.pull({ max_items: 10 });
+    for (const query of ['Orchid', 'clearedsender']) expect(lane.internalStore.searchItems(query, 10)).toHaveLength(1);
+    for (const query of ['Snippetsealedmarker', 'Bodysealedmarker']) expect(lane.internalStore.searchItems(query, 10)).toEqual([]);
+    expect(lane.internalStore.localContent('personal:msg-1')?.chunks).toEqual([]);
+    expect(lane.secureStore.localContent('personal:msg-1')?.chunks.join(' ')).toContain('Bodysealedmarker');
+  });
+
   test('a bounded slice resumes mid-traversal and promotes a watermark when it completes', async () => {
     const client = fakeGmailClient(gmailMessages(5));
     const lane = gmailLane({ client, maxMessages: 2 });
@@ -490,6 +508,7 @@ function gmailLane(input: {
   client: CountingGmailApiClient;
   maxMessages: number;
   budget?: GoogleDailyRequestBudget;
+  sniffer?: TierSniffer;
   env?: Record<string, string | undefined>;
   /** Inject a store to model divergence (a wiped or shared store). */
   stores?: { internalStore?: LocalConnectorStore; secureStore?: LocalConnectorStore };
@@ -522,6 +541,7 @@ function gmailLane(input: {
       internalStore,
       secureStore,
       account: 'personal',
+      ...(input.sniffer ? { tierClassification: { sniffer: input.sniffer } } : {}),
       apiClient: input.client,
       maxMessages: input.maxMessages,
       internalEmbeddingProvider: provider,
