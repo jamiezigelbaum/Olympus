@@ -18,6 +18,15 @@ broadcasting, no control surface (no sockets, no HTTP, no IPC). If WhatsApp
 logs the device out, the daemon exits and waits to be re-paired; it never
 retries in a way that looks like automation.
 
+## Licensing — build from source only
+
+whatsmeow is MPL-2.0 and pulls in `go.mau.fi/libsignal`, which is GPL-3.0.
+Olympus ships this bridge as source and builds it on the user's computer
+(`buildWhatsAppBridge` in `src/core/messaging-pairing.ts`), which keeps the
+rest of Olympus under MIT. Never publish or host a prebuilt bridge binary: a
+binary that links libsignal is a GPL-3.0 work that needs the GPL text and a
+source offer.
+
 ## Build
 
 Requires Go ≥ 1.26 and a C compiler (the session store uses

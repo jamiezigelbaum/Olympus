@@ -105,7 +105,15 @@ button { flex: 1; font: 600 1rem/1 system-ui, sans-serif; padding: .85rem 1rem; 
 .approve { background: var(--accent); color: #fff; border: 0; }
 .deny { background: transparent; color: var(--fg); border: 1px solid var(--line); }
 p.small { color: var(--muted); font-size: .85rem; margin-top: 1.25rem; }
+p.small a { color: var(--accent); }
 `;
+
+/**
+ * The line that makes the Terms part of the approval: shown beside the button
+ * that connects an app, so agreeing is part of the click (not a footer link).
+ * Links open a new tab so the approval page stays put.
+ */
+const TERMS_ASSENT = '<p class="small">By connecting, you agree to the Olympus <a href="https://olympusplugin.ai/terms/" target="_blank" rel="noopener noreferrer">Terms of Service</a> and acknowledge the <a href="https://olympusplugin.ai/privacy/" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.</p>';
 
 export function renderConsentPage(input: ConsentPageInput): { body: string; headers: Record<string, string> } {
   const nonce = randomBytes(16).toString('base64');
@@ -143,7 +151,7 @@ ${provenance}
 <p class="meta">After you approve, you return to <strong>${escapeHtml(input.redirectHost)}</strong></p>
 </div>
 ${mismatchWarning}${loopbackWarning}
-<p>${name} will be able to ask Olympus questions under your privacy rules. Private sources stay private, and you can remove it any time with <code>olympus connections revoke</code>.</p>
+<p>${name} will be able to ask Olympus questions under your privacy rules. For Private items it gets only answers written from them, which can repeat what they say, and nothing Olympus recognizes as a Secret. Labels are automatic and can be wrong. You can remove it any time with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
@@ -151,6 +159,7 @@ ${error}
 <label for="pairing_code">Pairing code</label>
 <input type="text" id="pairing_code" name="pairing_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" maxlength="20" placeholder="ABCD-EFGH-JKMN" required>
 <p class="hint">Get one by running <code>olympus connections pair</code> on the computer running Olympus, or by asking your OpenClaw agent. Codes last 10 minutes and work once.</p>
+${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Approve</button>
 <button class="deny" type="submit" name="action" value="deny" formnovalidate>Deny</button>
@@ -173,6 +182,12 @@ export interface LoopbackConsentPageInput {
   redirectOrigin: string;
   /** The client returns to a loopback address (the ChatGPT desktop app's Codex client, any port). */
   loopbackRedirect?: boolean;
+  /**
+   * A pinned ChatGPT client. Through the relay ChatGPT gets the ChatGPT
+   * surface (Private answers only in the encrypted panel); every other app
+   * gets answers written from Private items, so the page must say which.
+   */
+  chatgpt?: boolean;
 }
 
 /**
@@ -206,11 +221,15 @@ ${input.loopbackRedirect
     : ''}
 <p><strong>Connecting links Olympus on this Mac to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
 <p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
-<p><strong>${name} never sees the text of your Private items or any Secret.</strong> For Private items it gets only answers that Venice or a model on this Mac reasoned out, with each item's title and source.</p>
+${input.chatgpt
+    ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>`
+    : `<p><strong>For Private items, ${name} gets answers written from them by a model on this Mac or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
+<p>Olympus does not keep what it recognizes as a Secret, and never sends it to ${name}. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
 <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}">
+${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Connect</button>
 <button class="deny" type="submit" name="action" value="deny">Cancel</button>

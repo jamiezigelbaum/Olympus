@@ -319,6 +319,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'README.md',
   'INSTALL_FOR_AGENTS.md',
   'CONTRIBUTING.md',
+  'THIRD_PARTY_NOTICES.md',
   'bin/olympus',
   'dist/index.js',
   'dist/cli.js',

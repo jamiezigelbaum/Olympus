@@ -421,13 +421,26 @@ describe('relay mode: loopback-only approval and routable credentials', () => {
   };
   beforeEach(() => assemble({ publicBaseUrl: RELAY_ORIGIN, installId: INSTALL_ID }));
 
+  test('another app is told it gets answers written from Private items, with the Terms beside Connect', async () => {
+    const page = await openConsent(relayAuthorizeUrl({ client_id: CLAUDE_CLIENT_ID, redirect_uri: CLAUDE_REDIRECT_URI, resource: `${RELAY_ORIGIN}/mcp` }));
+    expect(page.response.status).toBe(200);
+    expect(page.html).toContain('Connect Claude to Olympus?');
+    expect(page.html).toContain('answers written from them by a model on this Mac or by Venice');
+    expect(page.html).toContain('Those answers can repeat what the items say.');
+    expect(page.html).not.toContain("model is told only that they do");
+    expect(page.html).toContain('By connecting, you agree to the Olympus');
+  });
+
   test('a direct visit on this Mac approves with one click and returns a code naming this install', async () => {
     const verifier = 'v'.repeat(50);
     const challenge = new Bun.CryptoHasher('sha256').update(verifier).digest('base64url');
     const page = await openConsent(relayAuthorizeUrl({ code_challenge: challenge, resource: `${RELAY_ORIGIN}/mcp` }));
     expect(page.response.status).toBe(200);
     expect(page.html).toContain('Connect ChatGPT to Olympus?');
-    expect(page.html).toContain('never sees the text of your Private items or any Secret');
+    expect(page.html).toContain("ChatGPT's model is told only that they do");
+    expect(page.html).not.toContain('answers written from them by a model on this Mac');
+    expect(page.html).toContain('href="https://olympusplugin.ai/terms/"');
+    expect(page.html).toContain('href="https://olympusplugin.ai/privacy/"');
     expect(page.html).not.toContain('pairing_code');
     // The page is plain http on loopback: a Secure cookie would never come back.
     expect(page.response.headers.get('set-cookie')).not.toContain('Secure');
