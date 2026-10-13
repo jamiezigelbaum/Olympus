@@ -1280,6 +1280,7 @@ export interface SourceDashboardBuildOptions {
   unreadableRecheck?: (corpusId: string) => { unreadable: number; blocked: number } | undefined;
   credentialHealth?: CredentialHealthReport;
   oauthClientIds?: Partial<Record<DashboardOAuthSource | 'google', string>>;
+  /** Per card; a Google entry is true only for a secret paired with that card's client id. */
   oauthClientSecretAvailability?: Partial<Record<DashboardOAuthSource | 'google', boolean>>;
   googleCloudProjectId?: string;
   googlePilotClientConfigured?: boolean;
@@ -3931,15 +3932,18 @@ function oauthClientIdForSource(
     ?? oauthClientIds['google-drive'];
 }
 
+/**
+ * Read per card, never borrowed across Google sources: the caller reports a
+ * Google secret only when it is paired with the client id that card starts
+ * with. Gmail's secret belongs to Gmail's client; showing it as on file for a
+ * Drive card on a different client made the field optional for an exchange
+ * that then went out without Drive's secret (Codex on #315).
+ */
 function oauthClientSecretAvailableForSource(
   source: DashboardOAuthSource,
   availability: Partial<Record<DashboardOAuthSource | 'google', boolean>>,
 ): boolean {
-  if (!isGoogleOAuthSource(source)) return availability[source] === true;
-  return availability[source] === true
-    || availability.google === true
-    || availability.gmail === true
-    || availability['google-drive'] === true;
+  return availability[source] === true;
 }
 
 /**

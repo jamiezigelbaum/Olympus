@@ -1384,7 +1384,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {}),
               ...(credentialHealth ? { credentialHealth } : {}),
               oauthClientIds: dashboardClientIdSets.all,
-              oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
+              oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore, dashboardClientIdSets.all),
               ...(googleCloudProjectId ? { googleCloudProjectId } : {}),
               googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
               oauthRedirectBaseUrl: dashboardOAuthOrigin,
@@ -1400,10 +1400,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // connection of its own leads into the owner's-own-app steps
               // instead. The card decides per source (a source that already
               // has a connection says Reauthenticate and is never held back).
-              // Asked only when a Google source would actually connect through
-              // that app.
-              googlePublisherFull: dashboardPublisherOAuthSources(dashboardClientIdSets.own).some(dashboardGoogleOAuthSource)
-                && await dashboardGooglePublisherFull(sourceDashboard),
+              // Asked only when a Google card would actually say Connect through
+              // that app: with every such card already connected, no answer
+              // could change the page, so the request is not made at all.
+              googlePublisherFull: await dashboardGooglePublisherFullForCards(
+                sourceDashboard,
+                registry,
+                dashboardPublisherOAuthSources(dashboardClientIdSets.own),
+              ),
               apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
               pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
               contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -6276,13 +6280,37 @@ async function dashboardGooglePublisherFull(
   registry?: ConnectedHandleRegistry,
   source?: DashboardOAuthSource | 'google',
 ): Promise<boolean> {
-  if (registry && source) {
-    const providers: readonly string[] = dashboardGoogleProvidersForSource(source);
-    const hasOwnConnection = registry.handles.some((handle) =>
-      providers.includes(handle.provider) && !isRetiredGoogleHandle(handle));
-    if (hasOwnConnection) return false;
-  }
+  if (registry && source && dashboardGoogleSourceHasOwnConnection(registry, source)) return false;
   return googlePublisherSignInFull(sourceDashboard.googleCapacityFetch ? { fetch: sourceDashboard.googleCapacityFetch } : {});
+}
+
+/**
+ * The capacity answer for the view model, asked only when at least one Google
+ * card through Olympus's own app has no connection of its own. A card that
+ * has one is never held back (the same rule the start route applies above),
+ * so with every publisher Google card connected the external request could
+ * not change the page and would only cost a dashboard refresh its timeout
+ * whenever the capacity route is down (Codex on #315).
+ */
+async function dashboardGooglePublisherFullForCards(
+  sourceDashboard: { googleCapacityFetch?: typeof fetch },
+  registry: ConnectedHandleRegistry,
+  publisherSources: readonly DashboardOAuthSource[],
+): Promise<boolean> {
+  const unconnected = publisherSources.filter((source) =>
+    dashboardGoogleOAuthSource(source) && !dashboardGoogleSourceHasOwnConnection(registry, source));
+  if (unconnected.length === 0) return false;
+  return dashboardGooglePublisherFull(sourceDashboard);
+}
+
+/** Whether a Google source card already holds a live (non-retired) handle of its own. */
+function dashboardGoogleSourceHasOwnConnection(
+  registry: ConnectedHandleRegistry,
+  source: DashboardOAuthSource | 'google',
+): boolean {
+  const providers: readonly string[] = dashboardGoogleProvidersForSource(source);
+  return registry.handles.some((handle) =>
+    providers.includes(handle.provider) && !isRetiredGoogleHandle(handle));
 }
 
 /** The handle providers behind one Google source card. */
@@ -6303,15 +6331,30 @@ function dashboardPublisherOAuthSources(
   ) !== undefined);
 }
 
+/**
+ * Whether each card has a client secret on file for the client it would start
+ * with.
+ *
+ * For Google the answer is per card and already paired: a secret counts only
+ * when the exchange would actually send it, i.e. when
+ * `dashboardGoogleOAuthClientSecret` finds it stored beside the very client id
+ * this card starts with. Gmail and Drive can carry different bring-your-own
+ * Web clients; reporting Gmail's secret on Drive's card made the field
+ * optional, the saved-value stand-in was submitted, and the exchange then ran
+ * without Drive's secret and failed after consent (Codex on #315).
+ */
 async function dashboardOAuthClientSecretAvailability(
   secretStore: SecretStore,
+  clientIds: Partial<Record<DashboardOAuthSource | 'google', string>>,
 ): Promise<Partial<Record<DashboardOAuthSource | 'google', boolean>>> {
   const output: Partial<Record<DashboardOAuthSource | 'google', boolean>> = {};
-  const sources: Array<DashboardOAuthSource | 'google'> = ['google', 'gmail', 'google-drive', 'x'];
-  for (const source of sources) {
-    output[source] = Boolean(await secretStore.get(dashboardOAuthClientSecretConfigKey(source)));
+  const googleSources: Array<DashboardOAuthSource> = ['google', 'gmail', 'google-drive'];
+  for (const source of googleSources) {
+    const clientId = dashboardOAuthClientIdForSource(source, clientIds);
+    output[source] = clientId !== undefined
+      && Boolean(await dashboardGoogleOAuthClientSecret(source, secretStore, undefined, clientId));
   }
-  if (process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_SECRET?.trim()) output.google = true;
+  output.x = Boolean(await secretStore.get(dashboardOAuthClientSecretConfigKey('x')));
   return output;
 }
 

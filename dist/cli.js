@@ -63807,9 +63807,7 @@ function oauthClientIdForSource(source, oauthClientIds) {
   return oauthClientIds[source] ?? oauthClientIds.google ?? oauthClientIds.gmail ?? oauthClientIds["google-drive"];
 }
 function oauthClientSecretAvailableForSource(source, availability) {
-  if (!isGoogleOAuthSource2(source))
-    return availability[source] === true;
-  return availability[source] === true || availability.google === true || availability.gmail === true || availability["google-drive"] === true;
+  return availability[source] === true;
 }
 function oauthRedirectUriToRegister(source, baseUrl) {
   if (!baseUrl)
@@ -116943,12 +116941,12 @@ function createEmailSourceWorker(options = {}) {
               ...options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {},
               ...credentialHealth ? { credentialHealth } : {},
               oauthClientIds: dashboardClientIdSets.all,
-              oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
+              oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore, dashboardClientIdSets.all),
               ...googleCloudProjectId ? { googleCloudProjectId } : {},
               googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
               oauthRedirectBaseUrl: dashboardOAuthOrigin,
               publisherOAuthSources: dashboardPublisherOAuthSources(dashboardClientIdSets.own),
-              googlePublisherFull: dashboardPublisherOAuthSources(dashboardClientIdSets.own).some(dashboardGoogleOAuthSource) && await dashboardGooglePublisherFull(sourceDashboard),
+              googlePublisherFull: await dashboardGooglePublisherFullForCards(sourceDashboard, registry2, dashboardPublisherOAuthSources(dashboardClientIdSets.own)),
               apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
               pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
               contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -119934,13 +119932,19 @@ function dashboardPublisherOAuthFlow(source, ownClientId) {
   return appKey ? { clientId: appKey, redirectUri: oauthRelayUrl(), relay: true } : undefined;
 }
 async function dashboardGooglePublisherFull(sourceDashboard, registry2, source) {
-  if (registry2 && source) {
-    const providers = dashboardGoogleProvidersForSource(source);
-    const hasOwnConnection = registry2.handles.some((handle) => providers.includes(handle.provider) && !isRetiredGoogleHandle(handle));
-    if (hasOwnConnection)
-      return false;
-  }
+  if (registry2 && source && dashboardGoogleSourceHasOwnConnection(registry2, source))
+    return false;
   return googlePublisherSignInFull(sourceDashboard.googleCapacityFetch ? { fetch: sourceDashboard.googleCapacityFetch } : {});
+}
+async function dashboardGooglePublisherFullForCards(sourceDashboard, registry2, publisherSources) {
+  const unconnected = publisherSources.filter((source) => dashboardGoogleOAuthSource(source) && !dashboardGoogleSourceHasOwnConnection(registry2, source));
+  if (unconnected.length === 0)
+    return false;
+  return dashboardGooglePublisherFull(sourceDashboard);
+}
+function dashboardGoogleSourceHasOwnConnection(registry2, source) {
+  const providers = dashboardGoogleProvidersForSource(source);
+  return registry2.handles.some((handle) => providers.includes(handle.provider) && !isRetiredGoogleHandle(handle));
 }
 function dashboardGoogleProvidersForSource(source) {
   if (source === "gmail")
@@ -119953,14 +119957,14 @@ function dashboardPublisherOAuthSources(ownClientIds) {
   const sources = ["gmail", "google-drive", "dropbox", "x"];
   return sources.filter((source) => dashboardPublisherOAuthFlow(source, dashboardOAuthClientIdForSource(source, ownClientIds)) !== undefined);
 }
-async function dashboardOAuthClientSecretAvailability(secretStore) {
+async function dashboardOAuthClientSecretAvailability(secretStore, clientIds) {
   const output = {};
-  const sources = ["google", "gmail", "google-drive", "x"];
-  for (const source of sources) {
-    output[source] = Boolean(await secretStore.get(dashboardOAuthClientSecretConfigKey(source)));
+  const googleSources = ["google", "gmail", "google-drive"];
+  for (const source of googleSources) {
+    const clientId = dashboardOAuthClientIdForSource(source, clientIds);
+    output[source] = clientId !== undefined && Boolean(await dashboardGoogleOAuthClientSecret(source, secretStore, undefined, clientId));
   }
-  if (process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_SECRET?.trim())
-    output.google = true;
+  output.x = Boolean(await secretStore.get(dashboardOAuthClientSecretConfigKey("x")));
   return output;
 }
 async function dashboardOAuthClientSecret(source, secretStore, fallback, clientId) {
