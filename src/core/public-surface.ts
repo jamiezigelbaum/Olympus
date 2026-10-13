@@ -160,6 +160,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'connect readwise',
   'connect gemini',
   'connect status',
+  'connect finish',
   'connections add',
   'connections pair',
   'connections list',

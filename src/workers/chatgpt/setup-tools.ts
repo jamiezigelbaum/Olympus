@@ -80,8 +80,12 @@ export class SetupBackendError extends Error {
 }
 
 export interface ChatGptSetupBackend {
-  /** Starts a publisher-app sign-in that returns through the relay; the provider's authorize URL. */
-  startOAuth(source: ChatGptOAuthSource): Promise<{ authorizationUrl: string; expiresAt: string }>;
+  /**
+   * Starts a publisher-app sign-in; the provider's authorize URL. It returns
+   * through the relay, except a Google sign-in on Olympus's Desktop client
+   * (`onComputer`), which runs on the computer and returns there on loopback.
+   */
+  startOAuth(source: ChatGptOAuthSource): Promise<{ authorizationUrl: string; expiresAt: string; onComputer?: boolean }>;
   /** A one-time `https://<relay>/go/<id>` link; undefined when this engine is not linked to the relay. */
   handoffLink(target: HandoffTarget): { url: string; expiresAt: string } | undefined;
   /**
@@ -416,9 +420,14 @@ export async function callSetupTool(
         if (backend.directSignIn) {
           return connectSourceToolResult({ status: 'open_link', source, openUrl: started.authorizationUrl, expiresAt: started.expiresAt }, { direct: true });
         }
-        const link = backend.handoffLink({ kind: 'redirect', location: started.authorizationUrl });
+        const link = started.onComputer && source !== 'dropbox'
+          ? backend.handoffLink({ kind: 'computer', source, location: started.authorizationUrl })
+          : backend.handoffLink({ kind: 'redirect', location: started.authorizationUrl });
         if (!link) throw new ChatGptSurfaceError('not_linked');
-        return connectSourceToolResult({ status: 'open_link', source, openUrl: link.url, expiresAt: link.expiresAt });
+        return connectSourceToolResult(
+          { status: 'open_link', source, openUrl: link.url, expiresAt: link.expiresAt },
+          { onComputer: started.onComputer === true },
+        );
       }
       case SCOPE_LIST_TOOL_NAME:
         return scopeListToolResult(await scopeList(backend, args));

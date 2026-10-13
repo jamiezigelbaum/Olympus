@@ -10,8 +10,9 @@
  * 1. The release builder replaces this module in staged bundles from
  *    `OLYMPUS_GOOGLE_PILOT_CLIENT_ID`, which a release build must set: to a
  *    Desktop client id, or to `none` for no Desktop client, since every
- *    host's Gmail and Drive connect uses the publisher Web client and relay
- *    (`scripts/release-google-pilot-choice.ts`). Unset, it packages the
+ *    host's Gmail and Drive connect uses Olympus's publisher clients instead
+ *    (the Desktop client in `publisher-oauth-client.ts` since 2026-10-13, the
+ *    Web client and relay before; `scripts/release-google-pilot-choice.ts`). Unset, it packages the
  *    source default below — the Olympus 1.0 choice (owner, 2026-10-03).
  * 2. `DEFAULT_GOOGLE_PILOT_CLIENT_ID` below, which ships in source. A
  *    repository install has no release substitution, so without a real default

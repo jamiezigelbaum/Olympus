@@ -4421,6 +4421,7 @@ export async function main(): Promise<void> {
             ...(sourceDashboardHistory ? { history: sourceDashboardHistory } : {}),
             ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
             oauthHandback: () => chatgptOAuthHandback(),
+            loopbackPort: port,
             ...(fileSourceScopes ? { fileSourceScopes } : {}),
             enforceConnectedSourceReads: true,
             // The filter applies to the override too. An override is a caller
@@ -5205,7 +5206,7 @@ export async function main(): Promise<void> {
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
       isRelayed: isRelayedRequest,
-    }), withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
+    }), withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs, { isRelayed: carriesRelayMarker }), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
       questions: privateQuestions,
       isRelayed: isRelayedRequest,
