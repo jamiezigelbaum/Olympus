@@ -14643,6 +14643,51 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
+// src/workers/classification/secret-locations.ts
+function screenedSecretLocator(locator) {
+  return locator?.trim() && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
+}
+var STOP_WORDS;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  STOP_WORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
 // src/workers/classification/installed-tier-classification-registry.ts
 function registeredInstalledTierClassification() {
   return registered;
@@ -17232,6 +17277,7 @@ var init_local_index = __esm(() => {
   init_engine();
   init_tier_ledger();
   init_tier_classifier();
+  init_secret_locations();
   init_tier_placement();
   init_source_ingestion_exclusions();
   init_fts();
@@ -20676,9 +20722,13 @@ var init_local_index = __esm(() => {
         `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(existing.item_pk);
           this.deleteFtsForItem(existing.item_pk);
+          if (tombstoneTrustTier === "S5")
+            this.keepSecretsLocationOnly(existing.item_pk);
           this.rememberItemOwner(existing.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
           return true;
         }
+        if (existing && tombstoneTrustTier === "S5")
+          this.keepSecretsLocationOnly(existing.item_pk);
         if (activeOnly)
           return false;
         this.db.query(`
@@ -20694,6 +20744,14 @@ var init_local_index = __esm(() => {
         this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
         return true;
       })();
+    }
+    keepSecretsLocationOnly(itemPk) {
+      const row = this.db.query("SELECT locator_uri FROM items WHERE item_pk = ?").get(itemPk);
+      this.db.query(`
+      UPDATE items
+      SET title = NULL, search_text = NULL, locator_uri = ?, sender_label = NULL, reactions_json = NULL
+      WHERE item_pk = ?
+    `).run(screenedSecretLocator(row.locator_uri), itemPk);
     }
     rememberItemOwner(itemPk, connectorId, ownershipKind, syncRunId, observedAt, observation) {
       this.db.query(`
@@ -25207,7 +25265,7 @@ var init_evidence_versions = __esm(() => {
 
 // src/core/analyst.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -25282,7 +25340,7 @@ var init_analyst = __esm(() => {
 `);
   DEFAULT_AUDIT_MAX_OUTPUT_CHARS = DEFAULT_ANALYST_MAX_OUTPUT_CHARS + AUDIT_OUTPUT_HEADROOM_CHARS;
   promptEncoder = new TextEncoder;
-  STOP_WORDS = new Set([
+  STOP_WORDS2 = new Set([
     "a",
     "about",
     "also",
@@ -27857,48 +27915,6 @@ var init_telegram_messages = __esm(() => {
   init_corpus_adapter4();
   init_capture_spool_connector();
   init_store_sync2();
-});
-
-// src/workers/classification/secret-locations.ts
-var STOP_WORDS2;
-var init_secret_locations = __esm(() => {
-  init_sqlite_migrations();
-  init_engine();
-  STOP_WORDS2 = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "did",
-    "do",
-    "does",
-    "find",
-    "for",
-    "have",
-    "i",
-    "in",
-    "is",
-    "it",
-    "kept",
-    "keep",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "put",
-    "saved",
-    "show",
-    "stored",
-    "the",
-    "there",
-    "to",
-    "what",
-    "where",
-    "which",
-    "who",
-    "with"
-  ]);
 });
 
 // src/workers/source-index/status.ts

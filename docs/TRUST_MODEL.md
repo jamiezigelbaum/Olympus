@@ -449,7 +449,11 @@ Rules:
   Private, searchable by keyword and not embedded until final. A Secret is
   stored nowhere; only its location (source, locator, a scanned title, finding
   kinds) is kept, in the source's secret-locations index, and returned beside
-  answers, never to a model. A copy a move leaves behind is superseded: kept,
+  answers, never to a model. An item that becomes Secret after it was stored
+  (the owner marks it, or a re-judge finds a secret) keeps no more: each
+  stored copy is tombstoned with its title, search text, sender label and
+  reactions cleared and its locator kept only if it passes the same scan;
+  the tombstone row stays so a later sync cannot resurrect it. A copy a move leaves behind is superseded: kept,
   never searched, served, counted or exported; cloud vectors of an item raised
   to Private are kept that way, hidden, until the owner approves a purge.
   Everything stored before P1b stays exactly where it is until the

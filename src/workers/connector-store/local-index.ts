@@ -76,6 +76,7 @@ import {
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
 import { classifyContentTier, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { screenedSecretLocator } from '../classification/secret-locations.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -7773,9 +7774,14 @@ export class LocalConnectorStore {
         `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(existing.item_pk);
         this.deleteFtsForItem(existing.item_pk);
+        if (tombstoneTrustTier === 'S5') this.keepSecretsLocationOnly(existing.item_pk);
         this.rememberItemOwner(existing.item_pk, connectorId, ownershipKind, syncRunId, now, 'local_write');
         return true;
       }
+      // A row already tombstoned (a provider deletion, or a Secret tombstoned
+      // before rows were screened) is screened all the same; nothing else
+      // about it changes.
+      if (existing && tombstoneTrustTier === 'S5') this.keepSecretsLocationOnly(existing.item_pk);
       if (activeOnly) return false;
 
       // A tombstone for an item this store never saw still gets a row so a
@@ -7814,6 +7820,26 @@ export class LocalConnectorStore {
       this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, 'local_write');
       return true;
     })();
+  }
+
+  /**
+   * An item that becomes Secret after it was stored keeps no more here than
+   * one detected at ingest: a Secret's name lives only in the secret-locations
+   * index, which decides from the item's metadata tier whether it may keep a
+   * scanned title (an owner-marked Secret keeps none). The store cannot see
+   * that tier, so its row keeps no title, no free text a search could match
+   * (search text, sender label, reactions), and its locator only through the
+   * index's own screen. The row itself, its identity and its ownership history
+   * stay: they are what stop a later sync from resurrecting the item.
+   */
+  private keepSecretsLocationOnly(itemPk: number): void {
+    const row = this.db.query('SELECT locator_uri FROM items WHERE item_pk = ?')
+      .get(itemPk) as { locator_uri: string | null };
+    this.db.query(`
+      UPDATE items
+      SET title = NULL, search_text = NULL, locator_uri = ?, sender_label = NULL, reactions_json = NULL
+      WHERE item_pk = ?
+    `).run(screenedSecretLocator(row.locator_uri), itemPk);
   }
 
   /**
