@@ -779,7 +779,7 @@ function describeZkapiReadiness(readiness: ZkapiConsultReadiness): string {
   const tor = readiness.tor === 'off'
     ? 'Tor off'
     : readiness.torExecutable ? 'tor found (a fresh client per consult)' : 'tor not found';
-  const confinement = `confinement on this platform: ${readiness.confinement.limit}`;
+  const confinement = readiness.confinement.checkLine ?? `confinement on this platform: ${readiness.confinement.limit}`;
   const ports = `daemon port ${readiness.daemonPort === 'free' ? 'free' : 'IN USE'}${readiness.torPort === 'not_used' ? '' : `, Tor port ${readiness.torPort === 'free' ? 'free' : 'IN USE'}`}`;
   const key = readiness.apiKeyConfigured ? 'local API key configured' : 'local API key NOT configured';
   const money = readiness.money;

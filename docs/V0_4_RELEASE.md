@@ -168,6 +168,15 @@ testers have exercised the normal product journey without custom engineering.
   uses that connection, with the same xAI account. Grok Bot's own sign-in (as
   Cursor's pinned client), Muse and the Grok API key path stay after 1.0.
 
+- **2026-10-13 — Linux anonymous answers qualification (local only).** W4
+  steps 3–4 integrated on the 1.0.0 base; Linux stays unavailable. The pinned
+  launcher passed the full Omarchy matrix, but the real daemon rejects required
+  companion custody on Linux before reaching `ready`. Activation is skipped;
+  a reviewed fork update and new bundle must precede another real-route proof.
+  The pinned Tor URL returned 404 (the identical archive verified from Tor's
+  archive mirror). Details and raw evidence: `design/linux-zkapi-confinement.md`,
+  “Step 5 qualification attempt”. Nothing pushed or deployed.
+
 - **2026-10-13 — Linux W5 PR preparation (local only).** Merge current main,
   retain existing standalone data in place, and use XDG for fresh installs.
   Program generations and personal data have separate removal roots on new

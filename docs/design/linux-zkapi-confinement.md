@@ -1,8 +1,8 @@
 # Linux confinement for the zkAPI private lane (workstream W4)
 
-Status: design and feasibility prototype, revision 3, 2026-10-12. Nothing here
-ships. No production code path changes with this document; the prototype lives
-in `tools/zkapi-confine-prototype/` and is not wired into the engine. Revision 2
+Status: revision 3 design; steps 3–4 implemented dark, 2026-10-13.
+The pin and injected transport exist, but Linux default selection still refuses.
+The original feasibility prototype remains in `tools/zkapi-confine-prototype/`. Revision 2
 closed the eight findings of the independent design review of revision 1
 (commit `3bf77d51`); revision 3 closes the five findings of the review of
 revision 2 (commit `0e2e0e1e`), all in section 1.2. Every critical step of the plan in section 9
@@ -351,14 +351,16 @@ to review finding 1.
   child's exit, already handled (`session_process_exited`). A broken Tor
   host side surfaces as the daemon's existing transport errors.
 
-### 4.4 Integration with the transport (what changes in code, later)
+### 4.4 Integration with the transport (dark implementation)
 
 The shape is the existing `ZkapiConfinement` seam, extended; the Mac
 implementation and every Mac test stay as they are.
 
 - `ZkapiConfinement` gains an optional **session** step:
-  `prepare(workDir, ports) -> { wrap(argv), fetch, verifyInstance(event),
-  close() }`. The Mac returns the current behaviour. The Linux session builds
+  `prepare(workDir, ports) -> { wrap(argv), fetch, verifyInstance(),
+  inspect(), status(event, watchdog), statusClosed(), close() }`. The event is
+  retained privately after binding, never returned in the receipt. The Mac
+  does not implement this optional step and retains the current behaviour. The Linux session builds
   the launcher argv (`run --dir <workDir> --status-fd 3 --expose api=<daemon
   port> --reach <ns tor port>=<host tor port> --connect-port ... --bind-port
   ... -- <daemon argv>`) and provides a `fetch` for the daemon origin.
@@ -380,8 +382,8 @@ implementation and every Mac test stay as they are.
     `no_status_event`), exactly as a `refused` event does. The launcher itself
     refuses to start without `--status-fd 3` (exit 64).
 - **Level and refusal.** `defaultZkapiConfinement()` on Linux returns
-  `loopback_filtered` when `zkapi-confine check` succeeds, and otherwise an
-  explicit unavailable state (`code`, `remedy`), not level `none`. The session
+  `loopback_filtered` only at activation (step 7), when `zkapi-confine check`
+  succeeds, and otherwise an explicit unavailable state (`code`, `remedy`), not level `none`. The session
   refuses with a new `confinement_unavailable` code before Tor starts; the
   existing `confinement_self_test_failed` covers a failed per-session test.
   `check` runs the real launcher around a short no-op and takes about 0.5 s
@@ -418,6 +420,29 @@ implementation and every Mac test stay as they are.
 - **Receipts**: `confinementSelfTest` as today, plus a non-secret
   `confinementBackend: { kind: 'linux_netns', landlockAbi, layers,
   stage0Layers }`.
+
+Implementation notes checked against fork `313646de` and the released archive:
+
+- Status is **prefixed** newline JSON: `zkapi-confine: {…}\n`, not bare
+  JSON. `launcher_exited` before readiness is a `refused` event's code in
+  this release. The parser accepts only known events on fd 3, never stdout.
+- HMAC input is `zkapi-confine/<srv|cli>/<bridge>\0` followed by the client
+  and server nonces, exactly as `bridge.go`; section 4.3's formula is shorthand.
+- `linuxZkapiConfinement()` is exported for explicit seam injection. Neither
+  readiness nor `defaultZkapiConfinement()` selects it automatically. A Linux
+  prepared session refuses Tor-off instead of taking the existing unwrapped
+  Mac path. Key-bearing checks and final completion use the session adapter.
+- The self-test's Unix datagram decoy is not a production launcher command:
+  `dgram-decoy` exists only with the fork's qualification build tag. The engine
+  uses a content-free Bun/libc host decoy, refuses if unavailable, and uses the
+  production launcher's `probe` for the confined raw-syscall child. It does not
+  require Go, Python or socat installed on the user's host.
+- Response streaming uses bounded strict HTTP framing. Requests have fixed
+  body lengths; unsupported streaming request bodies, redirects, informational
+  responses and chunk extensions refuse. The receipt adds only backend layers
+  and a fixed `confinementFailure` code; the bridge token never enters it.
+- The released arm64 archive has **no** launcher (rather than a runnable
+  unsupported-platform stub). Linux arm64 remains refused before resolution.
 
 ### 4.5 Instance binding, listener inspection and the dispatch check
 
@@ -816,6 +841,22 @@ Governing rules (review finding 8):
    cases of A.1, driven through a real watchdog spawn; an integration test runs the real launcher with a
    stand-in daemon on a Linux runner and fails if a layer is removed
    (ablation inverted into assertions). *Review before merge.*
+   Implementation proof and command: `test/zkapi-linux-confinement.test.ts`
+   covers process bindings, strict listener sets and private status plumbing;
+   `test/zkapi-linux-session.test.ts` exercises each launcher refusal through
+   the real supervisor; `test/zkapi-confine-fetch.test.ts` runs all 24 framing
+   cases through the real watchdog; `test/zkapi-confine-selftest.test.ts`
+   rejects incomplete controls, missing rows and removed layers.
+   The opt-in integrated proof is:
+
+   ```sh
+   OLYMPUS_ZKAPI_CONFINE_BIN=/absolute/path/to/zkapi-confine bun test test/zkapi-linux-integration.test.ts
+   ```
+
+   Run as the ordinary Omarchy user in this checkout. The real-launcher test
+   skips with a reason when the binary/environment is unavailable; a skip is
+   not positive-path proof. No live route, funds or provider is used.
+
 5. **Real-route qualification (Omarchy).** The real daemon, managed
    companion and Tor under the launcher with the integration of step 4
    injected: managed transport block matches, custody flags accepted, the
@@ -835,6 +876,48 @@ Governing rules (review finding 8):
    `loopback_filtered` when `check` passes; docs and the doctor line go
    live. *Acceptance:* steps 5 and 6 complete; Mac regression untouched.
    *Review before merge.*
+
+### Step 5 qualification attempt, 2026-10-13: blocked
+
+The integration of steps 3–4 was brought onto the 1.0.0 source base with Linux
+selection still dark. On the owner's Omarchy x64 scratch checkout (kernel
+7.2.5-3-omarchy, Bun 1.3.14, Landlock ABI 10), the released olympus3 launcher
+passed `check` and the full fork qualification matrix: **0 failures**, including
+lifecycle, bridge faults, framing and ablations; no launcher or namespace leak.
+Production rows used the pinned launcher; ablations and the hostile-init row
+used the fork's separate qualification binaries, never the release binary.
+
+**The real route did not reach `ready`.** The pinned
+`zkapi-clientd 0.1.6-olympus3` rejects `--require-companion-custody` on Linux:
+`managed companion custody is not supported on this platform`. The fork at
+`7ba3059f1962221d9a6b48de5638dd3c4590c5fe` builds
+`internal/zkapi/companion_custody_unsupported.go` on every non-Darwin platform.
+The integrated attempt passed its self-test and bootstrapped fresh Tor, then
+reported `confinement_unavailable` / `instance_binding_failed` when the daemon
+exited before instance verification. A separate invocation under the same real
+launcher captured the explicit custody refusal. No question was sent, nothing
+was reserved, and the fence stayed clear. This is not a funded-wallet failure:
+the daemon refuses before the companion starts.
+
+The pinned Tor download at `dist.torproject.org` also returned HTTP 404.
+Qualification retrieved the same 15.0.24 archive from Tor's official
+`archive.torproject.org/tor-package-archive/torbrowser/` mirror through the
+installer's fetch seam; its existing SHA-256 verified. The shipping URL remains
+unchanged and needs a separate delivery decision.
+
+Disposition: **gate activation on the existing step 5 requirement**. Step 7 is
+skipped; the default selector, dashboard copy and changelog's Linux limitation
+remain accurate. The fork owner must implement and review Linux companion
+custody, publish a new pinned bundle, and repeat the real-route qualification
+before activation and the anchor's integrated review. No custody flag was
+removed and no weaker mode was introduced. Paid end-to-end proof remains
+unrun; installed Olympus, its services, accounts and funds were untouched.
+
+Raw evidence is in the owner's release workspace at
+`/Users/zig/Code/olympus-wt/v1-night/logs/w4-step5-*`: launcher matrix and JSON,
+environment and binary hashes, installer results, integrated tests, route
+receipts and the explicit daemon refusal. The scratch route uses synthetic
+local credentials and never calls `send`.
 
 Deferred by owner decision, each its own later work: Linux arm64 (launcher
 run on hardware; Tor has no Linux arm64 bundle), and an Ubuntu positive-path
