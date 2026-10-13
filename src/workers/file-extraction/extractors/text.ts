@@ -58,7 +58,7 @@ import {
   decodeUtf8,
   extractDrawingMlTables,
   extractOfficeDocumentProperties,
-  extractPdfTextStreams,
+  extractPdfTextLayer,
   extractWordComments,
   extractWordParagraphs,
   extractWordTables,
@@ -75,6 +75,7 @@ import {
   officePartNumber,
   officeTableSummary,
   parseDelimitedRows,
+  PDF_TEXT_PARTIAL_WARNING,
   pdfAppearsImageOnly,
   OfficeDocumentUnreadableError,
   readZipEntries,
@@ -619,7 +620,8 @@ async function extractPdfText(input: {
     });
     if (viaCommand) return viaCommand;
   }
-  const streamText = normalizeExtractedText(extractPdfTextStreams(input.context.bytes).join('\n'));
+  const layer = extractPdfTextLayer(input.context.bytes);
+  const streamText = normalizeExtractedText(layer.texts.join('\n'));
   // The inline decoder knows no font encodings: a PDF whose text is drawn in
   // a composite (CID) font decodes to glyph ids, which read as control
   // characters. Indexing that would put noise where the document's text
@@ -631,7 +633,11 @@ async function extractPdfText(input: {
   return pdfTextExtractionResult({
     context: input.context,
     bounded,
-    warnings: ['pdf_text_layer_only'],
+    // The reader's budget ran out before the whole PDF was read: what is
+    // indexed is the text found up to that point.
+    warnings: layer.partial
+      ? ['pdf_text_layer_only', PDF_TEXT_PARTIAL_WARNING]
+      : ['pdf_text_layer_only'],
     ...(input.ocr ? { ocr: input.ocr } : {}),
   });
 }

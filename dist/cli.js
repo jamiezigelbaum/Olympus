@@ -98029,6 +98029,7 @@ var init_job_store = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/document-formats.ts
+import { Buffer as Buffer5 } from "node:buffer";
 import { inflateRawSync as inflateRawSync2, inflateSync } from "node:zlib";
 function decodeUtf8(bytes) {
   const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
@@ -98129,95 +98130,389 @@ function officeTableSummary(input) {
   return normalizeExtractedText(lines.join(`
 `));
 }
-function extractPdfTextStreams(bytes) {
-  const source = decodeLatin1(bytes);
-  const streamPattern = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+function extractPdfTextLayer(bytes, limits = {}) {
+  const now = limits.now ?? (() => performance.now());
+  const budget = {
+    maxStreamBytes: limits.maxStreamBytes ?? PDF_TEXT_MAX_STREAM_BYTES,
+    maxTotalBytes: limits.maxTotalBytes ?? PDF_TEXT_MAX_TOTAL_BYTES,
+    deadline: now() + (limits.maxDecodeMs ?? PDF_TEXT_MAX_DECODE_MS),
+    now,
+    usedBytes: 0,
+    partial: false
+  };
+  const buffer = Buffer5.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const texts = [];
-  let match;
-  while ((match = streamPattern.exec(source)) !== null) {
-    const streamSource = match[1] ?? "";
-    const streamBytes = latin1Bytes(streamSource);
-    const dictionaryStart = source.lastIndexOf("<<", match.index);
-    const dictionaryEnd = source.lastIndexOf(">>", match.index);
-    const dictionary = dictionaryStart >= 0 && dictionaryEnd >= dictionaryStart ? source.slice(dictionaryStart, dictionaryEnd + 2) : "";
-    const decoded = decodePdfStream(streamBytes, dictionary);
-    const text2 = normalizeExtractedText(extractPdfTextOperators(decoded).join(`
+  const streamRanges = [];
+  let cursor = 0;
+  for (;; ) {
+    const stream = findPdfStream(buffer, cursor);
+    if (!stream)
+      break;
+    cursor = stream.next;
+    streamRanges.push([stream.keywordStart, stream.next]);
+    if (pdfBudgetSpent(budget)) {
+      budget.partial = true;
+      break;
+    }
+    const dictionary = readPdfStreamDictionary(buffer, stream.keywordStart);
+    if (pdfStreamHoldsNoText(dictionary))
+      continue;
+    const content = readPdfStreamContent(buffer, stream, dictionary, budget);
+    if (content === undefined)
+      continue;
+    const text2 = normalizeExtractedText(scanPdfTextShows(content).join(`
 `));
     if (text2)
       texts.push(text2);
   }
-  if (texts.length > 0)
-    return texts;
-  return [normalizeExtractedText(extractPdfTextOperators(source).join(`
-`))].filter(Boolean);
-}
-function decodePdfStream(bytes, dictionary) {
-  if (!/\/FlateDecode\b/.test(dictionary))
-    return decodeLatin1(bytes);
-  try {
-    return decodeLatin1(inflateSync(bytes));
-  } catch {
-    try {
-      return decodeLatin1(inflateRawSync2(bytes));
-    } catch {
-      return "";
-    }
-  }
-}
-function extractPdfTextOperators(content) {
-  const texts = [];
-  const textObjectPattern = /BT([\s\S]*?)ET/g;
-  let match;
-  while ((match = textObjectPattern.exec(content)) !== null) {
-    const block = match[1] ?? "";
-    texts.push(...extractPdfTextRuns(block));
-  }
-  return texts.length > 0 ? texts : extractPdfTextRuns(content);
-}
-function extractPdfTextRuns(content) {
-  const texts = [];
-  const tokenPattern = /(\((?:\\.|[^\\()])*\)|<[\da-fA-F\s]+>)\s*(?:Tj|'|")|\[((?:[^\]\\]|\\.|\((?:\\.|[^\\()])*\)|<[\da-fA-F\s]+>)*)\]\s*TJ/g;
-  let match;
-  while ((match = tokenPattern.exec(content)) !== null) {
-    const literal3 = match[1];
-    const arrayBody = match[2];
-    if (literal3) {
-      texts.push(decodePdfTextToken(literal3));
-    } else if (arrayBody) {
-      const parts = [];
-      const arrayTokenPattern = /\((?:\\.|[^\\()])*\)|<[\da-fA-F\s]+>/g;
-      let tokenMatch;
-      while ((tokenMatch = arrayTokenPattern.exec(arrayBody)) !== null) {
-        parts.push(decodePdfTextToken(tokenMatch[0] ?? ""));
+  if (texts.length === 0 && !budget.partial) {
+    let gapStart = 0;
+    const boundaries = [...streamRanges, [buffer.length, buffer.length]];
+    for (const [rangeStart, rangeEnd] of boundaries) {
+      if (rangeStart - gapStart >= 4) {
+        if (pdfBudgetSpent(budget)) {
+          budget.partial = true;
+          break;
+        }
+        const length = Math.min(rangeStart - gapStart, budget.maxStreamBytes);
+        if (length < rangeStart - gapStart)
+          budget.partial = true;
+        const gap = buffer.subarray(gapStart, gapStart + length);
+        budget.usedBytes += length;
+        if (pdfHasTextObject(gap)) {
+          const text2 = normalizeExtractedText(scanPdfTextShows(gap.toString("latin1")).join(`
+`));
+          if (text2)
+            texts.push(text2);
+        }
       }
-      const joined = parts.join("");
-      if (joined)
-        texts.push(joined);
+      gapStart = rangeEnd;
     }
   }
-  return texts.map(normalizeExtractedText).filter(Boolean);
+  return { texts, partial: budget.partial };
 }
-function decodePdfTextToken(token) {
-  if (token.startsWith("<") && token.endsWith(">")) {
-    return decodePdfHexString(token.slice(1, -1));
+function pdfBudgetSpent(budget) {
+  return budget.usedBytes >= budget.maxTotalBytes || budget.now() > budget.deadline;
+}
+function findPdfStream(buffer, from) {
+  let search = from;
+  for (;; ) {
+    const keywordStart = buffer.indexOf("stream", search, "latin1");
+    if (keywordStart < 0)
+      return;
+    search = keywordStart + 6;
+    const before = keywordStart > 0 ? buffer[keywordStart - 1] : 10;
+    if (!isPdfWhitespaceCode(before) && before !== 62)
+      continue;
+    let dataStart = keywordStart + 6;
+    if (buffer[dataStart] === 13 && buffer[dataStart + 1] === 10)
+      dataStart += 2;
+    else if (buffer[dataStart] === 10)
+      dataStart += 1;
+    else
+      continue;
+    const close = buffer.indexOf("endstream", dataStart, "latin1");
+    if (close < 0)
+      return;
+    let dataEnd = close;
+    if (dataEnd > dataStart && buffer[dataEnd - 1] === 10) {
+      dataEnd -= 1;
+      if (dataEnd > dataStart && buffer[dataEnd - 1] === 13)
+        dataEnd -= 1;
+    } else if (dataEnd > dataStart && buffer[dataEnd - 1] === 13) {
+      dataEnd -= 1;
+    }
+    return { keywordStart, dataStart, dataEnd, next: close + 9 };
   }
-  if (token.startsWith("(") && token.endsWith(")")) {
-    return decodePdfLiteralString(token.slice(1, -1));
+}
+function readPdfStreamDictionary(buffer, keywordStart) {
+  let end = keywordStart;
+  while (end > 0 && isPdfWhitespaceCode(buffer[end - 1]))
+    end -= 1;
+  if (end < 2 || buffer[end - 1] !== 62 || buffer[end - 2] !== 62)
+    return "";
+  const floor = Math.max(0, end - PDF_STREAM_DICTIONARY_MAX_BYTES);
+  let depth = 0;
+  let index = end;
+  while (index - 2 >= floor) {
+    const first = buffer[index - 2];
+    const second = buffer[index - 1];
+    if (first === 62 && second === 62) {
+      depth += 1;
+      index -= 2;
+    } else if (first === 60 && second === 60) {
+      depth -= 1;
+      index -= 2;
+      if (depth === 0)
+        return buffer.toString("latin1", index, end);
+    } else {
+      index -= 1;
+    }
   }
   return "";
 }
-function decodePdfHexString(hex) {
-  const cleaned = hex.replace(/\s+/g, "");
-  const bytes = [];
-  for (let index = 0;index < cleaned.length; index += 2) {
-    const pair = cleaned.slice(index, index + 2).padEnd(2, "0");
-    const value = Number.parseInt(pair, 16);
-    if (!Number.isNaN(value))
-      bytes.push(value);
+function pdfStreamHoldsNoText(dictionary) {
+  return /\/Subtype\s*\/(?:Image|Type1C|CIDFontType0C|OpenType)\b/.test(dictionary) || /\/Length[123]\b/.test(dictionary) || /\/Type\s*\/(?:XRef|ObjStm|Metadata|EmbeddedFile)\b/.test(dictionary) || /\/(?:DCTDecode|JPXDecode|JBIG2Decode|CCITTFaxDecode)\b/.test(dictionary) || /\/(?:FunctionType|ShadingType|Alternate)\b/.test(dictionary) || /\/N\s+[134]\b/.test(dictionary);
+}
+function pdfStreamUsesFlate(dictionary) {
+  return /\/FlateDecode\b/.test(dictionary);
+}
+function pdfStreamHasFilter(dictionary) {
+  return /\/Filter\b/.test(dictionary);
+}
+function readPdfStreamContent(buffer, stream, dictionary, budget) {
+  const raw = buffer.subarray(stream.dataStart, stream.dataEnd);
+  let content;
+  if (pdfStreamUsesFlate(dictionary)) {
+    const inflated = inflatePdfStream(raw, budget.maxStreamBytes);
+    if (inflated === "too_large") {
+      budget.partial = true;
+      return;
+    }
+    if (inflated === undefined)
+      return;
+    content = inflated;
+  } else if (pdfStreamHasFilter(dictionary)) {
+    return;
+  } else {
+    if (raw.length > budget.maxStreamBytes) {
+      budget.partial = true;
+      return;
+    }
+    content = raw;
   }
-  return decodePdfStringBytes(new Uint8Array(bytes));
+  budget.usedBytes += content.length;
+  if (!pdfHasTextObject(content))
+    return;
+  return content.toString("latin1");
+}
+function inflatePdfStream(raw, maxOutputLength) {
+  try {
+    return inflateSync(raw, { maxOutputLength });
+  } catch (error2) {
+    if (isInflateOutputLimitError(error2))
+      return "too_large";
+  }
+  try {
+    return inflateRawSync2(raw, { maxOutputLength });
+  } catch (error2) {
+    return isInflateOutputLimitError(error2) ? "too_large" : undefined;
+  }
+}
+function isInflateOutputLimitError(error2) {
+  return error2?.code === "ERR_BUFFER_TOO_LARGE";
+}
+function pdfHasTextObject(content) {
+  const begin = content.indexOf("BT", 0, "latin1");
+  return begin >= 0 && content.indexOf("ET", begin + 2, "latin1") >= 0;
+}
+function isPdfWhitespaceCode(code) {
+  return code === 32 || code === 10 || code === 13 || code === 9 || code === 12 || code === 0;
+}
+function isPdfDelimiterCode(code) {
+  return code === 40 || code === 41 || code === 60 || code === 62 || code === 91 || code === 93 || code === 123 || code === 125 || code === 47 || code === 37;
+}
+function pdfHexDigitValue(code) {
+  if (code >= 48 && code <= 57)
+    return code - 48;
+  if (code >= 65 && code <= 70)
+    return code - 65 + 10;
+  if (code >= 97 && code <= 102)
+    return code - 97 + 10;
+  return -1;
+}
+function skipPdfLiteralString(content, start) {
+  let depth = 0;
+  for (let index = start;index < content.length; index += 1) {
+    const code = content.charCodeAt(index);
+    if (code === 92) {
+      index += 1;
+    } else if (code === 40) {
+      depth += 1;
+    } else if (code === 41) {
+      depth -= 1;
+      if (depth === 0)
+        return index + 1;
+    }
+  }
+  return -1;
+}
+function skipPdfHexString(content, start) {
+  for (let index = start + 1;index < content.length; index += 1) {
+    const code = content.charCodeAt(index);
+    if (code === 62)
+      return index + 1;
+    if (pdfHexDigitValue(code) < 0 && !isPdfWhitespaceCode(code))
+      return -1;
+  }
+  return -1;
+}
+function readPdfTextArray(content, from) {
+  const parts = [];
+  let index = from;
+  while (index < content.length) {
+    const code = content.charCodeAt(index);
+    if (code === 93)
+      return { text: parts.join(""), end: index + 1 };
+    if (code === 40) {
+      const end = skipPdfLiteralString(content, index);
+      if (end < 0)
+        return;
+      parts.push(decodePdfLiteralString(content.slice(index + 1, end - 1)));
+      index = end;
+    } else if (code === 60 && content.charCodeAt(index + 1) !== 60) {
+      const end = skipPdfHexString(content, index);
+      if (end < 0) {
+        index += 1;
+      } else {
+        parts.push(decodePdfHexString(content.slice(index + 1, end - 1)));
+        index = end;
+      }
+    } else {
+      index += 1;
+    }
+  }
+  return;
+}
+function skipPdfInlineImageData(content, from) {
+  let search = from;
+  for (;; ) {
+    const found = content.indexOf("EI", search);
+    if (found < 0)
+      return -1;
+    const beforeIsSpace = found > from && isPdfWhitespaceCode(content.charCodeAt(found - 1));
+    const afterIsSpace = found + 2 >= content.length || isPdfWhitespaceCode(content.charCodeAt(found + 2));
+    if (beforeIsSpace && afterIsSpace)
+      return found + 2;
+    search = found + 2;
+  }
+}
+function pushPdfTextRun(runs, text2) {
+  const run = normalizeExtractedText(text2);
+  if (run)
+    runs.push(run);
+}
+function scanPdfTextShows(content) {
+  const runs = [];
+  const length = content.length;
+  const noOperand = 0;
+  const stringOperand = 1;
+  const arrayOperand = 2;
+  let operandKind = noOperand;
+  let operandText = "";
+  let inlineImage = false;
+  let index = 0;
+  while (index < length) {
+    const code = content.charCodeAt(index);
+    if (isPdfWhitespaceCode(code)) {
+      index += 1;
+      continue;
+    }
+    if (code === 40) {
+      const end2 = skipPdfLiteralString(content, index);
+      if (end2 < 0)
+        break;
+      operandKind = stringOperand;
+      operandText = decodePdfLiteralString(content.slice(index + 1, end2 - 1));
+      index = end2;
+      continue;
+    }
+    if (code === 60) {
+      if (content.charCodeAt(index + 1) === 60) {
+        operandKind = noOperand;
+        index += 2;
+        continue;
+      }
+      const end2 = skipPdfHexString(content, index);
+      if (end2 < 0) {
+        operandKind = noOperand;
+        index += 1;
+      } else {
+        operandKind = stringOperand;
+        operandText = decodePdfHexString(content.slice(index + 1, end2 - 1));
+        index = end2;
+      }
+      continue;
+    }
+    if (code === 91) {
+      const array3 = readPdfTextArray(content, index + 1);
+      if (!array3)
+        break;
+      operandKind = arrayOperand;
+      operandText = array3.text;
+      index = array3.end;
+      continue;
+    }
+    if (code === 37) {
+      while (index < length && content.charCodeAt(index) !== 10 && content.charCodeAt(index) !== 13) {
+        index += 1;
+      }
+      continue;
+    }
+    const shown = operandKind;
+    operandKind = noOperand;
+    let end = index + 1;
+    if (code !== 47 && isPdfDelimiterCode(code)) {
+      index = end;
+      continue;
+    }
+    while (end < length) {
+      const next = content.charCodeAt(end);
+      if (isPdfWhitespaceCode(next) || isPdfDelimiterCode(next))
+        break;
+      end += 1;
+    }
+    if (code !== 47) {
+      const tokenLength = end - index;
+      const second = tokenLength === 2 ? content.charCodeAt(index + 1) : 0;
+      if (tokenLength === 1 && (code === 39 || code === 34)) {
+        if (shown === stringOperand)
+          pushPdfTextRun(runs, operandText);
+      } else if (tokenLength === 2 && code === 84 && second === 106) {
+        if (shown === stringOperand)
+          pushPdfTextRun(runs, operandText);
+      } else if (tokenLength === 2 && code === 84 && second === 74) {
+        if (shown === arrayOperand)
+          pushPdfTextRun(runs, operandText);
+      } else if (tokenLength === 2 && code === 66 && second === 73) {
+        inlineImage = true;
+      } else if (tokenLength === 2 && code === 73 && second === 68 && inlineImage) {
+        inlineImage = false;
+        end = skipPdfInlineImageData(content, end);
+        if (end < 0)
+          break;
+      }
+    }
+    index = end;
+  }
+  return runs;
+}
+function decodePdfHexString(hex) {
+  const bytes = new Uint8Array((hex.length >> 1) + 1);
+  let count = 0;
+  let high = -1;
+  for (let index = 0;index < hex.length; index += 1) {
+    const digit = pdfHexDigitValue(hex.charCodeAt(index));
+    if (digit < 0)
+      continue;
+    if (high < 0) {
+      high = digit;
+    } else {
+      bytes[count] = high << 4 | digit;
+      count += 1;
+      high = -1;
+    }
+  }
+  if (high >= 0) {
+    bytes[count] = high << 4;
+    count += 1;
+  }
+  return decodePdfStringBytes(bytes.subarray(0, count));
 }
 function decodePdfLiteralString(value) {
+  if (value.indexOf("\\") < 0 && !(value.charCodeAt(0) === 254 && value.charCodeAt(1) === 255)) {
+    return value;
+  }
   const bytes = [];
   for (let index = 0;index < value.length; index += 1) {
     const char = value[index];
@@ -98271,19 +98566,7 @@ function decodePdfStringBytes(bytes) {
   return decodeLatin1(bytes);
 }
 function decodeLatin1(bytes) {
-  const chunkSize = 8192;
-  let output = "";
-  for (let offset = 0;offset < bytes.length; offset += chunkSize) {
-    output += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return output;
-}
-function latin1Bytes(value) {
-  const bytes = new Uint8Array(value.length);
-  for (let index = 0;index < value.length; index += 1) {
-    bytes[index] = value.charCodeAt(index) & 255;
-  }
-  return bytes;
+  return Buffer5.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("latin1");
 }
 function pdfAppearsImageOnly(bytes) {
   const source = decodeLatin1(bytes);
@@ -98337,7 +98620,7 @@ function readZipEntryText(bytes, entries, name) {
   if (!entry)
     return;
   if (entry.uncompressedSize > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) {
-    throw new OfficeDocumentUnreadableError("unsupported", "Office document zip entry exceeds the local extraction cap.");
+    throw zipEntryExceedsCapError();
   }
   return decodeZipEntryText(bytes, entry);
 }
@@ -98350,18 +98633,26 @@ function decodeZipEntryText(bytes, entry) {
   const extraLength = readUint16Le(bytes, offset + 28);
   const dataOffset = offset + 30 + nameLength + extraLength;
   const compressed = bytes.subarray(dataOffset, dataOffset + entry.compressedSize);
-  if (entry.method === 0)
+  if (entry.method === 0) {
+    if (compressed.length > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES)
+      throw zipEntryExceedsCapError();
     return decodeUtf8(compressed);
+  }
   if (entry.method === 8) {
     let inflated;
     try {
-      inflated = inflateRawSync2(compressed);
-    } catch {
+      inflated = inflateRawSync2(compressed, { maxOutputLength: MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES });
+    } catch (error2) {
+      if (isInflateOutputLimitError(error2))
+        throw zipEntryExceedsCapError();
       throw new OfficeDocumentUnreadableError("damaged", "Office document zip entry does not decompress.");
     }
     return decodeUtf8(new Uint8Array(inflated));
   }
   throw new OfficeDocumentUnreadableError("unsupported", `Unsupported Office document zip compression method ${entry.method}.`);
+}
+function zipEntryExceedsCapError() {
+  return new OfficeDocumentUnreadableError("unsupported", "Office document zip entry exceeds the local extraction cap.");
 }
 function findZipEndOfCentralDirectory(bytes) {
   const minimumOffset = Math.max(0, bytes.length - 65558);
@@ -98521,7 +98812,7 @@ function decodeXmlEntities(input) {
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-var MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 5000000, OfficeDocumentUnreadableError, XLSX_MAX_COLUMNS = 16384;
+var MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 5000000, OfficeDocumentUnreadableError, PDF_TEXT_PARTIAL_WARNING = "pdf_text_partial", PDF_TEXT_MAX_STREAM_BYTES = 8000000, PDF_TEXT_MAX_TOTAL_BYTES = 48000000, PDF_TEXT_MAX_DECODE_MS = 1500, PDF_STREAM_DICTIONARY_MAX_BYTES = 65536, XLSX_MAX_COLUMNS = 16384;
 var init_document_formats = __esm(() => {
   init_bounded_text();
   OfficeDocumentUnreadableError = class OfficeDocumentUnreadableError extends Error {
@@ -98977,13 +99268,14 @@ async function extractPdfText(input) {
     if (viaCommand)
       return viaCommand;
   }
-  const streamText = normalizeExtractedText(extractPdfTextStreams(input.context.bytes).join(`
+  const layer = extractPdfTextLayer(input.context.bytes);
+  const streamText = normalizeExtractedText(layer.texts.join(`
 `));
   const bounded = boundText(pdfTextLooksUndecoded(streamText) ? "" : streamText, input.context.maxBoundedTextChars);
   return pdfTextExtractionResult({
     context: input.context,
     bounded,
-    warnings: ["pdf_text_layer_only"],
+    warnings: layer.partial ? ["pdf_text_layer_only", PDF_TEXT_PARTIAL_WARNING] : ["pdf_text_layer_only"],
     ...input.ocr ? { ocr: input.ocr } : {}
   });
 }
@@ -101803,7 +102095,7 @@ var init_transcription = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/vlm.ts
-import { Buffer as Buffer5 } from "node:buffer";
+import { Buffer as Buffer6 } from "node:buffer";
 import { createHash as createHash54 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
   const itemToken = createHash54("sha256").update(input.localItemId).digest("hex");
@@ -102096,14 +102388,14 @@ function estimateVlmPdfPageDescribeRequestBytes(input) {
           {
             type: "image_url",
             image_url: {
-              url: `data:${input.page.mimeType};base64,${Buffer5.from(input.page.bytes).toString("base64")}`
+              url: `data:${input.page.mimeType};base64,${Buffer6.from(input.page.bytes).toString("base64")}`
             }
           }
         ]
       }
     ]
   };
-  return Buffer5.byteLength(JSON.stringify(body), "utf8");
+  return Buffer6.byteLength(JSON.stringify(body), "utf8");
 }
 var VLM_PDF_EXTRACTOR_KIND = "local_vlm_pdf", VLM_PDF_EXTRACTOR_VERSION = "2026-08-17-delphi-vision-deep-v1", VLM_LAYOUT_EXTRACTOR_KIND = "local_vlm_layout", VLM_LAYOUT_EXTRACTOR_VERSION = "vlm-v1", DEFAULT_VLM_PDF_MAX_PAGES = 40, DEFAULT_VLM_PDF_MAX_TOKENS = 2000, DEFAULT_VLM_PDF_MAX_REQUEST_BYTES = 1050000, DEFAULT_VLM_PDF_PAGE_RETRIES = 2, DEFAULT_VLM_PDF_PAGE_RETRY_DELAY_MS = 3000, DEFAULT_VLM_PDF_HEALTHCHECK_TIMEOUT_MS = 20000, DEFAULT_VLM_PDF_RECYCLE_EVERY_N_PAGES = 0, DEFAULT_VLM_PROMPT, DEFAULT_VLM_PDF_PROMPT, VLM_PDF_PROBE_IMAGE_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", VLM_PDF_PROBE_IMAGE_BASE64, VLM_ROUTER_PROFILE_UNKNOWN_ERROR_KIND = "vlm_router_profile_unknown", VLM_ROUTER_REQUEST_REJECTED_ERROR_KIND = "vlm_router_request_rejected", VLM_ROUTER_AUTH_FAILED_ERROR_KIND = "vlm_router_auth_failed", VLM_BACKEND_UNAVAILABLE_ERROR_KIND = "vlm_backend_unavailable", VlmRouterError;
 var init_vlm = __esm(() => {
@@ -105006,7 +105298,7 @@ var init_analyst_venice = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/venice-client.ts
-import { Buffer as Buffer6 } from "node:buffer";
+import { Buffer as Buffer7 } from "node:buffer";
 
 class VeniceVlmClient {
   approvedRemoteDestination;
@@ -105077,7 +105369,7 @@ class VeniceVlmClient {
                 {
                   type: "image_url",
                   image_url: {
-                    url: `data:${request.mimeType};base64,${Buffer6.from(request.bytes).toString("base64")}`
+                    url: `data:${request.mimeType};base64,${Buffer7.from(request.bytes).toString("base64")}`
                   }
                 }
               ]
@@ -105174,7 +105466,7 @@ var init_venice_client = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/openai-compatible-client.ts
-import { Buffer as Buffer7 } from "node:buffer";
+import { Buffer as Buffer8 } from "node:buffer";
 
 class OpenAICompatibleVlmClient {
   baseUrl;
@@ -105215,7 +105507,7 @@ class OpenAICompatibleVlmClient {
                 {
                   type: "image_url",
                   image_url: {
-                    url: `data:${request.mimeType};base64,${Buffer7.from(request.bytes).toString("base64")}`
+                    url: `data:${request.mimeType};base64,${Buffer8.from(request.bytes).toString("base64")}`
                   }
                 }
               ]
