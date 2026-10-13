@@ -50,7 +50,7 @@ import type {
   TierSnifferStore,
 } from './sniffer-store.ts';
 import type { TierDecision } from './tier-classifier.ts';
-import type { TierLedger, TierLedgerRecord, TierPlacementPlan } from './tier-ledger.ts';
+import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
 
 /** The UTC daily cap survives restart. Time slices, not call counts, set the pace. */
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20_000;
@@ -382,10 +382,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     let next = aged[0] ?? pending[0]!;
     // Within an item, names go first: a Private names verdict can settle both.
     if (next.question.pass === 'content') next = pending.find(item => item.question.pass === 'metadata'
-      && item.target === next.target && item.question.provider === next.question.provider
-      && item.question.accountScope === next.question.accountScope
-      && item.question.providerConversationId === next.question.providerConversationId
-      && item.question.providerItemId === next.question.providerItemId) ?? next;
+      && item.target === next.target
+      && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
     pending.splice(pending.indexOf(next), 1);
     const pass = next.question.pass;
     if (!stillOpen(next.target, next.question)) {
