@@ -78,8 +78,9 @@ one redirect URI, and its client id is `DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID`
 in the same file.
 
 The publisher-side token-exchange endpoint the Google Web client needs
-(`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`) is **legacy since 2026-10-13**. It
-was deployed and verified live 2026-09-03, and Web-client connections record
+(`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`) is **legacy from Olympus 1.0.0**
+(decided 2026-10-13). It was deployed and verified live 2026-09-03, and
+Web-client connections made by the 1.0.0 release candidates record
 `oauth2Refresh.exchangeVia: 'publisher_endpoint'`, so they keep refreshing
 through it until it is retired. New Google sign-ins do not use it.
 
