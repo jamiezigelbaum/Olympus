@@ -147,7 +147,10 @@ export class TierSnifferStore {
   /**
    * Queue (or refresh) the question for one item and pass. A changed material
    * replaces the old one and resets the attempt count; an identical one keeps
-   * its place and attempts.
+   * its place and attempts. `stillAsk` is checked under this write's lock: the
+   * Secrets disposition deletes an item's questions only after the item is
+   * Secrets in the ledger, so a check that still finds it askable here runs
+   * before that deletion, and a later one finds it Secrets and queues nothing.
    */
   enqueue(question: {
     subject: TierSnifferSubject;
@@ -155,9 +158,12 @@ export class TierSnifferStore {
     material: string;
     mapRevision: string;
     flags: readonly string[];
-  }): void {
+    stillAsk?: () => boolean;
+  }): boolean {
     const materialHash = snifferMaterialHash(question.pass, question.material);
-    this.db.query(`
+    return this.db.transaction(() => {
+      if (question.stillAsk && !question.stillAsk()) return false;
+      this.db.query(`
       INSERT INTO sniffer_questions (
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
@@ -178,6 +184,8 @@ export class TierSnifferStore {
       JSON.stringify([...question.flags]),
       this.now().toISOString(),
     );
+      return true;
+    }).immediate();
   }
 
   questionFor(subject: TierSnifferSubject, pass: SnifferPass): SnifferQuestion | undefined {

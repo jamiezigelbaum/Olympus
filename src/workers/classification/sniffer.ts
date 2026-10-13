@@ -526,6 +526,7 @@ export class CachedTierSniffer implements TierSniffer {
           material,
           mapRevision,
           flags: request.flags,
+          ...(request.stillAsk ? { stillAsk: request.stillAsk } : {}),
         });
       }
     } catch {

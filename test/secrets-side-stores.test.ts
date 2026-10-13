@@ -24,6 +24,7 @@ import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
+import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
 import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { registerExtractionJobsDbPath, SECRET_ITEM_REDACTIONS_TABLE } from '../src/workers/file-extraction/job-names.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
@@ -125,6 +126,39 @@ describe('the sniffer question queue keeps nothing of an item that becomes Secre
     await fx.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     expect(fx.ledger.getCurrent(identityOf('ops-note'))?.contentTier).toBe('secrets');
     expect(sniffer.counts()).toMatchObject({ questions: 0, items: 0 });
+  });
+});
+
+describe('a sniffer pass that read an item before it became Secret', () => {
+  test('queues nothing for it after the Secrets disposition cleared its questions; other items are asked as before', async () => {
+    const dir = workspace('olympus-secret-side-sniffer-');
+    const installed = installSniffer(dir);
+    const fx = fixture(dir);
+    const specs: FixtureSpec[] = [
+      { id: 'mortgage-letter', name: 'mortgage letter', text: 'Lunch with the neighbours on Friday.' },
+      { id: 'therapy-notes', name: 'therapy notes', text: 'Notes from the Tuesday meeting.' },
+    ];
+    await fx.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const store = installed.snifferStoreForLedger(fx.ledger.dbPath);
+    const queued = (id: string) => (['metadata', 'content'] as const)
+      .filter((pass) => store.questionFor(identityOf(id), pass) !== undefined);
+    const lane = installed.forLedger(fx.ledger.dbPath).sniffer!;
+    // A pass in flight: it read both items (neither Secret) and is about to ask.
+    const stale = secretFencedSniffer(lane, fx.ledger, identityOf('mortgage-letter'));
+    const other = secretFencedSniffer(lane, fx.ledger, identityOf('therapy-notes'));
+
+    expect(runTierSet(['mortgage-letter', 'secrets'], { storePaths: storePaths(fx) }))
+      .toMatchObject({ results: [{ override: 'Secrets', outcome: 'hidden_now' }] });
+    expect(queued('mortgage-letter')).toEqual([]);
+
+    expect(stale.judge({ pass: 'metadata', flags: ['names:finance'], material: 'mortgage letter', subject: identityOf('mortgage-letter') }))
+      .toEqual({ verdict: 'undecided' });
+    expect(queued('mortgage-letter')).toEqual([]);
+    expect(JSON.stringify(store.listQuestions())).not.toContain('mortgage letter');
+
+    store.deleteItemQuestions(identityOf('therapy-notes'));
+    other.judge({ pass: 'metadata', flags: ['names:health'], material: 'therapy notes', subject: identityOf('therapy-notes') });
+    expect(queued('therapy-notes')).toEqual(['metadata']);
   });
 });
 

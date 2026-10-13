@@ -49,6 +49,7 @@ import type {
 } from '../connector-store/local-index.ts';
 import { moveTieredItem, sameText, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
 import { secretsDisposition, settleSecretsCopies, type SecretsDisposition } from '../connector-store/secrets-disposition.ts';
+import { secretFencedSniffer } from '../connector-store/tier-placement.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import {
   EMBEDDING_LEDGER_OWNER_APPROVAL,
@@ -704,7 +705,7 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
             continue;
           }
           const override = ledger.getOverride(item.identity);
-          const sniffer = laneSniffer;
+          const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity) : undefined;
           // A photo's picture judgment, when the photo judge made one here.
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
           const decision = classifyItemTiers(

@@ -140,6 +140,13 @@ export interface TierSnifferRequest {
   /** Always TIER_MAP_REVISION (a cache-key part kept from the retired sensitivity map). */
   mapRevision?: string;
   subject?: TierSnifferSubject;
+  /**
+   * Re-checked inside the queue's write, just before a question is queued:
+   * false when the item became Secrets after this pass read it, so a stale
+   * pass cannot queue its names or excerpt again after the Secrets
+   * disposition cleared them (connector-store/tier-placement.ts).
+   */
+  stillAsk?: () => boolean;
 }
 
 /**

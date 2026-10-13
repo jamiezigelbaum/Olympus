@@ -1064,6 +1064,15 @@ export class TierLedger {
     })();
   }
 
+  /** Whether the item is Secrets here: decided, moving there, or set so by the owner. */
+  itemIsSecret(identity: TierLedgerIdentity): boolean {
+    const override = this.getOverride(identity);
+    if (override?.kind === 'tier' && override.tier === 'secrets') return true;
+    const record = this.getCurrent(identity);
+    if (!record) return false;
+    return [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes('secrets');
+  }
+
   getOverride(identity: TierLedgerIdentity): ItemTierOverride | undefined {
     const row = this.db.query(`
       SELECT override_json FROM tier_overrides

@@ -27,7 +27,7 @@ import {
   type TierDecision,
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
-import type { TierLedger } from '../classification/tier-ledger.ts';
+import type { TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
 
 /**
@@ -175,6 +175,7 @@ export function decideItemTiers(
   extra: { namesOnly?: boolean } = {},
 ): TierDecision {
   const override = ledger?.getOverride(item.identity);
+  const sniffer = options?.sniffer && ledger ? secretFencedSniffer(options.sniffer, ledger, item.identity) : options?.sniffer;
   return classifyItemTiers(
     {
       signals: connector.classificationSignals(item),
@@ -186,9 +187,25 @@ export function decideItemTiers(
     },
     {
       ...(options?.rules ? { rules: options.rules } : {}),
-      ...(options?.sniffer ? { sniffer: options.sniffer } : {}),
+      ...(sniffer ? { sniffer } : {}),
       ...(override ? { override } : {}),
       ...(options?.retirePublic ? { retirePublic: true } : {}),
     },
   );
+}
+
+/**
+ * The sniffer for one pass over one item, fenced against the item becoming
+ * Secrets while the pass runs: a question is queued only if the item is not
+ * Secrets in the ledger at that moment (read under the queue's lock), so the
+ * names or excerpt the Secrets disposition just cleared are not queued
+ * again. An item already Secrets when the pass read it is not fenced: its
+ * listing is the fresh truth (its secret gone, it is asked about again).
+ */
+export function secretFencedSniffer(sniffer: TierSniffer, ledger: TierLedger, identity: TierLedgerIdentity): TierSniffer {
+  if (ledger.itemIsSecret(identity)) return sniffer;
+  return {
+    id: sniffer.id,
+    judge: (request) => sniffer.judge({ ...request, stillAsk: () => !ledger.itemIsSecret(identity) }),
+  };
 }
