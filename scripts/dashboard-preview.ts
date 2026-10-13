@@ -49,6 +49,10 @@ const NOW = DASHBOARD_PREVIEW_NOW;
 // the fixture names a store-only corpus id directly.
 const UNCLAIMED_CORPUS_ID = 'internal.fixture-library.derivatives';
 const PREVIEW_GOOGLE_CLIENT_ID = 'olympus-pilot-preview.apps.googleusercontent.com';
+// Secret availability is per card and already paired with that card's client
+// (the worker expands a shared Google registration into each card). Every
+// preview Google card uses the one preview client, so each has the secret.
+const PREVIEW_GOOGLE_SECRET_ON_FILE = { google: true, gmail: true, 'google-drive': true } as const;
 // The https origin a dashboard reached through a tailnet proxy derives its
 // callback from. It is what makes the redirect-URI block, the Web-application
 // Google guidance, and the provider-refusal card visible in the preview — the
@@ -226,7 +230,7 @@ function connectPreview(
       dropbox: 'preview-dropbox-app-key',
       x: 'preview-x-client-id',
     },
-    oauthClientSecretAvailability: options.publisher ? {} : { google: true, x: true },
+    oauthClientSecretAvailability: options.publisher ? {} : { ...PREVIEW_GOOGLE_SECRET_ON_FILE, x: true },
     googlePilotClientConfigured: true,
     // Publisher mode for the two relay providers: what the owner sees once the
     // publisher's Dropbox app key (and later Google web client id) ship.
@@ -349,7 +353,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
       ]),
       apiKeyAvailability: { readwise: true },
       oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, dropbox: 'preview-dropbox-app-key' },
-      oauthClientSecretAvailability: { google: true },
+      oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
       googlePilotClientConfigured: true,
       oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
       // Both keys, always, as the worker's scope summaries publish them.
@@ -373,7 +377,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
       ]),
       apiKeyAvailability: { readwise: true },
       oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, gmail: PREVIEW_GOOGLE_CLIENT_ID },
-      oauthClientSecretAvailability: { google: true },
+      oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
       googlePilotClientConfigured: true,
       oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
       ingestionDispositionsAvailable: true,
@@ -429,7 +433,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
       ]),
       apiKeyAvailability: { readwise: true },
       oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, dropbox: 'preview-dropbox-app-key' },
-      oauthClientSecretAvailability: { google: true },
+      oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
       googlePilotClientConfigured: true,
       oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
       fileSourceScopeStatus: { 'dropbox.files': 'approved' },
@@ -456,7 +460,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
       connectedHandleRegistry: registry([]),
       apiKeyAvailability: {},
       oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID },
-      oauthClientSecretAvailability: { google: true },
+      oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
       googlePilotClientConfigured: true,
       oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
       now: NOW,
@@ -484,7 +488,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
       // X carries a registered client id here, which is the live shape: its
       // expired handle gets the real Reconnect control rather than a setup link.
       oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, gmail: PREVIEW_GOOGLE_CLIENT_ID, 'google-drive': PREVIEW_GOOGLE_CLIENT_ID, x: 'preview-x-client-id' },
-      oauthClientSecretAvailability: { google: true, x: true },
+      oauthClientSecretAvailability: { ...PREVIEW_GOOGLE_SECRET_ON_FILE, x: true },
       googlePilotClientConfigured: true,
       oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
       now: NOW,
@@ -515,7 +519,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     // than a setup one: that is the state the two connect attempts below sit
     // in, and the state the owner's live failure happened in.
     oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, dropbox: 'preview-dropbox-app-key' },
-    oauthClientSecretAvailability: { google: true },
+    oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
     googlePilotClientConfigured: true,
     oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
     // Two connect attempts a reviewer can look at: Gmail still waiting on the
@@ -584,7 +588,7 @@ function dropboxPreview(mode: 'initial' | 'update') {
     ]),
     apiKeyAvailability: {},
     oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, dropbox: 'preview-dropbox-client-id' },
-    oauthClientSecretAvailability: { google: true },
+    oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
     googlePilotClientConfigured: true,
     oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
     now: NOW,
