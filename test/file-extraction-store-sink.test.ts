@@ -310,6 +310,22 @@ describe('extraction factory store sink', () => {
         sourceScopeRevision: revision,
         locatorPathScopes: ['/3 resources/books'],
       })).toBe(true);
+
+      // Secret text changes nothing for a metadata-only item: it never takes
+      // text, so its names stay exactly as policy keeps them.
+      const secretBook = await sinkFor(store).accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`, {
+        ref: refFor({
+          providerItemId: book.identity.providerItemId,
+          localItemId: book.identity.localItemId,
+        }),
+      }));
+      expect(secretBook.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_METADATA_ONLY);
+      expect(store.itemMatchesSearchFilters(book.identity.localItemId, ACCOUNT, {
+        provider: PROVIDER,
+        sourceScopeGeneration: generation,
+        sourceScopeRevision: revision,
+        locatorPathScopes: ['/3 resources/books'],
+      })).toBe(true);
     } finally {
       store.close();
     }
@@ -481,6 +497,10 @@ describe('extraction factory store sink', () => {
       for (const candidate of store.extractionCandidates({ limit: 10 }).candidates) {
         expect(candidate.storedChunks).toBe(0);
       }
+      // Secret text is refused the same way: neither row is tombstoned.
+      const secret = await sinkFor(store).accept(requestFor(`api_key: ${STRIPE_LIVE_KEY}`));
+      expect(secret.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS);
+      expect(store.extractionCandidates({ limit: 10 }).candidates).toHaveLength(2);
     } finally {
       store.close();
     }

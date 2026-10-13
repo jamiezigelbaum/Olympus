@@ -30,6 +30,7 @@ import type { RawItem } from '../../core/contracts.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { isImageMediaType, type ItemTierOverride } from '../classification/tier-classifier.ts';
 import { settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
+import type { ConnectorStoreItemWriteClaim } from '../connector-store/local-index.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
@@ -378,24 +379,8 @@ export function createConnectorStoreExtractionSink(
         };
       }
 
-      // THE DECIDING HALF of the fence. The grant travels into the store's
-      // write transaction, where it is compared against the newest one that
-      // corpus has accepted for this item and extractor — a comparison no
-      // race can get between, because it commits with the content itself.
-      //
-      // Scoped by extractor kind, so two extractors reading the same item
-      // order their own generations without ordering each other's. The
-      // lease token is hashed rather than copied: it is a capability in the
-      // queue, and the corpus needs only to tell two generations apart.
-      const writeClaim = request.claim
-        ? {
-          scope: request.extractorKind,
-          authority: request.claim.grantAuthority,
-          ordinal: request.claim.grantOrdinal,
-          holder: request.claim.jobId,
-          generation: connectorStoreHashString(request.claim.leaseToken),
-        }
-        : undefined;
+      // THE DECIDING HALF of the fence (extractionWriteClaim).
+      const writeClaim = extractionWriteClaim(request);
 
       // THE SECRETS FLOOR, before anything is written. A Secret is stored
       // nowhere: the copy this store already holds (an earlier version's text)
@@ -411,6 +396,7 @@ export function createConnectorStoreExtractionSink(
           store,
           identity: plan.item.identity,
           connectorId: options.syncConnectorId,
+          metadata: plan.item.metadata,
           ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
           ...(writeClaim ? { writeClaim } : {}),
         });
@@ -420,6 +406,9 @@ export function createConnectorStoreExtractionSink(
         const secretsSkip: Record<typeof settled, string> = {
           tombstoned: EXTRACTION_SINK_SKIPPED_SECRETS,
           missing: EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
+          ambiguous: EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
+          excluded: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
+          metadata_only: EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
           owned_elsewhere: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
           stale_claim: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
         };
@@ -523,6 +512,29 @@ export function createConnectorStoreExtractionSink(
       };
     },
   };
+}
+
+/**
+ * The grant a claimed extraction carries into the store's write transaction,
+ * where it is compared against the newest one that corpus has accepted for
+ * this item and extractor — a comparison no race can get between, because it
+ * commits with the content itself (or with a Secret's tombstone).
+ *
+ * Scoped by extractor kind, so two extractors reading the same item order
+ * their own generations without ordering each other's. The lease token is
+ * hashed rather than copied: it is a capability in the queue, and the corpus
+ * needs only to tell two generations apart.
+ */
+export function extractionWriteClaim(request: ExtractionSinkRequest): ConnectorStoreItemWriteClaim | undefined {
+  return request.claim
+    ? {
+      scope: request.extractorKind,
+      authority: request.claim.grantAuthority,
+      ordinal: request.claim.grantOrdinal,
+      holder: request.claim.jobId,
+      generation: connectorStoreHashString(request.claim.leaseToken),
+    }
+    : undefined;
 }
 
 /**

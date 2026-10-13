@@ -2024,6 +2024,16 @@ export interface ConnectorStoreChunkMedia {
  * orders grants: within one authority, a write may not land on top of a newer
  * one for the same item and scope.
  */
+/** How a fenced Secrets tombstone of an extracted item went. */
+export type ConnectorStoreSecretsExtractionOutcome =
+  | 'tombstoned'
+  | 'missing'
+  | 'ambiguous'
+  | 'excluded'
+  | 'metadata_only'
+  | 'owned_elsewhere'
+  | 'stale_claim';
+
 export interface ConnectorStoreItemWriteClaim {
   /** Which family of writes this grant orders. Data, chosen by the caller. */
   scope: string;
@@ -3058,24 +3068,44 @@ export class LocalConnectorStore {
     identity: SourceItemIdentity,
     options: {
       connectorId: string;
+      /** The extracted item's metadata, judged by the same exclusion gate as a restore. */
+      metadata: Readonly<Record<string, unknown>>;
       skipOwner?: { connectorId: string; ownershipKind: ConnectorStoreOwnershipKind };
       writeClaim?: ConnectorStoreItemWriteClaim;
     },
-  ): 'tombstoned' | 'missing' | 'owned_elsewhere' | 'stale_claim' {
+  ): ConnectorStoreSecretsExtractionOutcome {
     const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
     try {
-      return this.db.transaction((): 'tombstoned' | 'missing' | 'owned_elsewhere' | 'stale_claim' => {
+      return this.db.transaction((): ConnectorStoreSecretsExtractionOutcome => {
+        // The restore's own refusals, in its order: an excluded or
+        // metadata-only item takes no text, so there is no text to settle and
+        // its names stay exactly as policy keeps them.
+        const disposition = this.exclusions.evaluateMetadata(options.metadata);
+        if (disposition.excluded) return 'excluded';
+        if (disposition.disposition === 'metadata_only') return 'metadata_only';
         const existing = this.db.query(`
-          SELECT item_pk FROM items
-          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-            AND tombstoned = 0
+          SELECT
+            COUNT(*) AS matching_provider_id_rows,
+            SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
+            MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+          FROM items
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         `).get(
+          normalizeConversationId(identity.providerConversationId),
+          normalizeConversationId(identity.providerConversationId),
+          normalizeConversationId(identity.providerConversationId),
           identity.provider,
           identity.accountScope,
-          normalizeConversationId(identity.providerConversationId),
           identity.providerItemId,
-        ) as { item_pk: number } | null;
-        if (!existing) return 'missing';
+        ) as {
+          matching_provider_id_rows: number;
+          exact_identity_rows: number;
+          item_pk: number | null;
+          tombstoned: number | null;
+        };
+        if (existing.matching_provider_id_rows > 1) return 'ambiguous';
+        if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1) return 'missing';
         if (options.skipOwner) {
           const owned = this.db.query(`
             SELECT 1 AS present FROM item_owners

@@ -78,18 +78,20 @@ export function settleSecretsCopies(options: {
  * Hiding is a ledger copy row, and such a copy has none, so under either
  * disposition it cannot be kept hidden: it is tombstoned and keeps its
  * location only, exactly as the store's own sync treats an S5 item. The
- * store fences the tombstone like the write it replaces (owner skip, claim
- * generation) and says which way it went.
+ * store fences the tombstone like the write it replaces (exclusions, identity,
+ * owner skip, claim generation) and says which way it went.
  */
 export function settleUntrackedSecretsCopy(options: {
   store: LocalConnectorStore;
   identity: SourceItemIdentity;
   connectorId: string;
+  metadata: Readonly<Record<string, unknown>>;
   skipOwner?: { connectorId: string; ownershipKind: ConnectorStoreOwnershipKind };
   writeClaim?: ConnectorStoreItemWriteClaim;
 }): ReturnType<LocalConnectorStore['tombstoneSecretsExtraction']> {
   return options.store.tombstoneSecretsExtraction(options.identity, {
     connectorId: options.connectorId,
+    metadata: options.metadata,
     ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
     ...(options.writeClaim ? { writeClaim: options.writeClaim } : {}),
   });

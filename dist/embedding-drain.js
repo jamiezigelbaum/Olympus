@@ -17750,12 +17750,23 @@ var init_local_index = __esm(() => {
       const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
       try {
         return this.db.transaction(() => {
+          const disposition = this.exclusions.evaluateMetadata(options.metadata);
+          if (disposition.excluded)
+            return "excluded";
+          if (disposition.disposition === "metadata_only")
+            return "metadata_only";
           const existing = this.db.query(`
-          SELECT item_pk FROM items
-          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-            AND tombstoned = 0
-        `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
-          if (!existing)
+          SELECT
+            COUNT(*) AS matching_provider_id_rows,
+            SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
+            MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+          FROM items
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        `).get(normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), identity.provider, identity.accountScope, identity.providerItemId);
+          if (existing.matching_provider_id_rows > 1)
+            return "ambiguous";
+          if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1)
             return "missing";
           if (options.skipOwner) {
             const owned = this.db.query(`

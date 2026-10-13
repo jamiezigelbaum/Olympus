@@ -46,6 +46,7 @@ import {
   EXTRACTION_SINK_SKIPPED_SECRETS,
   EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
   createConnectorStoreExtractionSink,
+  extractionWriteClaim,
   planExtractionSinkWrite,
 } from './store-sink.ts';
 import type {
@@ -131,8 +132,11 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         if (result.skippedReason === EXTRACTION_SINK_SKIPPED_SECRETS && !('skippedReason' in legacyPlan)) {
           // The plain sink settled its own store's copy. Another legacy leg
           // may hold the same item, and no ledger row hides an unrouted copy,
-          // so every one of them is settled the same way; the location is
-          // recorded where the set keeps Secrets locations.
+          // so every one of them is settled the same way, each fenced by its
+          // own store's accepted grant so an older generation never removes
+          // a newer one's copy; the location is recorded where the set keeps
+          // Secrets locations.
+          const writeClaim = extractionWriteClaim(request);
           for (const domain of TIER_DOMAIN_ORDER) {
             const other = set.legSpec(domain)?.legacy === true ? set.store(domain) : undefined;
             if (!other || other === legacy) continue;
@@ -140,6 +144,8 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
               store: other,
               identity: legacyPlan.item.identity,
               connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+              metadata: legacyPlan.item.metadata,
+              ...(writeClaim ? { writeClaim } : {}),
             });
           }
           const names = ledger.getCurrent(identity)?.metadataTier;

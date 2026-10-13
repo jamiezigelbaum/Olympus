@@ -27517,12 +27517,23 @@ var init_local_index = __esm(() => {
       const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
       try {
         return this.db.transaction(() => {
+          const disposition = this.exclusions.evaluateMetadata(options.metadata);
+          if (disposition.excluded)
+            return "excluded";
+          if (disposition.disposition === "metadata_only")
+            return "metadata_only";
           const existing = this.db.query(`
-          SELECT item_pk FROM items
-          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-            AND tombstoned = 0
-        `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
-          if (!existing)
+          SELECT
+            COUNT(*) AS matching_provider_id_rows,
+            SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
+            MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+          FROM items
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        `).get(normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), identity.provider, identity.accountScope, identity.providerItemId);
+          if (existing.matching_provider_id_rows > 1)
+            return "ambiguous";
+          if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1)
             return "missing";
           if (options.skipOwner) {
             const owned = this.db.query(`
@@ -32404,6 +32415,7 @@ function settleSecretsCopies(options) {
 function settleUntrackedSecretsCopy(options) {
   return options.store.tombstoneSecretsExtraction(options.identity, {
     connectorId: options.connectorId,
+    metadata: options.metadata,
     ...options.skipOwner ? { skipOwner: options.skipOwner } : {},
     ...options.writeClaim ? { writeClaim: options.writeClaim } : {}
   });
@@ -103963,18 +103975,13 @@ function createConnectorStoreExtractionSink(options) {
           skippedReason: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
         };
       }
-      const writeClaim = request.claim ? {
-        scope: request.extractorKind,
-        authority: request.claim.grantAuthority,
-        ordinal: request.claim.grantOrdinal,
-        holder: request.claim.jobId,
-        generation: hashString2(request.claim.leaseToken)
-      } : undefined;
+      const writeClaim = extractionWriteClaim(request);
       if (options.secretsFloor !== false && plan.item.content.kind === "text" && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
         const settled = settleUntrackedSecretsCopy({
           store,
           identity: plan.item.identity,
           connectorId: options.syncConnectorId,
+          metadata: plan.item.metadata,
           ...options.skipOwner ? { skipOwner: options.skipOwner } : {},
           ...writeClaim ? { writeClaim } : {}
         });
@@ -103984,6 +103991,9 @@ function createConnectorStoreExtractionSink(options) {
         const secretsSkip = {
           tombstoned: EXTRACTION_SINK_SKIPPED_SECRETS,
           missing: EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
+          ambiguous: EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
+          excluded: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
+          metadata_only: EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
           owned_elsewhere: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
           stale_claim: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
         };
@@ -104054,6 +104064,15 @@ function createConnectorStoreExtractionSink(options) {
       };
     }
   };
+}
+function extractionWriteClaim(request) {
+  return request.claim ? {
+    scope: request.extractorKind,
+    authority: request.claim.grantAuthority,
+    ordinal: request.claim.grantOrdinal,
+    holder: request.claim.jobId,
+    generation: hashString2(request.claim.leaseToken)
+  } : undefined;
 }
 function secretsFloorHolds(store, item, text2) {
   let override;
@@ -105055,6 +105074,7 @@ function createTieredStoreExtractionSink(options) {
         const legacyScope = legacy.activeLocalItemRow(ref.localItemId)?.sourceScope;
         const result2 = await sinkFor(legacy, true, classificationNow(), false).accept(request);
         if (result2.skippedReason === EXTRACTION_SINK_SKIPPED_SECRETS && !("skippedReason" in legacyPlan)) {
+          const writeClaim = extractionWriteClaim(request);
           for (const domain of TIER_DOMAIN_ORDER) {
             const other = set2.legSpec(domain)?.legacy === true ? set2.store(domain) : undefined;
             if (!other || other === legacy)
@@ -105062,7 +105082,9 @@ function createTieredStoreExtractionSink(options) {
             settleUntrackedSecretsCopy({
               store: other,
               identity: legacyPlan.item.identity,
-              connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID
+              connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+              metadata: legacyPlan.item.metadata,
+              ...writeClaim ? { writeClaim } : {}
             });
           }
           const names = ledger.getCurrent(identity)?.metadataTier;

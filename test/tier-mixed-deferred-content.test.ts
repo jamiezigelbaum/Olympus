@@ -257,6 +257,32 @@ describe('a lane where only pictures arrive later', () => {
     expect(set.secrets()!.get(identityOf('notes-both'))).toBeDefined();
   });
 
+  test('a Secret from an older generation never removes a newer generation\'s copy in the other store', async () => {
+    const { set, stores } = openSet();
+    const key = ['sk', '_live_', 'k9Xp2LmQ7vRt4WzY8bNc3HdF'].join('');
+    const both: FixtureSpec = { id: 'notes-raced', name: 'raced-notes.pdf' };
+    MIME['notes-raced'] = 'application/pdf';
+    await stores.internal!.syncFromConnector(lane([both]), { fetchContent: false, placement: FIXTURE_PLACEMENT });
+    await stores.secure_local!.syncFromConnector(lane([{ ...both, legacyDomain: 'secure_local' }]), { fetchContent: false, placement: FIXTURE_PLACEMENT });
+    const sinkHome = (home: SourceTrustDomain) => createTieredStoreExtractionSink({
+      set,
+      home,
+      syncConnectorId: 'extraction',
+      ownerConnectorId: 'fixture-connector',
+      ownershipKind: 'observed',
+    });
+    const claim = (ordinal: number) => ({ jobId: `job-${ordinal}`, leaseToken: `lease-${ordinal}`, grantAuthority: 'queue-a', grantOrdinal: ordinal });
+    // The newer generation lands clean text in the Personal store.
+    const newer = await sinkHome('internal').accept({ ...request(CORPORA.internal, 'notes-raced', 'The newer clean notes.'), claim: claim(2) });
+    expect(newer.accepted).toBe(true);
+    // An older generation, never accepted by the Private store, reads Secret text there.
+    const older = await sinkHome('secure_local').accept({ ...request(CORPORA.secure_local, 'notes-raced', `api_key: ${key}`), claim: claim(1) });
+    expect(older.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
+    expect(chunkText(stores.secure_local, 'notes-raced')).toBe('');
+    // The other store's newer copy is judged by its own accepted grant and stays.
+    expect(chunkText(stores.internal, 'notes-raced')).toContain('newer clean notes');
+  });
+
   test('without an item, a decision whose text has not landed is placed as one arriving later', () => {
     const { set } = openSet(false);
     const base = { metadataTier: 'private', contentTier: 'private', state: 'current', metadataPending: false, contentPending: false } as const;
