@@ -636,7 +636,11 @@ export class TieredStoreSet {
    * placement replace the ledger rows without a move.
    */
   routedCopiesGone(identity: SourceItemIdentity): boolean {
-    const current = this.ledger.copies(identity).filter((copy) => copy.state === 'current');
+    const copies = this.ledger.copies(identity);
+    // A previously routed Secret or provider-deleted item has no source to
+    // move. A fresh placement is safe; staged/hidden move copies are not.
+    if (copies.length === 0) return true;
+    const current = copies.filter((copy) => copy.state === 'current');
     if (current.length === 0) return false;
     return current.every((copy) => {
       const domain = this.domainForCorpus(copy.corpusId);

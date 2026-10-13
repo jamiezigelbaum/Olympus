@@ -367,3 +367,21 @@ describe('P1b: deletion', () => {
 });
 
 export { ACCOUNT };
+
+for (const previous of ['secret', 'deleted'] as const) {
+  test(`a ${previous} item returning with no copy rows settles without an impossible move`, async () => {
+    const fixture = openTierFixture(workspace());
+    let specs: FixtureSpec[] = [{ id: 'returning', name: 'reminder.txt', text: previous === 'secret' ? `key ${FAKE_AWS_KEY}` : 'A garden reminder.' }];
+    const sync = () => fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    try {
+      await sync();
+      if (previous === 'deleted') { specs = [{ ...specs[0]!, deleted: true }]; await sync(); }
+      expect(fixture.ledger.copies(identityOf('returning'))).toEqual([]);
+      specs = [{ id: 'returning', name: 'reminder.txt', text: 'A fresh garden reminder.', version: 'v2' }];
+      await sync();
+      expect(fixture.ledger.getCurrent(identityOf('returning'))).toMatchObject({ state: 'current', contentTier: 'private' });
+      expect(fixture.ledger.listMoving()).toEqual([]);
+      expect(fixture.ledger.copies(identityOf('returning'))).toEqual(expect.arrayContaining([expect.objectContaining({ state: 'current', corpusId: CORPORA.internal })]));
+    } finally { fixture.close(); }
+  });
+}
