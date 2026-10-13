@@ -699,8 +699,9 @@ export class LocalFileExtractionJobStore {
         // listed it before it did (job-names.ts).
         const name = itemNameRedacted(this.db, ref) ? null : ref.name ?? null;
         // A job whose item left Secrets is read again, as if forced (its
-        // artifacts went with its name).
-        const reread = existing !== undefined && existing !== null && takeRestoredReread(this.db, existing.job_id);
+        // artifacts went with its name). Owed until a pass can queue it.
+        const reread = existing !== undefined && existing !== null && status === 'queued'
+          && takeRestoredReread(this.db, existing.job_id);
         const forceExisting = Boolean(existing) && (force || reread) && status === 'queued';
         const reset = forceExisting ? 1 : 0;
 
