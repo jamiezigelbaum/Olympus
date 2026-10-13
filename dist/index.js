@@ -11739,6 +11739,7 @@ var init_tier_rejudge = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
+  init_tier_placement();
 });
 
 // src/workers/connector-store/tier-override-settle.ts
@@ -12845,6 +12846,7 @@ var init_corpus_adapter4 = __esm(() => {
 // src/workers/connector-store/capture-spool-secrets.ts
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
+  init_secrets_disposition();
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts

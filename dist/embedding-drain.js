@@ -11794,6 +11794,9 @@ class TierLedger {
       this.settleRevokedOwnerMove(identity);
     })();
   }
+  classificationRead(identity) {
+    return this.db.transaction(() => ({ override: this.getOverride(identity), secret: this.itemIsSecret(identity) }))();
+  }
   itemIsSecret(identity) {
     const override = this.getOverride(identity);
     if (override?.kind === "tier" && override.tier === "secrets")
@@ -14854,8 +14857,9 @@ function isTextualMimeType(mimeType) {
   return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
 }
 function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
-  const override = ledger?.getOverride(item.identity);
-  const sniffer = options?.sniffer && ledger ? secretFencedSniffer(options.sniffer, ledger, item.identity) : options?.sniffer;
+  const read = ledger?.classificationRead(item.identity);
+  const override = read?.override;
+  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read.secret) : options?.sniffer;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
@@ -14870,8 +14874,8 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
 }
-function secretFencedSniffer(sniffer, ledger, identity) {
-  if (ledger.itemIsSecret(identity))
+function secretFencedSniffer(sniffer, ledger, identity, secretWhenRead) {
+  if (secretWhenRead)
     return sniffer;
   return {
     id: sniffer.id,
@@ -17986,7 +17990,8 @@ var init_local_index = __esm(() => {
         const existing = ledger.getCurrent(item.identity);
         if (!existing)
           return false;
-        const override = ledger.getOverride(item.identity);
+        const read = ledger.classificationRead(item.identity);
+        const override = read.override;
         const metadataString = (keys) => {
           for (const key2 of keys) {
             const value = item.metadata[key2];
@@ -18008,11 +18013,14 @@ var init_local_index = __esm(() => {
           mimeType: item.mimeType,
           subject: item.identity
         }, {
-          ...inputs?.sniffer ? { sniffer: inputs.sniffer } : {},
+          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read.secret) } : {},
           ...override ? { override } : {},
           ...inputs?.retirePublic ? { retirePublic: true } : {}
         });
-        return ledger.recordContentDecision(item.identity, content) !== undefined;
+        const recorded = ledger.recordContentDecision(item.identity, content) !== undefined;
+        if (recorded && content.contentTier === "secrets")
+          forgetSecretInSideStores({ ledger, identity: item.identity });
+        return recorded;
       } catch {
         return false;
       }
@@ -24746,7 +24754,8 @@ function rejudgeStoredContent(set, record, options) {
   const { report, key: key2, autoMoves } = options;
   const ledger = set.ledger;
   const identity = identityOf2(record);
-  if (ledger.getOverride(identity)) {
+  const read = ledger.classificationRead(identity);
+  if (read.override) {
     if (key2)
       ledger.markRejudged(identity, key2);
     report.skipped += 1;
@@ -24782,7 +24791,7 @@ function rejudgeStoredContent(set, record, options) {
     ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
     subject: identity
   }, {
-    ...options.sniffer ? { sniffer: options.sniffer } : {},
+    ...options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity, read.secret) } : {},
     ...options.retirePublic ? { retirePublic: true } : {}
   });
   const decision = {
@@ -24900,6 +24909,7 @@ var init_tier_rejudge = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
+  init_tier_placement();
 });
 
 // src/workers/connector-store/tier-override-settle.ts
@@ -27094,6 +27104,7 @@ var init_drive = __esm(() => {
 // src/workers/connector-store/capture-spool-secrets.ts
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
+  init_secrets_disposition();
 });
 
 // src/workers/whatsapp/reaction-index.ts
@@ -35295,6 +35306,7 @@ init_bounded_text();
 // src/workers/file-extraction/store-sink.ts
 init_engine();
 init_tier_classifier();
+init_secrets_disposition();
 init_source_ingestion_exclusions();
 init_connector_store();
 var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing";
@@ -35341,6 +35353,7 @@ init_types();
 init_engine();
 init_tier_classifier();
 init_tier_ledger();
+init_tier_placement();
 init_secrets_disposition();
 init_tiered_store_set();
 
