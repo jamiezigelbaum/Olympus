@@ -331,7 +331,9 @@ async function main(): Promise<void> {
   if (args[0] === 'engine') {
     try {
       const result = await runEngineCommand(args.slice(1));
-      if (result !== undefined) console.log(JSON.stringify(result, null, 2));
+      // `engine status --brief` is read by a program: one compact JSON line.
+      const brief = args[1] === 'status' && args.includes('--brief');
+      if (result !== undefined) console.log(brief ? JSON.stringify(result) : JSON.stringify(result, null, 2));
       // Linux automation treats every unhealthy/unknown result as nonzero;
       // retain the historical Mac exit contract for non-verifying commands.
       const healthExit = process.platform === 'linux' || ['install', 'verify', 'rollback'].includes(args[1] ?? '');
@@ -1290,7 +1292,7 @@ function printHelp(): void {
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
   console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
-  console.log('  olympus engine uninstall|status|start|stop|restart|rollback|logs');
+  console.log('  olympus engine uninstall|status [--brief]|start|stop|restart|rollback|logs');
   console.log('  olympus dashboard [--read-only] [--no-open] [--target <place>]');
   console.log('  olympus dashboard token');
   console.log('  olympus open olympus://open/<target>');

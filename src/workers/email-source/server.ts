@@ -5196,6 +5196,8 @@ export async function main(): Promise<void> {
       return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
     },
   };
+  const { withEngineBriefRoute } = await import('../engine-brief-route.ts');
+  const { dashboardViewModel: engineBriefView } = await import('../chatgpt/mcp-surface.ts');
   const { createDashboardPanelTools } = await import('./dashboard-panel-tools.ts');
   dashboardPanelTools = createDashboardPanelTools({
     surface: () => chatgptSurface,
@@ -5268,7 +5270,8 @@ export async function main(): Promise<void> {
             ...chatgptSurface,
           },
         })),
-        withWorkerBearerAuth(worker.fetch, { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
+        // The brief route must pass both bearer and owner-socket authorization.
+        withWorkerBearerAuth(withEngineBriefRoute(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
       )),
     )))), !!socketPath),
   };
