@@ -59,8 +59,9 @@ Everything is stored and searched on your computer: the search index is built
 there, by a model small enough for a computer with 8 GB of memory. There is no
 hosted copy of your things, no account and no subscription. Olympus's
 publisher runs only a relay that passes your AI app's requests to your
-computer without storing them, and the sign-in service for Olympus's shared
-Google app. For hard private
+computer without storing them. Google sign-in happens on your computer,
+directly with Google; Google connections made with a release candidate renew
+through a small sign-in service until you reconnect them. For hard private
 questions you can reach stronger models: [Venice](https://venice.ai) runs
 private models that, under Venice's own terms, keep nothing you send, and
 zkAPI, from OpenAnonymity and the Ethereum Foundation, hides who is asking
@@ -160,7 +161,8 @@ computer is how Olympus knows the computer is yours: there is no code to copy an
 Open the **Olympus** dashboard in ChatGPT's sidebar (or ask *"Show my
 Olympus dashboard"*). Choose **Connect** next to Dropbox and sign in with
 your own Dropbox account; the sign-in link works once, for 10 minutes, from
-any device. Gmail and Google Drive connect the same way.
+any device. Gmail and Google Drive connect the same way, except that you open their
+sign-in link on the computer where Olympus runs, not on a phone.
 
 Then pick folders. For each folder choose:
 
