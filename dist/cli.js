@@ -99172,7 +99172,7 @@ class LocalFileExtractionJobStore {
         const existing = this.existingJob(ref, extractorKind, extractorVersion);
         const jobId = existing?.job_id ?? makeJobId();
         const name = itemNameRedacted(this.db, ref) ? null : ref.name ?? null;
-        const reread = existing !== undefined && existing !== null && takeRestoredReread(this.db, existing.job_id);
+        const reread = existing !== undefined && existing !== null && status === "queued" && takeRestoredReread(this.db, existing.job_id);
         const forceExisting = Boolean(existing) && (force || reread) && status === "queued";
         const reset = forceExisting ? 1 : 0;
         this.db.query(`
