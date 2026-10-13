@@ -18013,14 +18013,15 @@ var init_local_index = __esm(() => {
           mimeType: item.mimeType,
           subject: item.identity
         }, {
-          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read.secret) } : {},
+          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, false) } : {},
           ...override ? { override } : {},
           ...inputs?.retirePublic ? { retirePublic: true } : {}
         });
-        const recorded = ledger.recordContentDecision(item.identity, content) !== undefined;
-        if (recorded && content.contentTier === "secrets")
+        const recorded = ledger.recordContentDecision(item.identity, content);
+        if (recorded && (recorded.record.contentTier === "secrets" || recorded.record.metadataTier === "secrets")) {
           forgetSecretInSideStores({ ledger, identity: item.identity });
-        return recorded;
+        }
+        return recorded !== undefined;
       } catch {
         return false;
       }
@@ -24791,7 +24792,7 @@ function rejudgeStoredContent(set, record, options) {
     ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
     subject: identity
   }, {
-    ...options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity, read.secret) } : {},
+    ...options.sniffer ? { sniffer: secretFencedSniffer(options.sniffer, ledger, identity, false) } : {},
     ...options.retirePublic ? { retirePublic: true } : {}
   });
   const decision = {
