@@ -22,7 +22,7 @@ import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { BUILT_IN_EMBEDDING_PROVIDER } from '../source-index/built-in-embedding/provider.ts';
 import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
-import { snifferPromptVersions } from './sniffer.ts';
+import { snifferMaterialCarriesSecret, snifferPromptVersions } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
@@ -637,6 +637,41 @@ export class TierSnifferService {
         ledger,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...(planner ? { placementFor: planner } : {}),
+        screenStoredQuestion: question => {
+          const row = ledger.getCurrent(question);
+          // Routed rows have the full-copy rejudge path. Unread names have
+          // no body yet; their eventual content pass will screen it.
+          if (!row || row.routed || !row.contentRead) return 'clean';
+          const set = tierSetForLedger(ledgerPath);
+          const stores = set?.openStores() ?? this.options.stores().filter(store =>
+            (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
+          try {
+            // A clean excerpt cannot carry the retry marker when settlement
+            // tombstoned the body and then failed writing the final ledger row.
+            const home = stores[0];
+            if (!home) return 'unreadable';
+            const shared = set?.secrets();
+            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home.dbPath) });
+            try {
+              if (locations.get(question)?.findingKinds.includes('sniffer_secret_refusal')) return 'secrets';
+            } finally { if (!shared) locations.close(); }
+            let foundBody = false;
+            for (const store of stores) {
+              if (!store.exportItemCopy) return 'unreadable';
+              const copy = store.exportItemCopy(question);
+              if (!copy) continue;
+              const body = copy.chunks.map(chunk => chunk.boundedText).join('');
+              if (!body.trim()) continue;
+              foundBody = true;
+              if (snifferMaterialCarriesSecret(body)) return 'secrets';
+            }
+            return foundBody ? 'clean' : 'unreadable';
+          } catch {
+            // No excerpt or cached model verdict can stand in for a failed
+            // full-copy read. Leave the question held for a later scan.
+            return 'unreadable';
+          }
+        },
         settleSecrets: (question, decision) => {
           const set = tierSetForLedger(ledgerPath);
           if (!ledger.getCurrent(question)?.routed) {

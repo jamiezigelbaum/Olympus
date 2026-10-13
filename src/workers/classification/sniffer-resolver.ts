@@ -68,6 +68,8 @@ export interface SnifferTarget {
    * a move instead of rewriting placement; without it routed items wait.
    */
   placementFor?: (decision: TierDecision) => TierPlacementPlan;
+  /** Store-backed targets screen the full current legacy copy, never just the excerpt. */
+  screenStoredQuestion?: (question: SnifferQuestion) => 'clean' | 'secrets' | 'unreadable';
   /** Uses the set's existing Secrets disposition; false keeps the question for retry. */
   settleSecrets?: (question: SnifferQuestion, decision: TierDecision) => boolean;
 }
@@ -176,7 +178,7 @@ export interface SnifferPassReport {
   secretRefused: number;
   /** Injection-shaped material resolved to Private without being sent. */
   injectionRefused: number;
-  /** Routed items whose set planner was not available: verdict cached, question kept. */
+  /** Questions waiting for readable stored content or their Secrets/placement adapter. */
   awaitingPlacement: number;
   /** Routed items the verdict moved to other stores: queued for the move primitive (P1b). */
   movesQueued: number;
@@ -239,6 +241,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     return current?.materialHash === question.materialHash && current.mapRevision === question.mapRevision;
   };
   const apply = (item: WorkItem, verdict: Omit<StoredSnifferVerdict, 'decidedAt'>): void => {
+    // The model awaited external work: re-read before settling its answer,
+    // without rekeying the dispatched revision. The ledger rejects stale answers.
+    if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false)
+      && !screenQuestion(item.target, item.question)) return;
     const tier = snifferTierKey(verdict);
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
@@ -292,7 +298,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   // `current` where it was: the item was visible all along, and the answer
   // settles the decision the re-judge kept beside the row, under that
   // decision's map revision.
-  const stillOpen = (target: SnifferTarget, question: SnifferQuestion): boolean => {
+  const stillOpen = (target: SnifferTarget, question: SnifferQuestion, rekey = true): boolean => {
     const row = target.ledger.getCurrent(question);
     if (row === undefined || row.decidedBy === 'override') return false;
     // The queued secret is the durable retry marker if copy cleanup failed
@@ -309,12 +315,34 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       }
     }
     if (open && expectedMap !== question.mapRevision) {
+      if (!rekey) return false;
       target.sniffer.rekey(question, question.pass, expectedMap);
       question.mapRevision = expectedMap;
       question.attempts = 0;
       report.staleRekeyed += 1;
     }
     return open;
+  };
+
+  const screenQuestion = (target: SnifferTarget, question: SnifferQuestion): boolean => {
+    // Check inside listQuestions' eligibility callback so unreadable copies
+    // remain queued while its durable bounded cursor advances past them.
+    const screen = snifferMaterialCarriesSecret(question.material) ? 'secrets'
+      : target.screenStoredQuestion?.(question) ?? 'clean';
+    if (screen === 'unreadable') { report.awaitingPlacement += 1; return false; }
+    if (screen === 'clean') return true;
+    const row = target.ledger.getCurrent(question)!;
+    const decision: TierDecision = {
+      ...row, snifferId: id, metadataTier: 'secrets', contentTier: 'secrets', state: 'current',
+      decidedBy: 'secret_detector', reasons: ['metadata:secret:sniffer_refused'],
+      metadataPending: false, contentPending: false, contentRead: true,
+    };
+    if (target.settleSecrets?.(question, decision) === true) {
+      target.sniffer.deleteQuestion(question, 'metadata');
+      target.sniffer.deleteQuestion(question, 'content');
+      report.secretRefused += 1;
+    } else report.awaitingPlacement += 1;
+    return false;
   };
 
   // 1. Open questions checked against each store's ledger before dispatch.
@@ -326,7 +354,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: question => {
       report.pendingSeen += 1;
       if (midMove(target, question)) return false;
-      if (stillOpen(target, question)) return true;
+      if (stillOpen(target, question)) return screenQuestion(target, question);
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
       report.staleDropped += 1;
       return false;
@@ -337,21 +365,6 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       if (!stillOpen(target, question)) {
         target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
         report.staleDropped += 1;
-        continue;
-      }
-      if (snifferMaterialCarriesSecret(question.material)) {
-        const row = target.ledger.getCurrent(question)!;
-        const decision: TierDecision = {
-          ...row, snifferId: id, metadataTier: 'secrets', contentTier: 'secrets', state: 'current',
-          decidedBy: 'secret_detector', reasons: ['metadata:secret:sniffer_refused'],
-          metadataPending: false, contentPending: false, contentRead: true,
-        };
-        const settled = target.settleSecrets?.(question, decision) === true;
-        if (settled) {
-          target.sniffer.deleteQuestion(question, 'metadata');
-          target.sniffer.deleteQuestion(question, 'content');
-          report.secretRefused += 1;
-        } else report.awaitingPlacement += 1;
         continue;
       }
       // Material shaped like an instruction to the model is never sent: the
@@ -401,11 +414,13 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       }
       continue;
     }
+    if (!screenQuestion(next.target, next.question)) continue;
     const group = [next];
     for (let i = pending.length - 1; i >= 0; i--) {
       const item = pending[i]!;
       if (item.question.pass === pass && item.question.materialHash === next.question.materialHash
-        && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)) {
+        && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)
+        && screenQuestion(item.target, item.question)) {
         group.push(item); pending.splice(i, 1);
       }
     }

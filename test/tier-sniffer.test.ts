@@ -1031,7 +1031,8 @@ test('aging skips blocked moves on both sides of the oldest eligible question', 
 });
 
 
-test('a large moving backlog has bounded examination and still serves aged eligible work', async () => {
+for (const blocked of ['moving', 'unreadable'] as const)
+test(`a large ${blocked} backlog has bounded examination and still serves aged eligible work`, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sniffer-scan-'));
   const ledger = new TierLedger({ dbPath: ':memory:' });
   const dbPath = join(dir, 'queue.sqlite');
@@ -1040,14 +1041,15 @@ test('a large moving backlog has bounded examination and still serves aged eligi
   try {
     for (let n = 1; n <= 1200; n++) {
       recordFlagged(ledger, store, n, `bank backlog ${n}`);
-      if (n !== 600 && n !== 601) ledger.beginMove(subject(n), { metadataTier: 'secure', contentTier: 'secure' }, ledger.getCurrent(subject(n))!.generation);
+      if (blocked === 'moving' && n !== 600 && n !== 601) ledger.beginMove(subject(n), { metadataTier: 'secure', contentTier: 'secure' }, ledger.getCurrent(subject(n))!.generation);
       clock = new Date(clock.getTime() + 1000);
     }
     clock = new Date('2026-01-02T00:00:00Z');
     for (let n = 0; n < 4; n++) store.recordDispatch();
     const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }));
     for (let tick = 0; tick < 25 && model.requests.length < 2; tick++) {
-      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, pendingPageSize: 1, maxCallsPerPass: 1 });
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store, screenStoredQuestion: question =>
+        blocked === 'unreadable' && !['600', '601'].some(n => question.providerItemId === subject(Number(n)).providerItemId) ? 'unreadable' : 'clean' }], lane: LOCAL_LANE, model, pendingPageSize: 1, maxCallsPerPass: 1 });
       expect(report.pendingSeen).toBeLessThanOrEqual(128);
       // A tick may reopen the store; progress must survive that boundary.
       store.close(); store = new TierSnifferStore({ dbPath, now: () => clock });
@@ -1115,5 +1117,23 @@ test('a discovered oldest question survives until its reserved aging dispatch', 
       await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, pendingPageSize: 1, maxCallsPerPass: 1 });
     }
     expect(model.requests.some(request => request.prompt.includes('bank pinned oldest 257'))).toBe(true);
+  } finally { store.close(); ledger.close(); }
+});
+
+
+test('a map revision changed during a model call keeps the old answer stale', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    recordFlagged(ledger, store, 1, 'bank notice');
+    const model = spyModel((_, items) => {
+      ledger.recordDecision(subject(1), { ...ledger.getCurrent(subject(1))!, mapRevision: 'new-map' });
+      return verdictsFor(items, { tier: 'personal', category: 'ordinary', confidence: 1 });
+    });
+    const result = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
+    expect(result.verdictsApplied).toBe(0);
+    expect(result.staleRekeyed).toBe(1);
+    expect(ledger.getCurrent(subject(1))?.metadataPending).toBe(true);
+    expect(store.questionFor(subject(1), 'metadata')?.mapRevision).toBe('new-map');
   } finally { store.close(); ledger.close(); }
 });

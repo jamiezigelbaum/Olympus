@@ -3,6 +3,7 @@ import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
+import { SNIFFER_PROMPT_VERSION, snifferCacheModelId } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { classifyItemTiers, tierSnifferInputHash, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets, settleLegacySecrets } from '../src/workers/connector-store/tier-rejudge.ts';
@@ -233,4 +234,78 @@ test(`routed secret cleanup retries after ${failure} and service restart`, async
     });
     expect(calls).toBe(0);
   } finally { store.tombstoneCopy = original; f.secrets.record = originalRecord; service.stop(); installed.close(); }
+});
+
+
+for (const scenario of ['secret', 'clean', 'unreadable', 'missing', 'cached-secret', 'cleanup-interrupted', 'changed-during-model'] as const)
+test(`legacy full-body screening before resolving a clean excerpt: ${scenario}`, async () => {
+  const tmp = tempDir();
+  const f = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { f.close(); tmp.cleanup(); });
+  const store = f.stores.internal!;
+  const body = `${'Ordinary orchard notes. '.repeat(400)}\n${scenario.includes('secret') || scenario === 'cleanup-interrupted'
+    ? ['postgres://alice:', 'q7', '@db.internal/app'].join('') : 'Prune the apple trees in winter.'}`;
+  // Land under the pre-upgrade screen, then restore the actual persisted body.
+  await store.syncFromConnector(fixtureConnector(() => [{ id: 'record', name: 'Orchard notes', text }]),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const original = store.exportItemCopy(identity)!;
+  store.importItemCopy({ ...original, chunks: original.chunks.map(chunk => ({ ...chunk, boundedText: body })) },
+    { trustTier: 'S3', syncConnectorId: 'legacy-fixture' });
+  store.bindTierSet(f.ledger);
+  const pending = classifyItemTiers({ signals: { title: 'Orchard notes' }, text, subject: identity },
+    { sniffer: { id: 'old-prompt', judge() { return { verdict: 'undecided' }; } } });
+  f.ledger.recordDecision(identity, { ...pending, engineVersion: '2026-10-01.p3' });
+  expect(f.ledger.getCurrent(identity)?.routed).toBe(false);
+  const installed = new InstalledTierClassification({ env: {} });
+  const queue = installed.snifferStoreForLedger(f.ledger.dbPath);
+  queue.enqueue({ subject: identity, pass: 'content', material: text, flags: [], mapRevision: 'none' });
+  if (scenario === 'cached-secret') queue.putVerdict({
+    materialHash: queue.questionFor(identity, 'content')!.materialHash,
+    modelId: snifferCacheModelId(BUILT_IN_SNIFFER_LANE), promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none',
+  }, { tier: 'personal', category: 'ordinary', confidence: 1, failSafe: false });
+  const exportCopy = store.exportItemCopy.bind(store);
+  const tombstoneCopy = store.tombstoneCopy.bind(store);
+  if (scenario === 'unreadable') store.exportItemCopy = () => { throw new Error('temporarily unreadable'); };
+  if (scenario === 'missing') store.exportItemCopy = () => undefined;
+  if (scenario === 'cleanup-interrupted') store.tombstoneCopy = (...args) => { tombstoneCopy(...args); throw new Error('interrupted after tombstone'); };
+  let calls = 0;
+  const service = new TierSnifferService({ installed, lane: BUILT_IN_SNIFFER_LANE,
+    model: { async complete() {
+      calls++;
+      if (scenario === 'changed-during-model') store.importItemCopy({ ...original,
+        chunks: original.chunks.map(chunk => ({ ...chunk, boundedText: `${body}\n${['postgres://alice:', 'q7', '@db.internal/app'].join('')}` })),
+      }, { trustTier: 'S3', syncConnectorId: 'legacy-fixture' });
+      return { modelId: BUILT_IN_SNIFFER_LANE.modelId, text: JSON.stringify({ verdicts: [
+      { i: 1, tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 1 },
+    ] }) }; } },
+    stores: () => [store], classificationLedgerPath: join(tmp.dir, 'classification.jsonl'), autoApproveBuiltIn: true });
+  try {
+    const result = await service.runOnce();
+    if (scenario === 'unreadable' || scenario === 'missing') {
+      expect(result).toMatchObject({ state: 'ran', report: { calls: 0, verdictsApplied: 0, staleDropped: 0 } });
+      expect(queue.counts().questions).toBe(1);
+      expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'pending', contentPending: true });
+      store.exportItemCopy = exportCopy;
+      await service.runOnce();
+      expect(queue.counts().questions).toBe(0);
+    } else if (scenario === 'clean') {
+      expect(result).toMatchObject({ state: 'ran', report: { calls: 1, verdictsApplied: 1 } });
+      expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+      expect(store.searchItems('Orchard', 10)).toHaveLength(1);
+      expect(queue.counts().questions).toBe(0);
+    } else {
+      if (scenario === 'cleanup-interrupted') {
+        expect(result).toMatchObject({ state: 'failed' });
+        expect(queue.counts().questions).toBe(1);
+        store.tombstoneCopy = tombstoneCopy;
+        expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { secretRefused: 1 } });
+      } else expect(result).toMatchObject({ state: 'ran', report: { secretRefused: 1 } });
+      expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secrets', contentPending: false });
+      expect(store.searchItems('Orchard', 10)).toEqual([]);
+      expect(store.localContent(localId('record'))).toBeUndefined();
+      expect(f.secrets.get(identity)).toMatchObject({ title: null, findingKinds: ['sniffer_secret_refusal'] });
+      expect(queue.counts().questions).toBe(0);
+      expect(calls).toBe(scenario === 'changed-during-model' ? 1 : 0);
+    }
+  } finally { store.exportItemCopy = exportCopy; store.tombstoneCopy = tombstoneCopy; service.stop(); installed.close(); }
 });
