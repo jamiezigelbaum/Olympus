@@ -428,6 +428,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
         redirectHost: redirectHost(entry.redirectUri),
         redirectOrigin: new URL(entry.redirectUri).origin,
         loopbackRedirect: isLoopbackRedirectUri(entry.redirectUri),
+        chatgpt: entry.client.host === 'chatgpt',
       })
       : renderConsentPage({
       requestId,
