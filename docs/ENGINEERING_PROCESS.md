@@ -209,8 +209,13 @@ A release is two pull requests, a tag and a site publish:
    value it requires, which is `false` for a plain version), the `README.md`
    badge and install line, `docs/QUICKSTART.md`,
    `scripts/owner-identifier-patterns.ts`, and the tests that check them.
-4. **Site**: `bun scripts/publish-release-to-site.ts`, then
-   `site/deploy/deploy.sh --dry-run` and `site/deploy/deploy.sh`
+4. **Site**: publish the exact tarball attached to the GitHub release, never
+   a rebuild. Without `--artifact` the script builds a new tarball from the
+   current tree, and once the pins PR has changed the packaged guides its
+   bytes differ from the tagged release's. So:
+   `gh release download vX.Y.Z -p olympus-X.Y.Z.tgz -D <dir>`, then
+   `bun scripts/publish-release-to-site.ts --artifact <dir>/olympus-X.Y.Z.tgz`,
+   then `site/deploy/deploy.sh --dry-run` and `site/deploy/deploy.sh`
    ([`chatgpt-plugin/SUBMISSION.md`](../chatgpt-plugin/SUBMISSION.md) has the
    checks).
 
