@@ -14933,6 +14933,27 @@ function createDropboxSourceConnector(options) {
     contentAllowedByLocalItemId.set(item.identity.localItemId, entry.tag === "file" && (!options.scope || options.scope.allowsContent(path)));
     return [item];
   });
+  const expandDeletedFolder = (entry, room, live, deleted, fetchedAt) => {
+    const resolver = options.deletedItemIdentityResolver;
+    if (!resolver?.activeItemsUnderLocatorIfIndexed || room <= 0)
+      return [];
+    const limit = room + live.size + deleted.size;
+    const found = new Map;
+    for (const folder of deletedFolderPaths(entry)) {
+      for (const descendant of resolver.activeItemsUnderLocatorIfIndexed({
+        provider: CONNECTOR_ID,
+        accountScope: account,
+        locatorUri: folder,
+        limit
+      })) {
+        const id = descendant.identity.providerItemId;
+        if (live.has(id) || deleted.has(id) || found.has(id))
+          continue;
+        found.set(id, descendant);
+      }
+    }
+    return [...found.values()].slice(0, room).map((descendant) => rawItemFromDeletedDescendant(descendant, account, fetchedAt));
+  };
   const ensureSession = async () => {
     if (cachedSession)
       return cachedSession;
@@ -14994,10 +15015,39 @@ function createDropboxSourceConnector(options) {
           throw new Error("Dropbox source connector requires native recursive listing.");
         }
         const providerPageLimit = Math.min(MAX_PAGE_LIMIT, limit);
+        const lookaheadEntries = options.deletedFolderLookaheadEntries ?? DELETED_FOLDER_LOOKAHEAD_ENTRIES;
         let cursor = initialCursor;
         let hasMore = true;
         let remaining = limit;
         const requestedPages = new Set;
+        const liveItemIds = new Set;
+        const deletedItemIds = new Set;
+        let lookaheadComplete = false;
+        let lookaheadCapped = false;
+        const lookAhead = async (fromCursor) => {
+          let seen = 0;
+          let next = fromCursor;
+          try {
+            for (;; ) {
+              const ahead = await client.listFolderContinue({ cursor: next, limit: providerPageLimit });
+              if (seen + ahead.entries.length > lookaheadEntries)
+                return "capped";
+              for (const entry of ahead.entries) {
+                if (entry.tag !== "deleted")
+                  liveItemIds.add(entry.id);
+              }
+              if (!ahead.hasMore)
+                return "complete";
+              seen += ahead.entries.length;
+              const following = ahead.cursor?.trim();
+              if (!following || following === next)
+                return "failed";
+              next = following;
+            }
+          } catch {
+            return "failed";
+          }
+        };
         while (hasMore && remaining > 0) {
           const requestKey = cursor.providerCursor ?? "<initial>";
           if (requestedPages.has(requestKey)) {
@@ -15029,24 +15079,76 @@ function createDropboxSourceConnector(options) {
             throw new Error("Dropbox metadata resume offset is past the provider page.");
           }
           const available = page.entries.slice(offset);
-          const accepted = available.slice(0, remaining);
-          remaining -= accepted.length;
-          if (accepted.length < available.length) {
-            const resumeCursor = encodeDropboxPageCursor({
+          for (const entry of page.entries) {
+            if (entry.tag !== "deleted")
+              liveItemIds.add(entry.id);
+          }
+          const fetchedAt = nowIso();
+          const items = [];
+          let consumed = 0;
+          for (const entry of available) {
+            if (remaining <= 0)
+              break;
+            if (entry.tag !== "deleted") {
+              items.push(...scopedItems([entry], fetchedAt));
+              remaining -= 1;
+              consumed += 1;
+              continue;
+            }
+            const deletion = scopedItems([entry], fetchedAt);
+            if (deletion.length > 0 && options.deletedItemIdentityResolver?.lookupsReady?.() === false)
+              break;
+            let descendants = deletion.length === 0 || lookaheadCapped ? [] : expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+            if (descendants.length > 0 && hasMore && !lookaheadComplete) {
+              const proof = await lookAhead(nextCursor);
+              if (proof === "failed") {
+                break;
+              }
+              if (proof === "capped") {
+                lookaheadCapped = true;
+                descendants = [];
+              } else {
+                lookaheadComplete = true;
+                descendants = expandDeletedFolder(entry, remaining, liveItemIds, deletedItemIds, fetchedAt);
+              }
+            }
+            if (descendants.length >= remaining) {
+              for (const descendant of descendants.slice(0, remaining)) {
+                deletedItemIds.add(descendant.identity.providerItemId);
+                items.push(descendant);
+              }
+              remaining = 0;
+              break;
+            }
+            for (const descendant of descendants) {
+              deletedItemIds.add(descendant.identity.providerItemId);
+              items.push(descendant);
+            }
+            for (const item of deletion) {
+              if (item.metadata["deletedIdentityResolved"] === true)
+                deletedItemIds.add(item.identity.providerItemId);
+              items.push(item);
+            }
+            remaining -= descendants.length + 1;
+            consumed += 1;
+          }
+          if (consumed < available.length) {
+            const resumeOffset = offset + consumed;
+            const resumeCursor = resumeOffset === 0 ? cursor.providerCursor : encodeDropboxPageCursor({
               ...cursor.providerCursor ? { providerCursor: cursor.providerCursor } : {},
-              itemOffset: offset + accepted.length,
+              itemOffset: resumeOffset,
               pageDigest: metadataPageDigest(page)
             });
             yield {
-              items: scopedItems(accepted, nowIso()),
-              nextCursor: resumeCursor,
+              items,
+              ...resumeCursor ? { nextCursor: resumeCursor } : {},
               done: false,
               truncated: true
             };
             return;
           }
           yield {
-            items: scopedItems(accepted, nowIso()),
+            items,
             ...nextCursor ? { nextCursor } : {},
             done: !hasMore
           };
@@ -15215,6 +15317,46 @@ function rawItemFromDeletedEntry(entry, account, fetchedAt, deletedItemIdentityR
     fetchedAt
   };
 }
+function deletedFolderPaths(entry) {
+  const seen = new Set;
+  const paths = [];
+  for (const candidate of [entry.pathDisplay, entry.pathLower]) {
+    const folder = candidate?.trim().replace(/\/+$/, "");
+    if (!folder || !folder.startsWith("/"))
+      continue;
+    const key = folder.normalize("NFC").toLowerCase();
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    paths.push(folder);
+  }
+  return paths;
+}
+function rawItemFromDeletedDescendant(descendant, account, fetchedAt) {
+  const { identity, locatorUri } = descendant;
+  return {
+    identity: {
+      family: "file",
+      provider: CONNECTOR_ID,
+      accountScope: account,
+      providerItemId: identity.providerItemId,
+      ...identity.providerFileId ? { providerFileId: identity.providerFileId } : {},
+      localItemId: identity.localItemId
+    },
+    mimeType: UNKNOWN_MIME_TYPE,
+    content: { kind: "metadata_only" },
+    metadata: Object.freeze({
+      entryKind: "deleted",
+      deleted: true,
+      deletedIdentityResolved: true,
+      deletedWithFolder: true,
+      name: locatorUri.slice(locatorUri.lastIndexOf("/") + 1),
+      pathDisplay: locatorUri,
+      pathLower: locatorUri.toLowerCase()
+    }),
+    fetchedAt
+  };
+}
 function encodeDropboxPageCursor(cursor) {
   const encoded = `${DROPBOX_PAGE_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
   if (encoded.length > SOURCE_CHECKPOINT_MAX_LENGTH) {
@@ -15303,7 +15445,7 @@ function requireNonEmpty(value, label) {
 function nowIso() {
   return new Date().toISOString();
 }
-var CONNECTOR_ID = "dropbox", DEFAULT_CREDENTIAL_HANDLE = "dropbox.personal", DEFAULT_MAX_FETCH_BYTES = 8000000, DEFAULT_PAGE_LIMIT = 1000, MAX_PAGE_LIMIT = 2000, MAX_TRAVERSAL_ITEMS = 1e5, DROPBOX_PAGE_CURSOR_PREFIX = "dbxp1:", FOLDER_MIME_TYPE = "inode/directory", UNKNOWN_MIME_TYPE = "application/octet-stream";
+var CONNECTOR_ID = "dropbox", DEFAULT_CREDENTIAL_HANDLE = "dropbox.personal", DEFAULT_MAX_FETCH_BYTES = 8000000, DEFAULT_PAGE_LIMIT = 1000, MAX_PAGE_LIMIT = 2000, MAX_TRAVERSAL_ITEMS = 1e5, DELETED_FOLDER_LOOKAHEAD_ENTRIES = 50000, DROPBOX_PAGE_CURSOR_PREFIX = "dbxp1:", FOLDER_MIME_TYPE = "inode/directory", UNKNOWN_MIME_TYPE = "application/octet-stream";
 var init_connector = __esm(() => {
   init_credential_broker();
   init_provider_client();
@@ -26378,6 +26520,9 @@ function createConnectorStoreLocatorIdentityIndex(db) {
     END;
   `);
 }
+function foldLocator(locator) {
+  return locator.normalize("NFC").toLowerCase();
+}
 function toFtsQuery(query, options = {}) {
   return sourceIndexFtsQuery(query, options);
 }
@@ -26582,7 +26727,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -27808,6 +27953,9 @@ var init_local_index = __esm(() => {
         indexedItems: Number(indexed.count)
       };
     }
+    locatorIdentityIndexReady() {
+      return this.locatorIdentityIndexState().completed;
+    }
     locatorIdentityIndexState() {
       const state = this.db.query(`
       SELECT cursor_item_pk, completed
@@ -27939,6 +28087,77 @@ var init_local_index = __esm(() => {
       if (!this.locatorIdentityIndexState().completed)
         return;
       return this.activeIdentityForLocator(input);
+    }
+    activeItemsUnderLocatorIfIndexed(input) {
+      if (!this.locatorIdentityIndexState().completed)
+        return [];
+      const folder = input.locatorUri.replace(/\/+$/, "");
+      if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
+        return [];
+      const toRow = (row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : [];
+      const exact = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= LOWER(?) || '/'
+        AND locator.normalized_locator < LOWER(?) || '0'
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, folder, folder, input.limit).flatMap(toRow);
+      if (exact.length > 0 || !/[^\u0000-\u007f]/.test(folder))
+        return exact;
+      const folded = folder.normalize("NFC");
+      const cut = folded.search(/[^\u0000-\u007f]/);
+      const head = (cut < 0 ? folded : folded.slice(0, cut)).replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+      const range = head === "" ? { sql: "", params: [] } : {
+        sql: "AND locator.normalized_locator >= ? AND locator.normalized_locator < ?",
+        params: [head, head.slice(0, -1) + String.fromCharCode(head.charCodeAt(head.length - 1) + 1)]
+      };
+      const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
+      const wanted = `${foldLocator(folder)}/`;
+      const matches = [];
+      const candidates = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        ${range.sql}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+    `);
+      let examined = 0;
+      for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params)) {
+        examined += 1;
+        if (examined > maxCandidates)
+          return [];
+        if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted))
+          continue;
+        matches.push(...toRow(row));
+        if (matches.length >= input.limit)
+          break;
+      }
+      return matches;
     }
     activeItemForLocator(input) {
       const identity = this.activeIdentityForLocator(input);
@@ -35808,6 +36027,19 @@ function createDropboxProviderStoreSyncHandler(options) {
           return identity;
       }
       return;
+    },
+    activeItemsUnderLocatorIfIndexed(input) {
+      const union = new Map;
+      for (const domain of ["secure_local", "internal", "public_safe"]) {
+        for (const descendant of tierSet.store(domain)?.activeItemsUnderLocatorIfIndexed(input) ?? []) {
+          if (!union.has(descendant.identity.providerItemId))
+            union.set(descendant.identity.providerItemId, descendant);
+        }
+      }
+      return [...union.values()];
+    },
+    lookupsReady() {
+      return ["secure_local", "internal", "public_safe"].every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
     }
   } : options.store;
   return {
