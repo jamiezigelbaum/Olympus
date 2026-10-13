@@ -103,6 +103,7 @@ describe('SQLite schema migration runner', () => {
         'locator_identity_index_state',
         'chunk_media_releases',
         'media_judgments',
+        'item_text_versions',
       ]));
       db.close();
 

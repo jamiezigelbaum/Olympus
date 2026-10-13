@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
 import { olympusPackageRoot } from './core/package-root.ts';
 import { pairMessagingSource, type MessagingCaptureScopeApproval } from './core/messaging-pairing.ts';
+import { WHATSAPP_UNOFFICIAL_CLIENT_NOTICE } from './core/whatsapp-notice.ts';
 import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from './core/messaging-capture.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
@@ -2423,6 +2424,7 @@ async function runMessagingPairing(
   const tell = (text: string) => writeSync(terminal, text);
   try {
     tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.\n`);
+    if (source === 'whatsapp') tell(`${WHATSAPP_UNOFFICIAL_CLIENT_NOTICE}\n`);
     const paired = await pairMessagingSource({
       source,
       packageRoot: olympusPackageRoot(),

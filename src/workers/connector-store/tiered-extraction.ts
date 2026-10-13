@@ -99,17 +99,39 @@ export function tieredExtractionView(
       return store && store.activeLocalItemRow(localItemId) ? [store] : [];
     });
 
+  // A routed item whose names sit in one store and whose text sits in another
+  // is listed through its names row, and its text row never is. When the text
+  // was read before the file was edited, that names row is the one to list
+  // again: the text is rewritten in place wherever it rests.
+  const staleContentElsewhere = (
+    corpusId: string,
+    copies: readonly TierCopy[],
+    localItemId: string,
+  ): boolean => {
+    const current = copies.filter((copy) => copy.state === 'current');
+    const mine = current.find((copy) => copy.corpusId === corpusId);
+    if (!mine || mine.layers === 'content') return false;
+    return current.some((copy) => {
+      if (copy.corpusId === corpusId || copy.layers !== 'content') return false;
+      const domain = set.domainForCorpus(copy.corpusId);
+      return domain !== undefined && set.store(domain)?.itemTextIsStale(localItemId) === true;
+    });
+  };
+
   const keep = (
     domain: SourceTrustDomain,
     store: LocalConnectorStore,
     candidates: readonly ConnectorStoreExtractionCandidate[],
+    includeStaleChunks: boolean,
   ): ConnectorStoreExtractionCandidate[] => {
     const copies = set.ledger.copiesForMany(candidates.map((candidate) => candidate.identity));
     const legacyLeg = set.legSpec(domain)?.legacy === true;
     return candidates.filter((candidate) => {
       const itemCopies = copies.get(tierLedgerIdentityKey(candidate.identity)) ?? [];
       if (itemCopies.length === 0) return legacyLeg && !set.ledger.isRouted(candidate.identity);
-      return routedCandidate(store.corpusId, itemCopies)
+      return (routedCandidate(store.corpusId, itemCopies)
+          || (includeStaleChunks
+            && staleContentElsewhere(store.corpusId, itemCopies, candidate.identity.localItemId)))
         && set.ledger.getCurrent(candidate.identity)?.state !== 'moving';
     });
   };
@@ -139,7 +161,7 @@ export function tieredExtractionView(
         }
         const { cursor: _ignored, ...rest } = options;
         const page = store.extractionCandidates({ ...rest, ...(cursor !== undefined ? { cursor } : {}) });
-        const candidates = keep(domain, store, page.candidates);
+        const candidates = keep(domain, store, page.candidates, options.includeStaleChunks === true);
         const last = index === domains.length - 1;
         if (!page.done) {
           return {

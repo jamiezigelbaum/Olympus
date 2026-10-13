@@ -5,4 +5,4 @@ Source: GeoNames gazetteer data, https://www.geonames.org/, downloaded 2026-10-0
 Content: the "name" and "asciiname" columns only, split into letter words and lower-cased; no alternate names, coordinates, populations or identifiers are kept.
 Generator: scripts/build-consult-vocabulary.ts (pack places), in the public Olympus source repository.
 Licence: Creative Commons Attribution 4.0 International (CC BY 4.0), https://creativecommons.org/licenses/by/4.0/
-Attribution: This pack contains words derived from GeoNames (https://www.geonames.org/), licensed under CC BY 4.0. The words were extracted and merged into a sorted word list; no endorsement by GeoNames is implied.
+Attribution: This pack contains words derived from GeoNames (https://www.geonames.org/), licensed under CC BY 4.0. The words were extracted and merged into a sorted word list; no endorsement by GeoNames is implied. GeoNames provides the data as is, without warranties of any kind; see Section 5 (Disclaimer of Warranties and Limitation of Liability) of the CC BY 4.0 licence.

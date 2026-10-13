@@ -182,6 +182,14 @@ export interface ExtractionCandidateReaderOptions {
   mimeTypes?: readonly string[];
   accountScope?: string;
   withoutChunksOnly?: boolean;
+  /**
+   * With `withoutChunksOnly`: also list an item whose stored text was read at
+   * an older source version than the item holds now, so a file edited after it
+   * was extracted is extracted again. The item's current version and content
+   * hash reach the source in the row, and a job is keyed by both, so the new
+   * read is a fresh job rather than a reopened one.
+   */
+  includeStaleChunks?: boolean;
 }
 
 export interface ExtractionCandidateReaderPage {
