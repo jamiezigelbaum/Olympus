@@ -19543,18 +19543,26 @@ class TierLedger {
     })();
     return { record: this.getCurrent(identity), copies };
   }
-  recordSecretSideStoreDebt(identity) {
-    this.db.query(`
-      INSERT INTO secret_side_store_debt (provider, account_scope, conversation_key, provider_item_id, local_item_id, recorded_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
-        local_item_id = CASE WHEN excluded.local_item_id <> '' THEN excluded.local_item_id ELSE secret_side_store_debt.local_item_id END,
-        recorded_at = excluded.recorded_at
-    `).run(...idParams(identity), identity.localItemId ?? "", this.now().toISOString());
+  recordSecretSideStoreDebt(identity, jobLedgerPaths = []) {
+    this.db.transaction(() => {
+      const existing = this.db.query(`
+        SELECT job_ledger_paths_json FROM secret_side_store_debt
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).get(...idParams(identity));
+      const paths = [...new Set([...existing ? JSON.parse(existing.job_ledger_paths_json) : [], ...jobLedgerPaths])].sort();
+      this.db.query(`
+        INSERT INTO secret_side_store_debt (provider, account_scope, conversation_key, provider_item_id, local_item_id, job_ledger_paths_json, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
+          local_item_id = CASE WHEN excluded.local_item_id <> '' THEN excluded.local_item_id ELSE secret_side_store_debt.local_item_id END,
+          job_ledger_paths_json = excluded.job_ledger_paths_json,
+          recorded_at = excluded.recorded_at
+      `).run(...idParams(identity), identity.localItemId ?? "", JSON.stringify(paths), this.now().toISOString());
+    })();
   }
   secretSideStoreDebts(limit = 100) {
     const rows = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id, local_item_id
+      SELECT provider, account_scope, conversation_key, provider_item_id, local_item_id, job_ledger_paths_json
       FROM secret_side_store_debt ORDER BY recorded_at LIMIT ?
     `).all(Math.max(1, Math.min(limit, 1000)));
     return rows.map((row) => ({
@@ -19562,7 +19570,8 @@ class TierLedger {
       accountScope: row.account_scope,
       providerItemId: row.provider_item_id,
       ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
-      ...row.local_item_id ? { localItemId: row.local_item_id } : {}
+      ...row.local_item_id ? { localItemId: row.local_item_id } : {},
+      jobLedgerPaths: JSON.parse(row.job_ledger_paths_json)
     }));
   }
   clearSecretSideStoreDebt(identity) {
@@ -20267,6 +20276,7 @@ function tierLedgerMigrations() {
             conversation_key TEXT NOT NULL DEFAULT '',
             provider_item_id TEXT NOT NULL,
             local_item_id TEXT NOT NULL DEFAULT '',
+            job_ledger_paths_json TEXT NOT NULL DEFAULT '[]',
             recorded_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
@@ -23933,27 +23943,29 @@ function itemNameRedacted(db, item) {
 }
 function clearExtractionJobNames(dbPath, item) {
   if (dbPath === ":memory:" || !existsSync23(dbPath))
-    return 0;
+    return { cleared: 0, durable: true };
   const db = new Database6(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
     if (!table)
-      return 0;
+      return { cleared: 0, durable: true };
     return db.transaction(() => {
-      if (redactionsTableExists(db)) {
+      const durable = redactionsTableExists(db);
+      if (durable) {
         db.query(`
           INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
           VALUES (?, ?, ?, ?, ?)
         `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", new Date().toISOString());
       }
-      return item.localItemId !== undefined ? db.query(`
+      const cleared = item.localItemId !== undefined ? db.query(`
             UPDATE extraction_jobs SET name = NULL
             WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
           `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
             UPDATE extraction_jobs SET name = NULL
             WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
           `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      return { cleared, durable };
     }).immediate();
   } finally {
     closeSqliteStore(db);
@@ -23999,8 +24011,9 @@ function settleSecretsCopies(options) {
   return { disposition, chunks, sideStores };
 }
 function forgetSecretInSideStores(options) {
-  const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0 };
+  const result = { snifferQuestions: 0, extractionJobNames: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
+  const owedJobLedgers = [];
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ":memory:" && existsSync24(snifferPath)) {
     try {
@@ -24019,21 +24032,27 @@ function forgetSecretInSideStores(options) {
       result.failed += 1;
     }
   }
-  for (const jobsPath of extractionJobsDbPaths()) {
+  for (const jobsPath of new Set([...extractionJobsDbPaths(), ...options.jobLedgerPaths ?? []])) {
     try {
-      result.extractionJobNames += clearExtractionJobNames(jobsPath, {
+      const cleared = clearExtractionJobNames(jobsPath, {
         provider: identity.provider,
         accountScope: identity.accountScope,
         providerItemId: identity.providerItemId,
         ...identity.localItemId ? { localItemId: identity.localItemId } : {}
       });
+      result.extractionJobNames += cleared.cleared;
+      if (!cleared.durable) {
+        result.notDurable += 1;
+        owedJobLedgers.push(jobsPath);
+      }
     } catch {
       result.failed += 1;
+      owedJobLedgers.push(jobsPath);
     }
   }
   try {
-    if (result.failed > 0)
-      ledger.recordSecretSideStoreDebt(identity);
+    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker)
+      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers);
     else
       ledger.clearSecretSideStoreDebt(identity);
   } catch {}
@@ -24044,7 +24063,9 @@ function forgetSecretInSideStores(options) {
 function retrySecretSideStoreDebts(ledger, limit = 100) {
   let cleared = 0;
   for (const identity of ledger.secretSideStoreDebts(limit)) {
-    if (forgetSecretInSideStores({ ledger, identity }).failed === 0)
+    const { jobLedgerPaths, ...item } = identity;
+    const result = forgetSecretInSideStores({ ledger, identity: item, jobLedgerPaths });
+    if (result.failed === 0 && result.notDurable === 0)
       cleared += 1;
   }
   return cleared;
@@ -153641,7 +153662,8 @@ function runTierSet(args, context2 = {}) {
     if (override.kind === "tier" && override.tier === "secrets") {
       forgetSecretInSideStores({
         ledger,
-        identity: { ...item.identity, ...item.localItemId ? { localItemId: item.localItemId } : {} }
+        identity: { ...item.identity, ...item.localItemId ? { localItemId: item.localItemId } : {} },
+        confirmInWorker: true
       });
     }
     if (override.kind === "not_secret") {
