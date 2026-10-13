@@ -520,8 +520,7 @@ describe('Secrets floor: placeholders stay out under every key shape', () => {
 });
 
 describe('Secrets floor: linear-time on adversarial input', () => {
-  const N = 200_000;
-  const cases: Array<[string, string]> = [
+  const casesAt = (N: number): Array<[string, string]> => [
     ['closing-bracket run after a value', `password=a${')'.repeat(N)}z`],
     ['dot run after a value', `password=a${'.'.repeat(N)}z`],
     ['mixed trailing punctuation', `password=a${';,)]}.'.repeat(N / 6)}z`],
@@ -573,13 +572,25 @@ describe('Secrets floor: linear-time on adversarial input', () => {
     ['many short pairs', 'a=b '.repeat(N / 4)],
     ['many short credential pairs', 'DB_PASSWORD=x '.repeat(N / 14)],
   ];
-  for (const [name, text] of cases) {
+  const small = casesAt(100_000);
+  const large = casesAt(200_000);
+  const time = (text: string): number => {
+    const started = performance.now();
+    scanDropboxContentPolicyText({ text });
+    secretLabelsInText(text);
+    return performance.now() - started;
+  };
+  for (const [index, [name]] of large.entries()) {
     test(name, () => {
-      const started = performance.now();
-      scanDropboxContentPolicyText({ text });
-      secretLabelsInText(text);
-      const elapsed = performance.now() - started;
-      expect([name, elapsed < 1000]).toEqual([name, true]);
+      // Linear, not a wall-clock budget: doubling the input must not much more
+      // than double the time (a quadratic pattern quadruples it). The fixed
+      // slack absorbs timer noise on small inputs, and the absolute cap still
+      // catches a linear but pathologically slow pattern. Shared CI runners
+      // are several times slower than a workstation, so a 1 s budget flaked.
+      const smallMs = time(small[index]![1]);
+      const largeMs = time(large[index]![1]);
+      expect([name, largeMs < 3 * smallMs + 150]).toEqual([name, true]);
+      expect([name, largeMs < 5000]).toEqual([name, true]);
     });
   }
 });
