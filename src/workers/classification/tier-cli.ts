@@ -243,15 +243,23 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
     }
     ledger.setOverride(item.identity, override);
     if (override.kind === 'tier' && override.tier === 'secrets') {
-      // Secrets at once, whether or not the engine runs: the side stores keep
-      // none of the item's names or excerpt (a queued sniffer question, a name
-      // an extraction job captured). Its copies follow below or at the set's
-      // next override pass.
+      // A routed item's copies are hidden first (one ledger write), then the
+      // side stores forget its names and excerpt (a queued sniffer question,
+      // a name an extraction job captured), which can wait on a busy
+      // extraction ledger. Whether or not the engine runs; an unrouted
+      // item's copies follow at the set's next override pass.
+      const current = ledger.getCurrent(item.identity);
+      const outcome = current?.routed
+        ? ledger.recordRoutedPlacement(item.identity, classifyItemTiers({ signals: {} }, { override }), { copies: [], embedHold: false }).outcome
+        : undefined;
       forgetSecretInSideStores({
         ledger,
         identity: { ...item.identity, ...(item.localItemId ? { localItemId: item.localItemId } : {}) },
         confirmInWorker: true,
       });
+      if (current?.routed) {
+        return { override: tierDisplayName(override.tier), outcome: outcome === 'secrets' ? 'hidden_now' : 'set_applies_next_pass' };
+      }
     }
     if (override.kind === 'not_secret') {
       return { override: 'not_secret', note: 'The next sync sends this item back through normal classification.' };
